@@ -32,7 +32,7 @@ export type SelectedTextQuickActionKey =
   | "proofread"
   | SelectedTextCommandActionKey;
 
-type SelectedTextActionCommandPresetKey = Exclude<
+export type SelectedTextActionCommandPresetKey = Exclude<
   SelectedTextTransformCommand,
   SelectedTextCaseTransformCommand
 >;

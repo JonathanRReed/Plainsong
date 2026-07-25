@@ -393,7 +393,9 @@ export function TranscriptViewer({
       <div className="shrink-0 border-b border-border bg-muted/30 px-4 py-3">
         <div className="flex items-center justify-between gap-3">
           <div className="flex flex-col gap-0.5">
-            <p className="rubric">TRANSCRIPT</p>
+            {/* No heading here. The rail this viewer sits in already names the
+                pane "Transcript" with a count under it; repeating the pair read
+                as two stacked headers for one pane. This is the readout only. */}
             <div className="flex items-baseline gap-2 font-mono text-xs text-muted-foreground tabular-nums">
               <span className="text-foreground">{segments.length} segments</span>
               {segments.length > 0 && (
@@ -454,8 +456,10 @@ export function TranscriptViewer({
         )}
       </div>
 
-      {/* Transcript */}
-      <ScrollArea className="h-full min-h-0 flex-1">
+      {/* Transcript. The scrollbar is always drawn, never hover-revealed:
+          testers could not tell a long transcript from a short one, because
+          nothing on screen said there was more of it below. */}
+      <ScrollArea type="always" className="h-full min-h-0 flex-1">
         <div
           className="p-4 space-y-4 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
           role="group"

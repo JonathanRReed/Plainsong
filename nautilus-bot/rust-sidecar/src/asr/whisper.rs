@@ -167,166 +167,20 @@ impl AsrProvider for WhisperProvider {
     }
 
     async fn transcribe(&self, audio_path: &Path) -> Result<TranscriptionResult> {
+        // whisper.cpp decoding is a multi-second, fully synchronous CPU/GPU
+        // burn. Running it inline blocked a tokio worker for the whole decode,
+        // which the live meeting preview cannot afford now that it decodes a
+        // span every few seconds while capture, mixing and event emission all
+        // want the runtime. Every other local provider here already wraps its
+        // inference in `spawn_blocking`; this brings Whisper in line. The
+        // Whisper *state* is created inside the closure so only the
+        // `Arc<WhisperContext>` (`Send + Sync`) crosses the boundary.
         let ctx = self.get_or_load_ctx()?;
-
-        let start_time = std::time::Instant::now();
-
-        tracing::info!("Loading audio file for Whisper: {:?}", audio_path);
-
-        // Load and preprocess audio
-        let raw_audio_data = crate::audio::utils::load_audio_file(audio_path)
-            .context("Failed to load audio file")?;
-
-        // VAD pre-filtering: trim silence to speed up transcription
-        let mut audio_data = if raw_audio_data.len() > 16000 {
-            // Only trim if > 1 second of audio
-            let trimmed = crate::audio::vad::trim_silence(&raw_audio_data, 16000, -40.0);
-            if trimmed.is_empty() {
-                raw_audio_data
-            } else {
-                let saved_ms = raw_audio_data.len().saturating_sub(trimmed.len()) as f64 / 16.0;
-                if saved_ms > 100.0 {
-                    tracing::info!(
-                        "VAD trimmed {:.0}ms of silence, processing {:.0}ms",
-                        saved_ms,
-                        trimmed.len() as f64 / 16.0
-                    );
-                }
-                trimmed
-            }
-        } else {
-            raw_audio_data
-        };
-
-        // Whisper requires > 1000ms of audio; pad with silence to 1.1s if needed
-        let min_samples = (16000.0_f32 * 1.1).ceil() as usize;
-        if !audio_data.is_empty() && audio_data.len() < min_samples {
-            tracing::info!(
-                "Whisper audio too short ({} samples / {:.0}ms), padding to {}ms",
-                audio_data.len(),
-                audio_data.len() as f64 / 16.0,
-                min_samples as f64 / 16.0
-            );
-            audio_data.resize(min_samples, 0.0);
-        }
-
-        tracing::info!(
-            "Whisper received {} samples (sample rate 16000, duration {:.2}s)",
-            audio_data.len(),
-            audio_data.len() as f64 / 16000.0
-        );
-
-        // Log audio statistics
-        if !audio_data.is_empty() {
-            let peak = audio_data.iter().fold(0.0_f32, |p, s| p.max(s.abs()));
-            let rms =
-                (audio_data.iter().map(|s| s * s).sum::<f32>() / audio_data.len() as f32).sqrt();
-            tracing::info!("Whisper audio stats: peak={:.4}, rms={:.4}", peak, rms);
-        }
-
-        // Create state and configure
-        let mut state = ctx
-            .create_state()
-            .context("Failed to create Whisper state")?;
-
-        // Use beam search for better accuracy (5 beams is a good balance)
-        let mut params = whisper_rs::FullParams::new(whisper_rs::SamplingStrategy::BeamSearch {
-            beam_size: 5,
-            patience: 1.0, // Standard patience - higher values search more but slower
-        });
-
-        // Speed optimizations
-        let num_threads = std::thread::available_parallelism()
-            .map(|n| n.get() as i32)
-            .unwrap_or(4);
-        params.set_n_threads(std::cmp::min(num_threads, 8)); // Cap at 8 threads to avoid diminishing returns
-
-        params.set_print_special(false);
-        params.set_print_progress(false);
-        params.set_print_realtime(false);
-        params.set_print_timestamps(false);
-        // English-only models (".en") are forced to English; multilingual models
-        // auto-detect the spoken language rather than assuming English.
-        let english_only = self.model_id.ends_with(".en");
-        params.set_language(if english_only { Some("en") } else { None });
-        params.set_translate(false);
-
-        // Anti-repetition and hallucination mitigation
-        params.set_no_context(true); // Don't use previous context to prevent loop hallucinations
-        params.set_entropy_thold(2.4); // Stricter entropy threshold
-        params.set_logprob_thold(-1.0); // Stricter logprob threshold
-
-        // Beam search patience for better accuracy on technical terms
-        params.set_token_timestamps(true); // Enable token-level timestamps for better alignment
-
-        // Run transcription
-        state
-            .full(params, &audio_data)
-            .context("Failed to run Whisper transcription")?;
-
-        let num_segments = state.full_n_segments();
-
-        // Report the actual language: forced "en" for English-only models,
-        // otherwise the language Whisper detected during decoding.
-        let detected_language = if english_only {
-            "en".to_string()
-        } else {
-            let lang_id = state.full_lang_id_from_state();
-            whisper_rs::get_lang_str(lang_id)
-                .unwrap_or("en")
-                .to_string()
-        };
-
-        tracing::info!("Whisper produced {} segments", num_segments);
-
-        let mut segments = Vec::new();
-        let mut full_text = String::new();
-
-        for i in 0..num_segments {
-            let segment = state
-                .get_segment(i)
-                .ok_or_else(|| anyhow::anyhow!("Failed to get Whisper segment {}", i))?;
-            let text = segment.to_str().context("Failed to get segment text")?;
-            let start = segment.start_timestamp();
-            let end = segment.end_timestamp();
-
-            segments.push(TranscriptSegment {
-                start_time: start as f64 / 100.0, // Convert from centiseconds to seconds
-                end_time: end as f64 / 100.0,
-                text: text.trim().to_string(),
-                confidence: 0.9, // whisper-rs doesn't provide per-segment confidence
-            });
-
-            if !full_text.is_empty() {
-                full_text.push(' ');
-            }
-            full_text.push_str(text.trim());
-        }
-
-        let processing_time = start_time.elapsed().as_millis() as u64;
-
-        tracing::info!(
-            "Whisper transcription completed: '{}' ({} segments in {}ms)",
-            full_text,
-            segments.len(),
-            processing_time
-        );
-
-        Ok(TranscriptionResult {
-            text: full_text,
-            segments,
-            language: detected_language,
-            confidence: 0.9,
-            processing_time_ms: processing_time,
-            model_name: format!("whisper-{}", self.model_id),
-            model_id: self.model_id.clone(),
-            requested_provider: AsrProviderType::Whisper,
-            actual_provider: AsrProviderType::Whisper,
-            requested_engine: Some("provider_default".to_string()),
-            actual_engine: Some("provider_default".to_string()),
-            optimization_applied: false,
-            fallback_reason: None,
-        })
+        let model_id = self.model_id.clone();
+        let audio_path = audio_path.to_path_buf();
+        tokio::task::spawn_blocking(move || transcribe_blocking(&ctx, &model_id, &audio_path))
+            .await
+            .context("Whisper inference task panicked")?
     }
 
     async fn transcribe_bytes(&self, audio_data: &[u8]) -> Result<TranscriptionResult> {
@@ -373,6 +227,173 @@ impl AsrProvider for WhisperProvider {
 
         Ok(())
     }
+}
+
+/// The synchronous half of [`WhisperProvider::transcribe`], run on a blocking
+/// thread. Audio loading, VAD trimming and the beam search are all CPU-bound
+/// and must stay off the async runtime's workers.
+fn transcribe_blocking(
+    ctx: &Arc<whisper_rs::WhisperContext>,
+    model_id: &str,
+    audio_path: &Path,
+) -> Result<TranscriptionResult> {
+    let start_time = std::time::Instant::now();
+
+    tracing::info!("Loading audio file for Whisper: {:?}", audio_path);
+
+    // Load and preprocess audio
+    let raw_audio_data =
+        crate::audio::utils::load_audio_file(audio_path).context("Failed to load audio file")?;
+
+    // VAD pre-filtering: trim silence to speed up transcription
+    let mut audio_data = if raw_audio_data.len() > 16000 {
+        // Only trim if > 1 second of audio
+        let trimmed = crate::audio::vad::trim_silence(&raw_audio_data, 16000, -40.0);
+        if trimmed.is_empty() {
+            raw_audio_data
+        } else {
+            let saved_ms = raw_audio_data.len().saturating_sub(trimmed.len()) as f64 / 16.0;
+            if saved_ms > 100.0 {
+                tracing::info!(
+                    "VAD trimmed {:.0}ms of silence, processing {:.0}ms",
+                    saved_ms,
+                    trimmed.len() as f64 / 16.0
+                );
+            }
+            trimmed
+        }
+    } else {
+        raw_audio_data
+    };
+
+    // Whisper requires > 1000ms of audio; pad with silence to 1.1s if needed
+    let min_samples = (16000.0_f32 * 1.1).ceil() as usize;
+    if !audio_data.is_empty() && audio_data.len() < min_samples {
+        tracing::info!(
+            "Whisper audio too short ({} samples / {:.0}ms), padding to {}ms",
+            audio_data.len(),
+            audio_data.len() as f64 / 16.0,
+            min_samples as f64 / 16.0
+        );
+        audio_data.resize(min_samples, 0.0);
+    }
+
+    tracing::info!(
+        "Whisper received {} samples (sample rate 16000, duration {:.2}s)",
+        audio_data.len(),
+        audio_data.len() as f64 / 16000.0
+    );
+
+    // Log audio statistics
+    if !audio_data.is_empty() {
+        let peak = audio_data.iter().fold(0.0_f32, |p, s| p.max(s.abs()));
+        let rms = (audio_data.iter().map(|s| s * s).sum::<f32>() / audio_data.len() as f32).sqrt();
+        tracing::info!("Whisper audio stats: peak={:.4}, rms={:.4}", peak, rms);
+    }
+
+    // Create state and configure
+    let mut state = ctx
+        .create_state()
+        .context("Failed to create Whisper state")?;
+
+    // Use beam search for better accuracy (5 beams is a good balance)
+    let mut params = whisper_rs::FullParams::new(whisper_rs::SamplingStrategy::BeamSearch {
+        beam_size: 5,
+        patience: 1.0, // Standard patience - higher values search more but slower
+    });
+
+    // Speed optimizations
+    let num_threads = std::thread::available_parallelism()
+        .map(|n| n.get() as i32)
+        .unwrap_or(4);
+    params.set_n_threads(std::cmp::min(num_threads, 8)); // Cap at 8 threads to avoid diminishing returns
+
+    params.set_print_special(false);
+    params.set_print_progress(false);
+    params.set_print_realtime(false);
+    params.set_print_timestamps(false);
+    // English-only models (".en") are forced to English; multilingual models
+    // auto-detect the spoken language rather than assuming English.
+    let english_only = model_id.ends_with(".en");
+    params.set_language(if english_only { Some("en") } else { None });
+    params.set_translate(false);
+
+    // Anti-repetition and hallucination mitigation
+    params.set_no_context(true); // Don't use previous context to prevent loop hallucinations
+    params.set_entropy_thold(2.4); // Stricter entropy threshold
+    params.set_logprob_thold(-1.0); // Stricter logprob threshold
+
+    // Beam search patience for better accuracy on technical terms
+    params.set_token_timestamps(true); // Enable token-level timestamps for better alignment
+
+    // Run transcription
+    state
+        .full(params, &audio_data)
+        .context("Failed to run Whisper transcription")?;
+
+    let num_segments = state.full_n_segments();
+
+    // Report the actual language: forced "en" for English-only models,
+    // otherwise the language Whisper detected during decoding.
+    let detected_language = if english_only {
+        "en".to_string()
+    } else {
+        let lang_id = state.full_lang_id_from_state();
+        whisper_rs::get_lang_str(lang_id)
+            .unwrap_or("en")
+            .to_string()
+    };
+
+    tracing::info!("Whisper produced {} segments", num_segments);
+
+    let mut segments = Vec::new();
+    let mut full_text = String::new();
+
+    for i in 0..num_segments {
+        let segment = state
+            .get_segment(i)
+            .ok_or_else(|| anyhow::anyhow!("Failed to get Whisper segment {}", i))?;
+        let text = segment.to_str().context("Failed to get segment text")?;
+        let start = segment.start_timestamp();
+        let end = segment.end_timestamp();
+
+        segments.push(TranscriptSegment {
+            start_time: start as f64 / 100.0, // Convert from centiseconds to seconds
+            end_time: end as f64 / 100.0,
+            text: text.trim().to_string(),
+            confidence: 0.9, // whisper-rs doesn't provide per-segment confidence
+        });
+
+        if !full_text.is_empty() {
+            full_text.push(' ');
+        }
+        full_text.push_str(text.trim());
+    }
+
+    let processing_time = start_time.elapsed().as_millis() as u64;
+
+    tracing::info!(
+        "Whisper transcription completed: '{}' ({} segments in {}ms)",
+        full_text,
+        segments.len(),
+        processing_time
+    );
+
+    Ok(TranscriptionResult {
+        text: full_text,
+        segments,
+        language: detected_language,
+        confidence: 0.9,
+        processing_time_ms: processing_time,
+        model_name: format!("whisper-{}", model_id),
+        model_id: model_id.to_string(),
+        requested_provider: AsrProviderType::Whisper,
+        actual_provider: AsrProviderType::Whisper,
+        requested_engine: Some("provider_default".to_string()),
+        actual_engine: Some("provider_default".to_string()),
+        optimization_applied: false,
+        fallback_reason: None,
+    })
 }
 
 #[derive(Clone, Copy)]

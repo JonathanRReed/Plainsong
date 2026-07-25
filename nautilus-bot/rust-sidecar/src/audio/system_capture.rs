@@ -32,12 +32,54 @@ const SOURCE_RMS_WINDOW_SECONDS: f32 = 1.0;
 /// (or a loopback with nothing playing) sits at or near zero.
 const SOURCE_SILENCE_RMS_THRESHOLD: f32 = 1.0e-4;
 
-/// How long a previously-active source must stay digitally silent before the
-/// capture thread warns the UI. Deliberately long: a loopback device reads as
-/// pure silence whenever nobody on the far side is playing audio, so this is
-/// tuned to catch a source that has actually disappeared mid-meeting (an
-/// AirPods disconnect, a muted virtual device) rather than a lull in the call.
-const SOURCE_SILENCE_WARNING_SECONDS: f32 = 30.0;
+/// How many consecutive [`SOURCE_RMS_WINDOW_SECONDS`] windows must be mostly
+/// padded before starvation counts as corroboration.
+///
+/// The mixer pads a source the moment it misses [`SOURCE_STARVATION_TIMEOUT`],
+/// which a perfectly healthy loopback does on any ordinary scheduling stall —
+/// display sleep, a Bluetooth route switch, a call app changing devices. One
+/// such hiccup is not evidence of anything, so the padding has to *persist*: a
+/// device that has actually gone away never delivers again, and pads every
+/// window from then on.
+const SOURCE_STARVATION_CORROBORATION_WINDOWS: u64 = 5;
+
+/// Per-source rules for the silence watchdog.
+///
+/// The two sources fail differently, so they cannot share one rule. A live
+/// microphone always carries a noise floor well above
+/// [`SOURCE_SILENCE_RMS_THRESHOLD`], so exact zeros from one *are* the fault
+/// signal. A loopback device legitimately reads as exact zeros the entire time
+/// nobody on the far side is playing audio — which is most of a meeting where
+/// you are the one talking — so silence there says nothing on its own.
+struct SourceSilenceProfile {
+    /// How long a previously-active source must stay digitally silent before
+    /// the capture thread warns the UI.
+    warn_after_seconds: f32,
+    /// Whether silence alone is enough, or whether the source must also have
+    /// stopped *delivering*, and stayed stopped, during the quiet span. A
+    /// device that has gone away stops driving its cpal callback, which the
+    /// mixer sees as starvation and pads for every window from then on; a
+    /// device that is merely idle keeps handing over zero-filled buffers on
+    /// schedule, pausing at most for the odd scheduling stall. That difference
+    /// is the only evidence available that separates a dead loopback from a
+    /// quiet one — see [`SOURCE_STARVATION_CORROBORATION_WINDOWS`] for how much
+    /// of it is required.
+    require_starvation_evidence: bool,
+}
+
+/// Digital silence from a microphone is itself the fault signal, so 30s of it
+/// is warned about on its own.
+const MIC_SILENCE_PROFILE: SourceSilenceProfile = SourceSilenceProfile {
+    warn_after_seconds: 30.0,
+    require_starvation_evidence: false,
+};
+
+/// A loopback needs corroboration and a much longer fuse: three minutes of
+/// nothing playing is an ordinary stretch of an ordinary call.
+const SYSTEM_SILENCE_PROFILE: SourceSilenceProfile = SourceSilenceProfile {
+    warn_after_seconds: 180.0,
+    require_starvation_evidence: true,
+};
 
 fn device_name(device: &cpal::Device) -> Result<String, cpal::Error> {
     Ok(device.description()?.name().to_string())
@@ -171,43 +213,66 @@ impl SourceResampler {
 /// simply keeps handing us zeros. This notices that the source has been
 /// digitally silent for a while *after* having carried real audio, which is the
 /// signal a user can act on.
+///
+/// What counts as "a while", and whether silence alone is enough, comes from
+/// the source's [`SourceSilenceProfile`] — see there for why a loopback cannot
+/// be judged by the same rule as a microphone.
 struct SourceSilenceWatchdog {
     sample_rate: f32,
     window_frames: u64,
     warn_after_frames: u64,
+    require_starvation_evidence: bool,
     frames_in_window: u64,
     window_sum_squares: f64,
     silent_frames: u64,
+    /// Frames the mixer had to pad for this source within the window currently
+    /// being filled.
+    starved_frames_in_window: u64,
+    /// Consecutive silent windows the mixer spent mostly padding this source:
+    /// the corroborating evidence that the device stopped delivering rather
+    /// than merely having nothing to deliver.
+    consecutive_starved_windows: u64,
     was_active: bool,
     warned: bool,
 }
 
 impl SourceSilenceWatchdog {
-    fn new(sample_rate: u32) -> Self {
+    fn new(sample_rate: u32, profile: &SourceSilenceProfile) -> Self {
         let sample_rate = sample_rate.max(1);
         let window_frames = ((sample_rate as f32) * SOURCE_RMS_WINDOW_SECONDS)
             .round()
             .max(1.0) as u64;
-        let warn_after_frames = ((sample_rate as f32) * SOURCE_SILENCE_WARNING_SECONDS)
+        let warn_after_frames = ((sample_rate as f32) * profile.warn_after_seconds)
             .round()
             .max(1.0) as u64;
         Self {
             sample_rate: sample_rate as f32,
             window_frames,
             warn_after_frames,
+            require_starvation_evidence: profile.require_starvation_evidence,
             frames_in_window: 0,
             window_sum_squares: 0.0,
             silent_frames: 0,
+            starved_frames_in_window: 0,
+            consecutive_starved_windows: 0,
             was_active: false,
             warned: false,
         }
     }
 
-    /// Feed the frames just written for this source. Returns the silent
-    /// duration, in seconds, the first time the source crosses the warning
-    /// threshold after having been active; `None` otherwise. Re-arms once the
-    /// source carries audio again, so a second dropout warns again.
-    fn observe(&mut self, samples: &[f32]) -> Option<f32> {
+    /// Feed the frames just written for this source, along with how many of
+    /// them the mixer had to pad because the device delivered nothing.
+    ///
+    /// Returns the silent duration, in seconds, the first time the source
+    /// crosses its warning threshold after having been active; `None`
+    /// otherwise. Re-arms once the source carries audio again, so a second
+    /// dropout warns again.
+    fn observe(&mut self, samples: &[f32], padded_frames: u64) -> Option<f32> {
+        // Drains are far shorter than a window, so attributing a drain's
+        // padding to the window it lands in is exact in practice and never off
+        // by more than one drain at a boundary.
+        self.starved_frames_in_window = self.starved_frames_in_window.saturating_add(padded_frames);
+
         let mut warning = None;
         for &sample in samples {
             self.window_sum_squares += (sample as f64) * (sample as f64);
@@ -218,18 +283,36 @@ impl SourceSilenceWatchdog {
 
             let window_frames = self.frames_in_window;
             let rms = (self.window_sum_squares / window_frames as f64).sqrt() as f32;
+            let starved_frames = std::mem::take(&mut self.starved_frames_in_window);
             self.window_sum_squares = 0.0;
             self.frames_in_window = 0;
 
             if rms >= SOURCE_SILENCE_RMS_THRESHOLD {
                 self.was_active = true;
                 self.silent_frames = 0;
+                self.consecutive_starved_windows = 0;
                 self.warned = false;
                 continue;
             }
 
             self.silent_frames = self.silent_frames.saturating_add(window_frames);
-            if self.was_active && !self.warned && self.silent_frames >= self.warn_after_frames {
+            // A window the mixer spent mostly inventing is a window the device
+            // did not deliver. One that it merely dipped into is jitter, and
+            // the run resets — so a single stall cannot arm the warning for the
+            // rest of the meeting.
+            if starved_frames * 2 >= window_frames {
+                self.consecutive_starved_windows += 1;
+            } else {
+                self.consecutive_starved_windows = 0;
+            }
+
+            let corroborated = !self.require_starvation_evidence
+                || self.consecutive_starved_windows >= SOURCE_STARVATION_CORROBORATION_WINDOWS;
+            if self.was_active
+                && !self.warned
+                && corroborated
+                && self.silent_frames >= self.warn_after_frames
+            {
                 self.warned = true;
                 warning = Some(self.silent_frames as f32 / self.sample_rate);
             }
@@ -811,10 +894,10 @@ impl MixedAudioCapture {
             let _ = ready_tx.send(Ok(target_sample_rate));
 
             let mut mixer = FrameMixer::new(capture_mic, capture_system);
-            let mut mic_watchdog =
-                capture_mic.then(|| SourceSilenceWatchdog::new(target_sample_rate));
-            let mut system_watchdog =
-                capture_system.then(|| SourceSilenceWatchdog::new(target_sample_rate));
+            let mut mic_watchdog = capture_mic
+                .then(|| SourceSilenceWatchdog::new(target_sample_rate, &MIC_SILENCE_PROFILE));
+            let mut system_watchdog = capture_system
+                .then(|| SourceSilenceWatchdog::new(target_sample_rate, &SYSTEM_SILENCE_PROFILE));
 
             let mut output = Vec::with_capacity(512);
             let mut mic_output = Vec::with_capacity(512);
@@ -871,6 +954,7 @@ impl MixedAudioCapture {
                 let mixed_before = output.len();
                 let mic_before = mic_output.len();
                 let system_before = system_output.len();
+                let padded_before = mixer.counts();
                 let frames = mixer.drain_into(
                     mic_starved,
                     system_starved,
@@ -884,13 +968,20 @@ impl MixedAudioCapture {
                     continue;
                 }
 
+                // Frames the mixer had to invent because a source delivered
+                // nothing: the evidence that separates a device which has gone
+                // away from one that simply has nothing to play.
+                let padded_now = mixer.counts();
                 if let Some(watchdog) = mic_watchdog.as_mut() {
-                    if let Some(seconds) = watchdog.observe(&mic_output[mic_before..]) {
+                    let padded = padded_now.mic_padded - padded_before.mic_padded;
+                    if let Some(seconds) = watchdog.observe(&mic_output[mic_before..], padded) {
                         emit_source_silence_warning(events.as_ref(), "mic", seconds);
                     }
                 }
                 if let Some(watchdog) = system_watchdog.as_mut() {
-                    if let Some(seconds) = watchdog.observe(&system_output[system_before..]) {
+                    let padded = padded_now.system_padded - padded_before.system_padded;
+                    if let Some(seconds) = watchdog.observe(&system_output[system_before..], padded)
+                    {
                         emit_source_silence_warning(events.as_ref(), "system", seconds);
                     }
                 }
@@ -1501,33 +1592,183 @@ mod tests {
     #[test]
     fn silence_watchdog_warns_once_after_a_previously_active_source_goes_quiet() {
         let sample_rate = 16_000u32;
-        let mut watchdog = SourceSilenceWatchdog::new(sample_rate);
+        let mut watchdog = SourceSilenceWatchdog::new(sample_rate, &MIC_SILENCE_PROFILE);
         let window = sample_rate as usize;
+        let warn_after = MIC_SILENCE_PROFILE.warn_after_seconds as usize;
 
         // Never active: silence alone must not warn.
-        for _ in 0..(SOURCE_SILENCE_WARNING_SECONDS as usize + 5) {
-            assert!(watchdog.observe(&vec![0.0; window]).is_none());
+        for _ in 0..(warn_after + 5) {
+            assert!(watchdog.observe(&vec![0.0; window], 0).is_none());
         }
 
-        assert!(watchdog.observe(&vec![0.3; window]).is_none());
+        assert!(watchdog.observe(&vec![0.3; window], 0).is_none());
 
         let mut warnings = Vec::new();
-        for _ in 0..(SOURCE_SILENCE_WARNING_SECONDS as usize + 5) {
-            if let Some(seconds) = watchdog.observe(&vec![0.0; window]) {
+        for _ in 0..(warn_after + 5) {
+            if let Some(seconds) = watchdog.observe(&vec![0.0; window], 0) {
                 warnings.push(seconds);
             }
         }
         assert_eq!(warnings.len(), 1, "warned {:?}", warnings);
-        assert!((warnings[0] - SOURCE_SILENCE_WARNING_SECONDS).abs() < 1.5);
+        assert!((warnings[0] - MIC_SILENCE_PROFILE.warn_after_seconds).abs() < 1.5);
 
         // Recovering re-arms the watchdog for a second dropout.
-        assert!(watchdog.observe(&vec![0.3; window]).is_none());
+        assert!(watchdog.observe(&vec![0.3; window], 0).is_none());
         let mut second = None;
-        for _ in 0..(SOURCE_SILENCE_WARNING_SECONDS as usize + 5) {
-            if let Some(seconds) = watchdog.observe(&vec![0.0; window]) {
+        for _ in 0..(warn_after + 5) {
+            if let Some(seconds) = watchdog.observe(&vec![0.0; window], 0) {
                 second = Some(seconds);
             }
         }
         assert!(second.is_some(), "watchdog must re-arm after recovery");
+    }
+
+    /// The regression: a loopback reads as exact zeros for as long as nobody on
+    /// the far side is playing anything, so an ordinary meeting where you do
+    /// the talking used to trip a "system audio went silent" warning within
+    /// half a minute. Silence from a still-delivering loopback is not a fault.
+    #[test]
+    fn quiet_but_live_loopback_never_warns() {
+        let sample_rate = 16_000u32;
+        let mut watchdog = SourceSilenceWatchdog::new(sample_rate, &SYSTEM_SILENCE_PROFILE);
+        let window = sample_rate as usize;
+
+        // Somebody shares audio briefly, then nothing plays for ten minutes
+        // while the device keeps delivering its buffers on schedule.
+        assert!(watchdog.observe(&vec![0.3; window], 0).is_none());
+        for second in 0..600 {
+            assert!(
+                watchdog.observe(&vec![0.0; window], 0).is_none(),
+                "warned at {second}s of an ordinary quiet stretch"
+            );
+        }
+    }
+
+    /// A loopback that has actually gone away stops driving its cpal callback,
+    /// so the mixer starts padding its track. That is the corroboration, and
+    /// with it the warning must still fire.
+    #[test]
+    fn loopback_that_stops_delivering_still_warns() {
+        let sample_rate = 16_000u32;
+        let mut watchdog = SourceSilenceWatchdog::new(sample_rate, &SYSTEM_SILENCE_PROFILE);
+        let window = sample_rate as usize;
+        let warn_after = SYSTEM_SILENCE_PROFILE.warn_after_seconds as usize;
+
+        assert!(watchdog.observe(&vec![0.3; window], 0).is_none());
+
+        let mut warnings = Vec::new();
+        for _ in 0..(warn_after + 5) {
+            // Every frame in this window had to be padded: the device is gone.
+            if let Some(seconds) = watchdog.observe(&vec![0.0; window], window as u64) {
+                warnings.push(seconds);
+            }
+        }
+        assert_eq!(warnings.len(), 1, "warned {:?}", warnings);
+        assert!((warnings[0] - SYSTEM_SILENCE_PROFILE.warn_after_seconds).abs() < 1.5);
+    }
+
+    /// The regression the corroboration rule itself had: it latched on the
+    /// first padded frame ever seen in a silent run, so one ordinary scheduling
+    /// stall — a display sleeping, a Bluetooth route switching — armed the
+    /// warning for the rest of the meeting and the false "system audio went
+    /// silent" came back minutes later on a perfectly healthy loopback.
+    #[test]
+    fn one_delivery_hiccup_does_not_arm_the_loopback_warning() {
+        let sample_rate = 16_000u32;
+        let mut watchdog = SourceSilenceWatchdog::new(sample_rate, &SYSTEM_SILENCE_PROFILE);
+        let window = sample_rate as usize;
+
+        // Somebody shares audio, then nothing plays. One second in, the device
+        // misses a single callback and the mixer pads a frame for it; after
+        // that it delivers on schedule for ten minutes.
+        assert!(watchdog.observe(&vec![0.3; window], 0).is_none());
+        assert!(watchdog.observe(&vec![0.0; window], 1).is_none());
+        for second in 0..600 {
+            assert!(
+                watchdog.observe(&vec![0.0; window], 0).is_none(),
+                "warned at {second}s after a single 400ms delivery hiccup"
+            );
+        }
+    }
+
+    /// A stall long enough to pad a whole window is still a stall, not a
+    /// departure: the device comes back, so the run of starved windows breaks
+    /// before it is long enough to corroborate anything.
+    #[test]
+    fn an_intermittent_stall_never_accumulates_into_corroboration() {
+        let sample_rate = 16_000u32;
+        let mut watchdog = SourceSilenceWatchdog::new(sample_rate, &SYSTEM_SILENCE_PROFILE);
+        let window = sample_rate as usize;
+
+        assert!(watchdog.observe(&vec![0.3; window], 0).is_none());
+        for second in 0..600 {
+            // Fully padded every fourth window, delivered the rest of the time.
+            let padded = if second % 4 == 0 { window as u64 } else { 0 };
+            assert!(
+                watchdog.observe(&vec![0.0; window], padded).is_none(),
+                "warned at {second}s of an intermittently stalling but live loopback"
+            );
+        }
+    }
+
+    /// A loopback that goes quiet first and dies later must still be reported,
+    /// and reported on the silence fuse rather than made to wait out a second
+    /// one — the user is owed the warning as soon as both facts are true.
+    #[test]
+    fn a_loopback_that_dies_partway_through_a_quiet_stretch_still_warns() {
+        let sample_rate = 16_000u32;
+        let mut watchdog = SourceSilenceWatchdog::new(sample_rate, &SYSTEM_SILENCE_PROFILE);
+        let window = sample_rate as usize;
+        let warn_after = SYSTEM_SILENCE_PROFILE.warn_after_seconds as usize;
+        let died_at = warn_after - 30;
+
+        assert!(watchdog.observe(&vec![0.3; window], 0).is_none());
+
+        let mut warned_at = None;
+        for second in 0..(warn_after + 30) {
+            let padded = if second >= died_at { window as u64 } else { 0 };
+            if watchdog.observe(&vec![0.0; window], padded).is_some() {
+                warned_at = Some(second);
+                break;
+            }
+        }
+
+        let warned_at = warned_at.expect("a departed loopback must still be reported");
+        assert!(
+            warned_at >= warn_after - 1 && warned_at <= warn_after + 2,
+            "warned at {warned_at}s; the silence fuse is {warn_after}s"
+        );
+    }
+
+    /// The distinction stated as a contrast: byte-for-byte identical input —
+    /// a burst of audio then unbroken digital silence, with the device still
+    /// delivering — is a fault on a microphone and an ordinary quiet stretch on
+    /// a loopback. Applying one rule to both is what produced the false
+    /// "system audio went silent" warning.
+    #[test]
+    fn identical_silence_is_a_fault_on_a_mic_and_ordinary_on_a_loopback() {
+        let sample_rate = 16_000u32;
+        let window = sample_rate as usize;
+
+        let observe_run = |profile: &SourceSilenceProfile| -> Option<f32> {
+            let mut watchdog = SourceSilenceWatchdog::new(sample_rate, profile);
+            watchdog.observe(&vec![0.3; window], 0);
+            let mut warning = None;
+            for _ in 0..600 {
+                if let Some(seconds) = watchdog.observe(&vec![0.0; window], 0) {
+                    warning = Some(seconds);
+                }
+            }
+            warning
+        };
+
+        assert!(
+            observe_run(&MIC_SILENCE_PROFILE).is_some(),
+            "a microphone delivering exact zeros has failed"
+        );
+        assert!(
+            observe_run(&SYSTEM_SILENCE_PROFILE).is_none(),
+            "a loopback delivering exact zeros is just nobody sharing audio"
+        );
     }
 }

@@ -53,22 +53,33 @@ import { formatAppliedDictationCommandLabel } from "@/lib/dictation-command-labe
 import {
   INSERTION_MODE_LABELS,
   formatInsertionModeLabel,
-  historyModeLabel,
-  historyPipelineStageLabel,
-  historyPromptSourceLabel,
 } from "@/lib/dictation-history-labels";
+import {
+  CONTEXT_SOURCE_LABELS,
+  DICTATION_MODE_DEFINITIONS,
+  DICTATION_MODE_DEFINITION_BY_ID,
+  DICTATION_PROFILE_TILES,
+  RECOMMENDED_APP_STYLES,
+  CODING_PROFILE_STYLE_ID,
+  QUIET_PROFILE_STYLE_ID,
+  coerceBaseModePreset,
+  resolveActiveDictationProfileId,
+  summarizeMode,
+  type DictationBaseModePreset,
+  type DictationProfileIconKey,
+  type RecommendedAppStyle,
+} from "@/lib/dictation-profiles";
+import {
+  DICTATION_HOTKEY_MODE_CHIP_LABELS,
+  resolveDictationHotkeyMode,
+} from "@/lib/dictation-hotkey-mode";
+import { requestMainView } from "@/lib/navigation";
 import { sanitizeUserFacingDictationMessage } from "@/lib/dictation-ui-message";
 import { speakTextAloud, stopSpeakingText } from "@/lib/text-to-speech";
 import { useToast } from "@/components/toast";
 import { Button } from "@/components/ui/button";
 import { PageHeader } from "@/components/ui/page-header";
-import {
-  Card,
-  CardContent,
-  CardDescription,
-  CardHeader,
-  CardTitle,
-} from "@/components/ui/card";
+import { Card, CardContent } from "@/components/ui/card";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { Switch } from "@/components/ui/switch";
 import {
@@ -78,12 +89,11 @@ import {
   SelectTrigger,
   SelectValue,
 } from "@/components/ui/select";
+import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import {
   Keyboard,
   Mic,
-  Square,
   Zap,
-  Save,
   RefreshCw,
   Download,
   Upload,
@@ -92,7 +102,9 @@ import {
   Terminal,
   Volume2,
   BookOpen,
+  NotebookPen,
   Replace,
+  SlidersHorizontal,
   CheckCircle2,
   TriangleAlert,
 } from "lucide-react";
@@ -102,6 +114,14 @@ import {
   DialogHeader,
   DialogTitle,
 } from "@/components/ui/dialog";
+import { DictationCaptureHero } from "@/components/views/dictation/dictation-capture-hero";
+import { DictationHistoryDialog } from "@/components/views/dictation/dictation-history-dialog";
+import { DictationTextActionsEditor } from "@/components/views/dictation/dictation-text-actions-editor";
+import {
+  DICTATION_TEXT_ACTIONS,
+  getDictationTextContextDescription,
+  type SelectedTextActionCommandPresetKey,
+} from "@/lib/selected-text-actions";
 
 import type {
   AsrProviderType,
@@ -118,6 +138,7 @@ import {
   type DictationContextSource,
   type DictationInsertionMode,
   type DictationModePreset,
+  type DictationPhase,
 } from "@/features/dictation/runtime";
 
 function getSafeLocalStorage(): Pick<Storage, "getItem" | "setItem"> | null {
@@ -137,7 +158,6 @@ function getSafeLocalStorage(): Pick<Storage, "getItem" | "setItem"> | null {
   return storage;
 }
 
-type DictationBaseModePreset = Exclude<DictationModePreset, "custom">;
 type CorrectionSuggestionGroup = {
   key: string;
   suggestionIds: string[];
@@ -147,19 +167,6 @@ type CorrectionSuggestionGroup = {
   updatedAt: string;
   sampleOriginalText: string;
   sampleCorrectedText: string;
-};
-
-type DictationModeDefinition = {
-  id: DictationModePreset;
-  label: string;
-  description: string;
-  profile?: "normal_speed" | "power_rewrite";
-  routePreference?: DictationRoutePreference | null;
-  insertionMode?: DictationInsertionMode;
-  contextSource?: DictationContextSource;
-  saveToInbox?: boolean;
-  copyToClipboard?: boolean;
-  commandModeEnabled?: boolean;
 };
 
 type DictationCustomModeDraft = {
@@ -278,49 +285,6 @@ function isCaseOnlyDifference(original: string, corrected: string): boolean {
   );
 }
 
-type DictationModeSummaryItem = {
-  label: string;
-  value: string;
-};
-
-type DictationRuntimePhase =
-  | "idle"
-  | "primed"
-  | "recording"
-  | "stopping"
-  | "transcribing"
-  | "delivering"
-  | "done"
-  | "error";
-
-type RecommendedAppStyle = {
-  id: string;
-  name: string;
-  description: string;
-  baseModePreset: DictationBaseModePreset;
-  customPrompt: string;
-  profile: "normal_speed" | "power_rewrite";
-  routePreference: DictationRoutePreference;
-  insertionMode: DictationInsertionMode;
-  contextSource: DictationContextSource;
-  saveToInbox: boolean;
-  copyToClipboard: boolean;
-  commandModeEnabled: boolean;
-  activationAppMatcher?: string;
-  activationDomainMatcher?: string;
-  livePreviewEnabled?: boolean;
-};
-
-type SoloLane = {
-  id: string;
-  title: string;
-  description: string;
-  icon: typeof Mic;
-  modeId?: DictationModePreset;
-  styleId?: string;
-  emphasis: string;
-};
-
 type DictationCoachStep =
   | "backtrack"
   | "dictionary"
@@ -413,189 +377,6 @@ const DICTATION_ACTIVE_LANGUAGE_OPTIONS =
     (option) => option.value !== "auto",
   );
 
-const RECOMMENDED_APP_STYLES: RecommendedAppStyle[] = [
-  {
-    id: "builtin-slack-replies",
-    name: "Slack Replies",
-    description:
-      "Short, clean replies that auto-activate in Slack and keep command edits ready.",
-    baseModePreset: "messages",
-    customPrompt:
-      "Rewrite the user's dictation as a concise Slack reply. Keep it direct, natural, and easy to scan. Avoid email-style greetings or sign-offs unless the user explicitly says them. Return only the final reply.",
-    profile: "normal_speed",
-    routePreference: "local",
-    insertionMode: "paste",
-    contextSource: "application_context",
-    saveToInbox: false,
-    copyToClipboard: true,
-    commandModeEnabled: true,
-    activationAppMatcher: "Slack",
-    livePreviewEnabled: true,
-  },
-  {
-    id: "builtin-gmail-drafts",
-    name: "Gmail Drafts",
-    description:
-      "Polished email drafting with selected-text context and auto-activation on Gmail.",
-    baseModePreset: "email",
-    customPrompt:
-      "Rewrite the user's dictation into polished email-ready prose. Preserve intent, improve structure, and keep tone professional. Return only the final email body with no subject line unless the user dictates one.",
-    profile: "power_rewrite",
-    routePreference: "local",
-    insertionMode: "paste",
-    contextSource: "selected_text",
-    saveToInbox: true,
-    copyToClipboard: true,
-    commandModeEnabled: true,
-    activationDomainMatcher: "gmail.com",
-    livePreviewEnabled: true,
-  },
-  {
-    id: "builtin-google-docs-writing",
-    name: "Google Docs Writing",
-    description:
-      "Long-form drafting with browser context and clean insert behavior for Docs.",
-    baseModePreset: "voice",
-    customPrompt:
-      "Rewrite the user's dictation into clean long-form prose for a document. Improve flow and clarity, but keep the original meaning. Use paragraphs rather than bullets unless the user explicitly asks for bullets.",
-    profile: "power_rewrite",
-    routePreference: "local",
-    insertionMode: "paste",
-    contextSource: "application_context",
-    saveToInbox: true,
-    copyToClipboard: true,
-    commandModeEnabled: true,
-    activationDomainMatcher: "docs.google.com",
-    livePreviewEnabled: true,
-  },
-  {
-    id: "builtin-notion-notes",
-    name: "Notion Notes",
-    description:
-      "Fast notes and structured edits for Notion pages with live preview on.",
-    baseModePreset: "notes",
-    customPrompt:
-      "Rewrite the user's dictation as crisp structured notes. Prefer short sections and bullets when they make the notes clearer. Keep action items and open questions explicit. Return only the final note text.",
-    profile: "normal_speed",
-    routePreference: "local",
-    insertionMode: "paste",
-    contextSource: "application_context",
-    saveToInbox: true,
-    copyToClipboard: true,
-    commandModeEnabled: true,
-    activationAppMatcher: "Notion",
-    livePreviewEnabled: true,
-  },
-  {
-    id: "builtin-linear-updates",
-    name: "Linear Updates",
-    description:
-      "Issue updates with concise drafting and selected-text editing on linear.app.",
-    baseModePreset: "meeting_follow_up",
-    customPrompt:
-      "Rewrite the user's dictation as a concise project or issue update. Make status, blockers, and next steps explicit. Keep the language short, precise, and suitable for a work-tracking tool.",
-    profile: "power_rewrite",
-    routePreference: "local",
-    insertionMode: "paste",
-    contextSource: "selected_text",
-    saveToInbox: true,
-    copyToClipboard: true,
-    commandModeEnabled: true,
-    activationDomainMatcher: "linear.app",
-    livePreviewEnabled: true,
-  },
-  {
-    id: "builtin-coding-copilot",
-    name: "Coding Copilot",
-    description:
-      "Code-aware dictation for prompts, commits, terminal commands, and editor rewrites.",
-    baseModePreset: "messages",
-    customPrompt:
-      "Rewrite the user's dictation for a software development workflow. Preserve code terms, filenames, CLI commands, markdown, and developer jargon exactly when possible. Prefer concise technical phrasing and keep variable names, casing, and product names intact.",
-    profile: "normal_speed",
-    routePreference: "local",
-    insertionMode: "paste",
-    contextSource: "selected_text",
-    saveToInbox: true,
-    copyToClipboard: true,
-    commandModeEnabled: true,
-    activationAppMatcher: "Cursor",
-    livePreviewEnabled: true,
-  },
-  {
-    id: "builtin-quiet-focus",
-    name: "Quiet Focus",
-    description:
-      "Low-friction dictation for whispering, private work, and fewer interruptions.",
-    baseModePreset: "voice",
-    customPrompt:
-      "Rewrite the user's dictation with minimal cleanup. Preserve quiet speech intent, keep corrections natural, and avoid over-formatting. Return only the final text.",
-    profile: "normal_speed",
-    routePreference: "local",
-    insertionMode: "paste",
-    contextSource: "none",
-    saveToInbox: true,
-    copyToClipboard: true,
-    commandModeEnabled: true,
-    livePreviewEnabled: true,
-  },
-];
-
-const SOLO_LANES: SoloLane[] = [
-  {
-    id: "everywhere",
-    title: "General",
-    description:
-      "Fast default dictation for everyday text targets with clean inserts and light cleanup.",
-    icon: Sparkles,
-    modeId: "voice",
-    emphasis: "Best all-around starting point",
-  },
-  {
-    id: "messages",
-    title: "Slack",
-    description: "Short replies for Slack, chat, and quick-response work.",
-    icon: Zap,
-    modeId: "messages",
-    emphasis: "Best for compact replies",
-  },
-  {
-    id: "writing",
-    title: "Writing",
-    description: "Long-form drafting for docs, email, and polished prose.",
-    icon: BookOpen,
-    modeId: "email",
-    emphasis: "Best for polished language",
-  },
-  {
-    id: "follow_up",
-    title: "Follow-up",
-    description:
-      "Turn rough notes into a polished meeting follow-up without forcing an insert.",
-    icon: Replace,
-    modeId: "meeting_follow_up",
-    emphasis: "Best for post-call writing",
-  },
-  {
-    id: "coding",
-    title: "Coding",
-    description:
-      "Developer-first dictation for prompts, issue updates, markdown, and commands.",
-    icon: Terminal,
-    styleId: "builtin-coding-copilot",
-    emphasis: "Optimized for software work",
-  },
-  {
-    id: "quiet",
-    title: "Quiet",
-    description:
-      "Low-noise dictation when you want whisper-friendly capture and fewer distractions.",
-    icon: Volume2,
-    styleId: "builtin-quiet-focus",
-    emphasis: "Best for low-volume speaking",
-  },
-];
-
 const DICTATION_COACH_CARDS: DictationCoachCard[] = [
   {
     id: "backtrack",
@@ -623,48 +404,39 @@ const DICTATION_COACH_CARDS: DictationCoachCard[] = [
   },
 ];
 
-const COMMAND_PRESET_FIELDS: Array<{
-  key: "rewrite_shorter" | "rewrite_professional" | "bulletize_selection";
-  label: string;
-  defaultPrompt: string;
-}> = [
-  {
-    key: "rewrite_shorter",
-    label: "Rewrite Shorter",
-    defaultPrompt:
-      "Rewrite the user's text to be shorter while preserving intent. Keep the same language and tone. Return only the rewritten text.",
-  },
-  {
-    key: "rewrite_professional",
-    label: "Rewrite Professional",
-    defaultPrompt:
-      "Rewrite the user's text in a professional tone while preserving meaning. Keep it clear and concise. Return only the rewritten text.",
-  },
-  {
-    key: "bulletize_selection",
-    label: "Bulletize Selection",
-    defaultPrompt:
-      "Convert the user's text into concise bullet points. Use one bullet per idea. Return only the bullet list.",
-  },
-];
-
 const DEFAULT_DICTATION_MODE: DictationModePreset = "voice";
 const DEFAULT_BASE_MODE: DictationBaseModePreset = "voice";
 
-const CONTEXT_SOURCE_LABELS: Record<DictationContextSource, string> = {
-  none: "No context",
-  clipboard: "Clipboard",
-  selected_text: "Selected text",
-  application_context: "Application context",
+/** Resolves the profile catalog's icon names to components at the render site. */
+const PROFILE_TILE_ICONS: Record<DictationProfileIconKey, typeof Mic> = {
+  sparkles: Sparkles,
+  zap: Zap,
+  book: BookOpen,
+  notebook: NotebookPen,
+  replace: Replace,
+  terminal: Terminal,
+  volume: Volume2,
+  sliders: SlidersHorizontal,
 };
 
-const PROFILE_LABELS = {
-  normal_speed: "Fast capture",
-  power_rewrite: "Power rewrite",
-} as const;
+type DictationConfigTab =
+  | "profiles"
+  | "capture"
+  | "dictionary"
+  | "snippets"
+  | "corrections"
+  | "text-actions"
+  | "destinations";
 
-const shortcutMode = (pushToTalk: boolean, handsFreeEnabled: boolean) =>
-  handsFreeEnabled ? "hands_free" : pushToTalk ? "hold_to_talk" : "toggle";
+const DICTATION_CONFIG_TABS: { value: DictationConfigTab; label: string }[] = [
+  { value: "profiles", label: "Profiles" },
+  { value: "capture", label: "Capture" },
+  { value: "dictionary", label: "Dictionary" },
+  { value: "snippets", label: "Snippets" },
+  { value: "corrections", label: "Corrections" },
+  { value: "text-actions", label: "Text actions" },
+  { value: "destinations", label: "Destinations" },
+];
 
 function formatTimeoutSeconds(seconds: number): string {
   if (seconds <= 0) return "off";
@@ -694,71 +466,6 @@ function normalizeActiveLanguageSet(languages: string[]): string[] {
   }
   return normalized;
 }
-
-const DICTATION_MODE_DEFINITIONS: DictationModeDefinition[] = [
-  {
-    id: "voice",
-    label: "General",
-    description: "Fast everyday dictation with reliable insert behavior.",
-    profile: "normal_speed",
-    insertionMode: "paste",
-    contextSource: "none",
-    saveToInbox: true,
-    copyToClipboard: true,
-    commandModeEnabled: true,
-  },
-  {
-    id: "messages",
-    label: "Slack & Chat",
-    description:
-      "Quick replies that stay compact and paste cleanly into chat apps.",
-    profile: "normal_speed",
-    insertionMode: "paste",
-    contextSource: "none",
-    saveToInbox: false,
-    copyToClipboard: true,
-    commandModeEnabled: false,
-  },
-  {
-    id: "email",
-    label: "Writing",
-    description:
-      "Cleaner output for polished drafting, rewrites, and longer-form prose.",
-    profile: "power_rewrite",
-    insertionMode: "paste",
-    contextSource: "selected_text",
-    saveToInbox: true,
-    copyToClipboard: true,
-    commandModeEnabled: true,
-  },
-  {
-    id: "notes",
-    label: "Notes",
-    description: "Capture ideas quickly and keep them saved for later.",
-    profile: "normal_speed",
-    insertionMode: "paste",
-    contextSource: "none",
-    saveToInbox: true,
-    copyToClipboard: true,
-    commandModeEnabled: true,
-  },
-  {
-    id: "meeting_follow_up",
-    label: "Meeting Follow-up",
-    description: "Generate polished follow-up text without forcing an insert.",
-    profile: "power_rewrite",
-    insertionMode: "clipboard_only",
-    contextSource: "clipboard",
-    saveToInbox: true,
-    copyToClipboard: true,
-    commandModeEnabled: true,
-  },
-  {
-    id: "custom",
-    label: "Custom",
-    description: "Keep full control over capture, insertion, and automation.",
-  },
-];
 
 function describeActivationRules(
   appMatcher: string | null | undefined,
@@ -818,18 +525,8 @@ function createCustomModeDraft(
   };
 }
 
-function dictationModeLabel(
-  modePreset: Exclude<DictationModePreset, "custom">,
-): string {
-  return (
-    DICTATION_MODE_DEFINITIONS.find(
-      (definition) => definition.id === modePreset,
-    )?.label ?? "General"
-  );
-}
-
 function getDictationPhaseSummary(
-  phase: DictationRuntimePhase,
+  phase: DictationPhase,
   message: string | null,
   preview: string | null,
 ): {
@@ -911,112 +608,6 @@ function getDictationPhaseSummary(
   }
 }
 
-function coerceBaseModePreset(
-  modePreset: string | null | undefined,
-): DictationBaseModePreset {
-  switch (modePreset) {
-    case "messages":
-    case "email":
-    case "notes":
-    case "meeting_follow_up":
-      return modePreset;
-    default:
-      return "voice";
-  }
-}
-
-function summarizeMode(mode: {
-  baseModePreset?: DictationBaseModePreset | null;
-  profile: "normal_speed" | "power_rewrite";
-  routePreference?: DictationRoutePreference | null;
-  insertionMode: DictationInsertionMode;
-  contextSource: DictationContextSource;
-  saveToInbox: boolean;
-  copyToClipboard: boolean;
-  commandModeEnabled: boolean;
-  dictationProvider?: string | null;
-  dictationModelId?: string | null;
-  aiProvider?: string | null;
-  aiModelId?: string | null;
-  customPrompt?: string | null;
-  activationAppMatcher?: string | null;
-  activationDomainMatcher?: string | null;
-  languageOverride?: string | null;
-  livePreviewEnabled?: boolean | null;
-}): DictationModeSummaryItem[] {
-  const summary: DictationModeSummaryItem[] = [
-    {
-      label: "Base",
-      value: dictationModeLabel(mode.baseModePreset ?? "voice"),
-    },
-    { label: "Style", value: PROFILE_LABELS[mode.profile] },
-    {
-      label: "Route",
-      value:
-        mode.routePreference === "cloud"
-          ? "Cloud preferred"
-          : mode.routePreference === "local"
-            ? "Local preferred"
-            : "Current route",
-    },
-    { label: "Result", value: INSERTION_MODE_LABELS[mode.insertionMode] },
-    { label: "Context", value: CONTEXT_SOURCE_LABELS[mode.contextSource] },
-    {
-      label: "History",
-      value: mode.saveToInbox ? "Save to Inbox" : "Do not save",
-    },
-    {
-      label: "Clipboard",
-      value: mode.copyToClipboard ? "Copy enabled" : "Copy off",
-    },
-    {
-      label: "Commands",
-      value: mode.commandModeEnabled ? "Command mode on" : "Command mode off",
-    },
-    {
-      label: "Transcription",
-      value: mode.dictationProvider
-        ? mode.dictationModelId
-          ? `${mode.dictationProvider} · ${mode.dictationModelId}`
-          : mode.dictationProvider
-        : "Current route",
-    },
-    {
-      label: "AI",
-      value: mode.aiProvider
-        ? mode.aiModelId
-          ? `${mode.aiProvider} · ${mode.aiModelId}`
-          : mode.aiProvider
-        : "Current AI route",
-    },
-    {
-      label: "Auto",
-      value: mode.activationDomainMatcher
-        ? `Domain ${mode.activationDomainMatcher}`
-        : mode.activationAppMatcher
-          ? `App ${mode.activationAppMatcher}`
-          : "Manual only",
-    },
-  ];
-
-  if (mode.languageOverride?.trim()) {
-    summary.push({ label: "Language", value: mode.languageOverride.trim() });
-  }
-
-  if (mode.customPrompt?.trim()) {
-    summary.push({ label: "Prompt", value: "Mode-specific style prompt" });
-  }
-
-  if (typeof mode.livePreviewEnabled === "boolean") {
-    summary.push({
-      label: "Preview",
-      value: mode.livePreviewEnabled ? "Live partials on" : "Live partials off",
-    });
-  }
-
-  return summary;
-}
-
 export function DictationView() {
   const {
     stateEvent: dictationStateEvent,
@@ -1035,6 +626,9 @@ export function DictationView() {
     formatShortcutForDisplay(defaultShortcut),
   );
   const [hotkeyShortcut, setHotkeyShortcut] = useState(defaultShortcut);
+  const [repasteShortcutLabel, setRepasteShortcutLabel] = useState<
+    string | null
+  >(null);
   const [transcribedText, setTranscribedText] = useState("");
   const [lastProvider, setLastProvider] = useState<string | null>(null);
   const [lastModelId, setLastModelId] = useState<string | null>(null);
@@ -1060,7 +654,7 @@ export function DictationView() {
   const [commandApplied, setCommandApplied] = useState<string | null>(null);
   const [snippetAppliedCount, setSnippetAppliedCount] = useState(0);
   const [dictationPhase, setDictationPhase] =
-    useState<DictationRuntimePhase>("idle");
+    useState<DictationPhase>("idle");
   const [dictationPhaseMessage, setDictationPhaseMessage] = useState<
     string | null
   >(null);
@@ -1181,6 +775,8 @@ export function DictationView() {
   const [dictationRetentionCustomHours, setDictationRetentionCustomHours] =
     useState(24);
   const [hotkeyPressed, setHotkeyPressed] = useState(false);
+  const [activeConfigTab, setActiveConfigTab] =
+    useState<DictationConfigTab>("profiles");
   const [selectedRecording, setSelectedRecording] = useState<Recording | null>(
     null,
   );
@@ -1191,6 +787,11 @@ export function DictationView() {
   const [dictationInsights, setDictationInsights] =
     useState<DictationInsights | null>(null);
   const [latestCorrectionBaseline, setLatestCorrectionBaseline] = useState("");
+  // "Edited since capture" is deliberately NOT the correction baseline: both
+  // correction paths reset that baseline to the edited wording, while the text
+  // Plainsong actually captured (and the sidecar still stores for the
+  // "Paste last result" shortcut) never changes. Only a fresh capture clears it.
+  const [latestResultDirty, setLatestResultDirty] = useState(false);
   const [latestLearnStatus, setLatestLearnStatus] = useState<string | null>(
     null,
   );
@@ -1229,20 +830,6 @@ export function DictationView() {
   );
   const [currentAiModelId, setCurrentAiModelId] = useState<string | null>(null);
   const timeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
-
-  const modeDefinitionById = useMemo(
-    () =>
-      DICTATION_MODE_DEFINITIONS.reduce<
-        Record<DictationModePreset, DictationModeDefinition>
-      >(
-        (acc, definition) => {
-          acc[definition.id] = definition;
-          return acc;
-        },
-        {} as Record<DictationModePreset, DictationModeDefinition>,
-      ),
-    [],
-  );
 
   useEffect(() => {
     return () => {
@@ -1317,35 +904,26 @@ export function DictationView() {
     [dictationCustomModes, selectedCustomModeId],
   );
 
-  const activeLaneId = useMemo(() => {
-    if (
-      dictationModePreset === "custom" &&
-      selectedCustomModeId === "builtin-coding-copilot"
-    ) {
-      return "coding";
-    }
-    if (
-      dictationModePreset === "custom" &&
-      selectedCustomModeId === "builtin-quiet-focus"
-    ) {
-      return "quiet";
-    }
-    switch (dictationModePreset) {
-      case "messages":
-        return "messages";
-      case "meeting_follow_up":
-        return "follow_up";
-      case "email":
-      case "notes":
-        return "writing";
-      default:
-        return "everywhere";
-    }
-  }, [dictationModePreset, selectedCustomModeId]);
+  const activeProfileId = useMemo(
+    () =>
+      resolveActiveDictationProfileId(dictationModePreset, selectedCustomModeId),
+    [dictationModePreset, selectedCustomModeId],
+  );
 
-  const activeLane = useMemo(
-    () => SOLO_LANES.find((lane) => lane.id === activeLaneId) ?? SOLO_LANES[0],
-    [activeLaneId],
+  const activeProfile = useMemo(
+    () =>
+      DICTATION_PROFILE_TILES.find((tile) => tile.id === activeProfileId) ??
+      DICTATION_PROFILE_TILES[0],
+    [activeProfileId],
+  );
+
+  const hotkeyMode = useMemo(
+    () =>
+      resolveDictationHotkeyMode(
+        dictationPushToTalk,
+        dictationHandsFreeEnabled,
+      ),
+    [dictationHandsFreeEnabled, dictationPushToTalk],
   );
 
   const dictationPhaseSummary = useMemo(
@@ -1924,6 +1502,10 @@ export function DictationView() {
         const shortcut = settings.shortcuts.toggleDictation || defaultShortcut;
         setHotkeyLabel(formatShortcutForDisplay(shortcut));
         setHotkeyShortcut(shortcut);
+        const repasteShortcut = settings.shortcuts.repasteLastDictation?.trim();
+        setRepasteShortcutLabel(
+          repasteShortcut ? formatShortcutForDisplay(repasteShortcut) : null,
+        );
       })
       .catch((error) => {
         console.warn("Failed to load dictation preferences:", error);
@@ -2133,7 +1715,7 @@ export function DictationView() {
   const applyDictationMode = (modeId: DictationModePreset) => {
     setDictationModePreset(modeId);
     setSelectedCustomModeId(null);
-    const definition = modeDefinitionById[modeId];
+    const definition = DICTATION_MODE_DEFINITION_BY_ID[modeId];
     if (!definition || modeId === "custom") {
       setCustomModeDraft((current) => ({
         ...current,
@@ -2604,6 +2186,7 @@ export function DictationView() {
     if (text) {
       setTranscribedText(text);
       setLatestCorrectionBaseline(text);
+      setLatestResultDirty(false);
       setLatestLearnStatus(null);
       setDictationError(null);
     }
@@ -2678,6 +2261,7 @@ export function DictationView() {
       if (text?.trim()) {
         setTranscribedText(text);
         setLatestCorrectionBaseline(text);
+        setLatestResultDirty(false);
         setLatestLearnStatus(null);
         setDictationError(null);
         void refetchDictationHistory();
@@ -2936,10 +2520,7 @@ export function DictationView() {
   };
 
   const upsertCommandPreset = async (
-    commandKey:
-      | "rewrite_shorter"
-      | "rewrite_professional"
-      | "bulletize_selection",
+    commandKey: SelectedTextActionCommandPresetKey,
     systemPrompt: string,
     enabled: boolean,
   ) => {
@@ -2964,10 +2545,7 @@ export function DictationView() {
   };
 
   const resetCommandPreset = async (
-    commandKey:
-      | "rewrite_shorter"
-      | "rewrite_professional"
-      | "bulletize_selection",
+    commandKey: SelectedTextActionCommandPresetKey,
   ) => {
     try {
       await deleteDictationCommandPreset(commandKey);
@@ -2979,15 +2557,8 @@ export function DictationView() {
     }
   };
 
-  const getCommandPreset = (
-    key: "rewrite_shorter" | "rewrite_professional" | "bulletize_selection",
-  ) => dictationCommandPresets.find((preset) => preset.commandKey === key);
-
   const setCommandPresetDraft = (
-    commandKey:
-      | "rewrite_shorter"
-      | "rewrite_professional"
-      | "bulletize_selection",
+    commandKey: SelectedTextActionCommandPresetKey,
     updates: Partial<Pick<DictationCommandPreset, "systemPrompt" | "enabled">>,
   ) => {
     setDictationCommandPresets((prev) => {
@@ -3376,6 +2947,40 @@ export function DictationView() {
     }
   };
 
+  /**
+   * Copy exactly what the result editor shows.
+   *
+   * There is deliberately no "insert into the app I was in" button here. The
+   * sidecar's re-insert path (`repaste_dictation_result`, bound to the
+   * "Paste last result" shortcut and the tray) targets whatever is frontmost
+   * when it runs — and a button inside this window can only be clicked while
+   * Plainsong itself is frontmost, so it would insert into Plainsong while
+   * reporting that it reached the user's target app. The shortcut works
+   * because it is pressed from the target app; the copy below is what a
+   * button in this window can honestly do.
+   */
+  const handleCopyLatestResult = async () => {
+    try {
+      await navigator.clipboard.writeText(transcribedText);
+      setPasteStatus("Copied — paste it where you want it with Cmd+V");
+    } catch (error) {
+      console.warn("Failed to copy the latest dictation result:", error);
+      toast("Couldn't copy that result to the clipboard.", "error");
+    }
+  };
+
+  // A correction can only be taught while the editor differs from the text the
+  // learner last saw. This is the baseline diff, not "edited since capture" —
+  // learning resets the baseline but never changes the stored capture.
+  const canLearnLatestCorrection =
+    latestCorrectionBaseline.trim() !== transcribedText.trim();
+  const activeProfileTitle =
+    dictationModePreset === "custom" && selectedCustomMode
+      ? selectedCustomMode.name
+      : activeProfile.title;
+  const hotkeyModeLabel = DICTATION_HOTKEY_MODE_CHIP_LABELS[hotkeyMode];
+  const hotkeyInstruction = dictationInstruction(hotkeyShortcut, hotkeyMode);
+
   return (
     <div className="h-full flex flex-col">
       <PageHeader
@@ -3385,20 +2990,16 @@ export function DictationView() {
         actions={
           <div
             className={cn(
-              "flex items-center gap-2 text-sm px-4 py-2 rounded-lg border transition-all",
+              "flex items-center gap-2 rounded-md border px-3 py-2 transition-all",
               hotkeyPressed
-                ? "bg-gold/10 text-gold-text border-gold/40 scale-105"
-                : "bg-muted",
+                ? "border-gold/40 bg-gold/10 text-gold-text scale-105"
+                : "border-border bg-muted",
             )}
           >
-            <Keyboard className="h-4 w-4" />
-            <span className="font-mono font-medium">{hotkeyLabel}</span>
-            <span className="text-muted-foreground ml-2">
-              {dictationHandsFreeEnabled
-                ? "hands-free"
-                : dictationPushToTalk
-                  ? "hold to talk"
-                  : "toggle"}
+            <Keyboard className="h-4 w-4" aria-hidden="true" />
+            <span className="font-mono text-sm font-medium">{hotkeyLabel}</span>
+            <span className="text-sm text-muted-foreground">
+              {hotkeyModeLabel}
             </span>
           </div>
         }
@@ -3407,1479 +3008,124 @@ export function DictationView() {
       <ScrollArea className="flex-1">
         <div className="p-6 max-w-4xl mx-auto space-y-6">
           {dictationError && (
-            <Card className="border-destructive/30 bg-destructive/10">
-              <CardContent className="p-4">
-                <p className="text-sm text-destructive">{dictationError}</p>
-              </CardContent>
-            </Card>
-          )}
-
-          <Card>
-            <CardHeader>
-              <CardTitle>Profiles</CardTitle>
-              <CardDescription>
-                Pick the profile that matches what you're doing right now. Save
-                private, app-aware profiles when you want Plainsong to switch
-                styles for you automatically.
-              </CardDescription>
-            </CardHeader>
-            <CardContent className="space-y-4">
-              <div className="space-y-3">
-                <div className="grid grid-cols-1 gap-3 md:grid-cols-2 xl:grid-cols-3">
-                  {SOLO_LANES.map((lane) => {
-                    const Icon = lane.icon;
-                    const isActive = activeLane.id === lane.id;
-                    return (
-                      <button
-                        key={lane.id}
-                        type="button"
-                        aria-label={`Profile: ${lane.title}`}
-                        onClick={() => {
-                          if (lane.styleId) {
-                            const style = RECOMMENDED_APP_STYLES.find(
-                              (candidate) => candidate.id === lane.styleId,
-                            );
-                            if (style) {
-                              void handleInstallRecommendedStyle(style);
-                            }
-                            return;
-                          }
-                          if (lane.modeId) {
-                            applyDictationMode(lane.modeId);
-                          }
-                        }}
-                        className={cn(
-                          "rounded-xl border p-4 text-left transition-colors",
-                          isActive
-                            ? "border-rust/40 bg-rust/8 shadow-sm"
-                            : "border-border bg-background hover:border-rust/40 hover:bg-muted/40",
-                        )}
-                      >
-                        <div className="flex items-center justify-between gap-3">
-                          <Icon
-                            className={cn(
-                              "h-4 w-4",
-                              isActive ? "text-gold" : "text-muted-foreground",
-                            )}
-                          />
-                          {isActive ? (
-                            <span className="rounded-full bg-rust px-2 py-0.5 text-[11px] font-semibold text-destructive-foreground">
-                              Active
-                            </span>
-                          ) : null}
-                        </div>
-                        <p className="mt-3 font-medium">{lane.title}</p>
-                        <p className="mt-2 text-sm text-muted-foreground">
-                          {lane.description}
-                        </p>
-                        <p
-                          className={cn(
-                            "mt-3 text-[11px] font-medium",
-                            isActive
-                              ? "text-gold-text"
-                              : "text-muted-foreground",
-                          )}
-                        >
-                          {lane.emphasis}
-                        </p>
-                      </button>
-                    );
-                  })}
-                </div>
-              </div>
-              <div className="space-y-3 border-t pt-4">
-                <div>
-                  <p className="section-heading">Saved modes</p>
-                  <p className="text-sm text-muted-foreground">
-                    Deeper presets with their own route, context, and history
-                    settings — layer these on top of the quick picks above.
-                  </p>
-                </div>
-                <div className="grid grid-cols-1 gap-3 md:grid-cols-2 xl:grid-cols-3">
-                  {DICTATION_MODE_DEFINITIONS.map((mode) => {
-                    const isActive = dictationModePreset === mode.id;
-                    return (
-                      <button
-                        key={mode.id}
-                        type="button"
-                        aria-label={`Flow profile: ${mode.label}`}
-                        onClick={() => applyDictationMode(mode.id)}
-                        className={cn(
-                          "rounded-xl border p-4 text-left transition-colors",
-                          isActive
-                            ? "border-rust/40 bg-rust/8 shadow-sm"
-                            : "border-border hover:border-rust/50 hover:bg-muted/40",
-                        )}
-                      >
-                        <div className="flex items-center justify-between gap-3">
-                          <p className="font-medium">{mode.label}</p>
-                          {isActive && (
-                            <span className="rounded-full bg-rust px-2 py-0.5 text-[11px] font-semibold text-destructive-foreground">
-                              Active
-                            </span>
-                          )}
-                        </div>
-                        <p className="mt-2 text-sm text-muted-foreground">
-                          {mode.description}
-                        </p>
-                      </button>
-                    );
-                  })}
-                </div>
-              </div>
-              <div className="space-y-3 border-t pt-4">
-                <div>
-                  <p className="section-heading">
-                    Recommended flow profiles
-                  </p>
-                  <p className="text-sm text-muted-foreground">
-                    Install ready-made auto-switch profiles for the apps you use
-                    most.
-                  </p>
-                </div>
-                <div className="grid grid-cols-1 gap-3 md:grid-cols-2 xl:grid-cols-3">
-                  {RECOMMENDED_APP_STYLES.map((style) => {
-                    const installedMode = dictationCustomModes.find(
-                      (mode) => mode.id === style.id,
-                    );
-                    return (
-                      <div
-                        key={style.id}
-                        className="rounded-xl border border-border bg-muted/20 p-4"
-                      >
-                        <div className="flex items-start justify-between gap-3">
-                          <div>
-                            <p className="font-medium">{style.name}</p>
-                            <p className="mt-2 text-sm text-muted-foreground">
-                              {style.description}
-                            </p>
-                            <p className="mt-2 text-xs text-muted-foreground">
-                              {style.activationDomainMatcher
-                                ? `Domain ${style.activationDomainMatcher}`
-                                : style.activationAppMatcher
-                                  ? `App ${style.activationAppMatcher}`
-                                  : "Manual profile"}
-                              {" · "}
-                              {CONTEXT_SOURCE_LABELS[style.contextSource]}
-                              {" · "}
-                              {INSERTION_MODE_LABELS[style.insertionMode]}
-                            </p>
-                          </div>
-                          {installedMode && (
-                            <span className="rounded-full border bg-background px-2 py-0.5 text-[11px] font-medium text-muted-foreground">
-                              Installed
-                            </span>
-                          )}
-                        </div>
-                        <div className="mt-3 flex gap-2">
-                          <Button
-                            variant={installedMode ? "outline" : "default"}
-                            size="sm"
-                            onClick={() =>
-                              void handleInstallRecommendedStyle(style)
-                            }
-                          >
-                            {installedMode
-                              ? "Update and use"
-                              : "Install and use"}
-                          </Button>
-                        </div>
-                      </div>
-                    );
-                  })}
-                </div>
-              </div>
-              {dictationCustomModes.length > 0 && (
-                <div className="space-y-3 border-t pt-4">
-                  <div>
-                    <p className="text-sm font-medium">Saved flow profiles</p>
-                    <p className="text-xs text-muted-foreground">
-                      Reuse your own dictation setups without rebuilding them
-                      from scratch.
-                    </p>
-                  </div>
-                  <div className="grid grid-cols-1 gap-3 md:grid-cols-2">
-                    {dictationCustomModes.map((mode) => {
-                      const isActive =
-                        dictationModePreset === "custom" &&
-                        selectedCustomModeId === mode.id;
-                      return (
-                        <div
-                          key={mode.id}
-                          className={cn(
-                            "rounded-xl border p-4",
-                            isActive
-                              ? "border-rust/40 bg-rust/8 shadow-sm"
-                              : "border-border bg-muted/20",
-                          )}
-                        >
-                          <div className="flex items-start justify-between gap-3">
-                            <div>
-                              <p className="font-medium">{mode.name}</p>
-                              <p className="mt-1 text-sm text-muted-foreground">
-                                {mode.description || "Private flow profile"}
-                              </p>
-                              <p className="mt-2 text-xs text-muted-foreground">
-                                {mode.dictationProvider ||
-                                  "Current transcription"}{" "}
-                                · {mode.dictationModelId || "Current model"}
-                                {mode.activationAppMatcher
-                                  ? ` · Auto for ${mode.activationAppMatcher}`
-                                  : ""}
-                                {mode.activationDomainMatcher
-                                  ? ` · Domain ${mode.activationDomainMatcher}`
-                                  : ""}
-                                {!mode.activationAppMatcher &&
-                                !mode.activationDomainMatcher
-                                  ? " · Manual profile"
-                                  : ""}
-                              </p>
-                            </div>
-                            {isActive && (
-                              <span className="rounded-full bg-rust px-2 py-0.5 text-[11px] font-semibold text-destructive-foreground">
-                                Active
-                              </span>
-                            )}
-                          </div>
-                          <div className="mt-3 flex gap-2">
-                            <Button
-                              variant={isActive ? "default" : "outline"}
-                              size="sm"
-                              onClick={() => applySavedCustomMode(mode)}
-                            >
-                              {isActive ? "Using now" : "Use profile"}
-                            </Button>
-                            <Button
-                              variant="ghost"
-                              size="sm"
-                              onClick={() =>
-                                void handleDeleteCustomMode(mode.id)
-                              }
-                            >
-                              Delete profile
-                            </Button>
-                          </div>
-                          <div className="mt-3 flex flex-wrap gap-2">
-                            {summarizeMode(mode).map((item) => (
-                              <span
-                                key={`${mode.id}-${item.label}`}
-                                className="rounded-full border bg-background px-2.5 py-1 text-[11px] text-muted-foreground"
-                              >
-                                <span className="font-medium text-foreground">
-                                  {item.label}:
-                                </span>{" "}
-                                {item.value}
-                              </span>
-                            ))}
-                          </div>
-                        </div>
-                      );
-                    })}
-                  </div>
-                </div>
-              )}
-              <div className="rounded-xl border bg-muted/20 p-4 space-y-3">
-                <div>
-                  <p className="text-sm font-medium">
-                    What this profile changes
-                  </p>
-                  <p className="text-xs text-muted-foreground">
-                    The active profile controls insertion, context, saved
-                    history, command behavior, and the transcription/AI routes
-                    captured below.
-                  </p>
-                </div>
-                <div className="flex flex-wrap gap-2">
-                  {activeModeSummary.map((item) => (
-                    <span
-                      key={item.label}
-                      className="rounded-full border bg-background px-2.5 py-1 text-[11px] text-muted-foreground"
-                    >
-                      <span className="font-medium text-foreground">
-                        {item.label}:
-                      </span>{" "}
-                      {item.value}
-                    </span>
-                  ))}
-                </div>
-              </div>
-              <div className="rounded-xl border bg-background/70 p-4 space-y-4">
-                <div className="grid gap-4 md:grid-cols-2">
-                  <div className="space-y-2">
-                    <p className="text-sm font-medium">Default route</p>
-                    <p className="text-xs text-muted-foreground">
-                      This mode prefers one hosting path by default, including
-                      hotkey dictation.
-                    </p>
-                    <div className="flex gap-2">
-                      {(["local", "cloud"] as const).map((route) => (
-                        <Button
-                          key={route}
-                          type="button"
-                          size="sm"
-                          variant={
-                            dictationRoutePreference === route
-                              ? "default"
-                              : "outline"
-                          }
-                          onClick={() => {
-                            setDictationRoutePreference(route);
-                            void persistDictationPreferences({
-                              routePreference: route,
-                            });
-                          }}
-                        >
-                          {route === "local" ? "Local first" : "Cloud first"}
-                        </Button>
-                      ))}
-                    </div>
-                    <p className="text-xs text-muted-foreground">
-                      Current provider hosting:{" "}
-                      {currentDictationProvider
-                        ? providerHostingPreference(
-                            currentDictationProvider as AsrProviderType,
-                            currentDictationModelId,
-                          ) === "cloud"
-                          ? "Cloud"
-                          : "Local"
-                        : "Unknown"}
-                    </p>
-                    {!useSharedAsrSelection &&
-                    currentDictationProvider &&
-                    currentMeetingProvider &&
-                    currentDictationProvider !== currentMeetingProvider ? (
-                      <p className="text-xs text-rust">
-                        Dictation uses {currentDictationProvider} while meetings
-                        use {currentMeetingProvider}.
-                      </p>
-                    ) : null}
-                  </div>
-                  <div className="space-y-2">
-                    <p className="text-sm font-medium">
-                      Next button capture override
-                    </p>
-                    <p className="text-xs text-muted-foreground">
-                      Use this when you want one manual capture to ignore the
-                      mode default.
-                    </p>
-                    <label className="inline-flex items-center gap-2 text-xs text-muted-foreground">
-                      <input
-                        type="checkbox"
-                        checked={dictationRouteOverrideEnabled}
-                        onChange={(event) => {
-                          const next = event.target.checked;
-                          setDictationRouteOverrideEnabled(next);
-                          if (!next) {
-                            setNextCaptureRoutePreference(null);
-                          }
-                          void persistDictationPreferences({
-                            routeOverrideEnabled: next,
-                          });
-                        }}
-                      />
-                      Allow next-capture override
-                    </label>
-                    {dictationRouteOverrideEnabled ? (
-                      <div className="flex gap-2">
-                        <Button
-                          type="button"
-                          size="sm"
-                          variant={
-                            nextCaptureRoutePreference === null
-                              ? "default"
-                              : "outline"
-                          }
-                          onClick={() => setNextCaptureRoutePreference(null)}
-                        >
-                          Use default
-                        </Button>
-                        {(["local", "cloud"] as const).map((route) => (
-                          <Button
-                            key={`next-${route}`}
-                            type="button"
-                            size="sm"
-                            variant={
-                              nextCaptureRoutePreference === route
-                                ? "default"
-                                : "outline"
-                            }
-                            onClick={() => setNextCaptureRoutePreference(route)}
-                          >
-                            Next {route}
-                          </Button>
-                        ))}
-                      </div>
-                    ) : (
-                      <p className="text-xs text-muted-foreground">
-                        Manual captures follow the active mode route until you
-                        re-enable overrides.
-                      </p>
-                    )}
-                  </div>
-                </div>
-              </div>
-              <div className="rounded-lg border bg-muted/30 px-3 py-2 text-xs text-muted-foreground">
-                {dictationModePreset === "custom"
-                  ? selectedCustomMode
-                    ? `${selectedCustomMode.name} is active. Update it when you want the current lower controls to become the new default profile.`
-                    : "Unsaved custom setup is active. Save it as a reusable flow profile when it feels right."
-                  : `${modeDefinitionById[dictationModePreset]?.label ?? "General"} profile is active. Lower controls stay editable if you want to fine-tune them.`}
-              </div>
-              {dictationModePreset === "custom" && (
-                <div className="rounded-xl border border-border/70 bg-background/70 p-4 space-y-3">
-                  <div className="grid gap-3 md:grid-cols-2">
-                    <div className="space-y-2">
-                      <label className="text-sm font-medium">
-                        Profile name
-                      </label>
-                      <input
-                        type="text"
-                        aria-label="Profile name"
-                        className="w-full rounded-md border bg-background p-2 text-sm"
-                        value={customModeDraft.name}
-                        onChange={(event) =>
-                          setCustomModeDraft((current) => ({
-                            ...current,
-                            name: event.target.value,
-                          }))
-                        }
-                        placeholder="Custom Flow Profile"
-                      />
-                    </div>
-                    <div className="space-y-2">
-                      <label className="text-sm font-medium">
-                        Short description
-                      </label>
-                      <input
-                        type="text"
-                        aria-label="Short description"
-                        className="w-full rounded-md border bg-background p-2 text-sm"
-                        value={customModeDraft.description}
-                        onChange={(event) =>
-                          setCustomModeDraft((current) => ({
-                            ...current,
-                            description: event.target.value,
-                          }))
-                        }
-                        placeholder="What this mode is for"
-                      />
-                    </div>
-                    <div className="space-y-2">
-                      <label className="text-sm font-medium">Base style</label>
-                      <select
-                        aria-label="Base style"
-                        className="w-full rounded-md border bg-background p-2 text-sm"
-                        value={customModeDraft.baseModePreset}
-                        onChange={(event) =>
-                          setCustomModeDraft((current) => ({
-                            ...current,
-                            baseModePreset: event.target
-                              .value as DictationBaseModePreset,
-                          }))
-                        }
-                      >
-                        {DICTATION_MODE_DEFINITIONS.filter(
-                          (mode) => mode.id !== "custom",
-                        ).map((mode) => (
-                          <option key={mode.id} value={mode.id}>
-                            {mode.label}
-                          </option>
-                        ))}
-                      </select>
-                      <p className="text-xs text-muted-foreground">
-                        Sets the deterministic formatting and reprocess behavior
-                        this flow profile should inherit before any
-                        profile-specific prompt runs.
-                      </p>
-                    </div>
-                    <div className="space-y-2 md:col-span-2">
-                      <label className="text-sm font-medium">
-                        Style prompt
-                      </label>
-                      <textarea
-                        aria-label="Style prompt"
-                        className="min-h-24 w-full rounded-md border bg-background p-2 text-sm"
-                        value={customModeDraft.customPrompt}
-                        onChange={(event) =>
-                          setCustomModeDraft((current) => ({
-                            ...current,
-                            customPrompt: event.target.value,
-                          }))
-                        }
-                        placeholder="Optional. Tell Plainsong how this mode should rewrite dictation for this app or workflow."
-                      />
-                      <p className="text-xs text-muted-foreground">
-                        Optional. Overrides the global Smart Format prompt only
-                        when this profile is active.
-                      </p>
-                    </div>
-                  </div>
-                  <div className="rounded-lg border bg-muted/20 p-3">
-                    <div className="flex flex-wrap items-center justify-between gap-2">
-                      <div>
-                        <p className="text-sm font-medium">Activation rules</p>
-                        <p className="text-xs text-muted-foreground">
-                          Hotkey and tray dictation can switch into this flow
-                          profile automatically before capture starts.
-                        </p>
-                      </div>
-                      <span className="rounded-full border bg-background px-2 py-1 text-[11px] font-medium text-muted-foreground">
-                        {customModeDraft.activationAppMatcher.trim() ||
-                        customModeDraft.activationDomainMatcher.trim()
-                          ? "Auto-ready"
-                          : "Manual only"}
-                      </span>
-                    </div>
-                    <div className="mt-3 grid gap-3 md:grid-cols-2">
-                      <div className="space-y-2">
-                        <label className="text-sm font-medium">
-                          Auto-activate for app
-                        </label>
-                        <input
-                          type="text"
-                          aria-label="Auto-activate for app"
-                          className="w-full rounded-md border bg-background p-2 text-sm"
-                          value={customModeDraft.activationAppMatcher}
-                          onChange={(event) =>
-                            setCustomModeDraft((current) => ({
-                              ...current,
-                              activationAppMatcher: event.target.value,
-                            }))
-                          }
-                          placeholder="Slack, Gmail, Cursor"
-                        />
-                        <p className="text-xs text-muted-foreground">
-                          Optional. When the frontmost app name matches,
-                          Plainsong can switch to this profile automatically for
-                          hotkey and tray dictation.
-                        </p>
-                        <div className="flex flex-wrap gap-2">
-                          {ACTIVATION_APP_SUGGESTIONS.map((suggestion) => (
-                            <button
-                              key={suggestion}
-                              type="button"
-                              className="rounded-full border bg-background px-2 py-1 text-[11px] text-muted-foreground transition-colors hover:bg-muted"
-                              onClick={() =>
-                                setCustomModeDraft((current) => ({
-                                  ...current,
-                                  activationAppMatcher: suggestion,
-                                }))
-                              }
-                            >
-                              {suggestion}
-                            </button>
-                          ))}
-                        </div>
-                      </div>
-                      <div className="space-y-2">
-                        <label className="text-sm font-medium">
-                          Auto-activate for domain
-                        </label>
-                        <input
-                          type="text"
-                          aria-label="Auto-activate for domain"
-                          className="w-full rounded-md border bg-background p-2 text-sm"
-                          value={customModeDraft.activationDomainMatcher}
-                          onChange={(event) =>
-                            setCustomModeDraft((current) => ({
-                              ...current,
-                              activationDomainMatcher: event.target.value,
-                            }))
-                          }
-                          placeholder="docs.google.com, linear.app"
-                        />
-                        <p className="text-xs text-muted-foreground">
-                          Optional. Browser-focused dictation can switch when
-                          the active tab URL host matches this domain.
-                        </p>
-                        <div className="flex flex-wrap gap-2">
-                          {ACTIVATION_DOMAIN_SUGGESTIONS.map((suggestion) => (
-                            <button
-                              key={suggestion}
-                              type="button"
-                              className="rounded-full border bg-background px-2 py-1 text-[11px] text-muted-foreground transition-colors hover:bg-muted"
-                              onClick={() =>
-                                setCustomModeDraft((current) => ({
-                                  ...current,
-                                  activationDomainMatcher: suggestion,
-                                }))
-                              }
-                            >
-                              {suggestion}
-                            </button>
-                          ))}
-                        </div>
-                      </div>
-                    </div>
-                    <div className="mt-3 rounded-md border bg-background/80 px-3 py-2 text-xs text-muted-foreground">
-                      {describeActivationRules(
-                        customModeDraft.activationAppMatcher,
-                        customModeDraft.activationDomainMatcher,
-                      )}
-                    </div>
-                    <div className="mt-3 grid gap-3 md:grid-cols-2">
-                      <div className="space-y-2">
-                        <label className="text-sm font-medium">
-                          Language override
-                        </label>
-                        <input
-                          type="text"
-                          aria-label="Language override"
-                          className="w-full rounded-md border bg-background p-2 text-sm"
-                          value={customModeDraft.languageOverride}
-                          onChange={(event) =>
-                            setCustomModeDraft((current) => ({
-                              ...current,
-                              languageOverride: event.target.value,
-                            }))
-                          }
-                          placeholder="Leave blank for auto"
-                        />
-                        <p className="text-xs text-muted-foreground">
-                          Optional. Save a language tag like{" "}
-                          <span className="font-mono">en</span> or{" "}
-                          <span className="font-mono">es</span> with this mode.
-                        </p>
-                      </div>
-                      <div className="space-y-2">
-                        <label className="text-sm font-medium">
-                          Live preview
-                        </label>
-                        <label className="inline-flex items-center gap-2 rounded-md border bg-background px-3 py-2 text-sm">
-                          <input
-                            type="checkbox"
-                            checked={customModeDraft.livePreviewEnabled}
-                            onChange={(event) =>
-                              setCustomModeDraft((current) => ({
-                                ...current,
-                                livePreviewEnabled: event.target.checked,
-                              }))
-                            }
-                          />
-                          Show live partial text in the popup for this mode
-                        </label>
-                        <p className="text-xs text-muted-foreground">
-                          Turn this off for cleaner captures when partial text
-                          is distracting.
-                        </p>
-                      </div>
-                    </div>
-                    <p className="mt-2 text-xs text-muted-foreground">
-                      Domain rules are checked first. If both are empty, this
-                      profile stays available for manual capture only.
-                    </p>
-                  </div>
-                  <div className="rounded-lg border bg-muted/30 px-3 py-2 text-xs text-muted-foreground">
-                    Saving a flow profile snapshots the current dictation style,
-                    result behavior, context source, transcription route, AI
-                    route, and optional app or domain auto-activation rules.
-                  </div>
-                  <div className="flex flex-wrap gap-2">
-                    <Button
-                      size="sm"
-                      onClick={() => void handleSaveCustomMode(false)}
-                    >
-                      {selectedCustomModeId
-                        ? "Update profile"
-                        : "Save current setup"}
-                    </Button>
-                    <Button
-                      size="sm"
-                      variant="outline"
-                      onClick={() => void handleSaveCustomMode(true)}
-                    >
-                      Save as new profile
-                    </Button>
-                    {selectedCustomModeId && (
-                      <Button
-                        size="sm"
-                        variant="ghost"
-                        onClick={() =>
-                          void handleDeleteCustomMode(selectedCustomModeId)
-                        }
-                      >
-                        Delete profile
-                      </Button>
-                    )}
-                  </div>
-                </div>
-              )}
-            </CardContent>
-          </Card>
-
-          {/* Quick Capture Card */}
-          <Card
-            className={cn(
-              "border transition-colors duration-200 shadow-sm",
-              isDictationBusy ? "border-gold/40" : "border-muted",
-            )}
-          >
-            <CardHeader>
-              <CardTitle className="flex items-center gap-2">
-                <Zap className="h-5 w-5" />
-                Capture
-              </CardTitle>
-              <CardDescription>
-                {dictationInstruction(
-                  hotkeyShortcut,
-                  shortcutMode(dictationPushToTalk, dictationHandsFreeEnabled),
-                )}
-              </CardDescription>
-            </CardHeader>
-            <CardContent>
-              <div className="space-y-4">
-                <div className="grid gap-3 md:grid-cols-3">
-                  <div className="rounded-xl border bg-background p-3">
-                    <p className="text-xs font-medium uppercase tracking-wide text-muted-foreground">
-                      Active lane
-                    </p>
-                    <p className="mt-1 text-sm font-semibold">
-                      {activeLane.title}
-                    </p>
-                    <p className="mt-1 text-xs text-muted-foreground">
-                      {activeLane.description}
-                    </p>
-                    {dictationResolvedModeLabel ? (
-                      <p className="mt-2 font-mono text-[11px] text-muted-foreground">
-                        Runtime mode: {dictationResolvedModeLabel}
-                      </p>
-                    ) : null}
-                  </div>
-                  <div className="rounded-xl border bg-background p-3">
-                    <p className="text-xs font-medium uppercase tracking-wide text-muted-foreground">
-                      Smart context
-                    </p>
-                    <p className="mt-1 text-xs text-muted-foreground">
-                      {smartContextSummary}
-                    </p>
-                  </div>
-                  <div className="rounded-xl border bg-background p-3">
-                    <p className="text-xs font-medium uppercase tracking-wide text-muted-foreground">
-                      Teaching Plainsong
-                    </p>
-                    <p className="mt-1 text-xs text-muted-foreground">
-                      {dictionaryCoverageSummary}
-                    </p>
-                  </div>
-                </div>
-                <div
-                  className={cn(
-                    "rounded-xl border p-4",
-                    dictationPhaseSummary.tone === "active"
-                      ? "border-gold/30 bg-gold/5"
-                      : dictationPhaseSummary.tone === "success"
-                        ? "border-gold/20 bg-gold/5"
-                        : dictationPhaseSummary.tone === "error"
-                          ? "border-destructive/20 bg-destructive/5"
-                          : "border-border bg-background",
-                  )}
-                >
-                  <div className="flex items-start justify-between gap-3">
-                    <div className="space-y-1">
-                      <p className="text-xs font-medium uppercase tracking-wide text-muted-foreground">
-                        Capture state
-                      </p>
-                      <p className="text-sm font-semibold">
-                        {dictationPhaseSummary.title}
-                      </p>
-                      <p className="text-sm text-muted-foreground">
-                        {dictationPhaseSummary.detail}
-                      </p>
-                    </div>
-                    <div
-                      className={cn(
-                        "rounded-full border px-2.5 py-1 text-[11px] font-semibold",
-                        dictationPhaseSummary.tone === "active"
-                          ? "border-gold/30 bg-gold/5 text-gold-text"
-                          : dictationPhaseSummary.tone === "success"
-                            ? "border-gold/20 bg-gold/5 text-gold-text"
-                            : dictationPhaseSummary.tone === "error"
-                              ? "border-destructive/20 bg-destructive/5 text-destructive"
-                              : "border-border bg-background text-muted-foreground",
-                      )}
-                    >
-                      {dictationPhaseSummary.title}
-                    </div>
-                  </div>
-                  {dictationPhasePreview ? (
-                    <div className="mt-3 rounded-md border bg-background px-3 py-2 text-sm text-muted-foreground">
-                      {dictationPhasePreview}
-                    </div>
-                  ) : null}
-                </div>
-                <div className="rounded-xl border border-border bg-muted/10 p-3">
-                  <div className="flex flex-wrap gap-2 text-xs">
-                    <span className="rounded-full border bg-background px-2.5 py-1 text-muted-foreground">
-                      Backtrack:{" "}
-                      <span className="font-medium text-foreground">
-                        scratch that
-                      </span>
-                    </span>
-                    <span className="rounded-full border bg-background px-2.5 py-1 text-muted-foreground">
-                      Replace:{" "}
-                      <span className="font-medium text-foreground">
-                        replace X with Y
-                      </span>
-                    </span>
-                    <span className="rounded-full border bg-background px-2.5 py-1 text-muted-foreground">
-                      Quick fix:{" "}
-                      <span className="font-medium text-foreground">
-                        actually ...
-                      </span>
-                    </span>
-                    <span className="rounded-full border bg-background px-2.5 py-1 text-muted-foreground">
-                      Teach words:{" "}
-                      <span className="font-medium text-foreground">
-                        edit result to Learn correction
-                      </span>
-                    </span>
-                  </div>
-                </div>
-                <div className="rounded-[20px] border border-border bg-background px-5 py-8">
-                  <div className="flex flex-col items-center gap-6">
-                    {isDictationCaptureLive ? (
-                      <div className="flex flex-col items-center gap-4">
-                        <div className="gilt-halo relative flex h-24 w-24 items-center justify-center rounded-full border border-gold/20 bg-gold/5">
-                          <span className="absolute inset-0 rounded-full border border-gold/20 animate-ping opacity-40" />
-                          <span className="absolute inset-[10px] rounded-full border border-gold/20 opacity-60" />
-                          <Mic className="relative h-10 w-10 text-gold" />
-                        </div>
-                        <div className="text-center">
-                          <p className="text-lg font-medium">
-                            <span
-                              aria-hidden="true"
-                              className="neume neume-lit neume-live mr-2 align-middle"
-                            />
-                            {dictationPhase === "primed"
-                              ? "Ready"
-                              : "Listening"}
-                          </p>
-                          <p className="time-spec mt-2 text-3xl font-mono font-semibold text-foreground">
-                            {dictationPhase === "recording"
-                              ? formattedDuration
-                              : "--:--"}
-                          </p>
-                        </div>
-                        <Button
-                          variant="outline"
-                          size="lg"
-                          onClick={handleStopDictation}
-                          className="mt-2"
-                        >
-                          <Square className="h-4 w-4 mr-2 fill-current" />
-                          Stop Dictation
-                        </Button>
-                      </div>
-                    ) : isDictationBusy ? (
-                      <div className="flex flex-col items-center gap-4">
-                        <div className="flex h-24 w-24 items-center justify-center rounded-full border border-border bg-muted/20">
-                          <RefreshCw className="h-10 w-10 animate-spin text-foreground" />
-                        </div>
-                        <div className="text-center">
-                          <p className="text-lg font-medium">
-                            <span
-                              aria-hidden="true"
-                              className="neume neume-lit neume-live mr-2 align-middle"
-                            />
-                            {dictationPhaseSummary.title}
-                          </p>
-                          <p className="mt-1 text-muted-foreground">
-                            {dictationPhaseSummary.detail}
-                          </p>
-                        </div>
-                        <Button
-                          variant="outline"
-                          size="lg"
-                          disabled
-                          className="mt-4"
-                        >
-                          <RefreshCw className="h-4 w-4 mr-2 animate-spin" />
-                          {dictationPhase === "delivering"
-                            ? "Inserting..."
-                            : "Working..."}
-                        </Button>
-                      </div>
-                    ) : dictationPhase === "done" ? (
-                      <div className="flex flex-col items-center gap-4">
-                        <div className="flex h-24 w-24 items-center justify-center rounded-full border border-gold/20 bg-gold/5">
-                          <CheckCircle2 className="h-10 w-10 text-gold-text" />
-                        </div>
-                        <div className="text-center">
-                          <p className="font-serif manuscript text-lg font-medium">
-                            <span
-                              aria-hidden="true"
-                              className="neume neume-lit mr-2 align-middle"
-                            />
-                            Result ready
-                          </p>
-                          <p className="text-muted-foreground mt-1">
-                            {dictationPhaseSummary.detail}
-                          </p>
-                        </div>
-                        <Button
-                          variant="default"
-                          size="lg"
-                          onClick={launchDictation}
-                          className="mt-4"
-                        >
-                          <Mic className="h-4 w-4 mr-2" />
-                          Start Next Dictation
-                        </Button>
-                      </div>
-                    ) : dictationPhase === "error" ? (
-                      <div className="flex flex-col items-center gap-4">
-                        <div className="flex h-24 w-24 items-center justify-center rounded-full border border-destructive/20 bg-destructive/5">
-                          <TriangleAlert className="h-10 w-10 text-destructive" />
-                        </div>
-                        <div className="text-center">
-                          <p className="text-lg font-medium">
-                            <span
-                              aria-hidden="true"
-                              className="neume neume-rust mr-2 align-middle"
-                            />
-                            Capture needs attention
-                          </p>
-                          <p className="text-muted-foreground mt-1">
-                            {dictationPhaseSummary.detail}
-                          </p>
-                        </div>
-                        <Button
-                          variant="default"
-                          size="lg"
-                          onClick={launchDictation}
-                          className="mt-4"
-                        >
-                          <Mic className="h-4 w-4 mr-2" />
-                          Retry Dictation
-                        </Button>
-                      </div>
-                    ) : (
-                      <div className="flex flex-col items-center gap-4">
-                        <div
-                          className={cn(
-                            "relative flex h-24 w-24 items-center justify-center rounded-full border transition-transform duration-150",
-                            hotkeyPressed
-                              ? "scale-[1.03] border-gold/30 bg-gold/5"
-                              : "border-border bg-muted/20",
-                          )}
-                        >
-                          <span
-                            aria-hidden="true"
-                            className={cn(
-                              "absolute inset-0 rounded-full border transition-all duration-150",
-                              hotkeyPressed
-                                ? "border-gold/30 opacity-100"
-                                : "border-border/60 opacity-70",
-                            )}
-                          />
-                          <span
-                            aria-hidden="true"
-                            className={cn(
-                              "absolute inset-[10px] rounded-full border transition-all duration-150",
-                              hotkeyPressed
-                                ? "border-gold/25 opacity-100"
-                                : "border-border/50 opacity-70",
-                            )}
-                          />
-                          <Mic
-                            className={cn(
-                              "relative h-10 w-10 transition-colors",
-                              hotkeyPressed
-                                ? "text-gold"
-                                : "text-muted-foreground",
-                            )}
-                          />
-                        </div>
-                        <div className="text-center">
-                          <p className="text-lg font-medium">
-                            <span
-                              aria-hidden="true"
-                              className="neume neume-hollow mr-2 align-middle"
-                            />
-                            {dictationPhaseSummary.title}
-                          </p>
-                          <p className="text-muted-foreground mt-1">
-                            {dictationHandsFreeEnabled
-                              ? `Press ${hotkeyLabel} to start. It stops after silence or when you press again`
-                              : dictationPushToTalk
-                                ? `Hold ${hotkeyLabel} to record and release to transcribe`
-                                : `Press ${hotkeyLabel} to start, press again to transcribe`}
-                          </p>
-                        </div>
-                        <Button
-                          variant="default"
-                          size="lg"
-                          onClick={launchDictation}
-                          className="mt-4"
-                          disabled={isDictationBusy}
-                        >
-                          <Mic className="h-4 w-4 mr-2" />
-                          Start Dictation
-                        </Button>
-                      </div>
-                    )}
-                  </div>
-                </div>
-                {!isDictationCaptureLive && !isDictationBusy ? (
-                  <div className="flex flex-wrap items-center justify-center gap-2 border-t border-border/60 pt-4">
-                    <Button
-                      variant="outline"
-                      size="sm"
-                      onClick={() => void handleReadSelectedText()}
-                    >
-                      <Volume2 className="mr-2 h-4 w-4" />
-                      {activeSpeechTarget === "selected-text"
-                        ? "Stop reading"
-                        : "Read selected text"}
-                    </Button>
-                  </div>
-                ) : null}
-              </div>
-            </CardContent>
-          </Card>
-
-          <section className="surface-panel-subtle rounded-2xl p-4">
-            <div className="flex flex-col gap-4 lg:flex-row lg:items-start lg:justify-between">
-              <div className="max-w-xl">
-                <p className="rubric-muted">Daily dictation guardrails</p>
-                <p className="mt-1 text-base font-medium text-card-foreground">
-                  The main path stays simple: trigger, speak, insert, then repair only when the target app needs it.
-                </p>
-              </div>
-              <div className="grid gap-2 sm:grid-cols-2 lg:w-[520px]">
-                {[
-                  {
-                    icon: Keyboard,
-                    label: "Trigger",
-                    body: "Use the global hotkey without switching back to Plainsong.",
-                  },
-                  {
-                    icon: Zap,
-                    label: "Insert",
-                    body: "Final text lands after capture finishes.",
-                  },
-                  {
-                    icon: Replace,
-                    label: "Repair",
-                    body: "Use scratch that, actually, or replace X with Y.",
-                  },
-                  {
-                    icon: BookOpen,
-                    label: "Remember",
-                    body: "Teach names and terms once.",
-                  },
-                ].map((item) => {
-                  const Icon = item.icon;
-                  return (
-                    <div
-                      key={item.label}
-                      className="flex gap-3 rounded-xl border border-border/70 bg-background/55 p-3"
-                    >
-                      <div className="flex size-8 shrink-0 items-center justify-center rounded-lg bg-muted/45 text-muted-foreground">
-                        <Icon className="h-4 w-4" />
-                      </div>
-                      <div className="min-w-0">
-                        <p className="text-sm font-medium text-card-foreground">{item.label}</p>
-                        <p className="mt-1 text-xs leading-5 text-muted-foreground">{item.body}</p>
-                      </div>
-                    </div>
-                  );
-                })}
-              </div>
+            <div className="rounded-md border border-rust/40 bg-rust/10 px-4 py-3">
+              <p className="text-sm text-rust">{dictationError}</p>
             </div>
-          </section>
-
-          {activeCoachCards.length > 0 && (
-            <Card>
-              <CardHeader>
-                <CardTitle className="text-sm flex items-center gap-2">
-                  <Sparkles className="h-4 w-4" />
-                  Dictation Coach
-                </CardTitle>
-                <CardDescription>
-                  Learn the highest-leverage moves that make Plainsong feel
-                  faster than typing.
-                </CardDescription>
-              </CardHeader>
-              <CardContent>
-                <div className="grid gap-3 xl:grid-cols-2">
-                  {activeCoachCards.map((card) => (
-                    <div
-                      key={card.id}
-                      className="rounded-xl border bg-muted/20 p-4 space-y-3"
-                    >
-                      <div>
-                        <p className="text-sm font-medium">{card.title}</p>
-                        <p className="mt-2 text-xs text-muted-foreground">
-                          {card.body}
-                        </p>
-                      </div>
-                      <div className="flex flex-wrap gap-2">
-                        {card.id === "command_mode" ? (
-                          <Button
-                            size="sm"
-                            onClick={() => {
-                              setDictationCommandModeEnabled(true);
-                              const nextModePreset = syncModePreset({
-                                commandModeEnabled: true,
-                              });
-                              void persistDictationPreferences({
-                                commandModeEnabled: true,
-                                modePreset: nextModePreset,
-                              });
-                              dismissCoachCard(card.id);
-                            }}
-                          >
-                            {card.actionLabel}
-                          </Button>
-                        ) : card.id === "profiles" ? (
-                          <Button
-                            size="sm"
-                            onClick={() => {
-                              const style = RECOMMENDED_APP_STYLES.find(
-                                (candidate) =>
-                                  candidate.id === "builtin-coding-copilot",
-                              );
-                              if (style) {
-                                void handleInstallRecommendedStyle(style);
-                              }
-                              dismissCoachCard(card.id);
-                            }}
-                          >
-                            Install a flow
-                          </Button>
-                        ) : (
-                          <Button
-                            size="sm"
-                            onClick={() => dismissCoachCard(card.id)}
-                          >
-                            {card.actionLabel}
-                          </Button>
-                        )}
-                        <Button
-                          size="sm"
-                          variant="outline"
-                          onClick={() => dismissCoachCard(card.id)}
-                        >
-                          Dismiss
-                        </Button>
-                      </div>
-                    </div>
-                  ))}
-                </div>
-              </CardContent>
-            </Card>
           )}
 
-          <div className="grid grid-cols-1 gap-4 xl:grid-cols-2">
-            <Card>
-              <CardHeader>
-                <CardTitle className="text-sm flex items-center gap-2">
-                  <Terminal className="h-4 w-4" />
-                  Developer Dictation
-                </CardTitle>
-                <CardDescription>
-                  A tighter lane for Cursor, terminals, commit messages,
-                  markdown, and prompt-heavy work.
-                </CardDescription>
-              </CardHeader>
-              <CardContent className="space-y-4">
-                <div className="rounded-md border bg-muted/20 p-3">
-                  <p className="text-xs font-medium uppercase tracking-wide text-muted-foreground">
-                    Best current setup
-                  </p>
-                  <p className="mt-1 text-sm font-medium">
-                    {currentDictationProvider && currentDictationModelId
-                      ? `${currentDictationProvider} · ${currentDictationModelId}`
-                      : "Use a fast local provider with live preview"}
-                  </p>
-                  <p className="mt-1 text-xs text-muted-foreground">
-                    Coding benefits from low-latency local capture,
-                    selected-text context, and command mode staying on.
-                  </p>
-                </div>
-                <div className="grid gap-2 md:grid-cols-2">
-                  <div className="rounded-md border bg-background px-3 py-3">
-                    <p className="text-xs font-medium text-muted-foreground">
-                      Good spoken patterns
-                    </p>
-                    <p className="mt-2 text-xs text-muted-foreground">
-                      “open paren”, “close brace”, “snake case”, “camel case”,
-                      file names, CLI commands, and bulletized status updates.
-                    </p>
-                  </div>
-                  <div className="rounded-md border bg-background px-3 py-3">
-                    <p className="text-xs font-medium text-muted-foreground">
-                      Best commands
-                    </p>
-                    <p className="mt-2 text-xs text-muted-foreground">
-                      Keep <code>{dictationCommandPrefix}</code> mode ready for
-                      rewrite, bulletize, and professional cleanup on selected
-                      text.
-                    </p>
-                  </div>
-                </div>
-                <div className="rounded-md border bg-background px-3 py-3">
-                  <p className="text-xs font-medium text-muted-foreground">
-                    Developer quick starts
-                  </p>
-                  <div className="mt-2 flex flex-wrap gap-2 text-[11px] text-muted-foreground">
-                    <span className="rounded-full border px-2 py-1">
-                      commit messages
-                    </span>
-                    <span className="rounded-full border px-2 py-1">
-                      PR summaries
-                    </span>
-                    <span className="rounded-full border px-2 py-1">
-                      terminal commands
-                    </span>
-                    <span className="rounded-full border px-2 py-1">
-                      issue updates
-                    </span>
-                    <span className="rounded-full border px-2 py-1">
-                      Cursor prompts
-                    </span>
-                  </div>
-                </div>
-                <div className="flex flex-wrap gap-2">
-                  <Button
-                    size="sm"
-                    onClick={() => {
-                      const style = RECOMMENDED_APP_STYLES.find(
-                        (candidate) =>
-                          candidate.id === "builtin-coding-copilot",
-                      );
-                      if (style) {
-                        void handleInstallRecommendedStyle(style);
-                      }
-                    }}
-                  >
-                    Use Coding lane
-                  </Button>
-                  <Button
-                    size="sm"
-                    variant="outline"
-                    onClick={() => {
-                      setDictationContextSource("selected_text");
-                      setDictationCommandModeEnabled(true);
-                      setDictationLivePreviewEnabled(true);
-                      const nextModePreset = syncModePreset({
-                        contextSource: "selected_text",
-                        commandModeEnabled: true,
-                      });
-                      void persistDictationPreferences({
-                        contextSource: "selected_text",
-                        commandModeEnabled: true,
-                        livePreviewEnabled: true,
-                        modePreset: nextModePreset,
-                      });
-                    }}
-                  >
-                    Turn on coding helpers
-                  </Button>
-                </div>
-              </CardContent>
-            </Card>
+          <DictationCaptureHero
+            phase={dictationPhase}
+            phaseTitle={dictationPhaseSummary.title}
+            phaseDetail={dictationPhaseSummary.detail}
+            phaseTone={dictationPhaseSummary.tone}
+            isCaptureLive={isDictationCaptureLive}
+            isBusy={isDictationBusy}
+            formattedDuration={formattedDuration}
+            hotkeyInstruction={hotkeyInstruction}
+            hotkeyPressed={hotkeyPressed}
+            livePreview={dictationPhasePreview}
+            activeProfileTitle={activeProfileTitle}
+            resolvedModeLabel={dictationResolvedModeLabel}
+            smartContextSummary={smartContextSummary}
+            isReadingSelectedText={activeSpeechTarget === "selected-text"}
+            onStart={launchDictation}
+            onStop={handleStopDictation}
+            onReadSelectedText={() => void handleReadSelectedText()}
+          />
 
-            <Card>
-              <CardHeader>
-                <CardTitle className="text-sm flex items-center gap-2">
-                  <Volume2 className="h-4 w-4" />
-                  Quiet Dictation
-                </CardTitle>
-                <CardDescription>
-                  Better defaults for low-volume speaking, focus sessions, and
-                  fewer distracting UI changes.
-                </CardDescription>
-              </CardHeader>
-              <CardContent className="space-y-4">
-                <div className="rounded-md border bg-muted/20 p-3">
-                  <p className="text-xs font-medium uppercase tracking-wide text-muted-foreground">
-                    Quiet-friendly defaults
-                  </p>
-                  <p className="mt-1 text-sm font-medium">
-                    Silence auto-stop{" "}
-                    {formatTimeoutSeconds(dictationSilenceTimeoutSeconds)}{" "}
-                    · Keep warm {dictationKeepWarm}
-                  </p>
-                  <p className="mt-1 text-xs text-muted-foreground">
-                    For whispering, a warmed local model and a slightly longer
-                    stop window reduce awkward cutoffs.
-                  </p>
-                </div>
-                <div className="grid gap-2 md:grid-cols-2">
-                  <div className="rounded-md border bg-background px-3 py-3">
-                    <p className="text-xs font-medium text-muted-foreground">
-                      Recommended route
-                    </p>
-                    <p className="mt-2 text-xs text-muted-foreground">
-                      Prefer local capture so quiet speech does not depend on
-                      network latency or upload timing.
-                    </p>
-                  </div>
-                  <div className="rounded-md border bg-background px-3 py-3">
-                    <p className="text-xs font-medium text-muted-foreground">
-                      Preview behavior
-                    </p>
-                    <p className="mt-2 text-xs text-muted-foreground">
-                      Leave live preview on when you want reassurance, or turn
-                      it off for less visual churn during deep work.
-                    </p>
-                  </div>
-                </div>
-                <div className="rounded-md border bg-background px-3 py-3">
-                  <p className="text-xs font-medium text-muted-foreground">
-                    Quiet quick starts
-                  </p>
-                  <div className="mt-2 flex flex-wrap gap-2 text-[11px] text-muted-foreground">
-                    <span className="rounded-full border px-2 py-1">
-                      late-night writing
-                    </span>
-                    <span className="rounded-full border px-2 py-1">
-                      shared spaces
-                    </span>
-                    <span className="rounded-full border px-2 py-1">
-                      focus sessions
-                    </span>
-                    <span className="rounded-full border px-2 py-1">
-                      private drafting
-                    </span>
-                  </div>
-                </div>
-                <div className="flex flex-wrap gap-2">
-                  <Button
-                    size="sm"
-                    onClick={() => {
-                      const style = RECOMMENDED_APP_STYLES.find(
-                        (candidate) => candidate.id === "builtin-quiet-focus",
-                      );
-                      if (style) {
-                        void handleInstallRecommendedStyle(style);
-                      }
-                    }}
-                  >
-                    Use Quiet lane
-                  </Button>
-                  <Button
-                    size="sm"
-                    variant="outline"
-                    onClick={() => {
-                      setDictationRoutePreference("local");
-                      setDictationKeepWarm("long");
-                      setDictationSilenceTimeoutSeconds(1.8);
-                      const nextModePreset = syncModePreset({});
-                      void persistDictationPreferences({
-                        routePreference: "local",
-                        keepWarm: "long",
-                        silenceTimeoutSeconds: 1.8,
-                        modePreset: nextModePreset,
-                      });
-                    }}
-                  >
-                    Apply whisper-friendly defaults
-                  </Button>
-                </div>
-              </CardContent>
-            </Card>
-          </div>
-
-          {/* Last Transcription */}
           {transcribedText && (
             <Card>
-              <CardHeader className="flex flex-row items-center justify-between">
-                <div>
-                  <CardTitle>Latest Result</CardTitle>
-                  <CardDescription>
-                    {pasteStatus ?? "Latest dictation result"}
-                  </CardDescription>
-                </div>
-                <div className="flex flex-wrap items-center gap-2">
-                  <Button
-                    variant="outline"
-                    size="sm"
-                    onClick={() =>
-                      void toggleReadAloudPlayback(
-                        transcribedText,
-                        "latest-result",
-                      )
-                    }
-                  >
-                    <Volume2 className="h-4 w-4 mr-2" />
-                    {activeSpeechTarget === "latest-result"
-                      ? "Stop reading"
-                      : "Read aloud"}
-                  </Button>
-                  <Button
-                    variant="outline"
-                    size="sm"
-                    onClick={() =>
-                      navigator.clipboard.writeText(transcribedText)
-                    }
-                  >
-                    <Save className="h-4 w-4 mr-2" />
-                    Copy Again
-                  </Button>
-                </div>
-              </CardHeader>
-              <CardContent>
-                <div className="space-y-3">
-                  <div className="grid gap-3 md:grid-cols-3">
-                    <div className="rounded-md border bg-muted/20 px-3 py-3">
-                      <p className="text-[11px] uppercase tracking-wide text-muted-foreground">
-                        Backtrack ready
-                      </p>
-                      <p className="mt-1 text-sm font-medium">
-                        Say “scratch that” after the next insert
-                      </p>
-                      <p className="mt-1 text-xs text-muted-foreground">
-                        Plainsong can undo the last insert or replace it with a
-                        corrected phrase.
-                      </p>
-                    </div>
-                    <div className="rounded-md border bg-muted/20 px-3 py-3">
-                      <p className="text-[11px] uppercase tracking-wide text-muted-foreground">
-                        Personal dictionary
-                      </p>
-                      <p className="mt-1 text-sm font-medium">
-                        Fix a word once, then teach it
-                      </p>
-                      <p className="mt-1 text-xs text-muted-foreground">
-                        Edit the result here and use Learn correction so your
-                        names and jargon stick.
-                      </p>
-                    </div>
-                    <div className="rounded-md border bg-muted/20 px-3 py-3">
-                      <p className="text-[11px] uppercase tracking-wide text-muted-foreground">
-                        Smart context
-                      </p>
-                      <p className="mt-1 text-sm font-medium">
-                        {activationMatcher ?? appTarget ?? "General dictation"}
-                      </p>
-                      <p className="mt-1 text-xs text-muted-foreground">
-                        {smartContextSummary}
-                      </p>
-                    </div>
-                  </div>
-                  <div className="rounded-lg bg-muted p-4">
-                    <textarea
-                      className="min-h-[120px] w-full resize-y bg-transparent text-sm outline-none"
-                      value={transcribedText}
-                      onChange={(event) =>
-                        setTranscribedText(event.target.value)
-                      }
-                      onBlur={() => {
-                        void maybeAutoLearnLatestCorrection();
-                      }}
-                    />
+              <CardContent className="space-y-4 p-6">
+                <div className="flex flex-wrap items-start justify-between gap-3">
+                  <div className="min-w-0">
+                    <h2 className="section-heading">Latest result</h2>
+                    <p className="text-sm text-muted-foreground">
+                      {pasteStatus ??
+                        "The text Plainsong set down from your last capture."}
+                    </p>
                   </div>
                   <div className="flex flex-wrap items-center gap-2">
                     <Button
                       variant="outline"
                       size="sm"
-                      disabled={
-                        latestCorrectionBaseline.trim() ===
-                        transcribedText.trim()
+                      onClick={() => void handleCopyLatestResult()}
+                    >
+                      <Copy className="mr-2 h-4 w-4" />
+                      Copy again
+                    </Button>
+                    <Button
+                      variant="outline"
+                      size="sm"
+                      onClick={() =>
+                        void toggleReadAloudPlayback(
+                          transcribedText,
+                          "latest-result",
+                        )
                       }
+                    >
+                      <Volume2 className="mr-2 h-4 w-4" />
+                      {activeSpeechTarget === "latest-result"
+                        ? "Stop reading"
+                        : "Read aloud"}
+                    </Button>
+                  </div>
+                </div>
+                <textarea
+                  aria-label="Latest dictation result"
+                  className="manuscript min-h-[120px] w-full resize-y rounded-md bg-muted p-4 text-sm outline-none"
+                  value={transcribedText}
+                  onChange={(event) => {
+                    setTranscribedText(event.target.value);
+                    setLatestResultDirty(true);
+                  }}
+                  onBlur={() => {
+                    void maybeAutoLearnLatestCorrection();
+                  }}
+                />
+                <p className="text-sm text-muted-foreground">
+                  {repasteShortcutLabel
+                    ? `To put this into another app, switch to that app and press ${repasteShortcutLabel}.`
+                    : 'To put this into another app, set a "Paste last result" shortcut in Settings and press it from that app.'}{" "}
+                  A button here can only reach Plainsong, because Plainsong is
+                  the frontmost app while you are clicking in this window.
+                </p>
+                {latestResultDirty ? (
+                  <p className="text-sm text-muted-foreground">
+                    You changed this after capture.{" "}
+                    {repasteShortcutLabel ?? 'The "Paste last result" shortcut'}{" "}
+                    still delivers the words Plainsong captured, not your edit —
+                    use Copy again for the text you see here. Learn correction
+                    teaches Plainsong the fix for next time.
+                  </p>
+                ) : null}
+                <div className="flex flex-wrap items-center gap-2">
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    disabled={!canLearnLatestCorrection}
+                    onClick={() =>
+                      void learnCorrection(
+                        latestCorrectionBaseline,
+                        transcribedText,
+                        {
+                          force: true,
+                          appTarget,
+                          setStatus: setLatestLearnStatus,
+                          onSuccess: () =>
+                            setLatestCorrectionBaseline(transcribedText.trim()),
+                        },
+                      )
+                    }
+                  >
+                    Learn correction
+                  </Button>
+                  {isCaseOnlyDifference(
+                    latestCorrectionBaseline,
+                    transcribedText,
+                  ) && (
+                    <Button
+                      variant="outline"
+                      size="sm"
                       onClick={() =>
                         void learnCorrection(
                           latestCorrectionBaseline,
@@ -4896,73 +3142,42 @@ export function DictationView() {
                         )
                       }
                     >
-                      Learn correction
+                      Fix capitalization
                     </Button>
-                    {isCaseOnlyDifference(
-                      latestCorrectionBaseline,
-                      transcribedText,
-                    ) && (
-                      <Button
-                        variant="outline"
-                        size="sm"
-                        onClick={() =>
-                          void learnCorrection(
-                            latestCorrectionBaseline,
-                            transcribedText,
-                            {
-                              force: true,
-                              appTarget,
-                              setStatus: setLatestLearnStatus,
-                              onSuccess: () =>
-                                setLatestCorrectionBaseline(
-                                  transcribedText.trim(),
-                                ),
-                            },
-                          )
-                        }
-                      >
-                        Fix capitalization
-                      </Button>
-                    )}
-                    <Button
-                      variant="outline"
-                      size="sm"
-                      onClick={() => {
-                        const trimmed = transcribedText.trim();
-                        if (!trimmed) {
-                          return;
-                        }
-                        setNewDictionarySpokenForm(trimmed);
-                        setNewDictionaryReplacement(trimmed);
-                        setDictionaryCsvStatus(
-                          "Loaded current result into the dictionary editor below.",
-                        );
-                      }}
-                    >
-                      Quick add to dictionary
-                    </Button>
-                    <p className="text-xs text-muted-foreground">
-                      Edit a mistaken word here and Plainsong can remember it for
-                      next time.
-                    </p>
-                  </div>
-                  {latestLearnStatus && (
-                    <div className="rounded-md border bg-background px-3 py-2 text-xs text-muted-foreground">
-                      {latestLearnStatus}
-                    </div>
                   )}
-                </div>
-                {recoveryState && (
-                  <div
-                    className={`mt-3 rounded-md border px-3 py-3 text-xs ${
-                      recoveryState.tone === "warning"
-                        ? "border-rust/40 bg-rust/10 text-rust"
-                        : "border-rust/50 bg-rust/10 text-rust"
-                    }`}
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    onClick={() => {
+                      const trimmed = transcribedText.trim();
+                      if (!trimmed) {
+                        return;
+                      }
+                      setNewDictionarySpokenForm(trimmed);
+                      setNewDictionaryReplacement(trimmed);
+                      setDictionaryCsvStatus(
+                        "Loaded the current result into the Dictionary tab.",
+                      );
+                      setActiveConfigTab("dictionary");
+                    }}
                   >
+                    Quick add to dictionary
+                  </Button>
+                  <p className="text-sm text-muted-foreground">
+                    Edit a mistaken word here and Plainsong can remember it for
+                    next time.
+                  </p>
+                </div>
+                {latestLearnStatus && (
+                  <p className="rounded-md border bg-background px-3 py-2 text-sm text-muted-foreground">
+                    {latestLearnStatus}
+                  </p>
+                )}
+                {recoveryState && (
+                  <div className="rounded-md border border-rust/40 bg-rust/10 px-3 py-3 text-sm text-rust">
                     <p className="font-medium">{recoveryState.title}</p>
                     <p className="mt-1">{recoveryState.detail}</p>
-                    <div className="mt-2 flex flex-wrap gap-2 text-[11px] text-current/90">
+                    <div className="mt-2 flex flex-wrap gap-2">
                       {recoveryState.hints.map((hint) => (
                         <span
                           key={hint}
@@ -4977,13 +3192,10 @@ export function DictationView() {
                 {deliveryDoctor && (
                   <div
                     className={cn(
-                      "mt-3 rounded-lg border p-3 text-xs",
-                      deliveryDoctor.tone === "ready" &&
-                        "border-gold/40 bg-gold/10 text-gold-text",
-                      deliveryDoctor.tone === "warning" &&
-                        "border-rust/40 bg-rust/10 text-rust",
-                      deliveryDoctor.tone === "attention" &&
-                        "border-rust/50 bg-rust/10 text-rust",
+                      "rounded-md border p-3 text-sm",
+                      deliveryDoctor.tone === "ready"
+                        ? "border-gold/40 bg-gold/10 text-gold-text"
+                        : "border-rust/40 bg-rust/10 text-rust",
                     )}
                   >
                     <div className="flex items-start gap-3">
@@ -5014,7 +3226,7 @@ export function DictationView() {
                               <span className="sr-only">
                                 {item.label}: {item.value}
                               </span>
-                              <p className="text-[10px] font-medium uppercase text-current/60">
+                              <p className="rubric-muted text-current/70">
                                 {item.label}
                               </p>
                               <p className="mt-0.5 truncate font-medium">
@@ -5034,487 +3246,1576 @@ export function DictationView() {
             </Card>
           )}
 
-          <Card>
-            <CardHeader className="flex flex-row items-center justify-between">
-              <div>
-                <CardTitle>Flow Profile</CardTitle>
-                <CardDescription>
-                  Private local usage stats across your saved dictations.
-                </CardDescription>
-              </div>
-              <Button
-                variant="outline"
-                size="sm"
-                onClick={() => void refreshDictationInsights()}
-              >
-                <RefreshCw className="h-4 w-4 mr-2" />
-                Refresh
-              </Button>
-            </CardHeader>
-            <CardContent>
-              {dictationInsights ? (
-                <div className="space-y-4">
-                  <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-5">
-                    <div className="rounded-md border bg-muted/30 px-3 py-3">
-                      <p className="text-[11px] uppercase tracking-wide text-muted-foreground">
-                        Total dictations
-                      </p>
-                      <p className="mt-1 text-lg font-semibold">
-                        {dictationInsights.totalDictations}
-                      </p>
-                    </div>
-                    <div className="rounded-md border bg-muted/30 px-3 py-3">
-                      <p className="text-[11px] uppercase tracking-wide text-muted-foreground">
-                        Words dictated
-                      </p>
-                      <p className="mt-1 text-lg font-semibold">
-                        {dictationInsights.dictatedWords}
-                      </p>
-                    </div>
-                    <div className="rounded-md border bg-muted/30 px-3 py-3">
-                      <p className="text-[11px] uppercase tracking-wide text-muted-foreground">
-                        Avg words
-                      </p>
-                      <p className="mt-1 text-lg font-semibold">
-                        {dictationInsights.averageWordsPerDictation}
-                      </p>
-                    </div>
-                    <div className="rounded-md border bg-muted/30 px-3 py-3">
-                      <p className="text-[11px] uppercase tracking-wide text-muted-foreground">
-                        Active days
-                      </p>
-                      <p className="mt-1 text-lg font-semibold">
-                        {dictationInsights.activeDays}
-                      </p>
-                    </div>
-                    <div className="rounded-md border bg-muted/30 px-3 py-3">
-                      <p className="text-[11px] uppercase tracking-wide text-muted-foreground">
-                        Last 7 days
-                      </p>
-                      <p className="mt-1 text-lg font-semibold">
-                        {dictationInsights.lastSevenDaysDictations}
-                      </p>
-                    </div>
-                  </div>
-                  <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
-                    <div className="rounded-md border px-3 py-3">
-                      <p className="text-[11px] uppercase tracking-wide text-muted-foreground">
-                        Commands used
-                      </p>
-                      <p className="mt-1 text-sm font-medium">
-                        {dictationInsights.commandsUsed}
-                      </p>
-                    </div>
-                    <div className="rounded-md border px-3 py-3">
-                      <p className="text-[11px] uppercase tracking-wide text-muted-foreground">
-                        Backtracks
-                      </p>
-                      <p className="mt-1 text-sm font-medium">
-                        {dictationInsights.backtracksUsed}
-                      </p>
-                    </div>
-                    <div className="rounded-md border px-3 py-3">
-                      <p className="text-[11px] uppercase tracking-wide text-muted-foreground">
-                        Snippet expansions
-                      </p>
-                      <p className="mt-1 text-sm font-medium">
-                        {dictationInsights.snippetsTriggered}
-                      </p>
-                    </div>
-                    <div className="rounded-md border px-3 py-3">
-                      <p className="text-[11px] uppercase tracking-wide text-muted-foreground">
-                        Top app
-                      </p>
-                      <p className="mt-1 text-sm font-medium">
-                        {dictationInsights.topAppTarget
-                          ? `${dictationInsights.topAppTarget} (${dictationInsights.topAppTargetCount})`
-                          : "No insert target yet"}
-                      </p>
-                    </div>
-                  </div>
-                </div>
-              ) : (
-                <p className="text-sm text-muted-foreground">
-                  No saved dictation stats yet. Flow Profile starts filling in
-                  once dictations are retained in history.
+          <section className="surface-panel-subtle rounded-md p-4">
+            <div className="flex flex-col gap-4 lg:flex-row lg:items-start lg:justify-between">
+              <div className="max-w-xl">
+                <h2 className="section-heading">The main path</h2>
+                <p className="mt-1 text-sm text-muted-foreground">
+                  Trigger, speak, insert, then repair only when the target app
+                  needs it.
                 </p>
-              )}
-            </CardContent>
-          </Card>
+              </div>
+              <div className="grid gap-2 sm:grid-cols-2 lg:w-[520px]">
+                {[
+                  {
+                    icon: Keyboard,
+                    label: "Trigger",
+                    body: "Use the global hotkey without switching back to Plainsong.",
+                  },
+                  {
+                    icon: Zap,
+                    label: "Insert",
+                    body: "Final text lands after capture finishes.",
+                  },
+                  {
+                    icon: Replace,
+                    label: "Repair",
+                    body: "Use scratch that, actually, or replace X with Y.",
+                  },
+                  {
+                    icon: BookOpen,
+                    label: "Remember",
+                    body: "Teach names and terms once.",
+                  },
+                ].map((item) => {
+                  const Icon = item.icon;
+                  return (
+                    <div
+                      key={item.label}
+                      className="flex gap-3 rounded-md border border-border/70 bg-background/55 p-3"
+                    >
+                      <div className="flex size-8 shrink-0 items-center justify-center rounded-md bg-muted/45 text-muted-foreground">
+                        <Icon className="h-4 w-4" aria-hidden="true" />
+                      </div>
+                      <div className="min-w-0">
+                        <p className="text-sm font-medium text-card-foreground">
+                          {item.label}
+                        </p>
+                        <p className="mt-1 text-sm leading-5 text-muted-foreground">
+                          {item.body}
+                        </p>
+                      </div>
+                    </div>
+                  );
+                })}
+              </div>
+            </div>
+          </section>
 
-          {/* Dictation History */}
-          <Card>
-            <CardHeader className="flex flex-row items-center justify-between">
+          {activeCoachCards.length > 0 && (
+            <section className="space-y-3">
               <div>
-                <CardTitle>Recent Dictations</CardTitle>
-                <CardDescription>
+                <h2 className="section-heading">Dictation coach</h2>
+                <p className="text-sm text-muted-foreground">
+                  Learn the highest-leverage moves that make Plainsong feel
+                  faster than typing.
+                </p>
+              </div>
+              <div className="grid gap-3 xl:grid-cols-2">
+                {activeCoachCards.map((card) => (
+                  <div
+                    key={card.id}
+                    className="space-y-3 rounded-md border bg-muted/20 p-4"
+                  >
+                    <div>
+                      <p className="text-sm font-medium">{card.title}</p>
+                      <p className="mt-2 text-sm text-muted-foreground">
+                        {card.body}
+                      </p>
+                    </div>
+                    <div className="flex flex-wrap gap-2">
+                      {card.id === "command_mode" ? (
+                        <Button
+                          size="sm"
+                          variant="outline"
+                          onClick={() => {
+                            setDictationCommandModeEnabled(true);
+                            const nextModePreset = syncModePreset({
+                              commandModeEnabled: true,
+                            });
+                            void persistDictationPreferences({
+                              commandModeEnabled: true,
+                              modePreset: nextModePreset,
+                            });
+                            dismissCoachCard(card.id);
+                          }}
+                        >
+                          {card.actionLabel}
+                        </Button>
+                      ) : card.id === "profiles" ? (
+                        <Button
+                          size="sm"
+                          variant="outline"
+                          onClick={() => {
+                            const style = RECOMMENDED_APP_STYLES.find(
+                              (candidate) =>
+                                candidate.id === CODING_PROFILE_STYLE_ID,
+                            );
+                            if (style) {
+                              void handleInstallRecommendedStyle(style);
+                            }
+                            dismissCoachCard(card.id);
+                          }}
+                        >
+                          Install a flow
+                        </Button>
+                      ) : (
+                        <Button
+                          size="sm"
+                          variant="outline"
+                          onClick={() => dismissCoachCard(card.id)}
+                        >
+                          {card.actionLabel}
+                        </Button>
+                      )}
+                      <Button
+                        size="sm"
+                        variant="ghost"
+                        onClick={() => dismissCoachCard(card.id)}
+                      >
+                        Dismiss
+                      </Button>
+                    </div>
+                  </div>
+                ))}
+              </div>
+            </section>
+          )}
+
+          <section className="space-y-3">
+            <div className="flex flex-wrap items-end justify-between gap-3">
+              <div>
+                <h2 className="section-heading">Recent dictations</h2>
+                <p className="text-sm text-muted-foreground">
                   Dictation recordings retained by your current auto-delete
                   policy.
-                </CardDescription>
+                </p>
               </div>
               <Button
                 variant="outline"
                 size="sm"
-                onClick={() => void refetchDictationHistory()}
+                onClick={() => {
+                  void refetchDictationHistory();
+                  void refreshDictationInsights();
+                }}
               >
-                <RefreshCw className="h-4 w-4 mr-2" />
+                <RefreshCw className="mr-2 h-4 w-4" />
                 Refresh
               </Button>
-            </CardHeader>
-            <CardContent>
-              {dictationHistoryLoading ? (
-                <p className="text-sm text-muted-foreground">
-                  Loading dictation history...
-                </p>
-              ) : dictationHistory.length === 0 ? (
-                <p className="text-sm text-muted-foreground">
-                  No saved dictations yet. If auto-delete is set to Immediate,
-                  history is intentionally not retained.
-                </p>
-              ) : (
-                <div className="space-y-2">
-                  {dictationHistory.slice(0, 25).map((recording) => (
-                    <div
-                      key={recording.id}
-                      className="flex items-center justify-between rounded-md border p-3 cursor-pointer hover:bg-muted/50 transition-colors"
-                      onClick={() => {
-                        setSelectedRecording(recording);
-                        setIsDialogOpen(true);
-                      }}
-                    >
-                      <div>
-                        <p className="font-medium">{recording.title}</p>
-                        <p className="text-xs text-muted-foreground">
-                          {new Date(recording.createdAt).toLocaleString()} ·{" "}
-                          {recording.status}
-                        </p>
-                      </div>
-                      <div className="flex items-center gap-2">
-                        <p className="time-spec text-sm text-muted-foreground">
-                          {formatRecordingDuration(recording.duration)}
-                        </p>
-                        <Button
-                          variant="ghost"
-                          size="sm"
-                          onClick={(event) => {
-                            event.stopPropagation();
-                            void handleCopyHistoryTranscript(recording.id);
-                          }}
-                        >
-                          Copy
-                        </Button>
-                        <Button
-                          variant="ghost"
-                          size="sm"
-                          onClick={(event) => {
-                            event.stopPropagation();
-                            void handleDeleteHistoryItem(recording.id);
-                          }}
-                        >
-                          Delete
-                        </Button>
-                      </div>
+            </div>
+            {dictationInsights ? (
+              <div className="flex flex-wrap gap-x-6 gap-y-3 border-y border-border/60 py-3">
+                {[
+                  {
+                    label: "Total dictations",
+                    value: String(dictationInsights.totalDictations),
+                  },
+                  {
+                    label: "Words dictated",
+                    value: String(dictationInsights.dictatedWords),
+                  },
+                  {
+                    label: "Avg words",
+                    value: String(dictationInsights.averageWordsPerDictation),
+                  },
+                  {
+                    label: "Active days",
+                    value: String(dictationInsights.activeDays),
+                  },
+                  {
+                    label: "Last 7 days",
+                    value: String(dictationInsights.lastSevenDaysDictations),
+                  },
+                  {
+                    label: "Commands used",
+                    value: String(dictationInsights.commandsUsed),
+                  },
+                  {
+                    label: "Backtracks",
+                    value: String(dictationInsights.backtracksUsed),
+                  },
+                  {
+                    label: "Snippet expansions",
+                    value: String(dictationInsights.snippetsTriggered),
+                  },
+                  {
+                    label: "Top app",
+                    value: dictationInsights.topAppTarget
+                      ? `${dictationInsights.topAppTarget} (${dictationInsights.topAppTargetCount})`
+                      : "No insert target yet",
+                  },
+                ].map((stat) => (
+                  <div key={stat.label}>
+                    <p className="rubric-muted">{stat.label}</p>
+                    <p className="mt-0.5 text-sm font-medium">{stat.value}</p>
+                  </div>
+                ))}
+              </div>
+            ) : (
+              <p className="text-sm text-muted-foreground">
+                No saved dictation stats yet. Stats start filling in once
+                dictations are retained in history.
+              </p>
+            )}
+            {dictationHistoryLoading ? (
+              <p className="text-sm text-muted-foreground">
+                Loading dictation history...
+              </p>
+            ) : dictationHistory.length === 0 ? (
+              <p className="text-sm text-muted-foreground">
+                No saved dictations yet. If auto-delete is set to Immediate,
+                history is intentionally not retained.
+              </p>
+            ) : (
+              <div className="space-y-2">
+                {dictationHistory.slice(0, 25).map((recording) => (
+                  <div
+                    key={recording.id}
+                    className="flex cursor-pointer items-center justify-between rounded-md border p-3 transition-colors hover:bg-muted/50"
+                    onClick={() => {
+                      setSelectedRecording(recording);
+                      setIsDialogOpen(true);
+                    }}
+                  >
+                    <div>
+                      <p className="font-medium">{recording.title}</p>
+                      <p className="text-sm text-muted-foreground">
+                        {new Date(recording.createdAt).toLocaleString()} ·{" "}
+                        {recording.status}
+                      </p>
                     </div>
-                  ))}
-                </div>
-              )}
-            </CardContent>
-          </Card>
+                    <div className="flex items-center gap-2">
+                      <p className="time-spec text-sm text-muted-foreground">
+                        {formatRecordingDuration(recording.duration)}
+                      </p>
+                      <Button
+                        variant="ghost"
+                        size="sm"
+                        onClick={(event) => {
+                          event.stopPropagation();
+                          void handleCopyHistoryTranscript(recording.id);
+                        }}
+                      >
+                        Copy
+                      </Button>
+                      <Button
+                        variant="ghost"
+                        size="sm"
+                        onClick={(event) => {
+                          event.stopPropagation();
+                          void handleDeleteHistoryItem(recording.id);
+                        }}
+                      >
+                        Delete
+                      </Button>
+                    </div>
+                  </div>
+                ))}
+              </div>
+            )}
+          </section>
 
-          {/* Settings */}
-          <Card>
-            <CardHeader>
-              <CardTitle className="text-sm">Capture and Insert</CardTitle>
-              <CardDescription>
-                Modes handle the recommended defaults. These controls are here
-                when you want to tune the details.
-              </CardDescription>
-            </CardHeader>
-            <CardContent>
-              <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-                <div className="space-y-2">
-                  <label className="text-sm font-medium">
-                    Dictation profile
-                  </label>
-                  <select
-                    className="w-full p-2 border rounded-md bg-background"
-                    value={dictationProfile}
-                    onChange={(event) => {
-                      const profile = event.target.value as
-                        | "normal_speed"
-                        | "power_rewrite";
-                      setDictationProfile(profile);
-                      const nextModePreset = syncModePreset({ profile });
-                      void persistDictationPreferences({
-                        profile,
-                        modePreset: nextModePreset,
-                      });
-                    }}
-                  >
-                    <option value="normal_speed">Normal Speed</option>
-                    <option value="power_rewrite">Power Rewrite</option>
-                  </select>
-                  <p className="text-xs text-muted-foreground">
-                    Uses the transcription method you chose in Settings.
-                  </p>
-                </div>
+          <section className="space-y-4 border-t border-border/60 pt-6">
+            <div>
+              <h2 className="section-heading">Set up dictation</h2>
+              <p className="text-sm text-muted-foreground">
+                Profiles, vocabulary, and delivery settings. Capture above keeps
+                working while you tune these.
+              </p>
+            </div>
+            <Tabs
+              value={activeConfigTab}
+              onValueChange={(value) =>
+                setActiveConfigTab(value as DictationConfigTab)
+              }
+            >
+              <TabsList className="flex h-auto w-full flex-wrap justify-start gap-1">
+                {DICTATION_CONFIG_TABS.map((tab) => (
+                  <TabsTrigger key={tab.value} value={tab.value}>
+                    {tab.label}
+                  </TabsTrigger>
+                ))}
+              </TabsList>
 
-                <div className="space-y-2">
-                  <label className="text-sm font-medium">Default Project</label>
-                  <select
-                    className="w-full p-2 border rounded-md bg-background"
-                    value={defaultProjectId}
-                    onChange={(event) => {
-                      const nextProjectId = event.target.value;
-                      setDefaultProjectId(nextProjectId);
-                      void persistDictationPreferences({
-                        projectId: nextProjectId,
-                      });
-                    }}
-                  >
-                    <option value="inbox">Inbox</option>
-                    {projects.map((project) => (
-                      <option key={project.id} value={project.id}>
-                        {project.name}
-                      </option>
-                    ))}
-                  </select>
-                </div>
-
-                <div className="space-y-2">
-                  <label className="text-sm font-medium">Hotkey behavior</label>
-                  <select
-                    className="w-full p-2 border rounded-md bg-background"
-                    value={shortcutMode(
-                      dictationPushToTalk,
-                      dictationHandsFreeEnabled,
-                    )}
-                    onChange={(event) => {
-                      const nextMode = event.target.value as
-                        | "hold_to_talk"
-                        | "toggle"
-                        | "hands_free";
-                      const pushToTalk = nextMode === "hold_to_talk";
-                      const handsFreeEnabled = nextMode === "hands_free";
-                      setDictationPushToTalk(pushToTalk);
-                      setDictationHandsFreeEnabled(handsFreeEnabled);
-                      void persistDictationPreferences({
-                        pushToTalk,
-                        handsFreeEnabled,
-                      });
-                    }}
-                  >
-                    <option value="toggle">Toggle (press to start, press again to stop)</option>
-                  </select>
-                  <p className="text-xs text-muted-foreground">
-                    Hands-free starts on press and stops after silence or a
-                    second press.
-                  </p>
-                </div>
-
-                <div className="space-y-2">
-                  <label className="text-sm font-medium">
-                    Session language
-                  </label>
-                  <select
-                    aria-label="Session language"
-                    className="w-full p-2 border rounded-md bg-background"
-                    value={dictationSessionLanguage}
-                    onChange={(event) => {
-                      const next = event.target.value;
-                      setDictationSessionLanguage(next);
-                      void persistDictationPreferences({
-                        sessionLanguage: next === "auto" ? null : next,
-                      });
-                    }}
-                  >
-                    {DICTATION_SESSION_LANGUAGE_OPTIONS.map((option) => (
-                      <option key={option.value} value={option.value}>
-                        {option.label}
-                      </option>
-                    ))}
-                  </select>
-                  <p className="text-xs text-muted-foreground">
-                    Fixed session languages always win. When this stays on auto,
-                    the active set below narrows what you expect in the session
-                    and locks capture if you keep only one language enabled.
-                  </p>
-                  <div className="rounded-md border bg-muted/20 px-3 py-3">
-                    <p className="text-xs font-medium text-foreground">
-                      Active language set
+              <TabsContent value="profiles" className="mt-4 space-y-6">
+                <div className="space-y-3">
+                  <div>
+                    <h3 className="section-heading">Pick a profile</h3>
+                    <p className="text-sm text-muted-foreground">
+                      One profile is active at a time. It sets the style,
+                      insertion, context, and history behavior for every
+                      capture — including hotkey dictation.
                     </p>
-                    <p className="mt-1 text-xs text-muted-foreground">
-                      Used only while Session language stays on auto detect.
+                  </div>
+                  <div className="grid grid-cols-1 gap-3 md:grid-cols-2 xl:grid-cols-3">
+                    {DICTATION_PROFILE_TILES.map((tile) => {
+                      const Icon = PROFILE_TILE_ICONS[tile.iconKey];
+                      const isActive = activeProfile.id === tile.id;
+                      return (
+                        <button
+                          key={tile.id}
+                          type="button"
+                          aria-pressed={isActive}
+                          aria-label={`Profile: ${tile.title}`}
+                          onClick={() => {
+                            if (tile.kind === "style") {
+                              const style = RECOMMENDED_APP_STYLES.find(
+                                (candidate) => candidate.id === tile.styleId,
+                              );
+                              if (style) {
+                                void handleInstallRecommendedStyle(style);
+                              }
+                              return;
+                            }
+                            applyDictationMode(tile.modeId);
+                          }}
+                          className={cn(
+                            "rounded-md border p-4 text-left transition-colors",
+                            isActive
+                              ? "border-rust/40 bg-rust/8 shadow-sm"
+                              : "border-border bg-background hover:border-rust/40 hover:bg-muted/40",
+                          )}
+                        >
+                          <div className="flex items-center justify-between gap-3">
+                            <Icon
+                              aria-hidden="true"
+                              className={cn(
+                                "h-4 w-4",
+                                isActive
+                                  ? "text-rust"
+                                  : "text-muted-foreground",
+                              )}
+                            />
+                            {isActive ? (
+                              <span className="rounded-full bg-rust px-2 py-0.5 text-xs font-semibold text-destructive-foreground">
+                                Active
+                              </span>
+                            ) : null}
+                          </div>
+                          <p className="mt-3 font-medium">{tile.title}</p>
+                          <p className="mt-2 text-sm text-muted-foreground">
+                            {tile.description}
+                          </p>
+                          <p className="mt-3 text-sm text-muted-foreground">
+                            {tile.emphasis}
+                          </p>
+                        </button>
+                      );
+                    })}
+                  </div>
+                  <p className="rounded-md border bg-muted/30 px-3 py-2 text-sm text-muted-foreground">
+                    {dictationModePreset === "custom"
+                      ? selectedCustomMode
+                        ? `${selectedCustomMode.name} is active. Update it when you want the current controls to become the new default profile.`
+                        : "Unsaved custom setup is active. Save it as a reusable flow profile when it feels right."
+                      : `${DICTATION_MODE_DEFINITION_BY_ID[dictationModePreset]?.label ?? "General"} profile is active. The controls in these tabs stay editable if you want to fine-tune them.`}
+                  </p>
+                </div>
+
+                <div className="space-y-3 border-t pt-4">
+                  <div>
+                    <h3 className="section-heading">What this profile changes</h3>
+                    <p className="text-sm text-muted-foreground">
+                      The active profile controls insertion, context, saved
+                      history, command behavior, and the transcription/AI routes
+                      below.
                     </p>
-                    <div className="mt-3 flex flex-wrap gap-2">
-                      {DICTATION_ACTIVE_LANGUAGE_OPTIONS.map((option) => {
-                        const selected = dictationActiveLanguages.includes(
-                          option.value,
-                        );
-                        return (
-                          <button
-                            key={option.value}
+                  </div>
+                  <div className="flex flex-wrap gap-2">
+                    {activeModeSummary.map((item) => (
+                      <span
+                        key={item.label}
+                        className="rounded-full border bg-background px-2.5 py-1 text-sm text-muted-foreground"
+                      >
+                        <span className="font-medium text-foreground">
+                          {item.label}:
+                        </span>{" "}
+                        {item.value}
+                      </span>
+                    ))}
+                  </div>
+                </div>
+
+                <div className="grid gap-4 border-t pt-4 md:grid-cols-2">
+                  <div className="space-y-2">
+                    <h3 className="section-heading">Default route</h3>
+                    <p className="text-sm text-muted-foreground">
+                      This profile prefers one hosting path by default,
+                      including hotkey dictation.
+                    </p>
+                    <div className="flex gap-2">
+                      {(["local", "cloud"] as const).map((route) => (
+                        <Button
+                          key={route}
+                          type="button"
+                          size="sm"
+                          variant={
+                            dictationRoutePreference === route
+                              ? "active"
+                              : "outline"
+                          }
+                          onClick={() => {
+                            setDictationRoutePreference(route);
+                            void persistDictationPreferences({
+                              routePreference: route,
+                            });
+                          }}
+                        >
+                          {route === "local" ? "Local first" : "Cloud first"}
+                        </Button>
+                      ))}
+                    </div>
+                    <p className="text-sm text-muted-foreground">
+                      Current provider hosting:{" "}
+                      {currentDictationProvider
+                        ? providerHostingPreference(
+                            currentDictationProvider as AsrProviderType,
+                            currentDictationModelId,
+                          ) === "cloud"
+                          ? "Cloud"
+                          : "Local"
+                        : "Unknown"}
+                    </p>
+                    {!useSharedAsrSelection &&
+                    currentDictationProvider &&
+                    currentMeetingProvider &&
+                    currentDictationProvider !== currentMeetingProvider ? (
+                      <p className="text-sm text-rust">
+                        Dictation uses {currentDictationProvider} while meetings
+                        use {currentMeetingProvider}.
+                      </p>
+                    ) : null}
+                  </div>
+                  <div className="space-y-2">
+                    <h3 className="section-heading">
+                      Next button capture override
+                    </h3>
+                    <p className="text-sm text-muted-foreground">
+                      Use this when you want one manual capture to ignore the
+                      profile default.
+                    </p>
+                    <label className="inline-flex items-center gap-2 text-sm text-muted-foreground">
+                      <input
+                        type="checkbox"
+                        checked={dictationRouteOverrideEnabled}
+                        onChange={(event) => {
+                          const next = event.target.checked;
+                          setDictationRouteOverrideEnabled(next);
+                          if (!next) {
+                            setNextCaptureRoutePreference(null);
+                          }
+                          void persistDictationPreferences({
+                            routeOverrideEnabled: next,
+                          });
+                        }}
+                      />
+                      Allow next-capture override
+                    </label>
+                    {dictationRouteOverrideEnabled ? (
+                      <div className="flex gap-2">
+                        <Button
+                          type="button"
+                          size="sm"
+                          variant={
+                            nextCaptureRoutePreference === null
+                              ? "active"
+                              : "outline"
+                          }
+                          onClick={() => setNextCaptureRoutePreference(null)}
+                        >
+                          Use default
+                        </Button>
+                        {(["local", "cloud"] as const).map((route) => (
+                          <Button
+                            key={`next-${route}`}
                             type="button"
-                            aria-pressed={selected}
-                            aria-label={`Toggle ${option.label} active language`}
-                            className={cn(
-                              "rounded-full border px-3 py-1 text-xs transition-colors",
-                              selected
-                                ? "border-foreground bg-foreground text-background"
-                                : "border-border bg-background text-muted-foreground hover:text-foreground",
-                            )}
-                            onClick={() => {
-                              const nextActiveLanguages = selected
-                                ? dictationActiveLanguages.filter(
-                                    (language) => language !== option.value,
-                                  )
-                                : [...dictationActiveLanguages, option.value];
-                              const normalized =
-                                normalizeActiveLanguageSet(nextActiveLanguages);
-                              setDictationActiveLanguages(normalized);
-                              void persistDictationPreferences({
-                                activeLanguages: normalized,
-                              });
-                            }}
+                            size="sm"
+                            variant={
+                              nextCaptureRoutePreference === route
+                                ? "active"
+                                : "outline"
+                            }
+                            onClick={() => setNextCaptureRoutePreference(route)}
                           >
-                            {option.label}
-                          </button>
+                            Next {route}
+                          </Button>
+                        ))}
+                      </div>
+                    ) : (
+                      <p className="text-sm text-muted-foreground">
+                        Manual captures follow the active profile route until
+                        you re-enable overrides.
+                      </p>
+                    )}
+                  </div>
+                </div>
+
+                <div className="space-y-3 border-t pt-4">
+                  <div>
+                    <h3 className="section-heading">Recommended flow profiles</h3>
+                    <p className="text-sm text-muted-foreground">
+                      Install ready-made auto-switch profiles for the apps you
+                      use most. Installing one saves it under Your saved
+                      profiles below.
+                    </p>
+                  </div>
+                  <div className="grid grid-cols-1 gap-3 md:grid-cols-2 xl:grid-cols-3">
+                    {RECOMMENDED_APP_STYLES.map((style) => {
+                      const installedMode = dictationCustomModes.find(
+                        (mode) => mode.id === style.id,
+                      );
+                      return (
+                        <div
+                          key={style.id}
+                          className="rounded-md border border-border bg-muted/20 p-4"
+                        >
+                          <div className="flex items-start justify-between gap-3">
+                            <div>
+                              <p className="font-medium">{style.name}</p>
+                              <p className="mt-2 text-sm text-muted-foreground">
+                                {style.description}
+                              </p>
+                              <p className="mt-2 text-sm text-muted-foreground">
+                                {style.activationDomainMatcher
+                                  ? `Domain ${style.activationDomainMatcher}`
+                                  : style.activationAppMatcher
+                                    ? `App ${style.activationAppMatcher}`
+                                    : "Manual profile"}
+                                {" · "}
+                                {CONTEXT_SOURCE_LABELS[style.contextSource]}
+                                {" · "}
+                                {INSERTION_MODE_LABELS[style.insertionMode]}
+                              </p>
+                            </div>
+                            {installedMode && (
+                              <span className="rounded-full border bg-background px-2 py-0.5 text-xs font-medium text-muted-foreground">
+                                Installed
+                              </span>
+                            )}
+                          </div>
+                          <div className="mt-3 flex gap-2">
+                            <Button
+                              variant="outline"
+                              size="sm"
+                              onClick={() =>
+                                void handleInstallRecommendedStyle(style)
+                              }
+                            >
+                              {installedMode
+                                ? "Update and use"
+                                : "Install and use"}
+                            </Button>
+                          </div>
+                        </div>
+                      );
+                    })}
+                  </div>
+                </div>
+
+                {dictationCustomModes.length > 0 && (
+                  <div className="space-y-3 border-t pt-4">
+                    <div>
+                      <h3 className="section-heading">Your saved profiles</h3>
+                      <p className="text-sm text-muted-foreground">
+                        Reuse your own dictation setups without rebuilding them
+                        from scratch.
+                      </p>
+                    </div>
+                    <div className="grid grid-cols-1 gap-3 md:grid-cols-2">
+                      {dictationCustomModes.map((mode) => {
+                        const isActive =
+                          dictationModePreset === "custom" &&
+                          selectedCustomModeId === mode.id;
+                        return (
+                          <div
+                            key={mode.id}
+                            className={cn(
+                              "rounded-md border p-4",
+                              isActive
+                                ? "border-rust/40 bg-rust/8 shadow-sm"
+                                : "border-border bg-muted/20",
+                            )}
+                          >
+                            <div className="flex items-start justify-between gap-3">
+                              <div>
+                                <p className="font-medium">{mode.name}</p>
+                                <p className="mt-1 text-sm text-muted-foreground">
+                                  {mode.description || "Private flow profile"}
+                                </p>
+                                <p className="mt-2 text-sm text-muted-foreground">
+                                  {mode.dictationProvider ||
+                                    "Current transcription"}{" "}
+                                  · {mode.dictationModelId || "Current model"}
+                                  {mode.activationAppMatcher
+                                    ? ` · Auto for ${mode.activationAppMatcher}`
+                                    : ""}
+                                  {mode.activationDomainMatcher
+                                    ? ` · Domain ${mode.activationDomainMatcher}`
+                                    : ""}
+                                  {!mode.activationAppMatcher &&
+                                  !mode.activationDomainMatcher
+                                    ? " · Manual profile"
+                                    : ""}
+                                </p>
+                              </div>
+                              {isActive && (
+                                <span className="rounded-full bg-rust px-2 py-0.5 text-xs font-semibold text-destructive-foreground">
+                                  Active
+                                </span>
+                              )}
+                            </div>
+                            <div className="mt-3 flex gap-2">
+                              <Button
+                                variant={isActive ? "active" : "outline"}
+                                size="sm"
+                                onClick={() => applySavedCustomMode(mode)}
+                              >
+                                {isActive ? "Using now" : "Use profile"}
+                              </Button>
+                              <Button
+                                variant="ghost"
+                                size="sm"
+                                onClick={() =>
+                                  void handleDeleteCustomMode(mode.id)
+                                }
+                              >
+                                Delete profile
+                              </Button>
+                            </div>
+                            <div className="mt-3 flex flex-wrap gap-2">
+                              {summarizeMode(mode).map((item) => (
+                                <span
+                                  key={`${mode.id}-${item.label}`}
+                                  className="rounded-full border bg-background px-2.5 py-1 text-sm text-muted-foreground"
+                                >
+                                  <span className="font-medium text-foreground">
+                                    {item.label}:
+                                  </span>{" "}
+                                  {item.value}
+                                </span>
+                              ))}
+                            </div>
+                          </div>
                         );
                       })}
                     </div>
-                    <p className="mt-3 text-xs text-muted-foreground">
-                      {dictationActiveLanguages.length === 0
-                        ? "No active-set filter yet. Auto detect stays fully open."
-                        : dictationActiveLanguages.length === 1
-                          ? `Auto detect will lock to ${DICTATION_ACTIVE_LANGUAGE_OPTIONS.find((option) => option.value === dictationActiveLanguages[0])?.label ?? dictationActiveLanguages[0]} until you add another language or set a fixed session language.`
-                          : `Auto detect stays on for this set: ${dictationActiveLanguages
-                              .map(
-                                (language) =>
-                                  DICTATION_ACTIVE_LANGUAGE_OPTIONS.find(
-                                    (option) => option.value === language,
-                                  )?.label ?? language,
-                              )
-                              .join(", ")}.`}
-                    </p>
+                  </div>
+                )}
+
+                {dictationModePreset === "custom" && (
+                  <div className="space-y-3 border-t pt-4">
+                    <div>
+                      <h3 className="section-heading">Custom profile</h3>
+                      <p className="text-sm text-muted-foreground">
+                        Saving a flow profile snapshots the current dictation
+                        style, result behavior, context source, transcription
+                        route, AI route, and optional app or domain
+                        auto-activation rules.
+                      </p>
+                    </div>
+                    <div className="grid gap-3 md:grid-cols-2">
+                      <div className="space-y-2">
+                        <label
+                          className="text-sm font-medium"
+                          htmlFor="custom-profile-name"
+                        >
+                          Profile name
+                        </label>
+                        <input
+                          id="custom-profile-name"
+                          type="text"
+                          aria-label="Profile name"
+                          className="w-full rounded-md border bg-background p-2 text-sm"
+                          value={customModeDraft.name}
+                          onChange={(event) =>
+                            setCustomModeDraft((current) => ({
+                              ...current,
+                              name: event.target.value,
+                            }))
+                          }
+                          placeholder="Custom Flow Profile"
+                        />
+                      </div>
+                      <div className="space-y-2">
+                        <label
+                          className="text-sm font-medium"
+                          htmlFor="custom-profile-description"
+                        >
+                          Short description
+                        </label>
+                        <input
+                          id="custom-profile-description"
+                          type="text"
+                          aria-label="Short description"
+                          className="w-full rounded-md border bg-background p-2 text-sm"
+                          value={customModeDraft.description}
+                          onChange={(event) =>
+                            setCustomModeDraft((current) => ({
+                              ...current,
+                              description: event.target.value,
+                            }))
+                          }
+                          placeholder="What this mode is for"
+                        />
+                      </div>
+                      <div className="space-y-2">
+                        <label
+                          className="text-sm font-medium"
+                          htmlFor="custom-profile-base"
+                        >
+                          Base style
+                        </label>
+                        <select
+                          id="custom-profile-base"
+                          aria-label="Base style"
+                          className="w-full rounded-md border bg-background p-2 text-sm"
+                          value={customModeDraft.baseModePreset}
+                          onChange={(event) =>
+                            setCustomModeDraft((current) => ({
+                              ...current,
+                              baseModePreset: event.target
+                                .value as DictationBaseModePreset,
+                            }))
+                          }
+                        >
+                          {DICTATION_MODE_DEFINITIONS.filter(
+                            (mode) => mode.id !== "custom",
+                          ).map((mode) => (
+                            <option key={mode.id} value={mode.id}>
+                              {mode.label}
+                            </option>
+                          ))}
+                        </select>
+                        <p className="text-sm text-muted-foreground">
+                          Sets the deterministic formatting and reprocess
+                          behavior this flow profile should inherit before any
+                          profile-specific prompt runs.
+                        </p>
+                      </div>
+                      <div className="space-y-2 md:col-span-2">
+                        <label
+                          className="text-sm font-medium"
+                          htmlFor="custom-profile-prompt"
+                        >
+                          Style prompt
+                        </label>
+                        <textarea
+                          id="custom-profile-prompt"
+                          aria-label="Style prompt"
+                          className="min-h-24 w-full rounded-md border bg-background p-2 text-sm"
+                          value={customModeDraft.customPrompt}
+                          onChange={(event) =>
+                            setCustomModeDraft((current) => ({
+                              ...current,
+                              customPrompt: event.target.value,
+                            }))
+                          }
+                          placeholder="Optional. Tell Plainsong how this mode should rewrite dictation for this app or workflow."
+                        />
+                        <p className="text-sm text-muted-foreground">
+                          Optional. Overrides the global Smart Format prompt
+                          only when this profile is active.
+                        </p>
+                      </div>
+                    </div>
+
+                    <div className="space-y-3 border-t pt-4">
+                      <div className="flex flex-wrap items-center justify-between gap-2">
+                        <div>
+                          <h4 className="section-heading">Activation rules</h4>
+                          <p className="text-sm text-muted-foreground">
+                            Hotkey and tray dictation can switch into this flow
+                            profile automatically before capture starts.
+                          </p>
+                        </div>
+                        <span className="rounded-full border bg-background px-2 py-1 text-xs font-medium text-muted-foreground">
+                          {customModeDraft.activationAppMatcher.trim() ||
+                          customModeDraft.activationDomainMatcher.trim()
+                            ? "Auto-ready"
+                            : "Manual only"}
+                        </span>
+                      </div>
+                      <div className="grid gap-3 md:grid-cols-2">
+                        <div className="space-y-2">
+                          <label
+                            className="text-sm font-medium"
+                            htmlFor="custom-profile-app-matcher"
+                          >
+                            Auto-activate for app
+                          </label>
+                          <input
+                            id="custom-profile-app-matcher"
+                            type="text"
+                            aria-label="Auto-activate for app"
+                            className="w-full rounded-md border bg-background p-2 text-sm"
+                            value={customModeDraft.activationAppMatcher}
+                            onChange={(event) =>
+                              setCustomModeDraft((current) => ({
+                                ...current,
+                                activationAppMatcher: event.target.value,
+                              }))
+                            }
+                            placeholder="Slack, Gmail, Cursor"
+                          />
+                          <p className="text-sm text-muted-foreground">
+                            Optional. When the frontmost app name matches,
+                            Plainsong can switch to this profile automatically
+                            for hotkey and tray dictation.
+                          </p>
+                          <div className="flex flex-wrap gap-2">
+                            {ACTIVATION_APP_SUGGESTIONS.map((suggestion) => (
+                              <button
+                                key={suggestion}
+                                type="button"
+                                className="rounded-full border bg-background px-2 py-1 text-sm text-muted-foreground transition-colors hover:bg-muted"
+                                onClick={() =>
+                                  setCustomModeDraft((current) => ({
+                                    ...current,
+                                    activationAppMatcher: suggestion,
+                                  }))
+                                }
+                              >
+                                {suggestion}
+                              </button>
+                            ))}
+                          </div>
+                        </div>
+                        <div className="space-y-2">
+                          <label
+                            className="text-sm font-medium"
+                            htmlFor="custom-profile-domain-matcher"
+                          >
+                            Auto-activate for domain
+                          </label>
+                          <input
+                            id="custom-profile-domain-matcher"
+                            type="text"
+                            aria-label="Auto-activate for domain"
+                            className="w-full rounded-md border bg-background p-2 text-sm"
+                            value={customModeDraft.activationDomainMatcher}
+                            onChange={(event) =>
+                              setCustomModeDraft((current) => ({
+                                ...current,
+                                activationDomainMatcher: event.target.value,
+                              }))
+                            }
+                            placeholder="docs.google.com, linear.app"
+                          />
+                          <p className="text-sm text-muted-foreground">
+                            Optional. Browser-focused dictation can switch when
+                            the active tab URL host matches this domain.
+                          </p>
+                          <div className="flex flex-wrap gap-2">
+                            {ACTIVATION_DOMAIN_SUGGESTIONS.map((suggestion) => (
+                              <button
+                                key={suggestion}
+                                type="button"
+                                className="rounded-full border bg-background px-2 py-1 text-sm text-muted-foreground transition-colors hover:bg-muted"
+                                onClick={() =>
+                                  setCustomModeDraft((current) => ({
+                                    ...current,
+                                    activationDomainMatcher: suggestion,
+                                  }))
+                                }
+                              >
+                                {suggestion}
+                              </button>
+                            ))}
+                          </div>
+                        </div>
+                      </div>
+                      <p className="rounded-md border bg-background/80 px-3 py-2 text-sm text-muted-foreground">
+                        {describeActivationRules(
+                          customModeDraft.activationAppMatcher,
+                          customModeDraft.activationDomainMatcher,
+                        )}{" "}
+                        Domain rules are checked first.
+                      </p>
+                      <div className="grid gap-3 md:grid-cols-2">
+                        <div className="space-y-2">
+                          <label
+                            className="text-sm font-medium"
+                            htmlFor="custom-profile-language"
+                          >
+                            Language override
+                          </label>
+                          <input
+                            id="custom-profile-language"
+                            type="text"
+                            aria-label="Language override"
+                            className="w-full rounded-md border bg-background p-2 text-sm"
+                            value={customModeDraft.languageOverride}
+                            onChange={(event) =>
+                              setCustomModeDraft((current) => ({
+                                ...current,
+                                languageOverride: event.target.value,
+                              }))
+                            }
+                            placeholder="Leave blank for auto"
+                          />
+                          <p className="text-sm text-muted-foreground">
+                            Optional. Save a language tag like{" "}
+                            <span className="font-mono">en</span> or{" "}
+                            <span className="font-mono">es</span> with this
+                            mode.
+                          </p>
+                        </div>
+                        <div className="space-y-2">
+                          <p className="text-sm font-medium">Live preview</p>
+                          <label className="inline-flex items-center gap-2 rounded-md border bg-background px-3 py-2 text-sm">
+                            <input
+                              type="checkbox"
+                              checked={customModeDraft.livePreviewEnabled}
+                              onChange={(event) =>
+                                setCustomModeDraft((current) => ({
+                                  ...current,
+                                  livePreviewEnabled: event.target.checked,
+                                }))
+                              }
+                            />
+                            Show live partial text in the popup for this mode
+                          </label>
+                          <p className="text-sm text-muted-foreground">
+                            Turn this off for cleaner captures when partial text
+                            is distracting.
+                          </p>
+                        </div>
+                      </div>
+                    </div>
+
+                    <div className="flex flex-wrap gap-2">
+                      <Button
+                        size="sm"
+                        onClick={() => void handleSaveCustomMode(false)}
+                      >
+                        {selectedCustomModeId
+                          ? "Update profile"
+                          : "Save current setup"}
+                      </Button>
+                      <Button
+                        size="sm"
+                        variant="outline"
+                        onClick={() => void handleSaveCustomMode(true)}
+                      >
+                        Save as new profile
+                      </Button>
+                      {selectedCustomModeId && (
+                        <Button
+                          size="sm"
+                          variant="ghost"
+                          onClick={() =>
+                            void handleDeleteCustomMode(selectedCustomModeId)
+                          }
+                        >
+                          Delete profile
+                        </Button>
+                      )}
+                    </div>
+                  </div>
+                )}
+
+                <div className="grid gap-4 border-t pt-4 xl:grid-cols-2">
+                  <div className="space-y-3">
+                    <div>
+                      <h3 className="section-heading">
+                        <Terminal
+                          className="mr-2 inline h-4 w-4 align-[-2px]"
+                          aria-hidden="true"
+                        />
+                        Developer dictation
+                      </h3>
+                      <p className="text-sm text-muted-foreground">
+                        A tighter lane for Cursor, terminals, commit messages,
+                        markdown, and prompt-heavy work.
+                      </p>
+                    </div>
+                    <div className="rounded-md border bg-muted/20 p-3">
+                      <p className="text-sm font-medium">
+                        {currentDictationProvider && currentDictationModelId
+                          ? `${currentDictationProvider} · ${currentDictationModelId}`
+                          : "Use a fast local provider with live preview"}
+                      </p>
+                      <p className="mt-1 text-sm text-muted-foreground">
+                        Coding benefits from low-latency local capture,
+                        selected-text context, and command mode staying on. Good
+                        spoken patterns: “open paren”, “close brace”, “snake
+                        case”, “camel case”, file names, and CLI commands. Keep{" "}
+                        <code>{dictationCommandPrefix}</code> mode ready for
+                        rewrite, bulletize, and professional cleanup on selected
+                        text.
+                      </p>
+                      <div className="mt-3 flex flex-wrap gap-2 text-sm text-muted-foreground">
+                        {[
+                          "commit messages",
+                          "PR summaries",
+                          "terminal commands",
+                          "issue updates",
+                          "Cursor prompts",
+                        ].map((label) => (
+                          <span
+                            key={label}
+                            className="rounded-full border px-2 py-1"
+                          >
+                            {label}
+                          </span>
+                        ))}
+                      </div>
+                    </div>
+                    <div className="flex flex-wrap gap-2">
+                      <Button
+                        size="sm"
+                        variant="outline"
+                        onClick={() => {
+                          const style = RECOMMENDED_APP_STYLES.find(
+                            (candidate) =>
+                              candidate.id === CODING_PROFILE_STYLE_ID,
+                          );
+                          if (style) {
+                            void handleInstallRecommendedStyle(style);
+                          }
+                        }}
+                      >
+                        Use Coding profile
+                      </Button>
+                      <Button
+                        size="sm"
+                        variant="outline"
+                        onClick={() => {
+                          setDictationContextSource("selected_text");
+                          setDictationCommandModeEnabled(true);
+                          setDictationLivePreviewEnabled(true);
+                          const nextModePreset = syncModePreset({
+                            contextSource: "selected_text",
+                            commandModeEnabled: true,
+                          });
+                          void persistDictationPreferences({
+                            contextSource: "selected_text",
+                            commandModeEnabled: true,
+                            livePreviewEnabled: true,
+                            modePreset: nextModePreset,
+                          });
+                        }}
+                      >
+                        Turn on coding helpers
+                      </Button>
+                    </div>
+                  </div>
+
+                  <div className="space-y-3">
+                    <div>
+                      <h3 className="section-heading">
+                        <Volume2
+                          className="mr-2 inline h-4 w-4 align-[-2px]"
+                          aria-hidden="true"
+                        />
+                        Quiet dictation
+                      </h3>
+                      <p className="text-sm text-muted-foreground">
+                        Better defaults for low-volume speaking, focus sessions,
+                        and fewer distracting UI changes.
+                      </p>
+                    </div>
+                    <div className="rounded-md border bg-muted/20 p-3">
+                      <p className="text-sm font-medium">
+                        Silence auto-stop{" "}
+                        {formatTimeoutSeconds(dictationSilenceTimeoutSeconds)} ·
+                        Keep warm {dictationKeepWarm}
+                      </p>
+                      <p className="mt-1 text-sm text-muted-foreground">
+                        For whispering, a warmed local model and a slightly
+                        longer stop window reduce awkward cutoffs. Prefer local
+                        capture so quiet speech does not depend on network
+                        latency, and turn live preview off when you want less
+                        visual churn.
+                      </p>
+                      <div className="mt-3 flex flex-wrap gap-2 text-sm text-muted-foreground">
+                        {[
+                          "late-night writing",
+                          "shared spaces",
+                          "focus sessions",
+                          "private drafting",
+                        ].map((label) => (
+                          <span
+                            key={label}
+                            className="rounded-full border px-2 py-1"
+                          >
+                            {label}
+                          </span>
+                        ))}
+                      </div>
+                    </div>
+                    <div className="flex flex-wrap gap-2">
+                      <Button
+                        size="sm"
+                        variant="outline"
+                        onClick={() => {
+                          const style = RECOMMENDED_APP_STYLES.find(
+                            (candidate) =>
+                              candidate.id === QUIET_PROFILE_STYLE_ID,
+                          );
+                          if (style) {
+                            void handleInstallRecommendedStyle(style);
+                          }
+                        }}
+                      >
+                        Use Quiet profile
+                      </Button>
+                      <Button
+                        size="sm"
+                        variant="outline"
+                        onClick={() => {
+                          setDictationRoutePreference("local");
+                          setDictationKeepWarm("long");
+                          setDictationSilenceTimeoutSeconds(1.8);
+                          const nextModePreset = syncModePreset({});
+                          void persistDictationPreferences({
+                            routePreference: "local",
+                            keepWarm: "long",
+                            silenceTimeoutSeconds: 1.8,
+                            modePreset: nextModePreset,
+                          });
+                        }}
+                      >
+                        Apply whisper-friendly defaults
+                      </Button>
+                    </div>
                   </div>
                 </div>
+              </TabsContent>
 
-                <div className="space-y-2">
-                  <label className="text-sm font-medium">Live preview</label>
-                  <select
-                    className="w-full p-2 border rounded-md bg-background"
-                    value={dictationLivePreviewEnabled ? "on" : "off"}
-                    onChange={(event) => {
-                      const next = event.target.value === "on";
-                      setDictationLivePreviewEnabled(next);
-                      void persistDictationPreferences({
-                        livePreviewEnabled: next,
-                      });
-                    }}
-                  >
-                    <option value="on">Show live partials</option>
-                    <option value="off">Hide live partials</option>
-                  </select>
-                  <p className="text-xs text-muted-foreground">
-                    Controls whether popup and inline flows show partial
-                    dictation text while you speak.
+              <TabsContent value="capture" className="mt-4 space-y-4">
+                <div>
+                  <h3 className="section-heading">Capture and insert</h3>
+                  <p className="text-sm text-muted-foreground">
+                    Profiles handle the recommended defaults. These controls are
+                    here when you want to tune the details.
                   </p>
                 </div>
 
-                <div className="space-y-2">
-                  <label className="text-sm font-medium">
-                    Command mode prefix
-                  </label>
-                  <div className="rounded-md border bg-muted/20 px-3 py-3 space-y-2">
-                    <p className="text-sm font-medium">
-                      {dictationCommandPrefix}
-                    </p>
-                    <p className="text-xs text-muted-foreground">
-                      Use this before voice editing commands when command mode
-                      is enabled. Great for rewrite, bulletize, summarize, and
-                      coding cleanup flows.
+                <div className="flex flex-wrap items-center justify-between gap-3 rounded-md border bg-muted/20 p-3">
+                  <div className="min-w-0">
+                    <p className="text-sm font-medium">Hotkey behavior</p>
+                    <p className="mt-1 text-sm text-muted-foreground">
+                      Currently {hotkeyModeLabel}. Hold-to-talk, toggle, and
+                      hands-free all live in Settings so the shortcut and its
+                      behavior stay in one place.
                     </p>
                   </div>
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    onClick={() => requestMainView("settings")}
+                  >
+                    <Keyboard className="mr-2 h-4 w-4" />
+                    Change in Settings
+                  </Button>
                 </div>
 
-                <div className="space-y-2">
-                  <label className="text-sm font-medium">
-                    Silence auto-stop
-                  </label>
-                  <div className="flex items-center gap-2">
-                    <input
-                      type="number"
-                      min={0}
-                      max={30}
-                      step={0.1}
-                      className="w-28 p-2 border rounded-md bg-background"
-                      value={
-                        dictationSilenceTimeoutSeconds <= 0
-                          ? 0
-                          : dictationSilenceTimeoutSeconds
-                      }
+                <div className="grid grid-cols-1 gap-4 md:grid-cols-2">
+                  <div className="space-y-2">
+                    <label
+                      className="text-sm font-medium"
+                      htmlFor="dictation-style"
+                    >
+                      Dictation style
+                    </label>
+                    <select
+                      id="dictation-style"
+                      className="w-full rounded-md border bg-background p-2 text-sm"
+                      value={dictationProfile}
                       onChange={(event) => {
-                        const rawValue = Number.parseFloat(event.target.value);
-                        const next = Number.isFinite(rawValue) ? rawValue : 0;
-                        setDictationSilenceTimeoutSeconds(next <= 0 ? 0 : next);
-                      }}
-                      onBlur={(event) => {
-                        const rawValue = Number.parseFloat(event.target.value);
-                        const next = normalizeDictationSilenceTimeoutSeconds(
-                          Number.isFinite(rawValue) ? rawValue : 0,
-                        );
-                        setDictationSilenceTimeoutSeconds(next);
+                        const profile = event.target.value as
+                          | "normal_speed"
+                          | "power_rewrite";
+                        setDictationProfile(profile);
+                        const nextModePreset = syncModePreset({ profile });
                         void persistDictationPreferences({
-                          silenceTimeoutSeconds: next,
+                          profile,
+                          modePreset: nextModePreset,
                         });
                       }}
-                    />
-                    <span className="text-sm text-muted-foreground">
-                      seconds
-                    </span>
+                    >
+                      <option value="normal_speed">Normal Speed</option>
+                      <option value="power_rewrite">Power Rewrite</option>
+                    </select>
+                    <p className="text-sm text-muted-foreground">
+                      Uses the transcription method you chose in Settings.
+                    </p>
                   </div>
-                  <p className="text-xs text-muted-foreground">
-                    `0` disables silence auto-stop. Hands-free falls back to 1.8
-                    seconds if this is off.
-                  </p>
+
+                  <div className="space-y-2">
+                    <label
+                      className="text-sm font-medium"
+                      htmlFor="dictation-project"
+                    >
+                      Default Project
+                    </label>
+                    <select
+                      id="dictation-project"
+                      className="w-full rounded-md border bg-background p-2 text-sm"
+                      value={defaultProjectId}
+                      onChange={(event) => {
+                        const nextProjectId = event.target.value;
+                        setDefaultProjectId(nextProjectId);
+                        void persistDictationPreferences({
+                          projectId: nextProjectId,
+                        });
+                      }}
+                    >
+                      <option value="inbox">Inbox</option>
+                      {projects.map((project) => (
+                        <option key={project.id} value={project.id}>
+                          {project.name}
+                        </option>
+                      ))}
+                    </select>
+                  </div>
+
+                  <div className="space-y-2">
+                    <label
+                      className="text-sm font-medium"
+                      htmlFor="dictation-session-language"
+                    >
+                      Session language
+                    </label>
+                    <select
+                      id="dictation-session-language"
+                      aria-label="Session language"
+                      className="w-full rounded-md border bg-background p-2 text-sm"
+                      value={dictationSessionLanguage}
+                      onChange={(event) => {
+                        const next = event.target.value;
+                        setDictationSessionLanguage(next);
+                        void persistDictationPreferences({
+                          sessionLanguage: next === "auto" ? null : next,
+                        });
+                      }}
+                    >
+                      {DICTATION_SESSION_LANGUAGE_OPTIONS.map((option) => (
+                        <option key={option.value} value={option.value}>
+                          {option.label}
+                        </option>
+                      ))}
+                    </select>
+                    <p className="text-sm text-muted-foreground">
+                      Fixed session languages always win. When this stays on
+                      auto, the active set narrows what you expect in the
+                      session and locks capture if you keep only one language
+                      enabled.
+                    </p>
+                    <div className="rounded-md border bg-muted/20 px-3 py-3">
+                      <p className="text-sm font-medium text-foreground">
+                        Active language set
+                      </p>
+                      <p className="mt-1 text-sm text-muted-foreground">
+                        Used only while Session language stays on auto detect.
+                      </p>
+                      <div className="mt-3 flex flex-wrap gap-2">
+                        {DICTATION_ACTIVE_LANGUAGE_OPTIONS.map((option) => {
+                          const selected = dictationActiveLanguages.includes(
+                            option.value,
+                          );
+                          return (
+                            <button
+                              key={option.value}
+                              type="button"
+                              aria-pressed={selected}
+                              aria-label={`Toggle ${option.label} active language`}
+                              className={cn(
+                                "rounded-full border px-3 py-1 text-sm transition-colors",
+                                selected
+                                  ? "border-foreground bg-foreground text-background"
+                                  : "border-border bg-background text-muted-foreground hover:text-foreground",
+                              )}
+                              onClick={() => {
+                                const nextActiveLanguages = selected
+                                  ? dictationActiveLanguages.filter(
+                                      (language) => language !== option.value,
+                                    )
+                                  : [
+                                      ...dictationActiveLanguages,
+                                      option.value,
+                                    ];
+                                const normalized = normalizeActiveLanguageSet(
+                                  nextActiveLanguages,
+                                );
+                                setDictationActiveLanguages(normalized);
+                                void persistDictationPreferences({
+                                  activeLanguages: normalized,
+                                });
+                              }}
+                            >
+                              {option.label}
+                            </button>
+                          );
+                        })}
+                      </div>
+                      <p className="mt-3 text-sm text-muted-foreground">
+                        {dictationActiveLanguages.length === 0
+                          ? "No active-set filter yet. Auto detect stays fully open."
+                          : dictationActiveLanguages.length === 1
+                            ? `Auto detect will lock to ${DICTATION_ACTIVE_LANGUAGE_OPTIONS.find((option) => option.value === dictationActiveLanguages[0])?.label ?? dictationActiveLanguages[0]} until you add another language or set a fixed session language.`
+                            : `Auto detect stays on for this set: ${dictationActiveLanguages
+                                .map(
+                                  (language) =>
+                                    DICTATION_ACTIVE_LANGUAGE_OPTIONS.find(
+                                      (option) => option.value === language,
+                                    )?.label ?? language,
+                                )
+                                .join(", ")}.`}
+                      </p>
+                    </div>
+                  </div>
+
+                  <div className="space-y-2">
+                    <label
+                      className="text-sm font-medium"
+                      htmlFor="dictation-live-preview"
+                    >
+                      Live preview
+                    </label>
+                    <select
+                      id="dictation-live-preview"
+                      className="w-full rounded-md border bg-background p-2 text-sm"
+                      value={dictationLivePreviewEnabled ? "on" : "off"}
+                      onChange={(event) => {
+                        const next = event.target.value === "on";
+                        setDictationLivePreviewEnabled(next);
+                        void persistDictationPreferences({
+                          livePreviewEnabled: next,
+                        });
+                      }}
+                    >
+                      <option value="on">Show live partials</option>
+                      <option value="off">Hide live partials</option>
+                    </select>
+                    <p className="text-sm text-muted-foreground">
+                      Controls whether popup and inline flows show partial
+                      dictation text while you speak.
+                    </p>
+                  </div>
+
+                  <div className="space-y-2">
+                    <label
+                      className="text-sm font-medium"
+                      htmlFor="dictation-silence-timeout"
+                    >
+                      Silence auto-stop
+                    </label>
+                    <div className="flex items-center gap-2">
+                      <input
+                        id="dictation-silence-timeout"
+                        type="number"
+                        min={0}
+                        max={30}
+                        step={0.1}
+                        className="w-28 rounded-md border bg-background p-2 text-sm"
+                        value={
+                          dictationSilenceTimeoutSeconds <= 0
+                            ? 0
+                            : dictationSilenceTimeoutSeconds
+                        }
+                        onChange={(event) => {
+                          const rawValue = Number.parseFloat(
+                            event.target.value,
+                          );
+                          const next = Number.isFinite(rawValue) ? rawValue : 0;
+                          setDictationSilenceTimeoutSeconds(
+                            next <= 0 ? 0 : next,
+                          );
+                        }}
+                        onBlur={(event) => {
+                          const rawValue = Number.parseFloat(
+                            event.target.value,
+                          );
+                          const next = normalizeDictationSilenceTimeoutSeconds(
+                            Number.isFinite(rawValue) ? rawValue : 0,
+                          );
+                          setDictationSilenceTimeoutSeconds(next);
+                          void persistDictationPreferences({
+                            silenceTimeoutSeconds: next,
+                          });
+                        }}
+                      />
+                      <span className="text-sm text-muted-foreground">
+                        seconds
+                      </span>
+                    </div>
+                    <p className="text-sm text-muted-foreground">
+                      <span className="font-mono">0</span> disables silence
+                      auto-stop. Hands-free falls back to 1.8 seconds if this is
+                      off.
+                    </p>
+                  </div>
+
+                  <div className="space-y-2">
+                    <label
+                      className="text-sm font-medium"
+                      htmlFor="dictation-keep-warm"
+                    >
+                      Keep warm
+                    </label>
+                    <select
+                      id="dictation-keep-warm"
+                      className="w-full rounded-md border bg-background p-2 text-sm"
+                      value={dictationKeepWarm}
+                      onChange={(event) => {
+                        const next = event.target.value as
+                          | "off"
+                          | "short"
+                          | "long";
+                        setDictationKeepWarm(next);
+                        void persistDictationPreferences({ keepWarm: next });
+                      }}
+                    >
+                      <option value="off">Off</option>
+                      <option value="short">Short</option>
+                      <option value="long">Long</option>
+                    </select>
+                    <p className="text-sm text-muted-foreground">
+                      Keeps the active dictation route warmer between captures
+                      to reduce startup latency.
+                    </p>
+                  </div>
+
+                  <div className="space-y-2">
+                    <label
+                      className="text-sm font-medium"
+                      htmlFor="dictation-context-source"
+                    >
+                      Text context
+                    </label>
+                    <select
+                      id="dictation-context-source"
+                      className="w-full rounded-md border bg-background p-2 text-sm"
+                      value={dictationContextSource}
+                      onChange={(event) => {
+                        const contextSource = event.target
+                          .value as DictationContextSource;
+                        setDictationContextSource(contextSource);
+                        const nextModePreset = syncModePreset({
+                          contextSource,
+                        });
+                        void persistDictationPreferences({
+                          contextSource,
+                          modePreset: nextModePreset,
+                        });
+                      }}
+                    >
+                      <option value="none">Off</option>
+                      <option value="application_context">
+                        Use application context
+                      </option>
+                      <option value="selected_text">Use selected text</option>
+                      <option value="clipboard">Use clipboard</option>
+                    </select>
+                    <p className="text-sm text-muted-foreground">
+                      {getDictationTextContextDescription(
+                        dictationCommandPrefix,
+                      )}
+                    </p>
+                  </div>
+
+                  <div className="space-y-2">
+                    <label
+                      className="text-sm font-medium"
+                      htmlFor="dictation-insertion-mode"
+                    >
+                      Insertion mode
+                    </label>
+                    <select
+                      id="dictation-insertion-mode"
+                      className="w-full rounded-md border bg-background p-2 text-sm"
+                      value={dictationInsertionMode}
+                      onChange={(event) => {
+                        const mode = event.target
+                          .value as DictationInsertionMode;
+                        setDictationInsertionMode(mode);
+                        const nextModePreset = syncModePreset({
+                          insertionMode: mode,
+                        });
+                        void persistDictationPreferences({
+                          insertionMode: mode,
+                          modePreset: nextModePreset,
+                        });
+                      }}
+                    >
+                      <option value="auto">Recommended</option>
+                      <option value="paste">Paste at cursor</option>
+                      <option value="inline">Insert on release</option>
+                      <option value="clipboard_only">Clipboard only</option>
+                    </select>
+                    <p className="text-sm text-muted-foreground">
+                      Recommended tries the best available insertion path.
+                      Insert on release keeps the flow simple and consistent.
+                    </p>
+                  </div>
+
+                  <div className="space-y-2">
+                    <label
+                      className="text-sm font-medium"
+                      htmlFor="dictation-retention"
+                    >
+                      Auto-delete dictation recordings
+                    </label>
+                    <select
+                      id="dictation-retention"
+                      className="w-full rounded-md border bg-background p-2 text-sm"
+                      value={dictationRetentionPreset}
+                      onChange={(event) => {
+                        const preset = event.target.value as
+                          | "immediate"
+                          | "24h"
+                          | "72h"
+                          | "never"
+                          | "custom";
+                        setDictationRetentionPreset(preset);
+                        void persistDictationPreferences({
+                          retentionPreset: preset,
+                        });
+                      }}
+                    >
+                      <option value="immediate">Immediately</option>
+                      <option value="24h">After 24 hours</option>
+                      <option value="72h">After 72 hours</option>
+                      <option value="never">Never</option>
+                      <option value="custom">Custom</option>
+                    </select>
+                    {dictationRetentionPreset === "custom" && (
+                      <div className="space-y-2">
+                        <label
+                          className="text-sm text-muted-foreground"
+                          htmlFor="dictation-retention-hours"
+                        >
+                          Custom hours
+                        </label>
+                        <input
+                          id="dictation-retention-hours"
+                          type="number"
+                          min={1}
+                          className="w-full rounded-md border bg-background p-2 text-sm"
+                          value={dictationRetentionCustomHours}
+                          onChange={(event) => {
+                            const nextHours = Math.max(
+                              1,
+                              Number(event.target.value) || 1,
+                            );
+                            setDictationRetentionCustomHours(nextHours);
+                            void persistDictationPreferences({
+                              retentionCustomHours: nextHours,
+                            });
+                          }}
+                        />
+                      </div>
+                    )}
+                  </div>
                 </div>
 
-                <div className="space-y-2">
-                  <label className="text-sm font-medium">Keep warm</label>
-                  <select
-                    className="w-full p-2 border rounded-md bg-background"
-                    value={dictationKeepWarm}
-                    onChange={(event) => {
-                      const next = event.target.value as
-                        | "off"
-                        | "short"
-                        | "long";
-                      setDictationKeepWarm(next);
-                      void persistDictationPreferences({ keepWarm: next });
-                    }}
-                  >
-                    <option value="off">Off</option>
-                    <option value="short">Short</option>
-                    <option value="long">Long</option>
-                  </select>
-                  <p className="text-xs text-muted-foreground">
-                    Keeps the active dictation route warmer between captures to
-                    reduce startup latency.
-                  </p>
-                </div>
-
-                <div className="rounded-md border bg-muted/30 px-3 py-3 text-xs text-muted-foreground">
+                <div className="rounded-md border bg-muted/30 px-3 py-3 text-sm text-muted-foreground">
                   <p className="font-medium text-foreground">
-                    Hands-free guide
+                    Active capture language
                   </p>
-                  <p className="mt-2">
-                    First press starts capture. A second press stops
-                    immediately. If silence auto-stop is set to{" "}
-                    <span className="font-mono">0</span>, hands-free still uses
-                    a 1.8 second fallback so sessions do not hang open.
-                  </p>
-                  <p className="mt-2">
-                    Active capture language:{" "}
+                  <p className="mt-1">
                     <span className="font-mono">
                       {effectiveCaptureLanguage ?? "auto"}
                     </span>
@@ -5528,255 +4829,19 @@ export function DictationView() {
                           : " from provider auto-detect."}
                   </p>
                 </div>
+              </TabsContent>
 
-                <div className="space-y-2">
-                  <label className="text-sm font-medium">Text context</label>
-                  <select
-                    className="w-full p-2 border rounded-md bg-background"
-                    value={dictationContextSource}
-                    onChange={(event) => {
-                      const contextSource = event.target
-                        .value as DictationContextSource;
-                      setDictationContextSource(contextSource);
-                      const nextModePreset = syncModePreset({ contextSource });
-                      void persistDictationPreferences({
-                        contextSource,
-                        modePreset: nextModePreset,
-                      });
-                    }}
-                  >
-                    <option value="none">Off</option>
-                    <option value="application_context">
-                      Use application context
-                    </option>
-                    <option value="selected_text">Use selected text</option>
-                    <option value="clipboard">Use clipboard</option>
-                  </select>
-                  <p className="text-xs text-muted-foreground">
-                    Lets voice commands transform existing text. Try
-                    &quot;command rewrite professional&quot; , &quot;command
-                    bulletize selection&quot;, &quot;command replace roadmap
-                    with launch plan&quot;, or editing commands like
-                    &quot;command replace selection with approved plan&quot;,
-                    &quot;command append today&quot;, &quot;command delete
-                    phrase roadmap&quot;, and case changes like &quot;command
-                    uppercase selection&quot; or &quot;command title case
-                    selection&quot;. Correction commands like &quot;command undo
-                    that&quot; work without text context. Application context
-                    captures the frontmost app, window title, and selected text
-                    when available.
-                  </p>
-                </div>
-
-                <div className="space-y-2">
-                  <label className="text-sm font-medium">
-                    Auto-delete dictation recordings
-                  </label>
-                  <select
-                    className="w-full p-2 border rounded-md bg-background"
-                    value={dictationRetentionPreset}
-                    onChange={(event) => {
-                      const preset = event.target.value as
-                        | "immediate"
-                        | "24h"
-                        | "72h"
-                        | "never"
-                        | "custom";
-                      setDictationRetentionPreset(preset);
-                      void persistDictationPreferences({
-                        retentionPreset: preset,
-                      });
-                    }}
-                  >
-                    <option value="immediate">Immediately</option>
-                    <option value="24h">After 24 hours</option>
-                    <option value="72h">After 72 hours</option>
-                    <option value="never">Never</option>
-                    <option value="custom">Custom</option>
-                  </select>
-                  {dictationRetentionPreset === "custom" && (
-                    <div className="space-y-2">
-                      <label className="text-xs text-muted-foreground">
-                        Custom hours
-                      </label>
-                      <input
-                        type="number"
-                        min={1}
-                        className="w-full p-2 border rounded-md bg-background"
-                        value={dictationRetentionCustomHours}
-                        onChange={(event) => {
-                          const nextHours = Math.max(
-                            1,
-                            Number(event.target.value) || 1,
-                          );
-                          setDictationRetentionCustomHours(nextHours);
-                          void persistDictationPreferences({
-                            retentionCustomHours: nextHours,
-                          });
-                        }}
-                      />
-                    </div>
-                  )}
-                </div>
-
-                <div className="space-y-2">
-                  <label className="text-sm font-medium">Insertion mode</label>
-                  <select
-                    className="w-full p-2 border rounded-md bg-background"
-                    value={dictationInsertionMode}
-                    onChange={(event) => {
-                      const mode = event.target.value as
-                        | "auto"
-                        | "paste"
-                        | "inline"
-                        | "clipboard_only";
-                      setDictationInsertionMode(mode);
-                      const nextModePreset = syncModePreset({
-                        insertionMode: mode,
-                      });
-                      void persistDictationPreferences({
-                        insertionMode: mode,
-                        modePreset: nextModePreset,
-                      });
-                    }}
-                  >
-                    <option value="auto">Recommended</option>
-                    <option value="paste">Paste at cursor</option>
-                    <option value="inline">Insert on release</option>
-                    <option value="clipboard_only">Clipboard only</option>
-                  </select>
-                  <p className="text-xs text-muted-foreground">
-                    Recommended tries the best available insertion path. Insert
-                    on release keeps the flow simple and consistent.
-                  </p>
-                </div>
-
-                <div className="space-y-2">
-                  <label className="text-sm font-medium">
-                    Command mode prefix
-                  </label>
-                  <input
-                    type="text"
-                    className="w-full p-2 border rounded-md bg-background"
-                    value={dictationCommandPrefix}
-                    onChange={(event) =>
-                      setDictationCommandPrefix(event.target.value)
-                    }
-                    onBlur={() => {
-                      const nextPrefix =
-                        dictationCommandPrefix.trim() || "command";
-                      setDictationCommandPrefix(nextPrefix);
-                      void persistDictationPreferences({
-                        commandPrefix: nextPrefix,
-                      });
-                    }}
-                  />
-                  <label className="inline-flex items-center gap-2 text-xs text-muted-foreground">
-                    <input
-                      type="checkbox"
-                      checked={dictationCommandModeEnabled}
-                      onChange={(event) => {
-                        const next = event.target.checked;
-                        setDictationCommandModeEnabled(next);
-                        const nextModePreset = syncModePreset({
-                          commandModeEnabled: next,
-                        });
-                        void persistDictationPreferences({
-                          commandModeEnabled: next,
-                          modePreset: nextModePreset,
-                        });
-                      }}
-                    />
-                    Enable command mode
-                  </label>
-                </div>
-              </div>
-
-              <div className="mt-5 border-t pt-4 space-y-3">
-                <div>
-                  <p className="text-sm font-medium">Text actions</p>
-                  <p className="text-xs text-muted-foreground">
-                    Customize rewrite and bullet actions that run after
-                    dictation.
-                  </p>
-                </div>
-                <div className="space-y-3">
-                  {COMMAND_PRESET_FIELDS.map((field) => {
-                    const preset = getCommandPreset(field.key);
-                    const promptValue =
-                      preset?.systemPrompt ?? field.defaultPrompt;
-                    const enabledValue = preset?.enabled ?? true;
-                    return (
-                      <div
-                        key={field.key}
-                        className="rounded-md border p-3 space-y-2"
-                      >
-                        <div className="flex items-center justify-between">
-                          <label className="text-sm font-medium">
-                            {field.label}
-                          </label>
-                          <div className="flex items-center gap-2">
-                            <label className="inline-flex items-center gap-2 text-xs text-muted-foreground">
-                              <input
-                                type="checkbox"
-                                checked={enabledValue}
-                                onChange={(event) => {
-                                  const next = event.target.checked;
-                                  setCommandPresetDraft(field.key, {
-                                    enabled: next,
-                                  });
-                                  void upsertCommandPreset(
-                                    field.key,
-                                    promptValue,
-                                    next,
-                                  );
-                                }}
-                              />
-                              Enabled
-                            </label>
-                            <Button
-                              variant="ghost"
-                              size="sm"
-                              onClick={() => void resetCommandPreset(field.key)}
-                            >
-                              Reset
-                            </Button>
-                          </div>
-                        </div>
-                        <textarea
-                          className="w-full min-h-[84px] p-2 border rounded-md bg-background text-sm"
-                          value={promptValue}
-                          onChange={(event) =>
-                            setCommandPresetDraft(field.key, {
-                              systemPrompt: event.target.value,
-                            })
-                          }
-                          onBlur={(event) => {
-                            const nextPrompt =
-                              event.target.value.trim() || field.defaultPrompt;
-                            setCommandPresetDraft(field.key, {
-                              systemPrompt: nextPrompt,
-                            });
-                            void upsertCommandPreset(
-                              field.key,
-                              nextPrompt,
-                              enabledValue,
-                            );
-                          }}
-                        />
-                      </div>
-                    );
-                  })}
-                </div>
-              </div>
-
-              <div className="mt-5 border-t pt-4 space-y-3">
-                <div className="flex items-center justify-between">
-                  <div>
-                    <p className="text-sm font-medium">Dictionary</p>
-                    <p className="text-xs text-muted-foreground">
+              <TabsContent
+                value="dictionary"
+                className="mt-4 space-y-4"
+                data-testid="dictionary-section"
+              >
+                <div className="flex flex-wrap items-start justify-between gap-3">
+                  <div className="min-w-0">
+                    <h3 className="section-heading">Dictionary</h3>
+                    <p className="text-sm text-muted-foreground">
                       Normalize names, brands, and phrases before snippets are
-                      applied.
+                      applied. {dictionaryCoverageSummary}
                     </p>
                   </div>
                   <div className="flex flex-wrap items-center gap-2">
@@ -5799,26 +4864,18 @@ export function DictationView() {
                       <Download className="mr-2 h-4 w-4" />
                       Export CSV
                     </Button>
-                    <label className="inline-flex items-center gap-2 text-xs text-muted-foreground">
-                      <input
-                        type="checkbox"
-                        checked={dictationAutoLearnCorrections}
-                        onChange={(event) => {
-                          const next = event.target.checked;
-                          setDictationAutoLearnCorrections(next);
-                          void persistDictationPreferences({
-                            autoLearnCorrections: next,
-                          });
-                        }}
-                      />
-                      Auto-learn corrections
-                    </label>
                   </div>
                 </div>
 
+                <p className="text-sm text-muted-foreground">
+                  Use global entries for names and jargon you want everywhere.
+                  Use app scope when a replacement should only happen in a
+                  specific app.
+                </p>
+
                 {recentlyLearnedDictionaryEntries.length > 0 && (
                   <div
-                    className="rounded-md border bg-muted/20 p-3 space-y-2"
+                    className="space-y-2 rounded-md border bg-muted/20 p-3"
                     data-testid="recently-learned-dictionary"
                   >
                     <p className="text-sm font-medium">Recently learned</p>
@@ -5826,7 +4883,7 @@ export function DictationView() {
                       {recentlyLearnedDictionaryEntries.map((entry) => (
                         <li
                           key={entry.id}
-                          className="flex items-center justify-between gap-3 text-xs"
+                          className="flex items-center justify-between gap-3 text-sm"
                         >
                           <span className="truncate">
                             <span className="font-mono text-muted-foreground">
@@ -5848,10 +4905,10 @@ export function DictationView() {
                   </div>
                 )}
 
-                <div className="grid grid-cols-1 md:grid-cols-[1fr_2fr_1fr_auto] gap-2">
+                <div className="grid grid-cols-1 gap-2 md:grid-cols-[1fr_2fr_1fr_auto]">
                   <input
                     type="text"
-                    className="w-full p-2 border rounded-md bg-background"
+                    className="w-full rounded-md border bg-background p-2 text-sm"
                     placeholder="Say (e.g. open ai)"
                     value={newDictionarySpokenForm}
                     onChange={(event) =>
@@ -5860,7 +4917,7 @@ export function DictationView() {
                   />
                   <input
                     type="text"
-                    className="w-full p-2 border rounded-md bg-background"
+                    className="w-full rounded-md border bg-background p-2 text-sm"
                     placeholder="Insert (e.g. OpenAI)"
                     value={newDictionaryReplacement}
                     onChange={(event) =>
@@ -5869,7 +4926,7 @@ export function DictationView() {
                   />
                   <input
                     type="text"
-                    className="w-full p-2 border rounded-md bg-background"
+                    className="w-full rounded-md border bg-background p-2 text-sm"
                     placeholder="App scope (optional)"
                     value={newDictionaryAppScope}
                     onChange={(event) =>
@@ -5907,7 +4964,7 @@ export function DictationView() {
                     </SelectContent>
                   </Select>
                 </div>
-                <label className="inline-flex items-center gap-2 text-xs text-muted-foreground">
+                <label className="inline-flex items-center gap-2 text-sm text-muted-foreground">
                   <input
                     type="checkbox"
                     checked={newDictionaryCaseSensitive}
@@ -6003,7 +5060,7 @@ export function DictationView() {
                               })
                             }
                           >
-                            <SelectTrigger className="text-xs">
+                            <SelectTrigger>
                               <SelectValue />
                             </SelectTrigger>
                             <SelectContent>
@@ -6024,7 +5081,7 @@ export function DictationView() {
                           </Select>
                         </div>
                         <div className="flex items-center justify-between">
-                          <div className="flex items-center gap-4 text-xs text-muted-foreground">
+                          <div className="flex items-center gap-4 text-sm text-muted-foreground">
                             <label className="inline-flex items-center gap-2">
                               <input
                                 type="checkbox"
@@ -6065,189 +5122,25 @@ export function DictationView() {
                   </div>
                 )}
                 {dictionaryCsvStatus && (
-                  <p className="text-xs text-muted-foreground">
+                  <p className="text-sm text-muted-foreground">
                     {dictionaryCsvStatus}
                   </p>
                 )}
-                <div className="rounded-md border bg-background/60 p-3 space-y-2">
-                  <div className="flex items-center gap-2">
-                    <BookOpen className="h-4 w-4 text-muted-foreground" />
-                    <p className="text-sm font-medium">
-                      Teach Plainsong your words
-                    </p>
-                  </div>
-                  <p className="text-xs text-muted-foreground">
-                    {dictionaryCoverageSummary}
-                  </p>
-                  <p className="text-xs text-muted-foreground">
-                    Use global entries for names and jargon you want everywhere.
-                    Use app scope when a replacement should only happen in a
-                    specific app.
-                  </p>
-                </div>
-                <div className="rounded-md border bg-muted/20 p-3 space-y-3">
-                  <div className="flex items-center justify-between gap-3">
-                    <div>
-                      <p className="text-sm font-medium">Correction Inbox</p>
-                      <p className="text-xs text-muted-foreground">
-                        Auto-learned corrections stay here until you approve
-                        them.
-                      </p>
-                    </div>
-                    <div className="flex items-center gap-3">
-                      <span className="text-xs text-muted-foreground">
-                        {dictationCorrectionSuggestions.length} pending
-                      </span>
-                      {groupedCorrectionSuggestions.length > 1 && (
-                        <>
-                          <Button
-                            type="button"
-                            size="sm"
-                            variant="outline"
-                            disabled={correctionInboxBusy}
-                            onClick={() =>
-                              void handleApproveCorrectionSuggestionGroup(
-                                groupedCorrectionSuggestions.flatMap(
-                                  (group) => group.suggestionIds,
-                                ),
-                              )
-                            }
-                          >
-                            Approve all
-                          </Button>
-                          <Button
-                            type="button"
-                            size="sm"
-                            variant="outline"
-                            disabled={correctionInboxBusy}
-                            onClick={() =>
-                              void handleRejectCorrectionSuggestionGroup(
-                                groupedCorrectionSuggestions.flatMap(
-                                  (group) => group.suggestionIds,
-                                ),
-                              )
-                            }
-                          >
-                            Dismiss all
-                          </Button>
-                        </>
-                      )}
-                    </div>
-                  </div>
-                  {groupedCorrectionSuggestions.length > 0 ? (
-                    <div className="space-y-2">
-                      {groupedCorrectionSuggestions.map((group) => (
-                        <div
-                          key={group.key}
-                          className="rounded-md border bg-background px-3 py-2"
-                        >
-                          <div className="flex flex-wrap items-start justify-between gap-3">
-                            <div className="space-y-1">
-                              <p className="text-sm font-medium">
-                                {group.spokenForm} {"->"} {group.replacement}
-                              </p>
-                              <p className="text-xs text-muted-foreground">
-                                {group.appTarget
-                                  ? `Source app: ${group.appTarget}`
-                                  : "Global suggestion"}
-                                {" · "}
-                                {new Date(group.updatedAt).toLocaleString()}
-                                {group.suggestionIds.length > 1
-                                  ? ` · ${group.suggestionIds.length} similar edits`
-                                  : ""}
-                              </p>
-                            </div>
-                            <div className="flex gap-2">
-                              <Button
-                                type="button"
-                                size="sm"
-                                disabled={correctionInboxBusy}
-                                onClick={() =>
-                                  void handleApproveCorrectionSuggestionGroup(
-                                    group.suggestionIds,
-                                  )
-                                }
-                              >
-                                {group.suggestionIds.length > 1
-                                  ? "Approve all"
-                                  : "Approve"}
-                              </Button>
-                              <Button
-                                type="button"
-                                size="sm"
-                                variant="outline"
-                                disabled={correctionInboxBusy}
-                                onClick={() =>
-                                  void handleRejectCorrectionSuggestionGroup(
-                                    group.suggestionIds,
-                                  )
-                                }
-                              >
-                                {group.suggestionIds.length > 1
-                                  ? "Dismiss all"
-                                  : "Dismiss"}
-                              </Button>
-                            </div>
-                          </div>
-                          <div className="mt-2 grid gap-2 md:grid-cols-2">
-                            <div className="rounded-md bg-muted/40 px-2 py-2">
-                              <p className="text-[11px] uppercase tracking-wide text-muted-foreground">
-                                Heard
-                              </p>
-                              <p className="mt-1 text-sm">
-                                {group.sampleOriginalText}
-                              </p>
-                            </div>
-                            <div className="rounded-md bg-muted/40 px-2 py-2">
-                              <p className="text-[11px] uppercase tracking-wide text-muted-foreground">
-                                Corrected
-                              </p>
-                              <p className="mt-1 text-sm">
-                                {group.sampleCorrectedText}
-                              </p>
-                            </div>
-                          </div>
-                        </div>
-                      ))}
-                    </div>
-                  ) : (
-                    <p className="text-xs text-muted-foreground">
-                      No pending corrections. Auto-learned edits will appear
-                      here for review.
-                    </p>
-                  )}
-                </div>
-                <div className="rounded-md border bg-muted/20 p-3 space-y-2">
-                  <p className="text-sm font-medium">Backtrack shortcuts</p>
-                  <p className="text-xs text-muted-foreground">
-                    Use quick correction phrases right after an insert:{" "}
-                    <code>scratch that</code>, <code>actually ...</code>,{" "}
-                    <code>no, say ...</code>, <code>replace X with Y</code>, or{" "}
-                    <code>change X to Y</code>.
-                  </p>
-                  <div className="flex flex-wrap gap-2 text-[11px] text-muted-foreground">
-                    <span className="rounded-full border bg-background px-2 py-1">
-                      Undo last insert
-                    </span>
-                    <span className="rounded-full border bg-background px-2 py-1">
-                      Replace most recent phrase
-                    </span>
-                    <span className="rounded-full border bg-background px-2 py-1">
-                      Keep flow without touching the keyboard
-                    </span>
-                  </div>
-                </div>
-              </div>
+              </TabsContent>
 
-              <div className="mt-5 border-t pt-4 space-y-3">
-                <div className="flex items-center justify-between">
-                  <div>
-                    <p className="text-sm font-medium">Phrase expansions</p>
-                    <p className="text-xs text-muted-foreground">
+              <TabsContent
+                value="snippets"
+                className="mt-4 space-y-4"
+                data-testid="snippet-section"
+              >
+                <div className="flex flex-wrap items-start justify-between gap-3">
+                  <div className="min-w-0">
+                    <h3 className="section-heading">Phrase expansions</h3>
+                    <p className="text-sm text-muted-foreground">
                       Expand short trigger phrases before text is inserted.
                     </p>
                   </div>
-                  <label className="inline-flex items-center gap-2 text-xs text-muted-foreground">
+                  <label className="inline-flex items-center gap-2 text-sm text-muted-foreground">
                     <input
                       type="checkbox"
                       checked={dictationSnippetsEnabled}
@@ -6263,10 +5156,10 @@ export function DictationView() {
                   </label>
                 </div>
 
-                <div className="grid grid-cols-1 md:grid-cols-[1fr_2fr_1fr_auto] gap-2">
+                <div className="grid grid-cols-1 gap-2 md:grid-cols-[1fr_2fr_1fr_auto]">
                   <input
                     type="text"
-                    className="w-full p-2 border rounded-md bg-background"
+                    className="w-full rounded-md border bg-background p-2 text-sm"
                     placeholder="Trigger (e.g. brb)"
                     value={newSnippetTrigger}
                     onChange={(event) =>
@@ -6275,7 +5168,7 @@ export function DictationView() {
                   />
                   <input
                     type="text"
-                    className="w-full p-2 border rounded-md bg-background"
+                    className="w-full rounded-md border bg-background p-2 text-sm"
                     placeholder="Expansion (e.g. be right back)"
                     value={newSnippetExpansion}
                     onChange={(event) =>
@@ -6284,7 +5177,7 @@ export function DictationView() {
                   />
                   <input
                     type="text"
-                    className="w-full p-2 border rounded-md bg-background"
+                    className="w-full rounded-md border bg-background p-2 text-sm"
                     placeholder="App scope (optional)"
                     value={newSnippetAppScope}
                     onChange={(event) =>
@@ -6322,7 +5215,7 @@ export function DictationView() {
                     </SelectContent>
                   </Select>
                 </div>
-                <label className="inline-flex items-center gap-2 text-xs text-muted-foreground">
+                <label className="inline-flex items-center gap-2 text-sm text-muted-foreground">
                   <input
                     type="checkbox"
                     checked={newSnippetCaseSensitive}
@@ -6418,7 +5311,7 @@ export function DictationView() {
                               })
                             }
                           >
-                            <SelectTrigger className="text-xs">
+                            <SelectTrigger>
                               <SelectValue />
                             </SelectTrigger>
                             <SelectContent>
@@ -6439,7 +5332,7 @@ export function DictationView() {
                           </Select>
                         </div>
                         <div className="flex items-center justify-between">
-                          <div className="flex items-center gap-4 text-xs text-muted-foreground">
+                          <div className="flex items-center gap-4 text-sm text-muted-foreground">
                             <label className="inline-flex items-center gap-2">
                               <input
                                 type="checkbox"
@@ -6477,111 +5370,347 @@ export function DictationView() {
                     ))}
                   </div>
                 )}
-              </div>
-            </CardContent>
-          </Card>
+              </TabsContent>
 
-          <Card>
-            <CardHeader>
-              <CardTitle className="text-sm">
-                Destination-aware formatting
-              </CardTitle>
-              <CardDescription>
-                Automatically adjust dictation tone and structure based on
-                what app you're dictating into.
-              </CardDescription>
-            </CardHeader>
-            <CardContent className="space-y-5">
-              <div className="flex items-center justify-between gap-4 rounded-2xl border border-border/60 bg-background/75 p-4">
-                <div className="space-y-0.5">
-                  <p className="text-sm font-medium">
-                    Format for destination app
-                  </p>
-                  <p className="text-xs text-muted-foreground">
-                    When on, Smart Format adapts tone and structure to the app
-                    you're dictating into. Turning this off restores the
-                    original, category-agnostic formatting.
-                  </p>
+              <TabsContent value="corrections" className="mt-4 space-y-4">
+                <div className="flex flex-wrap items-start justify-between gap-3">
+                  <div className="min-w-0">
+                    <h3 className="section-heading">Correction inbox</h3>
+                    <p className="text-sm text-muted-foreground">
+                      Auto-learned corrections stay here until you approve them.
+                    </p>
+                  </div>
+                  <div className="flex flex-wrap items-center gap-2">
+                    <label className="inline-flex items-center gap-2 text-sm text-muted-foreground">
+                      <input
+                        type="checkbox"
+                        checked={dictationAutoLearnCorrections}
+                        onChange={(event) => {
+                          const next = event.target.checked;
+                          setDictationAutoLearnCorrections(next);
+                          void persistDictationPreferences({
+                            autoLearnCorrections: next,
+                          });
+                        }}
+                      />
+                      Auto-learn corrections
+                    </label>
+                    <span className="text-sm text-muted-foreground">
+                      {dictationCorrectionSuggestions.length} pending
+                    </span>
+                    {groupedCorrectionSuggestions.length > 1 && (
+                      <>
+                        <Button
+                          type="button"
+                          size="sm"
+                          variant="outline"
+                          disabled={correctionInboxBusy}
+                          onClick={() =>
+                            void handleApproveCorrectionSuggestionGroup(
+                              groupedCorrectionSuggestions.flatMap(
+                                (group) => group.suggestionIds,
+                              ),
+                            )
+                          }
+                        >
+                          Approve all
+                        </Button>
+                        <Button
+                          type="button"
+                          size="sm"
+                          variant="outline"
+                          disabled={correctionInboxBusy}
+                          onClick={() =>
+                            void handleRejectCorrectionSuggestionGroup(
+                              groupedCorrectionSuggestions.flatMap(
+                                (group) => group.suggestionIds,
+                              ),
+                            )
+                          }
+                        >
+                          Dismiss all
+                        </Button>
+                      </>
+                    )}
+                  </div>
                 </div>
-                <Switch
-                  checked={dictationCategoryFormattingEnabled}
-                  onCheckedChange={(checked) => {
-                    setDictationCategoryFormattingEnabled(checked);
-                    void persistDictationPreferences({
-                      categoryFormattingEnabled: checked,
-                    });
-                  }}
-                />
-              </div>
 
-              <div className="rounded-md border bg-muted/20 p-3 space-y-2">
-                <p className="text-sm font-medium">Built-in categories</p>
-                <div className="grid grid-cols-1 gap-2 sm:grid-cols-2">
-                  {DICTATION_APP_CATEGORY_REFERENCE.map((entry) => (
-                    <div
-                      key={entry.key}
-                      className="rounded-md border bg-background px-3 py-2"
+                {groupedCorrectionSuggestions.length > 0 ? (
+                  <div className="space-y-2">
+                    {groupedCorrectionSuggestions.map((group) => (
+                      <div
+                        key={group.key}
+                        className="rounded-md border bg-background px-3 py-3"
+                      >
+                        <div className="flex flex-wrap items-start justify-between gap-3">
+                          <div className="space-y-1">
+                            <p className="text-sm font-medium">
+                              {group.spokenForm} {"->"} {group.replacement}
+                            </p>
+                            <p className="text-sm text-muted-foreground">
+                              {group.appTarget
+                                ? `Source app: ${group.appTarget}`
+                                : "Global suggestion"}
+                              {" · "}
+                              {new Date(group.updatedAt).toLocaleString()}
+                              {group.suggestionIds.length > 1
+                                ? ` · ${group.suggestionIds.length} similar edits`
+                                : ""}
+                            </p>
+                          </div>
+                          <div className="flex gap-2">
+                            <Button
+                              type="button"
+                              size="sm"
+                              disabled={correctionInboxBusy}
+                              onClick={() =>
+                                void handleApproveCorrectionSuggestionGroup(
+                                  group.suggestionIds,
+                                )
+                              }
+                            >
+                              {group.suggestionIds.length > 1
+                                ? "Approve all"
+                                : "Approve"}
+                            </Button>
+                            <Button
+                              type="button"
+                              size="sm"
+                              variant="outline"
+                              disabled={correctionInboxBusy}
+                              onClick={() =>
+                                void handleRejectCorrectionSuggestionGroup(
+                                  group.suggestionIds,
+                                )
+                              }
+                            >
+                              {group.suggestionIds.length > 1
+                                ? "Dismiss all"
+                                : "Dismiss"}
+                            </Button>
+                          </div>
+                        </div>
+                        <div className="mt-2 grid gap-2 md:grid-cols-2">
+                          <div className="rounded-md bg-muted/40 px-2 py-2">
+                            <p className="rubric-muted">Heard</p>
+                            <p className="mt-1 text-sm">
+                              {group.sampleOriginalText}
+                            </p>
+                          </div>
+                          <div className="rounded-md bg-muted/40 px-2 py-2">
+                            <p className="rubric-muted">Corrected</p>
+                            <p className="mt-1 text-sm">
+                              {group.sampleCorrectedText}
+                            </p>
+                          </div>
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                ) : (
+                  <p className="text-sm text-muted-foreground">
+                    No pending corrections. Auto-learned edits will appear here
+                    for review.
+                  </p>
+                )}
+
+                <div className="space-y-2 border-t pt-4">
+                  <h3 className="section-heading">Backtrack shortcuts</h3>
+                  <p className="text-sm text-muted-foreground">
+                    Use quick correction phrases right after an insert:{" "}
+                    <code>scratch that</code>, <code>actually ...</code>,{" "}
+                    <code>no, say ...</code>, <code>replace X with Y</code>, or{" "}
+                    <code>change X to Y</code>.
+                  </p>
+                  <div className="flex flex-wrap gap-2 text-sm text-muted-foreground">
+                    {[
+                      "Undo last insert",
+                      "Replace most recent phrase",
+                      "Keep flow without touching the keyboard",
+                    ].map((label) => (
+                      <span
+                        key={label}
+                        className="rounded-full border bg-background px-2 py-1"
+                      >
+                        {label}
+                      </span>
+                    ))}
+                  </div>
+                </div>
+              </TabsContent>
+
+              <TabsContent value="text-actions" className="mt-4 space-y-4">
+                <div className="grid gap-4 md:grid-cols-2">
+                  <div className="space-y-2">
+                    <label
+                      className="text-sm font-medium"
+                      htmlFor="dictation-command-prefix"
                     >
-                      <p className="text-xs font-medium">{entry.label}</p>
-                      <p className="text-xs text-muted-foreground">
-                        {entry.description}
-                      </p>
-                    </div>
-                  ))}
+                      {DICTATION_TEXT_ACTIONS.commandPrefixLabel}
+                    </label>
+                    <input
+                      id="dictation-command-prefix"
+                      type="text"
+                      className="w-full rounded-md border bg-background p-2 text-sm"
+                      value={dictationCommandPrefix}
+                      onChange={(event) =>
+                        setDictationCommandPrefix(event.target.value)
+                      }
+                      onBlur={() => {
+                        const nextPrefix =
+                          dictationCommandPrefix.trim() || "command";
+                        setDictationCommandPrefix(nextPrefix);
+                        void persistDictationPreferences({
+                          commandPrefix: nextPrefix,
+                        });
+                      }}
+                    />
+                    <p className="text-sm text-muted-foreground">
+                      {DICTATION_TEXT_ACTIONS.prefixDescription}
+                    </p>
+                  </div>
+                  <div className="space-y-2">
+                    <p className="text-sm font-medium">
+                      {DICTATION_TEXT_ACTIONS.commandModeLabel}
+                    </p>
+                    <label className="inline-flex items-center gap-2 rounded-md border bg-background px-3 py-2 text-sm">
+                      <input
+                        type="checkbox"
+                        checked={dictationCommandModeEnabled}
+                        onChange={(event) => {
+                          const next = event.target.checked;
+                          setDictationCommandModeEnabled(next);
+                          const nextModePreset = syncModePreset({
+                            commandModeEnabled: next,
+                          });
+                          void persistDictationPreferences({
+                            commandModeEnabled: next,
+                            modePreset: nextModePreset,
+                          });
+                        }}
+                      />
+                      {DICTATION_TEXT_ACTIONS.commandModeEnabledLabel}
+                    </label>
+                    <p className="text-sm text-muted-foreground">
+                      {DICTATION_TEXT_ACTIONS.settingsDescription}
+                    </p>
+                  </div>
                 </div>
-              </div>
 
-              <div className="border-t pt-4 space-y-3">
-                <div>
-                  <p className="text-sm font-medium">App overrides</p>
-                  <p className="text-xs text-muted-foreground">
-                    Pin a specific app (matched by substring, e.g. "slack") to
-                    a category, overriding the built-in classifier. First
-                    matching enabled override wins.
-                  </p>
-                </div>
-
-                <div className="grid grid-cols-1 md:grid-cols-[1fr_1fr_auto] gap-2">
-                  <input
-                    type="text"
-                    className="w-full p-2 border rounded-md bg-background"
-                    placeholder="App matcher (e.g. slack)"
-                    value={newCategoryOverrideAppMatcher}
-                    onChange={(event) =>
-                      setNewCategoryOverrideAppMatcher(event.target.value)
+                <div className="border-t pt-4">
+                  <DictationTextActionsEditor
+                    presets={dictationCommandPresets}
+                    commandPrefix={dictationCommandPrefix}
+                    onDraftChange={setCommandPresetDraft}
+                    onCommit={(commandKey, systemPrompt, enabled) =>
+                      void upsertCommandPreset(commandKey, systemPrompt, enabled)
+                    }
+                    onReset={(commandKey) =>
+                      void resetCommandPreset(commandKey)
                     }
                   />
-                  <Select
-                    value={newCategoryOverrideCategory}
-                    onValueChange={(value) =>
-                      setNewCategoryOverrideCategory(
-                        value as DictationAppCategoryKey,
-                      )
-                    }
-                  >
-                    <SelectTrigger>
-                      <SelectValue />
-                    </SelectTrigger>
-                    <SelectContent>
-                      {DICTATION_APP_CATEGORY_SELECT_OPTIONS.map((option) => (
-                        <SelectItem key={option.value} value={option.value}>
-                          {option.label}
-                        </SelectItem>
-                      ))}
-                    </SelectContent>
-                  </Select>
-                  <Button
-                    variant="outline"
-                    onClick={handleAddCategoryOverride}
-                  >
-                    Add
-                  </Button>
+                </div>
+              </TabsContent>
+
+              <TabsContent value="destinations" className="mt-4 space-y-4">
+                <div>
+                  <h3 className="section-heading">Destination-aware formatting</h3>
+                  <p className="text-sm text-muted-foreground">
+                    Automatically adjust dictation tone and structure based on
+                    what app you're dictating into.
+                  </p>
                 </div>
 
-                {dictationAppCategoryOverrides.length > 0 && (
-                  <div className="space-y-2">
-                    {dictationAppCategoryOverrides.map((override) => (
+                <div className="flex items-center justify-between gap-4 rounded-2xl border border-border/60 bg-background/75 p-4">
+                  <div className="space-y-0.5">
+                    <p className="text-sm font-medium">
+                      Format for destination app
+                    </p>
+                    <p className="text-sm text-muted-foreground">
+                      When on, Smart Format adapts tone and structure to the app
+                      you're dictating into. Turning this off restores the
+                      original, category-agnostic formatting.
+                    </p>
+                  </div>
+                  <Switch
+                    checked={dictationCategoryFormattingEnabled}
+                    onCheckedChange={(checked) => {
+                      setDictationCategoryFormattingEnabled(checked);
+                      void persistDictationPreferences({
+                        categoryFormattingEnabled: checked,
+                      });
+                    }}
+                  />
+                </div>
+
+                <div className="space-y-2">
+                  <h4 className="section-heading">Built-in categories</h4>
+                  <div className="grid grid-cols-1 gap-2 sm:grid-cols-2">
+                    {DICTATION_APP_CATEGORY_REFERENCE.map((entry) => (
                       <div
+                        key={entry.key}
+                        className="rounded-md border bg-background px-3 py-2"
+                      >
+                        <p className="text-sm font-medium">{entry.label}</p>
+                        <p className="text-sm text-muted-foreground">
+                          {entry.description}
+                        </p>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+
+                <div
+                  className="space-y-3 border-t pt-4"
+                  data-testid="category-override-section"
+                >
+                  <div>
+                    <h4 className="section-heading">App overrides</h4>
+                    <p className="text-sm text-muted-foreground">
+                      Pin a specific app (matched by substring, e.g. "slack") to
+                      a category, overriding the built-in classifier. First
+                      matching enabled override wins.
+                    </p>
+                  </div>
+
+                  <div className="grid grid-cols-1 gap-2 md:grid-cols-[1fr_1fr_auto]">
+                    <input
+                      type="text"
+                      className="w-full rounded-md border bg-background p-2 text-sm"
+                      placeholder="App matcher (e.g. slack)"
+                      value={newCategoryOverrideAppMatcher}
+                      onChange={(event) =>
+                        setNewCategoryOverrideAppMatcher(event.target.value)
+                      }
+                    />
+                    <Select
+                      value={newCategoryOverrideCategory}
+                      onValueChange={(value) =>
+                        setNewCategoryOverrideCategory(
+                          value as DictationAppCategoryKey,
+                        )
+                      }
+                    >
+                      <SelectTrigger>
+                        <SelectValue />
+                      </SelectTrigger>
+                      <SelectContent>
+                        {DICTATION_APP_CATEGORY_SELECT_OPTIONS.map((option) => (
+                          <SelectItem key={option.value} value={option.value}>
+                            {option.label}
+                          </SelectItem>
+                        ))}
+                      </SelectContent>
+                    </Select>
+                    <Button variant="outline" onClick={handleAddCategoryOverride}>
+                      Add
+                    </Button>
+                  </div>
+
+                  {dictationAppCategoryOverrides.length > 0 && (
+                    <div className="space-y-2">
+                      {dictationAppCategoryOverrides.map((override) => (
+                        <div
                         key={override.id}
                         className="rounded-md border p-2 space-y-2"
                       >
@@ -6634,7 +5763,7 @@ export function DictationView() {
                           </Select>
                         </div>
                         <div className="flex items-center justify-between">
-                          <label className="inline-flex items-center gap-2 text-xs text-muted-foreground">
+                          <label className="inline-flex items-center gap-2 text-sm text-muted-foreground">
                             <input
                               type="checkbox"
                               checked={override.enabled}
@@ -6657,645 +5786,105 @@ export function DictationView() {
                           </Button>
                         </div>
                       </div>
-                    ))}
-                  </div>
-                )}
-              </div>
-            </CardContent>
-          </Card>
+                      ))}
+                    </div>
+                  )}
+                </div>
+              </TabsContent>
+            </Tabs>
+          </section>
         </div>
       </ScrollArea>
 
-      <Dialog open={isDialogOpen} onOpenChange={setIsDialogOpen}>
-        <DialogContent className="max-w-2xl max-h-[80vh] overflow-y-auto">
-          <DialogHeader>
-            <div className="flex items-center justify-between gap-3">
-              <DialogTitle>
-                {selectedRecording?.title ?? "Dictation"}
-              </DialogTitle>
-              {selectedRecording && (
-                <div className="flex gap-2">
-                  {selectedTranscript?.fullText?.trim() && (
-                    <Button
-                      variant="outline"
-                      size="sm"
-                      onClick={() =>
-                        void toggleReadAloudPlayback(
-                          selectedTranscript.fullText,
-                          `history-${selectedRecording.id}`,
-                        )
-                      }
-                    >
-                      <Volume2 className="h-4 w-4 mr-2" />
-                      {activeSpeechTarget === `history-${selectedRecording.id}`
-                        ? "Stop reading"
-                        : "Read aloud"}
-                    </Button>
-                  )}
-                  <Button
-                    variant="outline"
-                    size="sm"
-                    onClick={() =>
-                      void handleCopyHistoryTranscript(selectedRecording.id)
-                    }
-                  >
-                    Copy
-                  </Button>
-                  <Button
-                    variant="outline"
-                    size="sm"
-                    onClick={() =>
-                      void handleDeleteHistoryItem(selectedRecording.id)
-                    }
-                  >
-                    Delete
-                  </Button>
-                </div>
-              )}
-            </div>
-          </DialogHeader>
-          {isLoadingTranscript ? (
-            <p className="text-muted-foreground">Loading transcript...</p>
-          ) : selectedTranscript ? (
-            <div className="space-y-4">
-              <div className="rounded-lg border p-4">
-                <div className="flex items-center justify-between gap-3">
-                  <div>
-                    <p className="text-sm font-medium">Capture details</p>
-                    <p className="text-xs text-muted-foreground">
-                      Inspect the original route, model, and transcript quality
-                      before reprocessing.
-                    </p>
-                  </div>
-                </div>
-                <div className="mt-4 grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
-                  <div className="rounded-md border bg-muted/30 px-3 py-2">
-                    <p className="text-[11px] uppercase tracking-wide text-muted-foreground">
-                      Requested engine
-                    </p>
-                    <p className="mt-1 text-sm font-medium">
-                      {selectedTranscript.requestedProvider || "Default route"}
-                    </p>
-                  </div>
-                  <div className="rounded-md border bg-muted/30 px-3 py-2">
-                    <p className="text-[11px] uppercase tracking-wide text-muted-foreground">
-                      Actual engine
-                    </p>
-                    <p className="mt-1 text-sm font-medium">
-                      {selectedTranscript.actualProvider ||
-                        selectedTranscript.requestedProvider ||
-                        "Unknown"}
-                    </p>
-                  </div>
-                  <div className="rounded-md border bg-muted/30 px-3 py-2">
-                    <p className="text-[11px] uppercase tracking-wide text-muted-foreground">
-                      Model
-                    </p>
-                    <p className="mt-1 text-sm font-medium">
-                      {selectedTranscript.modelId ||
-                        selectedTranscript.model ||
-                        "Unknown"}
-                    </p>
-                  </div>
-                  <div className="rounded-md border bg-muted/30 px-3 py-2">
-                    <p className="text-[11px] uppercase tracking-wide text-muted-foreground">
-                      Language
-                    </p>
-                    <p className="mt-1 text-sm font-medium">
-                      {selectedTranscript.language || "Unknown"}
-                    </p>
-                  </div>
-                  <div className="rounded-md border bg-muted/30 px-3 py-2">
-                    <p className="text-[11px] uppercase tracking-wide text-muted-foreground">
-                      Confidence
-                    </p>
-                    <p className="mt-1 text-sm font-medium">
-                      {Number.isFinite(selectedTranscript.confidence)
-                        ? `${Math.round(selectedTranscript.confidence * 100)}%`
-                        : "Unavailable"}
-                    </p>
-                  </div>
-                  <div className="rounded-md border bg-muted/30 px-3 py-2">
-                    <p className="text-[11px] uppercase tracking-wide text-muted-foreground">
-                      Segments
-                    </p>
-                    <p className="mt-1 text-sm font-medium">
-                      {selectedTranscript.segments?.length ?? 0}
-                    </p>
-                  </div>
-                  <div className="rounded-md border bg-muted/30 px-3 py-2">
-                    <p className="text-[11px] uppercase tracking-wide text-muted-foreground">
-                      Start
-                    </p>
-                    <p className="mt-1 text-sm font-medium">
-                      {selectedHistoryDetails?.startupLatencyMs != null
-                        ? selectedHistoryDetails.startupLatencyMs < 1000
-                          ? `${selectedHistoryDetails.startupLatencyMs}ms`
-                          : `${(selectedHistoryDetails.startupLatencyMs / 1000).toFixed(1)}s`
-                        : "Unavailable"}
-                    </p>
-                  </div>
-                </div>
-              </div>
+      <DictationHistoryDialog
+        open={isDialogOpen}
+        onOpenChange={setIsDialogOpen}
+        recording={selectedRecording}
+        transcript={selectedTranscript}
+        historyDetails={selectedHistoryDetails}
+        isLoadingTranscript={isLoadingTranscript}
+        durationLabel={
+          selectedRecording
+            ? formatRecordingDuration(selectedRecording.duration)
+            : "N/A"
+        }
+        reprocessModePreset={reprocessModePreset}
+        onReprocessModePresetChange={setReprocessModePreset}
+        reprocessedResult={reprocessedResult}
+        isReprocessing={isReprocessing}
+        reprocessError={reprocessError}
+        onReprocess={() => void handleReprocessSelectedDictation()}
+        onUseReprocessedResult={() => {
+          if (!reprocessedResult) {
+            return;
+          }
+          setTranscribedText(reprocessedResult.outputText);
+          // Reprocessed text is not what the sidecar stored either.
+          setLatestResultDirty(true);
+          setPasteStatus(
+            `Reprocessed with ${
+              DICTATION_MODE_DEFINITION_BY_ID[
+                reprocessedResult.modePreset as DictationModePreset
+              ]?.label ?? reprocessedResult.modePreset
+            }`,
+          );
+        }}
+        correctionText={historyCorrectionText}
+        onCorrectionTextChange={setHistoryCorrectionText}
+        onCorrectionBlur={() => {
+          void maybeAutoLearnHistoryCorrection();
+        }}
+        canLearnCorrection={
+          historyCorrectionBaseline.trim() !== historyCorrectionText.trim()
+        }
+        showFixCapitalization={isCaseOnlyDifference(
+          historyCorrectionBaseline,
+          historyCorrectionText,
+        )}
+        onLearnCorrection={() =>
+          void learnCorrection(
+            historyCorrectionBaseline,
+            historyCorrectionText,
+            {
+              force: true,
+              appTarget:
+                selectedHistoryDetails?.activationMatcher ??
+                selectedHistoryDetails?.appTarget ??
+                selectedHistoryDetails?.contextAppName ??
+                null,
+              setStatus: setHistoryLearnStatus,
+              onSuccess: () =>
+                setHistoryCorrectionBaseline(historyCorrectionText.trim()),
+            },
+          )
+        }
+        learnStatus={historyLearnStatus}
+        isReadingAloud={
+          activeSpeechTarget === `history-${selectedRecording?.id ?? ""}`
+        }
+        onToggleReadAloud={() => {
+          if (!selectedRecording || !selectedTranscript?.fullText) {
+            return;
+          }
+          void toggleReadAloudPlayback(
+            selectedTranscript.fullText,
+            `history-${selectedRecording.id}`,
+          );
+        }}
+        onCopyTranscript={() => {
+          if (!selectedRecording) {
+            return;
+          }
+          void handleCopyHistoryTranscript(selectedRecording.id);
+        }}
+        onDelete={() => {
+          if (!selectedRecording) {
+            return;
+          }
+          void handleDeleteHistoryItem(selectedRecording.id);
+        }}
+      />
 
-              <div className="rounded-lg border p-4">
-                <div>
-                  <p className="text-sm font-medium">Prompt and context</p>
-                  <p className="text-xs text-muted-foreground">
-                    Inspect the app context and prompt strategy Plainsong used
-                    for this dictation.
-                  </p>
-                </div>
-                {selectedHistoryDetails ? (
-                  <div className="mt-4 space-y-3">
-                    <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
-                      <div className="rounded-md border bg-muted/30 px-3 py-2">
-                        <p className="text-[11px] uppercase tracking-wide text-muted-foreground">
-                          Mode
-                        </p>
-                        <p className="mt-1 text-sm font-medium">
-                          {historyModeLabel(selectedHistoryDetails)}
-                        </p>
-                      </div>
-                      <div className="rounded-md border bg-muted/30 px-3 py-2">
-                        <p className="text-[11px] uppercase tracking-wide text-muted-foreground">
-                          Base style
-                        </p>
-                        <p className="mt-1 text-sm font-medium">
-                          {selectedHistoryDetails?.baseModeLabel ??
-                            (selectedHistoryDetails?.baseModePreset
-                              ? (modeDefinitionById[
-                                  selectedHistoryDetails.baseModePreset as DictationModePreset
-                                ]?.label ??
-                                selectedHistoryDetails.baseModePreset)
-                              : "Unavailable")}
-                        </p>
-                      </div>
-                      <div className="rounded-md border bg-muted/30 px-3 py-2">
-                        <p className="text-[11px] uppercase tracking-wide text-muted-foreground">
-                          Context source
-                        </p>
-                        <p className="mt-1 text-sm font-medium">
-                          {selectedHistoryDetails.contextSource ??
-                            "Unavailable"}
-                        </p>
-                      </div>
-                      <div className="rounded-md border bg-muted/30 px-3 py-2">
-                        <p className="text-[11px] uppercase tracking-wide text-muted-foreground">
-                          Requested route
-                        </p>
-                        <p className="mt-1 text-sm font-medium">
-                          {selectedHistoryDetails.routePreference
-                            ? selectedHistoryDetails.routePreference === "cloud"
-                              ? "Cloud"
-                              : "Local"
-                            : "Unavailable"}
-                        </p>
-                      </div>
-                      <div className="rounded-md border bg-muted/30 px-3 py-2">
-                        <p className="text-[11px] uppercase tracking-wide text-muted-foreground">
-                          Resolved hosting
-                        </p>
-                        <p className="mt-1 text-sm font-medium">
-                          {selectedHistoryDetails.resolvedHosting
-                            ? selectedHistoryDetails.resolvedHosting === "cloud"
-                              ? "Cloud"
-                              : "Local"
-                            : "Unavailable"}
-                        </p>
-                      </div>
-                      <div className="rounded-md border bg-muted/30 px-3 py-2">
-                        <p className="text-[11px] uppercase tracking-wide text-muted-foreground">
-                          Prompt strategy
-                        </p>
-                        <p className="mt-1 text-sm font-medium">
-                          {historyPromptSourceLabel(
-                            selectedHistoryDetails.promptSource,
-                          )}
-                        </p>
-                      </div>
-                    </div>
-                    {(selectedHistoryDetails.customModeName ||
-                      selectedHistoryDetails.contextAppName ||
-                      selectedHistoryDetails.appTarget ||
-                      selectedHistoryDetails.activationMatcher ||
-                      selectedHistoryDetails.commandApplied) && (
-                      <div className="flex flex-wrap gap-3 text-xs text-muted-foreground">
-                        {selectedHistoryDetails.customModeName && (
-                          <span>
-                            Custom mode: {selectedHistoryDetails.customModeName}
-                          </span>
-                        )}
-                        {selectedHistoryDetails.contextAppName && (
-                          <span>
-                            Context app: {selectedHistoryDetails.contextAppName}
-                          </span>
-                        )}
-                        {selectedHistoryDetails.appTarget && (
-                          <span>
-                            Insert target: {selectedHistoryDetails.appTarget}
-                          </span>
-                        )}
-                        {selectedHistoryDetails.activationMatcher && (
-                          <span>
-                            Auto rule:{" "}
-                            {selectedHistoryDetails.customModeName
-                              ? `${selectedHistoryDetails.customModeName} via ${selectedHistoryDetails.activationMatcher}`
-                              : selectedHistoryDetails.activationMatcher}
-                          </span>
-                        )}
-                        {selectedHistoryDetails.commandApplied && (
-                          <span>
-                            Command: {selectedHistoryDetails.commandApplied}
-                          </span>
-                        )}
-                      </div>
-                    )}
-                    {(selectedHistoryDetails.pipelineStageKeys.length > 0 ||
-                      selectedHistoryDetails.dictionaryAppliedCount != null ||
-                      selectedHistoryDetails.snippetAppliedCount != null ||
-                      selectedHistoryDetails.formattingApplied != null ||
-                      selectedHistoryDetails.recentInsertReused != null) && (
-                      <div className="rounded-md border bg-muted/20 p-3 space-y-3">
-                        <div>
-                          <p className="text-sm font-medium">Pipeline trace</p>
-                          <p className="text-xs text-muted-foreground">
-                            Shows which deterministic stages changed the text
-                            before delivery.
-                          </p>
-                        </div>
-                        {selectedHistoryDetails.pipelineStageKeys.length >
-                          0 && (
-                          <div className="flex flex-wrap gap-2">
-                            {selectedHistoryDetails.pipelineStageKeys.map(
-                              (stageKey) => (
-                                <span
-                                  key={stageKey}
-                                  className="rounded-full border bg-background px-2 py-1 text-[11px] font-medium"
-                                >
-                                  {historyPipelineStageLabel(stageKey)}
-                                </span>
-                              ),
-                            )}
-                          </div>
-                        )}
-                        <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
-                          <div className="rounded-md border bg-background px-3 py-2">
-                            <p className="text-[11px] uppercase tracking-wide text-muted-foreground">
-                              Dictionary
-                            </p>
-                            <p className="mt-1 text-sm font-medium">
-                              {selectedHistoryDetails.dictionaryAppliedCount ??
-                                0}{" "}
-                              rules
-                            </p>
-                          </div>
-                          <div className="rounded-md border bg-background px-3 py-2">
-                            <p className="text-[11px] uppercase tracking-wide text-muted-foreground">
-                              Snippets
-                            </p>
-                            <p className="mt-1 text-sm font-medium">
-                              {selectedHistoryDetails.snippetAppliedCount ?? 0}{" "}
-                              expansions
-                            </p>
-                          </div>
-                          <div className="rounded-md border bg-background px-3 py-2">
-                            <p className="text-[11px] uppercase tracking-wide text-muted-foreground">
-                              Formatting
-                            </p>
-                            <p className="mt-1 text-sm font-medium">
-                              {selectedHistoryDetails.formattingApplied
-                                ? "Applied"
-                                : "Not applied"}
-                            </p>
-                          </div>
-                          <div className="rounded-md border bg-background px-3 py-2">
-                            <p className="text-[11px] uppercase tracking-wide text-muted-foreground">
-                              Recent insert
-                            </p>
-                            <p className="mt-1 text-sm font-medium">
-                              {selectedHistoryDetails.recentInsertReused
-                                ? "Reused"
-                                : "Not reused"}
-                            </p>
-                          </div>
-                        </div>
-                      </div>
-                    )}
-                    {(selectedHistoryDetails.contextPreview ||
-                      selectedHistoryDetails.promptPreview) && (
-                      <div className="grid gap-4 md:grid-cols-2">
-                        <div className="space-y-2">
-                          <p className="text-sm font-medium">
-                            Captured context
-                          </p>
-                          <div className="min-h-[110px] rounded-lg bg-muted p-4 text-sm">
-                            <p className="whitespace-pre-wrap">
-                              {selectedHistoryDetails.contextPreview ||
-                                "No saved context preview."}
-                            </p>
-                          </div>
-                        </div>
-                        <div className="space-y-2">
-                          <p className="text-sm font-medium">Prompt preview</p>
-                          <div className="min-h-[110px] rounded-lg bg-muted p-4 text-sm">
-                            <p className="whitespace-pre-wrap">
-                              {selectedHistoryDetails.promptPreview ||
-                                "Using the standard prompt for this path."}
-                            </p>
-                          </div>
-                        </div>
-                      </div>
-                    )}
-                  </div>
-                ) : (
-                  <p className="mt-4 text-sm text-muted-foreground">
-                    Prompt/context inspection is available for newer dictations
-                    saved after this update.
-                  </p>
-                )}
-              </div>
-
-              <div className="rounded-lg border p-4 space-y-3">
-                <div className="flex flex-col gap-3 md:flex-row md:items-end md:justify-between">
-                  <div className="space-y-2">
-                    <label className="text-sm font-medium">
-                      Reprocess with mode
-                    </label>
-                    <select
-                      className="w-full min-w-[220px] rounded-md border bg-background p-2 text-sm"
-                      value={reprocessModePreset}
-                      onChange={(event) =>
-                        setReprocessModePreset(
-                          event.target.value as DictationModePreset,
-                        )
-                      }
-                    >
-                      {DICTATION_MODE_DEFINITIONS.filter(
-                        (mode) => mode.id !== "custom",
-                      ).map((mode) => (
-                        <option key={mode.id} value={mode.id}>
-                          {mode.label}
-                        </option>
-                      ))}
-                    </select>
-                  </div>
-                  <div className="flex gap-2">
-                    <Button
-                      variant="outline"
-                      onClick={() => void handleReprocessSelectedDictation()}
-                      disabled={isReprocessing}
-                    >
-                      {isReprocessing ? "Reprocessing..." : "Reprocess"}
-                    </Button>
-                    {reprocessedResult && (
-                      <Button
-                        variant="outline"
-                        onClick={() => {
-                          setTranscribedText(reprocessedResult.outputText);
-                          setPasteStatus(
-                            `Reprocessed with ${modeDefinitionById[reprocessedResult.modePreset as DictationModePreset]?.label ?? reprocessedResult.modePreset}`,
-                          );
-                        }}
-                      >
-                        Use Result
-                      </Button>
-                    )}
-                  </div>
-                </div>
-                <p className="text-xs text-muted-foreground">
-                  Compare the saved transcript with a mode-tuned result before
-                  you copy or reuse it.
-                </p>
-                {reprocessError && (
-                  <div className="rounded-md border border-destructive/30 bg-destructive/10 px-3 py-2 text-xs text-destructive">
-                    {reprocessError}
-                  </div>
-                )}
-              </div>
-
-              <div className="grid gap-3 md:grid-cols-3">
-                <div className="rounded-lg border bg-muted/20 p-3">
-                  <p className="text-[11px] uppercase tracking-wide text-muted-foreground">
-                    Heard
-                  </p>
-                  <p className="mt-1 text-sm font-medium">
-                    {selectedTranscript.requestedProvider || "Default route"}
-                  </p>
-                  <p className="mt-1 text-xs text-muted-foreground">
-                    {selectedTranscript.modelId ||
-                      selectedTranscript.model ||
-                      "Unknown model"}
-                  </p>
-                </div>
-                <div className="rounded-lg border bg-muted/20 p-3">
-                  <p className="text-[11px] uppercase tracking-wide text-muted-foreground">
-                    Ready to use
-                  </p>
-                  <p className="mt-1 text-sm font-medium">
-                    {reprocessedResult
-                      ? (modeDefinitionById[
-                          reprocessedResult.modePreset as DictationModePreset
-                        ]?.label ?? reprocessedResult.modePreset)
-                      : (modeDefinitionById[reprocessModePreset]?.label ??
-                        reprocessModePreset)}
-                  </p>
-                  <p className="mt-1 text-xs text-muted-foreground">
-                    {reprocessedResult
-                      ? reprocessedResult.usedAi
-                        ? "AI-tuned output"
-                        : "Rule-based output"
-                      : "Pick a mode to preview a final version"}
-                  </p>
-                </div>
-                <div className="rounded-lg border bg-muted/20 p-3">
-                  <p className="text-[11px] uppercase tracking-wide text-muted-foreground">
-                    Compare
-                  </p>
-                  <p className="mt-1 text-sm font-medium">
-                    {reprocessedResult
-                      ? "Before and after"
-                      : "Raw transcript only"}
-                  </p>
-                  <p className="mt-1 text-xs text-muted-foreground">
-                    Judge what Plainsong heard versus what you want to paste or
-                    save.
-                  </p>
-                </div>
-              </div>
-
-              <div className="grid gap-4 md:grid-cols-2">
-                <div className="space-y-2">
-                  <div className="flex items-center justify-between">
-                    <div>
-                      <p className="text-sm font-medium">What Plainsong heard</p>
-                      <p className="text-xs text-muted-foreground">
-                        The saved raw transcript from the original capture. Edit
-                        it to teach Plainsong a correction.
-                      </p>
-                    </div>
-                    <div className="flex items-center gap-2">
-                      <Button
-                        variant="ghost"
-                        size="sm"
-                        onClick={() =>
-                          navigator.clipboard.writeText(historyCorrectionText)
-                        }
-                      >
-                        Copy
-                      </Button>
-                      <Button
-                        variant="ghost"
-                        size="sm"
-                        disabled={
-                          historyCorrectionBaseline.trim() ===
-                          historyCorrectionText.trim()
-                        }
-                        onClick={() =>
-                          void learnCorrection(
-                            historyCorrectionBaseline,
-                            historyCorrectionText,
-                            {
-                              force: true,
-                              appTarget:
-                                selectedHistoryDetails?.activationMatcher ??
-                                selectedHistoryDetails?.appTarget ??
-                                selectedHistoryDetails?.contextAppName ??
-                                null,
-                              setStatus: setHistoryLearnStatus,
-                              onSuccess: () =>
-                                setHistoryCorrectionBaseline(
-                                  historyCorrectionText.trim(),
-                                ),
-                            },
-                          )
-                        }
-                      >
-                        Learn correction
-                      </Button>
-                      {isCaseOnlyDifference(
-                        historyCorrectionBaseline,
-                        historyCorrectionText,
-                      ) && (
-                        <Button
-                          variant="ghost"
-                          size="sm"
-                          onClick={() =>
-                            void learnCorrection(
-                              historyCorrectionBaseline,
-                              historyCorrectionText,
-                              {
-                                force: true,
-                                appTarget:
-                                  selectedHistoryDetails?.activationMatcher ??
-                                  selectedHistoryDetails?.appTarget ??
-                                  selectedHistoryDetails?.contextAppName ??
-                                  null,
-                                setStatus: setHistoryLearnStatus,
-                                onSuccess: () =>
-                                  setHistoryCorrectionBaseline(
-                                    historyCorrectionText.trim(),
-                                  ),
-                              },
-                            )
-                          }
-                        >
-                          Fix capitalization
-                        </Button>
-                      )}
-                    </div>
-                  </div>
-                  <div className="rounded-lg bg-muted p-4 min-h-[180px]">
-                    <textarea
-                      className="min-h-[180px] w-full resize-y bg-transparent text-sm outline-none"
-                      value={historyCorrectionText}
-                      onChange={(event) =>
-                        setHistoryCorrectionText(event.target.value)
-                      }
-                      onBlur={() => {
-                        void maybeAutoLearnHistoryCorrection();
-                      }}
-                    />
-                  </div>
-                  {historyLearnStatus && (
-                    <div className="rounded-md border bg-background px-3 py-2 text-xs text-muted-foreground">
-                      {historyLearnStatus}
-                    </div>
-                  )}
-                </div>
-                <div className="space-y-2">
-                  <div className="flex items-center justify-between">
-                    <div>
-                      <p className="text-sm font-medium">Ready to use</p>
-                      <p className="text-xs text-muted-foreground">
-                        A mode-shaped result for paste, clipboard, or follow-up
-                        writing.
-                      </p>
-                    </div>
-                    {reprocessedResult?.outputText && (
-                      <Button
-                        variant="ghost"
-                        size="sm"
-                        onClick={() =>
-                          navigator.clipboard.writeText(
-                            reprocessedResult.outputText,
-                          )
-                        }
-                      >
-                        Copy
-                      </Button>
-                    )}
-                  </div>
-                  <div className="p-4 bg-muted rounded-lg min-h-[180px]">
-                    {reprocessedResult ? (
-                      <p className="whitespace-pre-wrap text-sm">
-                        {reprocessedResult.outputText}
-                      </p>
-                    ) : (
-                      <p className="text-sm text-muted-foreground">
-                        Pick a mode and run Reprocess to preview an alternate
-                        result.
-                      </p>
-                    )}
-                  </div>
-                </div>
-              </div>
-              <div className="rounded-lg border bg-muted/20 p-3 text-xs text-muted-foreground">
-                Duration:{" "}
-                <span className="time-spec">
-                  {selectedRecording
-                    ? formatRecordingDuration(selectedRecording.duration)
-                    : "N/A"}
-                </span>{" "}
-                · Created:{" "}
-                {selectedRecording
-                  ? new Date(selectedRecording.createdAt).toLocaleString()
-                  : "N/A"}
-                {reprocessedResult && (
-                  <>
-                    {" "}
-                    · Final mode:{" "}
-                    {modeDefinitionById[
-                      reprocessedResult.modePreset as DictationModePreset
-                    ]?.label ?? reprocessedResult.modePreset}{" "}
-                    · {reprocessedResult.usedAi ? "AI tuned" : "Rule based"}
-                    {reprocessedResult.provider
-                      ? ` · Final engine: ${reprocessedResult.provider}`
-                      : ""}
-                    {reprocessedResult.modelId
-                      ? ` · Final model: ${reprocessedResult.modelId}`
-                      : ""}
-                  </>
-                )}
-              </div>
-            </div>
-          ) : (
-            <p className="text-muted-foreground">
-              No transcript available for this dictation.
-            </p>
-          )}
-        </DialogContent>
-      </Dialog>
       <Dialog
         open={dictionaryCsvDialogOpen}
         onOpenChange={setDictionaryCsvDialogOpen}
@@ -7322,12 +5911,12 @@ export function DictationView() {
               spellCheck={false}
             />
             {dictionaryCsvStatus && (
-              <div className="rounded-md border bg-muted/30 px-3 py-2 text-xs text-muted-foreground">
+              <div className="rounded-md border bg-muted/30 px-3 py-2 text-sm text-muted-foreground">
                 {dictionaryCsvStatus}
               </div>
             )}
             {dictionaryCsvImportResult?.errors.length ? (
-              <div className="rounded-md border border-rust/30 bg-rust/10 px-3 py-2 text-xs text-rust">
+              <div className="rounded-md border border-rust/30 bg-rust/10 px-3 py-2 text-sm text-rust">
                 {dictionaryCsvImportResult.errors.map((error) => (
                   <p key={error}>{error}</p>
                 ))}
