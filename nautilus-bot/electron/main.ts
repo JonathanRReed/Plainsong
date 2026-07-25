@@ -44,6 +44,7 @@ import {
   type OverlayWorkArea,
 } from "./overlay-placement";
 import { resolveUpdaterChannel, type UpdateChannel } from "./updater-channel";
+import { resolveWindowUiSettings } from "./window-ui-settings";
 import { createDictationOverlayWindow, createRecordingOverlayWindow } from "./windows";
 
 const isDev = process.env.NODE_ENV === "development" || !app.isPackaged;
@@ -66,6 +67,11 @@ let updateReadyToInstall = false;
 let bootstrapComplete = false;
 let tray: Tray | null = null;
 let minimizeToTrayEnabled = false;
+// Mirrors of ui settings the main process owns. Each one was previously
+// persisted and never read, so the switch moved but nothing happened.
+let alwaysOnTopEnabled = false;
+let showDictationOverlayEnabled = true;
+let showRecordingOverlayEnabled = true;
 let isQuitting = false;
 let nativeShortcutController: NativeShortcutController | null = null;
 let nativeShortcutAvailable = false;
@@ -126,6 +132,9 @@ type AppSettings = {
   };
   ui?: {
     minimizeToTray?: boolean;
+    alwaysOnTop?: boolean;
+    showDictationPopup?: boolean;
+    showRecordingPopup?: boolean;
   };
 };
 
@@ -698,6 +707,24 @@ function resizeOverlayKeepingBottomEdge(
     );
   } catch (error) {
     console.error("[main] Failed to resize overlay:", error);
+  }
+}
+
+/**
+ * Adopt the ui settings the main process is responsible for.
+ *
+ * Called at bootstrap and on every `settings-changed` broadcast, so any writer
+ * (Settings view, another window, a direct save) takes effect without the
+ * renderer having to push each field separately.
+ */
+function applyUiSettings(settings: AppSettings | null | undefined): void {
+  const resolved = resolveWindowUiSettings(settings);
+  minimizeToTrayEnabled = resolved.minimizeToTray;
+  alwaysOnTopEnabled = resolved.alwaysOnTop;
+  showDictationOverlayEnabled = resolved.showDictationOverlay;
+  showRecordingOverlayEnabled = resolved.showRecordingOverlay;
+  if (mainWindow && !mainWindow.isDestroyed()) {
+    mainWindow.setAlwaysOnTop(alwaysOnTopEnabled);
   }
 }
 
@@ -1373,6 +1400,12 @@ function createMainWindow(): BrowserWindow {
     void win.loadFile(path.join(__dirname, "../dist/index.html"));
   }
 
+  // Applied here rather than at the bootstrap call site so the setting survives
+  // the window being recreated (dock reactivate, and the non-macOS quit path).
+  if (alwaysOnTopEnabled) {
+    win.setAlwaysOnTop(true);
+  }
+
   return win;
 }
 
@@ -1486,6 +1519,10 @@ async function bootstrap() {
   });
 
   ipcBridge.onEvent((eventName: string, payload: unknown) => {
+    if (eventName === "settings-changed" && payload && typeof payload === "object") {
+      applyUiSettings(payload as AppSettings);
+    }
+
     if (
       eventName === "dictation-state-changed" &&
       payload &&
@@ -1526,9 +1563,13 @@ async function bootstrap() {
 
   ipcBridge.onWindowCommand((command: string, payload: unknown) => {
     if (command === "show-dictation-overlay") {
-      showOverlayWindow(getOrCreateOverlayWindow("dictation"));
+      if (showDictationOverlayEnabled) {
+        showOverlayWindow(getOrCreateOverlayWindow("dictation"));
+      }
     } else if (command === "show-recording-overlay") {
-      showOverlayWindow(getOrCreateOverlayWindow("recording"));
+      if (showRecordingOverlayEnabled) {
+        showOverlayWindow(getOrCreateOverlayWindow("recording"));
+      }
     } else if (command === "open-main") {
       showAndFocusMainWindow();
     } else if (command === "open-main-to") {
@@ -1556,11 +1597,13 @@ async function bootstrap() {
 
   try {
     const settings = (await ipcBridge.invoke("get_settings")) as AppSettings;
-    minimizeToTrayEnabled = settings?.ui?.minimizeToTray === true;
+    applyUiSettings(settings);
   } catch (error) {
-    console.error("[main] Failed to read minimize-to-tray setting:", error);
+    console.error("[main] Failed to read window ui settings:", error);
   }
 
+  // createMainWindow() runs after the settings read and applies the
+  // window-level settings itself, so every creation path gets them.
   mainWindow = createMainWindow();
   loadOverlayPlacements();
   prepareOverlayWindows();

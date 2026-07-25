@@ -192,6 +192,10 @@ const ALLOWED_RENDERER_COMMANDS = new Set<string>([
   "summarize_recording",
   "summarize_recording_grounded",
   "sync_backup_to_cloud",
+  // The command palette's selected-text actions have always called this
+  // (src/lib/backend.ts transformSelectedText); it was never on the allowlist,
+  // so every one of them failed at the bridge.
+  "transform_selected_text",
   "unlock_vault",
   "update_dictation_dictionary_entry",
   "update_dictation_snippet",

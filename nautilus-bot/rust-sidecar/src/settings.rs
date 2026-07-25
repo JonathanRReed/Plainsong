@@ -139,7 +139,7 @@ pub struct TranscriptionSettings {
     pub dictation_route_preference: String,
     /// Dictation: allow quick one-shot route override for the next manual capture.
     pub dictation_route_override_enabled: bool,
-    /// Dictation: keep the current route warm between captures.
+    /// Dictation: `on` pre-warms the model at session start, `off` skips it.
     pub dictation_keep_warm: String,
     /// Dictation: show live partial text in popup/inline surfaces.
     pub dictation_live_preview_enabled: bool,
@@ -160,7 +160,7 @@ pub struct TranscriptionSettings {
     pub dictation_command_mode_enabled: bool,
     /// Dictation: Prefix used to activate command mode
     pub dictation_command_prefix: String,
-    /// Dictation insertion mode: auto, paste, clipboard_only
+    /// Dictation insertion mode: auto (insert at cursor) or clipboard_only.
     pub dictation_insertion_mode: String,
     /// Active language set used when session language remains on auto.
     pub dictation_active_languages: Vec<String>,
@@ -294,7 +294,7 @@ impl Default for TranscriptionSettings {
             dictation_hands_free_enabled: false,
             dictation_route_preference: "local".to_string(),
             dictation_route_override_enabled: true,
-            dictation_keep_warm: "short".to_string(),
+            dictation_keep_warm: "on".to_string(),
             dictation_live_preview_enabled: true,
             dictation_ai_formatting: false,
             dictation_mode_preset: "voice".to_string(),
@@ -303,7 +303,7 @@ impl Default for TranscriptionSettings {
             dictation_context_source: "none".to_string(),
             dictation_command_mode_enabled: true,
             dictation_command_prefix: "command".to_string(),
-            dictation_insertion_mode: "paste".to_string(),
+            dictation_insertion_mode: "auto".to_string(),
             dictation_active_languages: Vec::new(),
             dictation_snippets_enabled: true,
             dictation_auto_learn_corrections: true,
@@ -618,11 +618,31 @@ fn normalize_transcription_model_id(provider: &str, model_id: &str) -> String {
     }
 }
 
+/// Normalize the keep-warm choice to the two states the app can actually
+/// deliver.
+///
+/// It used to offer off/short/long, and none of the three was read anywhere:
+/// the model prewarm ran unconditionally, so "off" was a lie and "short" and
+/// "long" were the same thing. The setting now gates the prewarm, and the two
+/// old "on" values migrate to `on`.
 fn normalize_dictation_keep_warm(value: &str) -> String {
     match value.trim() {
         "off" => "off".to_string(),
-        "long" => "long".to_string(),
-        _ => "short".to_string(),
+        _ => "on".to_string(),
+    }
+}
+
+/// Normalize an insertion mode to the two behaviors that actually differ.
+///
+/// `paste` and `inline` were extra names for what `auto` already did (all
+/// three called the same insert path), so saved files carrying them land on
+/// `auto`. `clipboard_only` is the only value that ever behaved differently.
+/// The renderer looks these up in a table that no longer has the retired
+/// keys, so a value that survives the load renders as a blank label.
+fn normalize_dictation_insertion_mode(value: &str) -> String {
+    match value.trim() {
+        "clipboard_only" => "clipboard_only".to_string(),
+        _ => "auto".to_string(),
     }
 }
 
@@ -744,6 +764,12 @@ fn normalize_loaded_transcription_settings(transcription: &mut TranscriptionSett
             *model_id = normalize_transcription_model_id(normalized_provider.as_str(), model_id);
         }
 
+        // The save path normalizes this (`normalize_dictation_custom_mode`),
+        // but `get_settings` hands the loaded file straight to the renderer,
+        // so a profile saved before the retirement has to be migrated here too
+        // or its card renders an empty "Result:" chip.
+        mode.insertion_mode = normalize_dictation_insertion_mode(&mode.insertion_mode);
+
         mode.language_override = mode.language_override.clone().and_then(|value| {
             let trimmed = value.trim();
             if trimmed.is_empty() {
@@ -762,13 +788,8 @@ fn normalize_loaded_transcription_settings(transcription: &mut TranscriptionSett
         });
     }
 
-    // Migrate legacy Notes preset behavior away from inline insertion.
-    if transcription.dictation_mode_preset == "notes"
-        && transcription.dictation_insertion_mode == "inline"
-        && transcription.dictation_selected_custom_mode_id.is_none()
-    {
-        transcription.dictation_insertion_mode = "paste".to_string();
-    }
+    transcription.dictation_insertion_mode =
+        normalize_dictation_insertion_mode(&transcription.dictation_insertion_mode);
 
     transcription.meeting_route_policy = match transcription.meeting_route_policy.trim() {
         "best_available" => "best_available".to_string(),
@@ -1165,9 +1186,9 @@ mod tests {
     use super::{
         dictation_app_category_from_key, dictation_app_category_to_key,
         normalize_audio_input_device_preference, normalize_dictation_active_languages,
-        resolve_dictation_app_category_with_overrides, AudioInputDevicePreference,
-        DictationAppCategoryOverride, PlatformOptimizationSettings, Settings,
-        TranscriptionSettings,
+        normalize_loaded_transcription_settings, resolve_dictation_app_category_with_overrides,
+        AudioInputDevicePreference, DictationAppCategoryOverride, DictationCustomMode,
+        PlatformOptimizationSettings, Settings, TranscriptionSettings,
     };
     use crate::text::format::DictationAppCategory;
 
@@ -1237,7 +1258,7 @@ mod tests {
         assert_eq!(settings.transcription.meeting_provider, "whisper");
         assert!(settings.transcription.dictation_command_mode_enabled);
         assert_eq!(settings.transcription.dictation_command_prefix, "command");
-        assert_eq!(settings.transcription.dictation_insertion_mode, "paste");
+        assert_eq!(settings.transcription.dictation_insertion_mode, "auto");
         assert!(settings.transcription.dictation_snippets_enabled);
         assert!(settings.transcription.dictation_auto_learn_corrections);
     }
@@ -1257,6 +1278,85 @@ mod tests {
             serde_json::from_str(r#"{"dictationCopyToClipboard": true}"#)
                 .expect("saved transcription settings should deserialize");
         assert!(parsed.dictation_copy_to_clipboard);
+    }
+
+    /// The picker used to offer `paste` and `inline` alongside `auto`, and all
+    /// three took the same insert path. A settings file still carrying one of
+    /// them has to load as the behavior it was actually getting.
+    #[test]
+    fn retired_insertion_modes_load_as_the_one_insert_behavior() {
+        for saved in ["paste", "inline", "something_invented"] {
+            let mut transcription = TranscriptionSettings {
+                dictation_insertion_mode: saved.to_string(),
+                ..Default::default()
+            };
+            normalize_loaded_transcription_settings(&mut transcription);
+            assert_eq!(
+                transcription.dictation_insertion_mode, "auto",
+                "'{saved}' should migrate onto the insert path it already used"
+            );
+        }
+
+        let mut clipboard_only = TranscriptionSettings {
+            dictation_insertion_mode: "clipboard_only".to_string(),
+            ..Default::default()
+        };
+        normalize_loaded_transcription_settings(&mut clipboard_only);
+        assert_eq!(
+            clipboard_only.dictation_insertion_mode, "clipboard_only",
+            "the one mode that really differed must survive"
+        );
+    }
+
+    /// Saved custom profiles carry their own insertion mode, and `get_settings`
+    /// returns the loaded file verbatim. A profile left on a retired value
+    /// reaches the renderer, which looks it up in a table that only has
+    /// `auto`/`clipboard_only` and renders a chip reading "Result:" with
+    /// nothing after it.
+    #[test]
+    fn retired_insertion_modes_migrate_inside_saved_custom_modes() {
+        let mut transcription = TranscriptionSettings {
+            dictation_custom_modes: vec![
+                DictationCustomMode {
+                    id: "sales".to_string(),
+                    name: "Sales Follow-up".to_string(),
+                    insertion_mode: "paste".to_string(),
+                    ..Default::default()
+                },
+                DictationCustomMode {
+                    id: "notes".to_string(),
+                    name: "Notes".to_string(),
+                    insertion_mode: "inline".to_string(),
+                    ..Default::default()
+                },
+                DictationCustomMode {
+                    id: "quiet".to_string(),
+                    name: "Quiet".to_string(),
+                    insertion_mode: "clipboard_only".to_string(),
+                    ..Default::default()
+                },
+                DictationCustomMode {
+                    id: "blank".to_string(),
+                    name: "Blank".to_string(),
+                    ..Default::default()
+                },
+            ],
+            ..Default::default()
+        };
+
+        normalize_loaded_transcription_settings(&mut transcription);
+
+        let modes = &transcription.dictation_custom_modes;
+        assert_eq!(modes[0].insertion_mode, "auto");
+        assert_eq!(modes[1].insertion_mode, "auto");
+        assert_eq!(
+            modes[2].insertion_mode, "clipboard_only",
+            "the one mode that really differed must survive inside profiles too"
+        );
+        assert_eq!(
+            modes[3].insertion_mode, "auto",
+            "a profile written before the field existed has no value to keep"
+        );
     }
 
     #[test]

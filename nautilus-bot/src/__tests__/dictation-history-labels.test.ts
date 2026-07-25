@@ -5,6 +5,7 @@ import {
   historyPipelineStageLabel,
   historyPromptSourceLabel,
   INSERTION_MODE_LABELS,
+  normalizeInsertionMode,
   SESSION_INSERTION_MODE_LABELS,
 } from "@/lib/dictation-history-labels";
 
@@ -17,6 +18,24 @@ describe("dictation history labels", () => {
     expect(formatInsertionModeLabel("clipboard_only")).toBe("Clipboard only");
     expect(formatInsertionModeLabel("none")).toBe("Save only");
     expect(formatInsertionModeLabel("custom_mode")).toBe("custom mode");
+  });
+
+  it("coerces stored insertion modes onto the two behaviors that remain", () => {
+    // Mirrors normalize_dictation_insertion_mode in the sidecar: only
+    // clipboard_only ever behaved differently, so everything else — including
+    // a settings file still carrying paste/inline — is the insert path.
+    expect(normalizeInsertionMode("clipboard_only")).toBe("clipboard_only");
+    expect(normalizeInsertionMode(" clipboard_only ")).toBe("clipboard_only");
+    expect(normalizeInsertionMode("paste")).toBe("auto");
+    expect(normalizeInsertionMode("inline")).toBe("auto");
+    expect(normalizeInsertionMode("auto")).toBe("auto");
+    expect(normalizeInsertionMode("")).toBe("auto");
+    expect(normalizeInsertionMode(null)).toBe("auto");
+    expect(normalizeInsertionMode(undefined)).toBe("auto");
+    // Every result has to be a real key, or the label lookup renders nothing.
+    expect(INSERTION_MODE_LABELS[normalizeInsertionMode("paste")]).toBe(
+      "Insert at cursor",
+    );
   });
 
   it("prefers saved mode labels before falling back to presets", () => {

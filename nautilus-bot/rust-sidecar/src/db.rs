@@ -1448,6 +1448,29 @@ impl Database {
         Ok(())
     }
 
+    /// Count stored recording files and how many of them are actually
+    /// encrypted, as `(encrypted, stored)`.
+    ///
+    /// Encryption is applied by the vault migration, which renames the file to
+    /// `.enc`; capture writes a plain WAV. So the vault-initialized bit says
+    /// only that a migration once ran, not that what is on disk now is
+    /// encrypted — the counts are the only honest answer.
+    pub fn count_encrypted_recordings(&self) -> Result<(i64, i64)> {
+        let stored: i64 = self.conn.query_row(
+            "SELECT COUNT(*) FROM recordings WHERE audio_path IS NOT NULL AND TRIM(audio_path) != ''",
+            [],
+            |row| row.get(0),
+        )?;
+        let encrypted: i64 = self.conn.query_row(
+            "SELECT COUNT(*) FROM recordings
+             WHERE audio_path IS NOT NULL AND TRIM(audio_path) != ''
+               AND LOWER(audio_path) LIKE '%.enc'",
+            [],
+            |row| row.get(0),
+        )?;
+        Ok((encrypted, stored))
+    }
+
     pub fn clear_recording_audio_path(&mut self, recording_id: &str) -> Result<()> {
         self.conn.execute(
             "UPDATE recordings SET audio_path = '', updated_at = ?1 WHERE id = ?2",
@@ -3311,6 +3334,41 @@ mod tests {
         let inbox_only = db.get_recordings(Some("inbox")).unwrap();
         assert_eq!(inbox_only.len(), 1);
         assert_eq!(inbox_only[0].id, "r1");
+    }
+
+    /// A vault migrated a year ago does not encrypt what was captured since —
+    /// capture writes a plain WAV. Only the counts can say what is on disk.
+    #[test]
+    fn encrypted_recording_count_reflects_the_files_not_the_vault_bit() {
+        let mut db = in_memory_db();
+        db.create_recording(&sample_recording("r1", "inbox"))
+            .unwrap();
+        db.create_recording(&sample_recording("r2", "inbox"))
+            .unwrap();
+        db.create_recording(&sample_recording("r3", "inbox"))
+            .unwrap();
+        // Two were swept up by the vault migration; the third was recorded
+        // after it and is still plaintext.
+        db.update_recording_path("r1", "/tmp/r1.wav.enc", 60)
+            .unwrap();
+        db.update_recording_path("r2", "/tmp/r2.wav.ENC", 60)
+            .unwrap();
+
+        assert_eq!(db.count_encrypted_recordings().unwrap(), (2, 3));
+    }
+
+    #[test]
+    fn recordings_without_a_file_are_not_counted_as_unencrypted() {
+        let mut db = in_memory_db();
+        db.create_recording(&sample_recording("r1", "inbox"))
+            .unwrap();
+        db.update_recording_path("r1", "/tmp/r1.wav.enc", 60)
+            .unwrap();
+        db.create_recording(&sample_recording("r2", "inbox"))
+            .unwrap();
+        db.clear_recording_audio_path("r2").unwrap();
+
+        assert_eq!(db.count_encrypted_recordings().unwrap(), (1, 1));
     }
 
     #[test]

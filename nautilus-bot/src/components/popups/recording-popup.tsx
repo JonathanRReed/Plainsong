@@ -23,6 +23,15 @@ import {
   describeMeetingConsent,
   MEETING_CONSENT_NOTICE_TEXT,
 } from "@/lib/meeting-consent";
+import {
+  describeAudioSourceWarning,
+  describeTranscriptDelay,
+  MEETING_AUDIO_SOURCE_WARNING_EVENT,
+  RECORDING_TRANSCRIPTION_STREAM_EVENT,
+  type AudioSourceWarningDescriptor,
+  type MeetingAudioSourceWarningEvent,
+  type RecordingTranscriptionStreamEvent,
+} from "@/lib/meeting-transcript-stream";
 import { getMeetingTemplateOption } from "@/lib/meeting-templates";
 import { rebaseMeetingNotes } from "@/lib/meeting-notes";
 import { AudioWaveform } from "@/components/ui/audio-waveform";
@@ -36,16 +45,6 @@ interface MeetingRecordingStateChangedEvent {
   message?: string | null;
 }
 
-interface RecordingTranscriptionStreamEvent {
-  recordingId: string;
-  isPartial: boolean;
-  isFinal: boolean;
-  text: string;
-  startTime?: number;
-  endTime?: number;
-  confidence?: number;
-}
-
 type DisplayMode = "full" | "compact" | "minimal";
 
 export function RecordingPopup() {
@@ -57,6 +56,12 @@ export function RecordingPopup() {
     "recording",
   );
   const [transcriptionPreview, setTranscriptionPreview] = useState("");
+  const [previewDelay, setPreviewDelay] = useState(() =>
+    describeTranscriptDelay(null),
+  );
+  const [lostAudioSeconds, setLostAudioSeconds] = useState(0);
+  const [audioSourceWarning, setAudioSourceWarning] =
+    useState<AudioSourceWarningDescriptor | null>(null);
   const [elapsed, setElapsed] = useState(0);
   const [stopping, setStopping] = useState(false);
   const [displayMode, setDisplayMode] = useState<DisplayMode>("full");
@@ -87,6 +92,7 @@ export function RecordingPopup() {
   useEffect(() => {
     let unlisten: (() => void) | undefined;
     let unlistenStream: (() => void) | undefined;
+    let unlistenSourceWarning: (() => void) | undefined;
 
     const setup = async () => {
       try {
@@ -139,6 +145,9 @@ export function RecordingPopup() {
             if (payload.phase === "recording") {
               setTranscriptionPreview("");
               setTranscriptCommitted(false);
+              setPreviewDelay(describeTranscriptDelay(null));
+              setLostAudioSeconds(0);
+              setAudioSourceWarning(null);
             }
             setStopping(false);
             return;
@@ -154,12 +163,15 @@ export function RecordingPopup() {
           setMessage(null);
           setTranscriptionPreview("");
           setTranscriptCommitted(false);
+          setPreviewDelay(describeTranscriptDelay(null));
+          setLostAudioSeconds(0);
+          setAudioSourceWarning(null);
           setStopping(false);
         },
       );
 
       unlistenStream = await listen<RecordingTranscriptionStreamEvent>(
-        "recording-transcription-stream",
+        RECORDING_TRANSCRIPTION_STREAM_EVENT,
         (event) => {
           const currentRecordingId = recordingIdRef.current;
           if (
@@ -168,13 +180,42 @@ export function RecordingPopup() {
           ) {
             return;
           }
+          setPreviewDelay(describeTranscriptDelay(event.payload));
+          // `text` is the whole preview transcript so far, not just this
+          // segment, so this pane replaces rather than appends. The segment's
+          // own words ride along as `segmentText` for the line-by-line surface
+          // in Meetings.
           if (event.payload.text.trim()) {
             setTranscriptionPreview(event.payload.text);
+          }
+          if (event.payload.kind === "gap") {
+            const dropped = Math.max(
+              0,
+              (event.payload.endTime ?? 0) - (event.payload.startTime ?? 0),
+            );
+            setLostAudioSeconds((current) => current + dropped);
           }
           if (event.payload.isFinal) {
             setMessage("Transcript preview is ready in Meetings.");
             setTranscriptCommitted(true);
           }
+        },
+      );
+
+      // A source going silent is a failure the user can still fix while the
+      // meeting runs, and this overlay is often the only Plainsong surface on
+      // screen at the time.
+      unlistenSourceWarning = await listen<MeetingAudioSourceWarningEvent>(
+        MEETING_AUDIO_SOURCE_WARNING_EVENT,
+        (event) => {
+          const currentRecordingId = recordingIdRef.current;
+          if (
+            !currentRecordingId ||
+            event.payload.recordingId !== currentRecordingId
+          ) {
+            return;
+          }
+          setAudioSourceWarning(describeAudioSourceWarning(event.payload));
         },
       );
     };
@@ -183,6 +224,7 @@ export function RecordingPopup() {
     return () => {
       unlisten?.();
       unlistenStream?.();
+      unlistenSourceWarning?.();
     };
   }, []);
 
@@ -598,10 +640,29 @@ export function RecordingPopup() {
           {transcriptionPreview.trim() ? (
             <span className="inline-flex items-center gap-2 rounded-full border border-border/80 bg-muted/60 px-2.5 py-1 text-[11px] font-medium text-foreground">
               <CheckCircle2 className="h-3.5 w-3.5" />
-              Live transcript preview
+              {previewDelay.label}
+            </span>
+          ) : null}
+          {lostAudioSeconds > 0 ? (
+            <span className="inline-flex items-center gap-2 rounded-full border border-rust/30 bg-rust/10 px-2.5 py-1 text-[11px] font-medium text-rust">
+              <span className="neume neume-hollow" aria-hidden="true" />
+              {Math.round(lostAudioSeconds)}s not transcribed
             </span>
           ) : null}
         </div>
+
+        {audioSourceWarning ? (
+          <div
+            role="status"
+            className="mt-3 flex items-start gap-2 rounded-xl border border-rust/30 bg-rust/10 p-2.5 text-sm leading-5 text-rust"
+          >
+            <span className="neume neume-hollow mt-1.5 shrink-0" aria-hidden="true" />
+            <span>
+              <span className="font-medium">{audioSourceWarning.title}</span>{" "}
+              {audioSourceWarning.message}
+            </span>
+          </div>
+        ) : null}
 
         <div
           className={displayMode === "compact"
@@ -719,16 +780,16 @@ export function RecordingPopup() {
                   transcriptCommitted ? " commit-shine" : ""
                 }`}
               >
-                <div className="mb-2 flex items-center justify-between">
+                <div className="mb-1 flex items-center justify-between">
                   <p className="font-mono text-xs font-medium uppercase tracking-[0.18em] text-muted-foreground">
-                    Transcript preview
-                  </p>
-                  <p className="text-[11px] text-muted-foreground">
-                    {isTranscribing
-                      ? "Updates while processing"
-                      : "Live support for your notes"}
+                    {previewDelay.label}
                   </p>
                 </div>
+                <p className="mb-2 text-sm leading-5 text-muted-foreground">
+                  {isTranscribing
+                    ? "Updates while processing."
+                    : previewDelay.caption}
+                </p>
                 <p className="manuscript max-h-[176px] overflow-y-auto text-sm leading-6 text-foreground">
                   {previewText}
                 </p>
@@ -790,7 +851,7 @@ export function RecordingPopup() {
             <div className="rounded-2xl border border-foreground/10 bg-foreground/4 p-3">
               <div className="mb-2 flex items-center justify-between">
                 <p className="text-xs font-medium uppercase tracking-[0.18em] text-muted-foreground">
-                  Transcript preview
+                  {previewDelay.label}
                 </p>
                 <p className="text-[11px] text-muted-foreground">{statusLabel}</p>
               </div>

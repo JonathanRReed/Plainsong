@@ -425,6 +425,113 @@ describe("DictationView modes", () => {
     ).toBeInTheDocument();
   });
 
+  it("offers only the two insertion behaviors that actually differ", async () => {
+    render(<DictationView />);
+
+    await openConfigTab("Capture");
+
+    const select = (await screen.findByLabelText(
+      "Insertion mode",
+    )) as HTMLSelectElement;
+    // "paste" and "inline" took the same code path as "auto" — three names for
+    // one behavior — so they are gone rather than sitting here as choices that
+    // change nothing.
+    expect(
+      Array.from(select.options).map((option) => option.value),
+    ).toEqual(["auto", "clipboard_only"]);
+    expect(
+      Array.from(select.options).map((option) => option.textContent),
+    ).toEqual(["Insert at cursor", "Clipboard only"]);
+  });
+
+  it("offers keep warm as the on/off it now actually is", async () => {
+    render(<DictationView />);
+
+    await openConfigTab("Capture");
+
+    const select = (await screen.findByLabelText(
+      "Keep warm",
+    )) as HTMLSelectElement;
+    // "Short" and "Long" described a prewarm that ran unconditionally, so
+    // neither of them (nor "Off") changed anything. The setting now gates the
+    // prewarm, and there is one thing to gate.
+    expect(
+      Array.from(select.options).map((option) => option.value),
+    ).toEqual(["on", "off"]);
+  });
+
+  it("describes keep warm as the speed choice it is, not a memory choice", async () => {
+    render(<DictationView />);
+
+    await openConfigTab("Capture");
+
+    // Off only skips the prewarm. The first transcription still loads the
+    // model into the process-global cache and nothing in the app evicts it,
+    // so "Off" costs latency once and saves no memory at all.
+    expect(
+      await screen.findByText(/stays in memory until you quit/i),
+    ).toBeInTheDocument();
+    expect(screen.queryByText(/frees the memory/i)).toBeNull();
+  });
+
+  it("reads a saved profile left on a retired insertion mode as the behavior it gets", async () => {
+    backendMocks.transcriptionOverrides.dictationCustomModes = [
+      {
+        id: "sales",
+        name: "Sales Follow-up",
+        description: "",
+        baseModePreset: "email",
+        customPrompt: null,
+        profile: "normal_speed",
+        routePreference: null,
+        languageOverride: null,
+        livePreviewEnabled: null,
+        // Written before "paste" was retired; the sidecar migrates this on
+        // load, but the renderer must not render a blank chip if it ever sees
+        // the old value.
+        insertionMode: "paste",
+        contextSource: "none",
+        saveToInbox: false,
+        copyToClipboard: false,
+        commandModeEnabled: false,
+        dictationProvider: null,
+        dictationModelId: null,
+        aiProvider: null,
+        aiModelId: null,
+        activationAppMatcher: null,
+        activationDomainMatcher: null,
+      },
+    ];
+
+    render(<DictationView />);
+
+    await openConfigTab("Profiles");
+
+    // Scoped to the saved-profile card: the active-setup summary above it
+    // renders its own "Result:" chip from the top-level setting.
+    const card = (await screen.findByText("Sales Follow-up")).closest(
+      "div.rounded-md",
+    );
+    expect(card).not.toBeNull();
+    expect(
+      within(card as HTMLElement).getByText("Result:").parentElement
+        ?.textContent,
+    ).toBe("Result: Insert at cursor");
+
+    fireEvent.click(screen.getByRole("button", { name: "Use profile" }));
+
+    await waitFor(() => {
+      expect(backendMocks.saveSettings).toHaveBeenCalled();
+    });
+    const saveCalls = backendMocks.saveSettings.mock.calls as unknown as Array<
+      [any]
+    >;
+    const latestSettings = saveCalls[saveCalls.length - 1]![0];
+    // Applying the profile must not write the retired value back out, and the
+    // picker it drives has no "paste" option to select.
+    expect(latestSettings.transcription.dictationInsertionMode).toBe("auto");
+  });
+
   it("applies Messages mode defaults and persists them", async () => {
     render(<DictationView />);
 
@@ -441,7 +548,9 @@ describe("DictationView modes", () => {
     const latestSettings = latestCall![0];
     expect(latestSettings.transcription.dictationModePreset).toBe("messages");
     expect(latestSettings.transcription.dictationProfile).toBe("normal_speed");
-    expect(latestSettings.transcription.dictationInsertionMode).toBe("paste");
+    // "paste" was retired: it was a second name for the insert path "auto"
+    // already took.
+    expect(latestSettings.transcription.dictationInsertionMode).toBe("auto");
     expect(latestSettings.transcription.dictationContextSource).toBe("none");
     expect(latestSettings.transcription.dictationSaveToInbox).toBe(false);
     expect(latestSettings.transcription.dictationCopyToClipboard).toBe(true);

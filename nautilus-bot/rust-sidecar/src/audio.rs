@@ -13,7 +13,7 @@ use crate::audio::preroll::{
 };
 use crate::audio::silero_vad::build_vad_gate;
 use crate::audio::system_capture::{MixedAudioCapture, MixedCaptureEvents};
-use crate::audio::vad::{VadBackendKind, VadConfig, VadEdge, VadGate, VoiceActivityDetector};
+use crate::audio::vad::{VadBackendKind, VadConfig, VadEdge, VadGate};
 use crate::models::RecordingOptions;
 use crate::settings;
 use crate::sidecar_handle::SidecarHandle;
@@ -157,12 +157,8 @@ pub struct AudioCapture {
     recordings_dir: PathBuf,
     host: cpal::Host,
     active_recording: Option<ActiveRecordingSession>,
-    /// Voice Activity Detector for auto-stop on silence
-    vad: Option<VoiceActivityDetector>,
     /// Audio preprocessor for noise suppression
     preprocessor: Option<AudioPreprocessor>,
-    /// Enable VAD auto-stop
-    vad_enabled: bool,
     /// Enable noise suppression
     noise_suppression_enabled: bool,
     /// Current audio level (0.0 to 1.0) for visualization
@@ -426,9 +422,7 @@ impl AudioCapture {
 
         let host = cpal::default_host();
 
-        let default_vad_config = VadConfig::default();
         let preprocessor = AudioPreprocessor::new(16000);
-        let vad = VoiceActivityDetector::new(default_vad_config);
 
         Self {
             is_dictating: Arc::new(AtomicBool::new(false)),
@@ -439,9 +433,7 @@ impl AudioCapture {
             recordings_dir,
             host,
             active_recording: None,
-            vad: Some(vad),
             preprocessor: Some(preprocessor),
-            vad_enabled: true,
             noise_suppression_enabled: true,
             dictation_audio_level: Arc::new(std::sync::atomic::AtomicU32::new(0)),
             dictation_callback_count: Arc::new(AtomicU64::new(0)),
@@ -1591,40 +1583,6 @@ impl AudioCapture {
             .lock()
             .ok()
             .map(|buffer| buffer.clone())
-    }
-
-    /// Enable or disable VAD for auto-stop on silence
-    pub fn set_vad_enabled(&mut self, enabled: bool) {
-        self.vad_enabled = enabled;
-        if enabled && self.vad.is_none() {
-            self.vad = Some(VoiceActivityDetector::new(VadConfig::default()));
-        }
-        tracing::info!(
-            "VAD auto-stop {}",
-            if enabled { "enabled" } else { "disabled" }
-        );
-    }
-
-    /// Enable or disable noise suppression
-    pub fn set_noise_suppression_enabled(&mut self, enabled: bool) {
-        self.noise_suppression_enabled = enabled;
-        if enabled && self.preprocessor.is_none() {
-            self.preprocessor = Some(AudioPreprocessor::new(16000));
-        }
-        tracing::info!(
-            "Noise suppression {}",
-            if enabled { "enabled" } else { "disabled" }
-        );
-    }
-
-    /// Get VAD status
-    pub fn is_vad_enabled(&self) -> bool {
-        self.vad_enabled
-    }
-
-    /// Get noise suppression status
-    pub fn is_noise_suppression_enabled(&self) -> bool {
-        self.noise_suppression_enabled
     }
 
     pub fn is_dictating(&self) -> bool {

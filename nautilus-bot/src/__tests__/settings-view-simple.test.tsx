@@ -27,6 +27,7 @@ const baseSettings = {
     silenceSkipEnabled: false,
     memorySearchMode: "fts" as const,
     embeddingModel: "nomic-embed-text",
+    enableAutoAnalysis: true,
   },
   ui: {
     alwaysOnTop: false,
@@ -150,6 +151,8 @@ vi.mock("@/lib/backend", () => ({
     vaultUnlocked: false,
     databaseEncrypted: false,
     recordingsEncrypted: false,
+    recordingsEncryptedCount: 0,
+    recordingsStoredCount: 0,
     llmProvider: "ollama",
     remoteProcessingEnabled: false,
     exportRoot: null,
@@ -321,11 +324,10 @@ describe("SettingsView performance behavior", () => {
     expect(screen.queryByText("Voice activity detection")).not.toBeInTheDocument();
   });
 
-  it("derives the Security tab's encrypted-recordings status from vault state, not from a settings save", async () => {
+  it("reports how many recordings are encrypted rather than claiming all of them are", async () => {
     const backend = await import("@/lib/backend");
-    // Vault-initialized in both the loaded settings and the fetched security
-    // status, matching the backend invariant that recordings_encrypted ==
-    // privacy.vault_initialized (lib.rs get_security_status).
+    // A vault was migrated at some point, but capture writes plain WAVs, so
+    // the two recordings made since are not encrypted.
     vi.mocked(backend.getSettings).mockResolvedValue({
       ...baseSettings,
       privacy: { ...baseSettings.privacy, vaultInitialized: true },
@@ -334,7 +336,9 @@ describe("SettingsView performance behavior", () => {
       vaultInitialized: true,
       vaultUnlocked: true,
       databaseEncrypted: true,
-      recordingsEncrypted: true,
+      recordingsEncrypted: false,
+      recordingsEncryptedCount: 4,
+      recordingsStoredCount: 6,
       llmProvider: "ollama",
       remoteProcessingEnabled: false,
       exportRoot: null,
@@ -344,7 +348,38 @@ describe("SettingsView performance behavior", () => {
 
     await screen.findByText("Tune transcription, AI, privacy, storage, and app behavior");
     fireEvent.click(screen.getByText("Privacy & Security"));
-    await screen.findByText("Encrypted");
+
+    expect(await screen.findByText("4 of 6 encrypted")).toBeInTheDocument();
+    expect(
+      screen.getByText(/still plaintext/i)
+    ).toBeInTheDocument();
+    // The bare claim the bytes on disk contradict.
+    expect(screen.queryByText("Encrypted")).not.toBeInTheDocument();
+  });
+
+  it("keeps the encrypted-recordings counts across an unrelated settings save", async () => {
+    const backend = await import("@/lib/backend");
+    vi.mocked(backend.getSettings).mockResolvedValue({
+      ...baseSettings,
+      privacy: { ...baseSettings.privacy, vaultInitialized: true },
+    } as unknown as Awaited<ReturnType<typeof backend.getSettings>>);
+    vi.mocked(backend.getSecurityStatus).mockResolvedValue({
+      vaultInitialized: true,
+      vaultUnlocked: true,
+      databaseEncrypted: true,
+      recordingsEncrypted: true,
+      recordingsEncryptedCount: 6,
+      recordingsStoredCount: 6,
+      llmProvider: "ollama",
+      remoteProcessingEnabled: false,
+      exportRoot: null,
+    });
+
+    render(<ToastProvider><SettingsView /></ToastProvider>);
+
+    await screen.findByText("Tune transcription, AI, privacy, storage, and app behavior");
+    fireEvent.click(screen.getByText("Privacy & Security"));
+    await screen.findByText("6 of 6 encrypted");
 
     // Toggling an unrelated setting on the same page triggers the debounced
     // whole-object save; the encrypted-status readout must not flip to
@@ -362,8 +397,7 @@ describe("SettingsView performance behavior", () => {
       expect(backend.saveSettings).toHaveBeenCalled();
     });
 
-    expect(screen.getByText("Encrypted")).toBeInTheDocument();
-    expect(screen.queryByText("Not encrypted")).not.toBeInTheDocument();
+    expect(screen.getByText("6 of 6 encrypted")).toBeInTheDocument();
   });
 
   it("debounces rapid settings changes into a single save", async () => {
@@ -744,6 +778,45 @@ describe("SettingsView performance behavior", () => {
     for (const [savedSettings] of vi.mocked(backend.saveSettings).mock.calls) {
       expect(savedSettings.privacy.llmProvider).toBe("ollama");
     }
+  });
+
+  it("discloses automatic meeting analysis and lets it be turned off", async () => {
+    const backend = await import("@/lib/backend");
+    vi.mocked(backend.getSettings).mockResolvedValue({
+      ...baseSettings,
+      privacy: {
+        ...baseSettings.privacy,
+        remoteProcessingEnabled: true,
+        llmProvider: "anthropic",
+      },
+    } as unknown as Awaited<ReturnType<typeof backend.getSettings>>);
+
+    render(
+      <ToastProvider>
+        <SettingsView />
+      </ToastProvider>,
+    );
+
+    await screen.findByText("Tune transcription, AI, privacy, storage, and app behavior");
+    fireEvent.click(screen.getByText("AI & Keys"));
+
+    // On by default, so it has to name the destination rather than sit
+    // undisclosed in the settings schema.
+    const row = (
+      await screen.findByText("Summarize every meeting automatically")
+    ).closest(".flex.items-start.justify-between");
+    expect(row).not.toBeNull();
+    expect(row?.textContent).toContain("Anthropic");
+    expect(row?.textContent).toContain("without asking");
+
+    fireEvent.click(within(row as HTMLElement).getByRole("switch"));
+
+    await waitFor(() => {
+      expect(backend.saveSettings).toHaveBeenCalled();
+    });
+    const saveCalls = vi.mocked(backend.saveSettings).mock.calls;
+    const lastCall = saveCalls[saveCalls.length - 1];
+    expect(lastCall?.[0]?.transcription?.enableAutoAnalysis).toBe(false);
   });
 
   it("clears the stale 'no stored key' warning as soon as a key is saved for the default analysis provider", async () => {

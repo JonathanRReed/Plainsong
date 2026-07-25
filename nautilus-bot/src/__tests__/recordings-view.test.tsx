@@ -897,6 +897,27 @@ describe("RecordingsView", () => {
     });
   });
 
+  it("states the redaction level it applies to a meeting export", async () => {
+    render(<RecordingsView />);
+
+    fireEvent.click(screen.getByText("Weekly sync"));
+    await screen.findByText("The record");
+
+    // The level is fixed at "basic" with no picker here, so the export surface
+    // has to say what the file will and will not have scrubbed.
+    const note = await screen.findByText(/basic redaction/i);
+    expect(note.textContent).toContain("email addresses and phone numbers");
+
+    fireEvent.click(await screen.findByRole("button", { name: /Export Text/ }));
+
+    await waitFor(() => {
+      expect(backend.exportRecordingV2).toHaveBeenCalledWith("r1", "text", {
+        redactionLevel: "basic",
+        preview: false,
+      });
+    });
+  });
+
   it("copies a grounded follow-up draft from the ask workspace", async () => {
     render(<RecordingsView />);
 
@@ -1613,6 +1634,148 @@ describe("RecordingsView", () => {
     // The app knows the prompt was shown; it does not know anyone was told.
     expect(await screen.findByText("Prompt shown")).toBeInTheDocument();
     expect(screen.queryByText("Consent confirmed")).not.toBeInTheDocument();
+  });
+
+  describe("the delayed preview panel", () => {
+    const streamSegment = (overrides = {}) => ({
+      recordingId: "r1",
+      isPartial: true,
+      isFinal: false,
+      text: "",
+      segmentText: "",
+      startTime: 0,
+      endTime: 5,
+      confidence: 0.9,
+      kind: "speech",
+      delayedPreview: true,
+      lagSeconds: 5,
+      ...overrides,
+    });
+
+    const startLiveMeeting = async () => {
+      recordingState = {
+        isRecording: true,
+        recordingId: "r1",
+        formattedDuration: "02:04",
+      };
+      recordings = [{ ...recordings[0], status: "recording" }] as Recording[];
+      backend.getRecording.mockResolvedValue(recordings[0]);
+      render(<RecordingsView />);
+      const handler = eventListeners.get("recording-transcription-stream");
+      expect(handler).toBeTruthy();
+      return handler;
+    };
+
+    it("keeps every segment as its own timestamped line", async () => {
+      const handler = await startLiveMeeting();
+
+      // Each event carries the running transcript in `text` and only the new
+      // words in `segmentText`. Rendering `text` per line would stamp the whole
+      // meeting with the newest segment's start time.
+      await act(async () => {
+        handler?.({
+          payload: streamSegment({
+            segmentText: "we should ship the parity push",
+            text: "we should ship the parity push",
+            startTime: 0,
+          }),
+        });
+        handler?.({
+          payload: streamSegment({
+            segmentText: "before Friday",
+            text: "we should ship the parity push before Friday",
+            startTime: 10,
+          }),
+        });
+        handler?.({
+          payload: streamSegment({
+            segmentText: "and tell the team",
+            text: "we should ship the parity push before Friday and tell the team",
+            startTime: 20,
+          }),
+        });
+      });
+
+      await waitFor(() => {
+        expect(
+          screen.getAllByText("we should ship the parity push").length
+        ).toBeGreaterThan(0);
+      });
+      expect(screen.getAllByText("before Friday").length).toBeGreaterThan(0);
+      expect(screen.getAllByText("and tell the team").length).toBeGreaterThan(0);
+      expect(screen.getAllByText("0:20").length).toBeGreaterThan(0);
+    });
+
+    it("calls the panel a delayed preview and says how far behind it runs", async () => {
+      const handler = await startLiveMeeting();
+
+      await act(async () => {
+        handler?.({
+          payload: streamSegment({
+            segmentText: "opening remarks",
+            text: "opening remarks",
+            lagSeconds: 8,
+          }),
+        });
+      });
+
+      await waitFor(() => {
+        expect(screen.getAllByText("Delayed preview").length).toBeGreaterThan(0);
+      });
+      expect(
+        screen.getAllByText(/8s behind the speaker/).length
+      ).toBeGreaterThan(0);
+      expect(screen.queryByText("Live transcript")).not.toBeInTheDocument();
+    });
+
+    it("renders a lost span as missing audio rather than as transcript", async () => {
+      const handler = await startLiveMeeting();
+
+      await act(async () => {
+        handler?.({
+          payload: streamSegment({
+            kind: "gap",
+            segmentText: "[12s not transcribed: the live preview fell behind]",
+            text: "[12s not transcribed: the live preview fell behind]",
+            startTime: 60,
+            endTime: 72,
+          }),
+        });
+      });
+
+      await waitFor(() => {
+        expect(
+          screen.getAllByText("12s of audio was overwritten before it could be read")
+            .length
+        ).toBeGreaterThan(0);
+      });
+      expect(
+        screen.queryByText("[12s not transcribed: the live preview fell behind]")
+      ).not.toBeInTheDocument();
+    });
+
+    it("warns during the meeting when a capture source goes silent", async () => {
+      await startLiveMeeting();
+
+      const handler = eventListeners.get("meeting-audio-source-warning");
+      expect(handler).toBeTruthy();
+
+      await act(async () => {
+        handler?.({
+          payload: {
+            recordingId: "r1",
+            source: "system",
+            reason: "silence",
+            silentSeconds: 45,
+          },
+        });
+      });
+
+      await waitFor(() => {
+        expect(screen.getByText("System audio has gone silent")).toBeInTheDocument();
+      });
+      expect(screen.getByText(/for 45s/)).toBeInTheDocument();
+    });
   });
 
   it("shows citation-backed provenance for a generated recap and jumps to the source", async () => {
