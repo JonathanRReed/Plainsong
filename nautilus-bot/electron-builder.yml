@@ -2,6 +2,21 @@ appId: com.plainsong.app
 productName: Plainsong
 copyright: Copyright © 2026 Jonathan Reed
 
+# Electron ships these fuses permissive by default, which would make a notarized
+# Plainsong a reusable gadget: `ELECTRON_RUN_AS_NODE=1` on the signed binary runs
+# arbitrary Node under our Developer ID, which carries device.microphone,
+# personal-information.speech-recognition, automation.apple-events and
+# disable-library-validation — plus the Accessibility grant the app holds so it
+# can inject keystrokes into every application. Notarization cannot be retracted
+# by shipping a later version, so this has to be right before the first ticket.
+electronFuses:
+  runAsNode: false
+  enableNodeOptionsEnvironmentVariable: false
+  enableNodeCliInspectArguments: false
+  enableEmbeddedAsarIntegrityValidation: true
+  onlyLoadAppFromAsar: true
+  grantFileProtocolExtraPrivileges: false
+
 directories:
   output: release
   buildResources: build-resources
@@ -71,7 +86,11 @@ nsis:
   artifactName: ${productName}-Setup-${version}.${ext}
 
 dmg:
-  sign: false
+  # The DMG is the primary download. electron-builder notarizes the .app only,
+  # so leaving this false shipped an unsigned, unstapled disk image
+  # (`spctl -a -t open` -> "rejected / source=no usable signature") while the
+  # release trust gate, which looked only at the .app, still reported green.
+  sign: true
 
 publish:
   provider: github

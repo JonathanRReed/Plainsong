@@ -460,6 +460,12 @@ function describeMeetingAssetRetention(recording: Recording | null): {
   audioLabel: string;
   detail: string;
   deleteWarning: string;
+  /**
+   * What the reader can actually do after cutting transcript text. Only claimed
+   * when the audio really is still attached — with no audio there is no way
+   * back, and saying otherwise would be a promise the app cannot keep.
+   */
+  transcriptRecoveryNote?: string;
 } {
   if (recording?.audioPath) {
     return {
@@ -468,6 +474,8 @@ function describeMeetingAssetRetention(recording: Recording | null): {
         "Audio is available for playback. Transcript, notes, summary, and action items remain attached to this meeting.",
       deleteWarning:
         "This permanently removes the meeting, transcript, notes, summary, action items, and saved audio file.",
+      transcriptRecoveryNote:
+        "The audio for this meeting is still saved, so “Re-transcribe from audio” in the meeting menu can produce the whole transcript again.",
     };
   }
 
@@ -478,6 +486,19 @@ function describeMeetingAssetRetention(recording: Recording | null): {
     deleteWarning:
       "This permanently removes the meeting, transcript, notes, summary, and action items. No saved audio file is attached.",
   };
+}
+
+/**
+ * Re-transcribing is the only way back from a transcript edit or deletion that
+ * went too far, so it is offered for any meeting whose audio is still on disk —
+ * not only for the ones that failed. The sidecar refuses while a pipeline is
+ * running, so those states are not offered here either.
+ */
+function canRetranscribeRecording(recording: Recording | null): boolean {
+  if (!recording?.audioPath) {
+    return false;
+  }
+  return recording.status !== "recording" && recording.status !== "processing";
 }
 
 function qualityToneClasses(tone: "good" | "warn" | "muted"): string {
@@ -876,6 +897,9 @@ export function RecordingsView() {
   const [diarizationMessage, setDiarizationMessage] = useState<string | null>(null);
   const [diarizationError, setDiarizationError] = useState<string | null>(null);
   const [showDeleteConfirm, setShowDeleteConfirm] = useState<Recording | null>(null);
+  // Re-transcribing a meeting that already has a transcript overwrites it, so a
+  // meeting that is not simply broken parks here until the reader agrees.
+  const [pendingRetranscribe, setPendingRetranscribe] = useState<Recording | null>(null);
   const [showRenameDialog, setShowRenameDialog] = useState<Recording | null>(null);
   const [renameValue, setRenameValue] = useState("");
   const [isStopping, setIsStopping] = useState(false);
@@ -2889,6 +2913,19 @@ export function RecordingsView() {
     }
   };
 
+  /**
+   * A failed meeting has no transcript to lose, so retrying is immediate. Any
+   * other meeting already has words on the page — possibly corrected by hand —
+   * and gets asked first.
+   */
+  const requestRetranscribeRecording = (recording: Recording) => {
+    if (recording.status === "error") {
+      void handleRetranscribeRecording(recording.id);
+      return;
+    }
+    setPendingRetranscribe(recording);
+  };
+
   const handleMarkAsDictation = async (recordingIdToUpdate: string) => {
     try {
       await setRecordingSourceType(recordingIdToUpdate, "dictation");
@@ -3050,16 +3087,18 @@ export function RecordingsView() {
                       <FileText className="mr-2 h-4 w-4" />
                       Export Markdown (basic redaction)
                     </DropdownMenuItem>
-                    {selectedRecording?.status === "error" && (
+                    {canRetranscribeRecording(selectedRecording) && !isLiveSelectedMeeting && (
                       <DropdownMenuItem
                         onClick={() => {
                           if (selectedRecording) {
-                            void handleRetranscribeRecording(selectedRecording.id);
+                            requestRetranscribeRecording(selectedRecording);
                           }
                         }}
                       >
                         <RefreshCw className="mr-2 h-4 w-4" />
-                        Retry Transcription
+                        {selectedRecording?.status === "error"
+                          ? "Retry Transcription"
+                          : "Re-transcribe from audio"}
                       </DropdownMenuItem>
                     )}
                     <DropdownMenuSeparator />
@@ -4436,6 +4475,10 @@ export function RecordingsView() {
                         }
                       }}
                       onDeleteSegments={handleDeleteTranscriptSegments}
+                      // Only promised when the audio is actually still attached.
+                      deleteRecoveryNote={
+                        selectedMeetingAssetRetention.transcriptRecoveryNote
+                      }
                     />
                   </div>
                 </div>
@@ -4526,7 +4569,21 @@ export function RecordingsView() {
                           )}
                           Refresh transcript
                         </Button>
-
+                        {/* This is also where a reader lands after deleting the
+                            last turn, so the way back is offered right here. */}
+                        {canRetranscribeRecording(selectedRecording) && !isLiveSelectedMeeting && (
+                          <Button
+                            type="button"
+                            size="sm"
+                            variant="outline"
+                            onClick={() =>
+                              selectedRecording && requestRetranscribeRecording(selectedRecording)
+                            }
+                          >
+                            <RefreshCw className="mr-2 h-4 w-4" />
+                            Re-transcribe from audio
+                          </Button>
+                        )}
                       </div>
                     </div>
                   )}
@@ -5035,15 +5092,17 @@ export function RecordingsView() {
                               <FileOutput className="h-4 w-4 mr-2" />
                               View Details
                             </DropdownMenuItem>
-                            {recording.status === "error" && (
+                            {canRetranscribeRecording(recording) && !isLiveRow && (
                               <DropdownMenuItem
-                                onClick={async (e) => {
+                                onClick={(e) => {
                                   e.stopPropagation();
-                                  await handleRetranscribeRecording(recording.id);
+                                  requestRetranscribeRecording(recording);
                                 }}
                               >
                                 <RefreshCw className="h-4 w-4 mr-2" />
-                                Retry Transcription
+                                {recording.status === "error"
+                                  ? "Retry Transcription"
+                                  : "Re-transcribe from audio"}
                               </DropdownMenuItem>
                             )}
                             <DropdownMenuSeparator />
@@ -5120,6 +5179,47 @@ export function RecordingsView() {
             >
               <RefreshCw className="mr-2 h-4 w-4" />
               Replace and regenerate
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      {/* Re-transcribing is the way back from a transcript edit or deletion,
+          but it reads the audio again and overwrites the whole transcript —
+          including corrections made by hand. Asked before, never after. */}
+      <Dialog
+        open={pendingRetranscribe !== null}
+        onOpenChange={(open) => {
+          if (!open) setPendingRetranscribe(null);
+        }}
+      >
+        <DialogContent>
+          <DialogHeader>
+            <DialogTitle>Re-transcribe from the saved audio?</DialogTitle>
+            <DialogDescription>
+              Plainsong reads the audio for &ldquo;{pendingRetranscribe?.title}&rdquo; again and
+              replaces the whole transcript. Speaker turns you edited, renamed, or removed are
+              replaced by what the transcriber hears this time. Your notes stay as they are; if
+              auto-analysis is on, the summary and action items are written again from the new
+              transcript.
+            </DialogDescription>
+          </DialogHeader>
+          <DialogFooter>
+            <Button variant="outline" onClick={() => setPendingRetranscribe(null)}>
+              Keep this transcript
+            </Button>
+            <Button
+              variant="destructive"
+              onClick={() => {
+                const target = pendingRetranscribe;
+                setPendingRetranscribe(null);
+                if (target) {
+                  void handleRetranscribeRecording(target.id);
+                }
+              }}
+            >
+              <RefreshCw className="h-4 w-4 mr-2" />
+              Replace and re-transcribe
             </Button>
           </DialogFooter>
         </DialogContent>

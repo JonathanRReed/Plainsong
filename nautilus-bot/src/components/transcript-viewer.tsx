@@ -3,6 +3,14 @@ import { cn } from "@/lib/utils";
 import { formatTimeWithMs } from "@/lib/format-time";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { Button } from "@/components/ui/button";
+import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle,
+} from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
 import { Edit2, Check, ChevronDown, ChevronUp, Trash2, User, X } from "lucide-react";
 import type { TranscriptSegment } from "@/types";
@@ -47,7 +55,25 @@ interface TranscriptViewerProps {
    * the caller, otherwise their old text would survive and duplicate.
    */
   onEditSegment?: (segmentIds: string[], newText: string) => Promise<void> | void;
+  /**
+   * Remove a whole speaker turn. Always asked about first — the viewer will not
+   * call this until the reader has confirmed the named turn in the dialog.
+   */
   onDeleteSegments?: (segmentIds: string[]) => Promise<void> | void;
+  /**
+   * One sentence the caller can prove about getting the words back (e.g. the
+   * audio is still on disk and the meeting can be re-transcribed). Shown in the
+   * delete confirmation. Omitted when the caller cannot promise a way back.
+   */
+  deleteRecoveryNote?: string;
+}
+
+/** Word count for a turn, counted the same way the info strip counts them. */
+function countWords(segments: TranscriptSegment[]): number {
+  return segments.reduce(
+    (total, segment) => total + segment.text.trim().split(/\s+/).filter(Boolean).length,
+    0
+  );
 }
 
 interface SpeakerBadgeProps {
@@ -186,12 +212,22 @@ export function TranscriptViewer({
   onRenameSpeaker,
   onEditSegment,
   onDeleteSegments,
+  deleteRecoveryNote,
 }: TranscriptViewerProps) {
   const [speakerNames, setSpeakerNames] = useState<Record<string, string>>({});
   const [isEditingSpeakers, setIsEditingSpeakers] = useState(false);
   const [editingSegmentId, setEditingSegmentId] = useState<string | null>(null);
   const [editingText, setEditingText] = useState("");
   const [isSavingSegmentEdit, setIsSavingSegmentEdit] = useState(false);
+  // A delete request parks here until the reader confirms it. The unit removed
+  // is a whole speaker turn, which on a single-source recording can be most of
+  // the transcript — so the turn is named and counted before anything is cut,
+  // and nothing is written until the reader says so.
+  const [pendingDelete, setPendingDelete] = useState<{
+    segments: TranscriptSegment[];
+    speakerLabel: string;
+  } | null>(null);
+  const [isDeletingSegments, setIsDeletingSegments] = useState(false);
   // Session-scoped ribbon: the last segment the reader played/opened, by id.
   // State only — no persistence backend (honest about what we keep).
   const [lastReadSegmentId, setLastReadSegmentId] = useState<string | null>(null);
@@ -218,10 +254,7 @@ export function TranscriptViewer({
 
   // Info-strip figures, all defensible from the actual transcript data.
   const stats = useMemo(() => {
-    const wordCount = segments.reduce(
-      (total, segment) => total + segment.text.trim().split(/\s+/).filter(Boolean).length,
-      0
-    );
+    const wordCount = countWords(segments);
     const lastEnd = segments.length > 0 ? segments[segments.length - 1].endTime : 0;
     const firstStart = segments.length > 0 ? segments[0].startTime : 0;
     const spanSeconds = Math.max(0, lastEnd - firstStart);
@@ -268,6 +301,40 @@ export function TranscriptViewer({
       setIsSavingSegmentEdit(false);
     }
   };
+
+  // Only fires after the reader has confirmed the named turn. If the caller
+  // rejects, the dialog is left open with the turn still quoted in it rather
+  // than closing on a write that did not happen.
+  const confirmDeleteSegments = async () => {
+    if (!onDeleteSegments || !pendingDelete || isDeletingSegments) return;
+    setIsDeletingSegments(true);
+    try {
+      await onDeleteSegments(pendingDelete.segments.map((segment) => segment.id));
+      setPendingDelete(null);
+    } catch (error) {
+      console.error("Failed to delete transcript segments:", error);
+    } finally {
+      setIsDeletingSegments(false);
+    }
+  };
+
+  // What the reader is about to lose, named in full: how many lines, how many
+  // words, whose turn, and where it starts.
+  const pendingDeleteSummary = useMemo(() => {
+    if (!pendingDelete) return null;
+    const lineCount = pendingDelete.segments.length;
+    const wordCount = countWords(pendingDelete.segments);
+    return {
+      lineCount,
+      wordCount,
+      sentence:
+        `Removes ${lineCount} transcript ${lineCount === 1 ? "line" : "lines"} ` +
+        `(${wordCount} ${wordCount === 1 ? "word" : "words"}) from one speaker turn by ` +
+        `${pendingDelete.speakerLabel}, starting at ${formatTimeWithMs(pendingDelete.segments[0].startTime)}. ` +
+        `The words are cut from the record and this cannot be undone here.`,
+      preview: pendingDelete.segments.map((segment) => segment.text).join(" "),
+    };
+  }, [pendingDelete]);
 
   // Group segments by speaker for better readability
   // When no speaker IDs exist, create groups based on pauses (>2s gap = new speaker)
@@ -649,30 +716,38 @@ export function TranscriptViewer({
                             );
                           })}
                         </p>
+                        {/* Both controls are 24×24 (WCAG 2.5.8) and sit a full
+                            12px apart: they used to be ~16px targets 4px from
+                            each other, and the copy above the transcript sends
+                            people to this exact corner for Edit. */}
                         {onEditSegment && (
-                          <div className="absolute top-0 right-0 flex items-center gap-1 opacity-0 group-hover/text:opacity-100 focus-within:opacity-100 transition-opacity">
+                          <div className="absolute top-0 right-0 flex items-center gap-3 opacity-0 group-hover/text:opacity-100 focus-within:opacity-100 transition-opacity">
                             <button
                               type="button"
                               aria-label="Edit segment"
-                              className="p-0.5 rounded hover:bg-muted focus-visible:opacity-100 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+                              className="inline-flex h-6 w-6 items-center justify-center rounded hover:bg-muted focus-visible:opacity-100 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
                               onClick={(e) => {
                                 e.stopPropagation();
                                 beginEditingGroup(group);
                               }}
                             >
-                              <Edit2 className="h-3 w-3 text-muted-foreground" />
+                              <Edit2 className="h-3.5 w-3.5 text-muted-foreground" />
                             </button>
                             {onDeleteSegments && (
                               <button
                                 type="button"
-                                aria-label="Delete segment lines"
-                                className="p-0.5 rounded hover:bg-destructive/10 focus-visible:opacity-100 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+                                aria-label="Delete this speaker turn"
+                                className="inline-flex h-6 w-6 items-center justify-center rounded hover:bg-destructive/10 focus-visible:opacity-100 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
                                 onClick={(e) => {
                                   e.stopPropagation();
-                                  void onDeleteSegments(group.map((segment) => segment.id));
+                                  setPendingDelete({
+                                    segments: group,
+                                    speakerLabel:
+                                      speakerName || defaultSpeakerLabel(speakerId),
+                                  });
                                 }}
                               >
-                                <Trash2 className="h-3 w-3 text-destructive" />
+                                <Trash2 className="h-3.5 w-3.5 text-destructive" />
                               </button>
                             )}
                           </div>
@@ -692,6 +767,53 @@ export function TranscriptViewer({
           )}
         </div>
       </ScrollArea>
+
+      {/* Deleting a turn is permanent and the record keeps no snapshot, so the
+          question is asked once, with the turn named and quoted back. */}
+      <Dialog
+        open={pendingDelete !== null}
+        onOpenChange={(open) => {
+          if (!open && !isDeletingSegments) setPendingDelete(null);
+        }}
+      >
+        <DialogContent>
+          <DialogHeader>
+            <DialogTitle>Cut this speaker turn from the transcript?</DialogTitle>
+            <DialogDescription>
+              {pendingDeleteSummary?.sentence}
+              {deleteRecoveryNote ? ` ${deleteRecoveryNote}` : ""}
+            </DialogDescription>
+          </DialogHeader>
+          {pendingDeleteSummary && (
+            <p className="manuscript max-h-40 overflow-y-auto rounded-md border border-border bg-muted/30 p-3 text-sm leading-relaxed">
+              {pendingDeleteSummary.preview}
+            </p>
+          )}
+          <DialogFooter>
+            <Button
+              variant="outline"
+              disabled={isDeletingSegments}
+              onClick={() => setPendingDelete(null)}
+            >
+              Keep this turn
+            </Button>
+            <Button
+              variant="destructive"
+              disabled={isDeletingSegments}
+              onClick={() => {
+                void confirmDeleteSegments();
+              }}
+            >
+              <Trash2 className="h-4 w-4 mr-2" />
+              {isDeletingSegments
+                ? "Removing…"
+                : `Delete ${pendingDeleteSummary?.lineCount ?? 0} ${
+                    pendingDeleteSummary?.lineCount === 1 ? "line" : "lines"
+                  }`}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
     </div>
   );
 }

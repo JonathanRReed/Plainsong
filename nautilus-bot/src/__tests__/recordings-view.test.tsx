@@ -504,14 +504,86 @@ describe("RecordingsView", () => {
     });
   });
 
-  it("does not offer retry-transcription for a completed meeting", async () => {
+  it("offers a completed meeting a way back from its audio, and asks before replacing the transcript", async () => {
+    // Deleting transcript text is permanent and keeps no snapshot, so the only
+    // recovery is re-deriving it from the audio. Gating that on status ===
+    // "error" meant a completed meeting could never be re-derived at all.
+    backend.retranscribeRecording.mockResolvedValue(undefined);
+
+    render(<RecordingsView />);
+
+    fireEvent.pointerDown(screen.getByRole("button", { name: "Recording options" }), {
+      button: 0,
+    });
+    fireEvent.click(await screen.findByRole("menuitem", { name: "Re-transcribe from audio" }));
+
+    // It overwrites hand-corrected turns, so it is asked about first.
+    const dialog = await screen.findByRole("dialog");
+    expect(dialog).toHaveTextContent("Re-transcribe from the saved audio?");
+    expect(dialog).toHaveTextContent("Weekly sync");
+    expect(dialog).toHaveTextContent(/replaces the whole transcript/i);
+    expect(backend.retranscribeRecording).not.toHaveBeenCalled();
+
+    fireEvent.click(screen.getByRole("button", { name: "Replace and re-transcribe" }));
+
+    await waitFor(() => {
+      expect(backend.retranscribeRecording).toHaveBeenCalledWith("r1");
+    });
+  });
+
+  it("keeps the transcript when the re-transcribe confirmation is declined", async () => {
+    render(<RecordingsView />);
+
+    fireEvent.pointerDown(screen.getByRole("button", { name: "Recording options" }), {
+      button: 0,
+    });
+    fireEvent.click(await screen.findByRole("menuitem", { name: "Re-transcribe from audio" }));
+    fireEvent.click(await screen.findByRole("button", { name: "Keep this transcript" }));
+
+    await waitFor(() => {
+      expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
+    });
+    expect(backend.retranscribeRecording).not.toHaveBeenCalled();
+  });
+
+  it("does not offer re-transcription when there is no audio left to re-derive from", async () => {
+    recordings[0] = { ...recordings[0], audioPath: undefined } as Recording;
+
     render(<RecordingsView />);
 
     fireEvent.pointerDown(screen.getByRole("button", { name: "Recording options" }), {
       button: 0,
     });
     await screen.findByRole("menuitem", { name: "Rename" });
+    expect(
+      screen.queryByRole("menuitem", { name: "Re-transcribe from audio" })
+    ).not.toBeInTheDocument();
     expect(screen.queryByRole("menuitem", { name: "Retry Transcription" })).not.toBeInTheDocument();
+  });
+
+  it("only promises the transcript can be re-derived when the audio is still attached", async () => {
+    const { unmount } = render(<RecordingsView />);
+
+    fireEvent.click(screen.getByText("Weekly sync"));
+    await waitFor(() => {
+      expect(transcriptViewerProps.current?.deleteRecoveryNote).toMatch(
+        /Re-transcribe from audio/
+      );
+    });
+    unmount();
+
+    // With no audio on disk there is no way back, and the delete confirmation
+    // must not claim one.
+    transcriptViewerProps.current = null;
+    recordings[0] = { ...recordings[0], audioPath: undefined } as Recording;
+    backend.getRecording.mockResolvedValue({ ...recordings[0] });
+
+    render(<RecordingsView />);
+    fireEvent.click(screen.getByText("Weekly sync"));
+    await waitFor(() => {
+      expect(transcriptViewerProps.current).not.toBeNull();
+    });
+    expect(transcriptViewerProps.current?.deleteRecoveryNote).toBeUndefined();
   });
 
   it("persists edited summary and action item blocks from the notes tab", async () => {

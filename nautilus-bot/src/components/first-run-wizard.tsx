@@ -243,6 +243,18 @@ export function FirstRunWizard({ mode = "full", onComplete }: Props) {
   const dialogRef = useRef<HTMLDivElement | null>(null);
   const titleId = useId();
 
+  // The model download can run for minutes, and the wizard unmounts the moment
+  // onboarding completes. Anything that resumes after an `await` has to check
+  // this before writing settings or state, or a late completion clobbers
+  // whatever the user changed in the meantime.
+  const mountedRef = useRef(true);
+  useEffect(() => {
+    mountedRef.current = true;
+    return () => {
+      mountedRef.current = false;
+    };
+  }, []);
+
   useEffect(() => {
     const previouslyFocused = document.activeElement as HTMLElement | null;
     const node = dialogRef.current;
@@ -578,16 +590,35 @@ export function FirstRunWizard({ mode = "full", onComplete }: Props) {
     setDownloadPercent(0);
     downloadingProviderTypeRef.current = option.providerType;
     try {
-      const settings = await getSettings();
       await downloadAsrModels(option.providerType);
+      if (!mountedRef.current) {
+        return;
+      }
+      // Read settings *after* the download, never before it. save_settings is
+      // a whole-struct replace, so a snapshot taken before a multi-minute
+      // fetch would roll back everything written while it ran -- the hotkey
+      // this wizard just taught the user, the auto-request-permissions
+      // toggle, the meeting storage/retention answers, the repaired meeting
+      // route. Only the ASR fields this step actually owns are mutated on the
+      // fresh copy.
+      const settings = await getSettings();
+      if (!mountedRef.current) {
+        return;
+      }
       settings.transcription.useSharedAsrSelection = false;
       settings.transcription.defaultProvider = option.providerType;
       settings.transcription.selectedModelId = option.id;
       settings.transcription.dictationProvider = option.providerType;
       settings.transcription.dictationModelId = option.id;
       await saveSettings(settings);
+      if (!mountedRef.current) {
+        return;
+      }
       setModelState("done");
     } catch (error) {
+      if (!mountedRef.current) {
+        return;
+      }
       setModelState("error");
       setModelError(error instanceof Error ? error.message : String(error));
     } finally {
@@ -595,11 +626,13 @@ export function FirstRunWizard({ mode = "full", onComplete }: Props) {
     }
   }, []);
 
-  // Skipping this step (Continue or "Skip for now" without ever downloading)
-  // would otherwise leave the persisted default route (whisper/base.en)
-  // permanently un-fetched, since nothing else in the app auto-downloads it.
-  // Kick off the fast default in the background so dictation has something
-  // ready even for users who skip past this step entirely.
+  // Leaving the model step un-downloaded -- by Continue, by "Skip for now", or
+  // by closing the wizard before ever reaching it -- would otherwise leave the
+  // persisted default route (whisper/base.en) permanently un-fetched, since
+  // nothing else in the app auto-downloads it. Kick off the fast default in the
+  // background so dictation has something ready. Called both when advancing
+  // past this step and from completeWizard on every exit that marks onboarding
+  // complete, so no exit path can close the door on an empty model cache.
   //
   // But only do this when the user doesn't already have a different,
   // previously-configured dictation route (e.g. parakeet, distil_whisper,
@@ -699,12 +732,24 @@ export function FirstRunWizard({ mode = "full", onComplete }: Props) {
 
   const completeWizard = useCallback(
     (result?: { markOnboardingComplete?: boolean; meetingsCompleted?: boolean }) => {
+      const markOnboardingComplete = result?.markOnboardingComplete ?? mode === "full";
+      // Marking onboarding complete permanently gates this wizard (App.tsx
+      // never reopens it once the flag is set), and the model step is the only
+      // place in the app that ever auto-downloads a dictation model. Leaving
+      // via "Skip for now" on the permissions step -- or "Close" on the
+      // welcome screen -- used to set the flag without ever passing the model
+      // step, so nothing was downloaded, dictation could never start, and the
+      // hotkey failed silently forever. Every exit that closes the door has to
+      // kick off the fast default first.
+      if (markOnboardingComplete) {
+        ensureDefaultModelDownloading();
+      }
       onComplete({
-        markOnboardingComplete: result?.markOnboardingComplete ?? mode === "full",
+        markOnboardingComplete,
         meetingsCompleted: result?.meetingsCompleted ?? false,
       });
     },
-    [mode, onComplete]
+    [ensureDefaultModelDownloading, mode, onComplete]
   );
 
   const nextStep = async () => {
@@ -897,12 +942,9 @@ export function FirstRunWizard({ mode = "full", onComplete }: Props) {
             {mode === "full" && step !== "welcome" ? (
               <Button
                 variant="ghost"
-                onClick={() => {
-                  if (step === "dictation-model") {
-                    ensureDefaultModelDownloading();
-                  }
-                  completeWizard({ markOnboardingComplete: true, meetingsCompleted: false });
-                }}
+                onClick={() =>
+                  completeWizard({ markOnboardingComplete: true, meetingsCompleted: false })
+                }
                 className="text-muted-foreground"
               >
                 Skip for now

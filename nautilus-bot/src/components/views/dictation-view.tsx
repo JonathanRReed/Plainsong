@@ -38,7 +38,9 @@ import {
   reprocessDictationText,
 } from "@/lib/backend/dictation";
 import { deleteRecording, getTranscript } from "@/lib/backend/recordings";
+import { downloadAsrModels, getAsrProviders } from "@/lib/backend/asr";
 import { getSettings, saveSettings } from "@/lib/backend/settings";
+import { normalizeDownloadStatus } from "@/lib/download-status";
 import {
   defaultDictationShortcut,
   dictationInstruction,
@@ -46,6 +48,7 @@ import {
   matchesShortcut,
 } from "@/lib/shortcuts";
 import {
+  isDownloadableProvider,
   providerHostingPreference,
   type DictationRoutePreference,
 } from "@/lib/asr-capabilities";
@@ -125,6 +128,7 @@ import {
 } from "@/lib/selected-text-actions";
 
 import type {
+  AsrProviderInfo,
   AsrProviderType,
   Recording,
   Transcript,
@@ -133,6 +137,7 @@ import type {
   DictationAppCategoryKey,
   DictationAppCategoryOverride,
   DictationCustomMode,
+  Settings,
 } from "@/types/settings";
 import {
   useDictationRuntime,
@@ -187,6 +192,71 @@ type DictationRecoveryState = {
   detail: string;
   hints: string[];
 };
+
+type DictationRouteReadiness = {
+  status: "missing" | "downloading";
+  providerType: AsrProviderType;
+  providerLabel: string;
+  routeLabel: string;
+};
+
+/**
+ * Reports when the route dictation would actually resolve to has no model on
+ * disk yet.
+ *
+ * This is the quietest failure in the app. `start_dictation` returns an error
+ * out of `resolve_ready_dictation_selection` before it emits a single
+ * `dictation-state-changed` event, and the hotkey owners only log — so a user
+ * who never downloaded a model presses the shortcut and gets nothing at all,
+ * with nothing anywhere saying why. A brand-new install ships no model (the
+ * packaged extraResources carry the sidecar, not weights), so this is the
+ * normal first-run state, not an exotic one.
+ */
+function resolveDictationRouteReadiness(
+  settings: Settings,
+  providers: AsrProviderInfo[],
+): DictationRouteReadiness | null {
+  const transcription = settings.transcription;
+  const useShared = transcription.useSharedAsrSelection ?? true;
+  const providerType = (
+    useShared
+      ? transcription.defaultProvider
+      : (transcription.dictationProvider ?? transcription.defaultProvider)
+  ) as AsrProviderType | undefined;
+
+  // Cloud and platform-native routes fail for other reasons (a missing API
+  // key, a missing speech grant) that other surfaces already name. "No model
+  // downloaded" is only meaningful for the local, downloadable engines.
+  if (!providerType || !isDownloadableProvider(providerType)) {
+    return null;
+  }
+
+  const provider = providers.find((item) => item.providerType === providerType);
+  if (!provider) {
+    return null;
+  }
+
+  const downloadKind = normalizeDownloadStatus(provider.downloadStatus).kind;
+  if (downloadKind === "downloaded" || downloadKind === "unknown") {
+    return null;
+  }
+
+  const modelId =
+    (useShared
+      ? transcription.selectedModelId
+      : (transcription.dictationModelId ?? transcription.selectedModelId)) ??
+    provider.selectedModelId;
+  const modelLabel =
+    provider.modelOptions.find((option) => option.id === modelId)?.label ??
+    modelId;
+
+  return {
+    status: downloadKind === "downloading" ? "downloading" : "missing",
+    providerType,
+    providerLabel: provider.name,
+    routeLabel: modelLabel ? `${provider.name} · ${modelLabel}` : provider.name,
+  };
+}
 
 type DeliveryDoctorTone = "ready" | "attention" | "warning";
 
@@ -826,6 +896,12 @@ export function DictationView() {
     string | null
   >(null);
   const [useSharedAsrSelection, setUseSharedAsrSelection] = useState(true);
+  const [dictationRouteReadiness, setDictationRouteReadiness] =
+    useState<DictationRouteReadiness | null>(null);
+  const [routeDownloadBusy, setRouteDownloadBusy] = useState(false);
+  const [routeDownloadError, setRouteDownloadError] = useState<string | null>(
+    null,
+  );
   const [currentAiProvider, setCurrentAiProvider] = useState<string | null>(
     null,
   );
@@ -1388,9 +1464,44 @@ export function DictationView() {
     }
   };
 
+  const refreshDictationRouteReadiness = async () => {
+    try {
+      const [settings, providers] = await Promise.all([
+        getSettings(),
+        getAsrProviders(),
+      ]);
+      setDictationRouteReadiness(
+        resolveDictationRouteReadiness(settings, providers),
+      );
+    } catch (error) {
+      // Keep whatever the last known answer was rather than inventing either
+      // a blocker or an all-clear from a failed probe.
+      console.warn("Failed to check the dictation route readiness:", error);
+    }
+  };
+
+  const handleDownloadDictationRouteModel = async () => {
+    if (!dictationRouteReadiness || routeDownloadBusy) {
+      return;
+    }
+    setRouteDownloadBusy(true);
+    setRouteDownloadError(null);
+    try {
+      await downloadAsrModels(dictationRouteReadiness.providerType);
+      await refreshDictationRouteReadiness();
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      setRouteDownloadError(message);
+      toast("Couldn't download the dictation model.", "error");
+    } finally {
+      setRouteDownloadBusy(false);
+    }
+  };
+
   useEffect(() => {
     let mounted = true;
     void refreshDictationInsights();
+    void refreshDictationRouteReadiness();
     void getSettings()
       .then((settings) => {
         if (!mounted) return;
@@ -2142,6 +2253,19 @@ export function DictationView() {
       if (matchesShortcut(e, hotkeyShortcut)) {
         setHotkeyPressed(true);
 
+        // A press against a route with no model is answered by nothing at
+        // all: the sidecar returns an error before it emits any dictation
+        // state, so the chip below would flash as though capture started.
+        // Say out loud what actually happened.
+        if (dictationRouteReadiness) {
+          toast(
+            dictationRouteReadiness.status === "downloading"
+              ? `${dictationRouteReadiness.routeLabel} is still downloading. Dictation starts once it finishes.`
+              : `Dictation can't start yet — ${dictationRouteReadiness.routeLabel} is not downloaded.`,
+            "error",
+          );
+        }
+
         // Clear any existing timeout
         if (timeoutRef.current) {
           clearTimeout(timeoutRef.current);
@@ -2159,7 +2283,7 @@ export function DictationView() {
         clearTimeout(timeoutRef.current);
       }
     };
-  }, [hotkeyShortcut]);
+  }, [dictationRouteReadiness, hotkeyShortcut, toast]);
 
   useEffect(() => {
     if (!dictationStateEvent) {
@@ -3012,6 +3136,62 @@ export function DictationView() {
 
       <ScrollArea className="flex-1">
         <div className="p-6 max-w-4xl mx-auto space-y-6">
+          {dictationRouteReadiness && (
+            <div
+              role="alert"
+              className="rounded-md border border-rust/40 bg-rust/10 px-4 py-3"
+            >
+              <div className="flex flex-wrap items-start justify-between gap-3">
+                <div className="flex min-w-0 items-start gap-2.5">
+                  <span
+                    className="neume neume-rust mt-1 shrink-0"
+                    aria-hidden="true"
+                  />
+                  <div className="min-w-0">
+                    <p className="text-sm font-medium text-rust">
+                      {dictationRouteReadiness.status === "downloading"
+                        ? "The dictation model is still downloading"
+                        : "Dictation has no model yet"}
+                    </p>
+                    <p className="mt-1 text-sm text-rust">
+                      {dictationRouteReadiness.status === "downloading"
+                        ? `${dictationRouteReadiness.routeLabel} is still coming down. Until it finishes, ${hotkeyLabel} does nothing.`
+                        : `${dictationRouteReadiness.routeLabel} is not on this Mac, so ${hotkeyLabel} does nothing at all. Download it once and dictation works offline.`}
+                    </p>
+                    {routeDownloadError ? (
+                      <p className="mt-1 text-sm text-rust">
+                        Download failed: {routeDownloadError}
+                      </p>
+                    ) : null}
+                  </div>
+                </div>
+                <div className="flex shrink-0 flex-wrap items-center gap-2">
+                  {dictationRouteReadiness.status === "missing" ? (
+                    <Button
+                      variant="outline"
+                      size="sm"
+                      disabled={routeDownloadBusy}
+                      onClick={() => void handleDownloadDictationRouteModel()}
+                    >
+                      <Download className="mr-2 h-4 w-4" />
+                      {routeDownloadBusy
+                        ? "Downloading…"
+                        : `Download ${dictationRouteReadiness.providerLabel}`}
+                    </Button>
+                  ) : null}
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    onClick={() => void refreshDictationRouteReadiness()}
+                  >
+                    <RefreshCw className="mr-2 h-4 w-4" />
+                    Re-check
+                  </Button>
+                </div>
+              </div>
+            </div>
+          )}
+
           {dictationError && (
             <div className="rounded-md border border-rust/40 bg-rust/10 px-4 py-3">
               <p className="text-sm text-rust">{dictationError}</p>

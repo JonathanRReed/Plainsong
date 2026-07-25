@@ -106,6 +106,87 @@ function commandDiagnostic(result) {
   };
 }
 
+function resolveReleaseArtifact(pattern) {
+  const releaseDir = path.resolve(repoRoot, "release");
+  if (!fs.existsSync(releaseDir)) return null;
+  const match = fs
+    .readdirSync(releaseDir)
+    .filter((name) => pattern.test(name))
+    .sort()
+    .pop();
+  return match ? path.join(releaseDir, match) : null;
+}
+
+/**
+ * Read the Electron fuse wire straight out of the packaged binary.
+ *
+ * Layout, matching @electron/fuses: a sentinel string, a version byte, a
+ * fuse-count byte, then one ASCII state byte per fuse ('0' disabled, '1'
+ * enabled, 'r' removed). The wire lives in Electron Framework, not the app's
+ * main executable, which on macOS is only a small launcher stub.
+ *
+ * Parsed here rather than shelling out to @electron/fuses so the gate stays
+ * dependency-free on a release machine.
+ */
+const FUSE_SENTINEL = "dL7pKGdnNz796PbbjQWNKmHXBZaB9tsX";
+const FUSE_STATE = { DISABLE: 0x30, ENABLE: 0x31, REMOVED: 0x72 };
+const FUSE_V1_ORDER = [
+  "runAsNode",
+  "enableCookieEncryption",
+  "enableNodeOptionsEnvironmentVariable",
+  "enableNodeCliInspectArguments",
+  "enableEmbeddedAsarIntegrityValidation",
+  "onlyLoadAppFromAsar",
+  "loadBrowserProcessSpecificV8Snapshot",
+  "grantFileProtocolExtraPrivileges",
+];
+
+function fuseBinaryPath(bundlePath) {
+  return path.join(
+    bundlePath,
+    "Contents",
+    "Frameworks",
+    "Electron Framework.framework",
+    "Electron Framework",
+  );
+}
+
+function readElectronFuses(bundlePath) {
+  const binaryPath = fuseBinaryPath(bundlePath);
+  try {
+    if (!fs.existsSync(binaryPath)) {
+      return { found: false, values: {}, error: `missing ${binaryPath}` };
+    }
+    const buffer = fs.readFileSync(binaryPath);
+    const index = buffer.indexOf(Buffer.from(FUSE_SENTINEL, "utf8"));
+    if (index < 0) {
+      return { found: false, values: {}, error: "sentinel not found" };
+    }
+    const wirePosition = index + FUSE_SENTINEL.length;
+    const wireVersion = buffer[wirePosition];
+    const wireLength = buffer[wirePosition + 1];
+    const values = {};
+    FUSE_V1_ORDER.forEach((name, offset) => {
+      if (offset < wireLength) {
+        values[name] = buffer[wirePosition + 2 + offset];
+      }
+    });
+    return { found: true, wireVersion, wireLength, values };
+  } catch (error) {
+    return { found: false, values: {}, error: String(error) };
+  }
+}
+
+/** Satisfied when the fuse is explicitly disabled, or removed by Electron. */
+function fuseDisabled(fuses, name) {
+  const value = fuses.values?.[name];
+  return value === FUSE_STATE.DISABLE || value === FUSE_STATE.REMOVED;
+}
+
+function fuseEnabled(fuses, name) {
+  return fuses.values?.[name] === FUSE_STATE.ENABLE;
+}
+
 const appSignature = run("/usr/bin/codesign", [
   "--verify",
   "--deep",
@@ -143,6 +224,39 @@ const gatekeeper = run("/usr/sbin/spctl", [
   appPath,
 ]);
 
+// The DMG is the primary download, and electron-builder notarizes the .app
+// only. Checking the bundle alone reported green while the disk image every
+// user actually opens shipped unsigned and unstapled.
+const dmgPath = resolveReleaseArtifact(/^Plainsong-.*\.dmg$/);
+const zipPath = resolveReleaseArtifact(/^Plainsong-.*-mac\.zip$/);
+const dmgSignature = dmgPath
+  ? run("/usr/bin/codesign", ["--verify", "--strict", "--verbose=2", dmgPath])
+  : null;
+const dmgStapler = dmgPath
+  ? run("/usr/bin/xcrun", ["stapler", "validate", dmgPath])
+  : null;
+const dmgGatekeeper = dmgPath
+  ? run("/usr/sbin/spctl", [
+      "--assess",
+      "--type",
+      "open",
+      "--context",
+      "context:primary-signature",
+      "--verbose=4",
+      dmgPath,
+    ])
+  : null;
+const zipStapler = zipPath
+  ? run("/usr/bin/xcrun", ["stapler", "validate", zipPath])
+  : null;
+
+// Electron's fuses ship permissive. Left that way, a notarized Plainsong is a
+// reusable gadget: ELECTRON_RUN_AS_NODE=1 runs arbitrary Node under our
+// Developer ID, which holds microphone, speech-recognition and Apple Events
+// entitlements plus the app's Accessibility grant. Notarization cannot be
+// retracted, so this is asserted on every release build, not trusted to config.
+const fuses = readElectronFuses(appPath);
+
 const checks = {
   appExists: fs.existsSync(appPath),
   mainExecutablePresent: isExecutable(mainExecutable),
@@ -176,6 +290,23 @@ const checks = {
   gatekeeperAccepted: gatekeeper.ok,
   gatekeeperSourceIsNotarizedDeveloperId:
     gatekeeper.ok && /source=Notarized Developer ID/i.test(gatekeeper.output),
+
+  // The disk image every user downloads, not just the bundle inside it.
+  dmgPresent: Boolean(dmgPath),
+  dmgSignatureValid: Boolean(dmgSignature?.ok),
+  dmgTicketStapled: Boolean(dmgStapler?.ok),
+  dmgGatekeeperAccepted: Boolean(dmgGatekeeper?.ok),
+  zipPresent: Boolean(zipPath),
+  zipTicketStapled: Boolean(zipStapler?.ok),
+
+  // Electron fuse hardening, read off the shipped binary.
+  electronFusesReadable: fuses.found,
+  fuseRunAsNodeDisabled: fuseDisabled(fuses, "runAsNode"),
+  fuseNodeOptionsDisabled: fuseDisabled(fuses, "enableNodeOptionsEnvironmentVariable"),
+  fuseNodeCliInspectDisabled: fuseDisabled(fuses, "enableNodeCliInspectArguments"),
+  fuseAsarIntegrityEnabled: fuseEnabled(fuses, "enableEmbeddedAsarIntegrityValidation"),
+  fuseOnlyLoadAppFromAsarEnabled: fuseEnabled(fuses, "onlyLoadAppFromAsar"),
+  fuseFileProtocolPrivilegesDisabled: fuseDisabled(fuses, "grantFileProtocolExtraPrivileges"),
 };
 
 const artifact = {
