@@ -36,6 +36,8 @@ const backendMocks = vi.hoisted(() => ({
   startDictation: vi.fn(async () => {}),
   stopDictation: vi.fn(async () => ""),
   invoke: vi.fn(async () => ({ pasted: true, copied: false })),
+  asrProviders: [] as any[],
+  downloadAsrModels: vi.fn(async () => {}),
   buildSettings: () => ({
   audio: {
     sampleRate: 16000,
@@ -122,6 +124,52 @@ const backendMocks = vi.hoisted(() => ({
   defaultTemplate: "meeting",
   theme: "system" as const,
   }),
+  buildAsrProviders: () => [
+    {
+      providerType: "moonshine",
+      name: "UsefulSensors Moonshine",
+      description: "Fast local dictation",
+      isAvailable: true,
+      inferenceEnabled: true,
+      selectedModelId: "moonshine-base",
+      modelOptions: [{ id: "moonshine-base", label: "Moonshine Base" }],
+      downloadStatus: "Downloaded",
+      runtimeStatus: "ready",
+      runtimeMessage: null,
+      runtimeDetails: {},
+      modelInfo: {
+        name: "Moonshine Base",
+        version: "1",
+        sizeMb: 100,
+        parameters: "base",
+        languages: ["en"],
+        license: "Apache-2.0",
+        sourceUrl: "https://example.com/moonshine",
+      },
+    },
+    {
+      providerType: "openai_cloud",
+      name: "OpenAI Cloud",
+      description: "Cloud multilingual",
+      isAvailable: true,
+      inferenceEnabled: true,
+      selectedModelId: "gpt-4o-transcribe",
+      modelOptions: [{ id: "gpt-4o-transcribe", label: "GPT-4o Transcribe" }],
+      downloadStatus: "Downloaded",
+      runtimeStatus: "ready",
+      runtimeMessage: null,
+      runtimeDetails: {},
+      modelInfo: {
+        name: "GPT-4o Transcribe",
+        version: "1",
+        sizeMb: 0,
+        parameters: "cloud",
+        languages: ["multilingual"],
+        license: "Commercial",
+        sourceUrl: "https://example.com/openai",
+      },
+    },
+  ],
   getSettings: vi.fn(),
 }));
 
@@ -174,52 +222,8 @@ vi.mock("@/lib/backend/recordings", () => ({
 }));
 
 vi.mock("@/lib/backend/asr", () => ({
-  getAsrProviders: vi.fn(async () => [
-    {
-      providerType: "moonshine",
-      name: "UsefulSensors Moonshine",
-      description: "Fast local dictation",
-      isAvailable: true,
-      inferenceEnabled: true,
-      selectedModelId: "moonshine-base",
-      modelOptions: [{ id: "moonshine-base", label: "Moonshine Base" }],
-      downloadStatus: "Downloaded",
-      runtimeStatus: "ready",
-      runtimeMessage: null,
-      runtimeDetails: {},
-      modelInfo: {
-        name: "Moonshine Base",
-        version: "1",
-        sizeMb: 100,
-        parameters: "base",
-        languages: ["en"],
-        license: "Apache-2.0",
-        sourceUrl: "https://example.com/moonshine",
-      },
-    },
-    {
-      providerType: "openai_cloud",
-      name: "OpenAI Cloud",
-      description: "Cloud multilingual",
-      isAvailable: true,
-      inferenceEnabled: true,
-      selectedModelId: "gpt-4o-transcribe",
-      modelOptions: [{ id: "gpt-4o-transcribe", label: "GPT-4o Transcribe" }],
-      downloadStatus: "Downloaded",
-      runtimeStatus: "ready",
-      runtimeMessage: null,
-      runtimeDetails: {},
-      modelInfo: {
-        name: "GPT-4o Transcribe",
-        version: "1",
-        sizeMb: 0,
-        parameters: "cloud",
-        languages: ["multilingual"],
-        license: "Commercial",
-        sourceUrl: "https://example.com/openai",
-      },
-    },
-  ]),
+  getAsrProviders: vi.fn(async () => backendMocks.asrProviders),
+  downloadAsrModels: backendMocks.downloadAsrModels,
 }));
 
 vi.mock("@/lib/backend/dictation", () => ({
@@ -314,6 +318,7 @@ describe("DictationView modes", () => {
   beforeEach(() => {
     vi.clearAllMocks();
     backendMocks.eventListeners.clear();
+    backendMocks.asrProviders = backendMocks.buildAsrProviders();
     for (const key of Object.keys(backendMocks.transcriptionOverrides)) {
       delete backendMocks.transcriptionOverrides[key];
     }
@@ -832,6 +837,76 @@ describe("DictationView modes", () => {
 
     expect((await screen.findAllByText("Microphone permission is not ready.")).length).toBeGreaterThan(0);
     expect(screen.getByText("Needs attention")).toBeInTheDocument();
+  });
+
+  it("names the missing model instead of letting the hotkey fail silently", async () => {
+    // A brand-new install ships no weights, and start_dictation errors out
+    // before it emits any dictation state -- so without this banner the user
+    // presses the shortcut and literally nothing happens, forever.
+    backendMocks.transcriptionOverrides.defaultProvider = "moonshine";
+    backendMocks.transcriptionOverrides.selectedModelId = "moonshine-base";
+    backendMocks.asrProviders = backendMocks.buildAsrProviders();
+    backendMocks.asrProviders[0].downloadStatus = "NotDownloaded";
+
+    render(<DictationView />);
+
+    expect(await screen.findByText("Dictation has no model yet")).toBeInTheDocument();
+    expect(
+      screen.getByText(/UsefulSensors Moonshine · Moonshine Base is not on this Mac/i),
+    ).toBeInTheDocument();
+
+    // And the shortcut press says so out loud rather than only in the console.
+    fireEvent.keyDown(window, {
+      key: " ",
+      code: "Space",
+      ctrlKey: true,
+      shiftKey: true,
+    });
+    expect(toast).toHaveBeenCalledWith(
+      expect.stringContaining("Dictation can't start yet"),
+      "error",
+    );
+  });
+
+  it("downloads the missing dictation model from the banner and then clears it", async () => {
+    backendMocks.transcriptionOverrides.defaultProvider = "moonshine";
+    backendMocks.transcriptionOverrides.selectedModelId = "moonshine-base";
+    backendMocks.asrProviders = backendMocks.buildAsrProviders();
+    backendMocks.asrProviders[0].downloadStatus = "NotDownloaded";
+    backendMocks.downloadAsrModels.mockImplementationOnce(async () => {
+      backendMocks.asrProviders = backendMocks.buildAsrProviders();
+    });
+
+    render(<DictationView />);
+
+    fireEvent.click(
+      await screen.findByRole("button", { name: /download usefulsensors moonshine/i }),
+    );
+
+    await waitFor(() => {
+      expect(backendMocks.downloadAsrModels).toHaveBeenCalledWith("moonshine");
+    });
+    await waitFor(() => {
+      expect(screen.queryByText("Dictation has no model yet")).not.toBeInTheDocument();
+    });
+  });
+
+  it("stays quiet when the dictation route already has its model", async () => {
+    backendMocks.transcriptionOverrides.defaultProvider = "moonshine";
+    backendMocks.transcriptionOverrides.selectedModelId = "moonshine-base";
+
+    render(<DictationView />);
+
+    await screen.findByRole("button", { name: /start dictation/i });
+    expect(screen.queryByText("Dictation has no model yet")).not.toBeInTheDocument();
+
+    fireEvent.keyDown(window, {
+      key: " ",
+      code: "Space",
+      ctrlKey: true,
+      shiftKey: true,
+    });
+    expect(toast).not.toHaveBeenCalled();
   });
 
   it("creates dictionary entries and round-trips dictionary CSV", async () => {

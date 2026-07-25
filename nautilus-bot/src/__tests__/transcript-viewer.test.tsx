@@ -268,6 +268,88 @@ describe("TranscriptViewer", () => {
     );
   });
 
+  it("asks before cutting a speaker turn, and names what would be lost", async () => {
+    const onDeleteSegments = vi.fn(async () => {});
+
+    render(
+      <TranscriptViewer
+        segments={GROUPED_TURN_SEGMENTS}
+        onEditSegment={vi.fn()}
+        onDeleteSegments={onDeleteSegments}
+        deleteRecoveryNote="The audio is still saved."
+      />
+    );
+
+    fireEvent.click(screen.getByRole("button", { name: "Delete this speaker turn" }));
+
+    // Nothing is written on the click itself: the whole turn is chained with no
+    // time bound, so one stray tap used to remove it outright.
+    expect(onDeleteSegments).not.toHaveBeenCalled();
+
+    const dialog = await screen.findByRole("dialog");
+    // Two lines, eight words, whose turn, and where it starts — plus the way
+    // back, which the caller had to prove before it could be claimed.
+    expect(dialog).toHaveTextContent("Removes 2 transcript lines");
+    expect(dialog).toHaveTextContent("8 words");
+    expect(dialog).toHaveTextContent("one speaker turn by Me");
+    expect(dialog).toHaveTextContent("starting at 0:00.00");
+    expect(dialog).toHaveTextContent("The audio is still saved.");
+    // The words themselves are quoted back before they go.
+    expect(dialog).toHaveTextContent("We agreed on the plan. Kickoff is Monday.");
+
+    fireEvent.click(screen.getByRole("button", { name: "Delete 2 lines" }));
+
+    await waitFor(() => {
+      expect(onDeleteSegments).toHaveBeenCalledWith(["seg-1", "seg-2"]);
+    });
+    await waitFor(() => {
+      expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
+    });
+  });
+
+  it("keeps the turn when the delete confirmation is declined", async () => {
+    const onDeleteSegments = vi.fn(async () => {});
+
+    render(
+      <TranscriptViewer
+        segments={GROUPED_TURN_SEGMENTS}
+        onEditSegment={vi.fn()}
+        onDeleteSegments={onDeleteSegments}
+      />
+    );
+
+    fireEvent.click(screen.getByRole("button", { name: "Delete this speaker turn" }));
+    fireEvent.click(await screen.findByRole("button", { name: "Keep this turn" }));
+
+    await waitFor(() => {
+      expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
+    });
+    expect(onDeleteSegments).not.toHaveBeenCalled();
+    expect(screen.getByText(/We agreed on the plan/i)).toBeInTheDocument();
+  });
+
+  it("gives Edit and Delete 24px targets with real space between them", () => {
+    // They were ~16px icons 4px apart, under the 24px WCAG 2.5.8 floor, and the
+    // copy above the transcript sends readers to this corner for Edit.
+    render(
+      <TranscriptViewer
+        segments={GROUPED_TURN_SEGMENTS}
+        onEditSegment={vi.fn()}
+        onDeleteSegments={vi.fn()}
+      />
+    );
+
+    const edit = screen.getByRole("button", { name: "Edit segment" });
+    const remove = screen.getByRole("button", { name: "Delete this speaker turn" });
+
+    for (const control of [edit, remove]) {
+      expect(control).toHaveClass("h-6", "w-6");
+      expect(control.className).not.toMatch(/\bp-0\.5\b/);
+    }
+    expect(edit.parentElement).toBe(remove.parentElement);
+    expect(edit.parentElement).toHaveClass("gap-3");
+  });
+
   it("keeps the editor open when saving the edit fails", async () => {
     const onEditSegment = vi.fn(async () => {
       throw new Error("disk full");

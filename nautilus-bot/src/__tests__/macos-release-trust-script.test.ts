@@ -30,7 +30,37 @@ function writeExecutableScript(filePath: string, body: string) {
   chmodSync(filePath, 0o755);
 }
 
-function createFakeMacosApp(tempRoot: string) {
+/** Electron's fuse states are ASCII: '0' disabled, '1' enabled, 'r' removed. */
+const FUSE_SENTINEL = "dL7pKGdnNz796PbbjQWNKmHXBZaB9tsX";
+const HARDENED_FUSE_WIRE = "00001100";
+const PERMISSIVE_FUSE_WIRE = "11110011";
+
+/**
+ * Write a stand-in Electron Framework carrying a fuse wire, which is where the
+ * real one lives — the app's own MacOS/ executable is only a launcher stub.
+ */
+function writeFakeElectronFramework(appPath: string, wire: string) {
+  const frameworkDir = path.join(
+    appPath,
+    "Contents",
+    "Frameworks",
+    "Electron Framework.framework",
+  );
+  mkdirSync(frameworkDir, { recursive: true });
+  const binary = Buffer.concat([
+    Buffer.from("padding-before-the-wire", "utf8"),
+    Buffer.from(FUSE_SENTINEL, "utf8"),
+    Buffer.from([1, wire.length]),
+    Buffer.from(wire, "utf8"),
+    Buffer.from("padding-after-the-wire", "utf8"),
+  ]);
+  writeFileSync(path.join(frameworkDir, "Electron Framework"), binary);
+}
+
+function createFakeMacosApp(
+  tempRoot: string,
+  { fuseWire = HARDENED_FUSE_WIRE }: { fuseWire?: string } = {},
+) {
   const appPath = path.join(tempRoot, "release", "mac-arm64", "Plainsong.app");
   const contentsDir = path.join(appPath, "Contents");
   const macosDir = path.join(contentsDir, "MacOS");
@@ -44,6 +74,18 @@ function createFakeMacosApp(tempRoot: string) {
   mkdirSync(macosDir, { recursive: true });
   mkdirSync(sidecarDir, { recursive: true });
   mkdirSync(shortcutHelperDir, { recursive: true });
+
+  writeFakeElectronFramework(appPath, fuseWire);
+
+  // The gate also inspects the disk image and archive the user downloads, not
+  // just the bundle inside them.
+  const releaseDir = path.join(tempRoot, "release");
+  writeFileSync(path.join(releaseDir, "Plainsong-1.0.0-arm64.dmg"), "dmg", "utf8");
+  writeFileSync(
+    path.join(releaseDir, "Plainsong-1.0.0-arm64-mac.zip"),
+    "zip",
+    "utf8",
+  );
 
   const mainExecutable = path.join(macosDir, "Plainsong");
   const sidecarExecutable = path.join(sidecarDir, "plainsong-sidecar");
@@ -341,6 +383,15 @@ describe("verify-macos-release-trust.mjs", () => {
       expect(artifact.checks.appUsesHardenedRuntime).toBe(true);
       expect(artifact.checks.sidecarUsesHardenedRuntime).toBe(true);
       expect(artifact.checks.shortcutHelperUsesHardenedRuntime).toBe(true);
+      expect(artifact.checks.electronFusesReadable).toBe(true);
+      expect(artifact.checks.fuseRunAsNodeDisabled).toBe(true);
+      expect(artifact.checks.fuseNodeOptionsDisabled).toBe(true);
+      expect(artifact.checks.fuseNodeCliInspectDisabled).toBe(true);
+      expect(artifact.checks.fuseAsarIntegrityEnabled).toBe(true);
+      expect(artifact.checks.fuseOnlyLoadAppFromAsarEnabled).toBe(true);
+      expect(artifact.checks.fuseFileProtocolPrivilegesDisabled).toBe(true);
+      expect(artifact.checks.dmgSignatureValid).toBe(true);
+      expect(artifact.checks.dmgTicketStapled).toBe(true);
       expect(artifact.checks.appHasSecureTimestamp).toBe(true);
       expect(artifact.checks.sidecarHasSecureTimestamp).toBe(true);
       expect(artifact.checks.shortcutHelperHasSecureTimestamp).toBe(true);
@@ -375,6 +426,45 @@ describe("verify-macos-release-trust.mjs", () => {
       expect(trace).toContain(path.basename(sidecarExecutable));
       expect(trace).toContain(path.basename(helperExecutable));
       expect(readFileSync(spoofedPathTracePath, "utf8")).toBe("");
+    } finally {
+      rmSync(tempRoot, { recursive: true, force: true });
+    }
+  });
+
+  it("fails closed when the Electron fuses are left permissive", () => {
+    // The security property this gate exists to hold. With default fuses,
+    // `ELECTRON_RUN_AS_NODE=1` on the signed binary runs arbitrary Node under a
+    // Developer ID carrying microphone, speech-recognition and Apple Events
+    // entitlements plus the app's Accessibility grant — and notarization cannot
+    // be retracted. Valid signatures everywhere must NOT be enough to pass.
+    const { tempRoot, tempScript } = createTempRepo("verify-macos-release-trust.mjs");
+    try {
+      const { appPath } = createFakeMacosApp(tempRoot, {
+        fuseWire: PERMISSIVE_FUSE_WIRE,
+      });
+      const { outPath, result } = runTrustScript(
+        tempScript,
+        tempRoot,
+        appPath,
+        "accept",
+      );
+
+      expect(result.status).not.toBe(0);
+
+      const artifact = JSON.parse(readFileSync(outPath, "utf8")) as {
+        checks: Record<string, boolean>;
+        pass?: boolean;
+      };
+      expect(artifact.pass).toBe(false);
+      expect(artifact.checks.electronFusesReadable).toBe(true);
+      expect(artifact.checks.fuseRunAsNodeDisabled).toBe(false);
+      expect(artifact.checks.fuseNodeOptionsDisabled).toBe(false);
+      expect(artifact.checks.fuseNodeCliInspectDisabled).toBe(false);
+      expect(artifact.checks.fuseAsarIntegrityEnabled).toBe(false);
+      expect(artifact.checks.fuseOnlyLoadAppFromAsarEnabled).toBe(false);
+      // Signing is untouched, so this really is the fuses failing it.
+      expect(artifact.checks.appSignatureValid).toBe(true);
+      expect(artifact.checks.appUsesDeveloperId).toBe(true);
     } finally {
       rmSync(tempRoot, { recursive: true, force: true });
     }

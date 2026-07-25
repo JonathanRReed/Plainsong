@@ -207,6 +207,115 @@ describe("FirstRunWizard", () => {
     vi.clearAllMocks();
   });
 
+  it("still fetches the fast default when the user skips at the permissions step", async () => {
+    // Marking onboarding complete permanently gates the wizard (App.tsx only
+    // opens it while the flag is unset), and the model step is the only place
+    // in the app that auto-downloads a dictation model. Skipping at
+    // permissions never reaches that step, so without this the user is left
+    // with no model, no wizard, and a hotkey that silently does nothing.
+    const onComplete = vi.fn();
+    const asrBackend = await import("@/lib/backend/asr");
+    const downloadAsrModels = vi.mocked(asrBackend.downloadAsrModels);
+
+    currentSettings.transcription.dictationProvider = "whisper";
+    currentSettings.transcription.dictationModelId = "base.en";
+
+    render(<FirstRunWizard onComplete={onComplete} />);
+
+    await clickPrimary(/start with dictation/i); // welcome -> permissions
+    await screen.findByText("Microphone");
+    await clickPrimary(/skip for now/i);
+
+    expect(onComplete).toHaveBeenCalledWith({
+      markOnboardingComplete: true,
+      meetingsCompleted: false,
+    });
+    await waitFor(() => {
+      expect(downloadAsrModels).toHaveBeenCalledWith("whisper");
+    });
+  });
+
+  it("still fetches the fast default when the user closes the welcome screen", async () => {
+    // The same permanent dead end is reachable one step earlier: "Close" on
+    // the welcome screen resolves markOnboardingComplete to true in full mode.
+    const onComplete = vi.fn();
+    const asrBackend = await import("@/lib/backend/asr");
+    const downloadAsrModels = vi.mocked(asrBackend.downloadAsrModels);
+
+    currentSettings.transcription.dictationProvider = "whisper";
+    currentSettings.transcription.dictationModelId = "base.en";
+
+    render(<FirstRunWizard onComplete={onComplete} />);
+
+    await screen.findByRole("button", { name: /start with dictation/i });
+    await clickPrimary(/^close$/i);
+
+    expect(onComplete).toHaveBeenCalledWith({
+      markOnboardingComplete: true,
+      meetingsCompleted: false,
+    });
+    await waitFor(() => {
+      expect(downloadAsrModels).toHaveBeenCalledWith("whisper");
+    });
+  });
+
+  it("does not downgrade an already-working route when skipping at the permissions step", async () => {
+    // The skip path must not become a new way to silently overwrite a route
+    // the user already configured -- the fixture ships macos_apple_speech.
+    const onComplete = vi.fn();
+    const asrBackend = await import("@/lib/backend/asr");
+    const downloadAsrModels = vi.mocked(asrBackend.downloadAsrModels);
+
+    render(<FirstRunWizard onComplete={onComplete} />);
+
+    await clickPrimary(/start with dictation/i);
+    await screen.findByText("Microphone");
+    await clickPrimary(/skip for now/i);
+
+    expect(onComplete).toHaveBeenCalled();
+    expect(downloadAsrModels).not.toHaveBeenCalled();
+    expect(currentSettings.transcription.dictationProvider).toBe("macos_apple_speech");
+  });
+
+  it("keeps settings saved during a slow model download instead of reverting them", async () => {
+    // save_settings is a whole-struct replace. Snapshotting settings before the
+    // ~142 MB fetch and writing that snapshot back on completion silently
+    // reverted the hotkey onboarding had just taught (and every other field
+    // saved while the download ran).
+    const asrBackend = await import("@/lib/backend/asr");
+    const downloadAsrModels = vi.mocked(asrBackend.downloadAsrModels);
+    let resolveDownload: (() => void) | undefined;
+    downloadAsrModels.mockImplementationOnce(
+      () => new Promise<void>((resolve) => { resolveDownload = resolve; })
+    );
+
+    currentSettings.transcription.dictationProvider = "whisper";
+    currentSettings.transcription.dictationModelId = "base.en";
+
+    render(<FirstRunWizard mode="dictation" onComplete={vi.fn()} />);
+
+    await clickPrimary(/continue/i); // permissions -> dictation-model
+    await clickPrimary(/continue/i); // -> hotkey, kicks off the background fetch
+
+    const shortcutInput = await screen.findByLabelText("Dictation shortcut");
+    fireEvent.keyDown(shortcutInput, { key: "J", metaKey: true, shiftKey: true });
+    await clickPrimary(/finish/i);
+
+    await waitFor(() => {
+      expect(currentSettings.shortcuts.toggleDictation).toBe("Cmd+Shift+J");
+    });
+
+    await act(async () => {
+      resolveDownload?.();
+    });
+
+    // The download completing must not roll the hotkey back to the default.
+    await waitFor(() => {
+      expect(currentSettings.transcription.dictationModelId).toBe("base.en");
+    });
+    expect(currentSettings.shortcuts.toggleDictation).toBe("Cmd+Shift+J");
+  });
+
   it("completes the full onboarding in dictation-only mode, downloading the fast default when nothing was configured", async () => {
     const onComplete = vi.fn();
 
