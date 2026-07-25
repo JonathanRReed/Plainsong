@@ -1,11 +1,24 @@
 import { act, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { DictationView } from "@/components/views/dictation-view";
+import {
+  SELECTED_TEXT_COMMAND_PRESET_ACTIONS,
+  SPOKEN_COMMAND_PREFIX_LABEL,
+} from "@/lib/selected-text-actions";
+import { DICTATION_PROFILE_TILES } from "@/lib/dictation-profiles";
+
+/** Radix tabs activate on mouse-down, not click. */
+async function openConfigTab(name: string) {
+  fireEvent.mouseDown(await screen.findByRole("tab", { name }), { button: 0 });
+}
 
 const speechSynthesisMock = {
   speak: vi.fn(),
   cancel: vi.fn(),
 };
+
+/** jsdom ships no clipboard; the latest-result card writes to it. */
+const clipboardWriteText = vi.fn(async () => {});
 
 const toast = vi.fn();
 
@@ -17,11 +30,13 @@ vi.mock("@/components/toast", () => ({
 
 const backendMocks = vi.hoisted(() => ({
   eventListeners: new Map<string, (event: { payload: any }) => void>(),
+  transcriptionOverrides: {} as Record<string, unknown>,
   saveSettings: vi.fn(async () => {}),
   refetchDictationHistory: vi.fn(),
   startDictation: vi.fn(async () => {}),
   stopDictation: vi.fn(async () => ""),
-  getSettings: vi.fn(async () => ({
+  invoke: vi.fn(async () => ({ pasted: true, copied: false })),
+  buildSettings: () => ({
   audio: {
     sampleRate: 16000,
     channels: 1,
@@ -106,8 +121,15 @@ const backendMocks = vi.hoisted(() => ({
   },
   defaultTemplate: "meeting",
   theme: "system" as const,
-  })),
+  }),
+  getSettings: vi.fn(),
 }));
+
+backendMocks.getSettings.mockImplementation(async () => {
+  const settings = backendMocks.buildSettings();
+  Object.assign(settings.transcription, backendMocks.transcriptionOverrides);
+  return settings;
+});
 
 vi.mock("@/lib/electron", () => ({
   listen: vi.fn(async (eventName: string, handler: (event: { payload: any }) => void) => {
@@ -116,7 +138,7 @@ vi.mock("@/lib/electron", () => ({
       backendMocks.eventListeners.delete(eventName);
     };
   }),
-  invoke: vi.fn(),
+  invoke: backendMocks.invoke,
 }));
 
 vi.mock("@/hooks/use-recording", () => ({
@@ -292,8 +314,16 @@ describe("DictationView modes", () => {
   beforeEach(() => {
     vi.clearAllMocks();
     backendMocks.eventListeners.clear();
+    for (const key of Object.keys(backendMocks.transcriptionOverrides)) {
+      delete backendMocks.transcriptionOverrides[key];
+    }
     speechSynthesisMock.speak.mockClear();
     speechSynthesisMock.cancel.mockClear();
+    clipboardWriteText.mockClear();
+    Object.defineProperty(navigator, "clipboard", {
+      configurable: true,
+      value: { writeText: clipboardWriteText },
+    });
     Object.assign(window, {
       speechSynthesis: speechSynthesisMock,
       SpeechSynthesisUtterance: class SpeechSynthesisUtterance {
@@ -311,23 +341,95 @@ describe("DictationView modes", () => {
     });
   });
 
-  it("renders the new mode presets", async () => {
+  it("offers one profile grid with exactly one active tile", async () => {
     render(<DictationView />);
 
-    await screen.findByText("Profiles");
-    expect(screen.getByRole("button", { name: /flow profile: general/i })).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: /flow profile: slack & chat/i })).toBeInTheDocument();
+    await openConfigTab("Profiles");
+
+    const tiles = screen.getAllByRole("button", { name: /^Profile: / });
+    expect(tiles).toHaveLength(DICTATION_PROFILE_TILES.length);
+
+    // The two grids this page used to stack both rendered a "General" tile and
+    // both marked it Active, which is the pattern STYLE.md forbids.
+    expect(screen.getAllByRole("button", { name: "Profile: General" })).toHaveLength(1);
+    expect(tiles.filter((tile) => tile.getAttribute("aria-pressed") === "true")).toHaveLength(1);
+    expect(screen.getAllByText("Active")).toHaveLength(1);
+
+    // Everything both grids used to reach is still one click away.
+    for (const name of [
+      "Profile: General",
+      "Profile: Slack & Chat",
+      "Profile: Writing",
+      "Profile: Notes",
+      "Profile: Meeting Follow-up",
+      "Profile: Coding",
+      "Profile: Quiet",
+      "Profile: Custom",
+    ]) {
+      expect(screen.getByRole("button", { name })).toBeInTheDocument();
+    }
+  });
+
+  it("moves the active marker to the ready-made profile that was installed", async () => {
+    render(<DictationView />);
+
+    await openConfigTab("Profiles");
     expect(
-      screen.getByRole("button", { name: /flow profile: meeting follow-up/i })
+      screen.getByRole("button", { name: "Profile: General" }),
+    ).toHaveAttribute("aria-pressed", "true");
+
+    fireEvent.click(screen.getByRole("button", { name: "Profile: Coding" }));
+
+    await waitFor(() => {
+      expect(
+        screen.getByRole("button", { name: "Profile: Coding" }),
+      ).toHaveAttribute("aria-pressed", "true");
+    });
+    expect(
+      screen.getByRole("button", { name: "Profile: General" }),
+    ).toHaveAttribute("aria-pressed", "false");
+    expect(
+      screen
+        .getAllByRole("button", { name: /^Profile: / })
+        .filter((tile) => tile.getAttribute("aria-pressed") === "true"),
+    ).toHaveLength(1);
+  });
+
+  it("puts capture above the configuration tabs", async () => {
+    render(<DictationView />);
+
+    const startButton = await screen.findByRole("button", { name: /start dictation/i });
+    const firstTab = screen.getByRole("tab", { name: "Profiles" });
+
+    expect(
+      startButton.compareDocumentPosition(firstTab) & Node.DOCUMENT_POSITION_FOLLOWING,
+    ).toBeTruthy();
+  });
+
+  it("keeps a hands-free choice and states one hotkey behavior", async () => {
+    backendMocks.transcriptionOverrides.dictationHandsFreeEnabled = true;
+
+    render(<DictationView />);
+
+    // Header chip and capture instruction resolve from the same helper, so the
+    // page cannot claim two behaviors at once.
+    expect(await screen.findByText("hands-free")).toBeInTheDocument();
+    expect(screen.getByText(/hands-free dictation/i)).toBeInTheDocument();
+
+    // The one-option select that used to live here could only write
+    // pushToTalk:false/handsFree:false, silently destroying this choice.
+    await openConfigTab("Capture");
+    expect(screen.queryByLabelText("Hotkey behavior")).toBeNull();
+    expect(
+      screen.getByRole("button", { name: "Change in Settings" }),
     ).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: /profile: follow-up/i })).toBeInTheDocument();
   });
 
   it("applies Messages mode defaults and persists them", async () => {
     render(<DictationView />);
 
-    await screen.findByText("Profiles");
-    fireEvent.click(screen.getByRole("button", { name: /flow profile: slack & chat/i }));
+    await openConfigTab("Profiles");
+    fireEvent.click(screen.getByRole("button", { name: "Profile: Slack & Chat" }));
 
     await waitFor(() => {
       expect(backendMocks.saveSettings).toHaveBeenCalled();
@@ -349,9 +451,9 @@ describe("DictationView modes", () => {
   it("saves the current setup as a reusable custom mode", async () => {
     render(<DictationView />);
 
-    await screen.findByText("Profiles");
-    fireEvent.click(screen.getByRole("button", { name: /flow profile: slack & chat/i }));
-    fireEvent.click(screen.getByRole("button", { name: /flow profile: custom/i }));
+    await openConfigTab("Profiles");
+    fireEvent.click(screen.getByRole("button", { name: "Profile: Slack & Chat" }));
+    fireEvent.click(screen.getByRole("button", { name: "Profile: Custom" }));
 
     const nameInput = await screen.findByLabelText("Profile name");
     fireEvent.change(nameInput, { target: { value: "Sales Follow-up" } });
@@ -379,6 +481,7 @@ describe("DictationView modes", () => {
   it("installs a recommended app style as a custom mode", async () => {
     render(<DictationView />);
 
+    await openConfigTab("Profiles");
     await screen.findByText("Recommended flow profiles");
     expect(screen.queryByText(/App undefined/i)).not.toBeInTheDocument();
     fireEvent.click(screen.getAllByRole("button", { name: /install and use/i })[0]);
@@ -404,7 +507,7 @@ describe("DictationView modes", () => {
   it("refreshes dictation history when a dictation result event arrives", async () => {
     render(<DictationView />);
 
-    await screen.findByText("Profiles");
+    await screen.findByRole("tab", { name: "Profiles" });
     const handler = backendMocks.eventListeners.get("dictation-text-ready");
     expect(handler).toBeTruthy();
 
@@ -425,7 +528,7 @@ describe("DictationView modes", () => {
   it("can read the latest result aloud from the dictation hero surface", async () => {
     render(<DictationView />);
 
-    await screen.findByText("Profiles");
+    await screen.findByRole("tab", { name: "Profiles" });
     const handler = backendMocks.eventListeners.get("dictation-text-ready");
     expect(handler).toBeTruthy();
 
@@ -463,7 +566,7 @@ describe("DictationView modes", () => {
   it("surfaces dictation lifecycle state in the capture card", async () => {
     render(<DictationView />);
 
-    await screen.findByText("Profiles");
+    await screen.findByRole("tab", { name: "Profiles" });
     const handler = backendMocks.eventListeners.get("dictation-state-changed");
     expect(handler).toBeTruthy();
 
@@ -486,7 +589,7 @@ describe("DictationView modes", () => {
   it("surfaces auto-activated app matcher details in the latest result", async () => {
     render(<DictationView />);
 
-    await screen.findByText("Profiles");
+    await screen.findByRole("tab", { name: "Profiles" });
     const handler = backendMocks.eventListeners.get("dictation-text-ready");
     expect(handler).toBeTruthy();
 
@@ -509,7 +612,7 @@ describe("DictationView modes", () => {
     const backend = await import("@/lib/backend/dictation");
     render(<DictationView />);
 
-    await screen.findByText("Profiles");
+    await screen.findByRole("tab", { name: "Profiles" });
     const handler = backendMocks.eventListeners.get("dictation-text-ready");
 
     await act(async () => {
@@ -564,6 +667,7 @@ describe("DictationView modes", () => {
 
     render(<DictationView />);
 
+    await openConfigTab("Corrections");
     expect(await screen.findByText(/2 similar edits/i)).toBeInTheDocument();
 
     fireEvent.click(screen.getByRole("button", { name: "Approve all" }));
@@ -577,7 +681,7 @@ describe("DictationView modes", () => {
   it("persists the session language separately from flow profiles", async () => {
     render(<DictationView />);
 
-    await screen.findByLabelText("Session language");
+    await openConfigTab("Capture");
     fireEvent.change(screen.getByLabelText("Session language"), {
       target: { value: "es" },
     });
@@ -594,7 +698,7 @@ describe("DictationView modes", () => {
   it("locks auto dictation to a single active language when the set has one item", async () => {
     render(<DictationView />);
 
-    await screen.findByLabelText("Session language");
+    await openConfigTab("Capture");
     fireEvent.click(screen.getByRole("button", { name: "Toggle French active language" }));
     fireEvent.click(screen.getByRole("button", { name: /start dictation/i }));
 
@@ -618,7 +722,7 @@ describe("DictationView modes", () => {
     fireEvent.click(screen.getByRole("button", { name: /start dictation/i }));
 
     expect((await screen.findAllByText("Microphone permission is not ready.")).length).toBeGreaterThan(0);
-    expect(screen.getByText("Capture needs attention")).toBeInTheDocument();
+    expect(screen.getByText("Needs attention")).toBeInTheDocument();
   });
 
   it("creates dictionary entries and round-trips dictionary CSV", async () => {
@@ -637,7 +741,7 @@ describe("DictationView modes", () => {
 
     render(<DictationView />);
 
-    await screen.findByText("Dictionary");
+    await openConfigTab("Dictionary");
     fireEvent.change(screen.getByPlaceholderText("Say (e.g. open ai)"), {
       target: { value: "open ai" },
     });
@@ -672,7 +776,7 @@ describe("DictationView modes", () => {
 
     render(<DictationView />);
 
-    await screen.findByText("Dictionary");
+    await openConfigTab("Dictionary");
     fireEvent.click(screen.getByRole("button", { name: "Import CSV" }));
 
     expect(await screen.findByText("Import Dictionary CSV")).toBeInTheDocument();
@@ -708,20 +812,17 @@ describe("DictationView modes", () => {
 
     render(<DictationView />);
 
-    await screen.findByText("Phrase expansions");
+    await openConfigTab("Snippets");
     fireEvent.change(screen.getByPlaceholderText("Trigger (e.g. brb)"), {
       target: { value: "brb" },
     });
     fireEvent.change(screen.getByPlaceholderText("Expansion (e.g. be right back)"), {
       target: { value: "be right back" },
     });
-    fireEvent.change(screen.getAllByPlaceholderText("App scope (optional)")[1], {
+    fireEvent.change(screen.getByPlaceholderText("App scope (optional)"), {
       target: { value: "Slack" },
     });
-    const snippetSection = screen
-      .getByPlaceholderText("Trigger (e.g. brb)")
-      .closest(".mt-5");
-    expect(snippetSection).toBeTruthy();
+    const snippetSection = screen.getByTestId("snippet-section");
     fireEvent.click(within(snippetSection as HTMLElement).getByRole("button", { name: "Add" }));
 
     await waitFor(() => {
@@ -739,6 +840,7 @@ describe("DictationView modes", () => {
   it("toggles category-aware dictation formatting", async () => {
     render(<DictationView />);
 
+    await openConfigTab("Destinations");
     const toggle = await screen.findByText("Format for destination app");
     const card = toggle.closest(".rounded-2xl");
     expect(card).toBeTruthy();
@@ -759,13 +861,12 @@ describe("DictationView modes", () => {
   it("adds and removes a per-app category override", async () => {
     render(<DictationView />);
 
-    await screen.findByText("App overrides");
-    const appMatcherInput = screen.getByPlaceholderText("App matcher (e.g. slack)");
+    await openConfigTab("Destinations");
+    const appMatcherInput = await screen.findByPlaceholderText("App matcher (e.g. slack)");
     fireEvent.change(appMatcherInput, {
       target: { value: "notion" },
     });
-    const overridesSection = appMatcherInput.closest(".border-t");
-    expect(overridesSection).toBeTruthy();
+    const overridesSection = screen.getByTestId("category-override-section");
     fireEvent.click(
       within(overridesSection as HTMLElement).getByRole("button", { name: "Add" }),
     );
@@ -803,6 +904,7 @@ describe("DictationView modes", () => {
 
     render(<DictationView />);
 
+    await openConfigTab("Text actions");
     const rewriteShorter = await screen.findByText("Rewrite Shorter");
     const presetCard = rewriteShorter.closest(".rounded-md");
     expect(presetCard).toBeTruthy();
@@ -822,6 +924,116 @@ describe("DictationView modes", () => {
         },
       );
     });
+  });
+
+  it("exposes every spoken-command preset from the shared catalog", async () => {
+    render(<DictationView />);
+
+    await openConfigTab("Text actions");
+
+    // The editor used to hard-code three presets while the catalog carried the
+    // full set, so the rest were unreachable from the UI.
+    expect(SELECTED_TEXT_COMMAND_PRESET_ACTIONS.length).toBeGreaterThan(3);
+    for (const action of SELECTED_TEXT_COMMAND_PRESET_ACTIONS) {
+      expect(
+        screen.getByLabelText(action.commandPresetLabel),
+      ).toBeInTheDocument();
+    }
+  });
+
+  it("keeps exactly one editable spoken-command prefix", async () => {
+    render(<DictationView />);
+
+    await openConfigTab("Text actions");
+    expect(screen.getAllByLabelText(SPOKEN_COMMAND_PREFIX_LABEL)).toHaveLength(1);
+
+    // The read-only copy that used to shadow it is gone.
+    await openConfigTab("Capture");
+    expect(screen.queryByText(SPOKEN_COMMAND_PREFIX_LABEL)).toBeNull();
+    expect(screen.queryByText("command")).toBeNull();
+  });
+
+  it("copies the text on screen and never re-pastes the stored capture from this window", async () => {
+    const backend = await import("@/lib/backend/dictation");
+    render(<DictationView />);
+
+    await screen.findByRole("tab", { name: "Profiles" });
+    const handler = backendMocks.eventListeners.get("dictation-text-ready");
+
+    await act(async () => {
+      handler?.({
+        payload: { text: "Ship it", actualProvider: "distil_whisper" },
+      });
+    });
+
+    fireEvent.click(await screen.findByRole("button", { name: "Copy again" }));
+    await waitFor(() => {
+      expect(clipboardWriteText).toHaveBeenCalledWith("Ship it");
+    });
+
+    // `repaste_dictation_result` re-resolves the frontmost app, and a button in
+    // this window can only be clicked while Plainsong itself is frontmost — it
+    // would insert into Plainsong while reporting it reached the target app.
+    expect(backendMocks.invoke).not.toHaveBeenCalledWith(
+      "repaste_dictation_result",
+      expect.anything(),
+    );
+
+    // Blur auto-learns the edit, which resets the correction baseline. The
+    // sidecar's stored capture is untouched by that, so the staleness warning
+    // must survive the reset instead of quietly disarming with it.
+    const editor = screen.getByDisplayValue("Ship it");
+    fireEvent.change(editor, { target: { value: "Ship it tomorrow" } });
+    fireEvent.blur(editor);
+
+    await waitFor(() => {
+      expect(backend.queueDictationCorrectionSuggestion).toHaveBeenCalled();
+    });
+    await waitFor(() => {
+      expect(
+        screen.getByRole("button", { name: "Learn correction" }),
+      ).toBeDisabled();
+    });
+    expect(
+      screen.getByText(/You changed this after capture/),
+    ).toBeInTheDocument();
+
+    clipboardWriteText.mockClear();
+    fireEvent.click(screen.getByRole("button", { name: "Copy again" }));
+    await waitFor(() => {
+      expect(clipboardWriteText).toHaveBeenCalledWith("Ship it tomorrow");
+    });
+  });
+
+  it("gives the page body real headings, not styled paragraphs", async () => {
+    render(<DictationView />);
+
+    await screen.findByRole("tab", { name: "Profiles" });
+
+    // Every section label used to be a CardTitle, which renders a real <h3>.
+    // The reorganized page must still be navigable by heading.
+    expect(
+      screen.getByRole("heading", { name: "Dictation", level: 1 }),
+    ).toBeInTheDocument();
+    for (const name of [
+      "Capture",
+      "The main path",
+      "Dictation coach",
+      "Recent dictations",
+      "Set up dictation",
+    ]) {
+      expect(
+        screen.getByRole("heading", { name, level: 2 }),
+      ).toBeInTheDocument();
+    }
+    expect(
+      screen.getByRole("heading", { name: "Pick a profile", level: 3 }),
+    ).toBeInTheDocument();
+
+    await openConfigTab("Dictionary");
+    expect(
+      await screen.findByRole("heading", { name: "Dictionary", level: 3 }),
+    ).toBeInTheDocument();
   });
 
   it("shows a recently learned list sourced from existing dictionary entries", async () => {
@@ -853,6 +1065,7 @@ describe("DictationView modes", () => {
 
     render(<DictationView />);
 
+    await openConfigTab("Dictionary");
     const recentlyLearned = await screen.findByTestId(
       "recently-learned-dictionary",
     );
@@ -872,7 +1085,7 @@ describe("DictationView modes", () => {
   it("only claims a clipboard copy when the text was left on the clipboard", async () => {
     render(<DictationView />);
 
-    await screen.findByText("Profiles");
+    await screen.findByRole("tab", { name: "Profiles" });
     const handler = backendMocks.eventListeners.get("dictation-text-ready");
     expect(handler).toBeTruthy();
 
@@ -917,7 +1130,7 @@ describe("DictationView modes", () => {
   it("shows Fix capitalization only for a case-only diff of the latest result", async () => {
     render(<DictationView />);
 
-    await screen.findByText("Profiles");
+    await screen.findByRole("tab", { name: "Profiles" });
     const handler = backendMocks.eventListeners.get("dictation-text-ready");
     expect(handler).toBeTruthy();
 
@@ -934,7 +1147,7 @@ describe("DictationView modes", () => {
       name: "Learn correction",
     });
     const textarea = learnButton
-      .closest(".space-y-3")
+      .closest(".space-y-4")
       ?.querySelector("textarea");
     expect(textarea).toBeTruthy();
 
@@ -978,7 +1191,7 @@ describe("DictationView modes", () => {
 
     render(<DictationView />);
 
-    await screen.findByText("Dictionary");
+    await openConfigTab("Dictionary");
     fireEvent.change(screen.getByPlaceholderText("Say (e.g. open ai)"), {
       target: { value: "standup" },
     });
@@ -986,10 +1199,7 @@ describe("DictationView modes", () => {
       target: { value: "stand-up" },
     });
 
-    const dictionarySection = screen
-      .getByPlaceholderText("Say (e.g. open ai)")
-      .closest(".mt-5");
-    expect(dictionarySection).toBeTruthy();
+    const dictionarySection = screen.getByTestId("dictionary-section");
     const categoryTrigger = within(
       dictionarySection as HTMLElement,
     ).getByRole("combobox");

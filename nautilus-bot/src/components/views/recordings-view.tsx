@@ -79,9 +79,16 @@ import {
   requestMainView,
   type OpenRecordingWorkspaceDetail,
 } from "@/lib/navigation";
+import { actionItemsToMarkdownList } from "@/lib/markdown";
+import { DocumentField } from "@/components/views/meetings/document-field";
+import { AudioIssueBanner } from "@/components/views/meetings/audio-issue-banner";
+import { EditableTitle } from "@/components/views/meetings/editable-title";
+import { MarkdownText } from "@/components/views/meetings/markdown-text";
+import { WorkspaceSkeleton } from "@/components/views/meetings/workspace-skeleton";
 import { listen } from "@/lib/electron";
 import {
   AlertCircle,
+  ArrowLeft,
   CheckCircle2,
   Copy,
   Edit3,
@@ -100,12 +107,8 @@ import {
   Square,
   Trash2,
   Users,
-  Rocket,
-  ClipboardList,
-  CalendarClock,
   Volume2,
   Quote,
-  Lock,
 } from "lucide-react";
 import type { AnalysisTemplate } from "@/types";
 import type { AsrProviderType, LlmCitation, SearchHit } from "@/types";
@@ -210,18 +213,20 @@ const RECAP_AUTHORSHIP_TREATMENT: Record<RecapAuthorship, string> = {
   unrecorded: "border-l-2 border-l-border text-foreground/70",
 };
 
+// The button under these captions is labelled "Regenerate". The only "Refresh"
+// on this page belongs to the transcript rail and does something else.
 const SUMMARY_AUTHORSHIP_CAPTION: Record<RecapAuthorship, string> = {
   plainsong: "Written by Plainsong this session from transcript and notes.",
-  user: "Your text. Refresh to have Plainsong rewrite it from the transcript.",
+  user: "Your text. Regenerate to have Plainsong rewrite it from the transcript.",
   unrecorded:
-    "Authorship not recorded — nothing stored says whether you or Plainsong wrote this. Refresh to have Plainsong rewrite it from the transcript.",
+    "Authorship not recorded — nothing stored says whether you or Plainsong wrote this. Regenerate to have Plainsong rewrite it from the transcript.",
 };
 
 const ACTION_ITEMS_AUTHORSHIP_CAPTION: Record<RecapAuthorship, string> = {
   plainsong: "Extracted by Plainsong this session from transcript and notes.",
-  user: "Your text. Refresh to have Plainsong extract them from the transcript.",
+  user: "Your text. Regenerate to have Plainsong extract them from the transcript.",
   unrecorded:
-    "Authorship not recorded — nothing stored says whether you or Plainsong wrote these. Refresh to have Plainsong extract them from the transcript.",
+    "Authorship not recorded — nothing stored says whether you or Plainsong wrote these. Regenerate to have Plainsong extract them from the transcript.",
 };
 
 function formatCitationTimeRange(citation: LlmCitation): string | null {
@@ -412,21 +417,6 @@ function resolveRecordingCaptureMode(
   }
 
   return formatCaptureMode(fallbackSystemAudio);
-}
-
-function formatMeetingReviewState(status: Recording["status"] | undefined): string {
-  switch (status) {
-    case "recording":
-      return "Capture live";
-    case "processing":
-      return "Transcribing";
-    case "completed":
-      return "Review ready";
-    case "error":
-      return "Needs attention";
-    default:
-      return "Unknown";
-  }
 }
 
 // A 1.5px left band that encodes meeting state by gold/rust/neutral — never a
@@ -639,7 +629,7 @@ function buildMeetingReadyState(args: {
       label: "Transcription failed",
       tone: "warn",
       detail:
-        "This meeting has no grounded transcript. Retry transcription from the Transcript tab before relying on a recap.",
+        "This meeting has no grounded transcript. Retry transcription from the meeting menu before relying on a recap.",
     };
   }
   if (args.status === "processing") {
@@ -682,6 +672,67 @@ function buildMeetingReadyState(args: {
     tone: "muted",
     detail: "This meeting has no transcript, notes, or recap attached to it.",
   };
+}
+
+/** Which part of the record a regeneration is about to overwrite. */
+type RegenerateScope = "summary" | "actions";
+
+const REGENERATE_SCOPE_LABEL: Record<RegenerateScope, string> = {
+  summary: "the summary",
+  actions: "the action items",
+};
+
+/**
+ * Regeneration replaces text in place, so it has to say what it is about to
+ * throw away. Only text this session watched Plainsong write is safe to
+ * replace silently; anything else is either the reader's own or has no
+ * recorded author, and both deserve the question first.
+ */
+function describeRegenerateClobber(args: {
+  scope: RegenerateScope;
+  summary: string;
+  actionItemsText: string;
+  summaryAuthorship: RecapAuthorship;
+  actionItemsAuthorship: RecapAuthorship;
+  /**
+   * Visible action items with no citation recorded this session. The list is
+   * the one field where the two hands mix line by line, so the overall
+   * authorship cannot decide this: four extracted items plus one the reader
+   * typed still reads as "plainsong", and regenerating would take the fifth
+   * away without asking. Counting the unattributed lines is the honest test.
+   */
+  unattributedActionItems: number;
+}): string | null {
+  const touchesSummary = args.scope === "summary";
+  const touchesActions = args.scope === "actions";
+  const atRisk: string[] = [];
+
+  if (touchesSummary && args.summary.trim() && args.summaryAuthorship !== "plainsong") {
+    atRisk.push(
+      args.summaryAuthorship === "user"
+        ? "the summary you wrote"
+        : "the stored summary, which has no recorded author"
+    );
+  }
+  if (touchesActions && args.actionItemsText.trim() && args.unattributedActionItems > 0) {
+    atRisk.push(
+      args.actionItemsAuthorship === "user"
+        ? "the action items you wrote"
+        : args.actionItemsAuthorship === "unrecorded"
+          ? "the stored action items, which have no recorded author"
+          : `${args.unattributedActionItems} action item${
+              args.unattributedActionItems === 1 ? "" : "s"
+            } Plainsong did not write`
+    );
+  }
+
+  if (atRisk.length === 0) {
+    return null;
+  }
+
+  return `Regenerating ${REGENERATE_SCOPE_LABEL[args.scope]} replaces ${atRisk.join(
+    " and "
+  )}. Plainsong cannot bring the old text back.`;
 }
 
 /**
@@ -728,7 +779,24 @@ export function RecordingsView() {
   >({});
   const [showConsent, setShowConsent] = useState(false);
   const [showRecordingDetail, setShowRecordingDetail] = useState(false);
-  const [meetingTab, setMeetingTab] = useState("notes");
+  // Opening a meeting and coming back are navigations between two pages that
+  // never coexist. Each page's h1 takes focus on arrival; otherwise focus is
+  // left on <body> and a keyboard reader restarts from the top of the document.
+  const workspaceHeadingRef = useRef<HTMLHeadingElement>(null);
+  const listHeadingRef = useRef<HTMLHeadingElement>(null);
+  const hasOpenedWorkspaceRef = useRef(false);
+  const [meetingTab, setMeetingTab] = useState("record");
+  // The record is a document first. Editing is an explicit act on one field at
+  // a time, so the other field never turns into a text box behind your back.
+  const [isEditingSummary, setIsEditingSummary] = useState(false);
+  const [isEditingActionItems, setIsEditingActionItems] = useState(false);
+  // A regeneration that would overwrite text Plainsong did not write this
+  // session parks here until the reader says it may.
+  const [pendingRegenerate, setPendingRegenerate] = useState<{
+    scope: RegenerateScope;
+    templateId: string | null;
+    warning: string;
+  } | null>(null);
   const [searchQuery, setSearchQuery] = useState("");
   const [transcriptMatches, setTranscriptMatches] = useState<TranscriptMatch[]>([]);
   const [activeTranscriptMatchIndex, setActiveTranscriptMatchIndex] = useState(0);
@@ -1235,6 +1303,9 @@ export function RecordingsView() {
       setMeetingChatMessages([]);
       setIsRefreshingSummary(false);
       setIsRefreshingActionItems(false);
+      setIsEditingSummary(false);
+      setIsEditingActionItems(false);
+      setPendingRegenerate(null);
       lastSavedMeetingNotesRef.current = "";
       lastSavedMeetingTemplateRef.current = "auto";
       lastSavedMeetingSummaryRef.current = "";
@@ -1450,9 +1521,12 @@ export function RecordingsView() {
     // whichever occurrence happens to come first in the meeting.
     pendingMatchFocusTimeRef.current =
       focus?.highlightQuery && focus.segmentTime !== undefined ? focus.segmentTime : null;
-    // A deep link lands on the moment it named; a plain open still starts on
-    // the note canvas.
-    setMeetingTab(focus?.segmentTime !== undefined || focus?.highlightQuery ? "transcript" : "notes");
+    // The transcript is its own pane now, always on screen beside the record,
+    // so a deep link cues the moment without hiding the document behind a tab.
+    setMeetingTab("record");
+    setIsEditingSummary(false);
+    setIsEditingActionItems(false);
+    setPendingRegenerate(null);
     setAudioPlaybackIssue(null);
     setMeetingSummaryProvenance(null);
     setMeetingActionItemProvenance([]);
@@ -1700,6 +1774,71 @@ export function RecordingsView() {
         setIsRefreshingActionItems(false);
       }
     }
+  };
+
+  // Two regenerations, kept apart on purpose: the plain one repeats what you
+  // already asked for, and the other one changes the playbook first. Rolling
+  // them into a single button forced a template picker onto every retry.
+  //
+  // The playbook is read from the stored recording by the summariser, so a
+  // playbook change has to land before the request goes out — the 250ms
+  // autosave is too late, and the model would answer with the old playbook.
+  const runRegeneration = async (scope: RegenerateScope, templateId: string | null) => {
+    if (!selectedRecording) {
+      return;
+    }
+
+    if (templateId && templateId !== meetingTemplateId) {
+      try {
+        await updateRecordingTemplate(
+          selectedRecording.id,
+          templateId === "auto" ? null : templateId
+        );
+        lastSavedMeetingTemplateRef.current = templateId;
+        setMeetingTemplateId(templateId);
+        setSelectedRecording((current) =>
+          current?.id === selectedRecording.id
+            ? {
+                ...current,
+                meetingTemplateId: templateId === "auto" ? null : templateId,
+              }
+            : current
+        );
+      } catch (error) {
+        console.error("Failed to switch meeting playbook before regenerating:", error);
+        toast(
+          error instanceof Error
+            ? error.message
+            : "Couldn't switch the playbook, so nothing was regenerated.",
+          "error"
+        );
+        return;
+      }
+    }
+
+    if (scope === "summary") {
+      await handleRefreshSummary();
+      return;
+    }
+    await handleRefreshActionItems();
+  };
+
+  const requestRegeneration = (scope: RegenerateScope, templateId: string | null = null) => {
+    const warning = describeRegenerateClobber({
+      scope,
+      summary: meetingSummary,
+      actionItemsText: meetingActionItemsText,
+      summaryAuthorship,
+      actionItemsAuthorship,
+      unattributedActionItems: unattributedActionItemCount,
+    });
+
+    if (warning) {
+      setPendingRegenerate({ scope, templateId, warning });
+      return;
+    }
+
+    void runRegeneration(scope, templateId);
   };
 
   const handleEnhanceMeetingNotes = async () => {
@@ -2070,6 +2209,49 @@ export function RecordingsView() {
     }
   };
 
+  // Leaving the workspace is a navigation, not a dismissal: the same teardown
+  // the dialog used to run on close, minus the modal.
+  const closeMeetingWorkspace = () => {
+    setShowRecordingDetail(false);
+    clearRecordingDetail();
+    setSearchQuery("");
+    // The failure belonged to the meeting being left. Kept, it would surface
+    // again on the list, detached from the click that caused it.
+    setAudioPlaybackIssue(null);
+    setDiarizationMessage(null);
+    setDiarizationError(null);
+    setPendingRegenerate(null);
+    setIsEditingSummary(false);
+    setIsEditingActionItems(false);
+    if (!isRecording) {
+      setMeetingNotesTargetId(null);
+      setMeetingNotes("");
+      setMeetingChatMessages([]);
+      setLastMeetingExportPath(null);
+      lastSavedMeetingNotesRef.current = "";
+      lastSavedMeetingChatRef.current = "[]";
+    }
+  };
+
+  // The title is edited where it is read, in the workspace header. It is the
+  // same write the row's Rename dialog performs.
+  const handleRenameMeetingTitle = async (nextTitle: string) => {
+    if (!selectedRecording) {
+      return;
+    }
+
+    try {
+      await renameRecording(selectedRecording.id, nextTitle);
+      setSelectedRecording((current) =>
+        current?.id === selectedRecording.id ? { ...current, title: nextTitle } : current
+      );
+      refetch();
+    } catch (error) {
+      console.error("Failed to rename meeting:", error);
+      toast("Couldn't rename that meeting — the old name is unchanged.", "error");
+    }
+  };
+
   const handleRenameRecording = async () => {
     if (!showRenameDialog || !renameValue.trim()) return;
     try {
@@ -2181,6 +2363,8 @@ export function RecordingsView() {
     () => meetings.find((meeting) => meeting.id === recordingId) ?? null,
     [meetings, recordingId]
   );
+  // The meeting on screen is the one being captured right now.
+  const isLiveSelectedMeeting = selectedRecording?.id === recordingId && isRecording;
   // Transcript bodies are not held in the meetings list, so the FTS index does
   // that half. Debounced so typing does not fire a query per keystroke.
   useEffect(() => {
@@ -2346,6 +2530,20 @@ export function RecordingsView() {
   );
   const hasRecapProvenance =
     Boolean(summaryProvenance) || generatedActionItemProvenance.length > 0;
+  // The failed meeting is named from the list when it is still there, and from
+  // the open workspace when the list is unmounted behind it.
+  const audioIssueMeetingTitle = audioPlaybackIssue
+    ? (meetings.find((meeting) => meeting.id === audioPlaybackIssue.recordingId)?.title ??
+      (selectedRecording?.id === audioPlaybackIssue.recordingId
+        ? selectedRecording.title
+        : "this meeting"))
+    : "this meeting";
+  // How many visible follow-ups Plainsong has no claim on. Drives both the
+  // caption and the regenerate warning, so a hand-typed line is never described
+  // as the model's and never replaced without being named.
+  const unattributedActionItemCount = actionItemProvenance.filter(
+    (entry) => entry.citations === null
+  ).length;
   // Three states, and the third is the honest one: text that was already stored
   // when the meeting opened has no recorded author, so it is neither claimed as
   // the model's nor handed back to the reader as their own.
@@ -2364,14 +2562,15 @@ export function RecordingsView() {
       ? "user"
       : "unrecorded";
 
-  // A citation is only useful if it can take you to the moment it names.
+  // A citation is only useful if it can take you to the moment it names. The
+  // transcript pane sits beside the record, so this cues it in place instead
+  // of swapping the document out for a tab.
   const jumpToTranscriptMoment = useCallback((startTime?: number) => {
     setSearchQuery("");
     setTranscriptMatches([]);
     setActiveTranscriptMatchIndex(0);
     pendingMatchFocusTimeRef.current = null;
     setTranscriptCueTime(typeof startTime === "number" ? startTime : undefined);
-    setMeetingTab("transcript");
   }, []);
   const selectedMeetingRelationshipMatches = useMemo(() => {
     if (!selectedRecording || !relationshipMemory) {
@@ -2502,109 +2701,6 @@ export function RecordingsView() {
       selectedTranscript?.segments?.length,
     ]
   );
-  const selectedMeetingReviewPath = useMemo(
-    () => [
-      {
-        title: "Ground transcript",
-        status: (selectedTranscript?.segments?.length ?? 0) > 0 ? "Grounded" : "Processing",
-        detail:
-          (selectedTranscript?.segments?.length ?? 0) > 0
-            ? `${selectedTranscript?.segments?.length ?? 0} transcript segments ready from ${selectedMeetingCaptureMode.toLowerCase()} capture. Consent: ${selectedMeetingConsent.label}.`
-            : "Transcript is still processing. Keep the note canvas current until grounded lines arrive.",
-      },
-      {
-        title: "Lock recap",
-        status: meetingSummary.trim() ? "Summary ready" : "Refresh summary",
-        detail: meetingSummary.trim()
-          ? "Your recap is editable. Refresh it only after notes or transcript context changes."
-          : "Refresh the summary from transcript and notes before you send anything out.",
-      },
-      {
-        title: "Send next move",
-        status:
-          meetingSummary.trim() && selectedMeetingActionItems.length > 0
-            ? "Send-ready"
-            : selectedMeetingActionItems.length > 0
-              ? "Need recap"
-              : "Need follow-ups",
-        detail:
-          meetingSummary.trim() && selectedMeetingActionItems.length > 0
-            ? "Copy a send-ready follow-up or a review bundle while context is still fresh."
-            : selectedMeetingActionItems.length > 0
-              ? "Action items are captured. Tighten the summary next so the follow-up is easy to send."
-              : "Extract owners and dates so the follow-up carries real commitments, not just recap text.",
-      },
-    ],
-    [
-      meetingSummary,
-      selectedMeetingActionItems,
-      selectedMeetingCaptureMode,
-      selectedMeetingConsent.label,
-      selectedTranscript?.segments?.length,
-    ]
-  );
-  const selectedMeetingEvidenceState = useMemo(
-    () => [
-      {
-        label: "Capture",
-        value:
-          selectedRecording?.id === recordingId && isRecording
-            ? "Recording"
-            : formatMeetingReviewState(selectedRecording?.status),
-      },
-      {
-        label: "Consent action",
-        value: selectedMeetingConsent.needsManualNotice
-          ? "Copy notice"
-          : selectedMeetingConsent.label,
-      },
-      {
-        label: "Transcript",
-        value:
-          (selectedTranscript?.segments?.length ?? 0) > 0
-            ? `${selectedTranscript?.segments?.length ?? 0} segments`
-            : selectedRecording?.status === "processing"
-              ? "Processing"
-              : "Not grounded",
-      },
-      {
-        label: "Export",
-        value: isExportingMeeting
-          ? "Exporting"
-          : lastMeetingExportPath
-            ? "Last export ready"
-            : "Not exported",
-      },
-    ],
-    [
-      isExportingMeeting,
-      isRecording,
-      lastMeetingExportPath,
-      recordingId,
-      selectedMeetingConsent.label,
-      selectedMeetingConsent.needsManualNotice,
-      selectedRecording?.id,
-      selectedRecording?.status,
-      selectedTranscript?.segments?.length,
-    ]
-  );
-  const transcriptPreviewItems = useMemo(() => {
-    if (selectedRecording?.id === recordingId && streamChunks.length > 0) {
-      return streamChunks.slice(-5).map((chunk, index) => ({
-        id: `live-${index}-${chunk.startTime}`,
-        text: chunk.text,
-        startTime: chunk.startTime,
-        isPartial: chunk.isPartial,
-      }));
-    }
-
-    return (selectedTranscript?.segments ?? []).slice(-4).map((segment) => ({
-      id: segment.id,
-      text: segment.text,
-      startTime: segment.startTime,
-      isPartial: false,
-    }));
-  }, [recordingId, selectedRecording?.id, selectedTranscript?.segments, streamChunks]);
   const enhancedMeetingNotesIsStale = useMemo(
     () =>
       Boolean(
@@ -2795,6 +2891,21 @@ export function RecordingsView() {
     openRequestedWorkspace(consumePendingRecordingWorkspace());
   }, [openRequestedWorkspace]);
 
+  // Move focus with the navigation. Deliberately not on first mount: nothing
+  // was navigated to yet, and stealing focus into a heading on load is worse
+  // than leaving it where the app put it.
+  useEffect(() => {
+    if (showRecordingDetail) {
+      hasOpenedWorkspaceRef.current = true;
+      workspaceHeadingRef.current?.focus();
+      return;
+    }
+    if (hasOpenedWorkspaceRef.current) {
+      hasOpenedWorkspaceRef.current = false;
+      listHeadingRef.current?.focus();
+    }
+  }, [showRecordingDetail]);
+
   useEffect(() => {
     const handleOpenRecordingWorkspace = (event: Event) => {
       // Clear the parked copy so the mount path cannot open it a second time.
@@ -2815,11 +2926,1552 @@ export function RecordingsView() {
   }, [openRequestedWorkspace]);
 
   return (
-    <div className="h-full flex flex-col">
+    <div className="flex h-full min-h-0 flex-col">
+      {showRecordingDetail ? (
+        <div className="flex h-full min-h-0 flex-col">
+          {/* The meeting is a page now, not a modal: it has a way back, a
+              title you can edit in place, and the row's actions in one
+              overflow instead of scattered across the surfaces below. */}
+          <div className="shrink-0 border-b border-border/70 px-6 py-4">
+            <div className="flex flex-wrap items-center justify-between gap-2">
+              <Button variant="ghost" size="sm" onClick={closeMeetingWorkspace}>
+                <ArrowLeft className="mr-2 h-4 w-4" />
+                All meetings
+              </Button>
+              <div className="flex items-center gap-2">
+                <Button
+                  type="button"
+                  size="sm"
+                  variant="outline"
+                  disabled={!selectedRecording?.audioPath}
+                  onClick={() => {
+                    if (selectedRecording) {
+                      void handlePlayAudio(selectedRecording);
+                    }
+                  }}
+                >
+                  <Play className="mr-2 h-4 w-4" />
+                  Play audio
+                </Button>
+                <DropdownMenu>
+                  <DropdownMenuTrigger asChild>
+                    <Button
+                      variant="ghost"
+                      size="icon"
+                      className="h-8 w-8"
+                      aria-label="Meeting options"
+                    >
+                      <MoreHorizontal className="h-4 w-4" />
+                    </Button>
+                  </DropdownMenuTrigger>
+                  <DropdownMenuContent align="end">
+                    <DropdownMenuItem onClick={() => void handleCopyMeetingRecap()}>
+                      <Copy className="mr-2 h-4 w-4" />
+                      Copy recap as Markdown
+                    </DropdownMenuItem>
+                    <DropdownMenuItem
+                      onClick={() => void handleExportMeetingArtifact("markdown")}
+                    >
+                      <FileText className="mr-2 h-4 w-4" />
+                      Export Markdown
+                    </DropdownMenuItem>
+                    {selectedRecording?.status === "error" && (
+                      <DropdownMenuItem
+                        onClick={() => {
+                          if (selectedRecording) {
+                            void handleRetranscribeRecording(selectedRecording.id);
+                          }
+                        }}
+                      >
+                        <RefreshCw className="mr-2 h-4 w-4" />
+                        Retry Transcription
+                      </DropdownMenuItem>
+                    )}
+                    <DropdownMenuSeparator />
+                    <DropdownMenuItem
+                      onClick={() => {
+                        if (selectedRecording) {
+                          void handleMarkAsDictation(selectedRecording.id);
+                        }
+                      }}
+                    >
+                      <Mic2 className="mr-2 h-4 w-4" />
+                      Mark as Dictation
+                    </DropdownMenuItem>
+                    <DropdownMenuSeparator />
+                    <DropdownMenuItem
+                      className="text-destructive"
+                      disabled={isLiveSelectedMeeting}
+                      onClick={() => {
+                        if (selectedRecording) {
+                          setShowDeleteConfirm(selectedRecording);
+                        }
+                      }}
+                    >
+                      <Trash2 className="mr-2 h-4 w-4" />
+                      {isLiveSelectedMeeting ? "Delete (stop recording first)" : "Delete"}
+                    </DropdownMenuItem>
+                  </DropdownMenuContent>
+                </DropdownMenu>
+              </div>
+            </div>
+
+            <div className="mt-3 flex flex-wrap items-start justify-between gap-3">
+              <div className="min-w-0 flex-1">
+                <p className="rubric mb-1.5">MEETING</p>
+                {/* The meeting's name is this page's h1. Without it the heading
+                    tree started at "The record" and a screen-reader user
+                    navigating by heading never heard which meeting they were
+                    in. The input carries the type, so the heading only names. */}
+                <h1
+                  ref={workspaceHeadingRef}
+                  tabIndex={-1}
+                  className="min-w-0 outline-none focus-visible:ring-1 focus-visible:ring-ring"
+                >
+                  <EditableTitle
+                    className="-ml-2"
+                    value={selectedRecording?.title ?? "Meeting"}
+                    disabled={!selectedRecording}
+                    onCommit={handleRenameMeetingTitle}
+                  />
+                </h1>
+              </div>
+              {/* Status is said once, here. Every card below used to restate
+                  it in its own words. */}
+              <Badge
+                variant="outline"
+                className={qualityToneClasses(selectedMeetingReadyState.tone)}
+              >
+                {selectedMeetingReadyState.label}
+              </Badge>
+            </div>
+            <p className="mt-1.5 max-w-prose text-sm text-muted-foreground">
+              {selectedMeetingReadyState.detail}
+            </p>
+            <div className="mt-3 flex flex-wrap items-center gap-x-4 gap-y-1.5 text-sm text-muted-foreground">
+              <span className="time-spec">
+                {selectedRecording
+                  ? new Date(selectedRecording.createdAt).toLocaleString()
+                  : "Date unknown"}
+              </span>
+              <span className="time-spec">
+                {formatDuration(selectedRecording?.duration ?? 0)}
+              </span>
+              <span>{selectedMeetingCaptureMode}</span>
+              <span className="inline-flex items-center gap-1.5">
+                <span
+                  className={cn(
+                    "neume",
+                    selectedMeetingConsent.needsManualNotice ? "neume-hollow" : "neume-lit"
+                  )}
+                  aria-hidden="true"
+                />
+                {selectedMeetingConsent.label}
+              </span>
+              <span>Playbook: {selectedTemplateOption.label}</span>
+              <span>{selectedMeetingAssetRetention.audioLabel}</span>
+              {isLiveSelectedMeeting ? (
+                <span className="inline-flex items-center gap-1.5 text-gold-text">
+                  <span className="neume neume-lit" aria-hidden="true" />
+                  Live capture · {formattedDuration}
+                </span>
+              ) : null}
+            </div>
+            {selectedMeetingConsent.message ? (
+              <p className="mt-1.5 max-w-prose text-sm text-muted-foreground">
+                {selectedMeetingConsent.message}
+              </p>
+            ) : null}
+          </div>
+
+          {/* The same failure surface the list carries. Without it here, Play
+              audio in the header above could fail with nothing on screen but a
+              toast, and a locked-vault reader had no route to unlock. */}
+          {audioPlaybackIssue && (
+            <div className="shrink-0 px-6 pt-4">
+              <AudioIssueBanner
+                meetingTitle={audioIssueMeetingTitle}
+                message={audioPlaybackIssue.message}
+                onUnlockVault={() => {
+                  setAudioPlaybackIssue(null);
+                  requestMainView("settings");
+                }}
+                onDismiss={() => setAudioPlaybackIssue(null)}
+              />
+            </div>
+          )}
+
+          {/* The transcript is a pane, not a tab a tester never found: it sits
+              beside the record at every width and keeps its own scrollbar. */}
+          <div className="grid min-h-0 flex-1 grid-rows-[minmax(0,1.35fr)_minmax(0,1fr)] overflow-hidden xl:grid-cols-[minmax(0,1.55fr)_minmax(360px,1fr)] xl:grid-rows-1">
+            <div className="flex min-h-0 min-w-0 flex-col overflow-hidden">
+              <Tabs
+                value={meetingTab}
+                onValueChange={setMeetingTab}
+                className="flex min-h-0 flex-1 flex-col overflow-hidden"
+              >
+                <TabsList className="mx-6 mt-4 grid w-auto shrink-0 grid-cols-3">
+                  <TabsTrigger value="record" className="flex items-center gap-2">
+                    <FileText className="h-4 w-4" />
+                    Record
+                  </TabsTrigger>
+                  <TabsTrigger value="ask" className="flex items-center gap-2">
+                    <MessageSquare className="h-4 w-4" />
+                    Ask
+                  </TabsTrigger>
+                  <TabsTrigger value="assets" className="flex items-center gap-2">
+                    <FileAudio className="h-4 w-4" />
+                    Assets
+                  </TabsTrigger>
+                </TabsList>
+
+                <TabsContent value="record" className="mt-0 min-h-0 flex-1 overflow-hidden">
+                  <ScrollArea type="always" className="h-full min-h-0">
+                    <div className="space-y-6 px-6 py-5">
+                      {isLoadingDetail ? (
+                        <WorkspaceSkeleton
+                          label="Opening this meeting. Summary, action items, and notes are still loading."
+                          lines={6}
+                        />
+                      ) : (
+                        <>
+                          <section className="space-y-5">
+                            <div className="min-w-0">
+                              <h2 className="font-serif text-lg font-semibold tracking-tight">
+                                The record
+                              </h2>
+                              <p className="mt-1 max-w-prose text-sm text-muted-foreground">
+                                What was decided, and what happens next. Edit either part by hand,
+                                or have Plainsong write it again from the transcript and your
+                                notes. The playbook shapes the summary Plainsong writes; action
+                                items are extracted the same way under any playbook.
+                              </p>
+                            </div>
+
+                            <DocumentField
+                              label="Meeting summary"
+                              value={meetingSummary}
+                              onChange={(next) => {
+                                setMeetingSummary(next);
+                                setUserEditedSummary(next);
+                              }}
+                              isEditing={isEditingSummary}
+                              onEditingChange={setIsEditingSummary}
+                              disabled={!selectedRecording}
+                              emptyMessage="No summary yet. Regenerate to have Plainsong write it from the transcript."
+                              editorPlaceholder="Write the recap in your own words, or regenerate it from the transcript."
+                              // No caption when the field is empty: the body
+                              // already says the same sentence, and printing it
+                              // twice is the duplicate-pair bug STYLE.md §2
+                              // names outright.
+                              caption={
+                                meetingSummary.trim()
+                                  ? SUMMARY_AUTHORSHIP_CAPTION[summaryAuthorship]
+                                  : undefined
+                              }
+                              bodyClassName={
+                                meetingSummary.trim()
+                                  ? RECAP_AUTHORSHIP_TREATMENT[summaryAuthorship]
+                                  : RECAP_AUTHORSHIP_TREATMENT.user
+                              }
+                              actions={
+                                <>
+                                  {/* Two regenerations, never conflated: the plain
+                                      one repeats the playbook already chosen, and
+                                      the other asks which playbook to use. */}
+                                  <Button
+                                    type="button"
+                                    size="sm"
+                                    aria-label="Regenerate summary"
+                                    onClick={() => requestRegeneration("summary")}
+                                    disabled={!selectedRecording || isRefreshingSummary}
+                                  >
+                                    {isRefreshingSummary ? (
+                                      <Loader2 className="mr-2 h-4 w-4 animate-spin" />
+                                    ) : (
+                                      <RefreshCw className="mr-2 h-4 w-4" />
+                                    )}
+                                    Regenerate
+                                  </Button>
+                                  <DropdownMenu>
+                                    <DropdownMenuTrigger asChild>
+                                      <Button
+                                        type="button"
+                                        size="sm"
+                                        variant="outline"
+                                        aria-label="Regenerate summary with a different playbook"
+                                        disabled={!selectedRecording || isRefreshingSummary}
+                                      >
+                                        Different playbook
+                                      </Button>
+                                    </DropdownMenuTrigger>
+                                    <DropdownMenuContent align="end" className="max-h-72 overflow-y-auto">
+                                      {MEETING_TEMPLATES.map((template) => (
+                                        <DropdownMenuItem
+                                          key={template.value}
+                                          onClick={() =>
+                                            requestRegeneration("summary", template.value)
+                                          }
+                                        >
+                                          {template.value === meetingTemplateId
+                                            ? `${template.label} (current)`
+                                            : template.label}
+                                        </DropdownMenuItem>
+                                      ))}
+                                    </DropdownMenuContent>
+                                  </DropdownMenu>
+                                  <Button
+                                    type="button"
+                                    size="sm"
+                                    variant="outline"
+                                    onClick={() =>
+                                      toggleReadAloudPlayback(meetingSummary, "meeting-summary")
+                                    }
+                                    disabled={!selectedRecording || !meetingSummary.trim()}
+                                  >
+                                    <Volume2 className="mr-2 h-4 w-4" />
+                                    {activeSpeechTarget === "meeting-summary"
+                                      ? "Stop reading"
+                                      : "Read aloud"}
+                                  </Button>
+                                </>
+                              }
+                            />
+
+                            <div className="border-t pt-5">
+                              <DocumentField
+                                label="Meeting action items"
+                                value={meetingActionItemsText}
+                                renderValue={actionItemsToMarkdownList(selectedMeetingActionItems)}
+                                onChange={(next) => {
+                                  setMeetingActionItemsText(next);
+                                  setUserEditedActionItemsText(next);
+                                }}
+                                isEditing={isEditingActionItems}
+                                onEditingChange={setIsEditingActionItems}
+                                disabled={!selectedRecording}
+                                emptyMessage="No action items yet. Regenerate to have Plainsong extract them from the transcript."
+                                editorPlaceholder="One follow-up per line. Owners and dates can stay inline."
+                                caption={
+                                  !meetingActionItemsText.trim()
+                                    ? undefined
+                                    : actionItemsAuthorship === "plainsong" &&
+                                        unattributedActionItemCount > 0
+                                      ? // The two hands mix line by line here, so
+                                        // the caption says so rather than handing
+                                        // the whole list to either one.
+                                        `Extracted by Plainsong this session, plus ${unattributedActionItemCount} line${
+                                          unattributedActionItemCount === 1 ? "" : "s"
+                                        } Plainsong did not write.`
+                                      : ACTION_ITEMS_AUTHORSHIP_CAPTION[actionItemsAuthorship]
+                                }
+                                bodyClassName={
+                                  meetingActionItemsText.trim()
+                                    ? RECAP_AUTHORSHIP_TREATMENT[actionItemsAuthorship]
+                                    : RECAP_AUTHORSHIP_TREATMENT.user
+                                }
+                                actions={
+                                  <>
+                                    <Button
+                                      type="button"
+                                      size="sm"
+                                      variant="outline"
+                                      aria-label="Regenerate action items"
+                                      onClick={() => requestRegeneration("actions")}
+                                      disabled={!selectedRecording || isRefreshingActionItems}
+                                    >
+                                      {isRefreshingActionItems ? (
+                                        <Loader2 className="mr-2 h-4 w-4 animate-spin" />
+                                      ) : (
+                                        <RefreshCw className="mr-2 h-4 w-4" />
+                                      )}
+                                      Regenerate
+                                    </Button>
+                                    <Button
+                                      type="button"
+                                      size="sm"
+                                      variant="outline"
+                                      onClick={() =>
+                                        toggleReadAloudPlayback(
+                                          meetingActionItemsText,
+                                          "meeting-action-items"
+                                        )
+                                      }
+                                      disabled={
+                                        !selectedRecording || !meetingActionItemsText.trim()
+                                      }
+                                    >
+                                      <Volume2 className="mr-2 h-4 w-4" />
+                                      {activeSpeechTarget === "meeting-action-items"
+                                        ? "Stop reading"
+                                        : "Read aloud"}
+                                    </Button>
+                                  </>
+                                }
+                              />
+                            </div>
+                          </section>
+                          {/* Provenance. The boxes above carry the authorship mark —
+                              machine-set text in the quieter ink behind a bronze
+                              rule, the reader's own in full ink, text with no
+                              recorded author behind a neutral rule. This is the
+                              evidence for the machine-set lines: each one either
+                              names the transcript moment it came from, in a row big
+                              enough to hit, or says plainly that it has none. */}
+                          <div className="mt-4 border-t pt-4">
+                            <div className="flex flex-wrap items-start justify-between gap-3">
+                              <div className="min-w-0">
+                                <p className="section-heading">Where this recap came from</p>
+                                <p className="mt-1 max-w-prose text-sm text-muted-foreground">
+                                  Evidence for the lines Plainsong wrote this session. Text you typed here
+                                  is your own; text that came back from storage has no recorded author.
+                                  Neither is listed below — Plainsong makes no evidence claim about
+                                  either.
+                                </p>
+                              </div>
+                            </div>
+
+                            {!hasRecapProvenance ? (
+                              <p className="mt-3 text-sm text-muted-foreground">
+                                Nothing on this recap was generated in this session, so there is no
+                                evidence to show. Regenerate the summary or action items to attach
+                                transcript citations.
+                              </p>
+                            ) : (
+                              <div className="mt-3 space-y-4">
+                                {summaryProvenance ? (
+                                  <div>
+                                    <p className="rubric-muted">Summary</p>
+                                    {summaryProvenance.citations.length === 0 ? (
+                                      <p className="mt-1.5 inline-flex items-center gap-1.5 text-sm text-rust">
+                                        <span className="neume neume-hollow" aria-hidden="true" />
+                                        Not grounded — the model returned no transcript citation for this
+                                        summary.
+                                      </p>
+                                    ) : (
+                                      <div className="mt-2 grid gap-1.5">
+                                        {summaryProvenance.citations.map((citation, index) => (
+                                          <button
+                                            key={`summary-citation-${index}`}
+                                            type="button"
+                                            className="rounded-md border border-border/70 bg-background/70 px-3 py-2.5 text-left transition-colors hover:bg-muted/40 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+                                            onClick={() => jumpToTranscriptMoment(citation.startTime)}
+                                          >
+                                            <span className="flex items-baseline gap-2">
+                                              <Quote
+                                                className="h-3.5 w-3.5 shrink-0 translate-y-0.5 text-muted-foreground"
+                                                aria-hidden="true"
+                                              />
+                                              <span className="rubric-muted time-spec shrink-0">
+                                                {formatCitationTimeRange(citation) ?? "No timestamp"}
+                                              </span>
+                                            </span>
+                                            <span className="manuscript mt-1 block text-sm">
+                                              {citation.text}
+                                            </span>
+                                            <span className="mt-1 block text-sm text-muted-foreground">
+                                              Jump to this moment in the transcript
+                                            </span>
+                                          </button>
+                                        ))}
+                                      </div>
+                                    )}
+                                  </div>
+                                ) : null}
+
+                                {generatedActionItemProvenance.length > 0 ? (
+                                  <div>
+                                    <p className="rubric-muted">Action items</p>
+                                    <div className="mt-1.5 space-y-3">
+                                      {generatedActionItemProvenance.map((entry, entryIndex) => (
+                                        <div key={`action-provenance-${entryIndex}`}>
+                                          <p className="manuscript max-w-prose border-l-2 border-gold-ambient/50 pl-3 text-sm leading-relaxed text-muted-foreground">
+                                            {entry.item}
+                                          </p>
+                                          {entry.citations.length === 0 ? (
+                                            <p className="mt-1 inline-flex items-center gap-1.5 text-sm text-rust">
+                                              <span className="neume neume-hollow" aria-hidden="true" />
+                                              Not grounded — no transcript citation was returned for this
+                                              follow-up.
+                                            </p>
+                                          ) : (
+                                            <div className="mt-1.5 grid gap-1.5">
+                                              {entry.citations.map((citation, citationIndex) => (
+                                                <button
+                                                  key={`action-citation-${entryIndex}-${citationIndex}`}
+                                                  type="button"
+                                                  className="rounded-md border border-border/70 bg-background/70 px-3 py-2.5 text-left transition-colors hover:bg-muted/40 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+                                                  onClick={() =>
+                                                    jumpToTranscriptMoment(citation.startTime)
+                                                  }
+                                                >
+                                                  <span className="flex items-baseline gap-2">
+                                                    <Quote
+                                                      className="h-3.5 w-3.5 shrink-0 translate-y-0.5 text-muted-foreground"
+                                                      aria-hidden="true"
+                                                    />
+                                                    <span className="rubric-muted time-spec shrink-0">
+                                                      {formatCitationTimeRange(citation) ?? "No timestamp"}
+                                                    </span>
+                                                  </span>
+                                                  <span className="manuscript mt-1 block text-sm">
+                                                    {citation.text}
+                                                  </span>
+                                                  <span className="mt-1 block text-sm text-muted-foreground">
+                                                    Jump to this moment in the transcript
+                                                  </span>
+                                                </button>
+                                              ))}
+                                            </div>
+                                          )}
+                                        </div>
+                                      ))}
+                                    </div>
+                                  </div>
+                                ) : null}
+                              </div>
+                            )}
+                          </div>
+
+                          <section className="border-t pt-5">
+                            <h2 className="section-heading">Your notes</h2>
+                            <p className="mt-1 max-w-prose text-sm text-muted-foreground">
+                              Raw notes ground the summary, the action items, and Ask. Fix them
+                              here and regenerate above — neither direction throws the other away.
+                            </p>
+                          <div className="mt-4 flex flex-wrap items-center gap-2">
+                            <label className="text-sm font-medium" htmlFor="meeting-template">
+                              Playbook
+                            </label>
+                            <select
+                              id="meeting-template"
+                              value={meetingTemplateId}
+                              onChange={(event) => setMeetingTemplateId(event.target.value)}
+                              className="h-9 rounded-md border bg-background px-3 text-sm"
+                            >
+                              {MEETING_TEMPLATES.map((template) => (
+                                <option key={template.value} value={template.value}>
+                                  {template.label}
+                                </option>
+                              ))}
+                            </select>
+                            <Button
+                              type="button"
+                              size="sm"
+                              variant="outline"
+                              onClick={handleApplyTemplateOutline}
+                            >
+                              Apply Outline
+                            </Button>
+                            {selectedMeetingConsent.needsManualNotice ? (
+                              <Button
+                                type="button"
+                                size="sm"
+                                variant="outline"
+                                onClick={async () => {
+                                  try {
+                                    await navigator.clipboard.writeText(MEETING_CONSENT_NOTICE_TEXT);
+                                    toast("Consent notice copied.", "success");
+                                  } catch {
+                                    toast("Couldn't copy the consent notice.", "error");
+                                  }
+                                }}
+                              >
+                                <Copy className="mr-2 h-4 w-4" />
+                                Copy Notice
+                              </Button>
+                            ) : null}
+                          </div>
+                          <div className="mt-4 flex flex-wrap items-center justify-between gap-2">
+                            <p className="text-sm text-muted-foreground">
+                              Sections autosave to the same meeting note as you type.
+                            </p>
+                            <Button
+                              type="button"
+                              size="sm"
+                              variant="outline"
+                              onClick={handleAddMeetingSection}
+                            >
+                              <Plus className="mr-2 h-4 w-4" />
+                              Add Section
+                            </Button>
+                          </div>
+                          <div aria-label="Meeting notes" role="group" className="mt-4 space-y-3">
+                            {meetingNoteSections.map((section, index) => (
+                              <div
+                                key={`${section.title}-${index}`}
+                                className="border-t border-border/60 pt-3"
+                              >
+                                <div className="flex flex-wrap items-start justify-between gap-3">
+                                  <div className="min-w-0 flex-1">
+                                    {section.isTemplateSection ? (
+                                      <div>
+                                        <div className="flex items-center gap-2">
+                                          <p className="text-sm font-medium">{section.title}</p>
+                                          <span className="rubric-muted">Template</span>
+                                        </div>
+                                        <p className="text-sm text-muted-foreground">
+                                          Keeps this meeting aligned to the selected playbook.
+                                        </p>
+                                      </div>
+                                    ) : (
+                                      <div className="space-y-2">
+                                        <label
+                                          className="text-sm font-medium"
+                                          htmlFor={`meeting-section-title-${index}`}
+                                        >
+                                          Section title
+                                        </label>
+                                        <Input
+                                          id={`meeting-section-title-${index}`}
+                                          value={section.title}
+                                          onChange={(event) =>
+                                            handleMeetingSectionTitleChange(
+                                              index,
+                                              event.target.value
+                                            )
+                                          }
+                                        />
+                                      </div>
+                                    )}
+                                  </div>
+                                  {section.isTemplateSection ? (
+                                    <Button
+                                      type="button"
+                                      size="sm"
+                                      variant="ghost"
+                                      onClick={() => handleClearMeetingSection(index)}
+                                    >
+                                      Clear
+                                    </Button>
+                                  ) : (
+                                    <Button
+                                      type="button"
+                                      size="icon"
+                                      variant="ghost"
+                                      aria-label={`Remove section ${section.title}`}
+                                      onClick={() => handleRemoveMeetingSection(index)}
+                                    >
+                                      <Trash2 className="h-4 w-4" />
+                                    </Button>
+                                  )}
+                                </div>
+                                <Textarea
+                                  value={section.body}
+                                  onChange={(event) =>
+                                    handleMeetingSectionBodyChange(index, event.target.value)
+                                  }
+                                  aria-label={`${section.title} notes`}
+                                  placeholder={`Capture ${section.title.toLowerCase()} here.`}
+                                  rows={5}
+                                  className="mt-3 min-h-[120px] resize-y bg-background"
+                                />
+                              </div>
+                            ))}
+                          </div>
+                        </section>
+
+                        <section className="space-y-3 border-t pt-5">
+                            <div className="flex flex-wrap items-start justify-between gap-3">
+                              <div className="min-w-0">
+                                <div className="flex flex-wrap items-center gap-2">
+                                  <p className="section-heading">Enhanced draft</p>
+                                  {enhancedMeetingNotesIsStale ? (
+                                    <Badge variant="outline" className="bg-rust/10 text-rust">
+                                      Raw notes changed
+                                    </Badge>
+                                  ) : null}
+                                </div>
+                                <p className="mt-1 max-w-prose text-sm text-muted-foreground">
+                                  A separate draft built from the transcript and your current raw
+                                  notes. Read the citations before it replaces anything.
+                                </p>
+                                {enhancedMeetingNotesDraft ? (
+                                  <p className="mt-2 text-sm text-muted-foreground">
+                                    Generated{" "}
+                                    {new Date(enhancedMeetingNotesDraft.generatedAt).toLocaleString()}.
+                                  </p>
+                                ) : null}
+                              </div>
+                              <div className="flex flex-wrap gap-2">
+                                <Button
+                                  type="button"
+                                  size="sm"
+                                  variant="outline"
+                                  onClick={() => void handleEnhanceMeetingNotes()}
+                                  disabled={!selectedRecording || isEnhancingMeetingNotes}
+                                >
+                                  {isEnhancingMeetingNotes ? (
+                                    <Loader2 className="mr-2 h-4 w-4 animate-spin" />
+                                  ) : (
+                                    <RefreshCw className="mr-2 h-4 w-4" />
+                                  )}
+                                  {enhancedMeetingNotesDraft ? "Regenerate" : "Enhance Notes"}
+                                </Button>
+                                <Button
+                                  type="button"
+                                  size="sm"
+                                  variant="outline"
+                                  onClick={() => void handleCopyEnhancedMeetingNotes()}
+                                  disabled={!enhancedMeetingNotesDraft?.text.trim()}
+                                >
+                                  <Copy className="mr-2 h-4 w-4" />
+                                  Copy
+                                </Button>
+                                <Button
+                                  type="button"
+                                  size="sm"
+                                  variant="outline"
+                                  onClick={() => void handleApplyEnhancedMeetingNotes()}
+                                  disabled={!enhancedMeetingNotesDraft?.text.trim()}
+                                >
+                                  <CheckCircle2 className="mr-2 h-4 w-4" />
+                                  Apply to Notes
+                                </Button>
+                              </div>
+                            </div>
+
+                            {enhancedMeetingNotesDraft ? (
+                              <div className="space-y-4">
+                                {/* The draft is read as the document it would
+                                    become, not as a scrollable text box. */}
+                                <div
+                                  role="region"
+                                  aria-label="Enhanced meeting notes draft"
+                                  className="border-l-2 border-l-gold-ambient/60 pl-3 text-muted-foreground"
+                                >
+                                  <MarkdownText value={enhancedMeetingNotesDraft.text} />
+                                </div>
+
+                                <div className="space-y-3 border-t pt-4">
+                                  <div>
+                                    <p className="section-heading">Where this draft came from</p>
+                                    <p className="mt-1 max-w-prose text-sm text-muted-foreground">
+                                      The transcript lines that grounded it.
+                                    </p>
+                                  </div>
+
+                                  <div className="space-y-2">
+                                    <p className="text-sm font-medium">Summary</p>
+                                    {enhancedMeetingNotesDraft.summaryCitations.length > 0 ? (
+                                      enhancedMeetingNotesDraft.summaryCitations.map((citation, index) => (
+                                        <div
+                                          key={`enhanced-summary-citation-${index}`}
+                                          className="border-t border-border/60 pt-2"
+                                        >
+                                          <p className="manuscript text-sm">{citation.text}</p>
+                                          <p className="rubric-muted time-spec mt-1">
+                                            {formatCitationTimeRange(citation) ?? "No timestamp"}
+                                            {citation.recordingId ? ` · ${citation.recordingId}` : ""}
+                                          </p>
+                                        </div>
+                                      ))
+                                    ) : (
+                                      <p className="text-sm text-muted-foreground">
+                                        No summary citations were returned for this draft.
+                                      </p>
+                                    )}
+                                  </div>
+
+                                  <div className="space-y-2">
+                                    <p className="text-sm font-medium">Action items</p>
+                                    {enhancedMeetingNotesDraft.actionItemCitations.some(
+                                      (group) => group.citations.length > 0
+                                    ) ? (
+                                      enhancedMeetingNotesDraft.actionItemCitations.map((group, groupIndex) => (
+                                        <div
+                                          key={`enhanced-action-group-${groupIndex}`}
+                                          className="border-t border-border/60 pt-2"
+                                        >
+                                          <p className="text-sm font-medium">{group.label}</p>
+                                          <div className="mt-2 space-y-2">
+                                            {group.citations.length > 0 ? (
+                                              group.citations.map((citation, citationIndex) => (
+                                                <div
+                                                  key={`enhanced-action-citation-${groupIndex}-${citationIndex}`}
+                                                  className="border-l-2 border-border pl-3"
+                                                >
+                                                  <p className="manuscript text-sm">{citation.text}</p>
+                                                  <p className="rubric-muted time-spec mt-1">
+                                                    {formatCitationTimeRange(citation) ?? "No timestamp"}
+                                                    {citation.recordingId
+                                                      ? ` · ${citation.recordingId}`
+                                                      : ""}
+                                                  </p>
+                                                </div>
+                                              ))
+                                            ) : (
+                                              <p className="text-sm text-muted-foreground">
+                                                No citations were returned for this action item.
+                                              </p>
+                                            )}
+                                          </div>
+                                        </div>
+                                      ))
+                                    ) : (
+                                      <p className="text-sm text-muted-foreground">
+                                        No action-item citations were returned for this draft.
+                                      </p>
+                                    )}
+                                  </div>
+                                </div>
+                              </div>
+                            ) : (
+                              <p className="max-w-prose text-sm text-muted-foreground">
+                                Build an enhanced draft when you want a cleaner note written from
+                                the transcript and your saved raw notes. It never replaces your
+                                notes until you apply it.
+                              </p>
+                            )}
+                        </section>
+
+                        <section className="border-t pt-5">
+                          <div className="flex flex-wrap items-start justify-between gap-3">
+                            <div className="min-w-0">
+                              <p className="section-heading">Prep</p>
+                              <p className="mt-1 max-w-prose text-sm text-muted-foreground">
+                                The questions worth answering live, and who Plainsong already
+                                remembers from earlier meetings.
+                              </p>
+                            </div>
+                            <Badge variant="outline" className="bg-background/80">
+                              {selectedTemplateOption.label}
+                            </Badge>
+                          </div>
+                          <div className="mt-3 space-y-4">
+                            <div>
+                              <p className="text-sm font-medium">Prep prompts</p>
+                              <ul className="mt-2 list-disc space-y-1 pl-5 text-sm">
+                                {selectedMeetingPrepPrompts.map((prompt) => (
+                                  <li key={prompt}>{prompt}</li>
+                                ))}
+                              </ul>
+                            </div>
+                            <div className="border-t pt-4">
+                              <p className="text-sm font-medium">Relationship memory</p>
+                                {selectedMeetingRelationshipMatches.people.length === 0 &&
+                                selectedMeetingRelationshipMatches.companies.length === 0 ? (
+                                  <p className="mt-2 text-sm text-muted-foreground">
+                                    No strong matches yet. Plainsong will start surfacing people and companies as meetings accumulate.
+                                  </p>
+                                ) : (
+                                  <div className="mt-2 space-y-2">
+                                    {selectedMeetingRelationshipMatches.people.map((person) => (
+                                      <div key={`person-${person.id}`} className="border-l-2 border-border pl-3">
+                                        <p className="text-sm font-medium">{person.name}</p>
+                                        <p className="rubric-muted time-spec mt-1">
+                                          {person.recordingCount} meetings · last seen {new Date(person.lastSeenAt).toLocaleDateString()}
+                                        </p>
+                                        {person.recentMeetings[0] ? (
+                                          <p className="mt-2 text-sm text-muted-foreground">
+                                            {person.recentMeetings[0].snippet}
+                                          </p>
+                                        ) : null}
+                                      </div>
+                                    ))}
+                                    {selectedMeetingRelationshipMatches.companies.map((company) => (
+                                      <div key={`company-${company.id}`} className="border-l-2 border-border pl-3">
+                                        <p className="text-sm font-medium">{company.name}</p>
+                                        <p className="rubric-muted time-spec mt-1">
+                                          {company.recordingCount} meetings · last seen {new Date(company.lastSeenAt).toLocaleDateString()}
+                                        </p>
+                                        {company.recentMeetings[0] ? (
+                                          <p className="mt-2 text-sm text-muted-foreground">
+                                            {company.recentMeetings[0].snippet}
+                                          </p>
+                                        ) : null}
+                                      </div>
+                                    ))}
+                                  </div>
+                                )}
+                            </div>
+                          </div>
+                        </section>
+
+                        <section className="border-t pt-5">
+                          <p className="section-heading">Follow-up drafts</p>
+                          <p className="mt-1 max-w-prose text-sm text-muted-foreground">
+                            Built from the summary and action items above, with no model call —
+                            copy one and send it while the meeting is still warm.
+                          </p>
+                          <div className="mt-3 grid gap-2 sm:grid-cols-2">
+                              <Button
+                                type="button"
+                                size="sm"
+                                variant="outline"
+                                onClick={() => void handleCopyMeetingFollowUp(deterministicMeetingFollowUp)}
+                              >
+                                <Copy className="mr-2 h-4 w-4" />
+                                Copy Follow-up Email
+                              </Button>
+                              <Button
+                                type="button"
+                                size="sm"
+                                variant="outline"
+                                onClick={() =>
+                                  void handleCopyMeetingFollowUp(
+                                    `${meetingSummary.trim() || "Quick recap"}\n\n${selectedMeetingActionItems
+                                      .map((item) => `- ${item}`)
+                                      .join("\n")}`.trim()
+                                  )
+                                }
+                              >
+                                <Copy className="mr-2 h-4 w-4" />
+                                Copy DM Recap
+                              </Button>
+                              <Button
+                                type="button"
+                                size="sm"
+                                variant="outline"
+                                onClick={() => void handleCopyMeetingFollowUp(deterministicNextAgenda)}
+                              >
+                                <Copy className="mr-2 h-4 w-4" />
+                                Copy Next Agenda
+                              </Button>
+                              <Button
+                                type="button"
+                                size="sm"
+                                variant="outline"
+                                onClick={() =>
+                                  void handleCopyMeetingFollowUp(
+                                    selectedMeetingActionItems.length > 0
+                                      ? selectedMeetingActionItems.map((item) => `- ${item}`).join("\n")
+                                      : "- Review this meeting summary\n- Confirm owners and dates"
+                                  )
+                                }
+                              >
+                                <Copy className="mr-2 h-4 w-4" />
+                                Copy Task List
+                              </Button>
+                            <Button
+                              type="button"
+                              size="sm"
+                              variant="outline"
+                              onClick={() =>
+                                toggleReadAloudPlayback(
+                                  deterministicMeetingFollowUp,
+                                  "meeting-follow-up"
+                                )
+                              }
+                              disabled={
+                                !selectedRecording ||
+                                (!meetingSummary.trim() && selectedMeetingActionItems.length === 0)
+                              }
+                            >
+                              <Volume2 className="mr-2 h-4 w-4" />
+                              {activeSpeechTarget === "meeting-follow-up"
+                                ? "Stop reading"
+                                : "Read Follow-up"}
+                            </Button>
+                          </div>
+                        </section>
+
+                        <section className="border-t pt-5">
+                          <p className="section-heading">Cross-meeting recall</p>
+                          <p className="mt-1 max-w-prose text-sm text-muted-foreground">
+                            Ask across prior meetings when an older promise, deadline, or repeated
+                            ask should change what you send next.
+                          </p>
+                          <div className="mt-3 space-y-3">
+                              <div className="flex flex-wrap gap-2">
+                                {selectedMeetingRecallPrompts.map((suggestion) => (
+                                  <Button
+                                    key={suggestion.prompt}
+                                    type="button"
+                                    size="sm"
+                                    variant="outline"
+                                    title={suggestion.prompt}
+                                    onClick={() => void runMeetingRecall(suggestion.prompt)}
+                                    disabled={meetingRecallLoading}
+                                  >
+                                    {suggestion.label}
+                                  </Button>
+                                ))}
+                              </div>
+                              <div className="flex gap-2">
+                                <Input
+                                  value={meetingRecallQuery}
+                                  onChange={(event) => setMeetingRecallQuery(event.target.value)}
+                                  placeholder="Ask across prior meetings"
+                                  aria-label="Ask across meetings"
+                                />
+                                <Button
+                                  type="button"
+                                  variant="outline"
+                                  onClick={() => void runMeetingRecall()}
+                                  disabled={meetingRecallLoading || !meetingRecallQuery.trim()}
+                                >
+                                  {meetingRecallLoading ? (
+                                    <>
+                                      <Loader2 className="mr-2 h-4 w-4 animate-spin" />
+                                      Asking
+                                    </>
+                                  ) : (
+                                    "Ask across meetings"
+                                  )}
+                                </Button>
+                              </div>
+                              {meetingRecallError ? (
+                                <div className="rounded-md border border-destructive/40 bg-destructive/10 px-3 py-2 text-sm text-destructive">
+                                  {meetingRecallError}
+                                </div>
+                              ) : null}
+                              {meetingRecallResponse ? (
+                                <div className="space-y-3 border-l-2 border-gold-ambient/50 pl-3">
+                                  <div className="flex items-start justify-between gap-3">
+                                    <div className="min-w-0">
+                                      <p className="text-sm font-medium text-muted-foreground">
+                                        {meetingRecallPromptLabel ?? "Cross-meeting answer"}
+                                      </p>
+                                      <MarkdownText
+                                        className="mt-2"
+                                        value={meetingRecallResponse}
+                                      />
+                                    </div>
+                                    <Button
+                                      type="button"
+                                      size="sm"
+                                      variant="ghost"
+                                      onClick={() => void handleCopyMeetingRecall(meetingRecallResponse)}
+                                    >
+                                      <Copy className="mr-2 h-4 w-4" />
+                                      Copy
+                                    </Button>
+                                  </div>
+                                  {meetingRecallCitations.length > 0 ? (
+                                    <div className="space-y-2">
+                                      <p className="text-sm font-medium text-muted-foreground">
+                                        Supporting meetings
+                                      </p>
+                                      {meetingRecallCitations.slice(0, 3).map((citation, index) => (
+                                        <div
+                                          key={`meeting-recall-citation-${index}`}
+                                          className="border-t border-border/60 pt-2"
+                                        >
+                                          <p className="manuscript text-sm">{citation.text}</p>
+                                          <p className="rubric-muted time-spec mt-1">
+                                            {formatCitationTimeRange(citation) ?? "No timestamp"}
+                                            {citation.recordingId ? ` · ${citation.recordingId}` : ""}
+                                          </p>
+                                        </div>
+                                      ))}
+                                    </div>
+                                  ) : null}
+                                </div>
+                              ) : (
+                                <p className="text-sm text-muted-foreground">
+                                  Start with a suggested prompt or ask your own question to pull forward
+                                  context from prior meetings.
+                                </p>
+                              )}
+                          </div>
+                        </section>
+
+                        <section className="border-t pt-5">
+                          <p className="section-heading">Share &amp; export</p>
+                          <p className="mt-1 max-w-prose text-sm text-muted-foreground">
+                            The recap carries the summary, action items, and your notes as Markdown,
+                            so it survives a paste into a chat window or a notes app. The full
+                            record adds the verbatim transcript — only copy that where the whole
+                            meeting is allowed to go.
+                          </p>
+                          <div className="mt-3 flex flex-wrap gap-2">
+                              <Button
+                                type="button"
+                                size="sm"
+                                variant="outline"
+                                onClick={() => void handleCopyMeetingRecap()}
+                                disabled={!selectedRecording || !selectedMeetingRecapMarkdown.trim()}
+                              >
+                                <Copy className="mr-2 h-4 w-4" />
+                                Copy recap
+                              </Button>
+                              <Button
+                                type="button"
+                                size="sm"
+                                variant="outline"
+                                onClick={() => void handleCopyMeetingFullRecord()}
+                                disabled={
+                                  !selectedRecording || !selectedTranscript?.fullText?.trim()
+                                }
+                              >
+                                <Copy className="mr-2 h-4 w-4" />
+                                Copy full record (includes transcript)
+                              </Button>
+                              <Button
+                                type="button"
+                                size="sm"
+                                variant="outline"
+                                onClick={() => void handleExportMeetingArtifact("markdown")}
+                                disabled={!selectedRecording || isExportingMeeting}
+                              >
+                                <FileText className="mr-2 h-4 w-4" />
+                                Export Markdown
+                              </Button>
+                              <Button
+                                type="button"
+                                size="sm"
+                                variant="outline"
+                                onClick={() => void handleExportMeetingArtifact("text")}
+                                disabled={!selectedRecording || isExportingMeeting}
+                              >
+                                {isExportingMeeting ? (
+                                  <Loader2 className="mr-2 h-4 w-4 animate-spin" />
+                                ) : (
+                                  <FileOutput className="mr-2 h-4 w-4" />
+                                )}
+                                Export Text
+                              </Button>
+                            </div>
+                            {lastMeetingExportPath ? (
+                              <div className="mt-3 border-t pt-3 text-sm text-muted-foreground">
+                                <div className="flex items-center justify-between gap-3">
+                                  <span className="min-w-0 break-all font-mono text-sm">
+                                    {lastMeetingExportPath}
+                                  </span>
+                                  <Button
+                                    type="button"
+                                    size="sm"
+                                    variant="ghost"
+                                    onClick={() => void handleOpenMeetingExport()}
+                                  >
+                                    <ExternalLink className="mr-2 h-4 w-4" />
+                                    Open
+                                  </Button>
+                                </div>
+                              </div>
+                            ) : null}
+                        </section>
+                        </>
+                      )}
+                    </div>
+                  </ScrollArea>
+                </TabsContent>
+
+                <TabsContent value="ask" forceMount className="mt-0 min-h-0 flex-1 overflow-hidden">
+                  {isLoadingDetail ? (
+                    <div className="px-6 py-5">
+                      <WorkspaceSkeleton label="Loading this meeting's transcript and notes so Ask has something to stand on." />
+                    </div>
+                  ) : selectedRecording ? (
+                    <ScrollArea type="always" className="h-full min-h-0">
+                      <div className="space-y-4 px-6 py-5">
+                        <div>
+                          <p className="section-heading">Ask this meeting</p>
+                          <p className="mt-1 max-w-prose text-sm text-muted-foreground">
+                            Answers are grounded in this meeting's transcript and your saved notes —
+                            follow-ups, decisions, blockers, owners.
+                          </p>
+                        </div>
+                        <AiAnalysisPanel
+                          key={selectedRecording.id}
+                          recordingId={selectedRecording.id}
+                          title="Meeting Chat"
+                          inputPlaceholder="Ask about decisions, blockers, follow-ups, or anything in this meeting..."
+                          templates={MEETING_ASK_TEMPLATES}
+                          emptyStateLabel="Reviewing meeting context..."
+                          analysisMode="grounded"
+                          chatMessages={meetingChatMessages}
+                          onChatMessagesChange={setMeetingChatMessages}
+                          responseActions={[
+                            {
+                              label: "Replace Summary",
+                              onAction: ({ response }) => setMeetingSummary(response),
+                              isVisible: ({ templateId }) => templateId !== "follow_up",
+                            },
+                            {
+                              label: "Append to Notes",
+                              onAction: ({ response, templateId }) =>
+                                appendMeetingNotesBlock(
+                                  templateId === "summary"
+                                    ? "Summary refresh"
+                                    : templateId === "decisions"
+                                      ? "Decisions"
+                                      : templateId === "dates"
+                                        ? "Deadlines"
+                                        : templateId === "follow_up"
+                                          ? "Follow-up draft"
+                                        : "Meeting answer",
+                                  response
+                                ),
+                            },
+                            {
+                              label: "Copy Follow-up",
+                              onAction: ({ response }) => {
+                                void handleCopyMeetingFollowUp(response);
+                              },
+                              isVisible: ({ templateId }) => templateId === "follow_up",
+                            },
+                          ]}
+                          actionItemActions={[
+                            {
+                              label: "Replace Action Items",
+                              onAction: ({ items }) =>
+                                setMeetingActionItemsText(
+                                  actionItemsToText(items.map((item) => formatGroundedActionItem(item)))
+                                ),
+                            },
+                            {
+                              label: "Append to Notes",
+                              onAction: ({ items }) =>
+                                appendMeetingNotesBlock(
+                                  "Action items",
+                                  items.map((item) => `- ${formatGroundedActionItem(item)}`).join("\n")
+                                ),
+                            },
+                          ]}
+                        />
+                      </div>
+                    </ScrollArea>
+                  ) : (
+                    <div className="h-full flex items-center justify-center text-muted-foreground">
+                      Select a meeting to ask questions.
+                    </div>
+                  )}
+                </TabsContent>
+
+                <TabsContent value="assets" className="mt-0 min-h-0 flex-1 overflow-hidden">
+                  {isLoadingDetail ? (
+                    <div className="px-6 py-5">
+                      <WorkspaceSkeleton label="Loading this meeting's audio and waveform." lines={3} />
+                    </div>
+                  ) : (
+                    <ScrollArea type="always" className="h-full min-h-0">
+                      <div className="space-y-5 px-6 py-5">
+                        <div>
+                          <p className="section-heading">Waveform</p>
+                          <div className="mt-3">
+                            <WaveformVisualizer data={waveformData} height={100} />
+                          </div>
+                        </div>
+
+                        <div className="border-t pt-4">
+                          <p className="section-heading">Audio &amp; retention</p>
+                          <p className="mt-2 text-sm">
+                            <span className="text-muted-foreground">Duration:</span>{" "}
+                            <span className="time-spec font-medium">
+                              {formatDuration(selectedRecording?.duration ?? 0)}
+                            </span>
+                          </p>
+                          <p className="mt-1 text-sm">
+                            <span className="text-muted-foreground">Created:</span>{" "}
+                            <span className="time-spec font-medium">
+                              {selectedRecording?.createdAt
+                                ? new Date(selectedRecording.createdAt).toLocaleString()
+                                : "Unknown"}
+                            </span>
+                          </p>
+                          <p className="mt-1 text-sm">
+                            <span className="text-muted-foreground">Audio:</span>{" "}
+                            <span className="font-medium">
+                              {selectedMeetingAssetRetention.audioLabel}
+                            </span>
+                          </p>
+                          <p className="mt-2 max-w-prose text-sm leading-relaxed text-muted-foreground">
+                            {selectedMeetingAssetRetention.detail}
+                          </p>
+                        </div>
+                      </div>
+                    </ScrollArea>
+                  )}
+                </TabsContent>
+              </Tabs>
+            </div>
+
+            <aside className="flex min-h-0 min-w-0 flex-col overflow-hidden border-t border-border/70 xl:border-l xl:border-t-0">
+              <div className="flex shrink-0 flex-wrap items-center justify-between gap-2 px-5 py-4">
+                <div className="min-w-0">
+                  <h2 className="section-heading">Transcript</h2>
+                  <p className="mt-0.5 text-sm text-muted-foreground">
+                    {isLoadingDetail
+                      ? "Loading the transcript."
+                      : `${selectedTranscript?.segments?.length ?? 0} segments · ${selectedMeetingCaptureMode}`}
+                  </p>
+                </div>
+                <Button
+                  type="button"
+                  size="sm"
+                  variant="outline"
+                  onClick={() => void handleRefreshTranscriptPanel()}
+                  disabled={isRefreshingTranscriptPanel || !selectedRecording}
+                >
+                  {isRefreshingTranscriptPanel ? (
+                    <Loader2 className="mr-2 h-4 w-4 animate-spin" />
+                  ) : (
+                    <RefreshCw className="mr-2 h-4 w-4" />
+                  )}
+                  Refresh
+                </Button>
+              </div>
+
+              {/* Live lines land here before they are written to the
+                  transcript, so the pane is never blank while capture runs. */}
+              {isLiveSelectedMeeting && streamChunks.length > 0 ? (
+                <div className="shrink-0 border-y border-gold/25 bg-gold/5 px-5 py-3">
+                  <p className="rubric-muted">Landing now</p>
+                  <div className="mt-1.5 space-y-1">
+                    {streamChunks.slice(-4).map((chunk, index) => (
+                      <p
+                        key={`live-line-${index}-${chunk.startTime}`}
+                        className={cn(
+                          "manuscript text-sm leading-relaxed",
+                          chunk.isPartial && "italic text-muted-foreground"
+                        )}
+                      >
+                        <span className="time-spec mr-2 font-mono text-xs text-muted-foreground">
+                          {formatDuration(Math.floor(chunk.startTime))}
+                        </span>
+                        {chunk.text}
+                      </p>
+                    ))}
+                  </div>
+                </div>
+              ) : null}
+
+              <div className="flex min-h-0 flex-1 flex-col px-5 pb-5 pt-4">
+              {isLoadingDetail ? (
+                <div className="flex-1 flex items-center justify-center text-muted-foreground">
+                  <Loader2 className="h-5 w-5 mr-2 animate-spin" />
+                  Loading transcript...
+                </div>
+              ) : selectedTranscript ? (
+                <div className="flex min-h-0 flex-1 flex-col">
+                  {detailError && (
+                    <div className="mb-3 flex items-center gap-2 rounded-md border border-rust/30 bg-rust/10 p-3 text-sm text-rust">
+                      <AlertCircle className="h-4 w-4 shrink-0" />
+                      {detailError}
+                    </div>
+                  )}
+                  {!hasSpeakerLabels && (
+                    <div className="mb-3 border-b pb-3">
+                      <div className="flex items-start justify-between gap-3">
+                        <div className="text-sm">
+                          <p className="font-medium">No speaker labels detected</p>
+                          <p className="text-muted-foreground">
+                            Run speaker identification to label multiple speakers in this transcript.
+                          </p>
+                        </div>
+                        <Button
+                          size="sm"
+                          variant="outline"
+                          onClick={handleRunDiarization}
+                          disabled={isRunningDiarization}
+                        >
+                          {isRunningDiarization ? (
+                            <>
+                              <Loader2 className="h-4 w-4 mr-2 animate-spin" />
+                              Identifying...
+                            </>
+                          ) : (
+                            "Identify Speakers"
+                          )}
+                        </Button>
+                      </div>
+                      {diarizationMessage && (
+                        <p className="mt-2 text-sm text-gold-text">{diarizationMessage}</p>
+                      )}
+                      {diarizationError && (
+                        <p className="mt-2 text-sm text-destructive">{diarizationError}</p>
+                      )}
+                    </div>
+                  )}
+                  {/* One strip of facts instead of four boxes: what the
+                      transcript is worth, where it came from, and how to work
+                      it. */}
+                  <div className="mb-3 flex flex-wrap items-center gap-x-4 gap-y-1.5 text-sm text-muted-foreground">
+                    <span
+                      className={`inline-flex items-center rounded-md border px-2 py-0.5 text-sm ${qualityToneClasses(
+                        transcriptQuality.tone
+                      )}`}
+                    >
+                      {transcriptQuality.label}
+                      {typeof selectedTranscriptDetails?.qualityScore === "number"
+                        ? ` · ${Math.round(selectedTranscriptDetails.qualityScore * 100)}%`
+                        : ""}
+                    </span>
+                    <span>{formatSourceMode(selectedTranscriptDetails)}</span>
+                    <span>
+                      {selectedTranscriptDetails?.actualProvider ??
+                        selectedTranscript?.actualProvider ??
+                        "Provider unknown"}
+                      {(selectedTranscriptDetails?.modelId ?? selectedTranscript?.modelId)
+                        ? ` · ${selectedTranscriptDetails?.modelId ?? selectedTranscript?.modelId}`
+                        : ""}
+                    </span>
+                    <span className="time-spec">
+                      {selectedTranscriptDetails?.transcriptionLatencyMs != null
+                        ? `${(selectedTranscriptDetails.transcriptionLatencyMs / 1000).toFixed(1)}s`
+                        : "Latency unavailable"}
+                    </span>
+                  </div>
+                  <p className="mb-3 max-w-prose text-sm text-muted-foreground">
+                    Click a paragraph to set your place; the text stays selectable. Double-click
+                    it, or use the Edit button, to correct it. Up and down arrows walk the
+                    transcript.
+                  </p>
+                  <TranscriptSearch
+                    query={searchQuery}
+                    onQueryChange={(query) => {
+                      setSearchQuery(query);
+                      setActiveTranscriptMatchIndex(0);
+                      // A search the reader types is their own; it must not
+                      // inherit a deep link's moment.
+                      pendingMatchFocusTimeRef.current = null;
+                    }}
+                    matchCount={transcriptMatches.length}
+                    activeMatchIndex={activeTranscriptMatchIndex}
+                    onStepMatch={stepTranscriptMatch}
+                    className="mb-4 shrink-0"
+                  />
+                  <div className="min-h-0 flex-1 overflow-hidden rounded-md border">
+                    <TranscriptViewer
+                      segments={transcriptSegments}
+                      speakerNames={speakerNames}
+                      provenance={selectedTranscriptProvenance}
+                      currentTime={transcriptCueTime}
+                      onSegmentClick={(segment) => setTranscriptCueTime(segment.startTime)}
+                      highlightQuery={searchQuery}
+                      activeMatchIndex={activeTranscriptMatchIndex}
+                      onMatchesChange={handleTranscriptMatchesChange}
+                      onRenameSpeaker={handleRenameSpeaker}
+                      onEditSegment={async (segmentIds, newText) => {
+                        if (!selectedRecording || segmentIds.length === 0) return;
+                        try {
+                          // The edited text covers the whole speaker turn: it
+                          // replaces the first segment, and the remaining
+                          // segments are removed so their old text can't
+                          // duplicate alongside the correction.
+                          const [firstSegmentId, ...restSegmentIds] = segmentIds;
+                          await updateTranscriptSegment(selectedRecording.id, firstSegmentId, newText);
+                          if (restSegmentIds.length > 0) {
+                            await deleteTranscriptSegments(selectedRecording.id, restSegmentIds);
+                          }
+                          await refreshTranscript(selectedRecording.id);
+                          await refreshTranscriptDetails(selectedRecording.id);
+                          toast("Transcript updated.", "success");
+                        } catch (error) {
+                          const message =
+                            error instanceof Error
+                              ? error.message
+                              : "Failed to update the transcript.";
+                          toast(message, "error");
+                          // Rethrow so the editor stays open with the correction.
+                          throw error;
+                        }
+                      }}
+                      onDeleteSegments={handleDeleteTranscriptSegments}
+                    />
+                  </div>
+                </div>
+              ) : detailError ? (
+                <div className="flex-1 flex items-center justify-center text-destructive">
+                  <AlertCircle className="h-5 w-5 mr-2" />
+                  {detailError}
+                </div>
+              ) : (
+                <div className="flex flex-1 items-center justify-center px-6">
+                  {selectedRecording?.status === "processing" ? (
+                    <div className="max-w-md text-sm text-muted-foreground">
+                      <div className="flex items-center gap-2 text-foreground">
+                        <Loader2 className="h-4 w-4 animate-spin" />
+                        <span className="font-medium">Processing transcript</span>
+                      </div>
+                      <p className="mt-2 leading-relaxed">
+                        Transcript lines have not landed yet. Auto-refresh is still running in the
+                        background, and you can force a manual refresh if the detail panel looks
+                        stale.
+                      </p>
+                      <div className="mt-3 flex flex-wrap items-center gap-2">
+                        <Button
+                          type="button"
+                          size="sm"
+                          variant="outline"
+                          onClick={() => void handleRefreshTranscriptPanel()}
+                          disabled={isRefreshingTranscriptPanel}
+                        >
+                          {isRefreshingTranscriptPanel ? (
+                            <Loader2 className="mr-2 h-4 w-4 animate-spin" />
+                          ) : (
+                            <RefreshCw className="mr-2 h-4 w-4" />
+                          )}
+                          Refresh now
+                        </Button>
+                        {selectedMeetingConsent.needsManualNotice ? (
+                          <span className="text-sm text-rust">
+                            Share the notice before distributing this capture.
+                          </span>
+                        ) : null}
+                      </div>
+                    </div>
+                  ) : selectedRecording?.status === "error" ? (
+                    <div className="max-w-md text-sm text-muted-foreground">
+                      <p className="font-medium text-foreground">
+                        Transcription failed
+                      </p>
+                      <p className="mt-2 leading-relaxed">
+                        This meeting's transcript could not be produced. The audio is still on
+                        disk, so you can retry transcription from scratch.
+                      </p>
+                      <div className="mt-3 flex flex-wrap items-center gap-2">
+                        <Button
+                          type="button"
+                          size="sm"
+                          variant="outline"
+                          onClick={() =>
+                            selectedRecording && void handleRetranscribeRecording(selectedRecording.id)
+                          }
+                        >
+                          <RefreshCw className="mr-2 h-4 w-4" />
+                          Retry transcription
+                        </Button>
+                      </div>
+                    </div>
+                  ) : (
+                    <div className="max-w-md text-sm text-muted-foreground">
+                      <p className="font-medium text-foreground">
+                        Transcript is not available yet
+                      </p>
+                      <p className="mt-2 leading-relaxed">
+                        This meeting has no grounded transcript lines yet. Refresh if processing
+                        already finished; the record beside this pane is still yours to write.
+                      </p>
+                      <div className="mt-3 flex flex-wrap items-center gap-2">
+                        <Button
+                          type="button"
+                          size="sm"
+                          variant="outline"
+                          onClick={() => void handleRefreshTranscriptPanel()}
+                          disabled={isRefreshingTranscriptPanel || !selectedRecording}
+                        >
+                          {isRefreshingTranscriptPanel ? (
+                            <Loader2 className="mr-2 h-4 w-4 animate-spin" />
+                          ) : (
+                            <RefreshCw className="mr-2 h-4 w-4" />
+                          )}
+                          Refresh transcript
+                        </Button>
+
+                      </div>
+                    </div>
+                  )}
+                </div>
+              )}
+              </div>
+            </aside>
+          </div>
+        </div>
+      ) : (
+        <>
       <div className="p-6 border-b flex items-center justify-between">
         <div>
           <p className="rubric mb-1.5">MEETINGS</p>
-          <h1 className="font-serif text-2xl font-semibold tracking-tight">Meetings</h1>
+          <h1
+            ref={listHeadingRef}
+            tabIndex={-1}
+            className="font-serif text-2xl font-semibold tracking-tight outline-none focus-visible:ring-1 focus-visible:ring-ring"
+          >
+            Meetings
+          </h1>
           <p className="mt-1 text-muted-foreground">
             Capture meetings, review transcripts, and keep follow-up moving.
           </p>
@@ -2849,7 +4501,7 @@ export function RecordingsView() {
                     <p className="text-sm font-medium text-rust">
                       Meeting title generation failed
                     </p>
-                    <p className="text-xs text-muted-foreground">{autoNameIssue.message}</p>
+                    <p className="text-sm text-muted-foreground">{autoNameIssue.message}</p>
                   </div>
                   <div className="flex gap-2">
                     <Button
@@ -2898,7 +4550,7 @@ export function RecordingsView() {
                     key={label}
                     className="min-w-24 rounded-xl border border-border/70 bg-background/55 px-3 py-2"
                   >
-                    <p className="font-mono text-[11px] uppercase tracking-wide text-muted-foreground">{label}</p>
+                    <p className="rubric-muted">{label}</p>
                     <p className="mt-1 font-serif text-xl font-semibold tabular-nums tracking-tight">{value}</p>
                   </div>
                 ))}
@@ -3031,46 +4683,17 @@ export function RecordingsView() {
           </section>
 
           {audioPlaybackIssue && (
-            <Card className="mb-4 border-rust/40 bg-rust/5">
-              <CardContent className="p-4">
-                <div className="flex flex-wrap items-center justify-between gap-3">
-                  <div className="min-w-0">
-                    <p className="text-sm font-medium text-rust">
-                      Couldn't open the audio for{" "}
-                      {meetings.find((meeting) => meeting.id === audioPlaybackIssue.recordingId)
-                        ?.title ?? "this meeting"}
-                    </p>
-                    {/* The backend already said what went wrong and what to do
-                        about it; pass that through instead of a generic line. */}
-                    <p className="mt-1 text-sm text-muted-foreground">
-                      {audioPlaybackIssue.message}
-                    </p>
-                  </div>
-                  <div className="flex shrink-0 gap-2">
-                    {/vault is locked/i.test(audioPlaybackIssue.message) && (
-                      <Button
-                        size="sm"
-                        variant="outline"
-                        onClick={() => {
-                          setAudioPlaybackIssue(null);
-                          requestMainView("settings");
-                        }}
-                      >
-                        <Lock className="mr-2 h-4 w-4" />
-                        Unlock vault
-                      </Button>
-                    )}
-                    <Button
-                      size="sm"
-                      variant="ghost"
-                      onClick={() => setAudioPlaybackIssue(null)}
-                    >
-                      Dismiss
-                    </Button>
-                  </div>
-                </div>
-              </CardContent>
-            </Card>
+            <div className="mb-4">
+              <AudioIssueBanner
+                meetingTitle={audioIssueMeetingTitle}
+                message={audioPlaybackIssue.message}
+                onUnlockVault={() => {
+                  setAudioPlaybackIssue(null);
+                  requestMainView("settings");
+                }}
+                onDismiss={() => setAudioPlaybackIssue(null)}
+              />
+            </div>
           )}
 
           {isRecording && recordingId && (
@@ -3080,7 +4703,7 @@ export function RecordingsView() {
                   <div className="space-y-2">
                     <div>
                       <p className="text-sm font-medium text-gold-text">Recording in progress</p>
-                      <p className="text-xs text-muted-foreground">
+                      <p className="text-sm text-muted-foreground">
                         Keep notes current while Plainsong captures the meeting.
                       </p>
                     </div>
@@ -3152,12 +4775,13 @@ export function RecordingsView() {
                 <div className="mt-4 grid gap-4 lg:grid-cols-[minmax(0,1.35fr)_minmax(280px,1fr)]">
                   <div className="rounded-lg border border-gold/20 bg-background/80 p-3">
                     <div className="mb-2 flex items-center justify-between gap-3">
-                      <p className="text-xs font-medium text-muted-foreground">
-                        Meeting Notes <span className="opacity-50">(grounds summary, actions, and Ask)</span>
+                      <p className="text-sm font-medium">
+                        Meeting notes{" "}
+                        <span className="font-normal text-muted-foreground">
+                          (grounds summary, actions, and Ask)
+                        </span>
                       </p>
-                      <p className="text-[11px] text-muted-foreground">
-                        Autosaves to this meeting
-                      </p>
+                      <p className="text-sm text-muted-foreground">Autosaves to this meeting</p>
                     </div>
                     <textarea
                       value={liveMeetingNotes}
@@ -3169,9 +4793,9 @@ export function RecordingsView() {
                   </div>
                   <div className="rounded-lg border border-gold/20 bg-background/70 p-3">
                     <div className="mb-2 flex items-center justify-between gap-2">
-                      <p className="text-xs font-medium text-gold-text">Live Transcript</p>
-                      <p className="text-[11px] text-muted-foreground">
-                        Transcript stays secondary to notes here
+                      <p className="text-sm font-medium text-gold-text">Live transcript</p>
+                      <p className="text-sm text-muted-foreground">
+                        Notes stay the point here
                       </p>
                     </div>
                     {streamChunks.length > 0 ? (
@@ -3199,32 +4823,6 @@ export function RecordingsView() {
                         Live transcript lines will appear here while the meeting is being captured.
                       </div>
                     )}
-                  </div>
-                </div>
-                <div className="mt-4 grid gap-3 md:grid-cols-3">
-                  <div className="rounded-lg border bg-background/70 p-3">
-                    <p className="text-[11px] uppercase tracking-wide text-muted-foreground">
-                      Solo operator tip
-                    </p>
-                    <p className="mt-2 text-sm text-muted-foreground">
-                      Capture decisions and owners in notes now. Plainsong can clean them up after the call, but only if the raw facts are here.
-                    </p>
-                  </div>
-                  <div className="rounded-lg border bg-background/70 p-3">
-                    <p className="text-[11px] uppercase tracking-wide text-muted-foreground">
-                      Best note pattern
-                    </p>
-                    <p className="mt-2 text-sm text-muted-foreground">
-                      Decision, owner, deadline, blocker. That four-part rhythm makes summaries and follow-ups much stronger.
-                    </p>
-                  </div>
-                  <div className="rounded-lg border bg-background/70 p-3">
-                    <p className="text-[11px] uppercase tracking-wide text-muted-foreground">
-                      End-of-call move
-                    </p>
-                    <p className="mt-2 text-sm text-muted-foreground">
-                      Stop capture, open workspace, refresh summary and action items, then copy a follow-up draft before context cools off.
-                    </p>
                   </div>
                 </div>
               </CardContent>
@@ -3397,6 +4995,8 @@ export function RecordingsView() {
           )}
         </div>
       </ScrollArea>
+        </>
+      )}
 
       <ConsentDialog
         open={showConsent}
@@ -3404,1628 +5004,37 @@ export function RecordingsView() {
         onStart={handleStartRecording}
       />
 
+      {/* Regenerating overwrites in place, so text Plainsong did not write in
+          this session gets the question asked before it disappears. */}
       <Dialog
-        open={showRecordingDetail}
+        open={pendingRegenerate !== null}
         onOpenChange={(open) => {
-          setShowRecordingDetail(open);
-          if (!open) {
-            clearRecordingDetail();
-            setSearchQuery("");
-            setDiarizationMessage(null);
-            setDiarizationError(null);
-            if (!isRecording) {
-              setMeetingNotesTargetId(null);
-              setMeetingNotes("");
-              setMeetingChatMessages([]);
-              setLastMeetingExportPath(null);
-              lastSavedMeetingNotesRef.current = "";
-              lastSavedMeetingChatRef.current = "[]";
-            }
-          }
+          if (!open) setPendingRegenerate(null);
         }}
       >
-          <DialogContent className="flex h-[85vh] max-h-[85vh] min-h-0 max-w-5xl flex-col overflow-hidden">
+        <DialogContent>
           <DialogHeader>
-            <DialogTitle>{selectedRecording?.title ?? "Recording"}</DialogTitle>
-            <DialogDescription>
-              Continue from live notes into grounded review, transcript editing, and follow-up for this meeting.
-            </DialogDescription>
+            <DialogTitle>Replace what is written there?</DialogTitle>
+            <DialogDescription>{pendingRegenerate?.warning}</DialogDescription>
           </DialogHeader>
-
-          <Tabs
-            value={meetingTab}
-            onValueChange={setMeetingTab}
-            className="flex min-h-0 flex-1 flex-col overflow-hidden"
-          >
-            <TabsList className="grid w-full grid-cols-4">
-              <TabsTrigger value="notes" className="flex items-center gap-2">
-                <Edit3 className="h-4 w-4" />
-                Notes
-              </TabsTrigger>
-              <TabsTrigger value="ask" className="flex items-center gap-2">
-                <MessageSquare className="h-4 w-4" />
-                Ask
-              </TabsTrigger>
-              <TabsTrigger value="transcript" className="flex items-center gap-2">
-                <FileText className="h-4 w-4" />
-                Transcript
-              </TabsTrigger>
-              <TabsTrigger value="assets" className="flex items-center gap-2">
-                <FileAudio className="h-4 w-4" />
-                Assets
-              </TabsTrigger>
-            </TabsList>
-
-            <TabsContent value="notes" className="mt-2 min-h-0 flex-1 overflow-hidden">
-              <ScrollArea className="h-full min-h-0 pr-2">
-                <div className="grid gap-4 xl:grid-cols-[minmax(0,1.5fr)_minmax(320px,1fr)]">
-                  <div className="rounded-lg border p-4">
-                    <div className="flex flex-wrap items-center justify-between gap-3">
-                      <div>
-                        <p className="text-sm font-medium">Meeting notes</p>
-                        <p className="text-xs text-muted-foreground">
-                          Keep the note canvas current. Summaries, action items, and meeting chat use this alongside the transcript.
-                        </p>
-                      </div>
-                      <div className="text-xs text-muted-foreground text-right">
-                        <div>Playbook: {selectedTemplateOption.label}</div>
-                        <div>{selectedTemplateOption.description}</div>
-                        {selectedRecording?.notesUpdatedAt ? (
-                          <div>
-                            Updated {new Date(selectedRecording.notesUpdatedAt).toLocaleString()}
-                          </div>
-                        ) : null}
-                      </div>
-                    </div>
-                    <div className="mt-4 grid gap-3 md:grid-cols-2 xl:grid-cols-5">
-                      <div className="rounded-lg border bg-muted/30 p-3">
-                        <p className="text-[11px] uppercase tracking-wide text-muted-foreground">
-                          Workspace
-                        </p>
-                        <div className="mt-2 flex flex-wrap items-center gap-2">
-                          <Badge variant="outline" className="bg-background/80">
-                            {formatMeetingReviewState(selectedRecording?.status)}
-                          </Badge>
-                          {selectedRecording?.id === recordingId && isRecording ? (
-                            <Badge variant="outline" className="border-border bg-muted/30 text-foreground">
-                              <span className="neume neume-lit mr-1" />
-                              Live meeting
-                            </Badge>
-                          ) : null}
-                        </div>
-                      </div>
-                      <div className="rounded-lg border bg-muted/30 p-3">
-                        <p className="text-[11px] uppercase tracking-wide text-muted-foreground">
-                          Capture mode
-                        </p>
-                        <p className="mt-2 text-sm font-medium">{selectedMeetingCaptureMode}</p>
-                      </div>
-                      <div className="rounded-lg border bg-muted/30 p-3">
-                        <p className="text-[11px] uppercase tracking-wide text-muted-foreground">
-                          Transcript grounding
-                        </p>
-                        <p className="mt-2 text-sm font-medium">
-                          {selectedTranscript?.segments?.length ?? 0} segments
-                        </p>
-                      </div>
-                      <div className="rounded-lg border bg-muted/30 p-3">
-                        <p className="text-[11px] uppercase tracking-wide text-muted-foreground">
-                          Consent
-                        </p>
-                        <p className="mt-2 text-sm font-medium">{selectedMeetingConsent.label}</p>
-                        {selectedMeetingConsent.message ? (
-                          <p className="mt-1 text-xs text-muted-foreground">
-                            {selectedMeetingConsent.message}
-                          </p>
-                        ) : null}
-                      </div>
-                      <div className="rounded-lg border bg-muted/30 p-3">
-                        <p className="text-[11px] uppercase tracking-wide text-muted-foreground">
-                          Retention
-                        </p>
-                        <p className="mt-2 text-sm font-medium">
-                          {selectedMeetingAssetRetention.audioLabel}
-                        </p>
-                        <p className="mt-1 text-xs leading-relaxed text-muted-foreground">
-                          {selectedMeetingAssetRetention.detail}
-                        </p>
-                      </div>
-                    </div>
-                    <div className="mt-4 rounded-lg border border-rust/20 bg-rust/5 p-4">
-                      <div className="flex flex-wrap items-start justify-between gap-3">
-                        <div>
-                          <p className="rubric">
-                            Solo Meeting Cockpit
-                          </p>
-                          <p className="mt-1 text-xs text-muted-foreground">
-                            One-glance status for what to do next before you leave this workspace.
-                          </p>
-                        </div>
-                        <Badge variant="outline" className={qualityToneClasses(selectedMeetingReadyState.tone)}>
-                          {selectedMeetingReadyState.label}
-                        </Badge>
-                      </div>
-                      <p className="mt-3 text-sm text-muted-foreground">{selectedMeetingReadyState.detail}</p>
-                      <div className="mt-4 grid gap-2 sm:grid-cols-2 xl:grid-cols-4">
-                        {selectedMeetingEvidenceState.map((item) => (
-                          <div
-                            key={item.label}
-                            className="rounded-md border bg-background/80 px-3 py-2"
-                          >
-                            <p className="text-xs font-medium text-muted-foreground">
-                              {item.label}
-                            </p>
-                            <p className="mt-1 text-sm font-semibold">
-                              {item.value}
-                            </p>
-                          </div>
-                        ))}
-                      </div>
-                      <div className="mt-4 grid gap-3 md:grid-cols-3">
-                        <div className="rounded-md border bg-background/80 p-3">
-                          <div className="flex items-center gap-2 text-xs font-medium text-muted-foreground">
-                            <FileText className="h-3.5 w-3.5" />
-                            Summary
-                          </div>
-                          <p className="mt-2 text-sm font-medium">
-                            {meetingSummary.trim() ? "Ready" : "Needs refresh"}
-                          </p>
-                        </div>
-                        <div className="rounded-md border bg-background/80 p-3">
-                          <div className="flex items-center gap-2 text-xs font-medium text-muted-foreground">
-                            <ClipboardList className="h-3.5 w-3.5" />
-                            Action items
-                          </div>
-                          <p className="mt-2 text-sm font-medium">
-                            {selectedMeetingActionItems.length > 0
-                              ? `${selectedMeetingActionItems.length} captured`
-                              : "Need follow-ups"}
-                          </p>
-                        </div>
-                        <div className="rounded-md border bg-background/80 p-3">
-                          <div className="flex items-center gap-2 text-xs font-medium text-muted-foreground">
-                            <Rocket className="h-3.5 w-3.5" />
-                            Follow-up
-                          </div>
-                          <p className="mt-2 text-sm font-medium">
-                            {meetingSummary.trim() && selectedMeetingActionItems.length > 0
-                              ? "Follow-up ready"
-                              : "Summary needed"}
-                          </p>
-                        </div>
-                      </div>
-                      <div className="mt-4 rounded-md border bg-background/80 p-3">
-                        <div className="flex flex-wrap items-start justify-between gap-3">
-                          <div>
-                            <p className="text-xs font-semibold uppercase tracking-wide text-muted-foreground">
-                              Review workflow
-                            </p>
-                            <p className="mt-1 text-xs text-muted-foreground">
-                              Review the summary, confirm the next steps, then copy the draft you need without leaving Notes.
-                            </p>
-                          </div>
-                          <Badge variant="outline" className="bg-muted/30">
-                            Reliable capture + review
-                          </Badge>
-                        </div>
-                        <div className="mt-3 grid gap-3 md:grid-cols-3">
-                          {selectedMeetingReviewPath.map((step) => (
-                            <div
-                              key={step.title}
-                              className="rounded-md border bg-muted/20 px-3 py-3"
-                            >
-                              <div className="flex items-center justify-between gap-2">
-                                <p className="text-xs font-medium text-muted-foreground">
-                                  {step.title}
-                                </p>
-                                <span className="rounded-full border bg-background px-2 py-0.5 text-[11px] text-muted-foreground">
-                                  {step.status}
-                                </span>
-                              </div>
-                              <p className="mt-2 text-sm text-muted-foreground">{step.detail}</p>
-                            </div>
-                          ))}
-                        </div>
-                        {/* Refresh and copy-recap live on the surfaces they act
-                            on — the Summary card, the Action Items card, and
-                            Share & export. Restating them here only duplicated
-                            the same handlers under the same names. */}
-                        <div className="mt-3 flex flex-wrap gap-2">
-                          <Button
-                            type="button"
-                            size="sm"
-                            variant="outline"
-                            onClick={() => void handleCopyMeetingFollowUp(deterministicMeetingFollowUp)}
-                            disabled={
-                              !selectedRecording ||
-                              (!meetingSummary.trim() && selectedMeetingActionItems.length === 0)
-                            }
-                          >
-                            <Copy className="mr-2 h-4 w-4" />
-                            Copy Follow-up Draft
-                          </Button>
-                          <Button
-                            type="button"
-                            size="sm"
-                            variant="outline"
-                            onClick={() =>
-                              toggleReadAloudPlayback(
-                                deterministicMeetingFollowUp,
-                                "meeting-follow-up"
-                              )
-                            }
-                            disabled={
-                              !selectedRecording ||
-                              (!meetingSummary.trim() && selectedMeetingActionItems.length === 0)
-                            }
-                          >
-                            <Volume2 className="mr-2 h-4 w-4" />
-                            {activeSpeechTarget === "meeting-follow-up"
-                              ? "Stop reading"
-                              : "Read Follow-up"}
-                          </Button>
-                        </div>
-                      </div>
-                    </div>
-                    <div className="mt-4 grid gap-3 xl:grid-cols-2">
-                      <div className="rounded-lg border-l-2 border-rust/40 border-y border-r border-y-rust/20 border-r-rust/20 bg-rust/5 p-4 space-y-3">
-                        <div className="flex items-center justify-between gap-3">
-                          <div>
-                            <p className="rubric flex items-center gap-1.5">
-                              <span className="neume neume-rust" aria-hidden="true" />
-                              Summary
-                            </p>
-                            {/* The old line claimed "AI-generated" even for text
-                                the user typed, and the line after it called
-                                every reopened recap theirs. Say which hand
-                                actually set these words down — or say that
-                                nothing recorded it. */}
-                            <p className="mt-1 text-sm text-muted-foreground">
-                              {meetingSummary.trim()
-                                ? SUMMARY_AUTHORSHIP_CAPTION[summaryAuthorship]
-                                : "No summary yet. Refresh to have Plainsong write it from the transcript."}
-                            </p>
-                            <p className="text-sm text-muted-foreground">
-                              Keep the meeting recap editable. Regenerate when your notes change.
-                            </p>
-                          </div>
-                          <Button
-                            type="button"
-                            size="sm"
-                            variant="outline"
-                            onClick={handleRefreshSummary}
-                            disabled={!selectedRecording || isRefreshingSummary}
-                          >
-                            {isRefreshingSummary ? (
-                              <Loader2 className="mr-2 h-4 w-4 animate-spin" />
-                            ) : (
-                              <RefreshCw className="mr-2 h-4 w-4" />
-                            )}
-                            Refresh Summary
-                          </Button>
-                          <Button
-                            type="button"
-                            size="sm"
-                            variant="outline"
-                            onClick={() =>
-                              toggleReadAloudPlayback(meetingSummary, "meeting-summary")
-                            }
-                            disabled={!selectedRecording || !meetingSummary.trim()}
-                          >
-                            <Volume2 className="mr-2 h-4 w-4" />
-                            {activeSpeechTarget === "meeting-summary"
-                              ? "Stop reading"
-                              : "Read aloud"}
-                          </Button>
-                        </div>
-                        {/* Machine-set text sits in the quieter ink behind a
-                            bronze rule; the reader's own keeps full ink; text
-                            whose author was never recorded gets a neutral rule
-                            and neither claim. The moment it is edited here it
-                            is the reader's again. */}
-                        <textarea
-                          value={meetingSummary}
-                          onChange={(event) => {
-                            setMeetingSummary(event.target.value);
-                            setUserEditedSummary(event.target.value);
-                          }}
-                          aria-label="Meeting summary"
-                          placeholder="Summary will appear here after transcription and analysis finish."
-                          rows={8}
-                          className={cn(
-                            "w-full resize-none rounded-lg border bg-background px-3 py-3 text-sm leading-relaxed placeholder:text-muted-foreground/60 focus:outline-none focus:ring-1 focus:ring-rust",
-                            meetingSummary.trim()
-                              ? RECAP_AUTHORSHIP_TREATMENT[summaryAuthorship]
-                              : RECAP_AUTHORSHIP_TREATMENT.user
-                          )}
-                        />
-                      </div>
-
-                      <div className="rounded-lg border-l-2 border-rust/40 border-y border-r border-y-border border-r-border p-4 space-y-3">
-                        <div className="flex items-center justify-between gap-3">
-                          <div>
-                            <p className="rubric flex items-center gap-1.5">
-                              <span className="neume neume-rust" aria-hidden="true" />
-                              Action Items
-                            </p>
-                            <p className="mt-1 text-sm text-muted-foreground">
-                              {meetingActionItemsText.trim()
-                                ? ACTION_ITEMS_AUTHORSHIP_CAPTION[actionItemsAuthorship]
-                                : "No action items yet. Refresh to have Plainsong extract them from the transcript."}
-                            </p>
-                            <p className="text-sm text-muted-foreground">
-                              One line per follow-up. Owners and dates can stay inline.
-                            </p>
-                          </div>
-                          <Button
-                            type="button"
-                            size="sm"
-                            variant="outline"
-                            onClick={handleRefreshActionItems}
-                            disabled={!selectedRecording || isRefreshingActionItems}
-                          >
-                            {isRefreshingActionItems ? (
-                              <Loader2 className="mr-2 h-4 w-4 animate-spin" />
-                            ) : (
-                              <RefreshCw className="mr-2 h-4 w-4" />
-                            )}
-                            Refresh Action Items
-                          </Button>
-                          <Button
-                            type="button"
-                            size="sm"
-                            variant="outline"
-                            onClick={() =>
-                              toggleReadAloudPlayback(
-                                meetingActionItemsText,
-                                "meeting-action-items"
-                              )
-                            }
-                            disabled={!selectedRecording || !meetingActionItemsText.trim()}
-                          >
-                            <Volume2 className="mr-2 h-4 w-4" />
-                            {activeSpeechTarget === "meeting-action-items"
-                              ? "Stop reading"
-                              : "Read aloud"}
-                          </Button>
-                        </div>
-                        <textarea
-                          value={meetingActionItemsText}
-                          onChange={(event) => {
-                            setMeetingActionItemsText(event.target.value);
-                            setUserEditedActionItemsText(event.target.value);
-                          }}
-                          aria-label="Meeting action items"
-                          placeholder="Action items will appear here after transcription and analysis finish."
-                          rows={8}
-                          className={cn(
-                            "w-full resize-none rounded-lg border bg-background px-3 py-3 text-sm leading-relaxed placeholder:text-muted-foreground/60 focus:outline-none focus:ring-1 focus:ring-rust",
-                            meetingActionItemsText.trim()
-                              ? RECAP_AUTHORSHIP_TREATMENT[actionItemsAuthorship]
-                              : RECAP_AUTHORSHIP_TREATMENT.user
-                          )}
-                        />
-                      </div>
-                    </div>
-
-                    {/* Provenance. The boxes above carry the authorship mark —
-                        machine-set text in the quieter ink behind a bronze
-                        rule, the reader's own in full ink, text with no
-                        recorded author behind a neutral rule. This is the
-                        evidence for the machine-set lines: each one either
-                        names the transcript moment it came from, in a row big
-                        enough to hit, or says plainly that it has none. */}
-                    <div className="mt-4 border-t pt-4">
-                      <div className="flex flex-wrap items-start justify-between gap-3">
-                        <div className="min-w-0">
-                          <p className="section-heading">Where this recap came from</p>
-                          <p className="mt-1 max-w-prose text-sm text-muted-foreground">
-                            Evidence for the lines Plainsong wrote this session. Text you typed here
-                            is your own; text that came back from storage has no recorded author.
-                            Neither is listed below — Plainsong makes no evidence claim about
-                            either.
-                          </p>
-                        </div>
-                      </div>
-
-                      {!hasRecapProvenance ? (
-                        <p className="mt-3 text-sm text-muted-foreground">
-                          Nothing on this recap was generated in this session, so there is no
-                          evidence to show. Refresh the summary or action items to attach
-                          transcript citations.
-                        </p>
-                      ) : (
-                        <div className="mt-3 space-y-4">
-                          {summaryProvenance ? (
-                            <div>
-                              <p className="rubric-muted">Summary</p>
-                              {summaryProvenance.citations.length === 0 ? (
-                                <p className="mt-1.5 inline-flex items-center gap-1.5 text-sm text-rust">
-                                  <span className="neume neume-hollow" aria-hidden="true" />
-                                  Not grounded — the model returned no transcript citation for this
-                                  summary.
-                                </p>
-                              ) : (
-                                <div className="mt-2 grid gap-1.5">
-                                  {summaryProvenance.citations.map((citation, index) => (
-                                    <button
-                                      key={`summary-citation-${index}`}
-                                      type="button"
-                                      className="rounded-md border border-border/70 bg-background/70 px-3 py-2.5 text-left transition-colors hover:bg-muted/40 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
-                                      onClick={() => jumpToTranscriptMoment(citation.startTime)}
-                                    >
-                                      <span className="flex items-baseline gap-2">
-                                        <Quote
-                                          className="h-3.5 w-3.5 shrink-0 translate-y-0.5 text-muted-foreground"
-                                          aria-hidden="true"
-                                        />
-                                        <span className="rubric-muted time-spec shrink-0">
-                                          {formatCitationTimeRange(citation) ?? "No timestamp"}
-                                        </span>
-                                      </span>
-                                      <span className="manuscript mt-1 block text-sm">
-                                        {citation.text}
-                                      </span>
-                                      <span className="mt-1 block text-sm text-muted-foreground">
-                                        Jump to this moment in the transcript
-                                      </span>
-                                    </button>
-                                  ))}
-                                </div>
-                              )}
-                            </div>
-                          ) : null}
-
-                          {generatedActionItemProvenance.length > 0 ? (
-                            <div>
-                              <p className="rubric-muted">Action items</p>
-                              <div className="mt-1.5 space-y-3">
-                                {generatedActionItemProvenance.map((entry, entryIndex) => (
-                                  <div key={`action-provenance-${entryIndex}`}>
-                                    <p className="manuscript max-w-prose border-l-2 border-gold-ambient/50 pl-3 text-sm leading-relaxed text-muted-foreground">
-                                      {entry.item}
-                                    </p>
-                                    {entry.citations.length === 0 ? (
-                                      <p className="mt-1 inline-flex items-center gap-1.5 text-sm text-rust">
-                                        <span className="neume neume-hollow" aria-hidden="true" />
-                                        Not grounded — no transcript citation was returned for this
-                                        follow-up.
-                                      </p>
-                                    ) : (
-                                      <div className="mt-1.5 grid gap-1.5">
-                                        {entry.citations.map((citation, citationIndex) => (
-                                          <button
-                                            key={`action-citation-${entryIndex}-${citationIndex}`}
-                                            type="button"
-                                            className="rounded-md border border-border/70 bg-background/70 px-3 py-2.5 text-left transition-colors hover:bg-muted/40 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
-                                            onClick={() =>
-                                              jumpToTranscriptMoment(citation.startTime)
-                                            }
-                                          >
-                                            <span className="flex items-baseline gap-2">
-                                              <Quote
-                                                className="h-3.5 w-3.5 shrink-0 translate-y-0.5 text-muted-foreground"
-                                                aria-hidden="true"
-                                              />
-                                              <span className="rubric-muted time-spec shrink-0">
-                                                {formatCitationTimeRange(citation) ?? "No timestamp"}
-                                              </span>
-                                            </span>
-                                            <span className="manuscript mt-1 block text-sm">
-                                              {citation.text}
-                                            </span>
-                                            <span className="mt-1 block text-sm text-muted-foreground">
-                                              Jump to this moment in the transcript
-                                            </span>
-                                          </button>
-                                        ))}
-                                      </div>
-                                    )}
-                                  </div>
-                                ))}
-                              </div>
-                            </div>
-                          ) : null}
-                        </div>
-                      )}
-                    </div>
-
-                    <div className="mt-4 flex flex-wrap items-center gap-2">
-                      <label className="text-xs font-medium text-muted-foreground" htmlFor="meeting-template">
-                        Playbook
-                      </label>
-                      <select
-                        id="meeting-template"
-                        value={meetingTemplateId}
-                        onChange={(event) => setMeetingTemplateId(event.target.value)}
-                        className="h-9 rounded-md border bg-background px-3 text-sm"
-                      >
-                        {MEETING_TEMPLATES.map((template) => (
-                          <option key={template.value} value={template.value}>
-                            {template.label}
-                          </option>
-                        ))}
-                      </select>
-                      <Button
-                        type="button"
-                        size="sm"
-                        variant="outline"
-                        onClick={handleApplyTemplateOutline}
-                      >
-                        Apply Outline
-                      </Button>
-                      {selectedMeetingConsent.needsManualNotice ? (
-                        <Button
-                          type="button"
-                          size="sm"
-                          variant="outline"
-                          onClick={async () => {
-                            try {
-                              await navigator.clipboard.writeText(MEETING_CONSENT_NOTICE_TEXT);
-                              toast("Consent notice copied.", "success");
-                            } catch {
-                              toast("Couldn't copy the consent notice.", "error");
-                            }
-                          }}
-                        >
-                          <Copy className="mr-2 h-4 w-4" />
-                          Copy Notice
-                        </Button>
-                      ) : null}
-                    </div>
-                    <div className="mt-4 flex flex-wrap items-center justify-between gap-2">
-                      <p className="text-xs text-muted-foreground">
-                        Edit notes by section. Everything still autosaves to the same meeting note record.
-                      </p>
-                      <Button
-                        type="button"
-                        size="sm"
-                        variant="outline"
-                        onClick={handleAddMeetingSection}
-                      >
-                        <Plus className="mr-2 h-4 w-4" />
-                        Add Section
-                      </Button>
-                    </div>
-                    <div aria-label="Meeting notes" role="group" className="mt-4 space-y-3">
-                      {meetingNoteSections.map((section, index) => (
-                        <div
-                          key={`${section.title}-${index}`}
-                          className="rounded-lg border bg-muted/20 p-3"
-                        >
-                          <div className="flex flex-wrap items-start justify-between gap-3">
-                            <div className="min-w-0 flex-1">
-                              {section.isTemplateSection ? (
-                                <div>
-                                  <div className="flex items-center gap-2">
-                                    <p className="text-sm font-medium">{section.title}</p>
-                                    <span className="rounded-full bg-background px-2 py-0.5 text-[11px] text-muted-foreground">
-                                      Template
-                                    </span>
-                                  </div>
-                                  <p className="text-xs text-muted-foreground">
-                                    Keeps this meeting aligned to the selected format.
-                                  </p>
-                                </div>
-                              ) : (
-                                <div className="space-y-2">
-                                  <label
-                                    className="text-xs font-medium text-muted-foreground"
-                                    htmlFor={`meeting-section-title-${index}`}
-                                  >
-                                    Section title
-                                  </label>
-                                  <Input
-                                    id={`meeting-section-title-${index}`}
-                                    value={section.title}
-                                    onChange={(event) =>
-                                      handleMeetingSectionTitleChange(
-                                        index,
-                                        event.target.value
-                                      )
-                                    }
-                                  />
-                                </div>
-                              )}
-                            </div>
-                            {section.isTemplateSection ? (
-                              <Button
-                                type="button"
-                                size="sm"
-                                variant="ghost"
-                                onClick={() => handleClearMeetingSection(index)}
-                              >
-                                Clear
-                              </Button>
-                            ) : (
-                              <Button
-                                type="button"
-                                size="icon"
-                                variant="ghost"
-                                aria-label={`Remove section ${section.title}`}
-                                onClick={() => handleRemoveMeetingSection(index)}
-                              >
-                                <Trash2 className="h-4 w-4" />
-                              </Button>
-                            )}
-                          </div>
-                          <Textarea
-                            value={section.body}
-                            onChange={(event) =>
-                              handleMeetingSectionBodyChange(index, event.target.value)
-                            }
-                            aria-label={`${section.title} notes`}
-                            placeholder={`Capture ${section.title.toLowerCase()} here.`}
-                            rows={5}
-                            className="mt-3 min-h-[120px] resize-y bg-background/90"
-                          />
-                        </div>
-                      ))}
-                    </div>
-
-                    <div className="rounded-lg border border-rust/30 bg-rust/5 p-4 space-y-3">
-                      <div className="flex items-start justify-between gap-3">
-                        <div>
-                          <div className="flex items-center gap-2">
-                            <p className="rubric">
-                              Enhanced Notes
-                            </p>
-                            <Badge variant="outline" className="bg-background/80">
-                              Transcript + raw notes
-                            </Badge>
-                            {enhancedMeetingNotesIsStale ? (
-                              <Badge variant="outline" className="bg-rust/10 text-rust">
-                                Raw notes changed
-                              </Badge>
-                            ) : null}
-                          </div>
-                          <p className="mt-1 text-xs text-muted-foreground">
-                            Build a separate enhanced draft from the transcript and your current raw
-                            notes, then review citations before replacing anything.
-                          </p>
-                          {enhancedMeetingNotesDraft ? (
-                            <p className="mt-2 text-[11px] text-muted-foreground">
-                              Generated{" "}
-                              {new Date(enhancedMeetingNotesDraft.generatedAt).toLocaleString()}.
-                            </p>
-                          ) : null}
-                        </div>
-                        <div className="flex flex-wrap gap-2">
-                          <Button
-                            type="button"
-                            size="sm"
-                            variant="outline"
-                            onClick={() => void handleEnhanceMeetingNotes()}
-                            disabled={!selectedRecording || isEnhancingMeetingNotes}
-                          >
-                            {isEnhancingMeetingNotes ? (
-                              <Loader2 className="mr-2 h-4 w-4 animate-spin" />
-                            ) : (
-                              <RefreshCw className="mr-2 h-4 w-4" />
-                            )}
-                            {enhancedMeetingNotesDraft ? "Regenerate" : "Enhance Notes"}
-                          </Button>
-                          <Button
-                            type="button"
-                            size="sm"
-                            variant="outline"
-                            onClick={() => void handleCopyEnhancedMeetingNotes()}
-                            disabled={!enhancedMeetingNotesDraft?.text.trim()}
-                          >
-                            <Copy className="mr-2 h-4 w-4" />
-                            Copy
-                          </Button>
-                          <Button
-                            type="button"
-                            size="sm"
-                            onClick={() => void handleApplyEnhancedMeetingNotes()}
-                            disabled={!enhancedMeetingNotesDraft?.text.trim()}
-                          >
-                            <CheckCircle2 className="mr-2 h-4 w-4" />
-                            Apply to Notes
-                          </Button>
-                        </div>
-                      </div>
-
-                      {enhancedMeetingNotesDraft ? (
-                        <div className="space-y-3">
-                          <Textarea
-                            value={enhancedMeetingNotesDraft.text}
-                            readOnly
-                            aria-label="Enhanced meeting notes draft"
-                            rows={12}
-                            className="min-h-[220px] resize-y bg-background/90"
-                          />
-
-                          <div className="rounded-md border bg-background/80 p-3 space-y-3">
-                            <div>
-                              <p className="text-xs font-semibold uppercase tracking-wide text-muted-foreground">
-                                Source Evidence
-                              </p>
-                              <p className="mt-1 text-xs text-muted-foreground">
-                                Review which transcript lines grounded this enhanced draft.
-                              </p>
-                            </div>
-
-                            <div className="space-y-2">
-                              <p className="text-xs font-medium">Summary</p>
-                              {enhancedMeetingNotesDraft.summaryCitations.length > 0 ? (
-                                enhancedMeetingNotesDraft.summaryCitations.map((citation, index) => (
-                                  <div
-                                    key={`enhanced-summary-citation-${index}`}
-                                    className="rounded-md border px-3 py-2 text-sm"
-                                  >
-                                    <p>{citation.text}</p>
-                                    <p className="mt-1 text-[11px] text-muted-foreground">
-                                      {formatCitationTimeRange(citation) ?? "No timestamp"}
-                                      {citation.recordingId ? ` · ${citation.recordingId}` : ""}
-                                    </p>
-                                  </div>
-                                ))
-                              ) : (
-                                <p className="text-xs text-muted-foreground">
-                                  No summary citations were returned for this draft.
-                                </p>
-                              )}
-                            </div>
-
-                            <div className="space-y-2">
-                              <p className="text-xs font-medium">Action Items</p>
-                              {enhancedMeetingNotesDraft.actionItemCitations.some(
-                                (group) => group.citations.length > 0
-                              ) ? (
-                                enhancedMeetingNotesDraft.actionItemCitations.map((group, groupIndex) => (
-                                  <div
-                                    key={`enhanced-action-group-${groupIndex}`}
-                                    className="rounded-md border px-3 py-2"
-                                  >
-                                    <p className="text-sm font-medium">{group.label}</p>
-                                    <div className="mt-2 space-y-2">
-                                      {group.citations.length > 0 ? (
-                                        group.citations.map((citation, citationIndex) => (
-                                          <div
-                                            key={`enhanced-action-citation-${groupIndex}-${citationIndex}`}
-                                            className="rounded-md border bg-muted/20 px-3 py-2 text-sm"
-                                          >
-                                            <p>{citation.text}</p>
-                                            <p className="mt-1 text-[11px] text-muted-foreground">
-                                              {formatCitationTimeRange(citation) ?? "No timestamp"}
-                                              {citation.recordingId
-                                                ? ` · ${citation.recordingId}`
-                                                : ""}
-                                            </p>
-                                          </div>
-                                        ))
-                                      ) : (
-                                        <p className="text-xs text-muted-foreground">
-                                          No citations were returned for this action item.
-                                        </p>
-                                      )}
-                                    </div>
-                                  </div>
-                                ))
-                              ) : (
-                                <p className="text-xs text-muted-foreground">
-                                  No action-item citations were returned for this draft.
-                                </p>
-                              )}
-                            </div>
-                          </div>
-                        </div>
-                      ) : (
-                        <div className="rounded-md border border-dashed bg-background/60 px-4 py-6 text-center text-sm text-muted-foreground">
-                          Generate an enhanced draft when you want a cleaner meeting note built
-                          from the transcript and your saved raw notes.
-                        </div>
-                      )}
-                    </div>
-                  </div>
-
-                  <div className="space-y-4">
-                    <div className="rounded-lg border bg-muted/20 p-4">
-                      <div className="flex items-start justify-between gap-3">
-                        <div>
-                          <p className="text-[11px] uppercase tracking-wide text-muted-foreground">
-                            Prep notes
-                          </p>
-                          <p className="mt-1 text-xs text-muted-foreground">
-                            Solo prep before or after the call: playbook, relationship memory, and the questions worth answering live.
-                          </p>
-                        </div>
-                        <Badge variant="outline" className="bg-background/80">
-                          {selectedTemplateOption.label}
-                        </Badge>
-                      </div>
-                      <div className="mt-3 space-y-3">
-                        <div className="rounded-md border bg-background/80 px-3 py-3">
-                          <p className="text-xs font-medium text-muted-foreground">Prep prompts</p>
-                          <ul className="mt-2 space-y-1 text-sm">
-                            {selectedMeetingPrepPrompts.map((prompt) => (
-                              <li key={prompt}>- {prompt}</li>
-                            ))}
-                          </ul>
-                        </div>
-                        <div className="rounded-md border bg-background/80 px-3 py-3">
-                          <p className="text-xs font-medium text-muted-foreground">Relationship memory</p>
-                          {selectedMeetingRelationshipMatches.people.length === 0 &&
-                          selectedMeetingRelationshipMatches.companies.length === 0 ? (
-                            <p className="mt-2 text-sm text-muted-foreground">
-                              No strong matches yet. Plainsong will start surfacing people and companies as meetings accumulate.
-                            </p>
-                          ) : (
-                            <div className="mt-2 space-y-2">
-                              {selectedMeetingRelationshipMatches.people.map((person) => (
-                                <div key={`person-${person.id}`} className="rounded-md border bg-muted/20 px-3 py-2">
-                                  <p className="text-sm font-medium">{person.name}</p>
-                                  <p className="mt-1 text-xs text-muted-foreground">
-                                    {person.recordingCount} meetings · last seen {new Date(person.lastSeenAt).toLocaleDateString()}
-                                  </p>
-                                  {person.recentMeetings[0] ? (
-                                    <p className="mt-2 text-sm text-muted-foreground">
-                                      {person.recentMeetings[0].snippet}
-                                    </p>
-                                  ) : null}
-                                </div>
-                              ))}
-                              {selectedMeetingRelationshipMatches.companies.map((company) => (
-                                <div key={`company-${company.id}`} className="rounded-md border bg-muted/20 px-3 py-2">
-                                  <p className="text-sm font-medium">{company.name}</p>
-                                  <p className="mt-1 text-xs text-muted-foreground">
-                                    {company.recordingCount} meetings · last seen {new Date(company.lastSeenAt).toLocaleDateString()}
-                                  </p>
-                                  {company.recentMeetings[0] ? (
-                                    <p className="mt-2 text-sm text-muted-foreground">
-                                      {company.recentMeetings[0].snippet}
-                                    </p>
-                                  ) : null}
-                                </div>
-                              ))}
-                            </div>
-                          )}
-                        </div>
-                      </div>
-                    </div>
-
-                    <div className="rounded-lg border bg-muted/20 p-4">
-                      <div className="flex items-start justify-between gap-3">
-                        <div>
-                          <p className="text-[11px] uppercase tracking-wide text-muted-foreground">
-                            Follow-up tools
-                          </p>
-                          <p className="mt-1 text-xs text-muted-foreground">
-                            Deterministic solo outputs you can copy immediately, even before generating an AI draft.
-                          </p>
-                        </div>
-                        <Badge variant="outline" className="bg-background/80">
-                          Solo
-                        </Badge>
-                      </div>
-                      <div className="mt-3 grid gap-3 md:grid-cols-3">
-                        <div className="rounded-md border bg-background/80 px-3 py-3">
-                          <p className="text-xs font-medium text-muted-foreground">Quick option</p>
-                          <p className="mt-2 text-sm text-muted-foreground">
-                            Copy a DM recap when you need speed, then send the longer follow-up after a quick edit.
-                          </p>
-                        </div>
-                        <div className="rounded-md border bg-background/80 px-3 py-3">
-                          <p className="text-xs font-medium text-muted-foreground">Planning option</p>
-                          <p className="mt-2 text-sm text-muted-foreground">
-                            Use Next Agenda after every important call so the next conversation starts with memory already loaded.
-                          </p>
-                        </div>
-                        <div className="rounded-md border bg-background/80 px-3 py-3">
-                          <p className="text-xs font-medium text-muted-foreground">Default</p>
-                          <p className="mt-2 text-sm text-muted-foreground">
-                            Summary, action items, and one copied draft cover the default review flow.
-                          </p>
-                        </div>
-                      </div>
-                      <div className="mt-3 grid gap-2 sm:grid-cols-2">
-                        <Button
-                          type="button"
-                          size="sm"
-                          variant="outline"
-                          onClick={() => void handleCopyMeetingFollowUp(deterministicMeetingFollowUp)}
-                        >
-                          <Copy className="mr-2 h-4 w-4" />
-                          Copy Follow-up Email
-                        </Button>
-                        <Button
-                          type="button"
-                          size="sm"
-                          variant="outline"
-                          onClick={() =>
-                            void handleCopyMeetingFollowUp(
-                              `${meetingSummary.trim() || "Quick recap"}\n\n${selectedMeetingActionItems
-                                .map((item) => `- ${item}`)
-                                .join("\n")}`.trim()
-                            )
-                          }
-                        >
-                          <Copy className="mr-2 h-4 w-4" />
-                          Copy DM Recap
-                        </Button>
-                        <Button
-                          type="button"
-                          size="sm"
-                          variant="outline"
-                          onClick={() => void handleCopyMeetingFollowUp(deterministicNextAgenda)}
-                        >
-                          <Copy className="mr-2 h-4 w-4" />
-                          Copy Next Agenda
-                        </Button>
-                        <Button
-                          type="button"
-                          size="sm"
-                          variant="outline"
-                          onClick={() =>
-                            void handleCopyMeetingFollowUp(
-                              selectedMeetingActionItems.length > 0
-                                ? selectedMeetingActionItems.map((item) => `- ${item}`).join("\n")
-                                : "- Review this meeting summary\n- Confirm owners and dates"
-                            )
-                          }
-                        >
-                          <Copy className="mr-2 h-4 w-4" />
-                          Copy Task List
-                        </Button>
-                      </div>
-                    </div>
-
-                    <div className="rounded-lg border bg-muted/20 p-4">
-                      <div className="flex items-start justify-between gap-3">
-                        <div>
-                          <p className="text-[11px] uppercase tracking-wide text-muted-foreground">
-                            Cross-meeting Recall
-                          </p>
-                          <p className="mt-1 text-xs text-muted-foreground">
-                            Ask across prior meetings before you draft the next note, reply, or agenda.
-                          </p>
-                        </div>
-                        <Badge variant="outline" className="bg-background/80">
-                          Memory
-                        </Badge>
-                      </div>
-                      <div className="mt-3 rounded-md border bg-background/80 px-3 py-3">
-                        <div className="flex items-center gap-2 text-xs font-medium text-muted-foreground">
-                          <CalendarClock className="h-3.5 w-3.5" />
-                          Best use
-                        </div>
-                        <p className="mt-2 text-sm text-muted-foreground">
-                          Run this before sending the follow-up when prior promises, deadlines, or repeated asks may change what you say next.
-                        </p>
-                      </div>
-                      <div className="mt-3 space-y-3">
-                        <div className="flex flex-wrap gap-2">
-                          {selectedMeetingRecallPrompts.map((suggestion) => (
-                            <Button
-                              key={suggestion.prompt}
-                              type="button"
-                              size="sm"
-                              variant="outline"
-                              title={suggestion.prompt}
-                              onClick={() => void runMeetingRecall(suggestion.prompt)}
-                              disabled={meetingRecallLoading}
-                            >
-                              {suggestion.label}
-                            </Button>
-                          ))}
-                        </div>
-                        <div className="flex gap-2">
-                          <Input
-                            value={meetingRecallQuery}
-                            onChange={(event) => setMeetingRecallQuery(event.target.value)}
-                            placeholder="Ask across prior meetings"
-                            aria-label="Ask across meetings"
-                          />
-                          <Button
-                            type="button"
-                            variant="outline"
-                            onClick={() => void runMeetingRecall()}
-                            disabled={meetingRecallLoading || !meetingRecallQuery.trim()}
-                          >
-                            {meetingRecallLoading ? (
-                              <>
-                                <Loader2 className="mr-2 h-4 w-4 animate-spin" />
-                                Asking
-                              </>
-                            ) : (
-                              "Ask across meetings"
-                            )}
-                          </Button>
-                        </div>
-                        {meetingRecallError ? (
-                          <div className="rounded-md border border-destructive/40 bg-destructive/10 px-3 py-2 text-sm text-destructive">
-                            {meetingRecallError}
-                          </div>
-                        ) : null}
-                        {meetingRecallResponse ? (
-                          <div className="space-y-3 rounded-md border bg-background/80 px-3 py-3">
-                            <div className="flex items-start justify-between gap-3">
-                              <div>
-                                <p className="text-xs font-medium text-muted-foreground">
-                                  {meetingRecallPromptLabel ?? "Cross-meeting answer"}
-                                </p>
-                                <p className="mt-2 text-sm whitespace-pre-wrap">
-                                  {meetingRecallResponse}
-                                </p>
-                              </div>
-                              <Button
-                                type="button"
-                                size="sm"
-                                variant="ghost"
-                                onClick={() => void handleCopyMeetingRecall(meetingRecallResponse)}
-                              >
-                                <Copy className="mr-2 h-4 w-4" />
-                                Copy
-                              </Button>
-                            </div>
-                            {meetingRecallCitations.length > 0 ? (
-                              <div className="space-y-2">
-                                <p className="text-xs font-medium text-muted-foreground">
-                                  Supporting meetings
-                                </p>
-                                {meetingRecallCitations.slice(0, 3).map((citation, index) => (
-                                  <div
-                                    key={`meeting-recall-citation-${index}`}
-                                    className="rounded-md border bg-muted/20 px-3 py-2 text-sm"
-                                  >
-                                    <p>{citation.text}</p>
-                                    <p className="mt-1 text-[11px] text-muted-foreground">
-                                      {formatCitationTimeRange(citation) ?? "No timestamp"}
-                                      {citation.recordingId ? ` · ${citation.recordingId}` : ""}
-                                    </p>
-                                  </div>
-                                ))}
-                              </div>
-                            ) : null}
-                          </div>
-                        ) : (
-                          <p className="text-sm text-muted-foreground">
-                            Start with a suggested prompt or ask your own question to pull forward
-                            context from prior meetings.
-                          </p>
-                        )}
-                      </div>
-                    </div>
-
-                    <div className="rounded-lg border bg-muted/20 p-4">
-                      <div className="flex items-start justify-between gap-3">
-                        <div>
-                          <p className="section-heading">Share &amp; export</p>
-                          <p className="mt-1 text-sm text-muted-foreground">
-                            The recap carries the summary, action items, and your notes. The full
-                            record adds the verbatim transcript — only copy that where the whole
-                            meeting is allowed to go.
-                          </p>
-                        </div>
-                        <Badge variant="outline" className="bg-background/80">
-                          Single-user
-                        </Badge>
-                      </div>
-                      <div className="mt-3 flex flex-wrap gap-2">
-                        <Button
-                          type="button"
-                          size="sm"
-                          variant="outline"
-                          onClick={() => void handleCopyMeetingRecap()}
-                          disabled={!selectedRecording || !selectedMeetingRecapMarkdown.trim()}
-                        >
-                          <Copy className="mr-2 h-4 w-4" />
-                          Copy recap
-                        </Button>
-                        <Button
-                          type="button"
-                          size="sm"
-                          variant="outline"
-                          onClick={() => void handleCopyMeetingFullRecord()}
-                          disabled={
-                            !selectedRecording || !selectedTranscript?.fullText?.trim()
-                          }
-                        >
-                          <Copy className="mr-2 h-4 w-4" />
-                          Copy full record (includes transcript)
-                        </Button>
-                        <Button
-                          type="button"
-                          size="sm"
-                          variant="outline"
-                          onClick={() => void handleExportMeetingArtifact("markdown")}
-                          disabled={!selectedRecording || isExportingMeeting}
-                        >
-                          <FileText className="mr-2 h-4 w-4" />
-                          Export Markdown
-                        </Button>
-                        <Button
-                          type="button"
-                          size="sm"
-                          variant="outline"
-                          onClick={() => void handleExportMeetingArtifact("text")}
-                          disabled={!selectedRecording || isExportingMeeting}
-                        >
-                          {isExportingMeeting ? (
-                            <Loader2 className="mr-2 h-4 w-4 animate-spin" />
-                          ) : (
-                            <FileOutput className="mr-2 h-4 w-4" />
-                          )}
-                          Export Text
-                        </Button>
-                      </div>
-                      {lastMeetingExportPath ? (
-                        <div className="mt-3 rounded-md border bg-background/80 px-3 py-2 text-xs text-muted-foreground">
-                          <div className="flex items-center justify-between gap-3">
-                            <span className="min-w-0 break-all">{lastMeetingExportPath}</span>
-                            <Button
-                              type="button"
-                              size="sm"
-                              variant="ghost"
-                              onClick={() => void handleOpenMeetingExport()}
-                            >
-                              <ExternalLink className="mr-2 h-4 w-4" />
-                              Open
-                            </Button>
-                          </div>
-                        </div>
-                      ) : null}
-                    </div>
-
-                    <div className="rounded-lg border bg-muted/20 p-4">
-                      <div className="flex items-center justify-between gap-3">
-                        <div>
-                          <p className="text-[11px] uppercase tracking-wide text-muted-foreground">
-                            Transcript preview
-                          </p>
-                          <p className="mt-1 text-xs text-muted-foreground">
-                            Keep the note canvas open while checking the latest grounded lines.
-                          </p>
-                        </div>
-                        <Badge variant="outline" className="bg-background/80">
-                          {selectedRecording?.id === recordingId && isRecording ? "Live" : "Recent"}
-                        </Badge>
-                      </div>
-                      {transcriptPreviewItems.length > 0 ? (
-                        <div className="mt-3 space-y-2">
-                          {transcriptPreviewItems.map((item) => {
-                            const minutes = Math.floor(item.startTime / 60);
-                            const seconds = Math.floor(item.startTime % 60);
-                            const ts = `${minutes}:${seconds.toString().padStart(2, "0")}`;
-                            return (
-                              <div
-                                key={item.id}
-                                className="rounded-md border bg-background/80 px-3 py-2 text-sm"
-                              >
-                                <p className="mb-1 font-mono text-[11px] text-muted-foreground">
-                                  {ts}
-                                  {item.isPartial ? " · partial" : ""}
-                                </p>
-                                <p className={item.isPartial ? "text-muted-foreground italic" : ""}>
-                                  {item.text}
-                                </p>
-                              </div>
-                            );
-                          })}
-                        </div>
-                      ) : (
-                        <div className="mt-3 rounded-md border border-dashed bg-background/60 px-4 py-6 text-center text-sm text-muted-foreground">
-                          {selectedRecording?.status === "processing"
-                            ? "Transcript preview will populate when processing catches up."
-                            : "Transcript preview appears here once the meeting has transcript content."}
-                        </div>
-                      )}
-                    </div>
-
-                    <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-1">
-                      <div className="rounded-lg border bg-muted/30 p-4">
-                        <p className="text-[11px] uppercase tracking-wide text-muted-foreground">
-                          Meeting status
-                        </p>
-                        <p className="mt-1 text-sm font-medium capitalize">
-                          {selectedRecording?.status ?? "unknown"}
-                        </p>
-                      </div>
-                      <div className="rounded-lg border bg-muted/30 p-4">
-                        <p className="text-[11px] uppercase tracking-wide text-muted-foreground">
-                          Transcript length
-                        </p>
-                        <p className="mt-1 text-sm font-medium">
-                          {selectedTranscript?.segments?.length ?? 0} segments
-                        </p>
-                      </div>
-                    </div>
-
-                  </div>
-                </div>
-              </ScrollArea>
-            </TabsContent>
-
-            <TabsContent value="ask" forceMount className="mt-2 min-h-0 flex-1 overflow-hidden">
-              {selectedRecording ? (
-                <ScrollArea className="h-full min-h-0 pr-2">
-                  <div className="space-y-4">
-                    <div className="rounded-lg border bg-muted/20 p-4">
-                      <p className="text-sm font-medium">Ask this meeting</p>
-                      <p className="mt-1 text-xs text-muted-foreground">
-                        Chat against the transcript and saved meeting notes. Use this for follow-ups, decisions, blockers, or owner questions.
-                      </p>
-                    </div>
-                    <AiAnalysisPanel
-                      key={selectedRecording.id}
-                      recordingId={selectedRecording.id}
-                      title="Meeting Chat"
-                      inputPlaceholder="Ask about decisions, blockers, follow-ups, or anything in this meeting..."
-                      templates={MEETING_ASK_TEMPLATES}
-                      emptyStateLabel="Reviewing meeting context..."
-                      analysisMode="grounded"
-                      chatMessages={meetingChatMessages}
-                      onChatMessagesChange={setMeetingChatMessages}
-                      responseActions={[
-                        {
-                          label: "Replace Summary",
-                          onAction: ({ response }) => setMeetingSummary(response),
-                          isVisible: ({ templateId }) => templateId !== "follow_up",
-                        },
-                        {
-                          label: "Append to Notes",
-                          onAction: ({ response, templateId }) =>
-                            appendMeetingNotesBlock(
-                              templateId === "summary"
-                                ? "Summary refresh"
-                                : templateId === "decisions"
-                                  ? "Decisions"
-                                  : templateId === "dates"
-                                    ? "Deadlines"
-                                    : templateId === "follow_up"
-                                      ? "Follow-up draft"
-                                    : "Meeting answer",
-                              response
-                            ),
-                        },
-                        {
-                          label: "Copy Follow-up",
-                          onAction: ({ response }) => {
-                            void handleCopyMeetingFollowUp(response);
-                          },
-                          isVisible: ({ templateId }) => templateId === "follow_up",
-                        },
-                      ]}
-                      actionItemActions={[
-                        {
-                          label: "Replace Action Items",
-                          onAction: ({ items }) =>
-                            setMeetingActionItemsText(
-                              actionItemsToText(items.map((item) => formatGroundedActionItem(item)))
-                            ),
-                        },
-                        {
-                          label: "Append to Notes",
-                          onAction: ({ items }) =>
-                            appendMeetingNotesBlock(
-                              "Action items",
-                              items.map((item) => `- ${formatGroundedActionItem(item)}`).join("\n")
-                            ),
-                        },
-                      ]}
-                    />
-                  </div>
-                </ScrollArea>
-              ) : (
-                <div className="h-full flex items-center justify-center text-muted-foreground">
-                  Select a meeting to ask questions.
-                </div>
-              )}
-            </TabsContent>
-
-            <TabsContent value="transcript" className="mt-2 flex min-h-0 flex-1 flex-col overflow-hidden">
-              {isLoadingDetail ? (
-                <div className="flex-1 flex items-center justify-center text-muted-foreground">
-                  <Loader2 className="h-5 w-5 mr-2 animate-spin" />
-                  Loading transcript...
-                </div>
-              ) : selectedTranscript ? (
-                <div className="flex min-h-0 flex-1 flex-col">
-                  {detailError && (
-                    <div className="mb-3 flex items-center gap-2 rounded-lg border border-rust/30 bg-rust/10 p-3 text-xs text-rust">
-                      <AlertCircle className="h-4 w-4 shrink-0" />
-                      {detailError}
-                    </div>
-                  )}
-                  {!hasSpeakerLabels && (
-                    <div className="mb-3 rounded-lg border p-3 bg-muted/40">
-                      <div className="flex items-start justify-between gap-3">
-                        <div className="text-sm">
-                          <p className="font-medium">No speaker labels detected</p>
-                          <p className="text-muted-foreground">
-                            Run speaker identification to label multiple speakers in this transcript.
-                          </p>
-                        </div>
-                        <Button
-                          size="sm"
-                          onClick={handleRunDiarization}
-                          disabled={isRunningDiarization}
-                        >
-                          {isRunningDiarization ? (
-                            <>
-                              <Loader2 className="h-4 w-4 mr-2 animate-spin" />
-                              Identifying...
-                            </>
-                          ) : (
-                            "Identify Speakers"
-                          )}
-                        </Button>
-                      </div>
-                      {diarizationMessage && (
-                        <p className="text-xs text-gold-text mt-2">{diarizationMessage}</p>
-                      )}
-                      {diarizationError && (
-                        <p className="text-xs text-destructive mt-2">{diarizationError}</p>
-                      )}
-                    </div>
-                  )}
-                  <div className="mb-3 rounded-lg border bg-muted/20 p-3 text-sm text-muted-foreground">
-                    Click a paragraph to set your place; the text stays selectable. Double-click
-                    it, or use the Edit button, to correct it. Up and down arrows walk the
-                    transcript.
-                  </div>
-                  <div className="mb-4 grid gap-3 md:grid-cols-2 xl:grid-cols-4">
-                    <div className="rounded-lg border bg-muted/20 p-3">
-                      <p className="text-[11px] uppercase tracking-wide text-muted-foreground">
-                        Transcript quality
-                      </p>
-                      <div className="mt-2 flex items-center gap-2">
-                        <span
-                          className={`inline-flex rounded-full border px-2 py-1 text-[11px] font-medium ${qualityToneClasses(
-                            transcriptQuality.tone
-                          )}`}
-                        >
-                          {transcriptQuality.label}
-                        </span>
-                        {typeof selectedTranscriptDetails?.qualityScore === "number" && (
-                          <span className="text-xs text-muted-foreground">
-                            {Math.round(selectedTranscriptDetails.qualityScore * 100)}%
-                          </span>
-                        )}
-                      </div>
-                    </div>
-                    <div className="rounded-lg border bg-muted/20 p-3">
-                      <p className="text-[11px] uppercase tracking-wide text-muted-foreground">
-                        Source attribution
-                      </p>
-                      <p className="mt-2 text-sm font-medium">
-                        {formatSourceMode(selectedTranscriptDetails)}
-                      </p>
-                    </div>
-                    <div className="rounded-lg border bg-muted/20 p-3">
-                      <p className="text-[11px] uppercase tracking-wide text-muted-foreground">
-                        Provider
-                      </p>
-                      <p className="mt-2 text-sm font-medium">
-                        {selectedTranscriptDetails?.actualProvider ??
-                          selectedTranscript?.actualProvider ??
-                          "Unknown"}
-                      </p>
-                      {(selectedTranscriptDetails?.modelId ?? selectedTranscript?.modelId) && (
-                        <p className="mt-1 text-xs text-muted-foreground">
-                          {selectedTranscriptDetails?.modelId ?? selectedTranscript?.modelId}
-                        </p>
-                      )}
-                    </div>
-                    <div className="rounded-lg border bg-muted/20 p-3">
-                      <p className="text-[11px] uppercase tracking-wide text-muted-foreground">
-                        Transcription latency
-                      </p>
-                      <p className="mt-2 text-sm font-medium">
-                        {selectedTranscriptDetails?.transcriptionLatencyMs != null
-                          ? `${(selectedTranscriptDetails.transcriptionLatencyMs / 1000).toFixed(1)}s`
-                          : "Unavailable"}
-                      </p>
-                    </div>
-                  </div>
-                  <TranscriptSearch
-                    query={searchQuery}
-                    onQueryChange={(query) => {
-                      setSearchQuery(query);
-                      setActiveTranscriptMatchIndex(0);
-                      // A search the reader types is their own; it must not
-                      // inherit a deep link's moment.
-                      pendingMatchFocusTimeRef.current = null;
-                    }}
-                    matchCount={transcriptMatches.length}
-                    activeMatchIndex={activeTranscriptMatchIndex}
-                    onStepMatch={stepTranscriptMatch}
-                    className="mb-4 shrink-0"
-                  />
-                  <div className="min-h-0 flex-1 rounded-lg border overflow-hidden">
-                    <TranscriptViewer
-                      segments={transcriptSegments}
-                      speakerNames={speakerNames}
-                      provenance={selectedTranscriptProvenance}
-                      currentTime={transcriptCueTime}
-                      onSegmentClick={(segment) => setTranscriptCueTime(segment.startTime)}
-                      highlightQuery={searchQuery}
-                      activeMatchIndex={activeTranscriptMatchIndex}
-                      onMatchesChange={handleTranscriptMatchesChange}
-                      onRenameSpeaker={handleRenameSpeaker}
-                      onEditSegment={async (segmentIds, newText) => {
-                        if (!selectedRecording || segmentIds.length === 0) return;
-                        try {
-                          // The edited text covers the whole speaker turn: it
-                          // replaces the first segment, and the remaining
-                          // segments are removed so their old text can't
-                          // duplicate alongside the correction.
-                          const [firstSegmentId, ...restSegmentIds] = segmentIds;
-                          await updateTranscriptSegment(selectedRecording.id, firstSegmentId, newText);
-                          if (restSegmentIds.length > 0) {
-                            await deleteTranscriptSegments(selectedRecording.id, restSegmentIds);
-                          }
-                          await refreshTranscript(selectedRecording.id);
-                          await refreshTranscriptDetails(selectedRecording.id);
-                          toast("Transcript updated.", "success");
-                        } catch (error) {
-                          const message =
-                            error instanceof Error
-                              ? error.message
-                              : "Failed to update the transcript.";
-                          toast(message, "error");
-                          // Rethrow so the editor stays open with the correction.
-                          throw error;
-                        }
-                      }}
-                      onDeleteSegments={handleDeleteTranscriptSegments}
-                    />
-                  </div>
-                </div>
-              ) : detailError ? (
-                <div className="flex-1 flex items-center justify-center text-destructive">
-                  <AlertCircle className="h-5 w-5 mr-2" />
-                  {detailError}
-                </div>
-              ) : (
-                <div className="flex flex-1 items-center justify-center px-6">
-                  {selectedRecording?.status === "processing" ? (
-                    <div className="max-w-md rounded-lg border bg-muted/20 p-4 text-sm text-muted-foreground">
-                      <div className="flex items-center gap-2 text-foreground">
-                        <Loader2 className="h-4 w-4 animate-spin" />
-                        <span className="font-medium">Processing transcript</span>
-                      </div>
-                      <p className="mt-2 leading-relaxed">
-                        Transcript lines have not landed yet. Auto-refresh is still running in the
-                        background, and you can force a manual refresh if the detail panel looks
-                        stale.
-                      </p>
-                      <div className="mt-3 flex flex-wrap items-center gap-2">
-                        <Button
-                          type="button"
-                          size="sm"
-                          variant="outline"
-                          onClick={() => void handleRefreshTranscriptPanel()}
-                          disabled={isRefreshingTranscriptPanel}
-                        >
-                          {isRefreshingTranscriptPanel ? (
-                            <Loader2 className="mr-2 h-4 w-4 animate-spin" />
-                          ) : (
-                            <RefreshCw className="mr-2 h-4 w-4" />
-                          )}
-                          Refresh now
-                        </Button>
-                        <span className="text-xs text-muted-foreground">
-                          Consent: {selectedMeetingConsent.label}
-                        </span>
-                        {selectedMeetingConsent.needsManualNotice ? (
-                          <span className="text-xs text-rust">
-                            Share the notice before distributing this capture.
-                          </span>
-                        ) : null}
-                      </div>
-                    </div>
-                  ) : selectedRecording?.status === "error" ? (
-                    <div className="max-w-md rounded-lg border bg-muted/20 p-4 text-sm text-muted-foreground">
-                      <p className="font-medium text-foreground">
-                        Transcription failed
-                      </p>
-                      <p className="mt-2 leading-relaxed">
-                        This meeting's transcript could not be produced. The audio is still on
-                        disk, so you can retry transcription from scratch.
-                      </p>
-                      <div className="mt-3 flex flex-wrap items-center gap-2">
-                        <Button
-                          type="button"
-                          size="sm"
-                          variant="outline"
-                          onClick={() =>
-                            selectedRecording && void handleRetranscribeRecording(selectedRecording.id)
-                          }
-                        >
-                          <RefreshCw className="mr-2 h-4 w-4" />
-                          Retry transcription
-                        </Button>
-                      </div>
-                    </div>
-                  ) : (
-                    <div className="max-w-md rounded-lg border bg-muted/20 p-4 text-sm text-muted-foreground">
-                      <p className="font-medium text-foreground">
-                        Transcript is not available yet
-                      </p>
-                      <p className="mt-2 leading-relaxed">
-                        This meeting does not have grounded transcript lines yet. Refresh the
-                        detail panel if processing already finished, or return to the note canvas
-                        while capture is still active.
-                      </p>
-                      <div className="mt-3 flex flex-wrap items-center gap-2">
-                        <Button
-                          type="button"
-                          size="sm"
-                          variant="outline"
-                          onClick={() => void handleRefreshTranscriptPanel()}
-                          disabled={isRefreshingTranscriptPanel || !selectedRecording}
-                        >
-                          {isRefreshingTranscriptPanel ? (
-                            <Loader2 className="mr-2 h-4 w-4 animate-spin" />
-                          ) : (
-                            <RefreshCw className="mr-2 h-4 w-4" />
-                          )}
-                          Refresh transcript
-                        </Button>
-                        <span className="text-xs text-muted-foreground">
-                          Capture mode: {selectedMeetingCaptureMode}
-                        </span>
-                      </div>
-                    </div>
-                  )}
-                </div>
-              )}
-            </TabsContent>
-
-            <TabsContent value="assets" className="mt-2 flex min-h-0 flex-1 flex-col overflow-hidden">
-              {isLoadingDetail ? (
-                <div className="flex-1 flex items-center justify-center text-muted-foreground">
-                  <Loader2 className="h-5 w-5 mr-2 animate-spin" />
-                  Loading meeting assets...
-                </div>
-              ) : (
-                <ScrollArea className="h-full min-h-0 pr-2">
-                  <div className="space-y-4">
-                    <div className="rounded-lg border p-4">
-                      <h3 className="font-medium mb-2">Waveform</h3>
-                      <WaveformVisualizer data={waveformData} height={100} />
-                    </div>
-
-                    <div className="grid gap-4 md:grid-cols-2">
-                      <div className="p-3 bg-muted rounded-lg text-sm">
-                        <span className="text-muted-foreground">Duration:</span>{" "}
-                        <span className="font-medium">
-                          {Math.floor((selectedRecording?.duration || 0) / 60)}:
-                          {((selectedRecording?.duration || 0) % 60).toString().padStart(2, "0")}
-                        </span>
-                      </div>
-                      <div className="p-3 bg-muted rounded-lg text-sm">
-                        <span className="text-muted-foreground">Status:</span>{" "}
-                        <span className="font-medium capitalize">
-                          {selectedRecording?.status ?? "unknown"}
-                        </span>
-                      </div>
-                      <div className="p-3 bg-muted rounded-lg text-sm">
-                        <span className="text-muted-foreground">Created:</span>{" "}
-                        <span className="font-medium">
-                          {selectedRecording?.createdAt
-                            ? new Date(selectedRecording.createdAt).toLocaleString()
-                            : "Unknown"}
-                        </span>
-                      </div>
-                      <div className="p-3 bg-muted rounded-lg text-sm">
-                        <span className="text-muted-foreground">Audio:</span>{" "}
-                        <span className="font-medium">
-                          {selectedMeetingAssetRetention.audioLabel}
-                        </span>
-                        <p className="mt-1 text-xs leading-relaxed text-muted-foreground">
-                          {selectedMeetingAssetRetention.detail}
-                        </p>
-                      </div>
-                    </div>
-                  </div>
-                </ScrollArea>
-              )}
-            </TabsContent>
-          </Tabs>
+          <DialogFooter>
+            <Button variant="outline" onClick={() => setPendingRegenerate(null)}>
+              Keep what I have
+            </Button>
+            <Button
+              variant="destructive"
+              onClick={() => {
+                const request = pendingRegenerate;
+                setPendingRegenerate(null);
+                if (request) {
+                  void runRegeneration(request.scope, request.templateId);
+                }
+              }}
+            >
+              <RefreshCw className="mr-2 h-4 w-4" />
+              Replace and regenerate
+            </Button>
+          </DialogFooter>
         </DialogContent>
       </Dialog>
 

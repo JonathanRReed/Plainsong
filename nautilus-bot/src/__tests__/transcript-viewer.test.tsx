@@ -63,6 +63,16 @@ describe("TranscriptViewer", () => {
     }
   });
 
+  it("keeps a scrollbar on screen so the transcript reads as a long document", () => {
+    // Testers could not tell a long transcript from a short one: the scrollbar
+    // was hover-revealed, so nothing on screen said there was more below.
+    const { container } = render(<TranscriptViewer segments={DEEP_LINK_SEGMENTS} />);
+
+    expect(
+      container.querySelectorAll('[data-orientation="vertical"]').length
+    ).toBeGreaterThan(0);
+  });
+
   it("renders source-aware meeting speakers as Me and Them", () => {
     render(
       <TranscriptViewer
@@ -209,6 +219,16 @@ describe("TranscriptViewer", () => {
       <TranscriptViewer segments={GROUPED_TURN_SEGMENTS} provenance={{ source: "local" }} />
     );
     expect(screen.getByText("Local transcript")).toBeInTheDocument();
+  });
+
+  it("leaves the pane's heading to the page and keeps only its own readout", () => {
+    // The rail this viewer sits in already renders a "Transcript" heading with
+    // a segment count under it. A second matching heading directly below read
+    // as two stacked headers for the same pane.
+    render(<TranscriptViewer segments={GROUPED_TURN_SEGMENTS} />);
+
+    expect(screen.queryByText("Transcript")).not.toBeInTheDocument();
+    expect(screen.getByText("2 segments")).toBeInTheDocument();
   });
 
   it("walks the transcript turn by turn from the keyboard", () => {
