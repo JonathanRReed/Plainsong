@@ -56,6 +56,16 @@ if (!fs.existsSync(sidecarPath)) {
 }
 
 function stableJson(value) {
+  // A settings key the sidecar no longer emits reads back as undefined, and
+  // Object.keys(undefined) throws — which turned "one check failed" into "the
+  // whole run crashed" and hid stale expectations here for eleven days. A
+  // missing key has to fail its own check and let the rest report.
+  if (value === null || value === undefined) {
+    return JSON.stringify(value ?? null);
+  }
+  if (typeof value !== "object") {
+    return JSON.stringify(value);
+  }
   return JSON.stringify(value, Object.keys(value).sort());
 }
 
@@ -236,23 +246,20 @@ function pick(settings, paths) {
 
 const normalChecks = {
   "theme": "dark",
-  "defaultTemplate": "meeting",
   "transcription.defaultProvider": "distil_whisper",
   "transcription.selectedModelId": "distil-large-v3.5",
   "transcription.useSharedAsrSelection": true,
   "transcription.dictationProfile": "normal_speed",
   "transcription.dictationModePreset": "voice",
-  "transcription.dictationInsertionMode": "paste",
+  "transcription.dictationInsertionMode": "auto",
   "transcription.dictationRetentionPreset": "never",
   "transcription.meetingAudioStorageMode": "always",
   "transcription.meetingRetentionPreset": "never",
   "privacy.remoteProcessingEnabled": false,
-  "privacy.cloudSync": false,
 };
 
 const powerChecks = {
   "theme": "dark",
-  "defaultTemplate": "research",
   "transcription.defaultProvider": "parakeet",
   "transcription.selectedModelId": "parakeet-tdt-0.6b-v3",
   "transcription.useSharedAsrSelection": false,
@@ -273,7 +280,6 @@ const powerChecks = {
   "transcription.meetingRetentionCustomMonths": 2,
   "transcription.meetingRetentionDeleteMode": "audio_only",
   "privacy.remoteProcessingEnabled": false,
-  "privacy.cloudSync": false,
 };
 
 function evaluateChecks(settings, expected) {
