@@ -74,6 +74,18 @@ import {
   MEETING_CONSENT_NOTICE_TEXT,
 } from "@/lib/meeting-consent";
 import {
+  appendTranscriptStreamLine,
+  describeAudioSourceWarning,
+  describeTranscriptDelay,
+  describeTranscriptGap,
+  MEETING_AUDIO_SOURCE_WARNING_EVENT,
+  RECORDING_TRANSCRIPTION_STREAM_EVENT,
+  type AudioSourceWarningDescriptor,
+  type MeetingAudioSourceWarningEvent,
+  type RecordingTranscriptionStreamEvent,
+  type TranscriptStreamLine,
+} from "@/lib/meeting-transcript-stream";
+import {
   consumePendingRecordingWorkspace,
   OPEN_RECORDING_WORKSPACE_EVENT,
   requestMainView,
@@ -477,6 +489,54 @@ function qualityToneClasses(tone: "good" | "warn" | "muted"): string {
     default:
       return "border-border bg-muted/40 text-muted-foreground";
   }
+}
+
+/**
+ * Meeting exports from this view are not offered a redaction choice, so the
+ * level is fixed and stated. Exports is where the other levels live.
+ */
+const MEETING_EXPORT_REDACTION_LEVEL = "basic" as const;
+const MEETING_EXPORT_REDACTION_NOTE =
+  "Exports from here use basic redaction: email addresses and phone numbers are replaced, nothing else. Use Exports to choose none or strict.";
+
+function formatDuration(seconds: number): string {
+  const safeSeconds = Math.max(0, seconds);
+  const mins = Math.floor(safeSeconds / 60);
+  const secs = safeSeconds % 60;
+  return `${mins}:${secs.toString().padStart(2, "0")}`;
+}
+
+/**
+ * One line of the delayed preview.
+ *
+ * A `gap` line is not transcript — it is the app admitting a span of the
+ * meeting was overwritten before it could be read — so it gets the "missing"
+ * vocabulary (rust, hollow neume) rather than being set as if it were speech.
+ */
+function TranscriptStreamLineRow({ line }: { line: TranscriptStreamLine }) {
+  if (line.kind === "gap") {
+    return (
+      <p className="flex items-start gap-2 text-sm leading-relaxed text-rust">
+        <span className="time-spec mt-1.5 font-mono text-xs text-rust/70">
+          {formatDuration(Math.floor(line.startTime))}
+        </span>
+        <span
+          className="neume neume-hollow mt-2 shrink-0"
+          aria-hidden="true"
+        />
+        <span>{describeTranscriptGap(line)}</span>
+      </p>
+    );
+  }
+
+  return (
+    <p className="manuscript text-sm leading-relaxed">
+      <span className="time-spec mr-2 font-mono text-xs text-muted-foreground">
+        {formatDuration(Math.floor(line.startTime))}
+      </span>
+      {line.text}
+    </p>
+  );
 }
 
 function normalizePrepSearchTokens(value: string): string[] {
@@ -895,9 +955,14 @@ export function RecordingsView() {
     [toast]
   );
 
-  // Live streaming transcript state
-  type StreamChunk = { text: string; startTime: number; isPartial: boolean };
-  const [streamChunks, setStreamChunks] = useState<StreamChunk[]>([]);
+  // Live streaming transcript state. Lines are the words each segment added,
+  // not the running transcript the same event also carries: these are stamped
+  // with their own start time, and stamping the whole transcript with the
+  // newest segment's time would claim the meeting began there.
+  const [streamChunks, setStreamChunks] = useState<TranscriptStreamLine[]>([]);
+  const [previewDelay, setPreviewDelay] = useState(() => describeTranscriptDelay(null));
+  const [audioSourceWarning, setAudioSourceWarning] =
+    useState<AudioSourceWarningDescriptor | null>(null);
   const streamScrollRef = useRef<HTMLDivElement>(null);
 
   const [autoNameIssue, setAutoNameIssue] = useState<{
@@ -1120,6 +1185,8 @@ export function RecordingsView() {
     if (lastRecordingState.current && !isRecording) {
       refetch();
       setStreamChunks([]);
+      setPreviewDelay(describeTranscriptDelay(null));
+      setAudioSourceWarning(null);
       setLiveMeetingNotes("");
       setLiveMeetingTemplateId("auto");
       setLiveMeetingSystemAudio(false);
@@ -1400,24 +1467,39 @@ export function RecordingsView() {
       return;
     }
     let unlisten: (() => void) | undefined;
-    listen<{ recordingId: string; text: string; startTime: number; isPartial: boolean }>(
-      "recording-transcription-stream",
+    listen<RecordingTranscriptionStreamEvent>(
+      RECORDING_TRANSCRIPTION_STREAM_EVENT,
       (event) => {
         if (event.payload.recordingId !== recordingId) return;
-        setStreamChunks((prev) => {
-          const chunk: StreamChunk = {
-            text: event.payload.text,
-            startTime: event.payload.startTime,
-            isPartial: event.payload.isPartial,
-          };
-          return [...prev.filter((c) => !c.isPartial), chunk];
-        });
+        setPreviewDelay(describeTranscriptDelay(event.payload));
+        setStreamChunks((prev) => appendTranscriptStreamLine(prev, event.payload));
         setTimeout(() => {
           streamScrollRef.current?.scrollTo({
             top: streamScrollRef.current.scrollHeight,
             behavior: "smooth",
           });
         }, 50);
+      }
+    ).then((fn) => {
+      unlisten = fn;
+    });
+    return () => {
+      unlisten?.();
+    };
+  }, [isRecording, recordingId]);
+
+  // A capture source going silent mid-meeting is only useful to know while the
+  // meeting is still running, so it is surfaced here rather than in a log.
+  useEffect(() => {
+    if (!isRecording || !recordingId) {
+      return;
+    }
+    let unlisten: (() => void) | undefined;
+    listen<MeetingAudioSourceWarningEvent>(
+      MEETING_AUDIO_SOURCE_WARNING_EVENT,
+      (event) => {
+        if (event.payload.recordingId !== recordingId) return;
+        setAudioSourceWarning(describeAudioSourceWarning(event.payload));
       }
     ).then((fn) => {
       unlisten = fn;
@@ -2097,7 +2179,7 @@ export function RecordingsView() {
     setLastMeetingExportPath(null);
     try {
       const result = await exportRecordingV2(selectedRecording.id, format, {
-        redactionLevel: "basic",
+        redactionLevel: MEETING_EXPORT_REDACTION_LEVEL,
         preview: false,
       });
       if (!result.exportPath) {
@@ -2838,13 +2920,6 @@ export function RecordingsView() {
     }
   };
 
-  const formatDuration = (seconds: number) => {
-    const safeSeconds = Math.max(0, seconds);
-    const mins = Math.floor(safeSeconds / 60);
-    const secs = safeSeconds % 60;
-    return `${mins}:${secs.toString().padStart(2, "0")}`;
-  };
-
   const openRequestedWorkspace = useCallback(
     (detail: OpenRecordingWorkspaceDetail | null | undefined) => {
       const requestedRecordingId = detail?.recordingId?.trim();
@@ -2973,7 +3048,7 @@ export function RecordingsView() {
                       onClick={() => void handleExportMeetingArtifact("markdown")}
                     >
                       <FileText className="mr-2 h-4 w-4" />
-                      Export Markdown
+                      Export Markdown (basic redaction)
                     </DropdownMenuItem>
                     {selectedRecording?.status === "error" && (
                       <DropdownMenuItem
@@ -4023,6 +4098,12 @@ export function RecordingsView() {
                                 Export Text
                               </Button>
                             </div>
+                            {/* The level is fixed here; say so rather than let
+                                the file imply more or less scrubbing than it
+                                got. Exports offers the other levels. */}
+                            <p className="mt-2 text-sm text-muted-foreground">
+                              {MEETING_EXPORT_REDACTION_NOTE}
+                            </p>
                             {lastMeetingExportPath ? (
                               <div className="mt-3 border-t pt-3 text-sm text-muted-foreground">
                                 <div className="flex items-center justify-between gap-3">
@@ -4204,25 +4285,20 @@ export function RecordingsView() {
                 </Button>
               </div>
 
-              {/* Live lines land here before they are written to the
+              {/* Decoded lines land here before they are written to the
                   transcript, so the pane is never blank while capture runs. */}
               {isLiveSelectedMeeting && streamChunks.length > 0 ? (
                 <div className="shrink-0 border-y border-gold/25 bg-gold/5 px-5 py-3">
-                  <p className="rubric-muted">Landing now</p>
+                  <p className="rubric-muted">{previewDelay.label}</p>
+                  <p className="mt-0.5 text-sm text-muted-foreground">
+                    {previewDelay.caption}
+                  </p>
                   <div className="mt-1.5 space-y-1">
-                    {streamChunks.slice(-4).map((chunk, index) => (
-                      <p
-                        key={`live-line-${index}-${chunk.startTime}`}
-                        className={cn(
-                          "manuscript text-sm leading-relaxed",
-                          chunk.isPartial && "italic text-muted-foreground"
-                        )}
-                      >
-                        <span className="time-spec mr-2 font-mono text-xs text-muted-foreground">
-                          {formatDuration(Math.floor(chunk.startTime))}
-                        </span>
-                        {chunk.text}
-                      </p>
+                    {streamChunks.slice(-4).map((line, index) => (
+                      <TranscriptStreamLineRow
+                        key={`live-line-${index}-${line.startTime}`}
+                        line={line}
+                      />
                     ))}
                   </div>
                 </div>
@@ -4772,6 +4848,20 @@ export function RecordingsView() {
                   isRecording={isRecording}
                   height={56}
                 />
+                {/* A source that has stopped producing audio is only fixable
+                    while the meeting is still running. */}
+                {audioSourceWarning ? (
+                  <div
+                    role="status"
+                    className="mt-4 flex items-start gap-2 rounded-md border border-rust/30 bg-rust/10 p-3 text-sm text-rust"
+                  >
+                    <span className="neume neume-hollow mt-1.5 shrink-0" aria-hidden="true" />
+                    <span>
+                      <span className="font-medium">{audioSourceWarning.title}</span>{" "}
+                      {audioSourceWarning.message}
+                    </span>
+                  </div>
+                ) : null}
                 <div className="mt-4 grid gap-4 lg:grid-cols-[minmax(0,1.35fr)_minmax(280px,1fr)]">
                   <div className="rounded-lg border border-gold/20 bg-background/80 p-3">
                     <div className="mb-2 flex items-center justify-between gap-3">
@@ -4793,34 +4883,31 @@ export function RecordingsView() {
                   </div>
                   <div className="rounded-lg border border-gold/20 bg-background/70 p-3">
                     <div className="mb-2 flex items-center justify-between gap-2">
-                      <p className="text-sm font-medium text-gold-text">Live transcript</p>
+                      <p className="section-heading text-gold-text">
+                        {previewDelay.label}
+                      </p>
                       <p className="text-sm text-muted-foreground">
                         Notes stay the point here
                       </p>
                     </div>
+                    <p className="mb-2 text-sm text-muted-foreground">
+                      {previewDelay.caption}
+                    </p>
                     {streamChunks.length > 0 ? (
                       <div
                         ref={streamScrollRef}
                         className="max-h-48 space-y-1 overflow-y-auto pr-1 text-sm text-muted-foreground"
                       >
-                        {streamChunks.map((chunk, i) => {
-                          const minutes = Math.floor(chunk.startTime / 60);
-                          const seconds = Math.floor(chunk.startTime % 60);
-                          const ts = `${minutes}:${seconds.toString().padStart(2, "0")}`;
-                          return (
-                            <p
-                              key={i}
-                              className={chunk.isPartial ? "opacity-50 italic" : "opacity-100"}
-                            >
-                              <span className="mr-1.5 font-mono text-xs text-gold-text/60">{ts}</span>
-                              {chunk.text}
-                            </p>
-                          );
-                        })}
+                        {streamChunks.map((line, index) => (
+                          <TranscriptStreamLineRow
+                            key={`preview-line-${index}-${line.startTime}`}
+                            line={line}
+                          />
+                        ))}
                       </div>
                     ) : (
                       <div className="flex h-full min-h-[140px] items-center justify-center rounded-md border border-dashed border-gold/20 bg-muted/20 px-4 text-center text-sm text-muted-foreground">
-                        Live transcript lines will appear here while the meeting is being captured.
+                        Decoded lines appear here a few seconds after they are spoken.
                       </div>
                     )}
                   </div>

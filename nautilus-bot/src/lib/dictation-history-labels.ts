@@ -4,6 +4,9 @@ import { formatAppliedDictationCommandLabel } from "@/lib/dictation-command-labe
 
 type DictationSessionInsertionMode =
   | DictationInsertionMode
+  // Retired settings values that stored sessions may still carry.
+  | "paste"
+  | "inline"
   | "command_only"
   | "none";
 
@@ -23,17 +26,35 @@ const VOICE_EDIT_PIPELINE_STAGE_KEYS = new Set([
 ]);
 
 export const INSERTION_MODE_LABELS: Record<DictationInsertionMode, string> = {
-  auto: "Recommended",
-  paste: "Paste at cursor",
-  inline: "Insert on release",
+  auto: "Insert at cursor",
   clipboard_only: "Clipboard only",
 };
+
+/**
+ * Coerce a stored insertion mode onto the two behaviors that still exist.
+ *
+ * Mirrors `normalize_dictation_insertion_mode` in rust-sidecar/src/settings.rs.
+ * The sidecar migrates saved values on load, so this only covers settings that
+ * reach the renderer before that rewrite lands on disk — without it, a profile
+ * still carrying `paste` indexes `INSERTION_MODE_LABELS` to `undefined` and
+ * puts a value the picker has no option for into its `<select>`.
+ */
+export function normalizeInsertionMode(
+  value: string | null | undefined,
+): DictationInsertionMode {
+  return value?.trim() === "clipboard_only" ? "clipboard_only" : "auto";
+}
 
 export const SESSION_INSERTION_MODE_LABELS: Record<
   DictationSessionInsertionMode,
   string
 > = {
   ...INSERTION_MODE_LABELS,
+  // History rows recorded before "paste"/"inline" were retired named the same
+  // insert path the app still takes, so they read under its current name
+  // rather than as modes that no longer exist.
+  paste: INSERTION_MODE_LABELS.auto,
+  inline: INSERTION_MODE_LABELS.auto,
   command_only: "Command only",
   none: "Save only",
 };

@@ -1005,7 +1005,15 @@ export interface SecurityStatus {
   vaultInitialized: boolean;
   vaultUnlocked: boolean;
   databaseEncrypted: boolean;
+  /** True only when every stored recording file is encrypted on disk. */
   recordingsEncrypted: boolean;
+  /**
+   * How many stored recording files are encrypted, and how many there are.
+   * Capture writes a plain WAV, so a vault initialized in the past says
+   * nothing about anything recorded since.
+   */
+  recordingsEncryptedCount: number;
+  recordingsStoredCount: number;
   llmProvider: string;
   remoteProcessingEnabled: boolean;
   exportRoot: string | null;

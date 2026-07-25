@@ -13,3 +13,17 @@ const THEME_SCHEMES: ThemeSchemeOption[] = [
 export function normalizeThemeScheme(value: string): string {
   return THEME_SCHEMES.some((scheme) => scheme.value === value) ? value : "default";
 }
+
+/**
+ * Put the scheme on the document root. Lived in two places (the theme provider
+ * and the Settings view) with identical bodies, which is one copy too many for
+ * something that decides what the whole app looks like.
+ */
+export function applyThemeScheme(scheme: string): void {
+  const root = document.documentElement;
+  if (scheme === "default") {
+    root.removeAttribute("data-theme");
+    return;
+  }
+  root.setAttribute("data-theme", scheme);
+}

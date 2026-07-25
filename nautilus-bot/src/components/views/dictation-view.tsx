@@ -53,6 +53,7 @@ import { formatAppliedDictationCommandLabel } from "@/lib/dictation-command-labe
 import {
   INSERTION_MODE_LABELS,
   formatInsertionModeLabel,
+  normalizeInsertionMode,
 } from "@/lib/dictation-history-labels";
 import {
   CONTEXT_SOURCE_LABELS,
@@ -692,9 +693,9 @@ export function DictationView() {
     useState<DictationRoutePreference>("local");
   const [dictationRouteOverrideEnabled, setDictationRouteOverrideEnabled] =
     useState(true);
-  const [dictationKeepWarm, setDictationKeepWarm] = useState<
-    "off" | "short" | "long"
-  >("short");
+  const [dictationKeepWarm, setDictationKeepWarm] = useState<"off" | "on">(
+    "on",
+  );
   const [dictationLivePreviewEnabled, setDictationLivePreviewEnabled] =
     useState(true);
   const [nextCaptureRoutePreference, setNextCaptureRoutePreference] =
@@ -1460,7 +1461,7 @@ export function DictationView() {
           settings.transcription.dictationRouteOverrideEnabled ?? true,
         );
         setDictationKeepWarm(
-          settings.transcription.dictationKeepWarm ?? "short",
+          settings.transcription.dictationKeepWarm ?? "on",
         );
         setDictationLivePreviewEnabled(
           settings.transcription.dictationLivePreviewEnabled ?? true,
@@ -1592,7 +1593,7 @@ export function DictationView() {
       handsFreeEnabled: boolean;
       routePreference: DictationRoutePreference;
       routeOverrideEnabled: boolean;
-      keepWarm: "off" | "short" | "long";
+      keepWarm: "off" | "on";
       livePreviewEnabled: boolean;
       copyToClipboard: boolean;
       commandModeEnabled: boolean;
@@ -1831,6 +1832,10 @@ export function DictationView() {
   });
 
   const applySavedCustomMode = (mode: DictationCustomMode) => {
+    // A profile saved before `paste`/`inline` were retired still carries one
+    // until the sidecar rewrites settings.json, and feeding that straight into
+    // the picker leaves a `<select>` with no matching option.
+    const insertionMode = normalizeInsertionMode(mode.insertionMode);
     setDictationModePreset("custom");
     setSelectedCustomModeId(mode.id);
     setCustomModeDraft(
@@ -1850,7 +1855,7 @@ export function DictationView() {
     setDictationRoutePreference(
       mode.routePreference ?? dictationRoutePreference,
     );
-    setDictationInsertionMode(mode.insertionMode);
+    setDictationInsertionMode(insertionMode);
     setDictationContextSource(mode.contextSource);
     setDictationLivePreviewEnabled(
       mode.livePreviewEnabled ?? dictationLivePreviewEnabled,
@@ -1873,7 +1878,7 @@ export function DictationView() {
       routePreference: mode.routePreference ?? dictationRoutePreference,
       livePreviewEnabled:
         mode.livePreviewEnabled ?? dictationLivePreviewEnabled,
-      insertionMode: mode.insertionMode,
+      insertionMode,
       contextSource: mode.contextSource,
       saveToInbox: mode.saveToInbox,
       copyToClipboard: mode.copyToClipboard,
@@ -1885,7 +1890,7 @@ export function DictationView() {
         settings.transcription.dictationModePreset = "custom";
         settings.transcription.dictationSelectedCustomModeId = mode.id;
         settings.transcription.dictationProfile = mode.profile;
-        settings.transcription.dictationInsertionMode = mode.insertionMode;
+        settings.transcription.dictationInsertionMode = insertionMode;
         settings.transcription.dictationContextSource = mode.contextSource;
         settings.transcription.dictationSaveToInbox = mode.saveToInbox;
         settings.transcription.dictationCopyToClipboard = mode.copyToClipboard;
@@ -4365,12 +4370,12 @@ export function DictationView() {
                         variant="outline"
                         onClick={() => {
                           setDictationRoutePreference("local");
-                          setDictationKeepWarm("long");
+                          setDictationKeepWarm("on");
                           setDictationSilenceTimeoutSeconds(1.8);
                           const nextModePreset = syncModePreset({});
                           void persistDictationPreferences({
                             routePreference: "local",
-                            keepWarm: "long",
+                            keepWarm: "on",
                             silenceTimeoutSeconds: 1.8,
                             modePreset: nextModePreset,
                           });
@@ -4660,21 +4665,20 @@ export function DictationView() {
                       className="w-full rounded-md border bg-background p-2 text-sm"
                       value={dictationKeepWarm}
                       onChange={(event) => {
-                        const next = event.target.value as
-                          | "off"
-                          | "short"
-                          | "long";
+                        const next = event.target.value as "off" | "on";
                         setDictationKeepWarm(next);
                         void persistDictationPreferences({ keepWarm: next });
                       }}
                     >
+                      <option value="on">On</option>
                       <option value="off">Off</option>
-                      <option value="short">Short</option>
-                      <option value="long">Long</option>
                     </select>
                     <p className="text-sm text-muted-foreground">
-                      Keeps the active dictation route warmer between captures
-                      to reduce startup latency.
+                      Loads the dictation model as soon as a session starts, so
+                      the first result does not wait on a cold load. Off loads
+                      it during that first result instead, which makes only
+                      that one slower. Either way the model stays in memory
+                      until you quit.
                     </p>
                   </div>
 
@@ -4740,14 +4744,12 @@ export function DictationView() {
                         });
                       }}
                     >
-                      <option value="auto">Recommended</option>
-                      <option value="paste">Paste at cursor</option>
-                      <option value="inline">Insert on release</option>
+                      <option value="auto">Insert at cursor</option>
                       <option value="clipboard_only">Clipboard only</option>
                     </select>
                     <p className="text-sm text-muted-foreground">
-                      Recommended tries the best available insertion path.
-                      Insert on release keeps the flow simple and consistent.
+                      Insert at cursor puts the text into the frontmost app.
+                      Clipboard only copies it and leaves the insert to you.
                     </p>
                   </div>
 

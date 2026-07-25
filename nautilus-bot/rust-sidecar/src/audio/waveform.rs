@@ -67,39 +67,3 @@ pub fn generate_waveform_from_file(path: &str, max_points: usize) -> Result<Wave
     let samples = load_audio_file(&path_buf)?;
     Ok(generate_waveform(&samples, 16000, 1, max_points))
 }
-
-/// Export waveform as SVG
-pub fn export_waveform_svg(data: &WaveformData, width: u32, height: u32, color: &str) -> String {
-    let mut svg = format!(
-        r#"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 {} {}" width="{}" height="{}">"#,
-        width, height, width, height
-    );
-
-    // Background
-    svg.push_str(&format!(
-        r#"<rect width="{}" height="{}" fill="transparent"/>"#,
-        width, height
-    ));
-
-    // Draw waveform bars
-    let bar_width = width as f32 / data.samples.len() as f32;
-    let center_y = height as f32 / 2.0;
-
-    for (i, &amplitude) in data.samples.iter().enumerate() {
-        let x = i as f32 * bar_width;
-        let bar_height = amplitude * height as f32 * 0.9; // 90% of height max
-        let y = center_y - bar_height / 2.0;
-
-        svg.push_str(&format!(
-            r#"<rect x="{}" y="{}" width="{}" height="{}" fill="{}" rx="1"/>"#,
-            x,
-            y,
-            bar_width.max(1.0),
-            bar_height,
-            color
-        ));
-    }
-
-    svg.push_str("</svg>");
-    svg
-}

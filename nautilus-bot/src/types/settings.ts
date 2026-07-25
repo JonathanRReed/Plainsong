@@ -42,7 +42,7 @@ export interface DictationCustomMode {
   routePreference?: "local" | "cloud" | null;
   languageOverride?: string | null;
   livePreviewEnabled?: boolean | null;
-  insertionMode: "auto" | "paste" | "inline" | "clipboard_only";
+  insertionMode: "auto" | "clipboard_only";
   contextSource: "none" | "clipboard" | "selected_text" | "application_context";
   saveToInbox: boolean;
   copyToClipboard: boolean;
@@ -94,7 +94,7 @@ export interface TranscriptionSettings {
   dictationHandsFreeEnabled?: boolean;
   dictationRoutePreference?: "local" | "cloud";
   dictationRouteOverrideEnabled?: boolean;
-  dictationKeepWarm?: "off" | "short" | "long";
+  dictationKeepWarm?: "off" | "on";
   dictationLivePreviewEnabled?: boolean;
   dictationAiFormatting: boolean;
   dictationModePreset?:
@@ -109,7 +109,7 @@ export interface TranscriptionSettings {
   dictationContextSource?: "none" | "clipboard" | "selected_text" | "application_context";
   dictationCommandModeEnabled?: boolean;
   dictationCommandPrefix?: string;
-  dictationInsertionMode?: "auto" | "paste" | "inline" | "clipboard_only";
+  dictationInsertionMode?: "auto" | "clipboard_only";
   dictationActiveLanguages?: string[];
   dictationSnippetsEnabled?: boolean;
   dictationAutoLearnCorrections?: boolean;

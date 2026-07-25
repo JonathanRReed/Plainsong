@@ -135,6 +135,10 @@ flag; the numbers here are real.
 
 Speech recognition runs locally by default (Whisper via whisper.cpp, plus other
 native engines). Optional bring-your-own-key cloud providers (OpenAI,
-ElevenLabs, Mistral, Groq, Cohere) and local Ollama are supported. Keys are
-stored in the OS keychain and requests go directly to the provider, never
-through a Plainsong server.
+ElevenLabs, Mistral, Groq, Cohere) are supported. Keys are stored in the OS
+keychain and requests go directly to the provider, never through a Plainsong
+server.
+
+Ollama is **not** a speech-recognition provider here — there is no Ollama
+engine in `rust-sidecar/src/asr/`. It is the default *analysis* provider (local
+meeting summaries and action items).

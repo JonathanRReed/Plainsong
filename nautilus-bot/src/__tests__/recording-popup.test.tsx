@@ -205,4 +205,137 @@ describe("RecordingPopup", () => {
       expect(navigator.clipboard.writeText).toHaveBeenCalled();
     });
   });
+
+  describe("the transcript preview pane", () => {
+    const streamSegment = (overrides: Record<string, unknown> = {}) => ({
+      recordingId: "r1",
+      isPartial: true,
+      isFinal: false,
+      text: "",
+      segmentText: "",
+      startTime: 0,
+      endTime: 5,
+      confidence: 0.9,
+      kind: "speech",
+      delayedPreview: true,
+      lagSeconds: 7,
+      ...overrides,
+    });
+
+    it("shows the whole preview transcript across consecutive segments", async () => {
+      await act(async () => {
+        render(<RecordingPopup />);
+      });
+      await screen.findByText("Board sync");
+
+      const handler = popupMocks.listeners.get("recording-transcription-stream");
+      expect(handler).toBeTruthy();
+
+      // `text` is the running transcript, so this pane replaces rather than
+      // appends; appending would repeat every earlier word on every event.
+      await act(async () => {
+        handler?.({
+          payload: streamSegment({
+            segmentText: "we should ship the parity push",
+            text: "we should ship the parity push",
+          }),
+        });
+        handler?.({
+          payload: streamSegment({
+            segmentText: "before Friday",
+            text: "we should ship the parity push before Friday",
+          }),
+        });
+        handler?.({
+          payload: streamSegment({
+            segmentText: "and tell the team",
+            text: "we should ship the parity push before Friday and tell the team",
+          }),
+        });
+      });
+
+      await waitFor(() => {
+        expect(
+          screen.getAllByText(
+            "we should ship the parity push before Friday and tell the team"
+          ).length
+        ).toBeGreaterThan(0);
+      });
+    });
+
+    it("does not call a preview that trails the speaker a live transcript", async () => {
+      await act(async () => {
+        render(<RecordingPopup />);
+      });
+      await screen.findByText("Board sync");
+
+      const handler = popupMocks.listeners.get("recording-transcription-stream");
+
+      await act(async () => {
+        handler?.({
+          payload: streamSegment({
+            segmentText: "opening remarks",
+            text: "opening remarks",
+            lagSeconds: 9,
+          }),
+        });
+      });
+
+      await waitFor(() => {
+        expect(screen.getAllByText("Delayed preview").length).toBeGreaterThan(0);
+      });
+      expect(screen.queryByText("Live transcript preview")).not.toBeInTheDocument();
+      expect(screen.getByText(/9s behind the speaker/)).toBeInTheDocument();
+    });
+
+    it("reports audio that was lost before it could be decoded", async () => {
+      await act(async () => {
+        render(<RecordingPopup />);
+      });
+      await screen.findByText("Board sync");
+
+      const handler = popupMocks.listeners.get("recording-transcription-stream");
+
+      await act(async () => {
+        handler?.({
+          payload: streamSegment({
+            kind: "gap",
+            segmentText: "[12s not transcribed: the live preview fell behind]",
+            text: "[12s not transcribed: the live preview fell behind]",
+            startTime: 60,
+            endTime: 72,
+          }),
+        });
+      });
+
+      await waitFor(() => {
+        expect(screen.getByText("12s not transcribed")).toBeInTheDocument();
+      });
+    });
+
+    it("warns in the overlay when a capture source goes silent mid-meeting", async () => {
+      await act(async () => {
+        render(<RecordingPopup />);
+      });
+      await screen.findByText("Board sync");
+
+      const handler = popupMocks.listeners.get("meeting-audio-source-warning");
+      expect(handler).toBeTruthy();
+
+      await act(async () => {
+        handler?.({
+          payload: {
+            recordingId: "r1",
+            source: "mic",
+            reason: "silence",
+            silentSeconds: 20,
+          },
+        });
+      });
+
+      await waitFor(() => {
+        expect(screen.getByText("Microphone has gone silent")).toBeInTheDocument();
+      });
+    });
+  });
 });

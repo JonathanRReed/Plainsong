@@ -176,19 +176,22 @@ enum DictationSessionState {
     Recording,
 }
 
+/// What dictation does with the finished text.
+///
+/// There used to be four values. `auto`, `paste` and `inline` all called
+/// `paste_text_systemwide` with identical arguments, and `inline` then rewrote
+/// itself to `paste` in telemetry — three names for one behavior. Only
+/// clipboard-only ever did anything different, so the choice is now the two
+/// things that actually differ; legacy values migrate onto `auto`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum DictationInsertionMode {
     Auto,
-    Paste,
-    Inline,
     ClipboardOnly,
 }
 
 impl DictationInsertionMode {
     fn from_settings_value(value: &str) -> Self {
         match value {
-            "paste" => Self::Paste,
-            "inline" => Self::Inline,
             "clipboard_only" => Self::ClipboardOnly,
             _ => Self::Auto,
         }
@@ -197,8 +200,6 @@ impl DictationInsertionMode {
     fn as_settings_value(self) -> &'static str {
         match self {
             Self::Auto => "auto",
-            Self::Paste => "paste",
-            Self::Inline => "inline",
             Self::ClipboardOnly => "clipboard_only",
         }
     }
@@ -588,7 +589,13 @@ struct SecurityStatus {
     vault_initialized: bool,
     vault_unlocked: bool,
     database_encrypted: bool,
+    /// True only when every stored recording file is encrypted on disk.
     recordings_encrypted: bool,
+    /// How many stored recording files are encrypted, and how many there are.
+    /// Capture always writes a plain WAV, so a vault that was initialized
+    /// months ago says nothing about what was recorded since.
+    recordings_encrypted_count: i64,
+    recordings_stored_count: i64,
     llm_provider: String,
     remote_processing_enabled: bool,
     export_root: Option<String>,
@@ -2924,54 +2931,6 @@ async fn transform_selected_text_impl(
     }
 }
 
-/// Implements the "transform freshly-dictated text" variant of the same
-/// commands: unlike `transform_selected_text_impl`, the input is text the
-/// caller already has in hand (e.g. from a completed dictation session), so
-/// there is no capture step and no write-back — this just returns the
-/// transformed text for the caller to insert/display.
-async fn transform_dictation_text_impl(
-    state: &AppState,
-    text: String,
-    command_key: String,
-) -> Result<serde_json::Value, String> {
-    let input_text = text.trim();
-    if input_text.is_empty() {
-        return Err("Dictation text is empty.".to_string());
-    }
-
-    let action_label = crate::dictation_parity::dictation_command_selected_text_label(&command_key)
-        .ok_or_else(|| format!("Unsupported dictation text transform: {}", command_key))?;
-
-    #[cfg(target_os = "macos")]
-    let app_category = {
-        let target =
-            sanitize_dictation_target(get_frontmost_app_name(), get_frontmost_app_bundle_id());
-        Some(
-            resolve_selected_text_transform_app_category(
-                state,
-                target.0.as_deref(),
-                target.1.as_deref(),
-            )
-            .await,
-        )
-    };
-    #[cfg(not(target_os = "macos"))]
-    let app_category: Option<text::format::DictationAppCategory> = None;
-
-    let transform =
-        transform_text_with_command(state, &command_key, input_text, action_label, app_category)
-            .await?;
-
-    Ok(serde_json::json!({
-        "commandKey": command_key,
-        "inputText": input_text,
-        "outputText": transform.output_text,
-        "usedAi": transform.used_ai,
-        "provider": transform.provider,
-        "modelId": transform.model_id,
-    }))
-}
-
 /// Pure scope-selection policy behind `capture_selected_text_transform_target`
 /// (macOS): given the *result* of trying to capture an explicit selection
 /// and (lazily) the *result* of trying to capture the focused-field
@@ -5183,14 +5142,23 @@ async fn build_security_status(state: &AppState) -> Result<SecurityStatus, Strin
         (privacy, vault_state.unlocked, vault_state.db_encrypted)
     };
 
+    // Recording files are only ever encrypted by the vault migration
+    // (`migrate_storage_encryption`); capture writes a plain WAV either way.
+    // So the vault-initialized bit cannot stand in for "recordings are
+    // encrypted" — count what is actually on disk.
+    let (recordings_encrypted_count, recordings_stored_count) = {
+        let db = state.db.lock().await;
+        db.count_encrypted_recordings().map_err(|e| e.to_string())?
+    };
+
     Ok(SecurityStatus {
         vault_initialized: privacy.vault_initialized,
         vault_unlocked,
         database_encrypted: db_encrypted,
-        // Recording files are only ever encrypted by the vault migration
-        // (`migrate_storage_encryption`), so report that reality instead of
-        // a user-flippable settings flag that never encrypted anything.
-        recordings_encrypted: privacy.vault_initialized,
+        recordings_encrypted: recordings_stored_count > 0
+            && recordings_encrypted_count == recordings_stored_count,
+        recordings_encrypted_count,
+        recordings_stored_count,
         llm_provider: AnalysisProvider::from_settings_value(&privacy.llm_provider)
             .as_settings_value()
             .to_string(),
@@ -7130,13 +7098,36 @@ mod tests {
         assert_eq!(normalize_dictation_command_prefix(""), "command");
         assert_eq!(normalize_dictation_command_prefix(" cmd "), "cmd");
         assert_eq!(normalize_dictation_insertion_mode("auto"), "auto");
-        assert_eq!(normalize_dictation_insertion_mode("paste"), "paste");
-        assert_eq!(normalize_dictation_insertion_mode("inline"), "inline");
         assert_eq!(
             normalize_dictation_insertion_mode("clipboard_only"),
             "clipboard_only"
         );
         assert_eq!(normalize_dictation_insertion_mode("unknown"), "auto");
+    }
+
+    /// The prewarm used to run whatever this said, so "Off" claimed to turn
+    /// off something that kept running.
+    #[test]
+    fn keep_warm_off_is_the_only_value_that_skips_the_prewarm() {
+        assert!(!dictation_keep_warm_enabled("off"));
+        assert!(dictation_keep_warm_enabled("on"));
+        // Retired values from an older settings file.
+        assert!(dictation_keep_warm_enabled("short"));
+        assert!(dictation_keep_warm_enabled("long"));
+    }
+
+    /// `paste` and `inline` were separate names for what `auto` already did,
+    /// so a settings file written before they were removed has to land on the
+    /// one behavior they all performed rather than on a rejected value.
+    #[test]
+    fn retired_insertion_modes_migrate_onto_the_behavior_they_actually_had() {
+        assert_eq!(normalize_dictation_insertion_mode("paste"), "auto");
+        assert_eq!(normalize_dictation_insertion_mode("inline"), "auto");
+        // The one mode that really differed is untouched.
+        assert_eq!(
+            normalize_dictation_insertion_mode("clipboard_only"),
+            "clipboard_only"
+        );
     }
 
     #[test]
@@ -9178,6 +9169,14 @@ fn normalize_dictation_route_preference(value: &str) -> &'static str {
 
 fn normalize_dictation_insertion_mode(value: &str) -> &'static str {
     DictationInsertionMode::from_settings_value(value).as_settings_value()
+}
+
+/// Whether the dictation model should be pre-warmed on session start.
+///
+/// Only "off" turns it off. The retired "short"/"long" values were two names
+/// for the same (unconditional) behavior, so they read as on.
+fn dictation_keep_warm_enabled(value: &str) -> bool {
+    value.trim() != "off"
 }
 
 fn normalize_dictation_retention_preset(value: &str) -> &'static str {
@@ -15678,8 +15677,10 @@ async fn start_dictation_for_sidecar(
 
     // Pre-warm the resolved model into cache while the user is speaking, so the
     // first utterance doesn't pay a cold model load inside stop_dictation.
-    // Detached and best-effort; never blocks the start path.
-    {
+    // Detached and best-effort; never blocks the start path. Gated on the
+    // "Keep warm" setting, which this used to ignore — leaving the control
+    // claiming to do something it never did.
+    if dictation_keep_warm_enabled(&settings_snapshot.transcription.dictation_keep_warm) {
         let prewarm_provider = asr::AsrProviderFactory::create_with_model(
             dictation_provider,
             Some(&dictation_model_id),
@@ -16734,17 +16735,7 @@ async fn stop_dictation_for_sidecar(
                         },
                     }
                 }
-                DictationInsertionMode::Inline => {
-                    actual_insertion_mode = "paste".to_string();
-                    paste_text_systemwide(
-                        state,
-                        final_text.as_str(),
-                        tracker_copy_to_clipboard(state).await,
-                        app_target.as_deref(),
-                        app_bundle_id.as_deref(),
-                    )
-                }
-                _ => paste_text_systemwide(
+                DictationInsertionMode::Auto => paste_text_systemwide(
                     state,
                     final_text.as_str(),
                     tracker_copy_to_clipboard(state).await,
@@ -19662,26 +19653,6 @@ pub async fn dispatch_command(
             "ok": true,
             "message": "Global shortcuts applied"
         })),
-        "get_audio_settings" => {
-            let audio = state.audio_capture.lock().await;
-            Ok(
-                serde_json::json!({ "vadEnabled": audio.is_vad_enabled(), "noiseSuppressionEnabled": audio.is_noise_suppression_enabled() }),
-            )
-        }
-        "set_vad_enabled" => {
-            let enabled: bool =
-                serde_json::from_value(params["enabled"].clone()).map_err(|e| e.to_string())?;
-            let mut audio = state.audio_capture.lock().await;
-            audio.set_vad_enabled(enabled);
-            Ok(serde_json::Value::Null)
-        }
-        "set_noise_suppression_enabled" => {
-            let enabled: bool =
-                serde_json::from_value(params["enabled"].clone()).map_err(|e| e.to_string())?;
-            let mut audio = state.audio_capture.lock().await;
-            audio.set_noise_suppression_enabled(enabled);
-            Ok(serde_json::Value::Null)
-        }
         "list_audio_input_devices" => {
             let (
                 devices,
@@ -19900,20 +19871,6 @@ pub async fn dispatch_command(
                 insights.top_app_target_count = count;
             }
             serde_json::to_value(insights).map_err(|e| e.to_string())
-        }
-        "punctuate_text" => {
-            let text: String =
-                serde_json::from_value(params["text"].clone()).map_err(|e| e.to_string())?;
-            let use_case: String = serde_json::from_value(
-                params
-                    .get("use_case")
-                    .or_else(|| params.get("useCase"))
-                    .cloned()
-                    .unwrap_or(serde_json::json!("general")),
-            )
-            .map_err(|e| e.to_string())?;
-            let result = text::format::format_for_use_case(&text, &use_case);
-            Ok(serde_json::json!(result))
         }
         "verify_dictation_setup" => {
             let permissions = collect_permission_diagnostics(state.as_ref(), Vec::new()).await;
@@ -20173,14 +20130,6 @@ pub async fn dispatch_command(
         // rather than accepting arbitrary text from the renderer.
         "repaste_dictation_result" => reuse_recent_dictation_result(state.as_ref(), &params, true),
         "recopy_dictation_result" => reuse_recent_dictation_result(state.as_ref(), &params, false),
-        "transform_dictation_text" => {
-            let text: String =
-                serde_json::from_value(params["text"].clone()).map_err(|e| e.to_string())?;
-            let command_key: String =
-                serde_json::from_value(params["commandKey"].clone()).map_err(|e| e.to_string())?;
-            transform_dictation_text_impl(state.as_ref(), text, command_key).await
-        }
-
         // ── Window management (handled by Electron) ──────────────────────────
         "open_main_window" => {
             handle.window_command("open-main", &serde_json::Value::Null);
@@ -20307,42 +20256,6 @@ pub async fn dispatch_command(
                 .cloned()
                 .collect();
             serde_json::to_value(templates).map_err(|e| e.to_string())
-        }
-        "generate_waveform_svg" => {
-            let recording_path: String = serde_json::from_value(
-                params
-                    .get("recording_path")
-                    .or_else(|| params.get("recordingPath"))
-                    .cloned()
-                    .unwrap_or(serde_json::Value::Null),
-            )
-            .map_err(|e| e.to_string())?;
-            let width: u32 = params
-                .get("width")
-                .and_then(|v| v.as_u64())
-                .map(|v| v as u32)
-                .unwrap_or(600);
-            let height: u32 = params
-                .get("height")
-                .and_then(|v| v.as_u64())
-                .map(|v| v as u32)
-                .unwrap_or(100);
-            let canonical = canonicalize_existing_absolute_path(&recording_path, "recording_path")?;
-            ensure_path_in_approved_roots(&canonical, "recording_path")?;
-            let (runtime_path, cleanup_path) = resolve_audio_path_for_runtime(
-                state.as_ref(),
-                canonical.to_string_lossy().as_ref(),
-                "recording_path",
-            )
-            .await?;
-            let data = crate::audio::waveform::generate_waveform_from_file(
-                &runtime_path.to_string_lossy(),
-                200,
-            )
-            .map_err(|e| e.to_string())?;
-            cleanup_temp_file(cleanup_path);
-            let svg = crate::audio::waveform::export_waveform_svg(&data, width, height, "#3b82f6");
-            Ok(serde_json::json!(svg))
         }
         "export_recording" => {
             let recording_id: String =
@@ -20613,30 +20526,6 @@ pub async fn dispatch_command(
             let backups = bm.list_backups().await.map_err(|e| e.to_string())?;
             serde_json::to_value(backups).map_err(|e| e.to_string())
         }
-        "create_backup" => {
-            let data_dir: String =
-                serde_json::from_value(params["dataDir"].clone()).map_err(|e| e.to_string())?;
-            let path = canonicalize_existing_absolute_path(&data_dir, "dataDir")?;
-            let expected = nautilus_data_root()?;
-            if path != expected {
-                return Err(format!(
-                    "data_dir must be Plainsong data directory '{}', got '{}'",
-                    expected.display(),
-                    path.display()
-                ));
-            }
-            let snapshot = snapshot_live_database(state.as_ref()).await?;
-            let bm = state.backup_manager.lock().await;
-            let info = bm
-                .create_backup(&path, snapshot.as_deref())
-                .await
-                .map_err(|e| e.to_string())?;
-            drop(bm);
-            if let Some(snapshot_path) = snapshot {
-                let _ = std::fs::remove_file(snapshot_path);
-            }
-            serde_json::to_value(info).map_err(|e| e.to_string())
-        }
         "create_backup_default" => {
             let data_dir = dirs::data_dir()
                 .ok_or("Could not find data directory")?
@@ -20663,28 +20552,6 @@ pub async fn dispatch_command(
                 .await
                 .map_err(|e| e.to_string())?;
             serde_json::to_value(info).map_err(|e| e.to_string())
-        }
-        "restore_backup" => {
-            let backup_id: String =
-                serde_json::from_value(params["backupId"].clone()).map_err(|e| e.to_string())?;
-            let data_dir: String =
-                serde_json::from_value(params["dataDir"].clone()).map_err(|e| e.to_string())?;
-            let path = canonicalize_existing_absolute_path(&data_dir, "dataDir")?;
-            let expected = nautilus_data_root()?;
-            if path != expected {
-                return Err(format!(
-                    "data_dir must be Plainsong data directory '{}', got '{}'",
-                    expected.display(),
-                    path.display()
-                ));
-            }
-            let bm = state.backup_manager.lock().await;
-            bm.restore_backup(&backup_id, &path)
-                .await
-                .map_err(|e| e.to_string())?;
-            drop(bm);
-            reopen_database_after_restore(state.as_ref()).await?;
-            Ok(serde_json::Value::Null)
         }
         "restore_backup_default" => {
             let backup_id: String =

@@ -118,11 +118,9 @@ const INSERTION_META: Record<
   DictationInsertionMode,
   { label: string; detail: string }
 > = {
-  auto: { label: "Recommended", detail: "Best available insert path" },
-  paste: { label: "Paste at cursor", detail: "Paste into the frontmost app" },
-  inline: {
-    label: "Insert on release",
-    detail: "Single insert after you stop speaking",
+  auto: {
+    label: "Insert at cursor",
+    detail: "Insert into the frontmost app",
   },
   clipboard_only: {
     label: "Clipboard only",
@@ -415,7 +413,7 @@ export function DictationPopup() {
   const [dictationResolvedHosting, setDictationResolvedHosting] =
     useState<DictationRoutePreference | null>(null);
   const [dictationInsertionMode, setDictationInsertionMode] =
-    useState<DictationInsertionMode>("paste");
+    useState<DictationInsertionMode>("auto");
   const [dictationCommandPrefix, setDictationCommandPrefix] =
     useState("command");
   const [dictationShortcut, setDictationShortcut] = useState<string | null>(

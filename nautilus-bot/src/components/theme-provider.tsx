@@ -1,6 +1,6 @@
 import React, { createContext, useContext, useEffect, useState } from "react";
 import { invoke } from "@/lib/electron";
-import { normalizeThemeScheme } from "@/lib/theme-schemes";
+import { applyThemeScheme, normalizeThemeScheme } from "@/lib/theme-schemes";
 
 type Theme = "light" | "dark" | "system";
 
@@ -19,15 +19,6 @@ export function ThemeProvider({ children }: { children: React.ReactNode }) {
   const [theme, setThemeState] = useState<Theme>("dark");
   const [isDark, setIsDark] = useState(true);
   const [colorScheme, setColorSchemeState] = useState<string>("default");
-
-  const applyColorScheme = (scheme: string) => {
-    const root = window.document.documentElement;
-    if (scheme === "default") {
-      root.removeAttribute("data-theme");
-      return;
-    }
-    root.setAttribute("data-theme", scheme);
-  };
 
   // Load theme from settings on mount
   useEffect(() => {
@@ -75,7 +66,7 @@ export function ThemeProvider({ children }: { children: React.ReactNode }) {
   }, [theme]);
 
   useEffect(() => {
-    applyColorScheme(colorScheme);
+    applyThemeScheme(colorScheme);
   }, [colorScheme]);
 
   // Listen for system theme changes when in system mode
@@ -112,7 +103,7 @@ export function ThemeProvider({ children }: { children: React.ReactNode }) {
   const setColorScheme = async (scheme: string) => {
     const normalized = normalizeThemeScheme(scheme);
     setColorSchemeState(normalized);
-    applyColorScheme(normalized);
+    applyThemeScheme(normalized);
 
     try {
       const settings = await invoke<Record<string, unknown>>("get_settings");

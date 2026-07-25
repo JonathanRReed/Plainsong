@@ -27,7 +27,12 @@ export type DictationContextSource =
   | "selected_text"
   | "application_context";
 
-export type DictationInsertionMode = "auto" | "paste" | "inline" | "clipboard_only";
+/**
+ * `paste` and `inline` were removed: they took the same insert path as `auto`,
+ * and `inline` reported itself as `paste` afterwards. The sidecar migrates
+ * saved values onto `auto` (rust-sidecar/src/settings.rs).
+ */
+export type DictationInsertionMode = "auto" | "clipboard_only";
 
 export interface DictationStateChangedEvent {
   phase: DictationPhase;
@@ -79,8 +84,6 @@ interface DictationTextReadyEvent {
   endToEndMs?: number;
   insertionModeUsed?:
     | "auto"
-    | "paste"
-    | "inline"
     | "clipboard_only"
     | "command_only"
     | "none";

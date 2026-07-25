@@ -1,5 +1,8 @@
 import type { DictationRoutePreference } from "@/lib/asr-capabilities";
-import { INSERTION_MODE_LABELS } from "@/lib/dictation-history-labels";
+import {
+  INSERTION_MODE_LABELS,
+  normalizeInsertionMode,
+} from "@/lib/dictation-history-labels";
 import type {
   DictationContextSource,
   DictationInsertionMode,
@@ -103,7 +106,7 @@ export const RECOMMENDED_APP_STYLES: RecommendedAppStyle[] = [
       "Rewrite the user's dictation as a concise Slack reply. Keep it direct, natural, and easy to scan. Avoid email-style greetings or sign-offs unless the user explicitly says them. Return only the final reply.",
     profile: "normal_speed",
     routePreference: "local",
-    insertionMode: "paste",
+    insertionMode: "auto",
     contextSource: "application_context",
     saveToInbox: false,
     copyToClipboard: true,
@@ -121,7 +124,7 @@ export const RECOMMENDED_APP_STYLES: RecommendedAppStyle[] = [
       "Rewrite the user's dictation into polished email-ready prose. Preserve intent, improve structure, and keep tone professional. Return only the final email body with no subject line unless the user dictates one.",
     profile: "power_rewrite",
     routePreference: "local",
-    insertionMode: "paste",
+    insertionMode: "auto",
     contextSource: "selected_text",
     saveToInbox: true,
     copyToClipboard: true,
@@ -139,7 +142,7 @@ export const RECOMMENDED_APP_STYLES: RecommendedAppStyle[] = [
       "Rewrite the user's dictation into clean long-form prose for a document. Improve flow and clarity, but keep the original meaning. Use paragraphs rather than bullets unless the user explicitly asks for bullets.",
     profile: "power_rewrite",
     routePreference: "local",
-    insertionMode: "paste",
+    insertionMode: "auto",
     contextSource: "application_context",
     saveToInbox: true,
     copyToClipboard: true,
@@ -157,7 +160,7 @@ export const RECOMMENDED_APP_STYLES: RecommendedAppStyle[] = [
       "Rewrite the user's dictation as crisp structured notes. Prefer short sections and bullets when they make the notes clearer. Keep action items and open questions explicit. Return only the final note text.",
     profile: "normal_speed",
     routePreference: "local",
-    insertionMode: "paste",
+    insertionMode: "auto",
     contextSource: "application_context",
     saveToInbox: true,
     copyToClipboard: true,
@@ -175,7 +178,7 @@ export const RECOMMENDED_APP_STYLES: RecommendedAppStyle[] = [
       "Rewrite the user's dictation as a concise project or issue update. Make status, blockers, and next steps explicit. Keep the language short, precise, and suitable for a work-tracking tool.",
     profile: "power_rewrite",
     routePreference: "local",
-    insertionMode: "paste",
+    insertionMode: "auto",
     contextSource: "selected_text",
     saveToInbox: true,
     copyToClipboard: true,
@@ -193,7 +196,7 @@ export const RECOMMENDED_APP_STYLES: RecommendedAppStyle[] = [
       "Rewrite the user's dictation for a software development workflow. Preserve code terms, filenames, CLI commands, markdown, and developer jargon exactly when possible. Prefer concise technical phrasing and keep variable names, casing, and product names intact.",
     profile: "normal_speed",
     routePreference: "local",
-    insertionMode: "paste",
+    insertionMode: "auto",
     contextSource: "selected_text",
     saveToInbox: true,
     copyToClipboard: true,
@@ -211,7 +214,7 @@ export const RECOMMENDED_APP_STYLES: RecommendedAppStyle[] = [
       "Rewrite the user's dictation with minimal cleanup. Preserve quiet speech intent, keep corrections natural, and avoid over-formatting. Return only the final text.",
     profile: "normal_speed",
     routePreference: "local",
-    insertionMode: "paste",
+    insertionMode: "auto",
     contextSource: "none",
     saveToInbox: true,
     copyToClipboard: true,
@@ -226,7 +229,7 @@ export const DICTATION_MODE_DEFINITIONS: DictationModeDefinition[] = [
     label: "General",
     description: "Fast everyday dictation with reliable insert behavior.",
     profile: "normal_speed",
-    insertionMode: "paste",
+    insertionMode: "auto",
     contextSource: "none",
     saveToInbox: true,
     copyToClipboard: true,
@@ -238,7 +241,7 @@ export const DICTATION_MODE_DEFINITIONS: DictationModeDefinition[] = [
     description:
       "Quick replies that stay compact and paste cleanly into chat apps.",
     profile: "normal_speed",
-    insertionMode: "paste",
+    insertionMode: "auto",
     contextSource: "none",
     saveToInbox: false,
     copyToClipboard: true,
@@ -250,7 +253,7 @@ export const DICTATION_MODE_DEFINITIONS: DictationModeDefinition[] = [
     description:
       "Cleaner output for polished drafting, rewrites, and longer-form prose.",
     profile: "power_rewrite",
-    insertionMode: "paste",
+    insertionMode: "auto",
     contextSource: "selected_text",
     saveToInbox: true,
     copyToClipboard: true,
@@ -261,7 +264,7 @@ export const DICTATION_MODE_DEFINITIONS: DictationModeDefinition[] = [
     label: "Notes",
     description: "Capture ideas quickly and keep them saved for later.",
     profile: "normal_speed",
-    insertionMode: "paste",
+    insertionMode: "auto",
     contextSource: "none",
     saveToInbox: true,
     copyToClipboard: true,
@@ -449,7 +452,12 @@ export function summarizeMode(mode: {
             ? "Local preferred"
             : "Current route",
     },
-    { label: "Result", value: INSERTION_MODE_LABELS[mode.insertionMode] },
+    {
+      label: "Result",
+      // Saved profiles are typed as the current modes but can still carry a
+      // retired one on disk, which would render as "Result:" and nothing else.
+      value: INSERTION_MODE_LABELS[normalizeInsertionMode(mode.insertionMode)],
+    },
     { label: "Context", value: CONTEXT_SOURCE_LABELS[mode.contextSource] },
     {
       label: "History",

@@ -92,7 +92,7 @@ import type {
   ShortcutConflict,
 } from "@/lib/backend/settings";
 import type { Settings } from "@/types/settings";
-import { normalizeThemeScheme } from "@/lib/theme-schemes";
+import { applyThemeScheme, normalizeThemeScheme } from "@/lib/theme-schemes";
 import { formatShortcutForDisplay, normalizeShortcut } from "@/lib/shortcuts";
 import {
   normalizeShortcutAccelerator,
@@ -383,6 +383,100 @@ type ReadinessChipState = {
   tone: boolean | "neutral";
 };
 
+/**
+ * Where an automatically analyzed transcript actually goes. Naming the
+ * destination is the difference between disclosure and a switch label.
+ */
+/// Whether analysis with this provider would leave the machine. Remote
+/// providers are refused outright when remote processing is off, so the
+/// disclosure must not promise a summary that policy will block.
+function isRemoteAnalysisProvider(llmProvider: string): boolean {
+  return llmProvider !== "ollama";
+}
+
+function describeAnalysisDestination(llmProvider: string): string {
+  switch (llmProvider) {
+    case "ollama":
+      return "Ollama on this machine";
+    case "openai":
+      return "OpenAI";
+    case "anthropic":
+      return "Anthropic";
+    case "gemini":
+      return "Google Gemini";
+    case "deepseek":
+      return "DeepSeek";
+    case "ollama-cloud":
+      return "Ollama Cloud";
+    default:
+      return "the configured analysis provider";
+  }
+}
+
+type RecordingEncryptionSummary = {
+  chip: string;
+  description: string;
+  allEncrypted: boolean;
+};
+
+/**
+ * Describe what is actually encrypted on disk.
+ *
+ * Encryption happens in the vault migration, which rewrites existing files;
+ * capture always writes a plain WAV. So a vault that was initialized once does
+ * not make everything recorded since encrypted, and a bare "Encrypted at rest"
+ * claim would be contradicted by the bytes.
+ */
+function describeRecordingEncryption(
+  status: SecurityStatus | null,
+): RecordingEncryptionSummary {
+  if (!status) {
+    return {
+      chip: "Checking",
+      description: "Reading the state of the recordings on disk.",
+      allEncrypted: false,
+    };
+  }
+
+  const stored = status.recordingsStoredCount ?? 0;
+  const encrypted = status.recordingsEncryptedCount ?? 0;
+
+  if (stored === 0) {
+    return {
+      chip: "No recordings",
+      description: status.vaultInitialized
+        ? "The vault is set up, but new recordings are written unencrypted until you migrate again."
+        : "Nothing is stored yet. Use “Migrate to Encrypted Storage” below to encrypt recordings.",
+      allEncrypted: false,
+    };
+  }
+
+  if (encrypted === stored) {
+    return {
+      chip: `${encrypted} of ${stored} encrypted`,
+      description:
+        "Every stored recording is encrypted. New recordings are written unencrypted until you migrate again.",
+      allEncrypted: true,
+    };
+  }
+
+  if (encrypted === 0) {
+    return {
+      chip: `0 of ${stored} encrypted`,
+      description:
+        "No stored recording is encrypted. Use “Migrate to Encrypted Storage” below to encrypt them.",
+      allEncrypted: false,
+    };
+  }
+
+  return {
+    chip: `${encrypted} of ${stored} encrypted`,
+    description:
+      "Recordings made since the last migration are still plaintext. Migrate again to encrypt them.",
+    allEncrypted: false,
+  };
+}
+
 function resolveDictationReadinessChip(
   settings: Settings | null,
   permissionDiagnostics: PermissionDiagnostics | null,
@@ -551,6 +645,10 @@ export function SettingsView() {
     () => resolveDictationReadinessChip(settings, permissionDiagnostics),
     [settings, permissionDiagnostics],
   );
+  const recordingEncryptionSummary = useMemo(
+    () => describeRecordingEncryption(securityStatus),
+    [securityStatus],
+  );
   const dictationShortcutBehavior = resolveDictationHotkeyBehavior(settings);
   const dictationHoldToTalkActive =
     nativeShortcutAvailable && settings?.transcription.dictationPushToTalk;
@@ -567,11 +665,9 @@ export function SettingsView() {
         ? {
             ...current,
             vaultInitialized: next.privacy.vaultInitialized,
-            // recordings_encrypted mirrors vault_initialized on the backend
-            // (lib.rs get_security_status) now that the flippable
-            // privacy.encryptRecordings flag has been removed from the
-            // schema -- there is no separate "encrypted" state to read here.
-            recordingsEncrypted: next.privacy.vaultInitialized,
+            // recordingsEncrypted and its counts are read off the files on
+            // disk (lib.rs build_security_status), so a settings save cannot
+            // re-derive them and must leave them alone.
             llmProvider: next.privacy.llmProvider,
             remoteProcessingEnabled: next.privacy.remoteProcessingEnabled,
             exportRoot: next.privacy.exportRoot ?? null,
@@ -1433,21 +1529,12 @@ export function SettingsView() {
     );
   }, [activeTab, getCachedModelsForProvider, settings, updateSettings]);
 
-  const applyColorScheme = useCallback((scheme: string) => {
-    const root = document.documentElement;
-    if (scheme === "default") {
-      root.removeAttribute("data-theme");
-      return;
-    }
-    root.setAttribute("data-theme", scheme);
-  }, []);
-
   useEffect(() => {
     if (!settings) {
       return;
     }
     const nextScheme = normalizeThemeScheme(settings.ui.colorScheme);
-    applyColorScheme(nextScheme);
+    applyThemeScheme(nextScheme);
     if (nextScheme !== settings.ui.colorScheme) {
       void updateSettings(
         {
@@ -1460,7 +1547,7 @@ export function SettingsView() {
         { immediate: true },
       );
     }
-  }, [applyColorScheme, settings, updateSettings]);
+  }, [settings, updateSettings]);
 
   const refreshBackups = useCallback(async () => {
     const data = await listBackups();
@@ -3719,28 +3806,29 @@ export function SettingsView() {
                         </CardDescription>
                       </CardHeader>
                       <CardContent className="space-y-5">
-                        <div className="flex items-center justify-between">
+                        {/* The vault-initialized bit only says a migration
+                            once ran. Capture writes a plain WAV either way, so
+                            report the count of files that are actually
+                            encrypted and say plainly that new recordings are
+                            not. */}
+                        <div className="flex items-start justify-between gap-3">
                           <div className="space-y-0.5">
                             <Label className="flex items-center gap-2">
                               <Lock className="h-4 w-4" />
-                              Encrypt recordings at rest
+                              Recordings encrypted at rest
                             </Label>
                             <p className="text-sm text-muted-foreground">
-                              {securityStatus?.recordingsEncrypted
-                                ? "Recordings are stored in the encrypted vault."
-                                : "Recordings are not yet encrypted. Use “Migrate to Encrypted Storage” below to enable it."}
+                              {recordingEncryptionSummary.description}
                             </p>
                           </div>
                           <span
-                            className={`rounded-full border px-2.5 py-1 text-xs ${
-                              securityStatus?.recordingsEncrypted
-                                ? "border-rust/40 bg-rust/8 text-rust"
-                                : "border-border bg-muted text-muted-foreground"
+                            className={`shrink-0 rounded-full border px-2.5 py-1 text-sm ${
+                              recordingEncryptionSummary.allEncrypted
+                                ? "border-gold/30 bg-gold/10 text-gold-text"
+                                : "border-rust/40 bg-rust/8 text-rust"
                             }`}
                           >
-                            {securityStatus?.recordingsEncrypted
-                              ? "Encrypted"
-                              : "Not encrypted"}
+                            {recordingEncryptionSummary.chip}
                           </span>
                         </div>
 
@@ -4788,6 +4876,37 @@ export function SettingsView() {
                         </CardDescription>
                       </CardHeader>
                       <CardContent className="space-y-5">
+                        {/* This is on by default and was previously only in
+                            the settings schema: every finished meeting was
+                            handed to the analysis provider with nothing in the
+                            UI saying so. */}
+                        <div className="flex items-start justify-between gap-3">
+                          <div className="space-y-0.5">
+                            <Label>Summarize every meeting automatically</Label>
+                            <p className="text-sm text-muted-foreground">
+                              {!settings.transcription.enableAutoAnalysis
+                                ? "Meetings are only summarized when you ask for it from the meeting view."
+                                : isRemoteAnalysisProvider(
+                                      settings.privacy.llmProvider,
+                                    ) && !settings.privacy.remoteProcessingEnabled
+                                  ? `Each finished meeting would be summarized by ${describeAnalysisDestination(settings.privacy.llmProvider)}, but remote processing is off, so nothing leaves this machine and no summary is written.`
+                                  : `Each finished meeting transcript is sent to ${describeAnalysisDestination(settings.privacy.llmProvider)} for a summary and action items, without asking.`}
+                            </p>
+                          </div>
+                          <Switch
+                            checked={settings.transcription.enableAutoAnalysis}
+                            onCheckedChange={(checked) =>
+                              void updateSettings({
+                                ...settings,
+                                transcription: {
+                                  ...settings.transcription,
+                                  enableAutoAnalysis: checked,
+                                },
+                              })
+                            }
+                          />
+                        </div>
+
                         <div className="space-y-2">
                           <Label>Default analysis provider</Label>
                           <select
