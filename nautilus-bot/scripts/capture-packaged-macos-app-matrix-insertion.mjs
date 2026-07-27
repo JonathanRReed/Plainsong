@@ -83,6 +83,17 @@ const activationNames = {
   "HubSpot (Chrome)": "Google Chrome",
 };
 
+const bundleIds = {
+  "Apple Notes": ["com.apple.Notes"],
+  "Google Docs (Chrome)": ["com.google.Chrome"],
+  Slack: ["com.tinyspeck.slackmacgap"],
+  Notion: ["notion.id"],
+  "VS Code": ["com.microsoft.VSCode"],
+  Cursor: ["com.todesktop.230313mzl4w4u92"],
+  Messages: ["com.apple.MobileSMS"],
+  "HubSpot (Chrome)": ["com.google.Chrome"],
+};
+
 function writeText(filePath, body) {
   fs.mkdirSync(path.dirname(filePath), { recursive: true });
   fs.writeFileSync(filePath, `${body.trimEnd()}\n`, "utf8");
@@ -176,7 +187,14 @@ function normalize(value) {
     .toLowerCase();
 }
 
-function targetMatches(frontmost, target) {
+function targetMatches(frontmost, target, bundleId) {
+  const expectedBundleIds = bundleIds[target] ?? [];
+  if (
+    typeof bundleId === "string" &&
+    expectedBundleIds.some((expected) => expected.toLowerCase() === bundleId.toLowerCase())
+  ) {
+    return true;
+  }
   const front = normalize(frontmost);
   const expected = normalize(target);
   if (!front || !expected) return false;
@@ -382,7 +400,8 @@ async function run() {
     artifact.checks.sidecarCommandCompleted = true;
     artifact.checks.frontmostMatchedTarget = targetMatches(
       artifact.sidecarResult?.targetApp,
-      targetApp
+      targetApp,
+      artifact.sidecarResult?.targetBundleId,
     );
     artifact.checks.pasteReported = Boolean(artifact.sidecarResult?.pasted);
 

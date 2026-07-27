@@ -12,10 +12,12 @@ function valueFor(name, fallback = null) {
 const thresholdMs = Number(valueFor("--threshold-ms", "2500"));
 const pollIntervalMs = Number(valueFor("--poll-interval-ms", "120"));
 const readyCommand = valueFor("--ready-command");
+const readyOutputPattern = valueFor("--ready-output-pattern");
+const enableElectronLogging = args.includes("--electron-logging");
 const sep = args.indexOf("--");
 
 if (sep < 0 || sep === args.length - 1) {
-  console.error("Usage: node scripts/cold-start-gate.mjs [--threshold-ms 2500] [--ready-command \"<shell command>\"] -- <launch command> [args...]");
+  console.error("Usage: node scripts/cold-start-gate.mjs [--threshold-ms 2500] [--ready-command \"<shell command>\"] [--ready-output-pattern \"text\"] [--electron-logging] -- <launch command> [args...]");
   process.exit(1);
 }
 
@@ -37,21 +39,39 @@ function runReadyCommand(shellCommand) {
 }
 
 async function waitForReadiness(startedAt, launchState) {
-  if (!readyCommand) {
+  if (!readyCommand && !readyOutputPattern) {
     return Date.now();
   }
 
   while (Date.now() - startedAt < thresholdMs) {
-    if (launchState.code !== null && launchState.code !== 0) {
-      throw new Error(`Launch command exited before readiness check completed (code ${launchState.code})`);
+    if (launchState.closed) {
+      const exitReason = launchState.code !== null
+        ? `code ${launchState.code}`
+        : `signal ${launchState.signal || "unknown"}`;
+      throw new Error(`Launch command exited before readiness check completed (${exitReason})`);
     }
 
-    const ready = await runReadyCommand(readyCommand);
-    if (ready) return Date.now();
+    const commandReady = readyCommand ? await runReadyCommand(readyCommand) : true;
+    const outputReady = readyOutputPattern
+      ? `${launchState.stdout}\n${launchState.stderr}`.includes(readyOutputPattern)
+      : true;
+    if (commandReady && outputReady) return Date.now();
     await delay(Math.max(40, pollIntervalMs));
   }
 
-  throw new Error(`Readiness command did not succeed within ${thresholdMs}ms`);
+  throw new Error(`Readiness signal did not succeed within ${thresholdMs}ms`);
+}
+
+async function stopLaunch(launch, launchState) {
+  if (launchState.closed) return;
+  launch.kill("SIGTERM");
+  const deadline = Date.now() + 3000;
+  while (!launchState.closed && Date.now() < deadline) {
+    await delay(50);
+  }
+  if (!launchState.closed) {
+    launch.kill("SIGKILL");
+  }
 }
 
 async function main() {
@@ -64,13 +84,25 @@ async function main() {
   }
 
   const started = Date.now();
-  const launch = spawn(cmd, cmdArgs, { stdio: "pipe" });
+  const launch = spawn(cmd, cmdArgs, {
+    stdio: "pipe",
+    env: {
+      ...process.env,
+      ...(enableElectronLogging ? { ELECTRON_ENABLE_LOGGING: "1" } : {}),
+    },
+  });
 
   const launchState = {
+    closed: false,
     code: null,
+    signal: null,
+    stdout: "",
     stderr: "",
   };
 
+  launch.stdout.on("data", (chunk) => {
+    launchState.stdout += String(chunk);
+  });
   launch.stderr.on("data", (chunk) => {
     launchState.stderr += String(chunk);
   });
@@ -80,12 +112,14 @@ async function main() {
     process.exit(1);
   });
 
-  launch.on("close", (code) => {
+  launch.on("close", (code, signal) => {
+    launchState.closed = true;
     launchState.code = code;
+    launchState.signal = signal;
   });
 
   try {
-    if (!readyCommand) {
+    if (!readyCommand && !readyOutputPattern) {
       await new Promise((resolve, reject) => {
         launch.on("close", (code) => {
           if (code !== 0) {
@@ -112,6 +146,7 @@ async function main() {
           generatedAt: new Date().toISOString(),
           command: [cmd, ...cmdArgs].join(" "),
           readinessCommand: readyCommand || null,
+          readinessOutputPattern: readyOutputPattern || null,
           elapsedMs,
           thresholdMs,
         },
@@ -119,7 +154,9 @@ async function main() {
         2
       )
     );
+    await stopLaunch(launch, launchState);
   } catch (error) {
+    await stopLaunch(launch, launchState);
     console.error(String(error?.message || error));
     if (launchState.stderr.trim()) {
       console.error(launchState.stderr.trim());

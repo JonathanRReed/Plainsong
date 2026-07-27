@@ -4,19 +4,22 @@ Release state as of **July 27, 2026**.
 
 The current working tree contains a locally verified Plainsong v1.0.0 release
 candidate for Apple Silicon Macs. The app, DMG, ZIP, sidecar, shortcut helper,
-and Apple Speech helper are Developer ID signed. The candidate is not
-notarized, stapled, Gatekeeper-approved, tagged, pushed, or published.
+and Apple Speech helper are Developer ID signed. The candidate is deliberately
+not notarized or stapled because notarization was deferred for this pass. It is
+not Gatekeeper-approved, tagged, or published.
 
 This file separates source and local-package completion from the credentials
 and user-present checks that cannot be completed by an unattended build.
 
 ## Verdict
 
-**Source and local package: ready. Public release: blocked.**
+**Source, local package, and current-host acceptance: ready. Public release:
+deferred.**
 
-The remaining blockers are Apple notarization and hands-on validation of the
-permission-sensitive capture and insertion flows. Do not describe v1.0.0 as
-launched until every item under "External release gates" is complete.
+The remaining release gates are Apple notarization, a clean-Mac install and
+permission pass, an N-to-N+1 updater installation, broader target-app
+compatibility, and publication. Do not describe v1.0.0 as launched until every
+item under "External release gates" is complete.
 
 ## Verified source gates
 
@@ -71,6 +74,15 @@ launched until every item under "External release gates" is complete.
 | backup and restore | pass | Local create/restore plus explicit iCloud-provider sync/restore path |
 | exports | pass | Markdown, JSON, text, all seven templates, database restore, fixture cleanup |
 | packaged renderer | pass | Main window and Dictation render through the production protocol |
+| cold start | pass | Production renderer emitted `App rendered` in 1,822 ms against a 2.5 s gate |
+| dictation hotkey | pass | Packaged global shortcut, microphone capture, Whisper transcript, clipboard delivery |
+| Apple Notes insertion | pass | Real packaged insertion into Notes, including native-paste fallback and bundle-ID evidence |
+| microphone meeting | pass | Real capture, overlays, persisted audio, database/settings restore, cleanup |
+| system-audio known tone | pass | Core Audio process tap, callbacks, non-silent frames, and 997 Hz fixture |
+| combined meeting capture | pass | Same-session system-audio verification plus mic, system, and mixed WAV output |
+| meeting soak preflight | pass | 30-second mic capture, completed transcript, event lifecycle, restore, cleanup |
+| local Ollama analysis | pass | `gpt-oss:20b` summary and action items with grounded citations |
+| idle CPU | pass | 0.05% average, 0.9% maximum, 0.1% p95, clean exit |
 | release trust | expected fail | Every local signature check passes; notarization checks fail closed |
 
 The retention, backup, and export harnesses restore the original database and
@@ -108,6 +120,14 @@ June and is not a v1 feature.
       claims.
 - [x] Native helper packaging verifies both usage strings and the least-
       privilege entitlement split.
+- [x] Ollama structured analysis uses the documented chat endpoint, which
+      returns `gpt-oss` structured output in assistant message content.
+- [x] Combined and soak meeting harnesses verify the system-audio known tone
+      before setup and recording in the same sidecar session.
+- [x] The app-matrix insertion harness recognizes known target bundle IDs when
+      macOS omits the application name.
+- [x] The cold-start gate measures real packaged renderer readiness and stops
+      the launched process after evidence is captured.
 
 ## System-audio support
 
@@ -117,26 +137,33 @@ symbols dynamically so the macOS 13 app can still launch. A virtual loopback
 device remains the compatibility path on macOS 13 and earlier macOS 14
 versions.
 
-The route and package are present, but an audible known-tone capture was not
-triggered unattended because it can open a system permission prompt and uses
-real system audio. That remains a user-present release gate.
+The packaged native process-tap route passed a real known-tone capture on this
+Mac. It produced 247 callbacks, 106,479 non-silent frames, and detected the
+997 Hz fixture. A same-session Me + Them recording then produced microphone,
+system, and mixed WAV files. Clean-Mac permission behavior remains an external
+release gate.
 
 ## External release gates
 
 ### Apple notarization
 
-The local credential preflight does not have the complete release credential
-set. The trust gate therefore reports:
+Developer ID signing and a local Keychain notarization profile are available.
+The credentialed build was stopped before submission when notarization was
+explicitly deferred. A fresh signed candidate was then rebuilt with all
+notarization inputs removed, and no Plainsong submission appears in
+`notarytool` history. The trust gate therefore reports:
 
 - app: `source=Unnotarized Developer ID`
 - ZIP-contained app: `source=Unnotarized Developer ID`
 - no stapled ticket on the app, DMG, or ZIP-contained app
 - Gatekeeper rejection, as required before notarization
 
-Complete these in the credentialed release environment:
+Complete these only when notarization is resumed:
 
-- [ ] Configure `MAC_CSC_LINK`, `MAC_CSC_KEY_PASSWORD`, `APPLE_ID`,
-      `APPLE_APP_SPECIFIC_PASSWORD`, and `APPLE_TEAM_ID`.
+- [x] Confirm a Developer ID identity and supported notarization credential
+      route are available.
+- [ ] Resume a credentialed build with `APPLE_KEYCHAIN_PROFILE`, or with
+      `APPLE_ID`, `APPLE_APP_SPECIFIC_PASSWORD`, and `APPLE_TEAM_ID`.
 - [ ] Run `bun run gate:release-credentials:preflight`.
 - [ ] Build through `.github/workflows/release.yml`.
 - [ ] Submit and staple the signed DMG.
@@ -152,13 +179,16 @@ See `nautilus-bot/docs/APPLE_DEVELOPER_SETUP.md` and
       opens it without a bypass.
 - [ ] Complete first-run microphone, Speech Recognition, Accessibility, and
       system-audio permissions.
-- [ ] Dictate into Notes, a browser field, and a code editor using toggle,
-      hold-to-talk, and hands-free modes.
-- [ ] Confirm paste-last, copy-last, and open-window shortcuts register and
-      behave as labeled.
-- [ ] Record and review one real mic-only meeting.
-- [ ] Record and review one real native system-audio meeting using a known
-      audible tone.
+- [x] Trigger the packaged global shortcut, capture microphone audio, complete
+      local Whisper transcription, and deliver through the clipboard.
+- [x] Insert packaged dictation into Apple Notes and verify the exact text in
+      the target note.
+- [x] Record packaged mic-only and native system-audio meetings, including a
+      known audible tone.
+- [ ] Extend insertion coverage to an installed browser and code editor, and
+      exercise toggle, hold-to-talk, and hands-free modes on the clean Mac.
+- [ ] Confirm paste-last, copy-last, and open-window shortcuts behave as
+      labeled on the clean Mac.
 - [ ] Verify transcript, summary, action items, diarization enrichment,
       retention, and export on the real recordings.
 - [ ] Install an update end to end from the signed ZIP and
@@ -167,10 +197,11 @@ See `nautilus-bot/docs/APPLE_DEVELOPER_SETUP.md` and
 
 ## Publication sequence
 
-No publication action is authorized by this checklist.
+The commit and push requested for this pass do not authorize tagging or release
+publication.
 
-- [ ] Review and commit the current working tree.
-- [ ] Push the reviewed branch.
+- [x] Review and commit the current working tree.
+- [x] Push the reviewed `main` branch.
 - [ ] Create and push the `v1.0.0` tag.
 - [ ] Let the release workflow create a verified draft release.
 - [ ] Review checksums, release notes, and clean-Mac evidence.

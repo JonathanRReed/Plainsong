@@ -5,19 +5,22 @@ the first Plainsong macOS release.
 
 ## Confirmed local state
 
-As of July 23, 2026:
+As of July 27, 2026:
 
 - a Developer ID Application identity for team `AJ9VWBRNZN` is installed
-- the v1.0.0 app, sidecar, and native shortcut helper are Developer ID signed
+- the v1.0.0 app, sidecar, native shortcut helper, and Apple Speech helper are
+  Developer ID signed
 - hardened runtime and secure timestamps are present
 - the packaged arm64 DMG, ZIP, blockmap, and updater manifest were built
-- the candidate is not notarized because the Apple credential environment
-  variables were not available
+- a supported local `notarytool` Keychain profile is available
+- notarization was explicitly deferred before a Plainsong submission was made
+- the current candidate was rebuilt without notarization inputs
 - stapler reports that no ticket is attached
 - Gatekeeper reports `source=Unnotarized Developer ID`
 
-The next build must run through the credentialed official release workflow. Do
-not publish the current local candidate.
+When notarization is resumed, the next candidate must run through the
+credentialed official release workflow. Do not publish the current local
+candidate.
 
 ## 1. Confirm Apple team access
 
@@ -88,6 +91,24 @@ bun run qa:packaged:macos:update-metadata
 APPLE_TEAM_ID="AJ9VWBRNZN" bun run gate:release:macos:trust
 bun run gate:size
 ```
+
+For a local machine with an existing `notarytool` Keychain profile, use
+`CSC_NAME` and `APPLE_KEYCHAIN_PROFILE` instead of exporting the certificate
+and Apple ID password:
+
+```bash
+CSC_NAME="Jonathan Reed (AJ9VWBRNZN)" \
+APPLE_KEYCHAIN_PROFILE="<notarytool-profile>" \
+bun run gate:release-credentials:preflight
+
+CSC_NAME="Jonathan Reed (AJ9VWBRNZN)" \
+APPLE_KEYCHAIN_PROFILE="<notarytool-profile>" \
+bun run release:mac
+```
+
+Do not include the `Developer ID Application:` prefix in `CSC_NAME`;
+`electron-builder` rejects the prefixed form. You can also omit `CSC_NAME`
+when automatic identity discovery selects the intended Developer ID identity.
 
 The trust gate must pass completely. In particular:
 
