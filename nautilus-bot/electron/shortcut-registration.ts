@@ -163,12 +163,9 @@ function normalizeAcceleratorToken(
 // SHORTCUT_FIELD_PRECEDENCE below.
 export type ShortcutFieldKey =
   | "toggleDictation"
-  | "toggleRecording"
   | "openWindow"
   | "repasteLastDictation"
-  | "recopyLastDictation"
-  | "quickExport"
-  | "focusSearch";
+  | "recopyLastDictation";
 
 export type ShortcutFieldSettings = Partial<Record<ShortcutFieldKey, string | undefined>>;
 
@@ -185,24 +182,13 @@ export type ShortcutConflictInfo = {
 // registration; later fields are skipped. Dictation is the app's primary
 // interaction (per the OSS "Cursor Tab of voice" positioning) so it always
 // wins. Open window, then the two dictation recovery bindings (re-paste and
-// re-copy the last result), are the other fields actually registered with
-// Electron's globalShortcut today, so they come next. toggleRecording is a
-// pre-existing settings field that is not wired to any registration path
-// (neither globalShortcut.register nor the native shortcut controller, which
-// only wires toggleDictation) — it is ranked below the shortcuts that really
-// register something so a collision never disables a working shortcut in
-// favor of one that was never going to fire. quickExport/focusSearch are
-// renderer-local shortcuts (not yet wired to globalShortcut) but are still
-// included so users get a warning if they configure a clash before those are
-// wired up.
+// re-copy the last result), are the other fields registered with Electron's
+// globalShortcut today, so they come next.
 export const SHORTCUT_FIELD_PRECEDENCE: Array<{ key: ShortcutFieldKey; label: string }> = [
   { key: "toggleDictation", label: "Dictation" },
   { key: "openWindow", label: "Open window" },
   { key: "repasteLastDictation", label: "Paste last result" },
   { key: "recopyLastDictation", label: "Copy last result" },
-  { key: "toggleRecording", label: "Recording" },
-  { key: "quickExport", label: "Quick export" },
-  { key: "focusSearch", label: "Search" },
 ];
 
 export function findConflictingShortcuts(

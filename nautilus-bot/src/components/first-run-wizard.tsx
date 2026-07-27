@@ -31,8 +31,9 @@ import {
   type SetupVerificationResult,
 } from "@/lib/backend/settings";
 import {
-  checkSystemAudioAvailability,
-  getLoopbackDeviceName,
+  getSystemAudioCapability,
+  testSystemAudioCapture,
+  type SystemAudioCapability,
 } from "@/lib/backend/recordings";
 import {
   defaultDictationShortcut,
@@ -128,7 +129,7 @@ const PERMISSION_GATES: PermissionGate[] = [
     key: "speech",
     label: "Speech recognition",
     purpose:
-      "Optional -- only needed if Plainsong falls back to Apple's native speech engine. The fast local default below doesn't use it.",
+      "Optional -- only needed when you explicitly choose Apple Speech for on-device dictation. Plainsong never uses it as a fallback route.",
     section: "speech",
     settingsLabel: "Speech Recognition",
     optional: true,
@@ -217,6 +218,23 @@ function summarizeMeetingRoute(provider: AsrProviderType | null, modelId: string
   const modelLabel =
     providerInfo?.modelOptions.find((option) => option.id === modelId)?.label ?? modelId;
   return `${providerLabel} · ${modelLabel}`;
+}
+
+function isMeetingRouteReady(
+  providerType: AsrProviderType | null,
+  modelId: string | null,
+  providers: AsrProviderInfo[]
+) {
+  if (!providerType || !modelId) {
+    return false;
+  }
+  return buildAsrRouteCatalog(providers, "prefer_local").some(
+    (route) =>
+      route.providerType === providerType &&
+      route.modelId === modelId &&
+      route.laneCompatibility.meeting &&
+      route.readiness === "ready"
+  );
 }
 
 function getRecommendedMeetingRoute(providers: AsrProviderInfo[]) {
@@ -323,6 +341,9 @@ export function FirstRunWizard({ mode = "full", onComplete }: Props) {
   const [hotkeyDemoActive, setHotkeyDemoActive] = useState(false);
   const [saveBusy, setSaveBusy] = useState(false);
   const [saveError, setSaveError] = useState<string | null>(null);
+  const [saveErrorContext, setSaveErrorContext] = useState<
+    "hotkey" | "meeting-route" | "meeting-settings" | null
+  >(null);
 
   const [meetingAudioStorageMode, setMeetingAudioStorageMode] = useState<"always" | "transcript_only">("always");
   const [meetingRetentionPreset, setMeetingRetentionPreset] = useState<"1m" | "2m" | "3m" | "custom" | "never">("never");
@@ -332,8 +353,10 @@ export function FirstRunWizard({ mode = "full", onComplete }: Props) {
   const [meetingRouteSummary, setMeetingRouteSummary] = useState("Checking meeting route…");
   const [meetingRouteReady, setMeetingRouteReady] = useState<boolean | null>(null);
   const [meetingRouteError, setMeetingRouteError] = useState<string | null>(null);
-  const [meetingSystemAudioAvailable, setMeetingSystemAudioAvailable] = useState<boolean | null>(null);
-  const [loopbackDevice, setLoopbackDevice] = useState<string | null>(null);
+  const [meetingSystemAudioCapability, setMeetingSystemAudioCapability] =
+    useState<SystemAudioCapability | null>(null);
+  const [systemAudioTestLoading, setSystemAudioTestLoading] = useState(false);
+  const [systemAudioTestStatus, setSystemAudioTestStatus] = useState<string | null>(null);
   const [meetingVerificationDetails, setMeetingVerificationDetails] = useState<string[]>([]);
   const [meetingRecommendedRoute, setMeetingRecommendedRoute] = useState<{
     providerType: AsrProviderType;
@@ -471,17 +494,20 @@ export function FirstRunWizard({ mode = "full", onComplete }: Props) {
   const refreshMeetingSetup = useCallback(async () => {
     setMeetingSetupLoading(true);
     try {
-      const [settings, providers, systemAudioAvailable, detectedLoopbackDevice, verification] = await Promise.all([
+      const [settings, providers, systemAudioCapability, verification] = await Promise.all([
         getSettings(),
         getAsrProviders(),
-        checkSystemAudioAvailability().catch(() => false),
-        getLoopbackDeviceName().catch(() => null),
+        getSystemAudioCapability().catch(() => null),
         verifyMeetingSetup().catch(() => null as SetupVerificationResult | null),
       ]);
 
       const currentProvider = (settings.transcription.meetingProvider as AsrProviderType | undefined) ?? null;
       const currentModelId = settings.transcription.meetingModelId ?? null;
-      const routeReady = verification?.ok ?? false;
+      const routeReady = isMeetingRouteReady(
+        currentProvider,
+        currentModelId,
+        providers
+      );
 
       setMeetingRouteSummary(summarizeMeetingRoute(currentProvider, currentModelId, providers));
       setMeetingRouteReady(routeReady);
@@ -490,26 +516,57 @@ export function FirstRunWizard({ mode = "full", onComplete }: Props) {
         routeReady
           ? null
           : verification?.summary ??
-              "Meetings need a meeting-grade ASR route with microphone and system-audio setup ready."
+              "Meetings need a meeting-grade ASR route plus a ready microphone and permission. System audio is optional for Me + Them capture."
       );
-      setMeetingSystemAudioAvailable(systemAudioAvailable);
-      setLoopbackDevice(detectedLoopbackDevice);
+      setMeetingSystemAudioCapability(systemAudioCapability);
       setMeetingRecommendedRoute(getRecommendedMeetingRoute(providers));
-      return { routeReady, systemAudioAvailable };
+      return {
+        routeReady,
+        systemAudioAvailable: systemAudioCapability?.backend !== "none",
+      };
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
       setMeetingRouteSummary("Meeting setup check failed");
       setMeetingRouteReady(false);
       setMeetingRouteError(message || "Could not verify the meeting setup right now.");
       setMeetingVerificationDetails([]);
-      setMeetingSystemAudioAvailable(null);
-      setLoopbackDevice(null);
+      setMeetingSystemAudioCapability(null);
       setMeetingRecommendedRoute(null);
       return { routeReady: false, systemAudioAvailable: false };
     } finally {
       setMeetingSetupLoading(false);
     }
   }, []);
+
+  const testMeetingSystemAudio = useCallback(async () => {
+    setSystemAudioTestLoading(true);
+    setSystemAudioTestStatus(
+      "Waiting for macOS and checking the current system-audio signal…"
+    );
+    try {
+      const result = await testSystemAudioCapture();
+      setMeetingSystemAudioCapability(result.capability);
+      if (result.capability.ready) {
+        setSystemAudioTestStatus(
+          result.verificationMethod === "external_audio"
+            ? `Verified non-silent system audio via ${result.capability.routeDevice ?? "the current external-audio route"}.`
+            : `Verified ${Math.round(result.expectedToneHz)} Hz system audio via ${result.capability.routeDevice ?? "the current route"}.`
+        );
+      } else {
+        setSystemAudioTestStatus(
+          result.capability.actionableReason ??
+            "System audio could not be verified. Check the current route and macOS privacy settings."
+        );
+      }
+      if (result.capability.ready) {
+        await refreshMeetingSetup();
+      }
+    } catch (error) {
+      setSystemAudioTestStatus(error instanceof Error ? error.message : String(error));
+    } finally {
+      setSystemAudioTestLoading(false);
+    }
+  }, [refreshMeetingSetup]);
 
   useEffect(() => {
     if (step === "meeting-setup") {
@@ -657,6 +714,7 @@ export function FirstRunWizard({ mode = "full", onComplete }: Props) {
   const persistDictationStep = useCallback(async () => {
     setSaveBusy(true);
     setSaveError(null);
+    setSaveErrorContext(null);
     try {
       const settings = await getSettings();
       settings.shortcuts.toggleDictation = normalizeShortcut(shortcutValue);
@@ -666,6 +724,7 @@ export function FirstRunWizard({ mode = "full", onComplete }: Props) {
       return true;
     } catch (error) {
       setSaveError(error instanceof Error ? error.message : String(error));
+      setSaveErrorContext("hotkey");
       return false;
     } finally {
       setSaveBusy(false);
@@ -678,6 +737,7 @@ export function FirstRunWizard({ mode = "full", onComplete }: Props) {
     }
     setSaveBusy(true);
     setSaveError(null);
+    setSaveErrorContext(null);
     try {
       const settings = await getSettings();
       settings.transcription.useSharedAsrSelection = false;
@@ -694,6 +754,7 @@ export function FirstRunWizard({ mode = "full", onComplete }: Props) {
       return true;
     } catch (error) {
       setSaveError(error instanceof Error ? error.message : String(error));
+      setSaveErrorContext("meeting-route");
       return false;
     } finally {
       setSaveBusy(false);
@@ -703,6 +764,7 @@ export function FirstRunWizard({ mode = "full", onComplete }: Props) {
   const persistMeetingStep = useCallback(async () => {
     setSaveBusy(true);
     setSaveError(null);
+    setSaveErrorContext(null);
     try {
       const settings = await getSettings();
       settings.transcription.meetingAudioStorageMode = meetingAudioStorageMode;
@@ -714,6 +776,7 @@ export function FirstRunWizard({ mode = "full", onComplete }: Props) {
       return true;
     } catch (error) {
       setSaveError(error instanceof Error ? error.message : String(error));
+      setSaveErrorContext("meeting-settings");
       return false;
     } finally {
       setSaveBusy(false);
@@ -911,8 +974,10 @@ export function FirstRunWizard({ mode = "full", onComplete }: Props) {
             routeReady={meetingRouteReady}
             routeError={meetingRouteError}
             verificationDetails={meetingVerificationDetails}
-            systemAudioAvailable={meetingSystemAudioAvailable}
-            loopbackDevice={loopbackDevice}
+            systemAudioCapability={meetingSystemAudioCapability}
+            systemAudioTestLoading={systemAudioTestLoading}
+            systemAudioTestStatus={systemAudioTestStatus}
+            onTestSystemAudio={() => void testMeetingSystemAudio()}
             meetingAudioStorageMode={meetingAudioStorageMode}
             onMeetingAudioStorageModeChange={setMeetingAudioStorageMode}
             meetingRetentionPreset={meetingRetentionPreset}
@@ -934,6 +999,8 @@ export function FirstRunWizard({ mode = "full", onComplete }: Props) {
                   )
                 : null
             }
+            saveError={saveError}
+            saveErrorContext={saveErrorContext}
           />
         ) : null}
 
@@ -1101,7 +1168,8 @@ function PermissionsStep({
       <p className="text-sm text-muted-foreground">
         Grant these in order. Microphone first so Plainsong can hear you, then the
         cursor-control grant so it can insert your spoken words into other apps. Speech
-        recognition is optional -- it's only used by Apple's native fallback route.
+        recognition is optional -- it is only used when you explicitly select Apple's
+        on-device, dictation-only route.
       </p>
 
       {revocationNotice ? (
@@ -1156,7 +1224,7 @@ function PermissionsStep({
           <div>
             <p className="text-sm font-medium">Auto-request permissions before dictation</p>
             <p className="text-xs text-muted-foreground">
-              Prompt for native speech and microphone access when needed. Leave this off if you are not at the Mac to respond to system prompts.
+              Prompt for microphone access, plus Speech Recognition only when the selected dictation route needs it. Leave this off if you are not at the Mac to respond to system prompts.
             </p>
           </div>
           <input
@@ -1472,7 +1540,11 @@ function HotkeyStep({
         </div>
       </div>
 
-      {saveError ? <p className="text-xs text-destructive">Failed to save hotkey: {saveError}</p> : null}
+      {saveError ? (
+        <p className="text-xs text-destructive" role="alert">
+          Failed to save hotkey: {saveError}
+        </p>
+      ) : null}
     </div>
   );
 }
@@ -1483,8 +1555,10 @@ function MeetingSetupStep({
   routeReady,
   routeError,
   verificationDetails,
-  systemAudioAvailable,
-  loopbackDevice,
+  systemAudioCapability,
+  systemAudioTestLoading,
+  systemAudioTestStatus,
+  onTestSystemAudio,
   meetingAudioStorageMode,
   onMeetingAudioStorageModeChange,
   meetingRetentionPreset,
@@ -1496,14 +1570,18 @@ function MeetingSetupStep({
   onRefresh,
   onApplyRecommendedRoute,
   recommendedRouteSummary,
+  saveError,
+  saveErrorContext,
 }: {
   loading: boolean;
   routeSummary: string;
   routeReady: boolean | null;
   routeError: string | null;
   verificationDetails: string[];
-  systemAudioAvailable: boolean | null;
-  loopbackDevice: string | null;
+  systemAudioCapability: SystemAudioCapability | null;
+  systemAudioTestLoading: boolean;
+  systemAudioTestStatus: string | null;
+  onTestSystemAudio(): void;
   meetingAudioStorageMode: "always" | "transcript_only";
   onMeetingAudioStorageModeChange(value: "always" | "transcript_only"): void;
   meetingRetentionPreset: "1m" | "2m" | "3m" | "custom" | "never";
@@ -1515,7 +1593,18 @@ function MeetingSetupStep({
   onRefresh(): void;
   onApplyRecommendedRoute?: () => void;
   recommendedRouteSummary: string | null;
+  saveError: string | null;
+  saveErrorContext: "hotkey" | "meeting-route" | "meeting-settings" | null;
 }) {
+  const systemAudioBackendLabel =
+    systemAudioCapability?.backend === "core_audio_process_tap"
+      ? "Core Audio process tap"
+      : systemAudioCapability?.backend === "virtual_loopback"
+        ? "virtual loopback"
+        : "no route";
+  const systemAudioRouteAvailable =
+    Boolean(systemAudioCapability) && systemAudioCapability?.backend !== "none";
+
   return (
     <div className="space-y-4">
       <p className="text-sm text-muted-foreground">
@@ -1555,37 +1644,89 @@ function MeetingSetupStep({
               <span className="text-xs text-muted-foreground">{recommendedRouteSummary}</span>
             </div>
           ) : null}
+          {saveError && saveErrorContext === "meeting-route" ? (
+            <p className="mt-2 text-xs text-destructive" role="alert">
+              Couldn&apos;t save the recommended meeting route: {saveError}. Retry the route;
+              your storage and retention choices are still here.
+            </p>
+          ) : null}
         </div>
 
         <div className="rounded-lg border border-border p-3">
           <div className="flex items-start justify-between gap-3">
             <div>
               <p className="text-sm font-medium">System audio capture</p>
-              {systemAudioAvailable === null ? (
-                <p className="text-xs text-muted-foreground">Checking availability…</p>
-              ) : systemAudioAvailable ? (
+              {systemAudioCapability === null ? (
+                <p className="text-xs text-muted-foreground">Checking routes…</p>
+              ) : systemAudioCapability.ready ? (
                 <p className="text-xs text-gold-text">
-                  Ready{loopbackDevice ? ` via ${loopbackDevice}` : ""}.
+                  Verified via {systemAudioBackendLabel}
+                  {systemAudioCapability.routeDevice
+                    ? ` on ${systemAudioCapability.routeDevice}`
+                    : ""}
+                  {systemAudioCapability.nativeSampleRate && systemAudioCapability.nativeChannels
+                    ? ` · ${systemAudioCapability.nativeSampleRate} Hz / ${systemAudioCapability.nativeChannels} ch`
+                    : ""}
+                  .
+                </p>
+              ) : systemAudioRouteAvailable ? (
+                <p className="text-xs text-rust">
+                  Route detected via {systemAudioBackendLabel}, but permission and non-silent audio are not verified yet.
                 </p>
               ) : (
                 <p className="text-xs text-rust">
-                  Not ready yet. Mic-only meetings work now, but capturing other speakers/system audio still needs setup.
+                  No usable system-audio route is ready. Mic-only meetings still work.
                 </p>
               )}
             </div>
-            {loading ? (
+            {loading || systemAudioTestLoading ? (
               <Loader2 className="h-4 w-4 animate-spin text-muted-foreground" />
-            ) : systemAudioAvailable === null ? (
-              <span className="neume neume-hollow" aria-hidden="true" />
-            ) : systemAudioAvailable ? (
+            ) : systemAudioCapability?.ready ? (
               <span className="neume neume-lit" aria-hidden="true" />
+            ) : systemAudioCapability === null ? (
+              <span className="neume neume-hollow" aria-hidden="true" />
             ) : (
               <span className="neume neume-rust" aria-hidden="true" />
             )}
           </div>
-          {!systemAudioAvailable ? (
+          {systemAudioCapability?.actionableReason ? (
             <p className="mt-2 text-xs text-muted-foreground">
-              Install and configure a loopback device such as BlackHole if you want Plainsong to capture both sides of calls. Mic-only meetings remain usable immediately.
+              {systemAudioCapability.actionableReason}
+            </p>
+          ) : null}
+          <p className="mt-2 text-xs text-muted-foreground">
+            The native macOS permission prompt can take about 45 seconds, and fallback routes may take longer. Plainsong plays a brief low-volume tone only for the native Core Audio process tap. Virtual loopback routes must carry external audio during the test. A route is only marked ready after callbacks contain the expected non-silent verification signal.
+          </p>
+          <div className="mt-3 flex flex-wrap items-center gap-2">
+            <Button
+              type="button"
+              size="sm"
+              variant="outline"
+              disabled={systemAudioTestLoading || !systemAudioRouteAvailable}
+              onClick={onTestSystemAudio}
+            >
+              {systemAudioTestLoading ? (
+                <Loader2 className="mr-2 h-4 w-4 animate-spin" />
+              ) : null}
+              Test system audio
+            </Button>
+            {systemAudioCapability?.reason === "permission_denied" ? (
+              <Button
+                type="button"
+                size="sm"
+                variant="ghost"
+                onClick={() => void openPermissionSettings("system_audio")}
+              >
+                Open system-audio privacy settings
+              </Button>
+            ) : null}
+          </div>
+          {systemAudioTestStatus ? (
+            <p
+              className={`mt-2 text-xs ${systemAudioCapability?.ready ? "text-gold-text" : "text-muted-foreground"}`}
+              role="status"
+            >
+              {systemAudioTestStatus}
             </p>
           ) : null}
         </div>
@@ -1680,6 +1821,13 @@ function MeetingSetupStep({
             <option value="audio_and_transcript">Delete audio and transcript</option>
           </select>
         </div>
+
+        {saveError && saveErrorContext === "meeting-settings" ? (
+          <p className="text-xs text-destructive" role="alert">
+            Meeting storage and retention weren&apos;t saved: {saveError}. Your selections are
+            still here; choose Finish meeting setup to retry.
+          </p>
+        ) : null}
       </div>
 
       <div className="flex flex-wrap gap-2">

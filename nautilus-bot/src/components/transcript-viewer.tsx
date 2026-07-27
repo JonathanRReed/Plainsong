@@ -22,6 +22,7 @@ import type { TranscriptSegment } from "@/types";
  */
 export type TranscriptProvenance =
   | { source: "local" }
+  | { source: "apple_on_device" }
   | { source: "cloud"; provider: string }
   | { source: "unknown" };
 
@@ -50,9 +51,8 @@ interface TranscriptViewerProps {
   onMatchesChange?: (matches: TranscriptMatch[]) => void;
   onRenameSpeaker?: (speakerId: string, newName: string) => Promise<void> | void;
   /**
-   * Save an edited speaker turn. Receives every segment id in the turn: the
-   * edited text replaces the first segment and the rest must be removed by
-   * the caller, otherwise their old text would survive and duplicate.
+   * Save an edited speaker turn. Receives every segment id in the turn so the
+   * caller can replace the first and remove the rest as one atomic mutation.
    */
   onEditSegment?: (segmentIds: string[], newText: string) => Promise<void> | void;
   /**
@@ -77,38 +77,59 @@ function countWords(segments: TranscriptSegment[]): number {
 }
 
 interface SpeakerBadgeProps {
-  speakerId: string;
+  speakerId: string | null;
   speakerName?: string;
   isEditing?: boolean;
   isActive?: boolean;
   isFirstMention?: boolean;
-  onRename?: (newName: string) => void;
+  onRename?: (newName: string) => Promise<void> | void;
 }
 
-function defaultSpeakerLabel(speakerId: string) {
-  const normalized = speakerId.trim().toLowerCase();
-  if (normalized === "me") {
+function normalizePersistedSpeakerId(speakerId: string | null | undefined): string | null {
+  const normalized = speakerId?.trim();
+  return normalized ? normalized : null;
+}
+
+function defaultSpeakerLabel(speakerId: string | null | undefined) {
+  const normalized = normalizePersistedSpeakerId(speakerId);
+  if (!normalized) {
+    return "Unattributed";
+  }
+  if (normalized.toLowerCase() === "me") {
     return "Me";
   }
-  if (normalized === "them") {
+  if (normalized.toLowerCase() === "them") {
     return "Them";
   }
-  return speakerId;
+  return normalized;
 }
 
 const SpeakerBadge = memo(function SpeakerBadge({ speakerId, speakerName, isEditing, isActive, isFirstMention, onRename }: SpeakerBadgeProps) {
   const [isEditMode, setIsEditMode] = useState(false);
+  const [isSaving, setIsSaving] = useState(false);
   const [editValue, setEditValue] = useState(speakerName || defaultSpeakerLabel(speakerId));
 
   useEffect(() => {
     setEditValue(speakerName || defaultSpeakerLabel(speakerId));
   }, [speakerId, speakerName]);
 
-  const handleSave = () => {
-    if (onRename && editValue.trim()) {
-      onRename(editValue.trim());
+  const handleSave = async () => {
+    const trimmedName = editValue.trim();
+    if (!onRename || !trimmedName || isSaving) {
+      return;
     }
-    setIsEditMode(false);
+
+    setIsSaving(true);
+    try {
+      await onRename(trimmedName);
+      setIsEditMode(false);
+    } catch (error) {
+      // The caller owns the visible error treatment. Keep the editor and the
+      // attempted value open so a failed persistence request never looks saved.
+      console.error("Failed to rename transcript speaker:", error);
+    } finally {
+      setIsSaving(false);
+    }
   };
 
   if (isEditMode) {
@@ -118,10 +139,12 @@ const SpeakerBadge = memo(function SpeakerBadge({ speakerId, speakerName, isEdit
           value={editValue}
           onChange={(e: React.ChangeEvent<HTMLInputElement>) => setEditValue(e.target.value)}
           className="h-6 w-24 text-xs"
+          aria-label="Speaker name"
           autoFocus
+          disabled={isSaving}
           onKeyDown={(e) => {
-            if (e.key === "Enter") handleSave();
-            if (e.key === "Escape") setIsEditMode(false);
+            if (e.key === "Enter") void handleSave();
+            if (e.key === "Escape" && !isSaving) setIsEditMode(false);
           }}
         />
         <Button
@@ -129,7 +152,8 @@ const SpeakerBadge = memo(function SpeakerBadge({ speakerId, speakerName, isEdit
           size="icon"
           className="h-6 w-6"
           aria-label="Save speaker name"
-          onClick={handleSave}
+          disabled={isSaving || !editValue.trim()}
+          onClick={() => void handleSave()}
         >
           <Check className="h-3 w-3" />
         </Button>
@@ -152,11 +176,11 @@ const SpeakerBadge = memo(function SpeakerBadge({ speakerId, speakerName, isEdit
         <User className="h-3 w-3" aria-hidden="true" />
         <span>{speakerName || defaultSpeakerLabel(speakerId)}</span>
       </div>
-      {isEditing && (
+      {isEditing && onRename && (
         <Button
           variant="ghost"
           size="icon"
-          className="h-6 w-6 opacity-0 group-hover:opacity-100 transition-opacity"
+          className="h-6 w-6 opacity-0 transition-opacity group-hover:opacity-100 group-focus-within:opacity-100 focus-visible:opacity-100"
           aria-label="Edit speaker name"
           onClick={() => setIsEditMode(true)}
         >
@@ -234,23 +258,30 @@ export function TranscriptViewer({
 
   // Provenance is only ever what the caller could actually establish. With no
   // prop we say so; we never fabricate a "Local" claim for an unnamed provider.
-  const isLocal = provenance?.source === "local";
+  const isAppleOnDevice = provenance?.source === "apple_on_device";
+  const isLocal = provenance?.source === "local" || isAppleOnDevice;
   const cloudProvider = provenance?.source === "cloud" ? provenance.provider : null;
-  const provenanceLabel = isLocal
-    ? "Local transcript"
-    : cloudProvider
-      ? `Cloud (${cloudProvider})`
-      : "Provider unknown";
-  const provenanceShortLabel = isLocal
-    ? "Local"
-    : cloudProvider
-      ? `Cloud (${cloudProvider})`
-      : "Provider unknown";
-  const provenanceTitle = isLocal
-    ? "Transcribed on this device."
-    : cloudProvider
-      ? `Transcribed by ${cloudProvider}, a named cloud provider.`
-      : "This meeting did not record which transcription provider produced it.";
+  const provenanceLabel = isAppleOnDevice
+    ? "Apple Speech · on-device"
+    : isLocal
+      ? "Local transcript"
+      : cloudProvider
+        ? `Cloud (${cloudProvider})`
+        : "Provider unknown";
+  const provenanceShortLabel = isAppleOnDevice
+    ? "Apple on-device"
+    : isLocal
+      ? "Local"
+      : cloudProvider
+        ? `Cloud (${cloudProvider})`
+        : "Provider unknown";
+  const provenanceTitle = isAppleOnDevice
+    ? "Transcribed by Apple Speech on this device with server fallback disabled."
+    : isLocal
+      ? "Transcribed on this device."
+      : cloudProvider
+        ? `Transcribed by ${cloudProvider}, a named cloud provider.`
+        : "This meeting did not record which transcription provider produced it.";
 
   // Info-strip figures, all defensible from the actual transcript data.
   const stats = useMemo(() => {
@@ -272,11 +303,28 @@ export function TranscriptViewer({
     }
   }, [externalSpeakerNames]);
 
-  const handleRenameSpeaker = async (speakerId: string, newName: string) => {
-    setSpeakerNames(prev => ({ ...prev, [speakerId]: newName }));
-    if (onRenameSpeaker) {
-      await onRenameSpeaker(speakerId, newName);
+  const canRenameSpeakers = useMemo(
+    () =>
+      Boolean(
+        onRenameSpeaker &&
+          segments.some((segment) => normalizePersistedSpeakerId(segment.speakerId))
+      ),
+    [onRenameSpeaker, segments]
+  );
+
+  useEffect(() => {
+    if (!canRenameSpeakers) {
+      setIsEditingSpeakers(false);
     }
+  }, [canRenameSpeakers]);
+
+  const handleRenameSpeaker = async (speakerId: string, newName: string) => {
+    if (!onRenameSpeaker) {
+      return;
+    }
+
+    await onRenameSpeaker(speakerId, newName);
+    setSpeakerNames((prev) => ({ ...prev, [speakerId]: newName }));
   };
 
   const beginEditingGroup = (group: TranscriptSegment[]) => {
@@ -288,7 +336,7 @@ export function TranscriptViewer({
   // Await the save and only close the editor on success, so a failed write
   // never silently discards the user's correction.
   const saveSegmentEdit = async (group: TranscriptSegment[]) => {
-    if (!onEditSegment || isSavingSegmentEdit) return;
+    if (!onEditSegment || isSavingSegmentEdit || !editingText.trim()) return;
     setIsSavingSegmentEdit(true);
     try {
       await onEditSegment(group.map((segment) => segment.id), editingText);
@@ -364,7 +412,7 @@ export function TranscriptViewer({
     const seen = new Set<string>();
     const firsts = new Set<number>();
     groupedSegments.forEach((group, index) => {
-      const key = group[0].speakerId ?? `speaker-${index}`;
+      const key = normalizePersistedSpeakerId(group[0].speakerId) ?? "unattributed";
       if (!seen.has(key)) {
         seen.add(key);
         firsts.add(index);
@@ -487,13 +535,15 @@ export function TranscriptViewer({
               />
               {provenanceLabel}
             </span>
-            <Button
-              variant="ghost"
-              size="sm"
-              onClick={() => setIsEditingSpeakers(!isEditingSpeakers)}
-            >
-              {isEditingSpeakers ? "Done" : "Rename Speakers"}
-            </Button>
+            {canRenameSpeakers && (
+              <Button
+                variant="ghost"
+                size="sm"
+                onClick={() => setIsEditingSpeakers(!isEditingSpeakers)}
+              >
+                {isEditingSpeakers ? "Done" : "Rename Speakers"}
+              </Button>
+            )}
           </div>
         </div>
 
@@ -557,11 +607,16 @@ export function TranscriptViewer({
           ) : (
             groupedSegments.map((group, groupIndex) => {
               const firstSegment = group[0];
-              const rawSpeakerId = firstSegment.speakerId;
-              // Generate a unique ID for this speaker group if none exists
-              const speakerId = rawSpeakerId || `speaker-${groupIndex}`;
-              const speakerName = speakerNames[speakerId];
-              const canRenameSpeaker = true; // Always allow renaming
+              const speakerId = normalizePersistedSpeakerId(firstSegment.speakerId);
+              const speakerName = speakerId ? speakerNames[speakerId] : undefined;
+              const speakerLabel = speakerName || defaultSpeakerLabel(speakerId);
+              const timestampLabel = formatTimeWithMs(firstSegment.startTime);
+              const editHintId = `transcript-edit-hint-${groupIndex}`;
+              const canRenameSpeaker = Boolean(speakerId && onRenameSpeaker);
+              const renameSpeakerForGroup =
+                speakerId && canRenameSpeaker
+                  ? (name: string) => handleRenameSpeaker(speakerId, name)
+                  : undefined;
               const isFirstSpeakerMention = firstSpeakerGroupIndices.has(groupIndex);
 
               // Check if this group is currently playing
@@ -605,7 +660,7 @@ export function TranscriptViewer({
                   {/* Timestamp & Speaker */}
                   <div className="flex flex-col gap-1 min-w-[100px]">
                     <span className="rubric-muted time-spec">
-                      {formatTimeWithMs(firstSegment.startTime)}
+                      {timestampLabel}
                     </span>
                     <SpeakerBadge
                       speakerId={speakerId}
@@ -613,7 +668,7 @@ export function TranscriptViewer({
                       isEditing={isEditingSpeakers && canRenameSpeaker}
                       isActive={isActive}
                       isFirstMention={isFirstSpeakerMention}
-                      onRename={canRenameSpeaker ? (name) => handleRenameSpeaker(speakerId, name) : undefined}
+                      onRename={renameSpeakerForGroup}
                     />
                   </div>
 
@@ -626,17 +681,25 @@ export function TranscriptViewer({
                           value={editingText}
                           onChange={(e) => setEditingText(e.target.value)}
                           rows={3}
+                          aria-label={`Edit transcript for ${speakerLabel} at ${timestampLabel}`}
+                          aria-describedby={editHintId}
                           className="w-full text-sm bg-background border border-gold rounded-md px-2 py-1 resize-none focus:outline-none focus:ring-1 focus:ring-gold"
                           onKeyDown={(e) => {
                             if (e.key === "Escape") { setEditingSegmentId(null); }
                             if (e.key === "Enter" && (e.metaKey || e.ctrlKey)) {
+                              e.preventDefault();
                               void saveSegmentEdit(group);
                             }
                           }}
                         />
-                        <div className="flex gap-1 justify-end">
-                          <Button size="sm" variant="ghost" className="h-6 text-xs" disabled={isSavingSegmentEdit} onClick={() => setEditingSegmentId(null)}>Cancel</Button>
-                          <Button size="sm" className="h-6 text-xs" disabled={isSavingSegmentEdit} onClick={() => { void saveSegmentEdit(group); }}><Check className="h-3 w-3 mr-1" />{isSavingSegmentEdit ? "Saving…" : "Save"}</Button>
+                        <div className="flex items-center justify-between gap-2">
+                          <p id={editHintId} className="text-xs text-muted-foreground">
+                            Cmd/Ctrl+Enter to save
+                          </p>
+                          <div className="flex gap-1">
+                            <Button size="sm" variant="ghost" className="h-6 text-xs" disabled={isSavingSegmentEdit} onClick={() => setEditingSegmentId(null)}>Cancel</Button>
+                            <Button size="sm" className="h-6 text-xs" disabled={isSavingSegmentEdit || !editingText.trim()} onClick={() => { void saveSegmentEdit(group); }}><Check className="h-3 w-3 mr-1" />{isSavingSegmentEdit ? "Saving…" : "Save"}</Button>
+                          </div>
                         </div>
                       </div>
                     ) : (

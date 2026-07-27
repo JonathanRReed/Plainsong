@@ -7,7 +7,7 @@
 use anyhow::Result;
 #[cfg(feature = "diarization")]
 use anyhow::{anyhow, Context};
-use ndarray::{Array1, Array2};
+use ndarray::Array1;
 #[cfg(feature = "diarization")]
 use ndarray::{ArrayViewD, IxDyn};
 #[cfg(feature = "diarization")]
@@ -84,15 +84,15 @@ impl SpeakerEmbeddingExtractor {
         audio_path: &Path,
         segments: &[(f64, f64)], // (start_sec, end_sec) chunks
     ) -> Result<Vec<(f64, f64, Array1<f32>)>> {
-        // Load audio
-        let samples = crate::audio::utils::load_audio_file(audio_path)
-            .context("Failed to load audio for diarization")?;
-
+        let audio_path = audio_path.to_path_buf();
         let model_path = self.model_path.clone();
         let segments = segments.to_vec();
         let sample_rate = self.sample_rate;
 
         tokio::task::spawn_blocking(move || -> Result<Vec<(f64, f64, Array1<f32>)>> {
+            // WAV loading, channel conversion, and resampling are CPU/blocking work.
+            let samples = crate::audio::utils::load_audio_file(&audio_path)
+                .context("Failed to load audio for diarization")?;
             let mut session = load_embedding_session(&model_path)?;
             let mut embeddings = Vec::new();
 
@@ -556,9 +556,11 @@ impl EmbeddingClusterer {
         self
     }
 
-    /// Cluster embeddings using agglomerative clustering
+    /// Cluster embeddings as connected components under the fixed cosine-distance
+    /// threshold. This is equivalent to single linkage, but computes each pair
+    /// distance exactly once instead of repeatedly rescanning cluster members.
     ///
-    /// Returns speaker assignments for each embedding
+    /// Returns contiguous speaker assignments labeled by first occurrence.
     pub fn cluster(&self, embeddings: &[(f64, f64, Array1<f32>)]) -> Vec<usize> {
         if embeddings.is_empty() {
             return Vec::new();
@@ -574,33 +576,27 @@ impl EmbeddingClusterer {
             self.threshold
         );
 
-        // Compute pairwise distances
         let n = embeddings.len();
-        let mut distances = Array2::zeros((n, n));
-
-        for i in 0..n {
-            for j in (i + 1)..n {
-                let dist = cosine_distance(&embeddings[i].2, &embeddings[j].2);
-                distances[[i, j]] = dist;
-                distances[[j, i]] = dist;
-            }
-        }
-
-        // Log distance statistics
+        let mut components = UnionFind::new(n);
         let mut min_d = f32::INFINITY;
         let mut max_d = 0.0f32;
         let mut sum_d = 0.0f32;
-        let mut count = 0;
+        let mut count = 0usize;
+
         for i in 0..n {
             for j in (i + 1)..n {
-                let d = distances[[i, j]];
-                min_d = min_d.min(d);
-                max_d = max_d.max(d);
-                sum_d += d;
+                let distance = cosine_distance(&embeddings[i].2, &embeddings[j].2);
+                min_d = min_d.min(distance);
+                max_d = max_d.max(distance);
+                sum_d += distance;
                 count += 1;
+                if distance <= self.threshold {
+                    components.union(i, j);
+                }
             }
         }
-        let avg_d = sum_d / count.max(1) as f32;
+
+        let avg_d = sum_d / count as f32;
         tracing::debug!(
             "Distance stats: min={:.4}, max={:.4}, avg={:.4}, threshold={:.4}",
             min_d,
@@ -609,64 +605,21 @@ impl EmbeddingClusterer {
             self.threshold
         );
 
-        // Agglomerative clustering
-        self.agglomerative_cluster(&distances, n)
-    }
-
-    /// Agglomerative clustering with single linkage
-    fn agglomerative_cluster(&self, distances: &Array2<f32>, n: usize) -> Vec<usize> {
-        // Each point starts as its own cluster.
-        // We track members explicitly so linkage distance is computed between clusters,
-        // not between stale representative indices.
-        let mut clusters: Vec<Vec<usize>> = (0..n).map(|idx| vec![idx]).collect();
-
-        // Merge closest clusters until threshold reached
-        loop {
-            // Find closest pair of clusters using single linkage
-            let mut min_dist = f32::INFINITY;
-            let mut closest_pair: Option<(usize, usize)> = None;
-
-            for i in 0..clusters.len() {
-                for j in (i + 1)..clusters.len() {
-                    let dist = single_linkage_distance(distances, &clusters[i], &clusters[j]);
-                    if dist < min_dist {
-                        min_dist = dist;
-                        closest_pair = Some((i, j));
-                    }
-                }
-            }
-
-            // Stop if no pair found or distance exceeds threshold
-            if closest_pair.is_none() || min_dist > self.threshold {
-                tracing::debug!(
-                    "Clustering stopped: min_dist={:.4}, threshold={:.4}, clusters={}",
-                    min_dist,
-                    self.threshold,
-                    clusters.len()
-                );
-                break;
-            }
-
-            let Some((i, j)) = closest_pair else {
-                break;
-            };
-
-            // Merge cluster j into i and remove j.
-            // j > i by construction, so removing j keeps i index stable.
-            let merged = clusters.remove(j);
-            clusters[i].extend(merged);
-
-            if clusters.len() <= 1 {
-                break;
-            }
-        }
-
-        // Build contiguous labels in cluster order
+        let mut root_labels = vec![None; n];
         let mut labels = vec![0usize; n];
-        for (cluster_idx, members) in clusters.iter().enumerate() {
-            for &member_idx in members {
-                labels[member_idx] = cluster_idx;
-            }
+        let mut next_label = 0usize;
+        for index in 0..n {
+            let root = components.find(index);
+            let label = match root_labels[root] {
+                Some(label) => label,
+                None => {
+                    let label = next_label;
+                    next_label += 1;
+                    root_labels[root] = Some(label);
+                    label
+                }
+            };
+            labels[index] = label;
         }
 
         labels
@@ -705,21 +658,49 @@ impl EmbeddingClusterer {
     }
 }
 
-fn single_linkage_distance(distances: &Array2<f32>, left: &[usize], right: &[usize]) -> f32 {
-    let mut min_dist = f32::INFINITY;
-    for &i in left {
-        for &j in right {
-            let distance = if i <= j {
-                distances[[i, j]]
-            } else {
-                distances[[j, i]]
-            };
-            if distance < min_dist {
-                min_dist = distance;
-            }
+struct UnionFind {
+    parent: Vec<usize>,
+    size: Vec<usize>,
+}
+
+impl UnionFind {
+    fn new(len: usize) -> Self {
+        Self {
+            parent: (0..len).collect(),
+            size: vec![1; len],
         }
     }
-    min_dist
+
+    fn find(&mut self, index: usize) -> usize {
+        let mut root = index;
+        while self.parent[root] != root {
+            root = self.parent[root];
+        }
+
+        let mut current = index;
+        while self.parent[current] != current {
+            let next = self.parent[current];
+            self.parent[current] = root;
+            current = next;
+        }
+        root
+    }
+
+    fn union(&mut self, left: usize, right: usize) {
+        let mut left_root = self.find(left);
+        let mut right_root = self.find(right);
+        if left_root == right_root {
+            return;
+        }
+
+        if self.size[left_root] < self.size[right_root]
+            || (self.size[left_root] == self.size[right_root] && left_root > right_root)
+        {
+            std::mem::swap(&mut left_root, &mut right_root);
+        }
+        self.parent[right_root] = left_root;
+        self.size[left_root] += self.size[right_root];
+    }
 }
 
 impl Default for EmbeddingClusterer {

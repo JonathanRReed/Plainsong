@@ -12,6 +12,7 @@ describe("buildSidecarEnv", () => {
       ELEVENLABS_API_KEY: "xi-test-secret",
       GITHUB_TOKEN: "ghp_secret",
       PLAINSONG_DATA_DIR: "/tmp/nautilus",
+      PLAINSONG_MACOS_SPEECH_HELPER_PATH: "/tmp/untrusted-helper",
     });
 
     expect(env).toMatchObject({
@@ -23,6 +24,7 @@ describe("buildSidecarEnv", () => {
       ELEVENLABS_API_KEY: "xi-test-secret",
     });
     expect(env.GITHUB_TOKEN).toBeUndefined();
+    expect(env.PLAINSONG_MACOS_SPEECH_HELPER_PATH).toBeUndefined();
   });
 });
 
@@ -33,5 +35,11 @@ describe("getCommandTimeoutMs", () => {
       getCommandTimeoutMs("save_settings"),
     );
     expect(getCommandTimeoutMs("stop_dictation")).toBeGreaterThan(getCommandTimeoutMs("get_settings"));
+    expect(getCommandTimeoutMs("extract_action_items_grounded")).toBe(
+      getCommandTimeoutMs("summarize_recording_grounded"),
+    );
+    expect(getCommandTimeoutMs("summarize_recording_grounded")).toBeGreaterThan(
+      getCommandTimeoutMs("download_asr_models"),
+    );
   });
 });

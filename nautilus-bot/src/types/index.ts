@@ -1,3 +1,5 @@
+import type { AnalysisProvenance, ActionItemsProvenance } from "./asr";
+
 export interface Recording {
   id: string;
   title: string;
@@ -12,6 +14,8 @@ export interface Recording {
   status: "recording" | "processing" | "completed" | "error";
   summary?: string;
   actionItems?: string[];
+  summaryProvenance?: AnalysisProvenance | null;
+  actionItemsProvenance?: ActionItemsProvenance | null;
   meetingNotes?: string | null;
   meetingTemplateId?: string | null;
   meetingCaptureMode?: "mic_only" | "me_and_them" | null;
@@ -53,7 +57,7 @@ export interface TranscriptSegment {
   startTime: number;
   endTime: number;
   text: string;
-  speakerId?: string;
+  speakerId?: string | null;
   confidence: number;
 }
 

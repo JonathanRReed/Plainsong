@@ -59,6 +59,7 @@ export function AsrRouteCombobox({
   const renderItem = (route: AsrRouteCatalogEntry) => (
     <CommandItem
       key={route.routeId}
+      disabled={!route.selectable}
       value={[
         route.label,
         route.providerLabel,
@@ -71,7 +72,7 @@ export function AsrRouteCombobox({
         onSelect(route);
         setOpen(false);
       }}
-      className="items-start gap-3 px-3 py-3"
+      className="items-start gap-3 px-3 py-3 data-[disabled=true]:opacity-60"
     >
       <Check
         className={cn(
@@ -102,7 +103,7 @@ export function AsrRouteCombobox({
           ) : null}
         </div>
         <p className="mt-1 truncate text-xs text-muted-foreground">
-          {route.summary}
+          {route.readinessDetail ?? route.summary}
         </p>
       </div>
     </CommandItem>

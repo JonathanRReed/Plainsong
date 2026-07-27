@@ -125,7 +125,7 @@ pub struct TranscriptionSettings {
     pub enable_diarization: bool,
     /// Language (auto-detect if None)
     pub language: Option<String>,
-    /// Skip silence segments during transcription (Pro/Friends Club feature)
+    /// Skip silence segments during transcription.
     pub silence_skip_enabled: bool,
     /// Dictation: Keep latest dictation result in clipboard
     pub dictation_copy_to_clipboard: bool,
@@ -817,10 +817,10 @@ fn normalize_loaded_privacy_settings(privacy: &mut PrivacySettings) {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
 #[serde(rename_all = "lowercase")]
 pub enum UpdateChannel {
-    /// Stable releases for all entitled users
+    /// Stable releases.
     #[default]
     Stable,
-    /// Beta releases for Friends Club tier only
+    /// Opt into beta releases.
     Beta,
 }
 
@@ -1049,9 +1049,12 @@ pub struct SettingsManager {
 }
 
 impl SettingsManager {
-    /// Create new settings manager
+    /// Create new settings manager.
     pub fn new() -> Result<Self> {
-        let config_path = Self::config_path()?;
+        Self::load_from_path(Self::config_path()?)
+    }
+
+    fn load_from_path(config_path: PathBuf) -> Result<Self> {
         let mut needs_migration_rewrite = false;
         let mut settings = if config_path.exists() {
             match Self::load_from_file(&config_path) {
@@ -1107,6 +1110,14 @@ impl SettingsManager {
         }
 
         Ok(manager)
+    }
+
+    /// Replace the in-memory settings with a freshly normalized load from the
+    /// same file. Restore uses this so `get_settings` changes immediately.
+    pub(crate) fn reload_from_disk(&mut self) -> Result<()> {
+        let replacement = Self::load_from_path(self.config_path.clone())?;
+        *self = replacement;
+        Ok(())
     }
 
     /// Get settings reference
@@ -1188,9 +1199,60 @@ mod tests {
         normalize_audio_input_device_preference, normalize_dictation_active_languages,
         normalize_loaded_transcription_settings, resolve_dictation_app_category_with_overrides,
         AudioInputDevicePreference, DictationAppCategoryOverride, DictationCustomMode,
-        PlatformOptimizationSettings, Settings, TranscriptionSettings,
+        PlatformOptimizationSettings, Settings, SettingsManager, TranscriptionSettings,
     };
     use crate::text::format::DictationAppCategory;
+    use std::fs;
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    #[test]
+    fn reload_from_disk_replaces_live_settings_and_runs_load_normalization() {
+        let suffix = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("system time before epoch")
+            .as_nanos();
+        let root = std::env::temp_dir().join(format!("nautilus-settings-reload-{suffix}"));
+        let settings_path = root.join("settings.json");
+        fs::create_dir_all(&root).expect("create settings test directory");
+
+        let original = Settings {
+            theme: "light".to_string(),
+            ..Settings::default()
+        };
+        fs::write(
+            &settings_path,
+            serde_json::to_string_pretty(&original).expect("serialize original settings"),
+        )
+        .expect("write original settings");
+        let mut manager =
+            SettingsManager::load_from_path(settings_path.clone()).expect("load original settings");
+        assert_eq!(manager.settings().theme, "light");
+
+        let restored = Settings {
+            theme: "dark".to_string(),
+            transcription: TranscriptionSettings {
+                default_provider: "canary".to_string(),
+                ..TranscriptionSettings::default()
+            },
+            ..Settings::default()
+        };
+        fs::write(
+            &settings_path,
+            serde_json::to_string_pretty(&restored).expect("serialize restored settings"),
+        )
+        .expect("replace settings file");
+
+        manager
+            .reload_from_disk()
+            .expect("reload restored settings into live manager");
+        assert_eq!(manager.settings().theme, "dark");
+        assert_eq!(
+            manager.settings().transcription.default_provider,
+            "whisper_candle"
+        );
+
+        let _ = fs::remove_dir_all(root);
+    }
 
     #[test]
     fn removed_settings_keys_trigger_migration_rewrite() {

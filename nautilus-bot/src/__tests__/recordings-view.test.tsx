@@ -58,11 +58,18 @@ let recordingState = {
   recordingId: null as string | null,
   formattedDuration: "00:00",
 };
+const refetchRecordings = vi.fn();
+let recordingsLoading = false;
+let recordingsHaveLoaded = true;
+let recordingsError: string | null = null;
 
 vi.mock("@/hooks/use-recordings", () => ({
   useRecordings: () => ({
     recordings,
-    refetch: vi.fn(),
+    isLoading: recordingsLoading,
+    hasLoaded: recordingsHaveLoaded,
+    error: recordingsError,
+    refetch: refetchRecordings,
   }),
 }));
 
@@ -233,7 +240,7 @@ vi.mock("@/lib/backend", () => ({
   getMeetingChatMessages: vi.fn(async () => []) as any,
   updateMeetingChatMessages: vi.fn(async () => {}) as any,
   askMemory: vi.fn() as any,
-  updateTranscriptSegment: vi.fn() as any,
+  editTranscriptSpeakerTurn: vi.fn() as any,
   deleteTranscriptSegments: vi.fn() as any,
   updateRecordingNotes: vi.fn(async () => {}) as any,
   updateRecordingAnalysis: vi.fn(async () => {}) as any,
@@ -286,18 +293,23 @@ describe("RecordingsView", () => {
     recordingState.isRecording = false;
     recordingState.recordingId = null;
     recordingState.formattedDuration = "00:00";
-    recordings[0] = {
-      id: "r1",
-      title: "Weekly sync",
-      projectId: "default",
-      duration: 120,
-      createdAt: "2026-03-06T12:00:00Z",
-      updatedAt: "2026-03-06T12:00:00Z",
-      sourceType: "meeting",
-      audioPath: "/tmp/weekly-sync.wav",
-      meetingCaptureMode: "me_and_them",
-      status: "completed" as const,
-    } as Recording;
+    recordingsLoading = false;
+    recordingsHaveLoaded = true;
+    recordingsError = null;
+    recordings = [
+      {
+        id: "r1",
+        title: "Weekly sync",
+        projectId: "default",
+        duration: 120,
+        createdAt: "2026-03-06T12:00:00Z",
+        updatedAt: "2026-03-06T12:00:00Z",
+        sourceType: "meeting",
+        audioPath: "/tmp/weekly-sync.wav",
+        meetingCaptureMode: "me_and_them",
+        status: "completed" as const,
+      } as Recording,
+    ];
     startMeeting.mockReset();
     stopMeeting.mockReset();
     backend.getRecording.mockResolvedValue({
@@ -334,6 +346,10 @@ describe("RecordingsView", () => {
       hasSourceAwareSpeakers: true,
       hasSpeakerLabels: true,
     });
+    backend.getSpeakers.mockResolvedValue([]);
+    backend.renameSpeaker.mockResolvedValue(undefined);
+    backend.editTranscriptSpeakerTurn.mockResolvedValue(undefined);
+    backend.deleteRecording.mockResolvedValue(undefined);
     backend.searchTranscripts.mockResolvedValue([]);
     backend.getRelationshipMemory.mockResolvedValue(null);
     backend.getMeetingChatMessages.mockResolvedValue([]);
@@ -344,8 +360,20 @@ describe("RecordingsView", () => {
     backend.summarizeRecordingGrounded.mockResolvedValue({
       summary: "Fresh grounded summary",
       citations: [],
+      actualProvider: "ollama",
       model: "test-model",
       processingTimeMs: 1200,
+      grounded: true,
+      provenance: {
+        version: 1,
+        contentHash: "v1:sha256:fresh-summary",
+        actualProvider: "ollama",
+        actualModel: "test-model",
+        promptSource: "meeting_playbook:auto",
+        completedAt: "2026-07-25T12:00:00.000Z",
+        citations: [],
+        grounded: true,
+      },
     });
     backend.extractActionItemsGrounded.mockResolvedValue({
       items: [
@@ -356,8 +384,27 @@ describe("RecordingsView", () => {
           citations: [],
         },
       ],
+      actualProvider: "ollama",
       model: "test-model",
       processingTimeMs: 900,
+      grounded: true,
+      provenance: {
+        version: 1,
+        contentHash: "v1:sha256:fresh-actions",
+        actualProvider: "ollama",
+        actualModel: "test-model",
+        promptSource: "plainsong_action_items_v1",
+        completedAt: "2026-07-25T12:00:00.000Z",
+        citations: [],
+        grounded: true,
+        items: [
+          {
+            contentHash: "v1:sha256:fresh-action",
+            citations: [],
+            grounded: true,
+          },
+        ],
+      },
     });
     backend.askMemory.mockResolvedValue({
       answer: "Jon keeps pushing for a written launch plan and Friday owner confirmation.",
@@ -378,6 +425,56 @@ describe("RecordingsView", () => {
       exportPath: "/tmp/weekly-sync.md",
       content: null,
     });
+  });
+
+  it("shows a loading state before the meetings library has loaded", () => {
+    recordings = [];
+    recordingsLoading = true;
+    recordingsHaveLoaded = false;
+
+    render(<RecordingsView />);
+
+    expect(screen.getByRole("status")).toHaveTextContent("Loading your meetings");
+    expect(screen.queryByText("No meetings yet")).not.toBeInTheDocument();
+    expect(screen.getByText("Total").parentElement).toHaveTextContent("—");
+  });
+
+  it("shows an actionable load error and retries without claiming the library is empty", () => {
+    recordings = [];
+    recordingsLoading = false;
+    recordingsHaveLoaded = false;
+    recordingsError = "The recordings service is unavailable.";
+
+    render(<RecordingsView />);
+
+    expect(screen.getByRole("alert")).toHaveTextContent(
+      "The recordings service is unavailable."
+    );
+    expect(screen.queryByText("No meetings yet")).not.toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", { name: "Retry" }));
+    expect(refetchRecordings).toHaveBeenCalledTimes(1);
+  });
+
+  it("keeps cached meetings visible during a background refresh", () => {
+    recordingsLoading = true;
+    recordingsHaveLoaded = true;
+
+    render(<RecordingsView />);
+
+    expect(screen.getByText("Weekly sync")).toBeInTheDocument();
+    expect(screen.queryByText("Loading your meetings…")).not.toBeInTheDocument();
+    expect(screen.queryByText("No meetings yet")).not.toBeInTheDocument();
+  });
+
+  it("shows the empty state only after a successful empty response", () => {
+    recordings = [];
+    recordingsLoading = false;
+    recordingsHaveLoaded = true;
+
+    render(<RecordingsView />);
+
+    expect(screen.getByText("No meetings yet")).toBeInTheDocument();
   });
 
   it("updates meeting filters immediately when a recording enters processing", async () => {
@@ -471,6 +568,105 @@ describe("RecordingsView", () => {
     });
   });
 
+  it("saves a speaker-turn edit with one atomic backend command", async () => {
+    render(<RecordingsView />);
+
+    fireEvent.click(screen.getByText("Weekly sync"));
+    await screen.findByText("The record");
+    await waitFor(() => {
+      expect(transcriptViewerProps.current?.onEditSegment).toBeTypeOf("function");
+    });
+
+    await act(async () => {
+      await transcriptViewerProps.current.onEditSegment(
+        ["s1", "s2"],
+        "Corrected whole speaker turn."
+      );
+    });
+
+    expect(backend.editTranscriptSpeakerTurn).toHaveBeenCalledTimes(1);
+    expect(backend.editTranscriptSpeakerTurn).toHaveBeenCalledWith(
+      "r1",
+      ["s1", "s2"],
+      "Corrected whole speaker turn."
+    );
+    expect(backend.deleteTranscriptSegments).not.toHaveBeenCalled();
+  });
+
+  it("persists a speaker rename before updating local speaker names", async () => {
+    const pendingRename = deferred<void>();
+    backend.getSpeakers.mockResolvedValue([
+      { id: "speaker_0", name: "Speaker 1", color: "#000", sampleCount: 1 },
+    ]);
+    backend.renameSpeaker.mockReturnValueOnce(pendingRename.promise);
+
+    render(<RecordingsView />);
+
+    fireEvent.click(screen.getByText("Weekly sync"));
+    await screen.findByText("The record");
+    await waitFor(() => {
+      expect(transcriptViewerProps.current?.speakerNames).toEqual({
+        speaker_0: "Speaker 1",
+      });
+    });
+
+    let renamePromise!: Promise<void>;
+    act(() => {
+      renamePromise = transcriptViewerProps.current.onRenameSpeaker(
+        "speaker_0",
+        "Alice",
+      );
+    });
+
+    expect(backend.renameSpeaker).toHaveBeenCalledWith(
+      "r1",
+      "speaker_0",
+      "Alice",
+    );
+    expect(transcriptViewerProps.current.speakerNames).toEqual({
+      speaker_0: "Speaker 1",
+    });
+
+    await act(async () => {
+      pendingRename.resolve();
+      await renamePromise;
+    });
+
+    await waitFor(() => {
+      expect(transcriptViewerProps.current.speakerNames).toEqual({
+        speaker_0: "Alice",
+      });
+    });
+  });
+
+  it("keeps local speaker names unchanged and propagates rename failures", async () => {
+    backend.getSpeakers.mockResolvedValue([
+      { id: "speaker_0", name: "Speaker 1", color: "#000", sampleCount: 1 },
+    ]);
+    backend.renameSpeaker.mockRejectedValueOnce(
+      new Error("Alias write failed"),
+    );
+
+    render(<RecordingsView />);
+
+    fireEvent.click(screen.getByText("Weekly sync"));
+    await screen.findByText("The record");
+    await waitFor(() => {
+      expect(transcriptViewerProps.current?.speakerNames).toEqual({
+        speaker_0: "Speaker 1",
+      });
+    });
+
+    await expect(
+      transcriptViewerProps.current.onRenameSpeaker("speaker_0", "Alice"),
+    ).rejects.toThrow("Alias write failed");
+
+    expect(transcriptViewerProps.current.speakerNames).toEqual({
+      speaker_0: "Speaker 1",
+    });
+    expect(toast).toHaveBeenCalledWith("Alias write failed", "error");
+  });
+
   it("offers a retry-transcription entry point in the row menu for meetings stuck in error", async () => {
     recordings[0] = { ...recordings[0], status: "error" as const };
     backend.retranscribeRecording.mockResolvedValue(undefined);
@@ -561,6 +757,28 @@ describe("RecordingsView", () => {
     expect(screen.queryByRole("menuitem", { name: "Retry Transcription" })).not.toBeInTheDocument();
   });
 
+  it.each([
+    ["recording", "Delete (stop recording first)"],
+    ["processing", "Delete (wait for processing)"],
+  ] as const)(
+    "disables deletion while a meeting is %s",
+    async (status, label) => {
+      recordings[0] = { ...recordings[0], status } as Recording;
+
+      render(<RecordingsView />);
+
+      fireEvent.pointerDown(screen.getByRole("button", { name: "Recording options" }), {
+        button: 0,
+      });
+      const deleteItem = await screen.findByRole("menuitem", { name: label });
+      expect(deleteItem).toHaveAttribute("data-disabled");
+      fireEvent.click(deleteItem);
+
+      expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
+      expect(backend.deleteRecording).not.toHaveBeenCalled();
+    }
+  );
+
   it("only promises the transcript can be re-derived when the audio is still attached", async () => {
     const { unmount } = render(<RecordingsView />);
 
@@ -602,11 +820,10 @@ describe("RecordingsView", () => {
     });
 
     await waitFor(() => {
-      expect(backend.updateRecordingAnalysis).toHaveBeenCalledWith(
-        "r1",
-        "User-edited recap",
-        ["Follow up with design", "Ship release notes"]
-      );
+      expect(backend.updateRecordingAnalysis).toHaveBeenCalledWith("r1", {
+        summary: "User-edited recap",
+        actionItems: ["Follow up with design", "Ship release notes"],
+      });
     });
   });
 
@@ -718,7 +935,9 @@ describe("RecordingsView", () => {
       summary: "Saved summary",
       actionItems: ["Existing follow-up"],
     });
-    backend.updateRecordingAnalysis.mockRejectedValueOnce(new Error("Disk write failed"));
+    backend.summarizeRecordingGrounded.mockRejectedValueOnce(
+      new Error("Disk write failed")
+    );
 
     render(<RecordingsView />);
 
@@ -729,12 +948,9 @@ describe("RecordingsView", () => {
     fireEvent.click(await screen.findByRole("button", { name: "Replace and regenerate" }));
 
     await waitFor(() => {
-      expect(backend.updateRecordingAnalysis).toHaveBeenCalledWith(
-        "r1",
-        "Fresh grounded summary",
-        ["Existing follow-up"]
-      );
+      expect(backend.summarizeRecordingGrounded).toHaveBeenCalledWith("r1");
     });
+    expect(backend.updateRecordingAnalysis).not.toHaveBeenCalled();
 
     expect(screen.getByText("Saved summary")).toBeInTheDocument();
     expect(screen.queryByText("Fresh grounded summary")).not.toBeInTheDocument();
@@ -850,6 +1066,122 @@ describe("RecordingsView", () => {
         expect.stringContaining("What has Jon cared about across recent meetings?")
       );
     });
+  });
+
+  it("shows Saving until meeting notes persist, then confirms they were saved", async () => {
+    const pendingSave = deferred<void>();
+    backend.updateRecordingNotes.mockReturnValueOnce(pendingSave.promise);
+
+    render(<RecordingsView />);
+
+    fireEvent.click(screen.getByText("Weekly sync"));
+    await screen.findByLabelText("Goals notes");
+    fireEvent.change(screen.getByLabelText("Goals notes"), {
+      target: { value: "Keep the scope tight" },
+    });
+
+    expect(await screen.findByText("Saving…")).toBeInTheDocument();
+    await waitFor(() => {
+      expect(backend.updateRecordingNotes).toHaveBeenCalledWith(
+        "r1",
+        "Goals\nKeep the scope tight"
+      );
+    });
+    expect(screen.queryByText("Saved just now")).not.toBeInTheDocument();
+
+    await act(async () => {
+      pendingSave.resolve();
+      await pendingSave.promise;
+    });
+
+    expect(await screen.findByText("Saved just now")).toBeInTheDocument();
+  });
+
+  it("offers a notes retry after persistence fails and clears the failure while retrying", async () => {
+    const retrySave = deferred<void>();
+    backend.updateRecordingNotes
+      .mockRejectedValueOnce(new Error("Notes file is locked"))
+      .mockReturnValueOnce(retrySave.promise);
+
+    render(<RecordingsView />);
+
+    fireEvent.click(screen.getByText("Weekly sync"));
+    await screen.findByLabelText("Goals notes");
+    fireEvent.change(screen.getByLabelText("Goals notes"), {
+      target: { value: "Confirm the launch owner" },
+    });
+
+    const notSaved = await screen.findByText(/Not saved/);
+    expect(notSaved.closest('[role="status"]')).toHaveTextContent(/Not saved.*Retry/);
+
+    fireEvent.click(screen.getByRole("button", { name: "Retry" }));
+
+    expect(await screen.findByText("Saving…")).toBeInTheDocument();
+    expect(screen.queryByText(/Not saved/)).not.toBeInTheDocument();
+    await waitFor(() => {
+      expect(backend.updateRecordingNotes).toHaveBeenCalledTimes(2);
+    });
+
+    await act(async () => {
+      retrySave.resolve();
+      await retrySave.promise;
+    });
+
+    expect(await screen.findByText("Saved just now")).toBeInTheDocument();
+  });
+
+  it("serializes notes writes so an older request cannot outlast a newer edit", async () => {
+    const firstSave = deferred<void>();
+    const secondSave = deferred<void>();
+    backend.updateRecordingNotes
+      .mockReturnValueOnce(firstSave.promise)
+      .mockReturnValueOnce(secondSave.promise);
+
+    render(<RecordingsView />);
+
+    fireEvent.click(screen.getByText("Weekly sync"));
+    await screen.findByLabelText("Goals notes");
+    fireEvent.change(screen.getByLabelText("Goals notes"), {
+      target: { value: "First draft" },
+    });
+    await waitFor(() => {
+      expect(backend.updateRecordingNotes).toHaveBeenCalledTimes(1);
+    });
+
+    fireEvent.change(screen.getByLabelText("Goals notes"), {
+      target: { value: "Newer draft" },
+    });
+    expect(await screen.findByText("Saving…")).toBeInTheDocument();
+
+    // The newer write waits behind the older one. Revision-gating the label is
+    // not enough: if both writes race, the old request can finish last on disk
+    // after the UI has already said the newer draft was saved.
+    await act(async () => {
+      await new Promise((resolve) => window.setTimeout(resolve, 450));
+    });
+    expect(backend.updateRecordingNotes).toHaveBeenCalledTimes(1);
+
+    await act(async () => {
+      firstSave.resolve();
+      await firstSave.promise;
+    });
+
+    expect(screen.getByText("Saving…")).toBeInTheDocument();
+    expect(screen.queryByText("Saved just now")).not.toBeInTheDocument();
+
+    await waitFor(() => {
+      expect(backend.updateRecordingNotes).toHaveBeenCalledTimes(2);
+    });
+    await act(async () => {
+      secondSave.resolve();
+      await secondSave.promise;
+    });
+
+    expect(await screen.findByText("Saved just now")).toBeInTheDocument();
+    expect(backend.updateRecordingNotes).toHaveBeenLastCalledWith(
+      "r1",
+      "Goals\nNewer draft"
+    );
   });
 
   it("persists meeting note section edits through the notes autosave flow", async () => {
@@ -1103,6 +1435,48 @@ describe("RecordingsView", () => {
     expect(toast).toHaveBeenCalledWith(
       "Enhanced notes applied to this meeting.",
       "success"
+    );
+  });
+
+  it("keeps prior action items when enhanced-note action analysis fails", async () => {
+    backend.summarizeRecordingGrounded.mockResolvedValue({
+      summary: "Fresh summary survived the partial failure.",
+      citations: [],
+      actualProvider: "ollama",
+      model: "test-model",
+      processingTimeMs: 1200,
+      grounded: true,
+      provenance: {
+        version: 1,
+        contentHash: "v1:sha256:summary",
+        actualProvider: "ollama",
+        actualModel: "test-model",
+        promptSource: "meeting_playbook:auto",
+        completedAt: "2026-07-25T12:00:00.000Z",
+        citations: [],
+        grounded: true,
+      },
+    });
+    backend.extractActionItemsGrounded.mockRejectedValueOnce(
+      new Error("Action extraction timed out")
+    );
+
+    render(<RecordingsView />);
+    fireEvent.click(screen.getByText("Weekly sync"));
+    await screen.findByText("The record");
+    fireEvent.click(screen.getByRole("button", { name: "Enhance Notes" }));
+
+    const draft = await screen.findByRole("region", {
+      name: "Enhanced meeting notes draft",
+    });
+    expect(draft).toHaveTextContent("Fresh summary survived the partial failure.");
+    expect(draft).toHaveTextContent("Ship launch checklist");
+    expect(screen.getByLabelText("Meeting action items")).toHaveTextContent(
+      "Ship launch checklist"
+    );
+    expect(toast).toHaveBeenCalledWith(
+      expect.stringContaining("saved action items kept unchanged"),
+      "info"
     );
   });
 
@@ -1556,6 +1930,30 @@ describe("RecordingsView", () => {
     });
   });
 
+  it("labels Apple Speech recordings as explicitly on-device", async () => {
+    backend.getMeetingTranscriptDetails.mockResolvedValue({
+      segmentCount: 1,
+      model: "Apple Speech",
+      modelId: "macos_apple_speech",
+      requestedProvider: "macos_apple_speech",
+      actualProvider: "macos_apple_speech",
+      qualityScore: 0.92,
+      transcriptionLatencyMs: 480,
+      sourceMode: "single_source",
+      hasSourceAwareSpeakers: false,
+      hasSpeakerLabels: false,
+    });
+
+    render(<RecordingsView />);
+    fireEvent.click(screen.getByText("Weekly sync"));
+
+    await waitFor(() => {
+      expect(transcriptViewerProps.current?.provenance).toEqual({
+        source: "apple_on_device",
+      });
+    });
+  });
+
   it("passes the backend's locked-vault message through with a route to unlock", async () => {
     recordings = [{ ...recordings[0] }] as Recording[];
     backend.openRecordingAudio.mockRejectedValue(
@@ -1873,7 +2271,7 @@ describe("RecordingsView", () => {
 
     // Before any generation, the recap makes no evidence claim at all.
     expect(
-      screen.getByText(/Nothing on this recap was generated in this session/i)
+      screen.getByText(/This recap has no saved analysis provenance/i)
     ).toBeInTheDocument();
 
     fireEvent.click(screen.getByRole("button", { name: "Regenerate summary" }));
@@ -1925,7 +2323,7 @@ describe("RecordingsView", () => {
 
     await waitFor(() => {
       expect(
-        screen.getByText(/Written by Plainsong this session from transcript and notes\./i)
+        screen.getByText(/Written by Plainsong from transcript and notes\./i)
       ).toBeInTheDocument();
     });
     expect(screen.getByLabelText("Meeting summary")).toHaveClass("text-muted-foreground");
@@ -1949,7 +2347,7 @@ describe("RecordingsView", () => {
     ).not.toBeInTheDocument();
   });
 
-  it("does not call a reopened machine-written recap the reader's own text", async () => {
+  it("reloads persisted machine provenance, citations, provider, and model", async () => {
     backend.summarizeRecordingGrounded.mockResolvedValue({
       summary: "Launch is on track pending legal sign-off.",
       citations: [
@@ -1974,7 +2372,7 @@ describe("RecordingsView", () => {
     fireEvent.click(await screen.findByRole("button", { name: "Replace and regenerate" }));
     await waitFor(() => {
       expect(
-        screen.getByText(/Written by Plainsong this session from transcript and notes\./i)
+        screen.getByText(/Written by Plainsong from transcript and notes\./i)
       ).toBeInTheDocument();
     });
 
@@ -1984,6 +2382,24 @@ describe("RecordingsView", () => {
       ...recordings[0],
       summary: "Launch is on track pending legal sign-off.",
       actionItems: ["Ship launch checklist"],
+      summaryProvenance: {
+        version: 1,
+        contentHash: "v1:sha256:summary",
+        actualProvider: "ollama",
+        actualModel: "llama3.2",
+        promptSource: "meeting_playbook:auto",
+        completedAt: "2026-07-25T12:00:00.000Z",
+        citations: [
+          {
+            text: "We are on track for launch, pending legal approval.",
+            startTime: 15,
+            endTime: 21,
+            recordingId: "r1",
+            certainty: 0.97,
+          },
+        ],
+        grounded: true,
+      },
     });
     fireEvent.click(screen.getByRole("button", { name: "All meetings" }));
     await waitFor(() => {
@@ -1998,11 +2414,14 @@ describe("RecordingsView", () => {
       );
     });
 
-    // These are the model's words. They must not come back in the reader's ink
-    // under a caption that calls them theirs.
     expect(screen.queryByText(/^Your text\./i)).not.toBeInTheDocument();
-    expect(screen.getByLabelText("Meeting summary")).not.toHaveClass("text-foreground");
-    expect(screen.getAllByText(/Authorship not recorded/i).length).toBeGreaterThan(0);
+    expect(
+      screen.getByText(/Written by Plainsong from transcript and notes\./i)
+    ).toBeInTheDocument();
+    expect(
+      screen.getByText("We are on track for launch, pending legal approval.")
+    ).toBeInTheDocument();
+    expect(screen.getByText(/ollama · llama3\.2 · completed/i)).toBeInTheDocument();
   });
 
   it("says plainly when a generated line has no transcript citation", async () => {
@@ -2261,7 +2680,7 @@ describe("RecordingsView", () => {
     expect(screen.queryByText("The record")).not.toBeInTheDocument();
     expect(screen.queryByText(/No summary yet/i)).not.toBeInTheDocument();
     expect(
-      screen.queryByText(/Nothing on this recap was generated in this session/i)
+      screen.queryByText(/This recap has no saved analysis provenance/i)
     ).not.toBeInTheDocument();
     expect(
       screen.getByText(/Loading this meeting's transcript and notes so Ask has something/i)

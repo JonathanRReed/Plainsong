@@ -14,8 +14,6 @@
     <true/>
     <key>com.apple.security.device.microphone</key>
     <true/>
-    <key>com.apple.security.personal-information.speech-recognition</key>
-    <true/>
     <key>com.apple.security.automation.apple-events</key>
     <true/>
   </dict>

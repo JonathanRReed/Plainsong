@@ -22,11 +22,12 @@ import { smokeTestCursorInsert } from "@/lib/backend/dictation";
 import {
   openPermissionSettings,
   repairCursorInsertPermissions,
+  requestAppleSpeechPermission,
   requestDictationPermissions,
   verifyDictationSetup,
   verifyMeetingSetup,
-  verifySystemAudioSetup,
 } from "@/lib/backend/settings";
+import { testSystemAudioCapture } from "@/lib/backend/recordings";
 import {
   isCloudProvider,
   isDownloadableProvider,
@@ -63,6 +64,33 @@ function permissionStatusLabel(
 }
 
 function providerBadge(provider: AsrProviderInfo) {
+  if (provider.providerType === "macos_apple_speech" && provider.platformReadiness) {
+    return (
+      <Badge
+        variant="outline"
+        className={
+          provider.platformReadiness.ready
+            ? "border-gold/30 text-gold-text"
+            : "border-rust/30 text-rust"
+        }
+      >
+        {provider.platformReadiness.ready
+          ? "Ready on-device"
+          : provider.platformReadiness.status === "authorization_not_determined"
+            ? "Permission required"
+            : provider.platformReadiness.status === "authorization_denied"
+              ? "Permission denied"
+              : provider.platformReadiness.status === "unsupported_locale"
+                ? "Locale unsupported"
+                : provider.platformReadiness.status === "helper_missing"
+                  ? "Helper missing"
+                  : provider.platformReadiness.status === "on_device_unavailable"
+                    ? "On-device unavailable"
+                    : "Unavailable"}
+      </Badge>
+    );
+  }
+
   if (provider.runtimeStatus === "ready") {
     return (
       <Badge
@@ -104,6 +132,18 @@ function providerBadge(provider: AsrProviderInfo) {
 }
 
 function providerActionVariant(provider: AsrProviderInfo) {
+  if (provider.providerType === "macos_apple_speech") {
+    if (provider.platformReadiness?.status === "authorization_not_determined") {
+      return "permission";
+    }
+    if (
+      provider.platformReadiness?.status === "authorization_denied" ||
+      provider.platformReadiness?.status === "authorization_restricted"
+    ) {
+      return "speech_settings";
+    }
+  }
+
   if (provider.runtimeStatus === "missing_model" && isDownloadableProvider(provider.providerType)) {
     return "download";
   }
@@ -123,8 +163,10 @@ export function SetupView() {
     settings,
     permissions,
     providers,
+    microphoneReady,
     systemAudioAvailable,
     loopbackDevice,
+    systemAudioCapability,
     meetingCaptureMode,
     dictationRoutePreference,
     dictationLocalReady,
@@ -134,8 +176,10 @@ export function SetupView() {
     meetingRoute,
     dictationReady,
     meetingReady,
+    fullCaptureReady,
     dictationBlockers,
     meetingBlockers,
+    fullCaptureBlockers,
   } = useSetupStatus();
   const [busyAction, setBusyAction] = useState<string | null>(null);
   const [statusMessage, setStatusMessage] = useState<string | null>(null);
@@ -268,7 +312,7 @@ export function SetupView() {
                   <div className={readinessDetailClass}>
                     <div className={readinessLabelClass}>Microphone</div>
                     <div className="mt-1 font-medium">
-                      {permissions?.microphoneReady ? "Ready" : "Needs access"}
+                      {loading ? "Checking" : microphoneReady ? "Ready" : "Needs attention"}
                     </div>
                   </div>
                   <div className={readinessDetailClass}>
@@ -412,7 +456,7 @@ export function SetupView() {
                   Meeting readiness
                 </CardTitle>
                 <CardDescription className="text-current opacity-80">
-                  Meeting-grade transcription, system audio, and loopback visibility.
+                  Mic-only meeting readiness plus separately verified Me + Them capture.
                 </CardDescription>
               </CardHeader>
               <CardContent className="space-y-3 text-sm">
@@ -432,13 +476,15 @@ export function SetupView() {
                     <div className="mt-1 font-medium">
                       {systemAudioAvailable === null
                         ? "Checking"
-                        : systemAudioAvailable
-                          ? "Available"
-                          : "Not detected"}
+                        : fullCaptureReady
+                          ? "Verified"
+                          : systemAudioAvailable
+                            ? "Route detected · unverified"
+                            : "Not detected"}
                     </div>
                   </div>
                   <div className={readinessDetailClass}>
-                    <div className={readinessLabelClass}>Loopback device</div>
+                    <div className={readinessLabelClass}>Capture route</div>
                     <div className="mt-1 font-medium">{loopbackDevice ?? "Not found"}</div>
                   </div>
                 </div>
@@ -446,35 +492,55 @@ export function SetupView() {
                   <div className={readinessLabelClass}>Meeting capture mode</div>
                   <div className="mt-1 font-medium">
                     {meetingCaptureMode === "me_and_them"
-                      ? "Me + Them"
-                      : meetingCaptureMode === "mic_only"
-                        ? "Mic only"
-                        : "Checking"}
+                      ? "Me + Them verified"
+                      : meetingCaptureMode === "mic_only" && meetingReady
+                        ? "Mic only ready"
+                        : meetingCaptureMode === "mic_only"
+                          ? "Not ready"
+                          : "Checking"}
                   </div>
                   <p className="mt-1 text-xs text-current opacity-70">
                     {meetingCaptureMode === "me_and_them"
-                      ? "Separate mic and system audio sources are available for source-aware meetings."
-                      : meetingCaptureMode === "mic_only"
-                        ? "Only microphone capture is ready. Remote participants may be missed until system audio is configured."
-                        : "Verifying whether source-aware meeting capture is available."}
+                      ? "Microphone, meeting ASR, and non-silent system-audio callbacks are verified."
+                      : meetingReady && systemAudioAvailable
+                        ? "Mic-only meetings are ready. A system-audio route is detected but unverified; run Test system audio before Me + Them."
+                        : meetingReady
+                          ? "Mic-only meetings are ready. Remote participants may be missed until system audio is configured and tested."
+                          : meetingCaptureMode === "unknown"
+                            ? "Checking microphone, meeting ASR, and system-audio readiness."
+                            : "Microphone input, permission, or the meeting ASR route still needs attention."}
                   </p>
                 </div>
                 {meetingRoute.reason ? (
                   <p className="text-sm text-current opacity-90">{meetingRoute.reason}</p>
-                ) : systemAudioAvailable ? (
+                ) : fullCaptureReady ? (
                   <p className="text-sm text-current opacity-90">
-                    Meetings are ready with a meeting-grade route and visible system audio capture.
+                    Meetings are ready for verified Me + Them capture.
+                  </p>
+                ) : meetingReady ? (
+                  <p className="text-sm text-current opacity-90">
+                    Mic-only meetings are ready. Me + Them remains optional until system audio passes its signal test.
                   </p>
                 ) : (
                   <p className="text-sm text-current opacity-90">
-                    Meeting transcription route is ready, but system audio still needs attention.
+                    Meeting capture still needs microphone input, permission, or a ready meeting ASR route.
                   </p>
                 )}
                 {meetingBlockers.length > 0 ? (
                   <div className="rounded-lg border border-rust/20 bg-rust/5 px-3 py-2 text-xs text-current opacity-90">
-                    <p className="mb-1 font-medium">Current blockers</p>
+                    <p className="mb-1 font-medium">Meeting blockers</p>
                     <ul className="space-y-1">
                       {meetingBlockers.map((blocker) => (
+                        <li key={blocker}>• {blocker}</li>
+                      ))}
+                    </ul>
+                  </div>
+                ) : null}
+                {meetingReady && !fullCaptureReady && fullCaptureBlockers.length > 0 ? (
+                  <div className="rounded-lg border border-border/60 bg-muted/20 px-3 py-2 text-xs text-current opacity-90">
+                    <p className="mb-1 font-medium">Me + Them not verified</p>
+                    <ul className="space-y-1">
+                      {fullCaptureBlockers.map((blocker) => (
                         <li key={blocker}>• {blocker}</li>
                       ))}
                     </ul>
@@ -498,11 +564,22 @@ export function SetupView() {
                   <Button
                     variant="outline"
                     onClick={() =>
-                      void runVerification("verify-system-audio", verifySystemAudioSetup)
+                      void runAction("test-system-audio", async () => {
+                        const result = await testSystemAudioCapture();
+                        setStatusMessage(
+                          result.capability.ready
+                            ? `System audio test: Verified ${result.capability.routeDevice ?? "the current route"} for Me + Them capture.`
+                            : `System audio test: ${result.capability.actionableReason ?? "No verified signal was detected. Start in Mic only mode or check the route and try again."}`
+                        );
+                      })
                     }
-                    disabled={busyAction !== null}
+                    disabled={
+                      busyAction !== null ||
+                      systemAudioCapability === null ||
+                      systemAudioCapability.backend === "none"
+                    }
                   >
-                    {busyAction === "verify-system-audio" ? (
+                    {busyAction === "test-system-audio" ? (
                       <Loader2 className="mr-2 h-4 w-4 animate-spin" />
                     ) : (
                       <MonitorUp className="mr-2 h-4 w-4" />
@@ -645,6 +722,38 @@ export function SetupView() {
                               {providerActionLabel(provider)}
                             </Button>
                           ) : null}
+                          {actionVariant === "permission" ? (
+                            <Button
+                              size="sm"
+                              variant="outline"
+                              onClick={() =>
+                                void runAction("request-apple-speech", async () => {
+                                  await requestAppleSpeechPermission();
+                                })
+                              }
+                              disabled={busyAction !== null}
+                            >
+                              {busyAction === "request-apple-speech" ? (
+                                <Loader2 className="mr-2 h-4 w-4 animate-spin" />
+                              ) : null}
+                              Request permission
+                            </Button>
+                          ) : null}
+                          {actionVariant === "speech_settings" ? (
+                            <Button
+                              size="sm"
+                              variant="outline"
+                              onClick={() =>
+                                void runAction("open-apple-speech-settings", async () => {
+                                  await openPermissionSettings("speech");
+                                })
+                              }
+                              disabled={busyAction !== null}
+                            >
+                              <Settings2 className="mr-2 h-4 w-4" />
+                              Open Speech Settings
+                            </Button>
+                          ) : null}
                           {actionVariant === "settings" ? (
                             <Button
                               size="sm"
@@ -656,7 +765,7 @@ export function SetupView() {
                               {providerActionLabel(provider)}
                             </Button>
                           ) : null}
-                          {!canDownload && actionVariant !== "settings" ? (
+                          {!canDownload && actionVariant === "refresh" ? (
                             <Button
                               size="sm"
                               variant="outline"
@@ -680,8 +789,16 @@ export function SetupView() {
 
                       <div className="mt-3 space-y-2 text-sm">
                         <p className="text-muted-foreground">
-                          {provider.runtimeMessage ?? `${provider.name} is not ready yet.`}
+                          {provider.platformReadiness?.message ??
+                            provider.runtimeMessage ??
+                            `${provider.name} is not ready yet.`}
                         </p>
+                        {provider.providerType === "macos_apple_speech" ? (
+                          <p className="text-xs text-muted-foreground">
+                            Dictation-only. Recognition stays on-device and Apple
+                            server fallback is disabled.
+                          </p>
+                        ) : null}
                         {isCloudProvider(provider.providerType) && provider.runtimeStatus !== "ready" ? (
                           <p className="text-xs text-muted-foreground">
                             Cloud routes usually need an API key or account setup in Settings before they become usable.
@@ -740,10 +857,16 @@ export function SetupView() {
                     className={meetingReady ? "neume neume-lit" : "neume neume-rust"}
                     aria-hidden="true"
                   />
-                  <p className="font-medium">{meetingReady ? "Meetings ready" : "Meetings not ready"}</p>
+                  <p className="font-medium">
+                    {fullCaptureReady
+                      ? "Meetings ready · Me + Them verified"
+                      : meetingReady
+                        ? "Mic-only meetings ready"
+                        : "Meetings not ready"}
+                  </p>
                 </div>
                 <p className="text-sm text-muted-foreground">
-                  Re-run guided meeting setup to validate system audio, loopback, and a meeting-grade ASR route.
+                  Re-run guided meeting setup to validate microphone access and a meeting-grade ASR route, then test system audio if you want Me + Them capture.
                 </p>
                 <Button className="mt-3 w-full" variant="outline" onClick={() => requestOnboarding("meetings")}>
                   Set up meetings

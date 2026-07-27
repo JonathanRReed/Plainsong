@@ -104,12 +104,9 @@ const createSettings = () => ({
     vaultSalt: null,
   },
   shortcuts: {
-    toggleRecording: "Ctrl+Shift+R",
     toggleDictation: "Cmd+Shift+Space",
     toggleDictationAlternates: [],
     openWindow: "Ctrl+Shift+N",
-    quickExport: "Ctrl+Shift+E",
-    focusSearch: "Ctrl+Shift+F",
   },
   updates: {
     channel: "stable" as const,
@@ -122,6 +119,16 @@ const createSettings = () => ({
 
 let currentSettings = createSettings();
 const storage = new Map<string, string>();
+
+function deferred<T>() {
+  let resolve!: (value: T) => void;
+  let reject!: (reason?: unknown) => void;
+  const promise = new Promise<T>((res, rej) => {
+    resolve = res;
+    reject = rej;
+  });
+  return { promise, resolve, reject };
+}
 
 function getMeetingVerificationResult() {
   const provider = currentSettings.transcription.meetingProvider;
@@ -150,8 +157,41 @@ vi.mock("@/lib/backend/asr", () => ({
 }));
 
 vi.mock("@/lib/backend/recordings", () => ({
-  checkSystemAudioAvailability: vi.fn(async () => true),
-  getLoopbackDeviceName: vi.fn(async () => "BlackHole 2ch"),
+  getSystemAudioCapability: vi.fn(async () => ({
+    backend: "core_audio_process_tap",
+    nativeOsSupported: true,
+    nativeOsEnabled: true,
+    routeDevice: "MacBook Pro Speakers",
+    routeId: "coreaudio:BuiltInSpeakerDevice",
+    nativeSampleRate: 48000,
+    nativeChannels: 2,
+    readiness: "ready",
+    ready: true,
+    reason: null,
+    actionableReason: null,
+  })),
+  testSystemAudioCapture: vi.fn(async () => ({
+    capability: {
+      backend: "core_audio_process_tap",
+      nativeOsSupported: true,
+      nativeOsEnabled: true,
+      routeDevice: "MacBook Pro Speakers",
+      routeId: "coreaudio:BuiltInSpeakerDevice",
+      nativeSampleRate: 48000,
+      nativeChannels: 2,
+      readiness: "ready",
+      ready: true,
+      reason: null,
+      actionableReason: null,
+    },
+    callbacks: 100,
+    capturedFrames: 48000,
+    nonSilentFrames: 45000,
+    peak: 0.04,
+    expectedToneHz: 997,
+    detectedToneAmplitude: 0.04,
+    verificationMethod: "known_tone",
+  })),
 }));
 
 vi.mock("@/lib/backend/settings", () => ({
@@ -436,6 +476,109 @@ describe("FirstRunWizard", () => {
     expect(currentSettings.transcription.dictationHandsFreeEnabled).toBe(false);
   });
 
+  it("announces a hotkey save failure and retries without losing the shortcut", async () => {
+    const onComplete = vi.fn();
+    const backend = await import("@/lib/backend/settings");
+    vi.mocked(backend.saveSettings).mockRejectedValueOnce(
+      new Error("Settings file is locked")
+    );
+
+    render(<FirstRunWizard mode="dictation" onComplete={onComplete} />);
+
+    await clickPrimary(/continue/i);
+    await clickPrimary(/continue/i);
+    const shortcutInput = await screen.findByLabelText("Dictation shortcut");
+    fireEvent.keyDown(shortcutInput, { key: "J", metaKey: true, shiftKey: true });
+    await clickPrimary(/finish/i);
+
+    expect(screen.getByRole("alert")).toHaveTextContent(
+      /failed to save hotkey: settings file is locked/i
+    );
+    expect(screen.getByLabelText("Dictation shortcut")).toHaveValue("Cmd + Shift + J");
+    expect(onComplete).not.toHaveBeenCalled();
+
+    await clickPrimary(/finish/i);
+
+    await waitFor(() => {
+      expect(onComplete).toHaveBeenCalledWith({
+        markOnboardingComplete: false,
+        meetingsCompleted: false,
+      });
+    });
+    expect(screen.queryByRole("alert")).not.toBeInTheDocument();
+    expect(currentSettings.shortcuts.toggleDictation).toBe("Cmd+Shift+J");
+  });
+
+  it("keeps system audio unverified until the non-silent tone test passes", async () => {
+    const recordingsBackend = await import("@/lib/backend/recordings");
+    const getSystemAudioCapability = vi.mocked(
+      recordingsBackend.getSystemAudioCapability,
+    );
+    const testSystemAudioCapture = vi.mocked(
+      recordingsBackend.testSystemAudioCapture,
+    );
+    getSystemAudioCapability.mockResolvedValueOnce({
+      backend: "core_audio_process_tap",
+      nativeOsSupported: true,
+      nativeOsEnabled: true,
+      routeDevice: "MacBook Pro Speakers",
+      routeId: "coreaudio:BuiltInSpeakerDevice",
+      nativeSampleRate: 48000,
+      nativeChannels: 2,
+      readiness: "unverified",
+      ready: false,
+      reason: null,
+      actionableReason: "Run Test system audio.",
+    });
+
+    render(<FirstRunWizard mode="meetings" onComplete={vi.fn()} />);
+
+    expect(
+      await screen.findByText(/permission and non-silent audio are not verified yet/i),
+    ).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: /test system audio/i }));
+
+    await waitFor(() => {
+      expect(testSystemAudioCapture).toHaveBeenCalledTimes(1);
+    });
+    expect(
+      await screen.findByText(/verified 997 hz system audio/i),
+    ).toBeInTheDocument();
+  });
+
+  it("reports external-audio verification honestly for input-only routes", async () => {
+    const recordingsBackend = await import("@/lib/backend/recordings");
+    vi.mocked(recordingsBackend.testSystemAudioCapture).mockResolvedValueOnce({
+      capability: {
+        backend: "virtual_loopback",
+        nativeOsSupported: true,
+        nativeOsEnabled: true,
+        routeDevice: "Stereo Mix",
+        routeId: "stereo-mix",
+        nativeSampleRate: 48000,
+        nativeChannels: 2,
+        readiness: "ready",
+        ready: true,
+        reason: null,
+        actionableReason: null,
+      },
+      callbacks: 100,
+      capturedFrames: 48000,
+      nonSilentFrames: 45000,
+      peak: 0.04,
+      expectedToneHz: 997,
+      detectedToneAmplitude: 0,
+      verificationMethod: "external_audio",
+    });
+
+    render(<FirstRunWizard mode="meetings" onComplete={vi.fn()} />);
+    fireEvent.click(await screen.findByRole("button", { name: /test system audio/i }));
+
+    expect(
+      await screen.findByText(/verified non-silent system audio via Stereo Mix/i),
+    ).toBeInTheDocument();
+  });
+
   it("repairs the meetings route in meetings-only onboarding", async () => {
     const onComplete = vi.fn();
 
@@ -463,6 +606,92 @@ describe("FirstRunWizard", () => {
     expect(currentSettings.transcription.useSharedAsrSelection).toBe(false);
     expect(currentSettings.transcription.meetingModelId).toBe("distil-large-v3");
     expect(storage.get(MEETING_ONBOARDING_STORAGE_KEY)).toBe("true");
+  });
+
+  it("keeps meeting choices and the wizard open when saving fails, then clears the error on retry", async () => {
+    const onComplete = vi.fn();
+    const backend = await import("@/lib/backend/settings");
+    const saveSettings = vi.mocked(backend.saveSettings);
+    const firstSave = deferred<void>();
+    const retrySave = deferred<void>();
+
+    currentSettings.transcription.useSharedAsrSelection = false;
+    currentSettings.transcription.meetingProvider = "distil_whisper";
+    currentSettings.transcription.meetingModelId = "distil-large-v3";
+
+    saveSettings
+      .mockImplementationOnce(() => firstSave.promise)
+      .mockImplementationOnce(async (nextSettings) => {
+        await retrySave.promise;
+        currentSettings = structuredClone(nextSettings) as ReturnType<typeof createSettings>;
+      });
+
+    render(<FirstRunWizard mode="meetings" onComplete={onComplete} />);
+
+    const finishButton = await screen.findByRole("button", {
+      name: /finish meeting setup/i,
+    });
+    fireEvent.change(screen.getByLabelText("Meeting audio storage"), {
+      target: { value: "transcript_only" },
+    });
+    fireEvent.change(screen.getByLabelText("Meeting retention"), {
+      target: { value: "custom" },
+    });
+    fireEvent.change(screen.getByLabelText("Custom retention months"), {
+      target: { value: "6" },
+    });
+    fireEvent.change(screen.getByLabelText("Retention delete mode"), {
+      target: { value: "audio_and_transcript" },
+    });
+
+    fireEvent.click(finishButton);
+    await waitFor(() => {
+      expect(saveSettings).toHaveBeenCalledTimes(1);
+    });
+
+    await act(async () => {
+      firstSave.reject(new Error("Settings file is locked"));
+      await firstSave.promise.catch(() => undefined);
+    });
+
+    expect(screen.getByRole("alert")).toHaveTextContent(
+      /meeting storage and retention weren't saved: settings file is locked/i
+    );
+    expect(screen.getByRole("dialog")).toBeInTheDocument();
+    expect(onComplete).not.toHaveBeenCalled();
+    expect(screen.getByLabelText("Meeting audio storage")).toHaveValue("transcript_only");
+    expect(screen.getByLabelText("Meeting retention")).toHaveValue("custom");
+    expect(screen.getByLabelText("Custom retention months")).toHaveValue(6);
+    expect(screen.getByLabelText("Retention delete mode")).toHaveValue(
+      "audio_and_transcript"
+    );
+
+    fireEvent.click(screen.getByRole("button", { name: /finish meeting setup/i }));
+
+    await waitFor(() => {
+      expect(saveSettings).toHaveBeenCalledTimes(2);
+      expect(screen.queryByRole("alert")).not.toBeInTheDocument();
+    });
+    expect(screen.getByLabelText("Meeting audio storage")).toHaveValue("transcript_only");
+    expect(screen.getByLabelText("Meeting retention")).toHaveValue("custom");
+
+    await act(async () => {
+      retrySave.resolve();
+      await retrySave.promise;
+    });
+
+    await waitFor(() => {
+      expect(onComplete).toHaveBeenCalledWith({
+        markOnboardingComplete: false,
+        meetingsCompleted: true,
+      });
+    });
+    expect(currentSettings.transcription.meetingAudioStorageMode).toBe("transcript_only");
+    expect(currentSettings.transcription.meetingRetentionPreset).toBe("custom");
+    expect(currentSettings.transcription.meetingRetentionCustomMonths).toBe(6);
+    expect(currentSettings.transcription.meetingRetentionDeleteMode).toBe(
+      "audio_and_transcript"
+    );
   });
 
   it("runs the dictation repair flow without marking full onboarding complete", async () => {
@@ -601,7 +830,7 @@ describe("FirstRunWizard", () => {
     await screen.findByText("Speech recognition");
     expect(screen.getByText("Optional")).toBeInTheDocument();
     expect(
-      screen.getByText(/only needed if plainsong falls back to apple's native speech engine/i)
+      screen.getByText(/only needed when you explicitly choose apple speech/i)
     ).toBeInTheDocument();
   });
 

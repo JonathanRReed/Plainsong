@@ -5,8 +5,8 @@ copyright: Copyright © 2026 Jonathan Reed
 # Electron ships these fuses permissive by default, which would make a notarized
 # Plainsong a reusable gadget: `ELECTRON_RUN_AS_NODE=1` on the signed binary runs
 # arbitrary Node under our Developer ID, which carries device.microphone,
-# personal-information.speech-recognition, automation.apple-events and
-# disable-library-validation — plus the Accessibility grant the app holds so it
+# automation.apple-events and disable-library-validation — plus the
+# Accessibility grant the app holds so it
 # can inject keystrokes into every application. Notarization cannot be retracted
 # by shipping a later version, so this has to be right before the first ticket.
 electronFuses:
@@ -20,6 +20,10 @@ electronFuses:
 directories:
   output: release
   buildResources: build-resources
+
+# Fail packaging before signing if a required native helper is absent, has the
+# wrong deployment target, or no longer matches its Rust protocol.
+afterPack: scripts/verify-packaged-native-helpers.mjs
 
 files:
   - dist/**
@@ -56,11 +60,19 @@ mac:
   gatekeeperAssess: false
   entitlements: build-resources/entitlements.mac.plist
   entitlementsInherit: build-resources/entitlements.mac.inherit.plist
+  # The Speech helper reads audio supplied by the Rust process; it does not own
+  # microphone capture, Apple Events, or a JIT. Give that binary only its Speech
+  # entitlement instead of the broad Electron child-process entitlement set.
+  sign: scripts/sign-macos.mjs
+  binaries:
+    - Contents/Resources/sidecar/nautilus-macos-speech-helper-aarch64-apple-darwin
+    - Contents/Resources/shortcut-helper/plainsong-native-shortcut-helper
   icon: build-resources/icon.icns
   # Required TCC usage strings — without these macOS terminates the app the
   # moment it accesses the microphone / speech recognition.
   extendInfo:
     NSMicrophoneUsageDescription: "Plainsong transcribes your speech on your Mac for dictation and meeting capture. Audio stays on your device."
+    NSAudioCaptureUsageDescription: "Plainsong captures audio playing on your Mac to record and transcribe meetings. Depending on your transcription settings, meeting audio may be processed on this Mac or sent to the cloud provider you choose."
     NSSpeechRecognitionUsageDescription: "Plainsong can use Apple's on-device speech recognition to transcribe your dictation."
   # macOS-only native helper (built by `shortcut-helper:build`) that observes
   # the dictation hotkey via a listen-only CGEventTap so press-and-hold works.
@@ -71,6 +83,10 @@ mac:
       to: shortcut-helper
       filter:
         - plainsong-native-shortcut-helper
+    - from: rust-sidecar/binaries/
+      to: sidecar
+      filter:
+        - nautilus-macos-speech-helper-aarch64-apple-darwin
 
 win:
   target:
@@ -86,11 +102,14 @@ nsis:
   artifactName: ${productName}-Setup-${version}.${ext}
 
 dmg:
-  # The DMG is the primary download. electron-builder notarizes the .app only,
-  # so leaving this false shipped an unsigned, unstapled disk image
-  # (`spctl -a -t open` -> "rejected / source=no usable signature") while the
-  # release trust gate, which looked only at the .app, still reported green.
+  # The DMG is the primary download. electron-builder notarizes the .app before
+  # creating this artifact, so sign the disk image here; the release workflow
+  # then submits the signed DMG separately and staples its own notary ticket.
   sign: true
+  # Stapling changes the DMG bytes after electron-builder has finished. Do not
+  # emit a pre-staple DMG blockmap/hash into latest-mac.yml; macOS updates use
+  # the ZIP and its blockmap, while the final DMG is covered by SHA256SUMS.txt.
+  writeUpdateInfo: false
 
 publish:
   provider: github

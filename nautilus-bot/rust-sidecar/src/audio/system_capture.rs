@@ -6,10 +6,11 @@ use anyhow::{Context, Result};
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use crossbeam::channel::TrySendError;
 use rubato::audioadapter_buffers::direct::InterleavedSlice;
-use rubato::{Fft, FixedSync, Resampler};
-use std::collections::VecDeque;
+use rubato::{Fft, FixedSync, Indexing, Resampler};
+use serde::Serialize;
+use std::collections::{HashMap, VecDeque};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex, OnceLock};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
@@ -97,17 +98,25 @@ fn push_normalized_samples<T>(
     num_channels: usize,
     buffer: &crossbeam::queue::ArrayQueue<f32>,
     dropped_samples: &AtomicU64,
-) where
+) -> (u64, u64)
+where
     T: cpal::Sample,
     f32: cpal::FromSample<T>,
 {
+    let mut frames = 0_u64;
+    let mut non_silent_frames = 0_u64;
     for_each_mono_sample(data, num_channels, |normalized| {
+        frames += 1;
+        if normalized.abs() > SYSTEM_AUDIO_TEST_NON_SILENT_THRESHOLD {
+            non_silent_frames += 1;
+        }
         if buffer.push(normalized).is_err() {
             let _ = buffer.pop();
             let _ = buffer.push(normalized);
             dropped_samples.fetch_add(1, Ordering::Relaxed);
         }
     });
+    (frames, non_silent_frames)
 }
 
 /// Sample-rate conversion for one capture source, applied on the mixing thread.
@@ -127,6 +136,8 @@ struct SourceResampler {
     pending: Vec<f32>,
     /// Reusable target-rate scratch, sized once to the resampler's maximum.
     scratch: Vec<f32>,
+    total_input_frames: u64,
+    total_output_frames: u64,
 }
 
 impl SourceResampler {
@@ -153,6 +164,8 @@ impl SourceResampler {
             resampler,
             pending,
             scratch,
+            total_input_frames: 0,
+            total_output_frames: 0,
         })
     }
 
@@ -163,7 +176,10 @@ impl SourceResampler {
             resampler,
             pending,
             scratch,
+            total_input_frames,
+            total_output_frames,
         } = self;
+        *total_input_frames = total_input_frames.saturating_add(samples.len() as u64);
         pending.extend_from_slice(samples);
 
         let mut consumed = 0usize;
@@ -190,6 +206,7 @@ impl SourceResampler {
             match resampler.process_into_buffer(&source, &mut sink, None) {
                 Ok((read, written)) => {
                     out.extend_from_slice(&scratch[..written]);
+                    *total_output_frames = total_output_frames.saturating_add(written as u64);
                     consumed += read;
                     if read == 0 {
                         break;
@@ -203,6 +220,66 @@ impl SourceResampler {
         }
 
         pending.drain(0..consumed);
+    }
+
+    /// Flush the final partial source-rate chunk at a route boundary.
+    ///
+    /// Replacing the converter without flushing loses up to one full resampler
+    /// chunk from the old route. Process the valid prefix as a partial chunk and
+    /// keep only the duration represented by those real input frames, rather
+    /// than appending the zero padding used internally by rubato.
+    fn finish(&mut self, out: &mut Vec<f32>) {
+        let expected_total =
+            (self.total_input_frames as f64 * self.resampler.resample_ratio()).ceil() as u64;
+        if self.total_output_frames >= expected_total {
+            self.pending.clear();
+            return;
+        }
+
+        let pending_frames = self.pending.len();
+        let needed = self.resampler.input_frames_next();
+        self.pending.resize(needed, 0.0);
+        let mut partial_len = Some(pending_frames);
+        let mut flush_attempts = 0_u8;
+
+        while self.total_output_frames < expected_total && flush_attempts < 8 {
+            flush_attempts += 1;
+            let produced = self.resampler.output_frames_next();
+            if self.scratch.len() < produced {
+                self.scratch.resize(produced, 0.0);
+            }
+            let Ok(source) = InterleavedSlice::new(&self.pending, 1, needed) else {
+                break;
+            };
+            let Ok(mut sink) =
+                InterleavedSlice::new_mut(&mut self.scratch[..produced], 1, produced)
+            else {
+                break;
+            };
+            let indexing = Indexing {
+                input_offset: 0,
+                output_offset: 0,
+                partial_len,
+                active_channels_mask: None,
+            };
+            match self
+                .resampler
+                .process_into_buffer(&source, &mut sink, Some(&indexing))
+            {
+                Ok((_read, written)) => {
+                    let remaining = (expected_total - self.total_output_frames) as usize;
+                    let retained = written.min(remaining);
+                    out.extend_from_slice(&self.scratch[..retained]);
+                    self.total_output_frames += retained as u64;
+                    partial_len = Some(0);
+                }
+                Err(error) => {
+                    tracing::warn!("Mixed capture resampler tail error: {}", error);
+                    break;
+                }
+            }
+        }
+        self.pending.clear();
     }
 }
 
@@ -485,11 +562,12 @@ impl FrameMixer {
     }
 }
 
-/// Hand one finished chunk to a writer channel. Returns `false` when the
-/// receiver is gone and capture should stop.
-fn forward_chunk(
-    sender: &crossbeam::channel::Sender<Vec<f32>>,
-    chunk: Vec<f32>,
+/// Hand one frame-aligned chunk to the WAV writer. A full channel drops the
+/// mixed/mic/system bundle together so the companion files can never diverge.
+/// Returns `false` when the receiver is gone and capture should stop.
+fn forward_aligned_chunk(
+    sender: &crossbeam::channel::Sender<MixedAudioChunk>,
+    chunk: MixedAudioChunk,
     dropped_chunks: &AtomicU64,
 ) -> bool {
     match sender.try_send(chunk) {
@@ -502,11 +580,267 @@ fn forward_chunk(
     }
 }
 
+const NATIVE_TAP_API_FLOOR: MacOsVersion = MacOsVersion::new(14, 2, 0);
+// CPAL 0.18.1 documents loopback as supported after 14.6. Keep the first
+// production gate conservative until signed-app QA covers 14.2, 14.4 and 14.6.
+const NATIVE_TAP_RELEASE_FLOOR: MacOsVersion = MacOsVersion::new(14, 7, 0);
+const SYSTEM_AUDIO_TEST_TONE_HZ: f32 = 997.0;
+const SYSTEM_AUDIO_TEST_TONE_AMPLITUDE: f32 = 0.04;
+const SYSTEM_AUDIO_TEST_NON_SILENT_THRESHOLD: f32 = 1.0e-5;
+const SYSTEM_ROUTE_STARTUP_GRACE: Duration = Duration::from_secs(5);
+const SYSTEM_ROUTE_RETRY_INTERVAL: Duration = Duration::from_secs(2);
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SystemAudioBackend {
+    CoreAudioProcessTap,
+    VirtualLoopback,
+    None,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SystemAudioReadiness {
+    Ready,
+    Unverified,
+    Unavailable,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SystemAudioFailureKind {
+    UnsupportedOs,
+    PermissionDenied,
+    RouteChanged,
+    SilentStream,
+    NoEligibleRoute,
+    StreamConstruction,
+    StreamRuntime,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SystemAudioCapability {
+    pub backend: SystemAudioBackend,
+    pub native_os_supported: bool,
+    pub native_os_enabled: bool,
+    pub route_device: Option<String>,
+    pub route_id: Option<String>,
+    pub native_sample_rate: Option<u32>,
+    pub native_channels: Option<u16>,
+    pub readiness: SystemAudioReadiness,
+    pub ready: bool,
+    pub reason: Option<SystemAudioFailureKind>,
+    pub actionable_reason: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SystemAudioVerificationMethod {
+    KnownTone,
+    ExternalAudio,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SystemAudioTestResult {
+    pub capability: SystemAudioCapability,
+    pub callbacks: u64,
+    pub captured_frames: u64,
+    pub non_silent_frames: u64,
+    pub peak: f32,
+    pub expected_tone_hz: f32,
+    pub detected_tone_amplitude: f64,
+    pub verification_method: Option<SystemAudioVerificationMethod>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+struct MacOsVersion {
+    major: u32,
+    minor: u32,
+    patch: u32,
+}
+
+impl MacOsVersion {
+    const fn new(major: u32, minor: u32, patch: u32) -> Self {
+        Self {
+            major,
+            minor,
+            patch,
+        }
+    }
+
+    fn parse(value: &str) -> Option<Self> {
+        let mut parts = value.trim().split('.');
+        let major = parts.next()?.parse().ok()?;
+        let minor = parts.next().unwrap_or("0").parse().ok()?;
+        let patch = parts.next().unwrap_or("0").parse().ok()?;
+        Some(Self::new(major, minor, patch))
+    }
+}
+
+#[derive(Debug, Clone)]
+struct NativeTapGate {
+    api_supported: bool,
+    enabled: bool,
+    reason: Option<String>,
+}
+
+fn native_tap_gate_for_version(version: Option<MacOsVersion>) -> NativeTapGate {
+    let Some(version) = version else {
+        return NativeTapGate {
+            api_supported: false,
+            enabled: false,
+            reason: Some(
+                "Could not determine the macOS version. Use a virtual loopback device such as BlackHole."
+                    .to_string(),
+            ),
+        };
+    };
+    if version < NATIVE_TAP_API_FLOOR {
+        return NativeTapGate {
+            api_supported: false,
+            enabled: false,
+            reason: Some(
+                "Native system capture requires macOS 14.2 or later. On this Mac, install and route a virtual loopback device such as BlackHole."
+                    .to_string(),
+            ),
+        };
+    }
+    if version < NATIVE_TAP_RELEASE_FLOOR {
+        return NativeTapGate {
+            api_supported: true,
+            enabled: false,
+            reason: Some(
+                "Native system capture is conservatively disabled on macOS 14.2–14.6 pending signed-app QA. Use a virtual loopback device such as BlackHole."
+                    .to_string(),
+            ),
+        };
+    }
+    NativeTapGate {
+        api_supported: true,
+        enabled: true,
+        reason: None,
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn current_macos_version() -> Option<MacOsVersion> {
+    static VERSION: OnceLock<Option<MacOsVersion>> = OnceLock::new();
+    *VERSION.get_or_init(|| {
+        let output = std::process::Command::new("/usr/bin/sw_vers")
+            .arg("-productVersion")
+            .output()
+            .ok()?;
+        output
+            .status
+            .success()
+            .then(|| String::from_utf8_lossy(&output.stdout).to_string())
+            .as_deref()
+            .and_then(MacOsVersion::parse)
+    })
+}
+
+#[cfg(not(target_os = "macos"))]
+fn current_macos_version() -> Option<MacOsVersion> {
+    None
+}
+
+fn native_tap_gate() -> NativeTapGate {
+    #[cfg(target_os = "macos")]
+    {
+        native_tap_gate_for_version(current_macos_version())
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        NativeTapGate {
+            api_supported: false,
+            enabled: false,
+            reason: None,
+        }
+    }
+}
+
+fn verified_system_audio_route() -> &'static Mutex<Option<String>> {
+    static VERIFIED_ROUTE: OnceLock<Mutex<Option<String>>> = OnceLock::new();
+    VERIFIED_ROUTE.get_or_init(|| Mutex::new(None))
+}
+
+fn is_verified_system_audio_route(route_key: &str) -> bool {
+    verified_system_audio_route()
+        .lock()
+        .map(|route| route.as_deref() == Some(route_key))
+        .unwrap_or(false)
+}
+
+fn system_audio_failures() -> &'static Mutex<HashMap<String, (SystemAudioFailureKind, String)>> {
+    static FAILURES: OnceLock<Mutex<HashMap<String, (SystemAudioFailureKind, String)>>> =
+        OnceLock::new();
+    FAILURES.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+fn failure_for_system_audio_route(route_key: &str) -> Option<(SystemAudioFailureKind, String)> {
+    system_audio_failures()
+        .lock()
+        .ok()
+        .and_then(|failures| failures.get(route_key).cloned())
+}
+
+fn mark_system_audio_route_verified(route_key: &str) {
+    if let Ok(mut route) = verified_system_audio_route().lock() {
+        *route = Some(route_key.to_string());
+    }
+    if let Ok(mut failures) = system_audio_failures().lock() {
+        failures.remove(route_key);
+    }
+}
+
+fn record_system_audio_route_failure(
+    route_key: &str,
+    kind: SystemAudioFailureKind,
+    actionable: &str,
+) {
+    if let Ok(mut failures) = system_audio_failures().lock() {
+        failures.insert(route_key.to_string(), (kind, actionable.to_string()));
+    }
+}
+
+fn clear_system_audio_route_verification(route_key: &str) {
+    if let Ok(mut route) = verified_system_audio_route().lock() {
+        if route.as_deref() == Some(route_key) {
+            *route = None;
+        }
+    }
+}
+
 struct LoopbackDeviceSelection {
     device: cpal::Device,
+    backend: SystemAudioBackend,
     display_name: String,
+    route_key: String,
     stream_config: cpal::StreamConfig,
     sample_format: cpal::SampleFormat,
+}
+
+#[derive(Debug, Clone)]
+struct SystemAudioRouteMetadata {
+    backend: SystemAudioBackend,
+    display_name: String,
+    route_key: String,
+    sample_rate: u32,
+    channels: u16,
+}
+
+impl LoopbackDeviceSelection {
+    fn metadata(&self) -> SystemAudioRouteMetadata {
+        SystemAudioRouteMetadata {
+            backend: self.backend,
+            display_name: self.display_name.clone(),
+            route_key: self.route_key.clone(),
+            sample_rate: self.stream_config.sample_rate,
+            channels: self.stream_config.channels,
+        }
+    }
 }
 
 const LOOPBACK_KEYWORDS: [&str; 7] = [
@@ -539,6 +873,62 @@ fn device_lookup_label(device: &cpal::Device) -> Option<String> {
     device_name(device).ok()
 }
 
+fn device_route_key(device: &cpal::Device, label: &str) -> String {
+    device
+        .id()
+        .map(|id| id.to_string())
+        .unwrap_or_else(|_| normalized_audio_label(label))
+}
+
+fn native_output_is_eligible(supports_input: bool, supports_output: bool) -> bool {
+    !supports_input && supports_output
+}
+
+fn capture_candidate_priority(
+    backend: SystemAudioBackend,
+    verified: bool,
+    has_failure: bool,
+) -> u8 {
+    match (verified, has_failure, backend) {
+        (true, false, _) => 0,
+        (false, false, SystemAudioBackend::CoreAudioProcessTap) => 1,
+        (false, false, SystemAudioBackend::VirtualLoopback) => 2,
+        _ => 3,
+    }
+}
+
+fn backend_allows_internal_verification_tone(backend: SystemAudioBackend) -> bool {
+    backend == SystemAudioBackend::CoreAudioProcessTap
+}
+
+fn unverified_system_audio_action(backend: SystemAudioBackend) -> String {
+    match backend {
+        SystemAudioBackend::CoreAudioProcessTap =>
+            "A native route is available, but permission and non-silent callbacks have not been verified. Run Test system audio; Plainsong will play a brief known tone through the native output."
+                .to_string(),
+        SystemAudioBackend::VirtualLoopback =>
+            "A virtual loopback route is available, but external audio has not been verified. Play audio through the loopback route, then run Test system audio."
+                .to_string(),
+        SystemAudioBackend::None =>
+            "No system-audio route is available. Start in Mic only mode or configure a route first."
+                .to_string(),
+    }
+}
+
+fn startup_route_is_unhealthy(
+    _backend: SystemAudioBackend,
+    has_alternative: bool,
+    callbacks: u64,
+    captured_frames: u64,
+    non_silent_frames: u64,
+) -> bool {
+    callbacks == 0 || captured_frames == 0 || (has_alternative && non_silent_frames == 0)
+}
+
+fn system_route_retry_due(rebuild_pending: bool, now: Instant, retry_at: Instant) -> bool {
+    rebuild_pending && now >= retry_at
+}
+
 /// System audio capture session helper
 pub struct SystemAudioCapture {
     host: cpal::Host,
@@ -553,11 +943,33 @@ pub struct MixedAudioCapture {
     dropped_mixed_chunks: Arc<AtomicU64>,
 }
 
+pub struct MixedAudioChunk {
+    pub mixed: Vec<f32>,
+    pub mic: Option<Vec<f32>>,
+    pub system: Option<Vec<f32>>,
+}
+
 pub struct MixedAudioCaptureStart {
-    pub mixed_receiver: crossbeam::channel::Receiver<Vec<f32>>,
-    pub mic_receiver: Option<crossbeam::channel::Receiver<Vec<f32>>>,
-    pub system_receiver: Option<crossbeam::channel::Receiver<Vec<f32>>>,
+    pub aligned_receiver: crossbeam::channel::Receiver<MixedAudioChunk>,
     pub sample_rate: u32,
+    activation_tx: crossbeam::channel::Sender<()>,
+    activated_rx: crossbeam::channel::Receiver<std::result::Result<(), String>>,
+}
+
+impl MixedAudioCaptureStart {
+    /// Start playback only after the caller has durably prepared every writer.
+    pub fn activate(&self) -> Result<()> {
+        self.activation_tx
+            .send(())
+            .map_err(|_| anyhow::anyhow!("Mixed capture stopped before activation"))?;
+        match self.activated_rx.recv_timeout(Duration::from_secs(5)) {
+            Ok(Ok(())) => Ok(()),
+            Ok(Err(error)) => Err(anyhow::anyhow!(error)),
+            Err(_) => Err(anyhow::anyhow!(
+                "Timed out waiting for mixed audio streams to activate"
+            )),
+        }
+    }
 }
 
 /// Event channel the capture thread uses for mid-session warnings (currently
@@ -576,12 +988,134 @@ impl SystemAudioCapture {
         }
     }
 
-    /// Check if system audio capture is available.
+    /// Backward-compatible route availability. This means that a candidate route
+    /// exists, not that macOS permission or non-silent callbacks were verified.
     pub fn is_available(&self) -> bool {
         self.find_loopback_device().ok().flatten().is_some()
     }
 
-    fn find_loopback_device(&self) -> Result<Option<LoopbackDeviceSelection>> {
+    pub fn capability(&self) -> SystemAudioCapability {
+        let gate = native_tap_gate();
+        match self.find_capability_device() {
+            Ok(Some(selection)) => {
+                let verified = is_verified_system_audio_route(&selection.route_key);
+                let last_failure = failure_for_system_audio_route(&selection.route_key);
+                SystemAudioCapability {
+                    backend: selection.backend,
+                    native_os_supported: gate.api_supported,
+                    native_os_enabled: gate.enabled,
+                    route_device: Some(selection.display_name),
+                    route_id: Some(selection.route_key),
+                    native_sample_rate: Some(selection.stream_config.sample_rate),
+                    native_channels: Some(selection.stream_config.channels),
+                    readiness: if verified {
+                        SystemAudioReadiness::Ready
+                    } else {
+                        SystemAudioReadiness::Unverified
+                    },
+                    ready: verified,
+                    reason: last_failure.as_ref().map(|(kind, _)| *kind),
+                    actionable_reason: if verified {
+                        None
+                    } else {
+                        Some(
+                            last_failure
+                                .map(|(_, actionable)| actionable)
+                                .unwrap_or_else(|| {
+                                    unverified_system_audio_action(selection.backend)
+                                }),
+                        )
+                    },
+                }
+            }
+            Ok(None) => SystemAudioCapability {
+                backend: SystemAudioBackend::None,
+                native_os_supported: gate.api_supported,
+                native_os_enabled: gate.enabled,
+                route_device: None,
+                route_id: None,
+                native_sample_rate: None,
+                native_channels: None,
+                readiness: SystemAudioReadiness::Unavailable,
+                ready: false,
+                reason: Some(if gate.api_supported || cfg!(not(target_os = "macos")) {
+                    SystemAudioFailureKind::NoEligibleRoute
+                } else {
+                    SystemAudioFailureKind::UnsupportedOs
+                }),
+                actionable_reason: gate.reason.or_else(|| {
+                    Some(
+                        "No eligible output-only default output or virtual loopback route was found. If the default output is duplex, use BlackHole or another virtual loopback device."
+                            .to_string(),
+                    )
+                }),
+            },
+            Err(error) => SystemAudioCapability {
+                backend: SystemAudioBackend::None,
+                native_os_supported: gate.api_supported,
+                native_os_enabled: gate.enabled,
+                route_device: None,
+                route_id: None,
+                native_sample_rate: None,
+                native_channels: None,
+                readiness: SystemAudioReadiness::Unavailable,
+                ready: false,
+                reason: Some(SystemAudioFailureKind::StreamConstruction),
+                actionable_reason: Some(format!("Could not inspect system-audio routes: {error}")),
+            },
+        }
+    }
+
+    #[cfg(target_os = "macos")]
+    fn native_default_output_candidate(&self) -> Result<Option<LoopbackDeviceSelection>> {
+        if !native_tap_gate().enabled {
+            return Ok(None);
+        }
+        let Some(device) = self.host.default_output_device() else {
+            return Ok(None);
+        };
+        // Probe input capability directly and fail closed. Device::description()
+        // intentionally erases a failed input-config probe into "no input", so it
+        // cannot be the privacy boundary for a duplex output. The vendored CPAL
+        // path also forces devices obtained as the default output through the
+        // process-tap path during stream construction, eliminating a second-probe
+        // race that could otherwise open the physical input.
+        let supports_input = device
+            .supported_input_configs()
+            .context("Could not verify whether the default output has a physical input")?
+            .next()
+            .is_some();
+        let supported_config = device
+            .default_output_config()
+            .context("Failed to read the default output's native configuration")?;
+        if !native_output_is_eligible(supports_input, supported_config.channels() > 0) {
+            let label =
+                device_lookup_label(&device).unwrap_or_else(|| "default output".to_string());
+            tracing::info!(
+                "Default output '{}' is duplex or output-ineligible; refusing native system-audio capture",
+                label
+            );
+            return Ok(None);
+        }
+        let label = device_lookup_label(&device)
+            .ok_or_else(|| anyhow::anyhow!("Failed to read the default output device name"))?;
+        let route_key = device_route_key(&device, &label);
+        Ok(Some(LoopbackDeviceSelection {
+            device,
+            backend: SystemAudioBackend::CoreAudioProcessTap,
+            display_name: label,
+            route_key,
+            stream_config: supported_config.config(),
+            sample_format: supported_config.sample_format(),
+        }))
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    fn native_default_output_candidate(&self) -> Result<Option<LoopbackDeviceSelection>> {
+        Ok(None)
+    }
+
+    fn virtual_loopback_candidates(&self) -> Result<Vec<LoopbackDeviceSelection>> {
         // CPAL's macOS `input_devices()` filter probes every device's supported
         // input formats. Some CoreAudio devices can block indefinitely during
         // that probe. Enumerate names without filtering, then validate only a
@@ -598,6 +1132,7 @@ impl SystemAudioCapture {
             .input_devices()
             .context("Failed to enumerate input devices")?;
 
+        let mut candidates = Vec::new();
         for device in devices {
             let Some(label) = device_lookup_label(&device) else {
                 continue;
@@ -617,19 +1152,49 @@ impl SystemAudioCapture {
                     continue;
                 }
             };
-            let sample_format = supported_config.sample_format();
-            let stream_config = supported_config.config();
-
-            tracing::info!("Found loopback device: {}", label);
-            return Ok(Some(LoopbackDeviceSelection {
+            let route_key = device_route_key(&device, &label);
+            tracing::info!("Found virtual loopback device: {}", label);
+            candidates.push(LoopbackDeviceSelection {
                 device,
+                backend: SystemAudioBackend::VirtualLoopback,
                 display_name: label,
-                stream_config,
-                sample_format,
-            }));
+                route_key,
+                stream_config: supported_config.config(),
+                sample_format: supported_config.sample_format(),
+            });
         }
+        Ok(candidates)
+    }
 
-        Ok(None)
+    fn find_loopback_candidates(&self) -> Result<Vec<LoopbackDeviceSelection>> {
+        let mut candidates = Vec::new();
+        match self.native_default_output_candidate() {
+            Ok(Some(native)) => candidates.push(native),
+            Ok(None) => {}
+            Err(error) => tracing::warn!("Native system-audio route inspection failed: {error}"),
+        }
+        match self.virtual_loopback_candidates() {
+            Ok(mut virtual_candidates) => candidates.append(&mut virtual_candidates),
+            Err(error) if candidates.is_empty() => return Err(error),
+            Err(error) => tracing::warn!("Virtual loopback route inspection failed: {error}"),
+        }
+        Ok(candidates)
+    }
+
+    fn find_loopback_device(&self) -> Result<Option<LoopbackDeviceSelection>> {
+        Ok(self.find_loopback_candidates()?.into_iter().next())
+    }
+
+    fn find_capability_device(&self) -> Result<Option<LoopbackDeviceSelection>> {
+        let mut candidates = self.find_loopback_candidates()?;
+        candidates.sort_by_key(|candidate| {
+            capture_candidate_priority(
+                candidate.backend,
+                is_verified_system_audio_route(&candidate.route_key),
+                failure_for_system_audio_route(&candidate.route_key).is_some(),
+            )
+        });
+        Ok(candidates.into_iter().next())
     }
 
     pub fn get_loopback_device_name(&self) -> Result<Option<String>> {
@@ -637,6 +1202,693 @@ impl SystemAudioCapture {
             Some(selection) => Ok(Some(selection.display_name)),
             None => Ok(None),
         }
+    }
+}
+
+#[derive(Debug, Clone)]
+struct SystemAudioRuntimeFailure {
+    kind: SystemAudioFailureKind,
+    message: String,
+}
+
+type SystemAudioRuntimeFailureSlot = Arc<Mutex<Option<SystemAudioRuntimeFailure>>>;
+
+#[derive(Default)]
+struct SystemStreamHealth {
+    callbacks: AtomicU64,
+    captured_frames: AtomicU64,
+    non_silent_frames: AtomicU64,
+}
+
+type SystemStreamHealthSlot = Arc<SystemStreamHealth>;
+
+type SystemStreamStart = (
+    cpal::Stream,
+    SystemAudioRouteMetadata,
+    SystemStreamHealthSlot,
+    bool,
+);
+
+fn classify_system_audio_error(
+    error: &cpal::Error,
+    backend: SystemAudioBackend,
+) -> SystemAudioFailureKind {
+    match error.kind() {
+        cpal::ErrorKind::PermissionDenied => SystemAudioFailureKind::PermissionDenied,
+        cpal::ErrorKind::DeviceChanged
+        | cpal::ErrorKind::DeviceNotAvailable
+        | cpal::ErrorKind::StreamInvalidated => SystemAudioFailureKind::RouteChanged,
+        cpal::ErrorKind::UnsupportedOperation
+            if backend == SystemAudioBackend::CoreAudioProcessTap =>
+        {
+            SystemAudioFailureKind::UnsupportedOs
+        }
+        _ => SystemAudioFailureKind::StreamConstruction,
+    }
+}
+
+fn actionable_reason_for_failure(
+    kind: SystemAudioFailureKind,
+    backend: SystemAudioBackend,
+    detail: &str,
+) -> String {
+    match kind {
+        SystemAudioFailureKind::UnsupportedOs => {
+            "This native Core Audio route is unsupported on this macOS version. Use BlackHole or another virtual loopback device."
+                .to_string()
+        }
+        SystemAudioFailureKind::PermissionDenied => {
+            "macOS denied system-audio capture. Enable Plainsong in Privacy & Security → Screen & System Audio Recording, then test again."
+                .to_string()
+        }
+        SystemAudioFailureKind::RouteChanged => {
+            "The system output route changed. Plainsong will rebuild the capture route; test again if audio does not resume."
+                .to_string()
+        }
+        SystemAudioFailureKind::SilentStream => {
+            "The route opened but delivered no verifiable audio. Check Screen & System Audio Recording permission and the current output route, then test again."
+                .to_string()
+        }
+        SystemAudioFailureKind::NoEligibleRoute => {
+            "No eligible system-audio route was found. Duplex outputs are not used because that could capture their physical microphone; use an output-only route or BlackHole."
+                .to_string()
+        }
+        SystemAudioFailureKind::StreamConstruction | SystemAudioFailureKind::StreamRuntime => {
+            let route = match backend {
+                SystemAudioBackend::CoreAudioProcessTap => "native Core Audio route",
+                SystemAudioBackend::VirtualLoopback => "virtual loopback route",
+                SystemAudioBackend::None => "system-audio route",
+            };
+            format!("The {route} could not start: {detail}")
+        }
+    }
+}
+
+fn invalidate_system_audio_route(
+    metadata: &SystemAudioRouteMetadata,
+    failure: &SystemAudioRuntimeFailure,
+) {
+    clear_system_audio_route_verification(&metadata.route_key);
+    let actionable =
+        actionable_reason_for_failure(failure.kind, metadata.backend, &failure.message);
+    record_system_audio_route_failure(&metadata.route_key, failure.kind, &actionable);
+}
+
+fn build_system_input_stream(
+    selection: &LoopbackDeviceSelection,
+    system_buffer: Arc<crossbeam::queue::ArrayQueue<f32>>,
+    is_capturing: Arc<AtomicBool>,
+    dropped_samples: Arc<AtomicU64>,
+    runtime_failure: SystemAudioRuntimeFailureSlot,
+    health: SystemStreamHealthSlot,
+) -> std::result::Result<cpal::Stream, cpal::Error> {
+    let config = selection.stream_config;
+    let num_channels = config.channels as usize;
+    let backend = selection.backend;
+
+    macro_rules! build_stream {
+        ($sample_type:ty) => {{
+            let system_buffer = Arc::clone(&system_buffer);
+            let is_capturing = Arc::clone(&is_capturing);
+            let dropped_samples = Arc::clone(&dropped_samples);
+            let runtime_failure = Arc::clone(&runtime_failure);
+            let health = Arc::clone(&health);
+            selection.device.build_input_stream(
+                config,
+                move |data: &[$sample_type], _: &cpal::InputCallbackInfo| {
+                    health.callbacks.fetch_add(1, Ordering::Relaxed);
+                    if is_capturing.load(Ordering::SeqCst) {
+                        let (frames, non_silent_frames) = push_normalized_samples(
+                            data,
+                            num_channels,
+                            &system_buffer,
+                            &dropped_samples,
+                        );
+                        health.captured_frames.fetch_add(frames, Ordering::Relaxed);
+                        health
+                            .non_silent_frames
+                            .fetch_add(non_silent_frames, Ordering::Relaxed);
+                    }
+                },
+                move |error| {
+                    let mut kind = classify_system_audio_error(&error, backend);
+                    if kind == SystemAudioFailureKind::StreamConstruction {
+                        kind = SystemAudioFailureKind::StreamRuntime;
+                    }
+                    tracing::error!("System audio stream error ({backend:?}/{kind:?}): {error}");
+                    if let Ok(mut failure) = runtime_failure.lock() {
+                        *failure = Some(SystemAudioRuntimeFailure {
+                            kind,
+                            message: error.to_string(),
+                        });
+                    }
+                },
+                None,
+            )
+        }};
+    }
+
+    match selection.sample_format {
+        cpal::SampleFormat::I8 => build_stream!(i8),
+        cpal::SampleFormat::I16 => build_stream!(i16),
+        cpal::SampleFormat::I24 => build_stream!(cpal::I24),
+        cpal::SampleFormat::I32 => build_stream!(i32),
+        cpal::SampleFormat::I64 => build_stream!(i64),
+        cpal::SampleFormat::U8 => build_stream!(u8),
+        cpal::SampleFormat::U16 => build_stream!(u16),
+        cpal::SampleFormat::U24 => build_stream!(cpal::U24),
+        cpal::SampleFormat::U32 => build_stream!(u32),
+        cpal::SampleFormat::U64 => build_stream!(u64),
+        cpal::SampleFormat::F32 => build_stream!(f32),
+        cpal::SampleFormat::F64 => build_stream!(f64),
+        _ => Err(cpal::ErrorKind::UnsupportedConfig.into()),
+    }
+}
+
+fn start_system_stream(
+    mut candidates: Vec<LoopbackDeviceSelection>,
+    system_buffer: Arc<crossbeam::queue::ArrayQueue<f32>>,
+    is_capturing: Arc<AtomicBool>,
+    dropped_samples: Arc<AtomicU64>,
+    runtime_failure: SystemAudioRuntimeFailureSlot,
+    play_immediately: bool,
+) -> std::result::Result<SystemStreamStart, SystemAudioRuntimeFailure> {
+    // A route that passed the explicit signal test remains first. Otherwise prefer
+    // the native process tap so a merely detected virtual device cannot preempt the
+    // current output route. Startup health checks retire any silent selection when
+    // an alternative is available.
+    candidates.sort_by_key(|candidate| {
+        capture_candidate_priority(
+            candidate.backend,
+            is_verified_system_audio_route(&candidate.route_key),
+            failure_for_system_audio_route(&candidate.route_key).is_some(),
+        )
+    });
+    let has_alternative = candidates.len() > 1;
+
+    let mut last_failure = None;
+    for selection in candidates {
+        let metadata = selection.metadata();
+        let health = Arc::new(SystemStreamHealth::default());
+        let stream = match build_system_input_stream(
+            &selection,
+            Arc::clone(&system_buffer),
+            Arc::clone(&is_capturing),
+            Arc::clone(&dropped_samples),
+            Arc::clone(&runtime_failure),
+            Arc::clone(&health),
+        ) {
+            Ok(stream) => stream,
+            Err(error) => {
+                let failure = SystemAudioRuntimeFailure {
+                    kind: classify_system_audio_error(&error, metadata.backend),
+                    message: error.to_string(),
+                };
+                invalidate_system_audio_route(&metadata, &failure);
+                tracing::warn!(
+                    "System audio candidate '{}' ({:?}) failed to build: {}",
+                    metadata.display_name,
+                    metadata.backend,
+                    error
+                );
+                last_failure = Some(failure);
+                continue;
+            }
+        };
+        if play_immediately {
+            if let Err(error) = stream.play() {
+                let failure = SystemAudioRuntimeFailure {
+                    kind: classify_system_audio_error(&error, metadata.backend),
+                    message: error.to_string(),
+                };
+                invalidate_system_audio_route(&metadata, &failure);
+                tracing::warn!(
+                    "System audio candidate '{}' ({:?}) failed to play: {}",
+                    metadata.display_name,
+                    metadata.backend,
+                    error
+                );
+                last_failure = Some(failure);
+                continue;
+            }
+            tracing::info!(
+                "System audio route started: {} via {:?} ({} Hz, {} ch)",
+                metadata.display_name,
+                metadata.backend,
+                metadata.sample_rate,
+                metadata.channels
+            );
+        } else {
+            tracing::info!(
+                "System audio route prepared: {} via {:?} ({} Hz, {} ch)",
+                metadata.display_name,
+                metadata.backend,
+                metadata.sample_rate,
+                metadata.channels
+            );
+        }
+        return Ok((stream, metadata, health, has_alternative));
+    }
+
+    Err(last_failure.unwrap_or_else(|| SystemAudioRuntimeFailure {
+        kind: SystemAudioFailureKind::NoEligibleRoute,
+        message: "No eligible system-audio route was found".to_string(),
+    }))
+}
+
+#[derive(Default)]
+struct SystemAudioTestStats {
+    callbacks: u64,
+    captured_frames: u64,
+    non_silent_frames: u64,
+    peak: f32,
+    tone_samples: Vec<f32>,
+}
+
+fn build_system_test_input_stream<T>(
+    selection: &LoopbackDeviceSelection,
+    stats: Arc<Mutex<SystemAudioTestStats>>,
+    tone_active: Arc<AtomicBool>,
+    runtime_failure: SystemAudioRuntimeFailureSlot,
+) -> std::result::Result<cpal::Stream, cpal::Error>
+where
+    T: cpal::Sample + cpal::SizedSample,
+    f32: cpal::FromSample<T>,
+{
+    let channels = selection.stream_config.channels as usize;
+    let backend = selection.backend;
+    let max_samples = selection.stream_config.sample_rate as usize * 4;
+    selection.device.build_input_stream(
+        selection.stream_config,
+        move |data: &[T], _: &cpal::InputCallbackInfo| {
+            if let Ok(mut stats) = stats.lock() {
+                stats.callbacks += 1;
+                for_each_mono_sample(data, channels, |sample| {
+                    stats.captured_frames += 1;
+                    stats.peak = stats.peak.max(sample.abs());
+                    if sample.abs() > SYSTEM_AUDIO_TEST_NON_SILENT_THRESHOLD {
+                        stats.non_silent_frames += 1;
+                    }
+                    if tone_active.load(Ordering::Relaxed) && stats.tone_samples.len() < max_samples
+                    {
+                        stats.tone_samples.push(sample);
+                    }
+                });
+            }
+        },
+        move |error| {
+            let kind = classify_system_audio_error(&error, backend);
+            if let Ok(mut failure) = runtime_failure.lock() {
+                *failure = Some(SystemAudioRuntimeFailure {
+                    kind,
+                    message: error.to_string(),
+                });
+            }
+        },
+        Some(Duration::from_secs(5)),
+    )
+}
+
+fn build_system_test_output_stream<T>(
+    device: &cpal::Device,
+    config: cpal::StreamConfig,
+    runtime_failure: SystemAudioRuntimeFailureSlot,
+) -> std::result::Result<cpal::Stream, cpal::Error>
+where
+    T: cpal::Sample + cpal::SizedSample + cpal::FromSample<f32>,
+{
+    let channels = config.channels as usize;
+    let phase_step =
+        std::f32::consts::TAU * SYSTEM_AUDIO_TEST_TONE_HZ / config.sample_rate.max(1) as f32;
+    let mut phase = 0.0f32;
+    device.build_output_stream(
+        config,
+        move |data: &mut [T], _: &cpal::OutputCallbackInfo| {
+            for frame in data.chunks_mut(channels.max(1)) {
+                let value = phase.sin() * SYSTEM_AUDIO_TEST_TONE_AMPLITUDE;
+                let value = T::from_sample(value);
+                for sample in frame {
+                    *sample = value;
+                }
+                phase += phase_step;
+                if phase >= std::f32::consts::TAU {
+                    phase -= std::f32::consts::TAU;
+                }
+            }
+        },
+        move |error| {
+            if let Ok(mut failure) = runtime_failure.lock() {
+                *failure = Some(SystemAudioRuntimeFailure {
+                    kind: SystemAudioFailureKind::StreamRuntime,
+                    message: error.to_string(),
+                });
+            }
+        },
+        Some(Duration::from_secs(5)),
+    )
+}
+
+fn tone_amplitude(samples: &[f32], sample_rate: u32, frequency: f32) -> f64 {
+    if samples.is_empty() || sample_rate == 0 {
+        return 0.0;
+    }
+    let skip = (sample_rate as usize / 5).min(samples.len());
+    let samples = &samples[skip..];
+    if samples.is_empty() {
+        return 0.0;
+    }
+    let omega = std::f64::consts::TAU * frequency as f64 / sample_rate as f64;
+    let mut sin_sum = 0.0f64;
+    let mut cos_sum = 0.0f64;
+    for (index, &sample) in samples.iter().enumerate() {
+        let angle = omega * index as f64;
+        sin_sum += sample as f64 * angle.sin();
+        cos_sum += sample as f64 * angle.cos();
+    }
+    2.0 * (sin_sum * sin_sum + cos_sum * cos_sum).sqrt() / samples.len() as f64
+}
+
+fn verification_signal_passes(
+    method: SystemAudioVerificationMethod,
+    non_silent_frames: u64,
+    minimum_non_silent: u64,
+    detected_tone_amplitude: f64,
+) -> bool {
+    non_silent_frames >= minimum_non_silent
+        && (method == SystemAudioVerificationMethod::ExternalAudio
+            || detected_tone_amplitude >= 0.005)
+}
+
+struct CandidateTestOutcome {
+    stats: SystemAudioTestStats,
+    tone_amplitude: f64,
+    verification_method: SystemAudioVerificationMethod,
+}
+
+fn run_system_audio_candidate_test(
+    selection: &LoopbackDeviceSelection,
+    first_callback_timeout: Duration,
+) -> std::result::Result<CandidateTestOutcome, SystemAudioRuntimeFailure> {
+    let stats = Arc::new(Mutex::new(SystemAudioTestStats::default()));
+    let tone_active = Arc::new(AtomicBool::new(false));
+    let runtime_failure: SystemAudioRuntimeFailureSlot = Arc::new(Mutex::new(None));
+
+    macro_rules! build_input {
+        ($sample_type:ty) => {
+            build_system_test_input_stream::<$sample_type>(
+                selection,
+                Arc::clone(&stats),
+                Arc::clone(&tone_active),
+                Arc::clone(&runtime_failure),
+            )
+        };
+    }
+    let input_stream = match selection.sample_format {
+        cpal::SampleFormat::I8 => build_input!(i8),
+        cpal::SampleFormat::I16 => build_input!(i16),
+        cpal::SampleFormat::I24 => build_input!(cpal::I24),
+        cpal::SampleFormat::I32 => build_input!(i32),
+        cpal::SampleFormat::I64 => build_input!(i64),
+        cpal::SampleFormat::U8 => build_input!(u8),
+        cpal::SampleFormat::U16 => build_input!(u16),
+        cpal::SampleFormat::U24 => build_input!(cpal::U24),
+        cpal::SampleFormat::U32 => build_input!(u32),
+        cpal::SampleFormat::U64 => build_input!(u64),
+        cpal::SampleFormat::F32 => build_input!(f32),
+        cpal::SampleFormat::F64 => build_input!(f64),
+        _ => Err(cpal::ErrorKind::UnsupportedConfig.into()),
+    }
+    .map_err(|error| SystemAudioRuntimeFailure {
+        kind: classify_system_audio_error(&error, selection.backend),
+        message: error.to_string(),
+    })?;
+    input_stream
+        .play()
+        .map_err(|error| SystemAudioRuntimeFailure {
+            kind: classify_system_audio_error(&error, selection.backend),
+            message: error.to_string(),
+        })?;
+
+    // Only the native Core Audio process tap may inject an internal known tone.
+    // Virtual loopback routes must prove they are carrying audio produced outside
+    // the verifier; writing a tone into the same virtual device would only prove a
+    // self-contained loop and could falsely mark an unrouted cable as ready.
+    let output_stream = if backend_allows_internal_verification_tone(selection.backend) {
+        selection.device.default_output_config().ok().and_then(|output_config| {
+            let output_stream_config = output_config.config();
+            macro_rules! build_output {
+                ($sample_type:ty) => {
+                    build_system_test_output_stream::<$sample_type>(
+                        &selection.device,
+                        output_stream_config,
+                        Arc::clone(&runtime_failure),
+                    )
+                };
+            }
+            let stream = match output_config.sample_format() {
+                cpal::SampleFormat::I8 => build_output!(i8),
+                cpal::SampleFormat::I16 => build_output!(i16),
+                cpal::SampleFormat::I24 => build_output!(cpal::I24),
+                cpal::SampleFormat::I32 => build_output!(i32),
+                cpal::SampleFormat::I64 => build_output!(i64),
+                cpal::SampleFormat::U8 => build_output!(u8),
+                cpal::SampleFormat::U16 => build_output!(u16),
+                cpal::SampleFormat::U24 => build_output!(cpal::U24),
+                cpal::SampleFormat::U32 => build_output!(u32),
+                cpal::SampleFormat::U64 => build_output!(u64),
+                cpal::SampleFormat::F32 => build_output!(f32),
+                cpal::SampleFormat::F64 => build_output!(f64),
+                _ => Err(cpal::ErrorKind::UnsupportedConfig.into()),
+            };
+            match stream.and_then(|stream| {
+                stream.play()?;
+                Ok(stream)
+            }) {
+                Ok(stream) => Some(stream),
+                Err(error) => {
+                    tracing::warn!(
+                        "Could not play a native verification tone through '{}'; checking for external route audio instead: {}",
+                        selection.display_name,
+                        error
+                    );
+                    None
+                }
+            }
+        })
+    } else {
+        None
+    };
+    let verification_method = if output_stream.is_some() {
+        SystemAudioVerificationMethod::KnownTone
+    } else {
+        SystemAudioVerificationMethod::ExternalAudio
+    };
+    tone_active.store(
+        verification_method == SystemAudioVerificationMethod::KnownTone,
+        Ordering::Relaxed,
+    );
+
+    // Start the known tone (or begin the external-audio observation window)
+    // before waiting for the first callback. Some process taps do not drive an
+    // input callback until the bound output device is active, so waiting first
+    // would manufacture a false silent-stream result.
+    let callback_deadline = Instant::now() + first_callback_timeout;
+    let mut first_callback_at = None;
+    loop {
+        let now = Instant::now();
+        let callbacks = stats.lock().map(|stats| stats.callbacks).unwrap_or(0);
+        if callbacks > 0 {
+            let first = first_callback_at.get_or_insert(now);
+            if now.duration_since(*first) >= Duration::from_millis(2200) {
+                break;
+            }
+        } else if now >= callback_deadline {
+            return Err(SystemAudioRuntimeFailure {
+                kind: SystemAudioFailureKind::SilentStream,
+                message: "The input stream produced no callbacks while the verification signal was active before the timeout"
+                    .to_string(),
+            });
+        }
+        if let Some(failure) = runtime_failure
+            .lock()
+            .ok()
+            .and_then(|failure| failure.clone())
+        {
+            return Err(failure);
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    }
+
+    tone_active.store(false, Ordering::Relaxed);
+    drop(output_stream);
+    std::thread::sleep(Duration::from_millis(150));
+
+    if let Some(failure) = runtime_failure
+        .lock()
+        .ok()
+        .and_then(|failure| failure.clone())
+    {
+        return Err(failure);
+    }
+
+    drop(input_stream);
+    let stats = Arc::try_unwrap(stats)
+        .ok()
+        .and_then(|stats| stats.into_inner().ok())
+        .unwrap_or_default();
+    let detected = tone_amplitude(
+        &stats.tone_samples,
+        selection.stream_config.sample_rate,
+        SYSTEM_AUDIO_TEST_TONE_HZ,
+    );
+    let minimum_non_silent = (selection.stream_config.sample_rate / 5) as u64;
+    if !verification_signal_passes(
+        verification_method,
+        stats.non_silent_frames,
+        minimum_non_silent,
+        detected,
+    ) {
+        let expected = match verification_method {
+            SystemAudioVerificationMethod::KnownTone => format!(
+                "the {} Hz verification tone was not detected",
+                SYSTEM_AUDIO_TEST_TONE_HZ
+            ),
+            SystemAudioVerificationMethod::ExternalAudio => {
+                "the route did not carry enough external audio".to_string()
+            }
+        };
+        return Err(SystemAudioRuntimeFailure {
+            kind: SystemAudioFailureKind::SilentStream,
+            message: format!(
+                "Callbacks arrived, but {expected} (non-silent frames: {}, amplitude: {:.6})",
+                stats.non_silent_frames, detected
+            ),
+        });
+    }
+
+    Ok(CandidateTestOutcome {
+        stats,
+        tone_amplitude: detected,
+        verification_method,
+    })
+}
+
+impl SystemAudioCapture {
+    pub fn test_system_audio(&self, first_callback_timeout: Duration) -> SystemAudioTestResult {
+        let gate = native_tap_gate();
+        let mut candidates = match self.find_loopback_candidates() {
+            Ok(candidates) if !candidates.is_empty() => candidates,
+            _ => {
+                return SystemAudioTestResult {
+                    capability: self.capability(),
+                    callbacks: 0,
+                    captured_frames: 0,
+                    non_silent_frames: 0,
+                    peak: 0.0,
+                    expected_tone_hz: SYSTEM_AUDIO_TEST_TONE_HZ,
+                    detected_tone_amplitude: 0.0,
+                    verification_method: None,
+                };
+            }
+        };
+
+        candidates.sort_by_key(|candidate| {
+            capture_candidate_priority(
+                candidate.backend,
+                is_verified_system_audio_route(&candidate.route_key),
+                failure_for_system_audio_route(&candidate.route_key).is_some(),
+            )
+        });
+
+        let mut last_result = None;
+        for selection in candidates {
+            let metadata = selection.metadata();
+            let callback_timeout = if metadata.backend == SystemAudioBackend::CoreAudioProcessTap {
+                first_callback_timeout
+            } else {
+                Duration::from_secs(5)
+            };
+            match run_system_audio_candidate_test(&selection, callback_timeout) {
+                Ok(outcome) => {
+                    mark_system_audio_route_verified(&metadata.route_key);
+                    return SystemAudioTestResult {
+                        capability: SystemAudioCapability {
+                            backend: metadata.backend,
+                            native_os_supported: gate.api_supported,
+                            native_os_enabled: gate.enabled,
+                            route_device: Some(metadata.display_name),
+                            route_id: Some(metadata.route_key),
+                            native_sample_rate: Some(metadata.sample_rate),
+                            native_channels: Some(metadata.channels),
+                            readiness: SystemAudioReadiness::Ready,
+                            ready: true,
+                            reason: None,
+                            actionable_reason: None,
+                        },
+                        callbacks: outcome.stats.callbacks,
+                        captured_frames: outcome.stats.captured_frames,
+                        non_silent_frames: outcome.stats.non_silent_frames,
+                        peak: outcome.stats.peak,
+                        expected_tone_hz: SYSTEM_AUDIO_TEST_TONE_HZ,
+                        detected_tone_amplitude: outcome.tone_amplitude,
+                        verification_method: Some(outcome.verification_method),
+                    };
+                }
+                Err(failure) => {
+                    clear_system_audio_route_verification(&metadata.route_key);
+                    let actionable = actionable_reason_for_failure(
+                        failure.kind,
+                        metadata.backend,
+                        &failure.message,
+                    );
+                    record_system_audio_route_failure(
+                        &metadata.route_key,
+                        failure.kind,
+                        &actionable,
+                    );
+                    tracing::warn!(
+                        "System audio verification failed for '{}' via {:?}: {:?}: {}",
+                        metadata.display_name,
+                        metadata.backend,
+                        failure.kind,
+                        failure.message
+                    );
+                    last_result = Some(SystemAudioTestResult {
+                        capability: SystemAudioCapability {
+                            backend: metadata.backend,
+                            native_os_supported: gate.api_supported,
+                            native_os_enabled: gate.enabled,
+                            route_device: Some(metadata.display_name),
+                            route_id: Some(metadata.route_key),
+                            native_sample_rate: Some(metadata.sample_rate),
+                            native_channels: Some(metadata.channels),
+                            readiness: SystemAudioReadiness::Unverified,
+                            ready: false,
+                            reason: Some(failure.kind),
+                            actionable_reason: Some(actionable),
+                        },
+                        callbacks: 0,
+                        captured_frames: 0,
+                        non_silent_frames: 0,
+                        peak: 0.0,
+                        expected_tone_hz: SYSTEM_AUDIO_TEST_TONE_HZ,
+                        detected_tone_amplitude: 0.0,
+                        verification_method: None,
+                    });
+                }
+            }
+        }
+
+        last_result.unwrap_or_else(|| SystemAudioTestResult {
+            capability: self.capability(),
+            callbacks: 0,
+            captured_frames: 0,
+            non_silent_frames: 0,
+            peak: 0.0,
+            expected_tone_hz: SYSTEM_AUDIO_TEST_TONE_HZ,
+            detected_tone_amplitude: 0.0,
+            verification_method: None,
+        })
     }
 }
 
@@ -673,21 +1925,13 @@ impl MixedAudioCapture {
         self.dropped_system_samples.store(0, Ordering::SeqCst);
         self.dropped_mixed_chunks.store(0, Ordering::SeqCst);
 
-        let (mixed_sender, mixed_receiver) = crossbeam::channel::bounded::<Vec<f32>>(100);
-        let (mic_sender, mic_receiver) = if capture_mic {
-            let (sender, receiver) = crossbeam::channel::bounded::<Vec<f32>>(100);
-            (Some(sender), Some(receiver))
-        } else {
-            (None, None)
-        };
-        let (system_sender, system_receiver) = if capture_system {
-            let (sender, receiver) = crossbeam::channel::bounded::<Vec<f32>>(100);
-            (Some(sender), Some(receiver))
-        } else {
-            (None, None)
-        };
+        let (aligned_sender, aligned_receiver) =
+            crossbeam::channel::bounded::<MixedAudioChunk>(100);
         let (ready_tx, ready_rx) =
             crossbeam::channel::bounded::<std::result::Result<u32, String>>(1);
+        let (activation_tx, activation_rx) = crossbeam::channel::bounded::<()>(1);
+        let (activated_tx, activated_rx) =
+            crossbeam::channel::bounded::<std::result::Result<(), String>>(1);
         let is_capturing = Arc::clone(&self.is_capturing);
         let dropped_mic_samples = Arc::clone(&self.dropped_mic_samples);
         let dropped_system_samples = Arc::clone(&self.dropped_system_samples);
@@ -707,6 +1951,10 @@ impl MixedAudioCapture {
             let mut system_sample_rate = None;
             let mut mic_channels = 1usize;
             let mut system_channels = 1usize;
+            let system_runtime_failure: SystemAudioRuntimeFailureSlot = Arc::new(Mutex::new(None));
+            let mut system_route: Option<SystemAudioRouteMetadata> = None;
+            let mut system_route_health: Option<SystemStreamHealthSlot> = None;
+            let mut system_route_has_alternative = false;
 
             if capture_mic {
                 let preferred_mic_device = mic_device.clone();
@@ -731,7 +1979,7 @@ impl MixedAudioCapture {
                             let dropped_samples = Arc::clone(&dropped_mic_samples);
 
                             device.build_input_stream(
-                                stream_config.clone(),
+                                stream_config,
                                 move |data: &[$sample_type], _: &cpal::InputCallbackInfo| {
                                     if is_capturing.load(Ordering::SeqCst) {
                                         push_normalized_samples(
@@ -748,7 +1996,7 @@ impl MixedAudioCapture {
                         }};
                     }
 
-                    let stream = match sample_format {
+                    match sample_format {
                         cpal::SampleFormat::I8 => build_mic_stream!(i8),
                         cpal::SampleFormat::I16 => build_mic_stream!(i16),
                         cpal::SampleFormat::I24 => build_mic_stream!(cpal::I24),
@@ -762,10 +2010,8 @@ impl MixedAudioCapture {
                         cpal::SampleFormat::F32 => build_mic_stream!(f32),
                         cpal::SampleFormat::F64 => build_mic_stream!(f64),
                         _ => Err(cpal::ErrorKind::UnsupportedConfig.into()),
-                    }?;
-
-                    stream.play()?;
-                    Ok(stream)
+                    }
+                    .map_err(Into::into)
                 };
 
                 match setup() {
@@ -781,67 +2027,39 @@ impl MixedAudioCapture {
             }
 
             if capture_system {
-                let mut setup = || -> Result<cpal::Stream> {
-                    let sys_capture = SystemAudioCapture::new();
-                    let loopback = sys_capture
-                        .find_loopback_device()?
-                        .ok_or_else(|| anyhow::anyhow!("Loopback device not found"))?;
-
-                    let config = loopback.stream_config;
-                    let sample_format = loopback.sample_format;
-                    system_sample_rate = Some(config.sample_rate);
-                    // BlackHole and friends are 2ch by default; without this the
-                    // system queue fills at twice the mono frame rate.
-                    let num_channels = config.channels as usize;
-                    system_channels = num_channels;
-                    macro_rules! build_system_stream {
-                        ($sample_type:ty) => {{
-                            let system_buffer = Arc::clone(&system_buffer);
-                            let is_capturing = Arc::clone(&is_capturing);
-                            let dropped_samples = Arc::clone(&dropped_system_samples);
-
-                            loopback.device.build_input_stream(
-                                config.clone(),
-                                move |data: &[$sample_type], _: &cpal::InputCallbackInfo| {
-                                    if is_capturing.load(Ordering::SeqCst) {
-                                        push_normalized_samples(
-                                            data,
-                                            num_channels,
-                                            &system_buffer,
-                                            &dropped_samples,
-                                        );
-                                    }
-                                },
-                                |err| tracing::error!("System stream error: {}", err),
-                                None,
-                            )
-                        }};
+                let candidates = SystemAudioCapture::new()
+                    .find_loopback_candidates()
+                    .unwrap_or_else(|error| {
+                        tracing::warn!("Failed to enumerate system-audio candidates: {error}");
+                        Vec::new()
+                    });
+                match start_system_stream(
+                    candidates,
+                    Arc::clone(&system_buffer),
+                    Arc::clone(&is_capturing),
+                    Arc::clone(&dropped_system_samples),
+                    Arc::clone(&system_runtime_failure),
+                    false,
+                ) {
+                    Ok((stream, metadata, health, has_alternative)) => {
+                        system_sample_rate = Some(metadata.sample_rate);
+                        system_channels = metadata.channels as usize;
+                        system_route = Some(metadata);
+                        system_route_health = Some(health);
+                        system_route_has_alternative = has_alternative;
+                        _sys_stream = Some(stream);
                     }
-
-                    let stream = match sample_format {
-                        cpal::SampleFormat::I8 => build_system_stream!(i8),
-                        cpal::SampleFormat::I16 => build_system_stream!(i16),
-                        cpal::SampleFormat::I24 => build_system_stream!(cpal::I24),
-                        cpal::SampleFormat::I32 => build_system_stream!(i32),
-                        cpal::SampleFormat::I64 => build_system_stream!(i64),
-                        cpal::SampleFormat::U8 => build_system_stream!(u8),
-                        cpal::SampleFormat::U16 => build_system_stream!(u16),
-                        cpal::SampleFormat::U24 => build_system_stream!(cpal::U24),
-                        cpal::SampleFormat::U32 => build_system_stream!(u32),
-                        cpal::SampleFormat::U64 => build_system_stream!(u64),
-                        cpal::SampleFormat::F32 => build_system_stream!(f32),
-                        cpal::SampleFormat::F64 => build_system_stream!(f64),
-                        _ => Err(cpal::ErrorKind::UnsupportedConfig.into()),
-                    }?;
-
-                    stream.play()?;
-                    Ok(stream)
-                };
-
-                match setup() {
-                    Ok(stream) => _sys_stream = Some(stream),
-                    Err(e) => {
-                        let message = format!("Failed to start system stream: {}", e);
+                    Err(failure) => {
+                        let message = format!(
+                            "Failed to start system stream ({:?}): {}. {}",
+                            failure.kind,
+                            failure.message,
+                            actionable_reason_for_failure(
+                                failure.kind,
+                                SystemAudioBackend::None,
+                                &failure.message,
+                            )
+                        );
                         tracing::error!("{}", message);
                         let _ = ready_tx.send(Err(message));
                         is_capturing.store(false, Ordering::SeqCst);
@@ -893,6 +2111,31 @@ impl MixedAudioCapture {
 
             let _ = ready_tx.send(Ok(target_sample_rate));
 
+            if activation_rx.recv_timeout(Duration::from_secs(5)).is_err() {
+                let _ = activated_tx.send(Err(
+                    "Timed out waiting for durable recording writers".to_string()
+                ));
+                is_capturing.store(false, Ordering::SeqCst);
+                return;
+            }
+            if let Some(stream) = _mic_stream.as_ref() {
+                if let Err(error) = stream.play() {
+                    let message = format!("Failed to activate microphone stream: {error}");
+                    let _ = activated_tx.send(Err(message));
+                    is_capturing.store(false, Ordering::SeqCst);
+                    return;
+                }
+            }
+            if let Some(stream) = _sys_stream.as_ref() {
+                if let Err(error) = stream.play() {
+                    let message = format!("Failed to activate system audio stream: {error}");
+                    let _ = activated_tx.send(Err(message));
+                    is_capturing.store(false, Ordering::SeqCst);
+                    return;
+                }
+            }
+            let _ = activated_tx.send(Ok(()));
+
             let mut mixer = FrameMixer::new(capture_mic, capture_system);
             let mut mic_watchdog = capture_mic
                 .then(|| SourceSilenceWatchdog::new(target_sample_rate, &MIC_SILENCE_PROFILE));
@@ -906,9 +2149,210 @@ impl MixedAudioCapture {
             let mut converted_scratch = Vec::with_capacity(RESAMPLE_CHUNK_FRAMES);
             let mut last_mic_data = Instant::now();
             let mut last_system_data = Instant::now();
+            let mut system_route_started_at = Instant::now();
+            let mut system_startup_health_checked = false;
+            let mut next_system_route_retry = Instant::now();
+            let mut system_rebuild_pending = false;
+            let mut pending_system_failure: Option<SystemAudioRuntimeFailure> = None;
+            let mut system_failure_reported = false;
+            let mut system_rebuild_receiver: Option<
+                crossbeam::channel::Receiver<
+                    std::result::Result<SystemStreamStart, SystemAudioRuntimeFailure>,
+                >,
+            > = None;
 
             while is_capturing.load(Ordering::SeqCst) {
                 let now = Instant::now();
+
+                if capture_system {
+                    if let Some(receiver) = system_rebuild_receiver.as_ref() {
+                        match receiver.try_recv() {
+                            Ok(Ok((stream, metadata, health, has_alternative))) => {
+                                system_rebuild_receiver = None;
+                                match source_resampler_for(
+                                    Some(metadata.sample_rate),
+                                    target_sample_rate,
+                                ) {
+                                    Ok(resampler) => {
+                                        system_resampler = resampler;
+                                        _sys_stream = Some(stream);
+                                        system_route = Some(metadata.clone());
+                                        system_route_health = Some(health);
+                                        system_route_has_alternative = has_alternative;
+                                        system_route_started_at = now;
+                                        system_startup_health_checked = false;
+                                        last_system_data = now;
+                                        system_rebuild_pending = false;
+                                        pending_system_failure = None;
+                                        system_failure_reported = false;
+                                        emit_system_audio_status(
+                                            events.as_ref(),
+                                            SystemAudioFailureKind::RouteChanged,
+                                            true,
+                                            Some(&metadata),
+                                            "System audio capture rebuilt on the current route",
+                                        );
+                                    }
+                                    Err(error) => {
+                                        drop(stream);
+                                        while system_buffer.pop().is_some() {}
+                                        let failure = SystemAudioRuntimeFailure {
+                                            kind: SystemAudioFailureKind::StreamConstruction,
+                                            message: format!(
+                                                "Failed to prepare replacement route resampler: {error}"
+                                            ),
+                                        };
+                                        invalidate_system_audio_route(&metadata, &failure);
+                                        pending_system_failure = Some(failure);
+                                        next_system_route_retry = now + SYSTEM_ROUTE_RETRY_INTERVAL;
+                                        system_failure_reported = false;
+                                    }
+                                }
+                            }
+                            Ok(Err(failure)) => {
+                                system_rebuild_receiver = None;
+                                pending_system_failure = Some(failure);
+                                next_system_route_retry = now + SYSTEM_ROUTE_RETRY_INTERVAL;
+                                system_failure_reported = false;
+                            }
+                            Err(crossbeam::channel::TryRecvError::Disconnected) => {
+                                system_rebuild_receiver = None;
+                                pending_system_failure = Some(SystemAudioRuntimeFailure {
+                                    kind: SystemAudioFailureKind::StreamConstruction,
+                                    message:
+                                        "Replacement system-audio route worker stopped unexpectedly"
+                                            .to_string(),
+                                });
+                                next_system_route_retry = now + SYSTEM_ROUTE_RETRY_INTERVAL;
+                                system_failure_reported = false;
+                            }
+                            Err(crossbeam::channel::TryRecvError::Empty) => {}
+                        }
+                    }
+
+                    if let Some(failure) = system_runtime_failure
+                        .lock()
+                        .ok()
+                        .and_then(|mut failure| failure.take())
+                    {
+                        if let Some(route) = system_route.as_ref() {
+                            invalidate_system_audio_route(route, &failure);
+                        }
+                        pending_system_failure = Some(failure);
+                        system_rebuild_pending = true;
+                        system_failure_reported = false;
+                    }
+
+                    if !system_rebuild_pending
+                        && !system_startup_health_checked
+                        && now.duration_since(system_route_started_at) >= SYSTEM_ROUTE_STARTUP_GRACE
+                    {
+                        if let (Some(route), Some(health)) =
+                            (system_route.as_ref(), system_route_health.as_ref())
+                        {
+                            let callbacks = health.callbacks.load(Ordering::Relaxed);
+                            let captured_frames = health.captured_frames.load(Ordering::Relaxed);
+                            let non_silent_frames =
+                                health.non_silent_frames.load(Ordering::Relaxed);
+                            if startup_route_is_unhealthy(
+                                route.backend,
+                                system_route_has_alternative,
+                                callbacks,
+                                captured_frames,
+                                non_silent_frames,
+                            ) {
+                                let failure = SystemAudioRuntimeFailure {
+                                    kind: SystemAudioFailureKind::SilentStream,
+                                    message: format!(
+                                        "Route '{}' did not prove live after startup (callbacks={}, frames={}, non-silent={})",
+                                        route.display_name,
+                                        callbacks,
+                                        captured_frames,
+                                        non_silent_frames
+                                    ),
+                                };
+                                invalidate_system_audio_route(route, &failure);
+                                pending_system_failure = Some(failure);
+                                system_rebuild_pending = true;
+                                system_failure_reported = false;
+                            } else {
+                                system_startup_health_checked = true;
+                            }
+                        }
+                    }
+
+                    if system_rebuild_receiver.is_none()
+                        && system_route_retry_due(
+                            system_rebuild_pending,
+                            now,
+                            next_system_route_retry,
+                        )
+                    {
+                        if !system_failure_reported {
+                            if let Some(failure) = pending_system_failure.as_ref() {
+                                emit_system_audio_status(
+                                    events.as_ref(),
+                                    failure.kind,
+                                    false,
+                                    system_route.as_ref(),
+                                    &failure.message,
+                                );
+                            }
+                            system_failure_reported = true;
+                        }
+
+                        // Stop the old callback before the replacement can start,
+                        // then consume every sample it queued and flush the old
+                        // rate converter's partial tail. Old and new routes never
+                        // write into the shared queue at the same time.
+                        drop(_sys_stream.take());
+                        source_scratch.clear();
+                        while let Some(sample) = system_buffer.pop() {
+                            source_scratch.push(sample);
+                        }
+                        if !source_scratch.is_empty() {
+                            last_system_data = now;
+                        }
+                        if let Some(resampler) = system_resampler.as_mut() {
+                            converted_scratch.clear();
+                            resampler.push(&source_scratch, &mut converted_scratch);
+                            resampler.finish(&mut converted_scratch);
+                            mixer.push_system(&converted_scratch);
+                        } else {
+                            mixer.push_system(&source_scratch);
+                        }
+                        system_resampler = None;
+                        system_route_health = None;
+
+                        let (result_tx, result_rx) = crossbeam::channel::bounded(1);
+                        let system_buffer = Arc::clone(&system_buffer);
+                        let is_capturing = Arc::clone(&is_capturing);
+                        let dropped_system_samples = Arc::clone(&dropped_system_samples);
+                        let system_runtime_failure = Arc::clone(&system_runtime_failure);
+                        std::thread::spawn(move || {
+                            let result = SystemAudioCapture::new()
+                                .find_loopback_candidates()
+                                .map_err(|error| SystemAudioRuntimeFailure {
+                                    kind: SystemAudioFailureKind::StreamConstruction,
+                                    message: format!(
+                                        "Failed to enumerate replacement system-audio routes: {error}"
+                                    ),
+                                })
+                                .and_then(|candidates| {
+                                    start_system_stream(
+                                        candidates,
+                                        system_buffer,
+                                        is_capturing,
+                                        dropped_system_samples,
+                                        system_runtime_failure,
+                                        true,
+                                    )
+                                });
+                            let _ = result_tx.send(result);
+                        });
+                        system_rebuild_receiver = Some(result_rx);
+                    }
+                }
 
                 if capture_mic {
                     source_scratch.clear();
@@ -928,7 +2372,7 @@ impl MixedAudioCapture {
                     }
                 }
 
-                if capture_system {
+                if capture_system && system_rebuild_receiver.is_none() {
                     source_scratch.clear();
                     while let Some(sample) = system_buffer.pop() {
                         source_scratch.push(sample);
@@ -995,34 +2439,21 @@ impl MixedAudioCapture {
                 }
 
                 if output.len() >= 512 {
-                    let chunk = std::mem::take(&mut output);
+                    let mixed = std::mem::take(&mut output);
                     if let Some(queue) = streaming_queue.as_ref() {
-                        if queue.push(chunk.clone()).is_err() {
+                        if queue.push(mixed.clone()).is_err() {
                             let _ = queue.pop();
-                            let _ = queue.push(chunk.clone());
+                            let _ = queue.push(mixed.clone());
                         }
                     }
-                    if !forward_chunk(&mixed_sender, chunk, &dropped_mixed_chunks) {
+                    let chunk = MixedAudioChunk {
+                        mixed,
+                        mic: capture_mic.then(|| std::mem::take(&mut mic_output)),
+                        system: capture_system.then(|| std::mem::take(&mut system_output)),
+                    };
+                    if !forward_aligned_chunk(&aligned_sender, chunk, &dropped_mixed_chunks) {
                         is_capturing.store(false, Ordering::SeqCst);
                         break;
-                    }
-
-                    if let (Some(sender), false) = (mic_sender.as_ref(), mic_output.is_empty()) {
-                        let mic_chunk = std::mem::take(&mut mic_output);
-                        if !forward_chunk(sender, mic_chunk, &dropped_mixed_chunks) {
-                            is_capturing.store(false, Ordering::SeqCst);
-                            break;
-                        }
-                    }
-
-                    if let (Some(sender), false) =
-                        (system_sender.as_ref(), system_output.is_empty())
-                    {
-                        let system_chunk = std::mem::take(&mut system_output);
-                        if !forward_chunk(sender, system_chunk, &dropped_mixed_chunks) {
-                            is_capturing.store(false, Ordering::SeqCst);
-                            break;
-                        }
                     }
                 }
             }
@@ -1041,15 +2472,12 @@ impl MixedAudioCapture {
                         let _ = queue.push(output.clone());
                     }
                 }
-                let _ = forward_chunk(&mixed_sender, output, &dropped_mixed_chunks);
-            }
-
-            if let (Some(sender), false) = (mic_sender.as_ref(), mic_output.is_empty()) {
-                let _ = sender.try_send(mic_output);
-            }
-
-            if let (Some(sender), false) = (system_sender.as_ref(), system_output.is_empty()) {
-                let _ = sender.try_send(system_output);
+                let chunk = MixedAudioChunk {
+                    mixed: output,
+                    mic: capture_mic.then_some(mic_output),
+                    system: capture_system.then_some(system_output),
+                };
+                let _ = forward_aligned_chunk(&aligned_sender, chunk, &dropped_mixed_chunks);
             }
 
             let counts = mixer.counts();
@@ -1084,10 +2512,10 @@ impl MixedAudioCapture {
                     sample_rate
                 );
                 Ok(MixedAudioCaptureStart {
-                    mixed_receiver,
-                    mic_receiver,
-                    system_receiver,
+                    aligned_receiver,
                     sample_rate,
+                    activation_tx,
+                    activated_rx,
                 })
             }
             Ok(Err(message)) => {
@@ -1181,6 +2609,33 @@ fn source_resampler_for(
     }
 }
 
+fn emit_system_audio_status(
+    events: Option<&MixedCaptureEvents>,
+    reason: SystemAudioFailureKind,
+    recovered: bool,
+    route: Option<&SystemAudioRouteMetadata>,
+    detail: &str,
+) {
+    tracing::warn!("System audio status ({reason:?}, recovered={recovered}): {detail}");
+    let Some(events) = events else {
+        return;
+    };
+    events.handle.emit(
+        "meeting-audio-source-warning",
+        serde_json::json!({
+            "recordingId": &events.recording_id,
+            "source": "system",
+            "reason": reason,
+            "recovered": recovered,
+            "detail": detail,
+            "backend": route.map(|route| route.backend),
+            "routeDevice": route.map(|route| route.display_name.as_str()),
+            "nativeSampleRate": route.map(|route| route.sample_rate),
+            "nativeChannels": route.map(|route| route.channels),
+        }),
+    );
+}
+
 /// Emit the per-source dropout warning over the same JSON-RPC event channel the
 /// rest of the meeting lifecycle uses. Always logged, so headless/CLI runs still
 /// leave a trace when no event channel was supplied.
@@ -1233,6 +2688,25 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "plays a brief audible tone and requires live macOS system-audio permission"]
+    fn live_system_audio_known_tone_smoke() {
+        let result = SystemAudioCapture::new().test_system_audio(Duration::from_secs(15));
+        assert!(
+            result.capability.ready,
+            "system audio was not verified: {:?}",
+            result.capability
+        );
+        assert_eq!(
+            result.capability.backend,
+            SystemAudioBackend::CoreAudioProcessTap,
+            "supported output-only default output should verify natively before fallback"
+        );
+        assert!(result.callbacks > 0);
+        assert!(result.non_silent_frames > 0);
+        assert!(result.detected_tone_amplitude >= 0.005);
+    }
+
+    #[test]
     fn loopback_identifier_matching_covers_supported_virtual_devices() {
         for identifier in [
             "BlackHole2ch_UID",
@@ -1246,6 +2720,265 @@ mod tests {
         }
         assert!(!is_loopback_identifier("MacBook Pro Microphone"));
         assert!(!is_loopback_identifier("Virtual Microphone"));
+    }
+
+    #[test]
+    fn native_tap_version_gate_separates_api_and_release_floors() {
+        let macos_13 = native_tap_gate_for_version(MacOsVersion::parse("13.6.9"));
+        assert!(!macos_13.api_supported);
+        assert!(!macos_13.enabled);
+        assert!(macos_13.reason.unwrap().contains("macOS 14.2"));
+
+        let macos_14_2 = native_tap_gate_for_version(MacOsVersion::parse("14.2"));
+        assert!(macos_14_2.api_supported);
+        assert!(!macos_14_2.enabled);
+        assert!(macos_14_2.reason.unwrap().contains("14.2–14.6"));
+
+        let macos_14_6 = native_tap_gate_for_version(MacOsVersion::parse("14.6.1"));
+        assert!(macos_14_6.api_supported);
+        assert!(!macos_14_6.enabled);
+
+        let macos_14_7 = native_tap_gate_for_version(MacOsVersion::parse("14.7"));
+        assert!(macos_14_7.api_supported);
+        assert!(macos_14_7.enabled);
+        assert!(macos_14_7.reason.is_none());
+    }
+
+    #[test]
+    fn native_selection_rejects_duplex_outputs() {
+        assert!(native_output_is_eligible(false, true));
+        assert!(!native_output_is_eligible(true, true));
+        assert!(!native_output_is_eligible(false, false));
+    }
+
+    #[test]
+    fn verified_routes_win_and_unverified_native_taps_precede_virtual_routes() {
+        assert!(
+            capture_candidate_priority(SystemAudioBackend::VirtualLoopback, true, false)
+                < capture_candidate_priority(SystemAudioBackend::CoreAudioProcessTap, false, false)
+        );
+        assert!(
+            capture_candidate_priority(SystemAudioBackend::CoreAudioProcessTap, false, false)
+                < capture_candidate_priority(SystemAudioBackend::VirtualLoopback, false, false)
+        );
+    }
+
+    #[test]
+    fn only_native_process_taps_may_inject_a_known_tone() {
+        assert!(backend_allows_internal_verification_tone(
+            SystemAudioBackend::CoreAudioProcessTap
+        ));
+        assert!(!backend_allows_internal_verification_tone(
+            SystemAudioBackend::VirtualLoopback
+        ));
+        assert!(
+            unverified_system_audio_action(SystemAudioBackend::VirtualLoopback)
+                .contains("external audio")
+        );
+    }
+
+    #[test]
+    fn failed_routes_are_deprioritized_behind_healthy_alternatives() {
+        assert!(
+            capture_candidate_priority(SystemAudioBackend::CoreAudioProcessTap, false, false)
+                < capture_candidate_priority(SystemAudioBackend::VirtualLoopback, false, true)
+        );
+        assert_eq!(
+            capture_candidate_priority(SystemAudioBackend::CoreAudioProcessTap, true, true),
+            3
+        );
+    }
+
+    #[test]
+    fn startup_health_rejects_dead_or_silent_routes_when_fallback_exists() {
+        assert!(startup_route_is_unhealthy(
+            SystemAudioBackend::VirtualLoopback,
+            false,
+            0,
+            0,
+            0
+        ));
+        assert!(startup_route_is_unhealthy(
+            SystemAudioBackend::CoreAudioProcessTap,
+            true,
+            10,
+            4_800,
+            0
+        ));
+        assert!(!startup_route_is_unhealthy(
+            SystemAudioBackend::CoreAudioProcessTap,
+            false,
+            10,
+            4_800,
+            0
+        ));
+        assert!(startup_route_is_unhealthy(
+            SystemAudioBackend::VirtualLoopback,
+            true,
+            10,
+            4_800,
+            0
+        ));
+    }
+
+    #[test]
+    fn active_route_failure_clears_cached_readiness() {
+        let route_key = "test-active-route-invalidation";
+        mark_system_audio_route_verified(route_key);
+        let metadata = SystemAudioRouteMetadata {
+            backend: SystemAudioBackend::CoreAudioProcessTap,
+            display_name: "Test Output".to_string(),
+            route_key: route_key.to_string(),
+            sample_rate: 48_000,
+            channels: 2,
+        };
+        let failure = SystemAudioRuntimeFailure {
+            kind: SystemAudioFailureKind::PermissionDenied,
+            message: "permission revoked".to_string(),
+        };
+
+        invalidate_system_audio_route(&metadata, &failure);
+
+        assert!(!is_verified_system_audio_route(route_key));
+        assert_eq!(
+            failure_for_system_audio_route(route_key).map(|(kind, _)| kind),
+            Some(SystemAudioFailureKind::PermissionDenied)
+        );
+    }
+
+    #[test]
+    fn aligned_writer_backpressure_drops_the_whole_bundle() {
+        let (sender, receiver) = crossbeam::channel::bounded(1);
+        let dropped = AtomicU64::new(0);
+        assert!(forward_aligned_chunk(
+            &sender,
+            MixedAudioChunk {
+                mixed: vec![1.0; 4],
+                mic: Some(vec![0.5; 4]),
+                system: Some(vec![0.25; 4]),
+            },
+            &dropped,
+        ));
+        assert!(forward_aligned_chunk(
+            &sender,
+            MixedAudioChunk {
+                mixed: vec![2.0; 4],
+                mic: Some(vec![1.0; 4]),
+                system: Some(vec![0.5; 4]),
+            },
+            &dropped,
+        ));
+
+        assert_eq!(dropped.load(Ordering::Relaxed), 1);
+        let retained = receiver.try_recv().expect("one aligned bundle");
+        assert_eq!(retained.mixed.len(), 4);
+        assert_eq!(retained.mic.as_ref().map(Vec::len), Some(4));
+        assert_eq!(retained.system.as_ref().map(Vec::len), Some(4));
+        assert!(receiver.try_recv().is_err());
+    }
+
+    #[test]
+    fn route_retry_waits_for_the_backoff_and_stops_after_recovery() {
+        let now = Instant::now();
+        assert!(!system_route_retry_due(false, now, now));
+        assert!(!system_route_retry_due(
+            true,
+            now,
+            now + SYSTEM_ROUTE_RETRY_INTERVAL
+        ));
+        assert!(system_route_retry_due(true, now, now));
+    }
+
+    #[test]
+    fn structured_capability_serializes_backend_format_and_unverified_state() {
+        let capability = SystemAudioCapability {
+            backend: SystemAudioBackend::CoreAudioProcessTap,
+            native_os_supported: true,
+            native_os_enabled: true,
+            route_device: Some("MacBook Pro Speakers".to_string()),
+            route_id: Some("coreaudio:BuiltInSpeakerDevice".to_string()),
+            native_sample_rate: Some(48_000),
+            native_channels: Some(2),
+            readiness: SystemAudioReadiness::Unverified,
+            ready: false,
+            reason: None,
+            actionable_reason: Some("Run Test system audio.".to_string()),
+        };
+        let value = serde_json::to_value(capability).unwrap();
+        assert_eq!(value["backend"], "core_audio_process_tap");
+        assert_eq!(value["nativeSampleRate"], 48_000);
+        assert_eq!(value["nativeChannels"], 2);
+        assert_eq!(value["readiness"], "unverified");
+        assert_eq!(value["ready"], false);
+    }
+
+    #[test]
+    fn cpal_errors_keep_permission_route_and_unsupported_kinds_distinct() {
+        let permission: cpal::ErrorKind = cpal::ErrorKind::PermissionDenied;
+        let permission: cpal::Error = permission.into();
+        assert_eq!(
+            classify_system_audio_error(&permission, SystemAudioBackend::CoreAudioProcessTap),
+            SystemAudioFailureKind::PermissionDenied
+        );
+
+        let route: cpal::ErrorKind = cpal::ErrorKind::StreamInvalidated;
+        let route: cpal::Error = route.into();
+        assert_eq!(
+            classify_system_audio_error(&route, SystemAudioBackend::CoreAudioProcessTap),
+            SystemAudioFailureKind::RouteChanged
+        );
+
+        let unsupported: cpal::ErrorKind = cpal::ErrorKind::UnsupportedOperation;
+        let unsupported: cpal::Error = unsupported.into();
+        assert_eq!(
+            classify_system_audio_error(&unsupported, SystemAudioBackend::CoreAudioProcessTap),
+            SystemAudioFailureKind::UnsupportedOs
+        );
+        assert_eq!(
+            classify_system_audio_error(&unsupported, SystemAudioBackend::VirtualLoopback),
+            SystemAudioFailureKind::StreamConstruction
+        );
+    }
+
+    #[test]
+    fn known_tone_detector_rejects_silence_and_detects_997_hz() {
+        let sample_rate = 48_000;
+        let silence = vec![0.0; sample_rate as usize];
+        assert_eq!(
+            tone_amplitude(&silence, sample_rate, SYSTEM_AUDIO_TEST_TONE_HZ),
+            0.0
+        );
+
+        let tone = interleaved_tone(
+            sample_rate,
+            1,
+            SYSTEM_AUDIO_TEST_TONE_HZ,
+            sample_rate as usize * 2,
+        );
+        let detected = tone_amplitude(&tone, sample_rate, SYSTEM_AUDIO_TEST_TONE_HZ);
+        assert!(detected > 0.45, "detected amplitude {detected}");
+    }
+
+    #[test]
+    fn external_audio_routes_verify_without_an_injected_tone() {
+        assert!(verification_signal_passes(
+            SystemAudioVerificationMethod::ExternalAudio,
+            9_600,
+            9_600,
+            0.0,
+        ));
+        assert!(!verification_signal_passes(
+            SystemAudioVerificationMethod::KnownTone,
+            9_600,
+            9_600,
+            0.0,
+        ));
+        assert!(!verification_signal_passes(
+            SystemAudioVerificationMethod::ExternalAudio,
+            9_599,
+            9_600,
+            0.0,
+        ));
     }
 
     #[test]
@@ -1295,6 +3028,18 @@ mod tests {
             resolve_target_sample_rate(None, Some(48_000)).unwrap(),
             48_000
         );
+    }
+
+    #[test]
+    fn output_native_system_rate_is_not_resampled_before_the_stable_mix_rate() {
+        let target = resolve_target_sample_rate(Some(16_000), Some(48_000)).unwrap();
+        assert_eq!(target, 48_000);
+        assert!(source_resampler_for(Some(48_000), target)
+            .unwrap()
+            .is_none());
+        assert!(source_resampler_for(Some(16_000), target)
+            .unwrap()
+            .is_some());
     }
 
     /// 44.1 kHz mic + 48 kHz loopback is the default macOS pairing, and it must
@@ -1587,6 +3332,21 @@ mod tests {
         let steady = &mono[mono.len() / 4..];
         let peak = steady.iter().fold(0.0f32, |acc, s| acc.max(s.abs()));
         assert!((peak - 0.5).abs() < 0.05, "peak amplitude {peak}");
+    }
+
+    #[test]
+    fn resampler_flushes_a_partial_tail_at_route_cutover() {
+        let mut resampler = SourceResampler::new(44_100, 48_000).expect("resampler");
+        let partial = vec![0.25; 200];
+        let mut output = Vec::new();
+
+        resampler.push(&partial, &mut output);
+        assert!(output.is_empty(), "partial input should remain pending");
+        resampler.finish(&mut output);
+
+        let expected = (partial.len() as f64 * 48_000.0 / 44_100.0).ceil() as usize;
+        assert_eq!(output.len(), expected);
+        assert!(resampler.pending.is_empty());
     }
 
     #[test]

@@ -143,7 +143,7 @@ impl AsrProviderType {
             AsrProviderType::WhisperCandle => "Whisper Candle",
             AsrProviderType::DistilWhisper => "Distil Whisper",
             AsrProviderType::MlxAudio => "MLX Audio",
-            AsrProviderType::MacosAppleSpeech => "Apple Native Speech",
+            AsrProviderType::MacosAppleSpeech => "Apple Speech (On-Device)",
             AsrProviderType::Moonshine => "UsefulSensors Moonshine",
             AsrProviderType::Voxtral => "Mistral Voxtral Mini",
             AsrProviderType::WindowsSdkDictation => "Windows Native Speech",
@@ -245,7 +245,7 @@ impl AsrProviderType {
             AsrProviderType::MlxAudio => mlx_audio::model_options(),
             AsrProviderType::MacosAppleSpeech => vec![ModelOption {
                 id: "macos_apple_speech".to_string(),
-                label: "Managed by macOS".to_string(),
+                label: "Apple Speech · on-device dictation".to_string(),
             }],
             AsrProviderType::Moonshine => vec![
                 ModelOption {

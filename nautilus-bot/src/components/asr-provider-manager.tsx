@@ -29,7 +29,7 @@ import {
   getPermissionDiagnostics,
   openPermissionSettings,
   openInstalledPlainsongApp,
-  requestDictationPermissions,
+  requestAppleSpeechPermission,
   repairCursorInsertPermissions,
   type PermissionDiagnostics,
 } from "@/lib/backend/settings";
@@ -396,6 +396,7 @@ export function AsrProviderManager({ className }: AsrProviderManagerProps) {
       selectedModelId: provider.selectedModelId,
       modelOptions: provider.modelOptions,
       downloadStatus: provider.downloadStatus,
+      platformReadiness: provider.platformReadiness,
     }));
 
   const loadInventory = async () => {
@@ -576,6 +577,25 @@ export function AsrProviderManager({ className }: AsrProviderManagerProps) {
 
   const inventoryReadiness = (provider: SelectionProvider) => {
     const status = normalizeDownloadStatus(provider.downloadStatus);
+    if (provider.providerType === "macos_apple_speech" && provider.platformReadiness) {
+      return provider.platformReadiness.ready
+        ? { tone: "success" as const, label: "Ready on-device" }
+        : {
+            tone: "warning" as const,
+            label:
+              provider.platformReadiness.status === "authorization_not_determined"
+                ? "Permission required"
+                : provider.platformReadiness.status === "authorization_denied"
+                  ? "Permission denied"
+                  : provider.platformReadiness.status === "unsupported_locale"
+                    ? "Locale unsupported"
+                    : provider.platformReadiness.status === "helper_missing"
+                      ? "Helper missing"
+                      : provider.platformReadiness.status === "on_device_unavailable"
+                        ? "On-device unavailable"
+                        : "Needs setup",
+          };
+    }
     if (!provider.inferenceEnabled) {
       return {
         tone: "muted" as const,
@@ -960,7 +980,7 @@ export function AsrProviderManager({ className }: AsrProviderManagerProps) {
               onClick={async () => {
                 setPermissionActionBusy(true);
                 try {
-                  await requestDictationPermissions();
+                  await requestAppleSpeechPermission();
                   await refreshPermissionDiagnostics();
                   await loadProviders();
                   await loadSelectionSettings();
@@ -999,6 +1019,10 @@ export function AsrProviderManager({ className }: AsrProviderManagerProps) {
     );
   };
 
+  const appleSpeechReadiness =
+    selectionProviderByType("macos_apple_speech")?.platformReadiness ??
+    providerByType("macos_apple_speech")?.platformReadiness ??
+    null;
   const selectedRouteUsesAppleNative = useSharedAsrSelection
     ? defaultProvider === "macos_apple_speech"
     : dictationProvider === "macos_apple_speech" ||
@@ -1022,6 +1046,13 @@ export function AsrProviderManager({ className }: AsrProviderManagerProps) {
       return;
     }
 
+    if (
+      appleSpeechReadiness &&
+      appleSpeechReadiness.status !== "authorization_not_determined"
+    ) {
+      return;
+    }
+
     const promptKey = useSharedAsrSelection
       ? "shared"
       : `${dictationProvider}:${meetingProvider}`;
@@ -1033,7 +1064,7 @@ export function AsrProviderManager({ className }: AsrProviderManagerProps) {
     setPermissionActionBusy(true);
     void (async () => {
       try {
-        await requestDictationPermissions();
+        await requestAppleSpeechPermission();
         await refreshAppleNativeReadiness();
       } catch (error) {
         console.error(
@@ -1045,6 +1076,7 @@ export function AsrProviderManager({ className }: AsrProviderManagerProps) {
       }
     })();
   }, [
+    appleSpeechReadiness,
     defaultProvider,
     dictationProvider,
     meetingProvider,
@@ -1129,6 +1161,10 @@ export function AsrProviderManager({ className }: AsrProviderManagerProps) {
     lane: WorkflowLane,
     route: AsrRouteCatalogEntry,
   ) => {
+    if (!route.selectable) {
+      return;
+    }
+
     const updates =
       lane === "shared"
         ? {
@@ -1146,10 +1182,6 @@ export function AsrProviderManager({ className }: AsrProviderManagerProps) {
             };
 
     await persistSelectionSettings(updates);
-
-    if (route.providerType === "macos_apple_speech") {
-      await requestDictationPermissions();
-    }
 
     const updatedInventory = await loadInventory();
     await loadSelectionSettings(updatedInventory);
@@ -1175,6 +1207,11 @@ export function AsrProviderManager({ className }: AsrProviderManagerProps) {
   };
 
   const handleRouteAction = async (route: AsrRouteCatalogEntry) => {
+    if (route.action === "request_permission") {
+      await requestAppleSpeechPermission();
+      await refreshAppleNativeReadiness();
+      return;
+    }
     if (route.action === "download") {
       await handleDownload(route.providerType);
       return;
@@ -1265,13 +1302,16 @@ export function AsrProviderManager({ className }: AsrProviderManagerProps) {
                         ? "default"
                         : "outline"
                     }
+                    disabled={!recommendedRoute.selectable}
                     onClick={() =>
                       void applyLaneRouteSelection(lane, recommendedRoute)
                     }
                   >
-                    {activeRoute?.routeId === recommendedRoute.routeId
-                      ? "Selected"
-                      : "Use recommended"}
+                    {!recommendedRoute.selectable
+                      ? "Setup required"
+                      : activeRoute?.routeId === recommendedRoute.routeId
+                        ? "Selected"
+                        : "Use recommended"}
                   </Button>
                   {recommendedRoute.action && recommendedRoute.actionLabel ? (
                     <Button
@@ -1407,7 +1447,7 @@ export function AsrProviderManager({ className }: AsrProviderManagerProps) {
       ready: permissionDiagnostics?.speechRecognitionReady ?? false,
       action: "Open Speech Settings",
       onClick: () => void openPermissionSettings("speech"),
-      detail: "Required for Apple Native transcription.",
+      detail: "Required for Apple Speech transcription.",
     },
     {
       key: "accessibility",
@@ -1417,7 +1457,7 @@ export function AsrProviderManager({ className }: AsrProviderManagerProps) {
       onClick: () => void openPermissionSettings("accessibility"),
       detail: appleNativeUsedForDictation
         ? "Preferred direct path so Plainsong can insert text directly into the focused field."
-        : "Needed when you later use Apple Native for dictation insertion.",
+        : "Needed when you later use Apple Speech for dictation insertion.",
     },
     {
       key: "keyboardEvents",
@@ -1427,13 +1467,13 @@ export function AsrProviderManager({ className }: AsrProviderManagerProps) {
       onClick: () => void openPermissionSettings("accessibility"),
       detail: appleNativeUsedForDictation
         ? "Fallback native Cmd+V path when direct Accessibility insertion cannot be used."
-        : "Optional fallback for native Cmd+V insertion when you later use Apple Native dictation.",
+        : "Optional fallback for native Cmd+V insertion when you later use Apple Speech dictation.",
     },
   ];
 
-  const appleNativeReadyForMeetings =
+  const appleNativeTranscriptionReady =
+    appleSpeechReadiness?.ready ??
     !!permissionDiagnostics?.speechRecognitionReady;
-  const appleNativeTranscriptionReady = appleNativeReadyForMeetings;
   const appleNativeAccessibilityReady =
     !!permissionDiagnostics?.accessibilityReady;
   const appleNativeAccessibilityTrusted =
@@ -1491,13 +1531,9 @@ export function AsrProviderManager({ className }: AsrProviderManagerProps) {
       return null;
     }
 
-    const routeSummary = useSharedAsrSelection
-      ? "Apple Native is selected for both dictation and meetings."
-      : appleNativeUsedForDictation && meetingProvider === "macos_apple_speech"
-        ? "Apple Native is selected for dictation and meetings."
-        : appleNativeUsedForDictation
-          ? "Apple Native is selected for dictation."
-          : "Apple Native is selected for meetings.";
+    const routeSummary = appleNativeUsedForDictation
+      ? "Apple Speech is selected for on-device dictation. It is not used for meetings."
+      : "Apple Speech is dictation-only. Choose it in the Dictation lane after readiness is confirmed.";
 
     const overallReady = appleNativeTranscriptionReady;
 
@@ -1511,14 +1547,26 @@ export function AsrProviderManager({ className }: AsrProviderManagerProps) {
             >
               {overallReady ? "Ready for transcription" : "Setup required"}
             </Badge>
-            <span className="text-sm font-medium">Apple Native setup</span>
+            <span className="text-sm font-medium">Apple Speech setup</span>
           </div>
           <p className="text-sm text-muted-foreground">
-            {routeSummary} Plainsong will request speech access automatically.
-            For cursor insertion, Plainsong first tries direct Accessibility text
-            insertion and can fall back to a native Cmd+V keyboard path when
-            macOS allows it for this app copy.
+            {routeSummary} Audio is sent only to Apple's on-device recognizer;
+            Apple server fallback is disabled. For cursor insertion, Plainsong
+            first tries direct Accessibility text insertion and can fall back to
+            a native Cmd+V keyboard path when macOS allows it for this app copy.
           </p>
+          {appleSpeechReadiness ? (
+            <div className="rounded-md border bg-background/60 p-3">
+              <p className="text-sm font-medium">
+                {appleSpeechReadiness.message}
+              </p>
+              {appleSpeechReadiness.setupAction ? (
+                <p className="mt-1 text-xs text-muted-foreground">
+                  {appleSpeechReadiness.setupAction}
+                </p>
+              ) : null}
+            </div>
+          ) : null}
         </div>
 
         {appleNativeTranscriptionReady &&
@@ -1526,7 +1574,7 @@ export function AsrProviderManager({ className }: AsrProviderManagerProps) {
         !appleNativeCursorInsertionReady ? (
           <div className="rounded-md border border-rust/30 bg-rust/10 p-3">
             <p className="text-sm font-medium text-rust">
-              Apple Native transcription is ready.
+              Apple Speech transcription is ready.
             </p>
             <p className="text-xs text-rust/90">
               Cursor insertion is not ready yet. Enable Plainsong in Privacy &
@@ -1543,7 +1591,7 @@ export function AsrProviderManager({ className }: AsrProviderManagerProps) {
         preferredInsertStrategy === "simulated_typing" ? (
           <div className="rounded-md border border-rust/30 bg-rust/10 p-3">
             <p className="text-sm font-medium text-rust">
-              Apple Native transcription is ready.
+              Apple Speech transcription is ready.
             </p>
             <p className="text-xs text-rust/90">
               Native Cmd+V fallback is available. Direct Accessibility text
@@ -1620,7 +1668,7 @@ export function AsrProviderManager({ className }: AsrProviderManagerProps) {
             onClick={async () => {
               setPermissionActionBusy(true);
               try {
-                await requestDictationPermissions();
+                await requestAppleSpeechPermission();
                 await refreshAppleNativeReadiness();
               } catch (error) {
                 console.error(
@@ -1709,7 +1757,7 @@ export function AsrProviderManager({ className }: AsrProviderManagerProps) {
               <span className="text-sm font-medium">Cursor Insert</span>
             </div>
             <p className="text-sm text-muted-foreground">
-              This repair path is shared by Whisper, Apple Native, and every
+              This repair path is shared by Whisper, Apple Speech, and every
               other dictation provider on macOS.
             </p>
           </div>

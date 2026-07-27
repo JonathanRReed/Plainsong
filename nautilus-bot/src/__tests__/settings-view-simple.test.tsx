@@ -46,12 +46,9 @@ const baseSettings = {
     vaultSalt: null,
   },
   shortcuts: {
-    toggleRecording: "Ctrl+Shift+R",
     toggleDictation: "Ctrl+Shift+Space",
     toggleDictationAlternates: [],
     openWindow: "Ctrl+Shift+N",
-    quickExport: "Ctrl+Shift+E",
-    focusSearch: "Ctrl+Shift+F",
   },
   theme: "system" as const,
 };
@@ -114,7 +111,7 @@ vi.mock("@/lib/backend", () => ({
     meetingSelectedDeviceId: null,
   })),
   getBackupConfig: vi.fn(async () => ({
-    enabled: true,
+    enabled: false,
     intervalHours: 24,
     maxBackups: 7,
     backupDir: null,
@@ -131,6 +128,19 @@ vi.mock("@/lib/backend", () => ({
     automationReady: true,
     notes: [],
   })),
+  getSystemAudioCapability: vi.fn(async () => ({
+    backend: "core_audio_process_tap",
+    nativeOsSupported: true,
+    nativeOsEnabled: true,
+    routeDevice: "MacBook Pro Speakers",
+    routeId: "coreaudio:BuiltInSpeakerDevice",
+    nativeSampleRate: 48000,
+    nativeChannels: 2,
+    readiness: "unverified",
+    ready: false,
+    reason: null,
+    actionableReason: "Run Test system audio.",
+  })),
   repairCursorInsertPermissions: vi.fn(async () => ({
     microphoneReady: true,
     speechRecognitionReady: true,
@@ -139,6 +149,7 @@ vi.mock("@/lib/backend", () => ({
     notes: [],
   })),
   getBackupSetupReport: vi.fn(),
+  getAsrProviders: vi.fn(async () => []),
   getDictationShortcutCapabilityStatus: vi.fn(async () => ({
     nativeShortcutAvailable: false,
   })),
@@ -189,6 +200,7 @@ vi.mock("@/lib/backend", () => ({
   downloadSileroVadModel: vi.fn(async () => {}),
   migrateToEncryptedStorage: vi.fn(),
   openPermissionSettings: vi.fn(),
+  refreshAsrRuntimeProbes: vi.fn(async () => {}),
   requestDictationPermissions: vi.fn(async () => ({
     microphoneReady: true,
     speechRecognitionReady: true,
@@ -201,6 +213,28 @@ vi.mock("@/lib/backend", () => ({
   setProviderSecret: vi.fn(async () => { }),
   restoreBackupDefault: vi.fn(async () => {}),
   syncBackupToCloud: vi.fn(),
+  testSystemAudioCapture: vi.fn(async () => ({
+    capability: {
+      backend: "core_audio_process_tap",
+      nativeOsSupported: true,
+      nativeOsEnabled: true,
+      routeDevice: "MacBook Pro Speakers",
+      routeId: "coreaudio:BuiltInSpeakerDevice",
+      nativeSampleRate: 48000,
+      nativeChannels: 2,
+      readiness: "ready",
+      ready: true,
+      reason: null,
+      actionableReason: null,
+    },
+    callbacks: 100,
+    capturedFrames: 48000,
+    nonSilentFrames: 45000,
+    peak: 0.04,
+    expectedToneHz: 997,
+    detectedToneAmplitude: 0.04,
+    verificationMethod: "known_tone",
+  })),
   unlockVault: vi.fn(),
   verifyBackupCloudConnection: vi.fn(),
 }));
@@ -235,6 +269,26 @@ describe("SettingsView performance behavior", () => {
     await waitFor(() => {
       expect(backend.listBackups).toHaveBeenCalledTimes(1);
     });
+  });
+
+  it("invalidates ASR runtime probes before refreshing permission diagnostics", async () => {
+    const backend = await import("@/lib/backend");
+    render(<ToastProvider><SettingsView /></ToastProvider>);
+
+    await screen.findByText("Tune transcription, AI, privacy, storage, and app behavior");
+    fireEvent.click(screen.getByText("Privacy & Security"));
+    await screen.findByText("Permission diagnostics");
+    vi.clearAllMocks();
+    fireEvent.click(screen.getByRole("button", { name: "Refresh" }));
+
+    await waitFor(() => {
+      expect(backend.refreshAsrRuntimeProbes).toHaveBeenCalledTimes(1);
+      expect(backend.getPermissionDiagnostics).toHaveBeenCalledTimes(1);
+      expect(backend.getAsrProviders).toHaveBeenCalledTimes(1);
+    });
+    expect(
+      vi.mocked(backend.refreshAsrRuntimeProbes).mock.invocationCallOrder[0],
+    ).toBeLessThan(vi.mocked(backend.getAsrProviders).mock.invocationCallOrder[0]);
   });
 
   it("renders settings before backup config finishes loading", async () => {
@@ -324,6 +378,29 @@ describe("SettingsView performance behavior", () => {
     expect(screen.queryByText("Voice activity detection")).not.toBeInTheDocument();
   });
 
+  it("marks system audio ready only after the explicit tone test returns verified callbacks", async () => {
+    const backend = await import("@/lib/backend");
+    render(<ToastProvider><SettingsView /></ToastProvider>);
+
+    await screen.findByText("Tune transcription, AI, privacy, storage, and app behavior");
+    fireEvent.click(screen.getByText("Transcription"));
+    expect(
+      await screen.findByText(/has not verified macOS permission and non-silent callbacks/i),
+    ).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", { name: /test system audio/i }));
+
+    await waitFor(() => {
+      expect(backend.testSystemAudioCapture).toHaveBeenCalledTimes(1);
+    });
+    expect(
+      await screen.findByText(/verified 997 hz system audio/i),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByText(/verified via Core Audio process tap/i),
+    ).toBeInTheDocument();
+  });
+
   it("reports how many recordings are encrypted rather than claiming all of them are", async () => {
     const backend = await import("@/lib/backend");
     // A vault was migrated at some point, but capture writes plain WAVs, so
@@ -355,6 +432,10 @@ describe("SettingsView performance behavior", () => {
     ).toBeInTheDocument();
     // The bare claim the bytes on disk contradict.
     expect(screen.queryByText("Encrypted")).not.toBeInTheDocument();
+    expect(screen.getByText("Apple Speech privacy boundary")).toBeInTheDocument();
+    expect(
+      screen.getByText(/disables apple's server fallback/i),
+    ).toBeInTheDocument();
   });
 
   it("keeps the encrypted-recordings counts across an unrelated settings save", async () => {
@@ -608,19 +689,23 @@ describe("SettingsView performance behavior", () => {
     expect(energyOption.className).toContain("border-rust/40");
   });
 
-  it("shows personal profile sync actions and can restore the latest profile snapshot", async () => {
+  it("presents settings-only snapshots and can restore the latest one", async () => {
     const backend = await import("@/lib/backend");
     render(<ToastProvider><SettingsView /></ToastProvider>);
 
     await screen.findByText("Tune transcription, AI, privacy, storage, and app behavior");
     fireEvent.click(screen.getByText("Storage"));
-    await screen.findByText("Personal Profile Sync");
+    await screen.findByText("Settings snapshots");
 
-    expect(screen.getByText("Latest profile snapshot")).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: "Create Profile Snapshot" })).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: "Sync Latest Profile Snapshot" })).toBeInTheDocument();
+    expect(screen.getByText("Latest settings snapshot")).toBeInTheDocument();
+    expect(
+      screen.getByText(/recordings and transcripts stay out of it/i),
+    ).toBeInTheDocument();
+    expect(screen.queryByText(/dictionary entries|snippets/i)).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Create Settings Snapshot" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Sync Latest Settings Snapshot" })).toBeInTheDocument();
 
-    const restoreButton = screen.getByRole("button", { name: "Restore Latest Profile Snapshot" });
+    const restoreButton = screen.getByRole("button", { name: "Restore Latest Settings Snapshot" });
     await waitFor(() => {
       expect(restoreButton).toBeEnabled();
     });
@@ -629,6 +714,27 @@ describe("SettingsView performance behavior", () => {
     await waitFor(() => {
       expect(backend.restoreBackupDefault).toHaveBeenCalledWith("settings_20260314_120000");
     });
+  });
+
+  it("states that backups and cloud uploads are manual without promising scheduling", async () => {
+    render(<ToastProvider><SettingsView /></ToastProvider>);
+
+    await screen.findByText("Tune transcription, AI, privacy, storage, and app behavior");
+    fireEvent.click(screen.getByText("Storage"));
+    await screen.findByText("Manual backups");
+
+    expect(
+      screen.getByText(/created only when you press its create button/i),
+    ).toBeInTheDocument();
+    expect(screen.queryByText(/schedule|scheduled/i)).not.toBeInTheDocument();
+    expect(screen.getByText("Manual cloud sync")).toBeInTheDocument();
+    expect(
+      screen.getByText(/nothing uploads or downloads automatically/i),
+    ).toBeInTheDocument();
+    expect(screen.queryByText("Automatic backups")).not.toBeInTheDocument();
+    expect(screen.queryByText("Backup interval (hours)")).not.toBeInTheDocument();
+    expect(screen.getByText("Manual backup retention")).toBeInTheDocument();
+    expect(screen.queryByText(/dictation flows/i)).not.toBeInTheDocument();
   });
 
   it("ships only the Plainsong palette — no alternate color-scheme picker", async () => {
@@ -1028,12 +1134,9 @@ describe("SettingsView performance behavior", () => {
     vi.mocked(backend.getSettings).mockResolvedValue({
       ...baseSettings,
       shortcuts: {
-        toggleRecording: "Ctrl+Shift+R",
         toggleDictation: "Ctrl+Shift+Space",
         toggleDictationAlternates: [],
         openWindow: "Ctrl+Shift+N",
-        quickExport: "Ctrl+Shift+E",
-        focusSearch: "Ctrl+Shift+F",
       },
     } as unknown as Awaited<ReturnType<typeof backend.getSettings>>);
 

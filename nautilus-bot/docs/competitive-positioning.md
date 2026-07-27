@@ -1,128 +1,136 @@
-# Competitive positioning & roadmap
+# Competitive positioning and roadmap
 
-This is the strategic north star, derived from a mid-2026 competitive scan and a
-deliberately adversarial critique. It exists to keep the project focused on the
-*one* thing that wins and to stop it sprawling into ten things a small team
-can't ship. Read it before adding scope.
+Last reviewed: 2026-07-27
 
-## The honest landscape (mid-2026)
+This document keeps product claims tied to current, first-party evidence. It is
+not launch copy and it should not be used as a substitute for release QA.
 
-- **"Free + local + open-source dictation" is now commodity.** Handy (MIT,
-  Tauri/Rust, ~23.6k stars, truly cross-platform, biweekly releases) owns that
-  identity. Being another free local dictation app is not a reason to exist.
-- **Our headline differentiators are partly already taken.** superwhisper
-  (closed/paid) already ships on-device streaming *and* meeting capture. Muesli
-  makes the same dictation+meetings+local bet on Apple Silicon at ~0.13s — and
-  is already Developer-ID signed and notarized, which we are not.
-- **The cloud incumbents are foils, not direct threats.** Wispr Flow (~$2B
-  raise, cloud-only, $15/mo, dictation-only) is wounded on trust (screenshot
-  scandal, SOC-2 audit fraud, 2.7/5 Trustpilot, frequent outages). Granola
-  (~$1.5B, meeting-notes leader) is cloud/closed/account-gated and took an
-  April-2026 "private by default" backlash. Neither competes on our axis; both
-  set category expectations and outspend us on marketing.
+## Current market facts
 
-## The two existential truths the strategy must respect
+- Free, local, open-source dictation is a crowded category. Handy is MIT,
+  cross-platform, and added streaming model support in
+  [v0.9.0](https://github.com/cjpais/Handy/releases/tag/v0.9.0) on 2026-07-01.
+- Local dictation plus local meeting capture is not unique. Muesli describes
+  local dictation, simultaneous microphone and system-audio meeting capture,
+  live transcripts, diarization, and local model support in its
+  [public MIT repository](https://github.com/pHequals7/muesli).
+- Superwhisper offers both voice typing and device-side
+  [meeting transcription](https://superwhisper.com/meeting-transcription),
+  including optional speaker separation.
+- Granola is a useful contrast for privacy positioning, but claims must remain
+  precise. Granola's own [security page](https://www.granola.ai/security) says
+  it uses transcription providers such as Deepgram and AssemblyAI and AI
+  providers such as OpenAI and Anthropic.
+- Anarlog remains open source, MIT-licensed, and maintained. Its
+  [repository](https://github.com/fastrepl/anarlog) says the team is primarily
+  building Char while keeping Anarlog available as the local-first meeting
+  notetaker.
 
-1. **The moat cannot be the engine or the latency number.** Apple's
-   SpeechAnalyzer (free, in macOS 26, streaming + diarization as a system API,
-   ~55% faster than MacWhisper) commoditizes on-device transcription over time.
-   Our measured ~593ms p50 (~74× real-time on 44s of real speech,
-   `scripts/fixtures/real-speech-44s.wav`) is real but it's *batch* latency on
-   `base.en` — the wrong metric to lead with for the "feel" segment. The durable moat is the
-   **product** (the workflow, the combo done well) and the **trust posture**,
-   not the millisecond count.
-2. **There is no revenue model, and that reads as eventual abandonment.** The
-   cautionary tale is in our own analysis: anarlog's founders pivoted to a
-   closed-source product. "MIT, free, small team, no funding" is exactly the
-   profile users distrust. We need a credible answer (see Sustainability) before
-   the "durable, didn't-pivot" positioning is honest.
+Do not use star counts, fundraising estimates, review scores, legal allegations,
+or competitor incident claims in public copy unless they are re-verified from a
+primary source during the release review.
 
-## The one thing that matters in the next 90 days
+## Plainsong's defensible position
 
-**Ship streaming partial transcription on Apple Silicon — words appearing as you
-speak — signed and notarized, and launch on *that alone*.**
+Plainsong should compete on a complete local workflow, not on an exclusivity
+claim that the market has already invalidated:
 
-Not the three-in-one. The launch line is:
-> "The open-source dictation that finally feels instant — words appear as you
-> speak, fully on your Mac. Audit the source."
+1. Local dictation and bot-free meeting capture in one auditable MIT codebase.
+2. No account required for local use.
+3. Local transcription by default, with remote processing disabled until the
+   user explicitly enables and configures it.
+4. User-controlled storage, retention, export, backup, and reset behavior.
+5. Provider choice for optional analysis, including local Ollama.
+6. Honest release evidence for signing, notarization, permissions, insertion,
+   capture, recovery, and update behavior.
 
-Why this and nothing else:
-- It's our real exposure (batch dictation "reads a generation behind").
-- The *open* field hasn't nailed it (superwhisper is the only one shipping it,
-  and it's closed/paid).
-- It's demoable in a 10-second GIF.
-- It directly beats Handy's loudest complaints (2-5s post-stop lag, clipped
-  first words, AirPods latency).
+The product loses credibility if any one of those claims is represented by a
+placeholder control, a source-only test, or an unverified package.
 
-Bundle it with the two cheap credibility gates so launch doesn't look amateur:
-- **Developer-ID signing + notarization** ($99/yr + ~a day). Mandatory.
-- **Hardened privacy defaults + a one-page comparison** (see PRIVACY.md) — the
-  one claim our architecture genuinely backs today.
+## What the product should lead with
 
-These three (streaming + signing + privacy) are the entire near-term program.
+The near-term story is:
 
-## Deliberately deferred (do NOT do these before the streaming launch)
+> Private dictation and meeting transcription that stay under your control.
+> Use local models, keep your data on your Mac, and inspect the MIT source.
 
-- **Cross-meeting memory / MCP "company memory."** Today this is a recall button
-  with a test, not a product. Ship plain local full-text search over transcripts
-  first and prove people use it before building an agent-facing API. Chasing
-  Granola's enterprise wedge as a no-name OSS app is a trap.
-- **AI cleanup / per-app context modes.** This competes head-on with Wispr's
-  single most-praised feature, built over years. We'd ship a worse version and
-  invite the comparison we lose. Defer until users say raw transcription quality
-  is what's blocking them — and then do it on-device by default.
-- **Tauri migration.** Real and worth doing — for cross-platform reach and to
-  not look heavier than Handy — but it is not a user-facing emergency (we have no
-  users to churn on idle RAM yet). Sequence it *after* streaming. Justify it
-  honestly (cross-platform + credibility), not as a vanity RAM benchmark.
-- **The three-in-one headline.** Meetings and memory are the *roadmap*, not the
-  launch story, until they are demonstrably good. A visibly weak meeting tab makes
-  the whole product read as "dictation app with a broken feature," which is worse
-  than shipping dictation alone.
+Streaming alone is not a moat now that Handy and Muesli publicly ship streaming
+paths. It remains valuable product behavior, but it should be evaluated against
+reliability, model size, language coverage, power use, and final transcript
+quality before it becomes a launch claim.
 
-## Where we genuinely win (lean on these)
+The strongest demo is an end-to-end workflow:
 
-- **Privacy by architecture, verifiable in MIT source, with stricter defaults
-  than even local rivals** (no dictation audio persisted; keys in Keychain not
-  plaintext JSON like superwhisper; zero telemetry; no network except opt-in
-  model download / BYOK cloud). This separates us from Wispr/Granola/superwhisper
-  — though note it's a *tie* with Handy, so it is not enough alone.
-- **Free forever, MIT, no account, no tier** — against $15/mo cloud tools.
-- **The combo as a roadmap thesis** (dictation + bot-free meetings + local
-  memory) that Wispr and Granola structurally cannot each match — once it's built
-  and good.
+1. Hold the dictation shortcut and insert text into the intended app.
+2. Capture microphone and system audio without a meeting bot.
+3. Persist a transcript before optional diarization or analysis begins.
+4. Review, correct, search, export, back up, and delete the result locally.
+5. Show that remote processing is optional and visibly controlled.
 
-## Meetings: the narrow, honest near-term play
+## Release priorities
 
-Do not try to out-Granola Granola in 90 days. Be the local-first, no-bot,
-no-account option for people who refuse cloud meeting notes: bot-free local
-capture, unmistakable consent UX, trustworthy transcript review. Explicitly NOT
-"company memory." Diarization on 3+ person calls is hard (even Granola is dinged
-for it) — don't ship the meeting pillar until it's solid, or it undercuts the
-whole pitch.
+### 1. Package trust
 
-## Sustainability (the 2-year-survival answer)
+Ship a Developer ID signed, notarized, stapled, Gatekeeper-approved build.
+Verify every bundled native helper has only its intended entitlements. Test the
+updater from an installed prior version to the candidate version.
 
-To not be the abandonment story we position against, the core stays free, local,
-and MIT — and revenue, if any, comes from things that don't compromise that:
+### 2. Real workflow proof
 
-- **GitHub Sponsors / OpenCollective** for the project, surfaced honestly.
-- **An optional paid hosted-sync tier** (encrypted multi-device sync of
-  settings/snippets/history) that is strictly opt-in and keeps the core fully
-  functional offline — the VoiceInk/Epicenter pattern (open core + a paid
-  convenience layer), never a paywall on local features.
-- **Paid support / priority builds** for teams that want them.
+Run packaged-app checks for first launch, permissions, dictation insertion,
+meeting capture, transcript persistence, retention, backup and restore, reset,
+and error recovery. Source tests are necessary but do not prove these flows.
 
-The rule: nothing that makes the local-first experience worse to push a paid
-tier. The funding model is itself part of the trust pitch.
+### 3. Meeting correctness
 
-## Risks to watch
+The unlabelled transcript must become durable and visible before best-effort
+diarization. Uncovered speech must stay unattributed instead of being assigned
+to a named speaker. Native system-audio capture should be preferred where the
+supported macOS and CPAL path is proven, with virtual loopback retained only as
+an explicit compatibility fallback.
 
-- Arriving late as "another Handy clone" if we launch before streaming is real.
-- Handy's solo-maintainer velocity shipping streaming or basic meetings first.
-- Muesli out-executing on the same combo (it's already signed; we're not).
-- Apple shipping a polished system dictation UX that commoditizes the engine.
-- Mis-sequencing: trying to ship streaming + Tauri + memory + signing +
-  cross-platform at once burns the one first impression. Sequence ruthlessly.
-- Streaming-model licensing: prefer Parakeet v3 (CC-BY-4.0) as the safe default;
-  verify any Nemotron/Foundry-Local terms before bundling in an MIT app.
+### 4. Analysis integrity
+
+Summaries and action items must cover the full transcript, preserve provider and
+model provenance, distinguish provider policy blocks from transport failures,
+and expose degraded results instead of silently truncating or inventing
+coverage.
+
+### 5. Public claims
+
+Every claim in the README, website, screenshots, and release notes must match
+the packaged candidate. Do not claim notarization, native capture, real-time
+behavior, local-only processing, or cross-app insertion from source inspection
+alone.
+
+## Deliberately deferred
+
+- Cross-meeting agent memory and MCP access, until local search and transcript
+  review are proven useful and an explicit read-only boundary is designed.
+- A Tauri migration, until it is justified by a supported-platform plan and
+  measured product constraints.
+- Persistent speaker voiceprints, until opt-in storage, deletion, consent, and
+  model-specific thresholds are designed and tested.
+- A hosted sync business, until the local backup and bring-your-own-cloud
+  workflow is reliable and the privacy boundary is documented.
+- Broad automation or computer-control claims.
+
+Deferred work is not a broken promise. It becomes one only if the UI or public
+copy presents it as available.
+
+## Sustainability
+
+The local core should remain useful without an account, subscription, or hosted
+service. Plausible funding paths include GitHub Sponsors, paid support, and
+optional hosted convenience services that do not reduce the local feature set.
+
+Do not promise "free forever" or a hosted tier before there is an explicit
+maintainer commitment and an operating plan. The durable promise today is
+narrower: the repository is MIT-licensed, the local workflow is the product,
+and optional remote services must remain opt-in.
+
+## Review cadence
+
+Recheck competitor capabilities and links before each public release. Record the
+review date at the top of this file. Prefer product documentation, release
+notes, and source repositories over commentary or social posts.

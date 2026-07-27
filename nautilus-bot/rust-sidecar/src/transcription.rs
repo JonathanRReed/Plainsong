@@ -251,6 +251,8 @@ mod tests {
             status: "completed".to_string(),
             summary: None,
             action_items: None,
+            summary_provenance: None,
+            action_items_provenance: None,
             meeting_notes: None,
             meeting_template_id: None,
             meeting_capture_mode: None,

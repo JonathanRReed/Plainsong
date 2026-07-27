@@ -1,5 +1,7 @@
 use super::{
-    platform::{EngineDiagnostics, PlatformEngine},
+    platform::{
+        macos_speech::AppleSpeechReadiness, EngineDiagnostics, EngineProbe, PlatformEngine,
+    },
     AsrProvider, AsrProviderFactory, AsrProviderType, DownloadStatus, ModelInfo,
     TranscriptionResult,
 };
@@ -128,6 +130,35 @@ impl AsrManager {
             }
             _ => AsrProviderFactory::create_with_model(provider_type, selected_model_id),
         }
+    }
+
+    fn platform_readiness_for_provider(
+        provider_type: AsrProviderType,
+    ) -> Option<AppleSpeechReadiness> {
+        match provider_type {
+            AsrProviderType::MacosAppleSpeech => {
+                Some(crate::asr::platform::macos_speech::readiness())
+            }
+            _ => None,
+        }
+    }
+
+    async fn fresh_apple_speech_readiness() -> Result<AppleSpeechReadiness, String> {
+        tokio::task::spawn_blocking(crate::asr::platform::macos_speech::fresh_readiness)
+            .await
+            .map_err(|error| format!("Apple Speech readiness task failed: {error}"))
+    }
+
+    fn engine_probe(
+        engine: PlatformEngine,
+        apple_speech_readiness: Option<&AppleSpeechReadiness>,
+    ) -> EngineProbe {
+        if engine == PlatformEngine::MacosAppleSpeech {
+            if let Some(readiness) = apple_speech_readiness {
+                return crate::asr::platform::macos_speech::probe_from_readiness(readiness);
+            }
+        }
+        engine.probe()
     }
 
     pub async fn set_selected_model_id(&self, model_id: String) {
@@ -364,13 +395,24 @@ impl AsrManager {
     }
 
     pub async fn get_provider_inventory(&self) -> Result<Vec<ProviderInventory>, String> {
-        if let Some(cached) = self.provider_inventory_cache.read().await.clone() {
+        let apple_speech_readiness = Self::fresh_apple_speech_readiness().await?;
+        let cached_inventory = self.provider_inventory_cache.read().await.clone();
+        if let Some(mut cached) = cached_inventory {
+            if let Some(apple) = cached
+                .iter_mut()
+                .find(|provider| provider.provider_type == AsrProviderType::MacosAppleSpeech)
+            {
+                apple.is_available = apple_speech_readiness.ready;
+                apple.platform_readiness = Some(apple_speech_readiness);
+            }
+            *self.provider_inventory_cache.write().await = Some(cached.clone());
             return Ok(cached);
         }
 
         let provider_models = self.provider_model_map().await;
 
         let futures = AsrProviderType::all().into_iter().map(|provider_type| {
+            let apple_speech_readiness = apple_speech_readiness.clone();
             let selected_model = provider_models
                 .get(&provider_type)
                 .cloned()
@@ -380,15 +422,24 @@ impl AsrManager {
                 tokio::task::spawn_blocking(move || {
                     let provider =
                         Self::provider_with_model(provider_type, Some(selected_model.as_str()));
+                    let platform_readiness = match provider_type {
+                        AsrProviderType::MacosAppleSpeech => Some(apple_speech_readiness),
+                        _ => None,
+                    };
+                    let is_available = platform_readiness
+                        .as_ref()
+                        .map(|readiness| readiness.ready)
+                        .unwrap_or_else(|| provider.is_available());
                     ProviderInventory {
                         provider_type,
                         name: provider.name().to_string(),
                         description: provider.description().to_string(),
-                        is_available: provider.is_available(),
+                        is_available,
                         inference_enabled: Self::is_provider_transcription_enabled(provider_type),
                         selected_model_id: selected_model,
                         model_options: provider_type.model_options(),
                         download_status: provider.download_status(),
+                        platform_readiness,
                     }
                 })
                 .await
@@ -450,6 +501,11 @@ impl AsrManager {
         );
         let provider =
             Self::provider_with_model(effective.provider_type, Some(effective.model_id.as_str()));
+        let platform_readiness = Self::platform_readiness_for_provider(effective.provider_type);
+        let provider_available = platform_readiness
+            .as_ref()
+            .map(|readiness| readiness.ready)
+            .unwrap_or_else(|| provider.is_available());
         let last_error = self
             .last_runtime_errors
             .read()
@@ -460,8 +516,9 @@ impl AsrManager {
         let diagnostics = runtime_diagnostics_for_provider(
             effective.provider_type,
             effective.model_id.as_str(),
-            provider.is_available(),
+            provider_available,
             last_error.as_deref(),
+            platform_readiness.as_ref(),
         );
 
         RuntimeDiagnostics {
@@ -729,6 +786,14 @@ impl AsrManager {
         provider_type: AsrProviderType,
         optimization: &crate::settings::PlatformOptimizationSettings,
     ) -> Option<PlatformEngine> {
+        // Apple Speech is a first-class, dictation-only provider. It is not an
+        // optimization engine for Whisper (or any other provider), and routing it
+        // through the engine layer would make an unavailable Apple route silently
+        // fall back to the requested provider.
+        if provider_type == AsrProviderType::MacosAppleSpeech {
+            return None;
+        }
+
         let selected = match optimization.mode.as_str() {
             "manual" => optimization
                 .manual_engine_priority
@@ -741,11 +806,6 @@ impl AsrManager {
             _ => {
                 if !provider_type.is_local() {
                     return None;
-                }
-
-                #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
-                if optimization.macos.apple_native_enabled {
-                    return Some(PlatformEngine::MacosAppleSpeech);
                 }
 
                 #[cfg(all(target_os = "windows", target_arch = "x86_64"))]
@@ -872,6 +932,11 @@ impl AsrManager {
         audio_data: &[u8],
         selected_model: Option<&str>,
     ) -> Result<TranscriptionResult> {
+        if provider_type == AsrProviderType::MacosAppleSpeech {
+            return Err(anyhow::anyhow!(
+                "Apple Speech is dictation-only and cannot be routed through meeting transcription. Choose a meeting-capable provider."
+            ));
+        }
         let mlx_enabled = *self.meeting_mlx_enabled.read().await;
         self.transcribe_inner(
             provider_type,
@@ -885,7 +950,45 @@ impl AsrManager {
 
     /// Get info for all providers (Parallelized)
     pub async fn get_all_providers_info(&self) -> Result<Vec<ProviderInfo>, String> {
-        if let Some(cached) = self.provider_info_cache.read().await.clone() {
+        let apple_speech_readiness = Self::fresh_apple_speech_readiness().await?;
+        let cached_info = self.provider_info_cache.read().await.clone();
+        if let Some(mut cached) = cached_info {
+            if let Some(apple) = cached
+                .iter_mut()
+                .find(|provider| provider.provider_type == AsrProviderType::MacosAppleSpeech)
+            {
+                let optimization = self.platform_optimization().await;
+                let mlx_enabled = self
+                    .mlx_accelerated_providers()
+                    .await
+                    .contains(&AsrProviderType::MacosAppleSpeech);
+                let last_error = self
+                    .last_runtime_errors
+                    .read()
+                    .await
+                    .get(&AsrProviderType::MacosAppleSpeech)
+                    .cloned();
+                let diagnostics = runtime_diagnostics_for_provider(
+                    AsrProviderType::MacosAppleSpeech,
+                    apple.selected_model_id.as_str(),
+                    apple_speech_readiness.ready,
+                    last_error.as_deref(),
+                    Some(&apple_speech_readiness),
+                );
+                apple.is_available = apple_speech_readiness.ready;
+                apple.runtime_status = diagnostics.runtime_status;
+                apple.runtime_message = diagnostics.runtime_message;
+                apple.runtime_details = diagnostics.runtime_details;
+                apple.engine_diagnostics = Self::engine_diagnostics_for_provider(
+                    AsrProviderType::MacosAppleSpeech,
+                    apple.selected_model_id.as_str(),
+                    &optimization,
+                    mlx_enabled,
+                    Some(&apple_speech_readiness),
+                );
+                apple.platform_readiness = Some(apple_speech_readiness);
+            }
+            *self.provider_info_cache.write().await = Some(cached.clone());
             return Ok(cached);
         }
 
@@ -895,6 +998,7 @@ impl AsrManager {
         let mlx_accelerated_providers = self.mlx_accelerated_providers().await;
 
         let futures = AsrProviderType::all().into_iter().map(|provider_type| {
+            let apple_speech_readiness = apple_speech_readiness.clone();
             let selected_model = provider_models
                 .get(&provider_type)
                 .cloned()
@@ -918,12 +1022,20 @@ impl AsrManager {
                         effective.provider_type,
                         Some(effective.model_id.as_str()),
                     );
-                    let is_available = provider.is_available();
+                    let platform_readiness = match provider_type {
+                        AsrProviderType::MacosAppleSpeech => Some(apple_speech_readiness),
+                        _ => None,
+                    };
+                    let is_available = platform_readiness
+                        .as_ref()
+                        .map(|readiness| readiness.ready)
+                        .unwrap_or_else(|| provider.is_available());
                     let diagnostics = runtime_diagnostics_for_provider(
                         effective.provider_type,
                         effective.model_id.as_str(),
                         is_available,
                         last_error.as_deref(),
+                        platform_readiness.as_ref(),
                     );
                     ProviderInfo {
                         provider_type,
@@ -950,7 +1062,9 @@ impl AsrManager {
                             effective.model_id.as_str(),
                             &optimization,
                             mlx_enabled,
+                            platform_readiness.as_ref(),
                         ),
+                        platform_readiness,
                     }
                 })
                 .await
@@ -978,6 +1092,7 @@ impl AsrManager {
         selected_model_id: &str,
         optimization: &crate::settings::PlatformOptimizationSettings,
         mlx_enabled: bool,
+        apple_speech_readiness: Option<&AppleSpeechReadiness>,
     ) -> EngineDiagnostics {
         let mut diagnostics = EngineDiagnostics::default();
         let effective = Self::effective_provider_selection(
@@ -999,7 +1114,7 @@ impl AsrManager {
                 continue;
             }
             let enabled = Self::engine_enabled(engine, optimization);
-            let probe = engine.probe();
+            let probe = Self::engine_probe(engine, apple_speech_readiness);
             if probe.ready && Self::engine_runtime_executable(engine) {
                 diagnostics.available_engines.push(engine.id().to_string());
                 if engine != PlatformEngine::ProviderDefault && !enabled {
@@ -1022,7 +1137,7 @@ impl AsrManager {
                 *engine == PlatformEngine::ProviderDefault
                     || (Self::engine_enabled(*engine, optimization)
                         && engine.supports_provider(effective.provider_type)
-                        && engine.probe().ready
+                        && Self::engine_probe(*engine, apple_speech_readiness).ready
                         && Self::engine_runtime_executable(*engine))
             })
             .map(|engine| engine.id().to_string());
@@ -1114,6 +1229,8 @@ pub struct ProviderInfo {
     pub runtime_details: RuntimeDetails,
     #[serde(default)]
     pub engine_diagnostics: EngineDiagnostics,
+    #[serde(default)]
+    pub platform_readiness: Option<crate::asr::platform::macos_speech::AppleSpeechReadiness>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1127,6 +1244,8 @@ pub struct ProviderInventory {
     pub selected_model_id: String,
     pub model_options: Vec<super::ModelOption>,
     pub download_status: DownloadStatus,
+    #[serde(default)]
+    pub platform_readiness: Option<crate::asr::platform::macos_speech::AppleSpeechReadiness>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1196,6 +1315,7 @@ fn runtime_diagnostics_for_provider(
     selected_model_id: &str,
     provider_available: bool,
     last_error: Option<&str>,
+    apple_speech_readiness: Option<&AppleSpeechReadiness>,
 ) -> RuntimeDiagnosticsInternal {
     let models_root = dirs::data_dir()
         .unwrap_or_else(|| PathBuf::from("."))
@@ -1467,55 +1587,31 @@ fn runtime_diagnostics_for_provider(
             }
         }
         AsrProviderType::MacosAppleSpeech => {
-            let probe = PlatformEngine::MacosAppleSpeech.probe();
-            let authorization = crate::asr::platform::macos_speech::speech_authorization_status();
-            let (runtime_status, runtime_message) = match authorization {
-                crate::asr::platform::macos_speech::SpeechAuthorizationStatus::Authorized => (
-                    if provider_available && probe.ready {
-                        RuntimeStatus::Ready
-                    } else {
-                        RuntimeStatus::MissingRuntime
-                    },
-                    "Apple native speech runtime ready.".to_string(),
-                ),
-                crate::asr::platform::macos_speech::SpeechAuthorizationStatus::NotDetermined => (
-                    RuntimeStatus::Error,
-                    "Apple native speech permission has not been granted yet.".to_string(),
-                ),
-                crate::asr::platform::macos_speech::SpeechAuthorizationStatus::Denied => (
-                    RuntimeStatus::Error,
-                    "Apple native speech permission is denied. Enable Plainsong in System Settings > Privacy & Security > Speech Recognition.".to_string(),
-                ),
-                crate::asr::platform::macos_speech::SpeechAuthorizationStatus::Restricted => (
-                    RuntimeStatus::Error,
-                    "Apple native speech permission is restricted by system policy.".to_string(),
-                ),
-                crate::asr::platform::macos_speech::SpeechAuthorizationStatus::Unavailable => (
-                    RuntimeStatus::MissingRuntime,
-                    "Apple native speech is unavailable in this build.".to_string(),
-                ),
-                crate::asr::platform::macos_speech::SpeechAuthorizationStatus::Unknown(status) => (
-                    RuntimeStatus::Error,
-                    format!(
-                        "Apple native speech returned an unknown authorization status: {}.",
-                        status
-                    ),
-                ),
+            use crate::asr::platform::macos_speech::AppleSpeechReadinessStatus;
+
+            let readiness = apple_speech_readiness
+                .cloned()
+                .unwrap_or_else(crate::asr::platform::macos_speech::readiness);
+            let runtime_status = match readiness.status {
+                AppleSpeechReadinessStatus::Ready if provider_available => RuntimeStatus::Ready,
+                AppleSpeechReadinessStatus::UnsupportedPlatform
+                | AppleSpeechReadinessStatus::HelperMissing
+                | AppleSpeechReadinessStatus::RuntimeUnavailable => RuntimeStatus::MissingRuntime,
+                _ => RuntimeStatus::Error,
             };
 
             RuntimeDiagnosticsInternal {
                 runtime_status,
-                runtime_message: Some(runtime_message),
+                runtime_message: Some(readiness.message),
                 runtime_details: RuntimeDetails {
                     model_path: None,
                     python_path: None,
-                    missing_files: Vec::new(),
-                    setup_action: Some(if probe.ready {
-                        "Grant Speech Recognition permission in macOS System Settings, or choose another ASR provider."
-                            .to_string()
+                    missing_files: if readiness.helper_present {
+                        Vec::new()
                     } else {
-                        probe.notes.join(" ")
-                    }),
+                        vec!["nautilus-macos-speech-helper-aarch64-apple-darwin".to_string()]
+                    },
+                    setup_action: readiness.setup_action,
                 },
             }
         }
@@ -2047,8 +2143,8 @@ fn sanitize_whisper_model_id(model_id: &str) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::{
-        migrate_legacy_local_artifacts, missing_or_invalid_voxtral_local_files, AsrManager,
-        AsrProviderType,
+        migrate_legacy_local_artifacts, missing_or_invalid_voxtral_local_files,
+        runtime_diagnostics_for_provider, AsrManager, AsrProviderType,
     };
     use crate::asr::AsrProviderFactory;
     use crate::settings::PlatformOptimizationSettings;
@@ -2168,7 +2264,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn manual_mode_honors_engine_priority() {
+    async fn apple_speech_engine_override_does_not_replace_whisper() {
         let manager = AsrManager::new();
         let optimization = PlatformOptimizationSettings {
             mode: "manual".to_string(),
@@ -2189,20 +2285,15 @@ mod tests {
             .iter()
             .find(|provider| provider.provider_type == AsrProviderType::Whisper)
             .expect("whisper provider should exist");
-        // On macOS aarch64 with apple_native_enabled and manual priority set,
-        // the engine will be macos_apple_speech ONLY if the helper binary is available.
-        // Otherwise it falls back to provider_default.
-        let helper_available = crate::asr::platform::macos_speech::probe().ready;
-        let expected =
-            if cfg!(all(target_os = "macos", target_arch = "aarch64")) && helper_available {
-                Some("macos_apple_speech")
-            } else {
-                Some("provider_default")
-            };
         assert_eq!(
             whisper.engine_diagnostics.active_engine.as_deref(),
-            expected
+            Some("provider_default")
         );
+        assert!(!whisper
+            .engine_diagnostics
+            .available_engines
+            .iter()
+            .any(|engine| engine == "macos_apple_speech"));
     }
 
     #[tokio::test]
@@ -2234,6 +2325,7 @@ mod tests {
             crate::asr::mlx_audio::default_model_id(),
             &PlatformOptimizationSettings::default(),
             false,
+            None,
         );
         assert_eq!(
             diagnostics.active_engine.as_deref(),
@@ -2245,36 +2337,117 @@ mod tests {
             .any(|engine| engine == "macos_mlx_sidecar"));
     }
 
-    #[tokio::test]
-    async fn diagnostics_report_ready_native_engines_even_when_disabled() {
-        let manager = AsrManager::new();
-        manager
-            .set_platform_optimization(PlatformOptimizationSettings::default())
-            .await;
+    #[test]
+    fn apple_speech_diagnostics_reuse_supplied_readiness() {
+        use crate::asr::platform::macos_speech::{
+            AppleSpeechReadiness, AppleSpeechReadinessStatus,
+        };
 
+        let readiness = AppleSpeechReadiness {
+            status: AppleSpeechReadinessStatus::Ready,
+            ready: true,
+            platform_supported: true,
+            helper_present: true,
+            authorization: "authorized".to_string(),
+            locale: Some("en_US".to_string()),
+            locale_supported: true,
+            on_device_available: true,
+            recognizer_available: true,
+            message: "synthetic single-probe readiness".to_string(),
+            setup_action: None,
+        };
+        let runtime = runtime_diagnostics_for_provider(
+            AsrProviderType::MacosAppleSpeech,
+            "macos_apple_speech",
+            true,
+            None,
+            Some(&readiness),
+        );
+        assert_eq!(
+            runtime.runtime_message.as_deref(),
+            Some(readiness.message.as_str())
+        );
+
+        let engine = AsrManager::engine_diagnostics_for_provider(
+            AsrProviderType::MacosAppleSpeech,
+            "macos_apple_speech",
+            &PlatformOptimizationSettings::default(),
+            false,
+            Some(&readiness),
+        );
+        assert!(engine
+            .available_engines
+            .iter()
+            .any(|id| id == "macos_apple_speech"));
+        assert!(engine
+            .notes
+            .iter()
+            .any(|note| note == "synthetic single-probe readiness"));
+    }
+
+    #[tokio::test]
+    async fn apple_speech_provider_reports_structured_platform_readiness() {
+        let manager = AsrManager::new();
         let providers = manager
             .get_all_providers_info()
             .await
             .expect("providers should load");
-        let whisper = providers
+        let apple = providers
             .iter()
-            .find(|provider| provider.provider_type == AsrProviderType::Whisper)
-            .expect("whisper provider should exist");
+            .find(|provider| provider.provider_type == AsrProviderType::MacosAppleSpeech)
+            .expect("Apple Speech provider should exist");
+        let readiness = apple
+            .platform_readiness
+            .as_ref()
+            .expect("Apple Speech should expose structured readiness");
 
-        if cfg!(all(
-            target_os = "macos",
-            target_arch = "aarch64",
-            nautilus_macos_speech_helper
-        )) {
-            assert!(
-                whisper
-                    .engine_diagnostics
-                    .available_engines
-                    .iter()
-                    .any(|engine| engine == "macos_apple_speech"),
-                "macOS Apple Speech should be reported as available even before the toggle is enabled"
-            );
-        }
+        assert_eq!(apple.is_available, readiness.ready);
+        assert_eq!(
+            matches!(apple.runtime_status, super::RuntimeStatus::Ready),
+            readiness.ready
+        );
+    }
+
+    #[tokio::test]
+    async fn cached_provider_views_refresh_without_locking_the_cache() {
+        let manager = AsrManager::new();
+        manager
+            .get_all_providers_info()
+            .await
+            .expect("initial provider info should load");
+        tokio::time::timeout(
+            std::time::Duration::from_secs(30),
+            manager.get_all_providers_info(),
+        )
+        .await
+        .expect("cached provider info refresh must not deadlock")
+        .expect("cached provider info should refresh");
+
+        manager
+            .get_provider_inventory()
+            .await
+            .expect("initial provider inventory should load");
+        tokio::time::timeout(
+            std::time::Duration::from_secs(30),
+            manager.get_provider_inventory(),
+        )
+        .await
+        .expect("cached provider inventory refresh must not deadlock")
+        .expect("cached provider inventory should refresh");
+    }
+
+    #[tokio::test]
+    async fn apple_speech_is_rejected_by_meeting_route_before_inference() {
+        let manager = AsrManager::new();
+        let error = manager
+            .transcribe_bytes_for_meeting(
+                AsrProviderType::MacosAppleSpeech,
+                b"not audio",
+                Some("macos_apple_speech"),
+            )
+            .await
+            .expect_err("Apple Speech must never run for meetings");
+        assert!(error.to_string().contains("dictation-only"));
     }
 
     #[tokio::test]

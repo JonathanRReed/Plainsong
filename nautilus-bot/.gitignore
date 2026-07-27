@@ -21,6 +21,7 @@ __pycache__/
 
 # Rust sidecar
 /rust-sidecar/target/
+/rust-sidecar/vendor/**/target/
 /rust-sidecar/WixTools/
 /rust-sidecar/gen/
 /rust-sidecar/binaries/

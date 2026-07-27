@@ -1,4 +1,10 @@
-import { fireEvent, render, screen, waitFor } from "@testing-library/react";
+import {
+  act,
+  fireEvent,
+  render,
+  screen,
+  waitFor,
+} from "@testing-library/react";
 import { describe, expect, it, vi } from "vitest";
 import { TranscriptViewer } from "@/components/transcript-viewer";
 
@@ -34,6 +40,16 @@ const DEEP_LINK_SEGMENTS = Array.from({ length: 6 }, (_, index) => ({
       : `Filler line ${index}.`,
   confidence: 0.9,
 }));
+
+function deferred<T>() {
+  let resolve!: (value: T) => void;
+  let reject!: (reason?: unknown) => void;
+  const promise = new Promise<T>((res, rej) => {
+    resolve = res;
+    reject = rej;
+  });
+  return { promise, resolve, reject };
+}
 
 describe("TranscriptViewer", () => {
   it("scrolls to the cued turn when the transcript lands after the viewer mounted", () => {
@@ -73,6 +89,19 @@ describe("TranscriptViewer", () => {
     ).toBeGreaterThan(0);
   });
 
+  it("labels Apple Speech provenance as on-device with server fallback disabled", () => {
+    render(
+      <TranscriptViewer
+        segments={GROUPED_TURN_SEGMENTS}
+        provenance={{ source: "apple_on_device" }}
+      />,
+    );
+
+    expect(screen.getByText("Apple Speech · on-device")).toBeInTheDocument();
+    expect(screen.getByText("Apple on-device")).toBeInTheDocument();
+    expect(screen.getByTitle(/server fallback disabled/i)).toBeInTheDocument();
+  });
+
   it("renders source-aware meeting speakers as Me and Them", () => {
     render(
       <TranscriptViewer
@@ -101,6 +130,173 @@ describe("TranscriptViewer", () => {
     expect(screen.getByText("Them")).toBeInTheDocument();
     expect(screen.getByText(/I opened the roadmap/i)).toBeInTheDocument();
     expect(screen.getByText(/Let's ship this Friday/i)).toBeInTheDocument();
+    expect(
+      screen.queryByRole("button", { name: "Rename Speakers" }),
+    ).not.toBeInTheDocument();
+  });
+
+  it("renders null speaker IDs as Unattributed without offering rename controls", () => {
+    render(
+      <TranscriptViewer
+        segments={[
+          {
+            id: "unattributed-1",
+            startTime: 0,
+            endTime: 1,
+            text: "Coverage begins after this line.",
+            speakerId: null,
+            confidence: 0.9,
+          },
+        ]}
+        onRenameSpeaker={vi.fn(async () => {})}
+      />,
+    );
+
+    expect(screen.getByText("Unattributed")).toBeInTheDocument();
+    expect(
+      screen.queryByRole("button", { name: "Rename Speakers" }),
+    ).not.toBeInTheDocument();
+    expect(
+      screen.queryByRole("button", { name: "Edit speaker name" }),
+    ).not.toBeInTheDocument();
+  });
+
+  it("offers rename controls only for persisted speaker IDs when a callback exists", () => {
+    render(
+      <TranscriptViewer
+        segments={[
+          {
+            id: "unattributed-1",
+            startTime: 0,
+            endTime: 1,
+            text: "An uncovered opening.",
+            speakerId: null,
+            confidence: 0.9,
+          },
+          {
+            id: "persisted-1",
+            startTime: 4,
+            endTime: 5,
+            text: "A labelled response.",
+            speakerId: "speaker_0",
+            confidence: 0.9,
+          },
+        ]}
+        onRenameSpeaker={vi.fn(async () => {})}
+      />,
+    );
+
+    fireEvent.click(screen.getByRole("button", { name: "Rename Speakers" }));
+
+    expect(screen.getByText("Unattributed")).toBeInTheDocument();
+    expect(
+      screen.getAllByRole("button", { name: "Edit speaker name" }),
+    ).toHaveLength(1);
+  });
+
+  it("reveals hover-hidden speaker rename controls when they receive keyboard focus", () => {
+    render(
+      <TranscriptViewer
+        segments={GROUPED_TURN_SEGMENTS}
+        onRenameSpeaker={vi.fn(async () => {})}
+      />,
+    );
+
+    fireEvent.click(screen.getByRole("button", { name: "Rename Speakers" }));
+    const renameButton = screen.getByRole("button", { name: "Edit speaker name" });
+    renameButton.focus();
+
+    expect(renameButton).toHaveFocus();
+    expect(renameButton).toHaveClass("group-focus-within:opacity-100");
+    expect(renameButton).toHaveClass("focus-visible:opacity-100");
+  });
+
+  it("waits for rename persistence before changing the visible speaker name", async () => {
+    const pendingRename = deferred<void>();
+    const onRenameSpeaker = vi.fn(() => pendingRename.promise);
+
+    render(
+      <TranscriptViewer
+        segments={GROUPED_TURN_SEGMENTS}
+        onRenameSpeaker={onRenameSpeaker}
+      />,
+    );
+
+    fireEvent.click(screen.getByRole("button", { name: "Rename Speakers" }));
+    fireEvent.click(screen.getByRole("button", { name: "Edit speaker name" }));
+    fireEvent.change(screen.getByLabelText("Speaker name"), {
+      target: { value: "Alice" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Save speaker name" }));
+
+    expect(onRenameSpeaker).toHaveBeenCalledWith("me", "Alice");
+    expect(screen.getByLabelText("Speaker name")).toHaveValue("Alice");
+    expect(screen.queryByText("Alice")).not.toBeInTheDocument();
+
+    await act(async () => {
+      pendingRename.resolve();
+      await pendingRename.promise;
+    });
+
+    expect(await screen.findByText("Alice")).toBeInTheDocument();
+    expect(screen.queryByLabelText("Speaker name")).not.toBeInTheDocument();
+  });
+
+  it("keeps the speaker editor and attempted value open when persistence rejects", async () => {
+    const pendingRename = deferred<void>();
+    const onRenameSpeaker = vi.fn(() => pendingRename.promise);
+
+    render(
+      <TranscriptViewer
+        segments={GROUPED_TURN_SEGMENTS}
+        onRenameSpeaker={onRenameSpeaker}
+      />,
+    );
+
+    fireEvent.click(screen.getByRole("button", { name: "Rename Speakers" }));
+    fireEvent.click(screen.getByRole("button", { name: "Edit speaker name" }));
+    fireEvent.change(screen.getByLabelText("Speaker name"), {
+      target: { value: "Alice" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Save speaker name" }));
+
+    await act(async () => {
+      pendingRename.reject(new Error("Alias write failed"));
+      await pendingRename.promise.catch(() => undefined);
+    });
+
+    expect(screen.getByLabelText("Speaker name")).toHaveValue("Alice");
+    expect(screen.queryByText("Alice")).not.toBeInTheDocument();
+  });
+
+  it("names a grouped-turn editor with its speaker and timestamp and describes the keyboard save shortcut", async () => {
+    const onEditSegment = vi.fn(async () => {});
+
+    render(
+      <TranscriptViewer
+        segments={GROUPED_TURN_SEGMENTS}
+        onEditSegment={onEditSegment}
+      />
+    );
+
+    fireEvent.click(screen.getByRole("button", { name: "Edit segment" }));
+
+    const editor = screen.getByRole("textbox", {
+      name: "Edit transcript for Me at 0:00.00",
+    });
+    expect(editor).toHaveAccessibleDescription("Cmd/Ctrl+Enter to save");
+
+    fireEvent.change(editor, {
+      target: { value: "We agreed on Tuesday." },
+    });
+    fireEvent.keyDown(editor, { key: "Enter", ctrlKey: true });
+
+    await waitFor(() => {
+      expect(onEditSegment).toHaveBeenCalledWith(
+        ["seg-1", "seg-2"],
+        "We agreed on Tuesday."
+      );
+    });
   });
 
   it("saves a grouped-turn edit with every segment id in the turn", async () => {
@@ -134,6 +330,53 @@ describe("TranscriptViewer", () => {
     await waitFor(() => {
       expect(screen.queryByRole("textbox")).not.toBeInTheDocument();
     });
+  });
+
+  it("disables speaker-turn save for whitespace-only text", () => {
+    const onEditSegment = vi.fn(async () => {});
+
+    render(
+      <TranscriptViewer
+        segments={GROUPED_TURN_SEGMENTS}
+        onEditSegment={onEditSegment}
+      />
+    );
+
+    fireEvent.click(screen.getByRole("button", { name: "Edit segment" }));
+    const editor = screen.getByRole("textbox");
+    fireEvent.change(editor, { target: { value: "   \n" } });
+
+    expect(screen.getByRole("button", { name: "Save" })).toBeDisabled();
+    fireEvent.keyDown(editor, { key: "Enter", metaKey: true });
+    expect(onEditSegment).not.toHaveBeenCalled();
+    expect(screen.getByRole("textbox")).toBeInTheDocument();
+  });
+
+  it("keeps the speaker-turn editor open when the atomic save rejects", async () => {
+    const pendingSave = deferred<void>();
+    const onEditSegment = vi.fn(() => pendingSave.promise);
+
+    render(
+      <TranscriptViewer
+        segments={GROUPED_TURN_SEGMENTS}
+        onEditSegment={onEditSegment}
+      />
+    );
+
+    fireEvent.click(screen.getByRole("button", { name: "Edit segment" }));
+    fireEvent.change(screen.getByRole("textbox"), {
+      target: { value: "A correction that must stay visible." },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Save" }));
+
+    await act(async () => {
+      pendingSave.reject(new Error("Atomic transcript write failed"));
+      await pendingSave.promise.catch(() => undefined);
+    });
+
+    expect(screen.getByRole("textbox")).toHaveValue(
+      "A correction that must stay visible."
+    );
   });
 
   it("does not open the editor on a single click, but does on a double click", () => {

@@ -1,12 +1,16 @@
 {
-  "$schema": "https://unpkg.com/knip@6/schema.json",
+  "$schema": "https://unpkg.com/knip@6.29.0/schema.json",
   "entry": [
     "src/main.tsx",
     "src/overlay-root.tsx",
     "electron/main.ts",
     "electron/preload.ts",
     "scripts/capture-packaged-macos-app-matrix-insertion.mjs",
-    "scripts/verify-packaged-macos-app-matrix-insertion.mjs"
+    "scripts/sign-macos.mjs",
+    "scripts/verify-macos-speech-helper.mjs",
+    "scripts/verify-macos-system-audio.mjs",
+    "scripts/verify-packaged-macos-app-matrix-insertion.mjs",
+    "scripts/verify-packaged-native-helpers.mjs"
   ],
   "project": [
     "src/**/*.{ts,tsx}",
@@ -20,10 +24,23 @@
     "dist-electron/**",
     "release/**"
   ],
+  "ignoreBinaries": [
+    "ditto",
+    "hdiutil",
+    "osascript",
+    "say",
+    "sqlite3",
+    "swiftc"
+  ],
   "ignoreDependencies": [
     "tailwindcss",
     "tw-animate-css"
   ],
+  "ignoreIssues": {
+    "src/lib/backend.ts": ["exports"],
+    "src/lib/backend/recordings.ts": ["types"],
+    "src/lib/backend/settings.ts": ["exports", "types"]
+  },
   "ignoreExportsUsedInFile": {
     "interface": true,
     "type": true

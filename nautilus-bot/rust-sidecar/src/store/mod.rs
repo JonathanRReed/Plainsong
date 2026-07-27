@@ -110,6 +110,10 @@ pub struct MeetingArtifactRecord {
     pub title: Option<String>,
     pub summary: Option<String>,
     pub action_items: Vec<String>,
+    #[serde(default)]
+    pub summary_provenance: Option<crate::models::AnalysisProvenance>,
+    #[serde(default)]
+    pub action_items_provenance: Option<crate::models::ActionItemsProvenance>,
     pub decisions: Vec<String>,
     pub deadlines: Vec<String>,
     pub template_id: Option<String>,

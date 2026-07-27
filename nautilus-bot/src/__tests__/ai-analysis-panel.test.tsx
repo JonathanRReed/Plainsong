@@ -1,17 +1,33 @@
-import { fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { act, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { AiAnalysisPanel } from "@/components/ai-analysis-panel";
 
 const backendMocks = vi.hoisted(() => ({
   analyzeRecording: vi.fn(),
+  cancelAnalysisRun: vi.fn(),
   extractActionItems: vi.fn(),
   extractActionItemsGrounded: vi.fn(),
 }));
 
+const eventMocks = vi.hoisted(() => ({
+  listeners: new Map<string, (event: { payload: any }) => void>(),
+}));
+
 vi.mock("@/lib/backend", () => ({
   analyzeRecording: backendMocks.analyzeRecording,
+  cancelAnalysisRun: backendMocks.cancelAnalysisRun,
   extractActionItems: backendMocks.extractActionItems,
   extractActionItemsGrounded: backendMocks.extractActionItemsGrounded,
+}));
+
+vi.mock("@/lib/electron", () => ({
+  listen: vi.fn(
+    async (eventName: string, handler: (event: { payload: any }) => void) => {
+      eventMocks.listeners.set(eventName, handler);
+      return () => eventMocks.listeners.delete(eventName);
+    }
+  ),
+  invoke: vi.fn(),
 }));
 
 function deferred<T>() {
@@ -27,6 +43,7 @@ function deferred<T>() {
 describe("AiAnalysisPanel", () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    eventMocks.listeners.clear();
     backendMocks.analyzeRecording.mockResolvedValue({
       query: "summary",
       response: "Grounded summary",
@@ -39,8 +56,19 @@ describe("AiAnalysisPanel", () => {
           certainty: 0.92,
         },
       ],
+      actualProvider: "ollama",
       model: "test-model",
       processingTimeMs: 950,
+      provenance: {
+        version: 1,
+        contentHash: "v1:sha256:summary",
+        actualProvider: "ollama",
+        actualModel: "test-model",
+        promptSource: "analysis_query",
+        completedAt: "2026-07-25T12:00:00.000Z",
+        citations: [],
+        grounded: true,
+      },
     });
     backendMocks.extractActionItems.mockResolvedValue([]);
     backendMocks.extractActionItemsGrounded.mockResolvedValue({
@@ -60,6 +88,7 @@ describe("AiAnalysisPanel", () => {
           ],
         },
       ],
+      actualProvider: "ollama",
       model: "test-model",
       processingTimeMs: 1100,
     });
@@ -71,13 +100,57 @@ describe("AiAnalysisPanel", () => {
     fireEvent.click(screen.getByRole("button", { name: /action items/i }));
 
     await waitFor(() => {
-      expect(backendMocks.extractActionItemsGrounded).toHaveBeenCalledWith("r1");
+      expect(backendMocks.extractActionItemsGrounded).toHaveBeenCalledWith(
+        "r1",
+        undefined,
+        {
+          persist: false,
+          runId: expect.any(String),
+        }
+      );
     });
 
     expect(screen.getByText("Ship the release")).toBeInTheDocument();
     expect(
       screen.getAllByText(/Jon will ship the release this Friday/).length
     ).toBeGreaterThan(0);
+  });
+
+  it("warns when citations remain but the backend marks the answer ungrounded", async () => {
+    backendMocks.analyzeRecording.mockResolvedValueOnce({
+      query: "summary",
+      response: "Grounded summary",
+      citations: [
+        {
+          text: "Ship the release this Friday",
+          startTime: 3,
+          endTime: 5,
+          recordingId: "r1",
+          certainty: 1,
+        },
+      ],
+      actualProvider: "ollama",
+      model: "test-model",
+      processingTimeMs: 950,
+      grounded: false,
+      provenance: {
+        version: 1,
+        contentHash: "v1:sha256:summary",
+        actualProvider: "ollama",
+        actualModel: "test-model",
+        promptSource: "analysis_query",
+        completedAt: "2026-07-25T12:00:00.000Z",
+        citations: [],
+        grounded: false,
+      },
+    });
+
+    render(<AiAnalysisPanel recordingId="r1" />);
+    fireEvent.click(screen.getByRole("button", { name: /meeting summary/i }));
+
+    expect(
+      await screen.findByText(/one or more citations were invalid or did not support the answer/i)
+    ).toBeInTheDocument();
   });
 
   it("exposes response actions with grounded payloads", async () => {
@@ -116,6 +189,16 @@ describe("AiAnalysisPanel", () => {
           certainty: 0.92,
         },
       ],
+      provenance: {
+        version: 1,
+        contentHash: "v1:sha256:summary",
+        actualProvider: "ollama",
+        actualModel: "test-model",
+        promptSource: "analysis_query",
+        completedAt: "2026-07-25T12:00:00.000Z",
+        citations: [],
+        grounded: true,
+      },
     });
   });
 
@@ -166,13 +249,122 @@ describe("AiAnalysisPanel", () => {
     await waitFor(() => {
       expect(backendMocks.analyzeRecording).toHaveBeenCalledWith(
         "r1",
-        expect.stringContaining("Conversation so far:")
+        expect.stringContaining("Earlier user questions for conversational context:"),
+        undefined,
+        expect.any(String)
+      );
+      const analyzeCalls = backendMocks.analyzeRecording.mock.calls;
+      expect(analyzeCalls[analyzeCalls.length - 1]?.[1]).not.toContain(
+        "Jon owned the release checklist."
       );
     });
     await waitFor(() => {
       expect(onChatMessagesChange).toHaveBeenCalled();
     });
     expect(screen.getAllByText(/What slipped\?/i).length).toBeGreaterThan(0);
+  });
+
+  it("isolates progress and failures to the active target and run", async () => {
+    render(<AiAnalysisPanel recordingId="r1" />);
+    await waitFor(() => {
+      expect(eventMocks.listeners.has("recording-analysis-progress")).toBe(true);
+      expect(eventMocks.listeners.has("recording-analysis-failed")).toBe(true);
+    });
+
+    const pending = deferred<any>();
+    backendMocks.analyzeRecording.mockReturnValueOnce(pending.promise);
+    fireEvent.click(screen.getByRole("button", { name: /meeting summary/i }));
+    await waitFor(() => expect(backendMocks.analyzeRecording).toHaveBeenCalled());
+    const analyzeCalls = backendMocks.analyzeRecording.mock.calls;
+    const runId = analyzeCalls[analyzeCalls.length - 1]?.[3];
+
+    act(() => {
+      eventMocks.listeners.get("recording-analysis-progress")?.({
+        payload: {
+          recordingId: "r1",
+          runId: "other-run",
+          target: "ask",
+          stage: "mapping",
+          strategy: "chunked",
+          completed: 1,
+          total: 9,
+          pass: 0,
+          message: "Wrong run",
+          updatedAt: "2026-07-25T12:00:00.000Z",
+        },
+      });
+      eventMocks.listeners.get("recording-analysis-progress")?.({
+        payload: {
+          recordingId: "r1",
+          runId,
+          target: "summary",
+          stage: "mapping",
+          strategy: "chunked",
+          completed: 1,
+          total: 7,
+          pass: 0,
+          message: "Wrong target",
+          updatedAt: "2026-07-25T12:00:00.000Z",
+        },
+      });
+    });
+    expect(screen.queryByText("Wrong run")).not.toBeInTheDocument();
+    expect(screen.queryByText("Wrong target")).not.toBeInTheDocument();
+
+    act(() => {
+      eventMocks.listeners.get("recording-analysis-progress")?.({
+        payload: {
+          recordingId: "r1",
+          runId,
+          target: "ask",
+          stage: "mapping",
+          strategy: "chunked",
+          completed: 2,
+          total: 5,
+          pass: 0,
+          message: "Reading transcript chunk 2 of 5",
+          updatedAt: "2026-07-25T12:00:00.000Z",
+        },
+      });
+    });
+    expect(screen.getByRole("status")).toHaveTextContent(
+      "Reading transcript chunk 2 of 5"
+    );
+
+    act(() => {
+      eventMocks.listeners.get("recording-analysis-failed")?.({
+        payload: {
+          recordingId: "r1",
+          runId,
+          target: "ask",
+          reason: "Provider timed out during reduction.",
+          updatedAt: "2026-07-25T12:00:01.000Z",
+        },
+      });
+    });
+    expect(
+      screen.getByText(/Previous successful analysis remains available/i)
+    ).toBeInTheDocument();
+
+    await act(async () => {
+      pending.reject(new Error("Provider timed out during reduction."));
+      await Promise.resolve();
+    });
+  });
+
+  it("cancels the active backend run when the panel unmounts", async () => {
+    const pending = deferred<any>();
+    backendMocks.analyzeRecording.mockReturnValueOnce(pending.promise);
+    const { unmount } = render(<AiAnalysisPanel recordingId="r1" />);
+
+    fireEvent.click(screen.getByRole("button", { name: /meeting summary/i }));
+    await waitFor(() => expect(backendMocks.analyzeRecording).toHaveBeenCalled());
+    const analyzeCalls = backendMocks.analyzeRecording.mock.calls;
+    const runId = analyzeCalls[analyzeCalls.length - 1]?.[3];
+
+    unmount();
+
+    expect(backendMocks.cancelAnalysisRun).toHaveBeenCalledWith(runId);
   });
 
   it("ignores stale analysis responses after the recording changes", async () => {
@@ -186,6 +378,7 @@ describe("AiAnalysisPanel", () => {
         recordingId: string;
         certainty: number;
       }>;
+      actualProvider: string;
       model: string;
       processingTimeMs: number;
     }>();
@@ -217,6 +410,7 @@ describe("AiAnalysisPanel", () => {
       query: "what slipped",
       response: "Stale response",
       citations: [],
+      actualProvider: "ollama",
       model: "test-model",
       processingTimeMs: 500,
     });
@@ -224,7 +418,9 @@ describe("AiAnalysisPanel", () => {
     await waitFor(() => {
       expect(backendMocks.analyzeRecording).toHaveBeenCalledWith(
         "r1",
-        expect.stringContaining("What slipped?")
+        expect.stringContaining("What slipped?"),
+        undefined,
+        expect.any(String)
       );
     });
 

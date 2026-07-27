@@ -33,7 +33,7 @@ const exportDir = path.join(
   `qa-packaged-exports-${Date.now()}`
 );
 const transcriptText =
-  "Maya confirmed the macOS packaged export workflow must produce Markdown, JSON, text, a signed evidence bundle, and reusable meeting templates. " +
+  "Maya confirmed the macOS packaged export workflow must produce Markdown, JSON, text, and reusable meeting templates. " +
   "Jon owns the Windows release validation after signing material is available. " +
   "Priya will review action items before launch claims are expanded.";
 const segments = [
@@ -41,7 +41,7 @@ const segments = [
     id: `${recordingId}-seg-1`,
     startTime: 0,
     endTime: 8,
-    text: "Maya confirmed the macOS packaged export workflow must produce Markdown, JSON, text, a signed evidence bundle, and reusable meeting templates.",
+    text: "Maya confirmed the macOS packaged export workflow must produce Markdown, JSON, text, and reusable meeting templates.",
     speakerId: "speaker-1",
     confidence: 0.98,
   },
@@ -283,8 +283,8 @@ Generated: ${artifact.generatedAt}
 - App: ${artifact.appPath}
 - Recording fixture: ${artifact.recordingId}
 - Export directory: ${artifact.exportDir}
+- Export directory cleaned: ${artifact.exportDirectoryCleaned ? "yes" : "no"}
 - Built-in templates: ${artifact.templates.length}
-- Evidence bundle valid: ${artifact.evidenceBundleVerification?.valid ? "yes" : "no"}
 - Database restored: ${artifact.databaseRestored ? "yes" : "no"}
 
 ## Standard Exports
@@ -314,11 +314,11 @@ const artifact = {
   templates: [],
   exports: {},
   templateExports: [],
-  evidenceBundleVerification: null,
   checks: {},
   dbHashesBefore: {},
   dbHashesAfterRestore: {},
   databaseRestored: false,
+  exportDirectoryCleaned: false,
   stderr: { length: 0, tail: "" },
   error: null,
 };
@@ -338,7 +338,6 @@ try {
     { format: "markdown", extension: "md" },
     { format: "json", extension: "json" },
     { format: "text", extension: "txt" },
-    { format: "evidence_bundle", extension: "json" },
   ];
 
   for (const request of exportRequests) {
@@ -356,16 +355,8 @@ try {
       response.exportPath === target &&
       file !== null &&
       file.sizeBytes > 0 &&
-      (request.format === "evidence_bundle" || file.containsTranscript);
+      file.containsTranscript;
     artifact.exports[request.format] = { ok, response, file };
-    if (request.format === "evidence_bundle" && file) {
-      artifact.evidenceBundleVerification = await sidecar.sendCommand("verify_evidence_bundle", {
-        targetPath: target,
-      });
-      artifact.exports[request.format].ok =
-        artifact.exports[request.format].ok &&
-        artifact.evidenceBundleVerification?.valid === true;
-    }
   }
 
   for (const template of templates) {
@@ -402,6 +393,15 @@ try {
   artifact.dbHashesAfterRestore = dbHashes();
   artifact.databaseRestored =
     JSON.stringify(artifact.dbHashesBefore) === JSON.stringify(artifact.dbHashesAfterRestore);
+  try {
+    fs.rmSync(exportDir, { recursive: true, force: true });
+    artifact.exportDirectoryCleaned = !fs.existsSync(exportDir);
+  } catch (error) {
+    const cleanupError = error instanceof Error ? error.message : String(error);
+    artifact.error = artifact.error
+      ? `${artifact.error}; export cleanup failed: ${cleanupError}`
+      : `Export cleanup failed: ${cleanupError}`;
+  }
 }
 
 const expectedTemplates = ["meeting", "journal", "medical", "interview", "quick", "podcast", "research"];
@@ -415,8 +415,8 @@ artifact.checks = {
   templateExportsPass:
     artifact.templateExports.length >= expectedTemplates.length &&
     artifact.templateExports.every((result) => result.ok),
-  evidenceBundleValid: artifact.evidenceBundleVerification?.valid === true,
   databaseRestored: artifact.databaseRestored,
+  exportDirectoryCleaned: artifact.exportDirectoryCleaned,
 };
 artifact.pass = Object.values(artifact.checks).every(Boolean);
 

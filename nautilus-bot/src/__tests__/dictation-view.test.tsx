@@ -108,12 +108,9 @@ const backendMocks = vi.hoisted(() => ({
     vaultSalt: null,
   },
   shortcuts: {
-    toggleRecording: "Ctrl+Shift+R",
     toggleDictation: "Ctrl+Shift+Space",
     toggleDictationAlternates: [],
     openWindow: "Ctrl+Shift+N",
-    quickExport: "Ctrl+Shift+E",
-    focusSearch: "Ctrl+Shift+F",
   },
   updates: {
     channel: "stable" as const,
@@ -463,6 +460,24 @@ describe("DictationView modes", () => {
     expect(
       Array.from(select.options).map((option) => option.value),
     ).toEqual(["on", "off"]);
+  });
+
+  it("suppresses batch live preview when Apple Speech is selected", async () => {
+    backendMocks.transcriptionOverrides.dictationProvider = "macos_apple_speech";
+    backendMocks.transcriptionOverrides.dictationModelId = "macos_apple_speech";
+    backendMocks.transcriptionOverrides.dictationLivePreviewEnabled = true;
+
+    render(<DictationView />);
+    await openConfigTab("Capture");
+
+    const select = (await screen.findByLabelText(
+      "Live preview",
+    )) as HTMLSelectElement;
+    expect(select).toBeDisabled();
+    expect(select).toHaveValue("off");
+    expect(
+      screen.getByText(/waits for the final on-device result/i),
+    ).toBeInTheDocument();
   });
 
   it("describes keep warm as the speed choice it is, not a memory choice", async () => {

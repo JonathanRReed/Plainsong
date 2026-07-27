@@ -1,3 +1,5 @@
+import { readFileSync } from "node:fs";
+import { resolve } from "node:path";
 import { describe, expect, it } from "vitest";
 import {
   convertShortcutToAccelerator,
@@ -106,41 +108,17 @@ describe("partitionUniqueShortcutRegistrations", () => {
 });
 
 describe("findConflictingShortcuts", () => {
-  it("only ranks fields that are actually registered (toggleDictation, openWindow) ahead of toggleRecording", () => {
-    // toggleRecording is a settings field that is never passed to
-    // globalShortcut.register anywhere in electron/main.ts, nor wired through
-    // the native shortcut controller (which only wires toggleDictation). If
-    // it ever outranks a field that IS registered, a collision would silently
-    // disable a working shortcut in favor of one that can never fire.
-    const dictationRank = SHORTCUT_FIELD_PRECEDENCE.findIndex(
-      (entry) => entry.key === "toggleDictation",
-    );
-    const openWindowRank = SHORTCUT_FIELD_PRECEDENCE.findIndex(
-      (entry) => entry.key === "openWindow",
-    );
-    const toggleRecordingRank = SHORTCUT_FIELD_PRECEDENCE.findIndex(
-      (entry) => entry.key === "toggleRecording",
-    );
-
-    expect(dictationRank).toBeGreaterThanOrEqual(0);
-    expect(openWindowRank).toBeGreaterThanOrEqual(0);
-    expect(toggleRecordingRank).toBeGreaterThanOrEqual(0);
-    expect(dictationRank).toBeLessThan(toggleRecordingRank);
-    expect(openWindowRank).toBeLessThan(toggleRecordingRank);
-  });
-
-  it("ranks the dictation recovery bindings with the other registered fields", () => {
-    // repaste/recopy ARE registered with globalShortcut (electron/main.ts), so
-    // a collision must never hand the OS registration to a field that can
-    // never fire (toggleRecording/quickExport/focusSearch are unwired).
+  it("ranks all registered fields in deterministic priority order", () => {
     const rank = (key: string) =>
       SHORTCUT_FIELD_PRECEDENCE.findIndex((entry) => entry.key === key);
 
+    expect(rank("toggleDictation")).toBeGreaterThanOrEqual(0);
+    expect(rank("openWindow")).toBeGreaterThanOrEqual(0);
     expect(rank("repasteLastDictation")).toBeGreaterThanOrEqual(0);
     expect(rank("recopyLastDictation")).toBeGreaterThanOrEqual(0);
-    expect(rank("toggleDictation")).toBeLessThan(rank("repasteLastDictation"));
-    expect(rank("repasteLastDictation")).toBeLessThan(rank("toggleRecording"));
-    expect(rank("recopyLastDictation")).toBeLessThan(rank("toggleRecording"));
+    expect(rank("toggleDictation")).toBeLessThan(rank("openWindow"));
+    expect(rank("openWindow")).toBeLessThan(rank("repasteLastDictation"));
+    expect(rank("repasteLastDictation")).toBeLessThan(rank("recopyLastDictation"));
   });
 
   it("reports a recovery binding that collides with dictation instead of double-registering it", () => {
@@ -172,23 +150,6 @@ describe("findConflictingShortcuts", () => {
     expect(convertShortcutToAccelerator("Cmd+Ctrl+C")).toBe("Command+Control+C");
   });
 
-  it("keeps openWindow as the winner when it collides with toggleRecording", () => {
-    const conflicts = findConflictingShortcuts({
-      openWindow: "Control+Alt+O",
-      toggleRecording: "Control+Alt+O",
-    });
-
-    expect(conflicts).toEqual([
-      {
-        field: "toggleRecording",
-        label: "Recording",
-        shortcut: "Control+Alt+O",
-        conflictsWith: "Open window",
-        conflictsWithField: "openWindow",
-      },
-    ]);
-  });
-
   it("keeps toggleDictation as the winner when it collides with openWindow", () => {
     const conflicts = findConflictingShortcuts({
       toggleDictation: "Control+Alt+D",
@@ -206,20 +167,16 @@ describe("findConflictingShortcuts", () => {
     ]);
   });
 
-  it("reports each conflicting field via its own key, not by re-matching labels", () => {
-    // quickExport and focusSearch are unrelated fields but share no label
-    // collisions with each other or with the recording/dictation fields;
-    // this exercises that the field key on each conflict comes straight from
-    // the definition rather than being looked up via label string matching.
+  it("reports each conflicting field via its own key", () => {
     const conflicts = findConflictingShortcuts({
-      quickExport: "Control+Alt+E",
-      focusSearch: "Control+Alt+E",
+      repasteLastDictation: "Control+Alt+E",
+      recopyLastDictation: "Control+Alt+E",
     });
 
     expect(conflicts).toHaveLength(1);
     expect(conflicts[0]).toMatchObject({
-      field: "focusSearch",
-      conflictsWithField: "quickExport",
+      field: "recopyLastDictation",
+      conflictsWithField: "repasteLastDictation",
     });
   });
 
@@ -227,12 +184,21 @@ describe("findConflictingShortcuts", () => {
     const conflicts = findConflictingShortcuts({
       toggleDictation: "Control+Alt+D",
       openWindow: "Control+Alt+O",
-      toggleRecording: "Control+Alt+R",
-      quickExport: "Control+Alt+E",
-      focusSearch: "Control+Alt+F",
+      repasteLastDictation: "Control+Alt+V",
+      recopyLastDictation: "Control+Alt+C",
     });
 
     expect(conflicts).toEqual([]);
+  });
+});
+
+describe("settings shortcut refresh wiring", () => {
+  it("re-registers hotkeys when restored settings are broadcast", () => {
+    const mainSource = readFileSync(resolve(process.cwd(), "electron/main.ts"), "utf8");
+
+    expect(mainSource).toMatch(
+      /eventName === "settings-changed"[\s\S]{0,700}applyElectronGlobalShortcuts\("settings-changed"\)/,
+    );
   });
 });
 

@@ -13,11 +13,37 @@ fn whisper_context_cache() -> &'static Mutex<HashMap<String, Arc<whisper_rs::Whi
     CACHE.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
+fn whisper_model_load_gate(model_id: &str) -> Arc<Mutex<()>> {
+    static GATES: OnceLock<Mutex<HashMap<String, Arc<Mutex<()>>>>> = OnceLock::new();
+    let gates = GATES.get_or_init(|| Mutex::new(HashMap::new()));
+    let mut gates = gates
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    Arc::clone(
+        gates
+            .entry(model_id.to_string())
+            .or_insert_with(|| Arc::new(Mutex::new(()))),
+    )
+}
+
 pub(crate) fn clear_cached_model(model_id: &str) {
     if let Ok(mut cache) = whisper_context_cache().lock() {
         if cache.remove(model_id).is_some() {
             tracing::info!("Cleared cached Whisper context for model {}", model_id);
         }
+    }
+}
+
+pub(crate) fn clear_all_cached_models() {
+    let mut cache = whisper_context_cache()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    if !cache.is_empty() {
+        tracing::info!(
+            "Releasing {} cached Whisper context(s) before shutdown",
+            cache.len()
+        );
+        cache.clear();
     }
 }
 
@@ -63,6 +89,19 @@ impl WhisperProvider {
 
     fn load_model(&self) -> Result<Arc<whisper_rs::WhisperContext>> {
         // Check cache first
+        if let Ok(cache) = whisper_context_cache().lock() {
+            if let Some(cached) = cache.get(&self.model_id).cloned() {
+                return Ok(cached);
+            }
+        }
+
+        // Prewarm, live preview, and the final decode may reach this method at
+        // the same time. Serialize loads for one model and re-check after
+        // acquiring the gate so only one Metal context is created.
+        let load_gate = whisper_model_load_gate(&self.model_id);
+        let _load_guard = load_gate
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         if let Ok(cache) = whisper_context_cache().lock() {
             if let Some(cached) = cache.get(&self.model_id).cloned() {
                 return Ok(cached);
@@ -505,5 +544,20 @@ fn whisper_model_spec(model_id: &str) -> WhisperModelSpec {
             real_time_factor: 0.5,
             url: "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-base.en.bin",
         },
+    }
+}
+
+#[cfg(test)]
+mod cache_tests {
+    use super::*;
+
+    #[test]
+    fn model_load_gate_is_shared_per_model() {
+        let first = whisper_model_load_gate("base.en");
+        let second = whisper_model_load_gate("base.en");
+        let other = whisper_model_load_gate("small.en");
+
+        assert!(Arc::ptr_eq(&first, &second));
+        assert!(!Arc::ptr_eq(&first, &other));
     }
 }

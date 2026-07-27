@@ -4350,7 +4350,14 @@ export function DictationView() {
                           <label className="inline-flex items-center gap-2 rounded-md border bg-background px-3 py-2 text-sm">
                             <input
                               type="checkbox"
-                              checked={customModeDraft.livePreviewEnabled}
+                              checked={
+                                currentDictationProvider === "macos_apple_speech"
+                                  ? false
+                                  : customModeDraft.livePreviewEnabled
+                              }
+                              disabled={
+                                currentDictationProvider === "macos_apple_speech"
+                              }
                               onChange={(event) =>
                                 setCustomModeDraft((current) => ({
                                   ...current,
@@ -4361,8 +4368,9 @@ export function DictationView() {
                             Show live partial text in the popup for this mode
                           </label>
                           <p className="text-sm text-muted-foreground">
-                            Turn this off for cleaner captures when partial text
-                            is distracting.
+                            {currentDictationProvider === "macos_apple_speech"
+                              ? "Apple Speech modes wait for the final on-device result; batch live preview is disabled."
+                              : "Turn this off for cleaner captures when partial text is distracting."}
                           </p>
                         </div>
                       </div>
@@ -4762,7 +4770,14 @@ export function DictationView() {
                     <select
                       id="dictation-live-preview"
                       className="w-full rounded-md border bg-background p-2 text-sm"
-                      value={dictationLivePreviewEnabled ? "on" : "off"}
+                      value={
+                        currentDictationProvider === "macos_apple_speech"
+                          ? "off"
+                          : dictationLivePreviewEnabled
+                            ? "on"
+                            : "off"
+                      }
+                      disabled={currentDictationProvider === "macos_apple_speech"}
                       onChange={(event) => {
                         const next = event.target.value === "on";
                         setDictationLivePreviewEnabled(next);
@@ -4775,8 +4790,9 @@ export function DictationView() {
                       <option value="off">Hide live partials</option>
                     </select>
                     <p className="text-sm text-muted-foreground">
-                      Controls whether popup and inline flows show partial
-                      dictation text while you speak.
+                      {currentDictationProvider === "macos_apple_speech"
+                        ? "Live preview is unavailable for Apple Speech. Plainsong waits for the final on-device result instead of repeatedly restarting batch transcription while you speak."
+                        : "Controls whether popup and inline flows show partial dictation text while you speak."}
                     </p>
                   </div>
 

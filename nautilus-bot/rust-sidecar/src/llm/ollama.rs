@@ -1,255 +1,236 @@
-//! Ollama LLM integration for transcript analysis
-//!
-//! Provides local LLM capabilities for:
-//! - Meeting summarization
-//! - Action item extraction
-//! - Decision identification
-//! - Custom queries with citations
+//! Ollama local LLM adapter using `/api/generate` and typed `/api/show` metadata.
 
-use crate::llm::{ActionItem, AnalysisResult, Citation};
+use crate::llm::transport::{
+    classify_http_error, CompletionRequest, CompletionResponse, CompletionTransport, ErrorKind,
+    LlmError, ModelContextMetadata, Provider, RequestOptions,
+};
 use anyhow::{Context, Result};
+use async_trait::async_trait;
+use serde::{Deserialize, Serialize};
+use serde_json::Value;
+use std::collections::{BTreeSet, HashMap};
+use std::sync::Arc;
+use std::time::{Duration, Instant};
+use tokio::sync::RwLock;
 
 const OLLAMA_DEFAULT_URL: &str = "http://localhost:11434";
+const OLLAMA_SHOW_TIMEOUT: Duration = Duration::from_secs(3);
+const OLLAMA_METADATA_TTL: Duration = Duration::from_secs(10 * 60);
 
-/// Ollama client for local LLM inference
+#[derive(Debug, Clone, Copy)]
+struct CachedModelContext {
+    metadata: ModelContextMetadata,
+    observed_at: Instant,
+}
+
+#[derive(Clone)]
 pub struct OllamaClient {
     base_url: String,
     client: reqwest::Client,
+    metadata_cache: Arc<RwLock<HashMap<String, CachedModelContext>>>,
+    show_timeout: Duration,
 }
 
 impl OllamaClient {
-    /// Create a new Ollama client
     pub fn new() -> Self {
+        Self::with_base_url_and_timeout(OLLAMA_DEFAULT_URL, OLLAMA_SHOW_TIMEOUT)
+    }
+
+    fn with_base_url_and_timeout(base_url: impl Into<String>, show_timeout: Duration) -> Self {
         Self {
-            base_url: OLLAMA_DEFAULT_URL.to_string(),
-            client: reqwest::Client::builder()
-                .timeout(std::time::Duration::from_secs(120))
-                .build()
-                .unwrap_or_default(),
+            base_url: base_url.into(),
+            client: reqwest::Client::new(),
+            metadata_cache: Arc::new(RwLock::new(HashMap::new())),
+            show_timeout,
         }
     }
 
-    /// Check if Ollama is available
     pub async fn is_available(&self) -> bool {
-        match self
-            .client
+        self.client
             .get(format!("{}/api/tags", self.base_url))
+            .timeout(Duration::from_secs(3))
             .send()
             .await
-        {
-            Ok(response) => response.status().is_success(),
-            Err(_) => false,
-        }
+            .is_ok_and(|response| response.status().is_success())
     }
 
-    /// List available models
     pub async fn list_models(&self) -> Result<Vec<String>> {
         let response = self
             .client
             .get(format!("{}/api/tags", self.base_url))
+            .timeout(Duration::from_secs(120))
             .send()
             .await
             .context("Failed to connect to Ollama")?;
-
+        if !response.status().is_success() {
+            let status = response.status();
+            let body = response.text().await.unwrap_or_default();
+            anyhow::bail!("Ollama model list error {}: {}", status, body);
+        }
         let data: serde_json::Value = response
             .json()
             .await
             .context("Failed to parse Ollama response")?;
-
-        let models: Vec<String> = data["models"]
+        let models = data["models"]
             .as_array()
-            .unwrap_or(&vec![])
-            .iter()
-            .filter_map(|m| m["name"].as_str().map(|s| s.to_string()))
-            .collect();
-
+            .map(|models| {
+                models
+                    .iter()
+                    .filter_map(|model| model["name"].as_str().map(str::to_string))
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default();
         tracing::info!("Ollama returned {} models", models.len());
         Ok(models)
     }
 
-    /// Generate completion
     pub async fn generate(&self, model: &str, prompt: &str) -> Result<String> {
-        self.generate_inner(model, prompt, None, 0.7).await
-    }
-
-    async fn generate_with_format(
-        &self,
-        model: &str,
-        prompt: &str,
-        format: serde_json::Value,
-    ) -> Result<String> {
-        let response = self
-            .generate_inner(model, prompt, Some(format), 0.1)
-            .await?;
-
-        if response.trim().is_empty() {
-            return self.generate_inner(model, prompt, None, 0.1).await;
-        }
-
-        Ok(response)
-    }
-
-    async fn generate_inner(
-        &self,
-        model: &str,
-        prompt: &str,
-        format: Option<serde_json::Value>,
-        temperature: f32,
-    ) -> Result<String> {
-        let request = GenerateRequest {
+        let request = CompletionRequest {
             model: model.to_string(),
+            system_prompt: None,
             prompt: prompt.to_string(),
-            stream: false,
-            format,
-            options: Some(GenerationOptions {
-                temperature,
-                num_predict: 1024,
-            }),
+            purpose: crate::llm::CompletionPurpose::Generic,
+            options: RequestOptions {
+                timeout: Duration::from_secs(120),
+                max_output_tokens: 1_024,
+                temperature: Some(0.7),
+                json_schema: None,
+                requested_context_tokens: None,
+            },
         };
-
-        let response = self
-            .client
-            .post(format!("{}/api/generate", self.base_url))
-            .json(&request)
-            .send()
-            .await
-            .context("Failed to send request to Ollama")?;
-
-        let data: GenerateResponse = response
-            .json()
-            .await
-            .context("Failed to parse Ollama response")?;
-
-        Ok(data.response)
+        Ok(self.complete(&request).await?.text)
     }
 
-    /// Analyze transcript with specific query
-    pub async fn analyze_transcript(
-        &self,
-        transcript: &str,
-        query: &str,
-        model: &str,
-    ) -> Result<AnalysisResult> {
-        let system_prompt = "You are an AI assistant analyzing meeting transcripts. \
-            Provide clear, concise answers based on the transcript provided. \
-            Always cite specific timestamps or quotes when making claims. \
-            If you're uncertain, say so.";
-
-        let prompt = format!(
-            "{system_prompt}\n\n\
-            Transcript:\n{transcript}\n\n\
-            Query: {query}\n\n\
-            Provide your analysis:"
-        );
-
-        let start_time = std::time::Instant::now();
-
-        let response = if let Some(format) = structured_format_for_query(query) {
-            self.generate_with_format(model, &prompt, format).await?
-        } else {
-            self.generate(model, &prompt).await?
-        };
-
-        // Extract citations from response
-        let citations = extract_citations(&response, transcript);
-
-        Ok(AnalysisResult {
-            query: query.to_string(),
-            response,
-            citations,
-            model: model.to_string(),
-            processing_time_ms: start_time.elapsed().as_millis() as u64,
-            grounded: false,
+    async fn cached_model_context(&self, model: &str) -> Option<ModelContextMetadata> {
+        let cache = self.metadata_cache.read().await;
+        cache.get(model).and_then(|entry| {
+            (entry.observed_at.elapsed() <= OLLAMA_METADATA_TTL).then_some(entry.metadata)
         })
     }
 
-    /// Summarize meeting with optional template. A non-empty `custom_prompt`
-    /// (the user's "Custom Meeting Summary Prompt" setting) replaces the
-    /// built-in summary instruction entirely.
-    pub async fn summarize(
-        &self,
-        transcript: &str,
-        model: &str,
-        custom_prompt: Option<&str>,
-    ) -> Result<String> {
-        if let Some(custom) = crate::llm::normalized_custom_summary_prompt(custom_prompt) {
-            let prompt = format!("{custom}\n\nTranscript:\n{transcript}\n\nSummary:");
-            return self.generate(model, &prompt).await;
+    async fn probe_model_context(&self, model: &str) -> Result<ModelContextMetadata, LlmError> {
+        let response = self
+            .client
+            .post(format!("{}/api/show", self.base_url))
+            .timeout(self.show_timeout)
+            .json(&ShowRequest {
+                model,
+                verbose: true,
+            })
+            .send()
+            .await
+            .map_err(|error| {
+                LlmError::from_reqwest(Provider::Ollama, "Failed to probe model metadata", error)
+            })?;
+        if !response.status().is_success() {
+            let status = response.status();
+            let body = response.text().await.unwrap_or_default();
+            return Err(classify_http_error(Provider::Ollama, status, body));
         }
-        self.summarize_with_template(transcript, model, None).await
+        let response: ShowResponse = response.json().await.map_err(|error| {
+            LlmError::from_reqwest(Provider::Ollama, "Failed to parse model metadata", error)
+        })?;
+        Ok(response.context_metadata())
     }
 
-    /// Summarize meeting with a specific template style
-    pub async fn summarize_with_template(
-        &self,
-        transcript: &str,
-        model: &str,
-        template: Option<&str>,
-    ) -> Result<String> {
-        let template_instruction = match template {
-            Some("standup") => "Format as a standup update: What was done, what is planned, and any blockers.",
-            Some("1on1") => "Format as a 1:1 summary: key topics discussed, feedback given, goals and commitments made.",
-            Some("sales") => "Format as a sales call summary: prospect information, pain points, objections, next steps, and deal status.",
-            Some("interview") => "Format as an interview summary: candidate strengths, weaknesses, key answers, and hiring recommendation.",
-            Some("brainstorm") => "Format as a brainstorm summary: ideas generated, top candidates, decisions made, and follow-up actions.",
-            _ => "Format as a meeting summary: key points, decisions made, and important outcomes.",
+    pub async fn invalidate_model_metadata(&self, model: &str) {
+        self.metadata_cache.write().await.remove(model);
+    }
+}
+
+#[async_trait]
+impl CompletionTransport for OllamaClient {
+    fn provider(&self) -> Provider {
+        Provider::Ollama
+    }
+
+    async fn complete(&self, request: &CompletionRequest) -> Result<CompletionResponse, LlmError> {
+        let prompt = match request.system_prompt.as_deref() {
+            Some(system) => format!("{}\n\n{}", system, request.prompt),
+            None => request.prompt.clone(),
         };
-
-        let prompt = format!(
-            "Summarize the following meeting transcript. {template_instruction}\n\nTranscript:\n{transcript}\n\nSummary:"
-        );
-
-        self.generate(model, &prompt).await
+        let num_ctx = request
+            .options
+            .requested_context_tokens
+            .and_then(|tokens| i32::try_from(tokens).ok())
+            .filter(|tokens| *tokens > 0);
+        let body = GenerateRequest {
+            model: request.model.clone(),
+            prompt,
+            stream: false,
+            format: request.options.json_schema.clone(),
+            options: Some(GenerationOptions {
+                temperature: request.options.temperature.unwrap_or(0.1),
+                num_predict: request.options.max_output_tokens.min(i32::MAX as usize) as i32,
+                num_ctx,
+            }),
+        };
+        let response = self
+            .client
+            .post(format!("{}/api/generate", self.base_url))
+            .timeout(request.options.timeout)
+            .json(&body)
+            .send()
+            .await
+            .map_err(|error| {
+                LlmError::from_reqwest(Provider::Ollama, "Failed to send request", error)
+            })?;
+        if !response.status().is_success() {
+            let status = response.status();
+            let body = response.text().await.unwrap_or_default();
+            return Err(classify_http_error(Provider::Ollama, status, body));
+        }
+        let data: GenerateResponse = response.json().await.map_err(|error| {
+            LlmError::from_reqwest(Provider::Ollama, "Failed to parse response", error)
+        })?;
+        if matches!(data.done_reason.as_deref(), Some("length")) {
+            return Err(LlmError::new(
+                Provider::Ollama,
+                ErrorKind::OutputLimit,
+                "Ollama stopped because the output token limit was reached",
+            ));
+        }
+        if let Some(reason) = data
+            .done_reason
+            .as_deref()
+            .filter(|reason| !matches!(*reason, "stop" | "load"))
+        {
+            return Err(LlmError::new(
+                Provider::Ollama,
+                ErrorKind::Upstream,
+                format!("Ollama stopped before completion: {}", reason),
+            ));
+        }
+        if data.response.trim().is_empty() {
+            return Err(LlmError::new(
+                Provider::Ollama,
+                ErrorKind::EmptyResponse,
+                "Ollama returned an empty completion",
+            ));
+        }
+        Ok(CompletionResponse {
+            text: data.response,
+            model: request.model.clone(),
+        })
     }
 
-    /// Extract action items
-    pub async fn extract_action_items(
-        &self,
-        transcript: &str,
-        model: &str,
-    ) -> Result<Vec<ActionItem>> {
-        let prompt = format!(
-            "You are an expert AI meeting assistant. Extract all actionable items from the following meeting transcript. \
-For each action item, clearly identify:\n\
-1. The specific task or deliverable\n\
-2. Who is responsible (if mentioned, otherwise mark as 'Unassigned')\n\
-3. Any deadlines or timeframes mentioned (if none, mark as 'No deadline')\n\n\
-Format as a clean, highly readable bulleted list. If there are no action items, simply output 'No action items identified.'\n\n\
-Transcript:\n{transcript}\n\n\
-Action Items:"
+    async fn model_context_metadata(&self, model: &str) -> Result<ModelContextMetadata, LlmError> {
+        if let Some(metadata) = self.cached_model_context(model).await {
+            return Ok(metadata);
+        }
+        let metadata = self.probe_model_context(model).await?;
+        self.metadata_cache.write().await.insert(
+            model.to_string(),
+            CachedModelContext {
+                metadata,
+                observed_at: Instant::now(),
+            },
         );
+        Ok(metadata)
+    }
 
-        let response = self.generate(model, &prompt).await?;
-
-        // Parse action items from response (supports -, *, and numbered lists)
-        let items: Vec<ActionItem> = response
-            .lines()
-            .filter(|line| {
-                let trimmed = line.trim();
-                trimmed.starts_with('-')
-                    || trimmed.starts_with('*')
-                    || trimmed.starts_with("•")
-                    || trimmed.chars().next().is_some_and(|c| c.is_ascii_digit())
-                        && trimmed.chars().nth(1).is_some_and(|c| c == '.' || c == ')')
-            })
-            .map(|line| {
-                let task = line
-                    .trim()
-                    .trim_start_matches("- ")
-                    .trim_start_matches("* ")
-                    .trim_start_matches("• ")
-                    .trim_start_matches(|c: char| c.is_ascii_digit())
-                    .trim_start_matches(['.', ')'])
-                    .trim_start();
-                ActionItem {
-                    task: task.to_string(),
-                    assignee: None,
-                    deadline: None,
-                }
-            })
-            .collect();
-
-        Ok(items)
+    async fn invalidate_model_context_metadata(&self, model: &str) {
+        self.invalidate_model_metadata(model).await;
     }
 }
 
@@ -259,8 +240,111 @@ impl Default for OllamaClient {
     }
 }
 
-/// Generate request
-#[derive(Debug, serde::Serialize)]
+#[derive(Debug, Serialize)]
+struct ShowRequest<'a> {
+    model: &'a str,
+    verbose: bool,
+}
+
+#[derive(Debug, Default, Deserialize)]
+struct ShowResponse {
+    #[serde(default)]
+    parameters: Option<String>,
+    #[serde(default)]
+    details: ShowDetails,
+    #[serde(default)]
+    model_info: Option<HashMap<String, Value>>,
+}
+
+#[derive(Debug, Default, Deserialize)]
+struct ShowDetails {
+    #[serde(default)]
+    family: Option<String>,
+    #[serde(default)]
+    families: Option<Vec<String>>,
+}
+
+impl ShowResponse {
+    fn context_metadata(&self) -> ModelContextMetadata {
+        ModelContextMetadata {
+            capacity_tokens: self
+                .model_info
+                .as_ref()
+                .and_then(|model_info| extract_context_capacity(model_info, &self.details)),
+            default_tokens: self
+                .parameters
+                .as_deref()
+                .and_then(extract_configured_num_ctx),
+        }
+    }
+}
+
+fn extract_context_capacity(
+    model_info: &HashMap<String, Value>,
+    details: &ShowDetails,
+) -> Option<usize> {
+    let mut prefixes = Vec::new();
+    if let Some(architecture) = model_info
+        .get("general.architecture")
+        .and_then(Value::as_str)
+    {
+        prefixes.push(architecture);
+    }
+    if let Some(family) = details.family.as_deref() {
+        prefixes.push(family);
+    }
+    prefixes.extend(details.families.iter().flatten().map(String::as_str));
+
+    for prefix in prefixes {
+        if let Some(tokens) = model_info
+            .get(&format!("{}.context_length", prefix))
+            .and_then(positive_usize)
+        {
+            return Some(tokens);
+        }
+    }
+    if let Some(tokens) = model_info
+        .get("general.context_length")
+        .and_then(positive_usize)
+    {
+        return Some(tokens);
+    }
+
+    let candidates = model_info
+        .iter()
+        .filter(|(key, _)| key.ends_with(".context_length"))
+        .filter_map(|(_, value)| positive_usize(value))
+        .collect::<BTreeSet<_>>();
+    (candidates.len() == 1)
+        .then(|| candidates.into_iter().next())
+        .flatten()
+}
+
+fn positive_usize(value: &Value) -> Option<usize> {
+    if let Some(value) = value.as_u64() {
+        return usize::try_from(value).ok().filter(|value| *value > 0);
+    }
+    if let Some(value) = value.as_i64() {
+        return usize::try_from(value).ok().filter(|value| *value > 0);
+    }
+    value
+        .as_str()
+        .and_then(|value| value.trim().parse::<usize>().ok())
+        .filter(|value| *value > 0)
+}
+
+fn extract_configured_num_ctx(parameters: &str) -> Option<usize> {
+    parameters.lines().rev().find_map(|line| {
+        let mut parts = line.split_whitespace();
+        (parts.next()? == "num_ctx")
+            .then(|| parts.next()?.parse::<i64>().ok())
+            .flatten()
+            .and_then(|value| usize::try_from(value).ok())
+            .filter(|value| *value > 0)
+    })
+}
+
+#[derive(Debug, Serialize)]
 struct GenerateRequest {
     model: String,
     prompt: String,
@@ -270,131 +354,252 @@ struct GenerateRequest {
     options: Option<GenerationOptions>,
 }
 
-/// Generation options
-#[derive(Debug, serde::Serialize)]
+#[derive(Debug, Serialize)]
 struct GenerationOptions {
     temperature: f32,
     num_predict: i32,
+    #[serde(skip_serializing_if = "invalid_num_ctx")]
+    num_ctx: Option<i32>,
 }
 
-/// Generate response
-#[derive(Debug, serde::Deserialize)]
+fn invalid_num_ctx(value: &Option<i32>) -> bool {
+    !matches!(value, Some(value) if *value > 0)
+}
+
+#[derive(Debug, Deserialize)]
 struct GenerateResponse {
     response: String,
-}
-
-/// Extract citations from response
-fn extract_citations(response: &str, transcript: &str) -> Vec<Citation> {
-    let mut citations = Vec::new();
-
-    // Simple heuristic: look for quoted text in response
-    for line in response.lines() {
-        if line.contains('"') {
-            let parts: Vec<&str> = line.split('"').collect();
-            for (i, part) in parts.iter().enumerate() {
-                if i % 2 == 1 && !part.is_empty() && transcript.contains(part) {
-                    citations.push(Citation {
-                        text: part.to_string(),
-                        start_time: None,
-                        end_time: None,
-                        recording_id: None,
-                        certainty: None,
-                    });
-                }
-            }
-        }
-    }
-
-    citations
-}
-
-fn structured_format_for_query(query: &str) -> Option<serde_json::Value> {
-    let normalized = query.to_ascii_lowercase();
-    if !(normalized.contains("return json only") && normalized.contains("citations")) {
-        return None;
-    }
-
-    if normalized.contains("actionitems") {
-        return Some(serde_json::json!({
-            "type": "object",
-            "properties": {
-                "actionItems": {
-                    "type": "array",
-                    "items": {
-                        "type": "object",
-                        "properties": {
-                            "task": { "type": "string" },
-                            "assignee": { "type": ["string", "null"] },
-                            "deadline": { "type": ["string", "null"] },
-                            "citations": {
-                                "type": "array",
-                                "items": citation_schema()
-                            }
-                        },
-                        "required": ["task", "assignee", "deadline", "citations"]
-                    }
-                }
-            },
-            "required": ["actionItems"]
-        }));
-    }
-
-    if normalized.contains("\"response\"") {
-        return Some(serde_json::json!({
-            "type": "object",
-            "properties": {
-                "response": { "type": "string" },
-                "citations": {
-                    "type": "array",
-                    "items": citation_schema()
-                }
-            },
-            "required": ["response", "citations"]
-        }));
-    }
-
-    None
-}
-
-fn citation_schema() -> serde_json::Value {
-    serde_json::json!({
-        "type": "object",
-        "properties": {
-            "recordingId": { "type": "string" },
-            "startTime": { "type": "number" },
-            "endTime": { "type": "number" },
-            "text": { "type": "string" },
-            "certainty": { "type": "number" }
-        },
-        "required": ["recordingId", "startTime", "endTime", "text", "certainty"]
-    })
+    #[serde(default)]
+    done_reason: Option<String>,
 }
 
 #[cfg(test)]
 mod tests {
-    use super::structured_format_for_query;
+    use super::*;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tokio::net::TcpListener;
 
     #[test]
-    fn structured_format_detects_grounded_analysis_payload() {
-        let format = structured_format_for_query(
-            "Return JSON only with schema: {\"response\":\"string\",\"citations\":[]}",
-        )
-        .expect("schema");
-        assert!(format["properties"]["response"].is_object());
-        assert!(format["properties"]["citations"].is_object());
+    fn show_response_extracts_architecture_context_and_configured_default() {
+        let response: ShowResponse = serde_json::from_value(serde_json::json!({
+            "parameters": "temperature 0.7\nnum_ctx 32768\nstop END",
+            "details": {"family": "llama"},
+            "model_info": {
+                "general.architecture": "llama",
+                "llama.context_length": 131072
+            }
+        }))
+        .unwrap();
+        assert_eq!(
+            response.context_metadata(),
+            ModelContextMetadata {
+                capacity_tokens: Some(131_072),
+                default_tokens: Some(32_768),
+            }
+        );
     }
 
     #[test]
-    fn structured_format_detects_grounded_action_items_payload() {
-        let format = structured_format_for_query(
-            "Return JSON only with schema: {\"actionItems\":[{\"citations\":[]}]}",
-        )
-        .expect("schema");
-        assert!(format["properties"]["actionItems"].is_object());
+    fn show_response_supports_family_and_unique_suffix_variants() {
+        let family: ShowResponse = serde_json::from_value(serde_json::json!({
+            "details": {"family": "gemma3"},
+            "model_info": {"gemma3.context_length": "131072"}
+        }))
+        .unwrap();
+        assert_eq!(family.context_metadata().capacity_tokens, Some(131_072));
+
+        let suffix: ShowResponse = serde_json::from_value(serde_json::json!({
+            "model_info": {"qwen2.context_length": 32768}
+        }))
+        .unwrap();
+        assert_eq!(suffix.context_metadata().capacity_tokens, Some(32_768));
     }
 
     #[test]
-    fn structured_format_ignores_free_text_queries() {
-        assert!(structured_format_for_query("Summarize this transcript").is_none());
+    fn unknown_or_ambiguous_show_metadata_stays_unknown() {
+        let unknown: ShowResponse = serde_json::from_value(serde_json::json!({
+            "parameters": "num_ctx 0\nnum_ctx -1\nnum_ctx nope",
+            "model_info": {
+                "text.context_length": 8192,
+                "vision.context_length": 4096
+            }
+        }))
+        .unwrap();
+        assert_eq!(unknown.context_metadata(), ModelContextMetadata::default());
+
+        let null_fields: ShowResponse = serde_json::from_value(serde_json::json!({
+            "parameters": null,
+            "details": {"families": null},
+            "model_info": null
+        }))
+        .unwrap();
+        assert_eq!(
+            null_fields.context_metadata(),
+            ModelContextMetadata::default()
+        );
+
+        let configured_only: ShowResponse = serde_json::from_value(serde_json::json!({
+            "parameters": "num_ctx 4096",
+            "model_info": null
+        }))
+        .unwrap();
+        assert_eq!(
+            configured_only.context_metadata(),
+            ModelContextMetadata {
+                capacity_tokens: None,
+                default_tokens: Some(4096),
+            }
+        );
+    }
+
+    #[test]
+    fn generation_options_never_serialize_non_positive_num_ctx() {
+        for num_ctx in [None, Some(0), Some(-1)] {
+            let value = serde_json::to_value(GenerationOptions {
+                temperature: 0.1,
+                num_predict: 10,
+                num_ctx,
+            })
+            .unwrap();
+            assert!(value.get("num_ctx").is_none());
+        }
+        let value = serde_json::to_value(GenerationOptions {
+            temperature: 0.1,
+            num_predict: 10,
+            num_ctx: Some(8192),
+        })
+        .unwrap();
+        assert_eq!(value["num_ctx"], 8192);
+    }
+
+    async fn spawn_show_server(
+        responses: Vec<(u16, &'static str, Duration)>,
+        request_count: Arc<AtomicUsize>,
+    ) -> String {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            for (status, body, delay) in responses {
+                let (mut socket, _) = listener.accept().await.unwrap();
+                request_count.fetch_add(1, Ordering::SeqCst);
+                let mut buffer = vec![0_u8; 4096];
+                let _ = socket.read(&mut buffer).await;
+                if !delay.is_zero() {
+                    tokio::time::sleep(delay).await;
+                }
+                let reason = if status == 200 { "OK" } else { "ERROR" };
+                let response = format!(
+                    "HTTP/1.1 {} {}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                    status,
+                    reason,
+                    body.len(),
+                    body
+                );
+                let _ = socket.write_all(response.as_bytes()).await;
+            }
+        });
+        format!("http://{}", address)
+    }
+
+    #[tokio::test]
+    async fn show_non_success_status_preserves_body_as_error() {
+        let requests = Arc::new(AtomicUsize::new(0));
+        let base_url = spawn_show_server(
+            vec![(404, r#"{"error":"model not found"}"#, Duration::ZERO)],
+            Arc::clone(&requests),
+        )
+        .await;
+        let client = OllamaClient::with_base_url_and_timeout(base_url, Duration::from_secs(1));
+        let error = client.model_context_metadata("missing").await.unwrap_err();
+        assert_eq!(error.status, Some(404));
+        assert!(error.message.contains("model not found"));
+        assert_eq!(requests.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn successful_unknown_metadata_is_cached_and_invalidation_reprobes() {
+        let requests = Arc::new(AtomicUsize::new(0));
+        let base_url = spawn_show_server(
+            vec![
+                (200, r#"{"details":{},"model_info":{}}"#, Duration::ZERO),
+                (
+                    200,
+                    r#"{"parameters":"num_ctx 4096","model_info":{"general.architecture":"llama","llama.context_length":8192}}"#,
+                    Duration::ZERO,
+                ),
+            ],
+            Arc::clone(&requests),
+        )
+        .await;
+        let client = OllamaClient::with_base_url_and_timeout(base_url, Duration::from_secs(1));
+        assert_eq!(
+            client.model_context_metadata("model").await.unwrap(),
+            ModelContextMetadata::default()
+        );
+        assert_eq!(
+            client.model_context_metadata("model").await.unwrap(),
+            ModelContextMetadata::default()
+        );
+        assert_eq!(requests.load(Ordering::SeqCst), 1);
+
+        client.invalidate_model_metadata("model").await;
+        assert_eq!(
+            client.model_context_metadata("model").await.unwrap(),
+            ModelContextMetadata {
+                capacity_tokens: Some(8192),
+                default_tokens: Some(4096),
+            }
+        );
+        assert_eq!(requests.load(Ordering::SeqCst), 2);
+    }
+
+    #[tokio::test]
+    async fn output_limit_termination_is_rejected_even_with_valid_json_text() {
+        let requests = Arc::new(AtomicUsize::new(0));
+        let base_url = spawn_show_server(
+            vec![(
+                200,
+                r#"{"response":"{\"response\":\"partial\",\"lineIds\":[\"L1\"]}","done_reason":"length"}"#,
+                Duration::ZERO,
+            )],
+            requests,
+        )
+        .await;
+        let client = OllamaClient::with_base_url_and_timeout(base_url, Duration::from_secs(1));
+        let error = client
+            .complete(&CompletionRequest {
+                model: "test".to_string(),
+                system_prompt: None,
+                prompt: "test".to_string(),
+                purpose: crate::llm::CompletionPurpose::Summary,
+                options: RequestOptions {
+                    timeout: Duration::from_secs(1),
+                    max_output_tokens: 16,
+                    temperature: Some(0.1),
+                    json_schema: None,
+                    requested_context_tokens: Some(4096),
+                },
+            })
+            .await
+            .unwrap_err();
+        assert_eq!(error.kind, ErrorKind::OutputLimit);
+    }
+
+    #[tokio::test]
+    async fn show_probe_uses_its_own_short_timeout() {
+        let requests = Arc::new(AtomicUsize::new(0));
+        let base_url = spawn_show_server(
+            vec![(
+                200,
+                r#"{"model_info":{"llama.context_length":8192}}"#,
+                Duration::from_millis(100),
+            )],
+            requests,
+        )
+        .await;
+        let client = OllamaClient::with_base_url_and_timeout(base_url, Duration::from_millis(10));
+        let error = client.model_context_metadata("slow").await.unwrap_err();
+        assert_eq!(error.kind, ErrorKind::Timeout);
     }
 }

@@ -23,9 +23,13 @@ const outPath = path.resolve(
   repoRoot,
   valueFor("--out", "artifacts/qa/macos/retention-policies.json")
 );
+const configDir = path.join(os.homedir(), "Library", "Application Support", "Plainsong");
 const workDir = path.resolve(
   repoRoot,
-  valueFor("--work-dir", "artifacts/qa/macos/retention-workdir")
+  valueFor(
+    "--work-dir",
+    path.join(configDir, "recordings", `.qa-retention-${process.pid}`)
+  )
 );
 const timeoutMs = Number(valueFor("--timeout-ms", "90000"));
 const sidecarPath = path.join(
@@ -35,7 +39,6 @@ const sidecarPath = path.join(
   "sidecar",
   "plainsong-sidecar"
 );
-const configDir = path.join(os.homedir(), "Library", "Application Support", "Plainsong");
 const settingsPath = path.join(configDir, "settings.json");
 const dbPath = path.join(configDir, "plainsong.db");
 const dbSidecarPaths = [dbPath, `${dbPath}-wal`, `${dbPath}-shm`];
@@ -130,7 +133,9 @@ function scenarioSettings(base, scenario) {
 
 function writeAudioFixture(filePath) {
   fs.mkdirSync(path.dirname(filePath), { recursive: true });
-  fs.writeFileSync(filePath, Buffer.from("Plainsong retention QA audio fixture\n", "utf8"));
+  const bytes = Buffer.from("Plainsong retention QA audio fixture\n", "utf8");
+  fs.writeFileSync(filePath, bytes);
+  return bytes;
 }
 
 function seedScenario(scenario) {
@@ -141,10 +146,12 @@ function seedScenario(scenario) {
       ? new Date().toISOString()
       : new Date(Date.now() - 100 * 24 * 60 * 60 * 1000).toISOString();
   const audioPath = path.join(workDir, `${recordingId}.wav`);
-  writeAudioFixture(audioPath);
+  const audioBytes = writeAudioFixture(audioPath);
 
   runSql(`
 BEGIN IMMEDIATE;
+DELETE FROM recording_audio_operations WHERE recording_id = ${sqlString(recordingId)};
+DELETE FROM recording_audio_assets WHERE recording_id = ${sqlString(recordingId)};
 DELETE FROM transcripts WHERE recording_id = ${sqlString(recordingId)};
 DELETE FROM recordings WHERE id = ${sqlString(recordingId)};
 INSERT INTO recordings (
@@ -170,6 +177,20 @@ INSERT INTO recordings (
   'manual',
   'qa',
   'QA fixture consent notice',
+  ${sqlString(createdAt)}
+);
+INSERT INTO recording_audio_assets (
+  recording_id, role, path, lifecycle, protection, plaintext_bytes,
+  plaintext_sha256, created_at, updated_at
+) VALUES (
+  ${sqlString(recordingId)},
+  'primary',
+  ${sqlString(audioPath)},
+  'ready',
+  'plaintext',
+  ${audioBytes.length},
+  ${sqlString(hashBytes(audioBytes))},
+  ${sqlString(createdAt)},
   ${sqlString(createdAt)}
 );
 INSERT INTO transcripts (
@@ -331,10 +352,9 @@ snapshotDbFiles();
 async function runScenario(scenario) {
   restoreDbFiles();
   restoreSettings();
-  const seeded = seedScenario(scenario);
   const sidecar = launchSidecar();
   const result = {
-    ...seeded,
+    recordingId: scenario.recordingId,
     pass: false,
     checks: {},
     maintenance: null,
@@ -347,6 +367,8 @@ async function runScenario(scenario) {
     await sidecar.sendCommand("save_settings", {
       settings: scenarioSettings(originalSettings, scenario),
     });
+    const seeded = seedScenario(scenario);
+    Object.assign(result, seeded);
     result.maintenance = await sidecar.sendCommand("run_storage_retention_maintenance", {
       recordingId: seeded.recordingId,
     });

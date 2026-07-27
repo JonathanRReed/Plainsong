@@ -22,6 +22,7 @@ vi.mock("@/lib/backend", () => ({
   getPermissionDiagnostics: (...args: unknown[]) => getPermissionDiagnosticsMock(...args),
   openPermissionSettings: vi.fn(async () => {}),
   openInstalledPlainsongApp: vi.fn(async () => {}),
+  requestAppleSpeechPermission: vi.fn(async () => ({})),
   requestDictationPermissions: vi.fn(async () => ({})),
   repairCursorInsertPermissions: vi.fn(async () => ({})),
 }));
@@ -149,8 +150,8 @@ const providerFixture = [
   },
   {
     providerType: "macos_apple_speech",
-    name: "Apple Native Speech",
-    description: "Use macOS native speech recognition.",
+    name: "Apple Speech (On-Device)",
+    description: "Dictation-only Apple Speech with server fallback disabled.",
     isAvailable: true,
     inferenceEnabled: true,
     modelInfo: {
@@ -163,10 +164,25 @@ const providerFixture = [
       sourceUrl: "https://developer.apple.com/documentation/speech",
     },
     selectedModelId: "macos_apple_speech",
-    modelOptions: [{ id: "macos_apple_speech", label: "Built into macOS" }],
+    modelOptions: [
+      { id: "macos_apple_speech", label: "Apple Speech · on-device dictation" },
+    ],
     downloadStatus: "Downloaded",
     runtimeStatus: "ready",
     runtimeDetails: {},
+    platformReadiness: {
+      status: "ready",
+      ready: true,
+      platformSupported: true,
+      helperPresent: true,
+      authorization: "authorized",
+      locale: "en_US",
+      localeSupported: true,
+      onDeviceAvailable: true,
+      recognizerAvailable: true,
+      message: "Apple Speech is ready for on-device dictation in locale 'en_US'.",
+      setupAction: null,
+    },
     engineDiagnostics: {
       activeEngine: "provider_default",
       availableEngines: ["provider_default", "macos_apple_speech"],
@@ -309,9 +325,11 @@ describe("Platform optimization settings", () => {
 
     render(<AsrProviderManager />);
 
-    expect(await screen.findByText("Apple Native setup")).toBeInTheDocument();
+    expect(await screen.findByText("Apple Speech setup")).toBeInTheDocument();
     await waitFor(() => {
-      expect(screen.getAllByText("Built into macOS").length).toBeGreaterThan(0);
+      expect(
+        screen.getAllByText("Apple Speech · on-device dictation").length,
+      ).toBeGreaterThan(0);
     });
 
     fireEvent.click(screen.getByRole("button", { name: "Show tools" }));
@@ -337,7 +355,7 @@ describe("Platform optimization settings", () => {
     fireEvent.click(await screen.findByRole("button", { name: "Split dictation + meetings" }));
     const dictationPanel = await screen.findByRole("tabpanel", { name: "Dictation" });
     fireEvent.click(within(dictationPanel).getByRole("combobox"));
-    fireEvent.click(await screen.findByText("Apple Native Speech"));
+    fireEvent.click(await screen.findByText("Apple Speech (On-Device)"));
 
     await waitFor(() => {
       expect(saveSettingsMock).toHaveBeenCalled();
@@ -349,6 +367,43 @@ describe("Platform optimization settings", () => {
     expect(savedPayload.transcription.dictationProvider).toBe("macos_apple_speech");
     expect(savedPayload.transcription.useSharedAsrSelection).toBe(false);
     expect(savedPayload.transcription.meetingProvider).toBe("distil_whisper");
+  });
+
+  it("renders unready Apple Speech as a disabled dictation option", async () => {
+    invokeMock.mockImplementation(async (cmd: string) => {
+      if (cmd === "get_asr_providers" || cmd === "get_asr_provider_inventory") {
+        return providerFixture.map((provider) =>
+          provider.providerType === "macos_apple_speech"
+            ? {
+                ...provider,
+                isAvailable: false,
+                runtimeStatus: "error",
+                platformReadiness: {
+                  ...(provider as any).platformReadiness,
+                  status: "authorization_denied",
+                  ready: false,
+                  authorization: "denied",
+                  message: "Speech Recognition permission is denied.",
+                  setupAction: "Open Speech Settings.",
+                },
+              }
+            : provider,
+        );
+      }
+      if (cmd === "get_default_asr_provider") return "distil_whisper";
+      if (cmd === "list_asr_benchmarks") return [];
+      return null;
+    });
+
+    render(<AsrProviderManager />);
+    fireEvent.click(await screen.findByRole("button", { name: "Split dictation + meetings" }));
+    const dictationPanel = await screen.findByRole("tabpanel", { name: "Dictation" });
+    fireEvent.click(within(dictationPanel).getByRole("combobox"));
+
+    const appleLabel = await screen.findByText("Apple Speech · on-device dictation");
+    const option = appleLabel.closest('[cmdk-item]');
+    expect(option).toHaveAttribute("aria-disabled", "true");
+    expect(screen.getByText("Permission denied")).toBeInTheDocument();
   });
 
   it("surfaces the latest clipboard-only insert fallback reason", async () => {
@@ -457,7 +512,7 @@ describe("Platform optimization settings", () => {
 
     render(<AsrProviderManager />);
 
-    expect(await screen.findByText("Apple Native setup")).toBeInTheDocument();
+    expect(await screen.findByText("Apple Speech setup")).toBeInTheDocument();
     expect(
       screen.queryByText(/Shared route: Apple native speech permission has not been granted yet\./)
     ).not.toBeInTheDocument();
@@ -569,7 +624,7 @@ describe("Platform optimization settings", () => {
 
     render(<AsrProviderManager />);
 
-    expect(await screen.findByText("Apple Native setup")).toBeInTheDocument();
+    expect(await screen.findByText("Apple Speech setup")).toBeInTheDocument();
     expect(
       screen.queryByText("Cursor insertion is not ready yet. Enable Plainsong in Privacy & Security > Accessibility so it can insert text into the target app.")
     ).not.toBeInTheDocument();

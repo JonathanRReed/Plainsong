@@ -117,7 +117,7 @@ jobs:
       - name: Setup Bun
         uses: oven-sh/setup-bun@v2
         with:
-          bun-version: 1.3.12
+          bun-version: 1.3.14
 
       - name: Setup Rust
         uses: dtolnay/rust-toolchain@stable
@@ -132,10 +132,12 @@ jobs:
 
       - name: Verify source
         run: |
-          bun run lint
-          bun run test
-          bun run test:rust
           bun run gate:ipc-contract
+          bun run gate:dead-code
+          bun run typecheck
+          bun run test
+          bun run lint:rust
+          bun run test:rust
 
       - name: Require signing and notarization credentials
         run: bun run gate:release-credentials:preflight
@@ -155,22 +157,48 @@ jobs:
           APPLE_APP_SPECIFIC_PASSWORD: ${{ secrets.APPLE_APP_SPECIFIC_PASSWORD }}
           APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
 
+      - name: Verify TCC usage strings
+        run: |
+          PLIST="release/mac-arm64/Plainsong.app/Contents/Info.plist"
+          /usr/libexec/PlistBuddy -c "Print :NSMicrophoneUsageDescription" "$PLIST"
+          /usr/libexec/PlistBuddy -c "Print :NSAudioCaptureUsageDescription" "$PLIST"
+          /usr/libexec/PlistBuddy -c "Print :NSSpeechRecognitionUsageDescription" "$PLIST"
+
+      - name: Verify packaged native executables
+        run: bun run gate:packaged:macos:native
+
       - name: Verify packaged updater metadata
         run: bun run qa:packaged:macos:update-metadata
+
+      - name: Verify package size
+        run: bun run gate:size
+
+      # electron-builder notarizes and staples the app before it creates the DMG.
+      # The disk image is a separate signed artifact and needs its own notary
+      # submission and ticket before the release trust gate can accept it.
+      - name: Notarize and staple signed DMG
+        env:
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_APP_SPECIFIC_PASSWORD: ${{ secrets.APPLE_APP_SPECIFIC_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+        run: |
+          shopt -s nullglob
+          DMGS=(release/*.dmg)
+          if [ "${#DMGS[@]}" -ne 1 ]; then
+            echo "Expected exactly one signed DMG, found ${#DMGS[@]}" >&2
+            exit 1
+          fi
+          xcrun notarytool submit "${DMGS[0]}" \
+            --apple-id "$APPLE_ID" \
+            --password "$APPLE_APP_SPECIFIC_PASSWORD" \
+            --team-id "$APPLE_TEAM_ID" \
+            --wait
+          xcrun stapler staple "${DMGS[0]}"
 
       - name: Verify signed, stapled, Gatekeeper-approved app
         run: bun run gate:release:macos:trust
         env:
           APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
-
-      - name: Verify TCC usage strings
-        run: |
-          PLIST="release/mac-arm64/Plainsong.app/Contents/Info.plist"
-          /usr/libexec/PlistBuddy -c "Print :NSMicrophoneUsageDescription" "$PLIST"
-          /usr/libexec/PlistBuddy -c "Print :NSSpeechRecognitionUsageDescription" "$PLIST"
-
-      - name: Verify package size
-        run: bun run gate:size
 
       - name: Verify release assets and write checksums
         run: |

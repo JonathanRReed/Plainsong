@@ -1,13 +1,16 @@
-//! DeepSeek client for transcript analysis
-//!
-//! DeepSeek uses an OpenAI-compatible API with competitive pricing
-//! Offers V3 for general chat and R1 for advanced reasoning
+//! DeepSeek client using its existing OpenAI-compatible raw HTTP endpoint.
 
-use crate::llm::{ActionItem, AnalysisResult, Citation};
+use crate::llm::transport::{
+    classify_http_error, CompletionRequest, CompletionResponse, CompletionTransport, ErrorKind,
+    LlmError, Provider, RequestOptions,
+};
 use anyhow::{Context, Result};
+use async_trait::async_trait;
+use std::time::Duration;
 
 const DEEPSEEK_API_URL: &str = "https://api.deepseek.com/v1";
 
+#[derive(Clone)]
 pub struct DeepSeekClient {
     api_key: Option<String>,
     client: reqwest::Client,
@@ -19,49 +22,42 @@ impl DeepSeekClient {
     }
 
     pub fn with_api_key(api_key: Option<String>) -> Self {
-        let resolved_api_key = api_key.or_else(|| std::env::var("DEEPSEEK_API_KEY").ok());
-
         Self {
-            api_key: resolved_api_key,
-            client: reqwest::Client::builder()
-                .timeout(std::time::Duration::from_secs(120))
-                .build()
-                .unwrap_or_default(),
+            api_key: api_key.or_else(|| std::env::var("DEEPSEEK_API_KEY").ok()),
+            client: reqwest::Client::new(),
         }
     }
 
-    /// List available models from DeepSeek API
     pub async fn list_models(&self) -> Result<Vec<String>> {
         let Some(ref key) = self.api_key else {
             return Ok(vec![]);
         };
-
         let response = self
             .client
             .get(format!("{}/models", DEEPSEEK_API_URL))
             .header("Authorization", format!("Bearer {}", key))
+            .timeout(Duration::from_secs(120))
             .send()
             .await
             .context("Failed to fetch DeepSeek models")?;
-
         if !response.status().is_success() {
             let status = response.status();
             let body = response.text().await.unwrap_or_default();
             anyhow::bail!("DeepSeek model list error {}: {}", status, body);
         }
-
         let data: serde_json::Value = response
             .json()
             .await
             .context("Failed to parse DeepSeek response")?;
-
-        let models: Vec<String> = data["data"]
+        let models = data["data"]
             .as_array()
-            .unwrap_or(&vec![])
-            .iter()
-            .filter_map(|m| m["id"].as_str().map(|s| s.to_string()))
-            .collect();
-
+            .map(|models| {
+                models
+                    .iter()
+                    .filter_map(|model| model["id"].as_str().map(str::to_string))
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default();
         tracing::info!("DeepSeek returned {} models", models.len());
         Ok(models)
     }
@@ -72,154 +68,104 @@ impl DeepSeekClient {
         prompt: &str,
         system_prompt: Option<&str>,
     ) -> Result<String> {
-        let Some(ref key) = self.api_key else {
-            return Err(anyhow::anyhow!("DeepSeek API key not configured"));
+        let request = CompletionRequest {
+            model: model.to_string(),
+            system_prompt: system_prompt.map(str::to_string),
+            prompt: prompt.to_string(),
+            purpose: crate::llm::CompletionPurpose::Generic,
+            options: RequestOptions {
+                timeout: Duration::from_secs(120),
+                max_output_tokens: 1_024,
+                temperature: Some(0.7),
+                json_schema: None,
+                requested_context_tokens: None,
+            },
         };
+        Ok(self.complete(&request).await?.text)
+    }
+}
 
-        let mut messages = vec![];
+#[async_trait]
+impl CompletionTransport for DeepSeekClient {
+    fn provider(&self) -> Provider {
+        Provider::DeepSeek
+    }
 
-        if let Some(system) = system_prompt {
-            messages.push(serde_json::json!({
-                "role": "system",
-                "content": system
-            }));
+    async fn complete(&self, request: &CompletionRequest) -> Result<CompletionResponse, LlmError> {
+        let key = self.api_key.as_deref().ok_or_else(|| {
+            LlmError::new(
+                Provider::DeepSeek,
+                ErrorKind::Configuration,
+                "DeepSeek API key not configured",
+            )
+        })?;
+        let mut messages = Vec::new();
+        if let Some(system) = request.system_prompt.as_deref() {
+            messages.push(serde_json::json!({"role": "system", "content": system}));
         }
-
-        messages.push(serde_json::json!({
-            "role": "user",
-            "content": prompt
-        }));
-
-        let request_body = serde_json::json!({
-            "model": model,
+        messages.push(serde_json::json!({"role": "user", "content": request.prompt}));
+        let mut body = serde_json::json!({
+            "model": request.model,
             "messages": messages,
-            "temperature": 0.7,
-            "max_tokens": 1024
+            "max_tokens": request.options.max_output_tokens,
         });
+        if let Some(temperature) = request.options.temperature {
+            body["temperature"] = serde_json::json!(temperature);
+        }
+        if request.options.json_schema.is_some() {
+            body["response_format"] = serde_json::json!({"type": "json_object"});
+        }
 
         let response = self
             .client
             .post(format!("{}/chat/completions", DEEPSEEK_API_URL))
             .header("Authorization", format!("Bearer {}", key))
             .header("Content-Type", "application/json")
-            .json(&request_body)
+            .timeout(request.options.timeout)
+            .json(&body)
             .send()
             .await
-            .context("Failed to send request to DeepSeek")?;
-
+            .map_err(|error| {
+                LlmError::from_reqwest(Provider::DeepSeek, "Failed to send request", error)
+            })?;
         if !response.status().is_success() {
             let status = response.status();
             let body = response.text().await.unwrap_or_default();
-            anyhow::bail!("DeepSeek completion error {}: {}", status, body);
+            return Err(classify_http_error(Provider::DeepSeek, status, body));
         }
-
-        let data: serde_json::Value = response
-            .json()
-            .await
-            .context("Failed to parse DeepSeek response")?;
-
-        let content = data["choices"][0]["message"]["content"]
+        let data: serde_json::Value = response.json().await.map_err(|error| {
+            LlmError::from_reqwest(Provider::DeepSeek, "Failed to parse response", error)
+        })?;
+        let finish_reason = data["choices"][0]["finish_reason"].as_str();
+        if matches!(finish_reason, Some("length")) {
+            return Err(LlmError::new(
+                Provider::DeepSeek,
+                ErrorKind::OutputLimit,
+                "DeepSeek stopped because the output token limit was reached",
+            ));
+        }
+        if let Some(reason) = finish_reason.filter(|reason| *reason != "stop") {
+            return Err(LlmError::new(
+                Provider::DeepSeek,
+                ErrorKind::Upstream,
+                format!("DeepSeek stopped before completion: {}", reason),
+            ));
+        }
+        let text = data["choices"][0]["message"]["content"]
             .as_str()
-            .unwrap_or("")
+            .unwrap_or_default()
             .to_string();
-
-        Ok(content)
-    }
-
-    pub async fn analyze_transcript(
-        &self,
-        transcript: &str,
-        query: &str,
-        model: &str,
-    ) -> Result<AnalysisResult> {
-        let system_prompt = "You are an AI assistant analyzing meeting transcripts. \
-            Provide clear, concise answers based on the transcript provided. \
-            Always cite specific timestamps or quotes when making claims. \
-            If you're uncertain, say so.";
-
-        let prompt = format!(
-            "Transcript:\n{transcript}\n\n\
-            Query: {query}\n\n\
-            Provide your analysis:"
-        );
-
-        let start_time = std::time::Instant::now();
-
-        let response = self.generate(model, &prompt, Some(system_prompt)).await?;
-
-        let citations = extract_citations(&response, transcript);
-
-        Ok(AnalysisResult {
-            query: query.to_string(),
-            response,
-            citations,
-            model: model.to_string(),
-            processing_time_ms: start_time.elapsed().as_millis() as u64,
-            grounded: false,
+        if text.trim().is_empty() {
+            return Err(LlmError::new(
+                Provider::DeepSeek,
+                ErrorKind::EmptyResponse,
+                "DeepSeek returned an empty completion",
+            ));
+        }
+        Ok(CompletionResponse {
+            text,
+            model: data["model"].as_str().unwrap_or(&request.model).to_string(),
         })
-    }
-
-    /// Summarize meeting. A non-empty `custom_prompt` (the user's "Custom
-    /// Meeting Summary Prompt" setting) replaces the default system prompt.
-    pub async fn summarize(
-        &self,
-        transcript: &str,
-        model: &str,
-        custom_prompt: Option<&str>,
-    ) -> Result<String> {
-        let system_prompt = crate::llm::normalized_custom_summary_prompt(custom_prompt)
-            .unwrap_or(crate::llm::DEFAULT_MEETING_SUMMARY_SYSTEM_PROMPT);
-
-        self.generate(model, transcript, Some(system_prompt)).await
-    }
-
-    pub async fn extract_action_items(
-        &self,
-        transcript: &str,
-        model: &str,
-    ) -> Result<Vec<ActionItem>> {
-        let prompt = format!(
-            "You are an expert AI meeting assistant. Extract all actionable items from the following meeting transcript. \
-For each action item, clearly identify:\n\
-1. The specific task or deliverable\n\
-2. Who is responsible (if mentioned, otherwise mark as 'Unassigned')\n\
-3. Any deadlines or timeframes mentioned (if none, mark as 'No deadline')\n\n\
-Format as a clean, highly readable bulleted list. If there are no action items, simply output 'No action items identified.'\n\n\
-Transcript:\n{transcript}\n\n\
-Action Items:"
-        );
-
-        let response = self.generate(model, &prompt, None).await?;
-
-        // Parse action items from response (supports -, *, and numbered lists)
-        let items: Vec<ActionItem> = response
-            .lines()
-            .filter(|line| {
-                let trimmed = line.trim();
-                trimmed.starts_with('-')
-                    || trimmed.starts_with('*')
-                    || trimmed.starts_with("•")
-                    || trimmed.chars().next().is_some_and(|c| c.is_ascii_digit())
-                        && trimmed.chars().nth(1).is_some_and(|c| c == '.' || c == ')')
-            })
-            .map(|line| {
-                let task = line
-                    .trim()
-                    .trim_start_matches("- ")
-                    .trim_start_matches("* ")
-                    .trim_start_matches("• ")
-                    .trim_start_matches(|c: char| c.is_ascii_digit())
-                    .trim_start_matches(['.', ')'])
-                    .trim_start();
-                ActionItem {
-                    task: task.to_string(),
-                    assignee: None,
-                    deadline: None,
-                }
-            })
-            .collect();
-
-        Ok(items)
     }
 }
 
@@ -227,27 +173,4 @@ impl Default for DeepSeekClient {
     fn default() -> Self {
         Self::new()
     }
-}
-
-fn extract_citations(response: &str, transcript: &str) -> Vec<Citation> {
-    let mut citations = Vec::new();
-
-    for line in response.lines() {
-        if line.contains('"') {
-            let parts: Vec<&str> = line.split('"').collect();
-            for (i, part) in parts.iter().enumerate() {
-                if i % 2 == 1 && !part.is_empty() && transcript.contains(part) {
-                    citations.push(Citation {
-                        text: part.to_string(),
-                        start_time: None,
-                        end_time: None,
-                        recording_id: None,
-                        certainty: None,
-                    });
-                }
-            }
-        }
-    }
-
-    citations
 }

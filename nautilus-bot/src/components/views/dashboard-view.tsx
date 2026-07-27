@@ -83,7 +83,12 @@ export function DashboardView() {
   const [relationshipMemory, setRelationshipMemory] = useState<RelationshipMemory | null>(null);
   const [relationshipMemoryLoading, setRelationshipMemoryLoading] = useState(true);
   const [relationshipMemoryError, setRelationshipMemoryError] = useState<string | null>(null);
-  const { dictationReady, meetingReady, loading: setupLoading } = useSetupStatus();
+  const {
+    dictationReady,
+    meetingReady,
+    fullCaptureReady,
+    loading: setupLoading,
+  } = useSetupStatus();
 
   useEffect(() => {
     let cancelled = false;
@@ -120,13 +125,15 @@ export function DashboardView() {
   const totalDuration = useMemo(() => recordings.reduce((acc, r) => acc + r.duration, 0), [recordings]);
   const setupHeadline = setupLoading
     ? "Checking your voice workspace"
-    : dictationReady && meetingReady
+    : dictationReady && meetingReady && fullCaptureReady
       ? "Everything is ready"
-      : dictationReady
-        ? "Dictation is ready. Meetings need one more pass"
-        : meetingReady
-          ? "Meetings are ready. Dictation needs one more pass"
-          : "Finish setup to unlock the full solo workflow";
+      : dictationReady && meetingReady
+        ? "Dictation and mic-only meetings are ready"
+        : dictationReady
+          ? "Dictation is ready. Meetings need one more pass"
+          : meetingReady
+            ? "Mic-only meetings are ready. Dictation needs one more pass"
+            : "Finish setup to unlock the full solo workflow";
   const timelineGroups = useMemo(() => recordings.reduce<Record<string, typeof recordings>>((acc, recording) => {
     const key = new Date(recording.createdAt).toLocaleDateString();
     if (!acc[key]) {
@@ -269,7 +276,13 @@ export function DashboardView() {
                 <div className="min-w-0">
                   <div className="mb-5 flex flex-wrap items-center gap-2">
                     <Badge variant={dictationReady && meetingReady ? "default" : "destructive"}>
-                      {setupLoading ? "Checking setup" : dictationReady && meetingReady ? "Ready" : "Needs attention"}
+                      {setupLoading
+                        ? "Checking setup"
+                        : dictationReady && meetingReady && fullCaptureReady
+                          ? "Ready"
+                          : dictationReady && meetingReady
+                            ? "Mic-only ready"
+                            : "Needs attention"}
                     </Badge>
                     <Badge variant="outline">Local memory</Badge>
                   </div>

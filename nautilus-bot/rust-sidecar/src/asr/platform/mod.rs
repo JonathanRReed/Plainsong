@@ -42,7 +42,8 @@ impl PlatformEngine {
     pub fn supports_provider(self, provider: AsrProviderType) -> bool {
         match self {
             PlatformEngine::ProviderDefault => true,
-            PlatformEngine::MacosAppleSpeech | PlatformEngine::WindowsSdkDictation => {
+            PlatformEngine::MacosAppleSpeech => provider == AsrProviderType::MacosAppleSpeech,
+            PlatformEngine::WindowsSdkDictation => {
                 !provider.is_remote() && provider != AsrProviderType::MlxAudio
             }
             PlatformEngine::MacosMlxSidecar | PlatformEngine::WindowsFoundryLocal => {
@@ -115,5 +116,19 @@ impl AsrProviderType {
 
     pub fn is_local(self) -> bool {
         !self.is_remote()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{AsrProviderType, PlatformEngine};
+
+    #[test]
+    fn apple_speech_engine_only_supports_its_own_provider() {
+        assert!(
+            PlatformEngine::MacosAppleSpeech.supports_provider(AsrProviderType::MacosAppleSpeech)
+        );
+        assert!(!PlatformEngine::MacosAppleSpeech.supports_provider(AsrProviderType::Whisper));
+        assert!(!PlatformEngine::MacosAppleSpeech.supports_provider(AsrProviderType::DistilWhisper));
     }
 }

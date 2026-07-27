@@ -24,6 +24,7 @@ type AsrRouteReadiness =
 type AsrRouteAction =
   | "download"
   | "connect_api_key"
+  | "request_permission"
   | "open_system_setup"
   | "fix_setup"
   | null;
@@ -42,6 +43,8 @@ export interface AsrRouteCatalogEntry {
   laneCompatibility: Record<AsrRouteLane, boolean>;
   hosting: AsrRouteHosting;
   readiness: AsrRouteReadiness;
+  readinessDetail: string | null;
+  selectable: boolean;
   downloadable: boolean;
   experimental: boolean;
   supportsMlxAcceleration: boolean;
@@ -134,6 +137,18 @@ function routeReadiness(
     return "unavailable";
   }
 
+  if (provider.providerType === "macos_apple_speech") {
+    const readiness = provider.platformReadiness;
+    if (readiness) {
+      if (readiness.ready && readiness.status === "ready") {
+        return "ready";
+      }
+      return readiness.status === "unsupported_platform"
+        ? "unavailable"
+        : "missing_runtime";
+    }
+  }
+
   if (
     hosting === "local" &&
     isDownloadableProvider(provider.providerType) &&
@@ -152,7 +167,35 @@ function routeReadiness(
   return "ready";
 }
 
-function routeReadinessLabel(readiness: AsrRouteReadiness) {
+function routeReadinessLabel(
+  provider: RouteSelectableProvider,
+  readiness: AsrRouteReadiness,
+) {
+  if (provider.providerType === "macos_apple_speech") {
+    switch (provider.platformReadiness?.status) {
+      case "ready":
+        return "Ready on-device";
+      case "authorization_not_determined":
+        return "Permission required";
+      case "authorization_denied":
+        return "Permission denied";
+      case "authorization_restricted":
+        return "Permission restricted";
+      case "unsupported_locale":
+        return "Locale unsupported";
+      case "on_device_unavailable":
+        return "On-device unavailable";
+      case "helper_missing":
+        return "Helper missing";
+      case "recognizer_unavailable":
+        return "Temporarily unavailable";
+      case "unsupported_platform":
+        return "Unsupported platform";
+      default:
+        break;
+    }
+  }
+
   switch (readiness) {
     case "ready":
       return "Ready";
@@ -168,10 +211,30 @@ function routeReadinessLabel(readiness: AsrRouteReadiness) {
 }
 
 function routeAction(
-  providerType: AsrProviderType,
+  provider: RouteSelectableProvider,
   readiness: AsrRouteReadiness,
   hosting: AsrRouteHosting,
 ): { action: AsrRouteAction; actionLabel: string | null } {
+  if (provider.providerType === "macos_apple_speech") {
+    switch (provider.platformReadiness?.status) {
+      case "authorization_not_determined":
+        return { action: "request_permission", actionLabel: "Request permission" };
+      case "authorization_denied":
+      case "authorization_restricted":
+        return { action: "open_system_setup", actionLabel: "Open Speech Settings" };
+      case "helper_missing":
+        return { action: "fix_setup", actionLabel: "Repair install" };
+      case "unsupported_locale":
+      case "on_device_unavailable":
+      case "recognizer_unavailable":
+      case "unknown_authorization":
+      case "runtime_unavailable":
+        return { action: "fix_setup", actionLabel: "Review setup" };
+      default:
+        break;
+    }
+  }
+
   if (readiness === "needs_download") {
     return { action: "download", actionLabel: "Download" };
   }
@@ -186,8 +249,8 @@ function routeAction(
   }
   if (
     readiness === "unavailable" &&
-    (providerType === "macos_apple_speech" ||
-      providerType === "windows_sdk_dictation")
+    (provider.providerType === "macos_apple_speech" ||
+      provider.providerType === "windows_sdk_dictation")
   ) {
     return { action: "open_system_setup", actionLabel: "Open system setup" };
   }
@@ -248,7 +311,7 @@ function routeSummary(
     return "Cloud route for meeting-grade transcription with a simple BYOK setup.";
   }
   if (providerType === "macos_apple_speech") {
-    return "Built into macOS and convenient for direct dictation, but not a meeting route.";
+    return "On-device Apple Speech for direct dictation only; server fallback is disabled and meetings use a separate provider.";
   }
   if (providerType === "windows_sdk_dictation") {
     return "Built into Windows and convenient for direct dictation, but not a meeting route.";
@@ -378,11 +441,7 @@ export function buildAsrRouteCatalog(
             provider.providerType,
             option.id,
           );
-          const actionState = routeAction(
-            provider.providerType,
-            readiness,
-            hosting,
-          );
+          const actionState = routeAction(provider, readiness, hosting);
 
           return {
             routeId: routeIdFor(provider.providerType, option.id),
@@ -394,6 +453,9 @@ export function buildAsrRouteCatalog(
             laneCompatibility: routeLaneCompatibility(provider.providerType, option.id),
             hosting,
             readiness,
+            readinessDetail: provider.platformReadiness?.message ?? null,
+            selectable:
+              provider.providerType !== "macos_apple_speech" || readiness === "ready",
             downloadable: isDownloadableProvider(provider.providerType),
             experimental: isExperimentalRoute(provider.providerType, option.id),
             supportsMlxAcceleration: modelSupportsMlxAcceleration(
@@ -401,7 +463,7 @@ export function buildAsrRouteCatalog(
               option.id,
             ),
             capabilityBadge,
-            readinessLabel: routeReadinessLabel(readiness),
+            readinessLabel: routeReadinessLabel(provider, readiness),
             action: actionState.action,
             actionLabel: actionState.actionLabel,
             summary: routeSummary(

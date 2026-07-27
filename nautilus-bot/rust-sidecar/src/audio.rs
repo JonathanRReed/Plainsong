@@ -12,9 +12,15 @@ use crate::audio::preroll::{
     PreRollBuffer, PRE_ROLL_MAX_AGE_MS, PRE_ROLL_SECONDS, PRE_ROLL_SPEECH_LEAD_SECONDS,
 };
 use crate::audio::silero_vad::build_vad_gate;
-use crate::audio::system_capture::{MixedAudioCapture, MixedCaptureEvents};
+use crate::audio::system_capture::{
+    MixedAudioCapture, MixedAudioChunk, MixedCaptureEvents, SystemAudioCapability,
+};
 use crate::audio::vad::{VadBackendKind, VadConfig, VadEdge, VadGate};
 use crate::models::RecordingOptions;
+use crate::recording_audio::{
+    create_new_file, sync_file, sync_parent_directory, validate_plaintext_wav, RecordingAudioRole,
+    RecordingAudioValidation, RecordingCapturePlan, ValidatedRecordingAudio,
+};
 use crate::settings;
 use crate::sidecar_handle::SidecarHandle;
 use anyhow::{Context, Result};
@@ -22,12 +28,11 @@ use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use cpal::{FromSample, Sample};
 use crossbeam::channel::{bounded, Receiver, TrySendError};
 use serde::{Deserialize, Serialize};
-use sha2::{Digest, Sha256};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 use std::thread::JoinHandle;
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant};
 
 const DICTATION_STOP_CAPTURE_TAIL_MS: u64 = 120;
 const DICTATION_MIN_CAPTURE_SECONDS: f32 = 0.35;
@@ -227,12 +232,43 @@ pub struct AudioCapture {
     dictation_first_sample_us: Arc<AtomicU64>,
 }
 
+static SYSTEM_AUDIO_TEST_ACTIVE: AtomicBool = AtomicBool::new(false);
+
+pub(crate) struct SystemAudioTestGuard;
+
+impl Drop for SystemAudioTestGuard {
+    fn drop(&mut self) {
+        SYSTEM_AUDIO_TEST_ACTIVE.store(false, Ordering::SeqCst);
+    }
+}
+
+fn claim_system_audio_test(recording_active: bool) -> Result<SystemAudioTestGuard> {
+    if recording_active {
+        return Err(anyhow::anyhow!(
+            "Cannot test system audio while a recording is active"
+        ));
+    }
+    SYSTEM_AUDIO_TEST_ACTIVE
+        .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
+        .map_err(|_| anyhow::anyhow!("A system-audio test is already running"))?;
+    Ok(SystemAudioTestGuard)
+}
+
+enum RecordingActivation {
+    Microphone {
+        activation_tx: crossbeam::channel::Sender<()>,
+        activated_rx: crossbeam::channel::Receiver<std::result::Result<(), String>>,
+    },
+    Mixed(crate::audio::system_capture::MixedAudioCaptureStart),
+}
+
 struct ActiveRecordingSession {
     id: String,
     audio_path: PathBuf,
     mic_audio_path: Option<PathBuf>,
     system_audio_path: Option<PathBuf>,
-    writer_handles: Vec<JoinHandle<()>>,
+    writer_handles: Vec<JoinHandle<Result<()>>>,
+    activation: Option<RecordingActivation>,
     capture_stop_flag: Arc<AtomicBool>,
     capture_handle: Option<JoinHandle<()>>,
     mixed_capture: Option<MixedAudioCapture>,
@@ -254,6 +290,7 @@ pub struct RecordingStopResult {
     pub audio_path: String,
     pub mic_audio_path: Option<String>,
     pub system_audio_path: Option<String>,
+    pub validated_assets: Vec<(RecordingAudioRole, ValidatedRecordingAudio)>,
     pub content_hash: String,
     pub dropped_stream_chunks: u64,
     pub dropped_writer_chunks: u64,
@@ -451,6 +488,10 @@ impl AudioCapture {
         }
     }
 
+    pub fn plan_recording(&self, options: &RecordingOptions) -> Result<RecordingCapturePlan> {
+        RecordingCapturePlan::new(&self.recordings_dir, options.mic, options.system_audio)
+    }
+
     /// Check if system audio capture is available
     pub fn is_system_audio_available(&self) -> bool {
         let sys_capture = system_capture::SystemAudioCapture::new();
@@ -461,6 +502,10 @@ impl AudioCapture {
     pub fn get_loopback_device_name(&self) -> Option<String> {
         let sys_capture = system_capture::SystemAudioCapture::new();
         sys_capture.get_loopback_device_name().ok().flatten()
+    }
+
+    pub fn system_audio_capability(&self) -> SystemAudioCapability {
+        system_capture::SystemAudioCapture::new().capability()
     }
 
     pub fn list_input_devices(&self) -> Result<Vec<AudioInputDeviceInfo>> {
@@ -1168,37 +1213,41 @@ impl AudioCapture {
         raw.sqrt()
     }
 
-    /// `event_handle`, if provided, is used by the mixed ("Me + Them") capture
-    /// path to emit `meeting-audio-source-warning` when one of the two sources
-    /// goes silent mid-session; same shape as `start_dictation`'s handle.
+    /// Prepare every enabled writer and capture stream without allowing a
+    /// callback to receive a sample. The caller must persist the plan first,
+    /// then mark its assets writing before calling [`Self::activate_recording`].
     pub fn start_recording(
         &mut self,
+        plan: RecordingCapturePlan,
         options: RecordingOptions,
         event_handle: Option<SidecarHandle>,
     ) -> Result<String> {
         if self.active_recording.is_some() {
             return Err(anyhow::anyhow!("A recording session is already active"));
         }
+        if SYSTEM_AUDIO_TEST_ACTIVE.load(Ordering::SeqCst) {
+            return Err(anyhow::anyhow!(
+                "Cannot start a recording while the system-audio test is running"
+            ));
+        }
         if !options.mic && !options.system_audio {
             return Err(anyhow::anyhow!(
                 "Must enable microphone or system audio capture"
             ));
         }
+        if plan.mic_path.is_some() != (options.mic && options.system_audio)
+            || plan.system_path.is_some() != options.system_audio
+        {
+            return Err(anyhow::anyhow!(
+                "Recording capture plan does not match enabled audio sources"
+            ));
+        }
 
-        let id = uuid::Uuid::new_v4().to_string();
-        let timestamp = SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs();
-
-        let filename = format!("recording_{}_{}.wav", timestamp, &id[..8]);
-        let audio_path = self.recordings_dir.join(&filename);
+        let id = plan.recording_id.clone();
+        let audio_path = plan.primary_path.clone();
+        let mic_audio_path = plan.mic_path.clone();
+        let system_audio_path = plan.system_path.clone();
         let waveform_buffer = Arc::new(std::sync::Mutex::new(Vec::with_capacity(4410)));
-
-        tracing::info!(
-            "Starting recording {} (mic: {}, system: {})",
-            id,
-            options.mic,
-            options.system_audio
-        );
-
         let streaming_queue: Arc<crossbeam::queue::ArrayQueue<Vec<f32>>> =
             Arc::new(crossbeam::queue::ArrayQueue::new(256));
         let preferred_mic_device = if options.mic {
@@ -1210,7 +1259,13 @@ impl AudioCapture {
             None
         };
 
-        // Use MixedAudioCapture if system audio is requested
+        tracing::info!(
+            "Preparing recording {} (mic: {}, system: {})",
+            id,
+            options.mic,
+            options.system_audio
+        );
+
         if options.system_audio {
             let mut mixed_capture = MixedAudioCapture::new();
             let capture_start = mixed_capture
@@ -1225,57 +1280,33 @@ impl AudioCapture {
                         recording_id: id.clone(),
                     }),
                 )
-                .context("Failed to start mixed audio capture")?;
+                .context("Failed to prepare mixed audio capture")?;
             let sample_rate = capture_start.sample_rate;
-            let mixed_receiver = capture_start.mixed_receiver;
-            let mic_receiver = capture_start.mic_receiver;
-            let system_receiver = capture_start.system_receiver;
-
-            let audio_stem = audio_path
-                .file_stem()
-                .and_then(|stem| stem.to_str())
-                .unwrap_or("recording")
-                .to_string();
-            let mic_audio_path = options
-                .mic
-                .then(|| self.recordings_dir.join(format!("{}_mic.wav", audio_stem)));
-            let system_audio_path = options.system_audio.then(|| {
-                self.recordings_dir
-                    .join(format!("{}_system.wav", audio_stem))
-            });
-
-            let mut writer_handles = Vec::new();
-
-            // Spawn writer thread for mixed audio
-            let audio_path_clone = audio_path.clone();
-            writer_handles.push(std::thread::spawn(move || {
-                if let Err(e) = write_wav_file(&audio_path_clone, mixed_receiver, sample_rate) {
-                    tracing::error!("Failed to write WAV file: {}", e);
+            let writer_receiver = capture_start.aligned_receiver.clone();
+            let prepared_writers = match prepare_aligned_wav_writers(
+                &audio_path,
+                mic_audio_path.as_deref(),
+                system_audio_path.as_deref(),
+                sample_rate,
+            ) {
+                Ok(writers) => writers,
+                Err(error) => {
+                    mixed_capture.stop();
+                    return Err(error);
                 }
-            }));
-
-            if let (Some(path), Some(receiver)) = (mic_audio_path.clone(), mic_receiver) {
-                writer_handles.push(std::thread::spawn(move || {
-                    if let Err(e) = write_wav_file(&path, receiver, sample_rate) {
-                        tracing::error!("Failed to write microphone sidecar WAV file: {}", e);
-                    }
-                }));
-            }
-
-            if let (Some(path), Some(receiver)) = (system_audio_path.clone(), system_receiver) {
-                writer_handles.push(std::thread::spawn(move || {
-                    if let Err(e) = write_wav_file(&path, receiver, sample_rate) {
-                        tracing::error!("Failed to write system-audio sidecar WAV file: {}", e);
-                    }
-                }));
-            }
+            };
+            let writer_log_path = audio_path.clone();
+            let writer_handle = std::thread::spawn(move || {
+                write_aligned_wav_files(prepared_writers, writer_receiver, &writer_log_path)
+            });
 
             self.active_recording = Some(ActiveRecordingSession {
                 id: id.clone(),
                 audio_path,
                 mic_audio_path,
                 system_audio_path,
-                writer_handles,
+                writer_handles: vec![writer_handle],
+                activation: Some(RecordingActivation::Mixed(capture_start)),
                 capture_stop_flag: Arc::new(AtomicBool::new(false)),
                 capture_handle: None,
                 mixed_capture: Some(mixed_capture),
@@ -1286,46 +1317,37 @@ impl AudioCapture {
                 dropped_writer_chunks: Arc::new(AtomicU64::new(0)),
             });
         } else {
-            // Standard microphone-only recording
+            let device = preferred_mic_device
+                .or_else(|| cpal::default_host().default_input_device())
+                .context("No microphone input device available")?;
+            let config = device
+                .default_input_config()
+                .context("Failed to read microphone input configuration")?;
+            let sample_rate = config.sample_rate();
+            let num_channels = config.channels() as usize;
+            let sample_format = config.sample_format();
+            let stream_config = config.config();
+
+            let prepared_writer = prepare_mono_wav_writer(&audio_path, sample_rate)?;
             let (samples_sender, samples_receiver) = bounded::<Vec<f32>>(256);
-            let wf_buffer = Arc::clone(&waveform_buffer);
-            let audio_path_clone = audio_path.clone();
+            let writer_log_path = audio_path.clone();
+            let writer_handle = std::thread::spawn(move || {
+                write_wav_file(prepared_writer, samples_receiver, &writer_log_path)
+            });
+
             let capture_stop_flag = Arc::new(AtomicBool::new(true));
             let capture_flag = Arc::clone(&capture_stop_flag);
             let dropped_stream_chunks = Arc::new(AtomicU64::new(0));
             let dropped_writer_chunks = Arc::new(AtomicU64::new(0));
             let dropped_stream_chunks_for_session = Arc::clone(&dropped_stream_chunks);
             let dropped_writer_chunks_for_session = Arc::clone(&dropped_writer_chunks);
-            let (startup_tx, startup_rx) = bounded::<Result<(), String>>(1);
-
+            let wf_buffer = Arc::clone(&waveform_buffer);
             let stream_queue_clone = Arc::clone(&streaming_queue);
+            let (ready_tx, ready_rx) = bounded::<Result<(), String>>(1);
+            let (activation_tx, activation_rx) = bounded::<()>(1);
+            let (activated_tx, activated_rx) = bounded::<Result<(), String>>(1);
+
             let capture_handle = std::thread::spawn(move || {
-                let device = match preferred_mic_device
-                    .or_else(|| cpal::default_host().default_input_device())
-                {
-                    Some(device) => device,
-                    None => {
-                        let _ = startup_tx
-                            .send(Err("No microphone input device available".to_string()));
-                        tracing::error!("No input device available");
-                        return;
-                    }
-                };
-                let Ok(config) = device.default_input_config() else {
-                    let _ = startup_tx.send(Err(
-                        "Failed to read microphone input configuration".to_string()
-                    ));
-                    tracing::error!("Failed to read input config");
-                    return;
-                };
-
-                // The recording is written as a 1-channel WAV, so interleaved
-                // multi-channel input must be downmixed to mono; otherwise a
-                // stereo device produces a double-length, half-speed recording.
-                let num_channels = config.channels() as usize;
-                let sample_format = config.sample_format();
-                let stream_config = config.config();
-
                 macro_rules! build_recording_stream {
                     ($sample_type:ty) => {{
                         let stream_queue = Arc::clone(&stream_queue_clone);
@@ -1365,7 +1387,7 @@ impl AudioCapture {
                                     Err(TrySendError::Disconnected(_)) => {}
                                 }
                             },
-                            |err| tracing::error!("Stream error: {}", err),
+                            |error| tracing::error!("Stream error: {}", error),
                             None,
                         )
                     }};
@@ -1386,24 +1408,28 @@ impl AudioCapture {
                     cpal::SampleFormat::F64 => build_recording_stream!(f64),
                     _ => Err(cpal::ErrorKind::UnsupportedConfig.into()),
                 };
-
                 let Ok(stream) = stream_result else {
                     let _ =
-                        startup_tx.send(Err("Failed to build microphone input stream".to_string()));
-                    tracing::error!("Failed to build microphone input stream");
+                        ready_tx.send(Err("Failed to build microphone input stream".to_string()));
                     return;
                 };
+                let _ = ready_tx.send(Ok(()));
 
-                if let Err(e) = stream.play() {
-                    let _ =
-                        startup_tx.send(Err(format!("Failed to start microphone stream: {}", e)));
-                    tracing::error!("Failed to play microphone stream: {}", e);
+                if activation_rx.recv_timeout(Duration::from_secs(5)).is_err() {
+                    let _ = activated_tx.send(Err(
+                        "Timed out waiting for durable microphone writer".to_string(),
+                    ));
                     return;
                 }
-                let _ = startup_tx.send(Ok(()));
+                if let Err(error) = stream.play() {
+                    let _ = activated_tx
+                        .send(Err(format!("Failed to start microphone stream: {error}")));
+                    return;
+                }
+                let _ = activated_tx.send(Ok(()));
 
                 while capture_flag.load(Ordering::SeqCst) {
-                    std::thread::sleep(std::time::Duration::from_millis(10));
+                    std::thread::sleep(Duration::from_millis(10));
                 }
 
                 let dropped_stream = dropped_stream_chunks.load(Ordering::Relaxed);
@@ -1415,38 +1441,34 @@ impl AudioCapture {
                         dropped_writer
                     );
                 }
-
                 drop(stream);
             });
 
-            match startup_rx.recv_timeout(Duration::from_millis(1500)) {
+            match ready_rx.recv_timeout(Duration::from_millis(1500)) {
                 Ok(Ok(())) => {}
                 Ok(Err(error)) => {
                     capture_stop_flag.store(false, Ordering::SeqCst);
                     let _ = capture_handle.join();
+                    let _ = join_writer_with_timeout(
+                        writer_handle,
+                        Duration::from_secs(5),
+                        "wav writer thread",
+                    );
                     return Err(anyhow::anyhow!(error));
                 }
                 Err(_) => {
                     capture_stop_flag.store(false, Ordering::SeqCst);
                     let _ = capture_handle.join();
+                    let _ = join_writer_with_timeout(
+                        writer_handle,
+                        Duration::from_secs(5),
+                        "wav writer thread",
+                    );
                     return Err(anyhow::anyhow!(
-                        "Timed out waiting for microphone stream to start"
+                        "Timed out waiting for microphone stream preparation"
                     ));
                 }
             }
-
-            let sample_rate = self
-                .resolve_input_device_by_id(options.preferred_input_device_id.as_deref())?
-                .0
-                .default_input_config()?
-                .sample_rate();
-
-            // Spawn writer thread
-            let writer_handle = std::thread::spawn(move || {
-                if let Err(e) = write_wav_file(&audio_path_clone, samples_receiver, sample_rate) {
-                    tracing::error!("Failed to write WAV file: {}", e);
-                }
-            });
 
             self.active_recording = Some(ActiveRecordingSession {
                 id: id.clone(),
@@ -1454,6 +1476,10 @@ impl AudioCapture {
                 mic_audio_path: None,
                 system_audio_path: None,
                 writer_handles: vec![writer_handle],
+                activation: Some(RecordingActivation::Microphone {
+                    activation_tx,
+                    activated_rx,
+                }),
                 capture_stop_flag,
                 capture_handle: Some(capture_handle),
                 mixed_capture: None,
@@ -1465,12 +1491,83 @@ impl AudioCapture {
             });
         }
 
-        tracing::info!("Recording started: {}", id);
+        tracing::info!("Recording prepared: {}", id);
         Ok(id)
+    }
+
+    pub fn activate_recording(&mut self, recording_id: &str) -> Result<()> {
+        let activation = {
+            let session = self
+                .active_recording
+                .as_mut()
+                .context("No prepared recording session")?;
+            if session.id != recording_id {
+                anyhow::bail!(
+                    "Recording ID mismatch: active={}, requested={}",
+                    session.id,
+                    recording_id
+                );
+            }
+            session
+                .activation
+                .take()
+                .context("Recording session is already active")?
+        };
+
+        let result = match activation {
+            RecordingActivation::Microphone {
+                activation_tx,
+                activated_rx,
+            } => {
+                activation_tx
+                    .send(())
+                    .map_err(|_| anyhow::anyhow!("Microphone capture stopped before activation"))?;
+                match activated_rx.recv_timeout(Duration::from_secs(5)) {
+                    Ok(Ok(())) => Ok(()),
+                    Ok(Err(error)) => Err(anyhow::anyhow!(error)),
+                    Err(_) => Err(anyhow::anyhow!(
+                        "Timed out waiting for microphone capture to activate"
+                    )),
+                }
+            }
+            RecordingActivation::Mixed(capture_start) => capture_start.activate(),
+        };
+
+        if let Err(error) = result {
+            self.abort_prepared_recording();
+            return Err(error);
+        }
+
+        tracing::info!("Recording activated: {}", recording_id);
+        Ok(())
+    }
+
+    pub(crate) fn abort_prepared_recording(&mut self) {
+        let Some(mut session) = self.active_recording.take() else {
+            return;
+        };
+        session.capture_stop_flag.store(false, Ordering::SeqCst);
+        drop(session.activation.take());
+        if let Some(mut mixed_capture) = session.mixed_capture.take() {
+            mixed_capture.stop();
+        }
+        if let Some(handle) = session.capture_handle.take() {
+            let _ = handle.join();
+        }
+        for handle in session.writer_handles.drain(..) {
+            let _ = handle.join();
+        }
     }
 
     pub fn stop_recording(&mut self, recording_id: &str) -> Result<RecordingStopResult> {
         tracing::info!("Stopping recording: {}", recording_id);
+        if self
+            .active_recording
+            .as_ref()
+            .is_some_and(|session| session.activation.is_some())
+        {
+            anyhow::bail!("Recording session has not been activated");
+        }
 
         let mut session = self
             .active_recording
@@ -1506,7 +1603,7 @@ impl AudioCapture {
         }
 
         for handle in session.writer_handles.drain(..) {
-            join_thread_with_timeout(handle, Duration::from_secs(20), "wav writer thread")?;
+            join_writer_with_timeout(handle, Duration::from_secs(20), "wav writer thread")?;
         }
 
         let dropped_stream_chunks = session.dropped_stream_chunks.load(Ordering::Relaxed);
@@ -1529,28 +1626,56 @@ impl AudioCapture {
         }
 
         let path = session.audio_path;
+        let mic_audio_path = session.mic_audio_path;
+        let system_audio_path = session.system_audio_path;
         tracing::info!("Recording saved to: {:?}", path);
 
-        // Hash computation may fail if file is still being written - that's OK
-        let hash = compute_file_hash(&path).unwrap_or_else(|e| {
-            tracing::warn!(
-                "Could not compute file hash (file may still be writing): {}",
-                e
-            );
-            "pending".to_string()
-        });
+        let mut validated_assets = Vec::new();
+        for (role, asset_path) in [
+            Some((RecordingAudioRole::Primary, path.as_path())),
+            mic_audio_path
+                .as_deref()
+                .map(|path| (RecordingAudioRole::Mic, path)),
+            system_audio_path
+                .as_deref()
+                .map(|path| (RecordingAudioRole::System, path)),
+        ]
+        .into_iter()
+        .flatten()
+        {
+            sync_file(asset_path)?;
+            match validate_plaintext_wav(asset_path) {
+                RecordingAudioValidation::Ready(metadata) => {
+                    validated_assets.push((role, metadata));
+                }
+                RecordingAudioValidation::Missing(error)
+                | RecordingAudioValidation::Failed(error) => {
+                    anyhow::bail!(
+                        "Failed to validate '{}' recording audio '{}': {}",
+                        role.as_str(),
+                        asset_path.display(),
+                        error
+                    );
+                }
+            }
+        }
+        sync_parent_directory(&path)?;
+        let hash = validated_assets
+            .iter()
+            .find(|(role, _)| *role == RecordingAudioRole::Primary)
+            .map(|(_, metadata)| metadata.plaintext_sha256.clone())
+            .context("Validated recording has no primary audio metadata")?;
         tracing::info!("Recording SHA256: {}", hash);
 
         Ok(RecordingStopResult {
             audio_path: path.to_string_lossy().to_string(),
-            mic_audio_path: session
-                .mic_audio_path
+            mic_audio_path: mic_audio_path
                 .as_ref()
                 .map(|path| path.to_string_lossy().to_string()),
-            system_audio_path: session
-                .system_audio_path
+            system_audio_path: system_audio_path
                 .as_ref()
                 .map(|path| path.to_string_lossy().to_string()),
+            validated_assets,
             content_hash: hash,
             dropped_stream_chunks,
             dropped_writer_chunks,
@@ -1612,6 +1737,10 @@ impl AudioCapture {
 
     pub fn is_recording(&self) -> bool {
         self.active_recording.is_some()
+    }
+
+    pub(crate) fn begin_system_audio_test(&self) -> Result<SystemAudioTestGuard> {
+        claim_system_audio_test(self.active_recording.is_some())
     }
 
     pub fn has_microphone_input(&self) -> bool {
@@ -1963,32 +2092,149 @@ fn encode_wav(samples: &[f32], sample_rate: u32, channels: u16) -> Result<Vec<u8
     Ok(buffer)
 }
 
-fn write_wav_file(path: &PathBuf, receiver: Receiver<Vec<f32>>, sample_rate: u32) -> Result<()> {
+type MeetingWavWriter = hound::WavWriter<std::io::BufWriter<std::fs::File>>;
+
+struct PreparedAlignedWavWriters {
+    mixed: MeetingWavWriter,
+    mic: Option<MeetingWavWriter>,
+    system: Option<MeetingWavWriter>,
+}
+
+fn new_mono_wav_writer(path: &Path, sample_rate: u32) -> Result<MeetingWavWriter> {
     let spec = hound::WavSpec {
         channels: 1,
         sample_rate,
         bits_per_sample: 16,
         sample_format: hound::SampleFormat::Int,
     };
+    let file = create_new_file(path)?;
+    Ok(hound::WavWriter::new(std::io::BufWriter::new(file), spec)?)
+}
 
-    use std::fs::File;
-    use std::io::BufWriter;
+fn prepare_mono_wav_writer(path: &Path, sample_rate: u32) -> Result<MeetingWavWriter> {
+    let mut writer = new_mono_wav_writer(path, sample_rate)?;
+    writer.flush()?;
+    sync_file(path)?;
+    sync_parent_directory(path)?;
+    Ok(writer)
+}
 
-    let file = File::create(path)?;
-    let writer = BufWriter::new(file);
-    let mut wav_writer = hound::WavWriter::new(writer, spec)?;
+fn prepare_aligned_wav_writers(
+    mixed_path: &Path,
+    mic_path: Option<&Path>,
+    system_path: Option<&Path>,
+    sample_rate: u32,
+) -> Result<PreparedAlignedWavWriters> {
+    let mut mixed = new_mono_wav_writer(mixed_path, sample_rate)?;
+    let mut mic = mic_path
+        .map(|path| new_mono_wav_writer(path, sample_rate))
+        .transpose()?;
+    let mut system = system_path
+        .map(|path| new_mono_wav_writer(path, sample_rate))
+        .transpose()?;
 
-    while let Ok(samples) = receiver.recv() {
-        let mut samples = samples;
-        boost_quiet_audio(&mut samples);
-        for sample in samples {
-            wav_writer.write_sample((sample.clamp(-1.0, 1.0) * 32767.0) as i16)?;
+    mixed.flush()?;
+    if let Some(writer) = mic.as_mut() {
+        writer.flush()?;
+    }
+    if let Some(writer) = system.as_mut() {
+        writer.flush()?;
+    }
+    sync_file(mixed_path)?;
+    if let Some(path) = mic_path {
+        sync_file(path)?;
+    }
+    if let Some(path) = system_path {
+        sync_file(path)?;
+    }
+    sync_parent_directory(mixed_path)?;
+
+    Ok(PreparedAlignedWavWriters { mixed, mic, system })
+}
+
+fn write_wav_samples(writer: &mut MeetingWavWriter, mut samples: Vec<f32>) -> Result<()> {
+    boost_quiet_audio(&mut samples);
+    for sample in samples {
+        writer.write_sample((sample.clamp(-1.0, 1.0) * 32767.0) as i16)?;
+    }
+    Ok(())
+}
+
+fn checkpoint_aligned_writers(writers: &mut PreparedAlignedWavWriters) -> Result<()> {
+    writers.mixed.flush()?;
+    if let Some(writer) = writers.mic.as_mut() {
+        writer.flush()?;
+    }
+    if let Some(writer) = writers.system.as_mut() {
+        writer.flush()?;
+    }
+    Ok(())
+}
+
+fn write_aligned_wav_files(
+    mut writers: PreparedAlignedWavWriters,
+    receiver: Receiver<MixedAudioChunk>,
+    log_path: &Path,
+) -> Result<()> {
+    let mut last_checkpoint = Instant::now();
+    while let Ok(chunk) = receiver.recv() {
+        let frames = chunk.mixed.len();
+        if chunk
+            .mic
+            .as_ref()
+            .is_some_and(|samples| samples.len() != frames)
+            || chunk
+                .system
+                .as_ref()
+                .is_some_and(|samples| samples.len() != frames)
+            || writers.mic.is_some() != chunk.mic.is_some()
+            || writers.system.is_some() != chunk.system.is_some()
+        {
+            return Err(anyhow::anyhow!(
+                "Aligned meeting audio chunk had mismatched track lengths"
+            ));
+        }
+
+        write_wav_samples(&mut writers.mixed, chunk.mixed)?;
+        if let (Some(writer), Some(samples)) = (writers.mic.as_mut(), chunk.mic) {
+            write_wav_samples(writer, samples)?;
+        }
+        if let (Some(writer), Some(samples)) = (writers.system.as_mut(), chunk.system) {
+            write_wav_samples(writer, samples)?;
+        }
+        if last_checkpoint.elapsed() >= Duration::from_secs(5) {
+            checkpoint_aligned_writers(&mut writers)?;
+            last_checkpoint = Instant::now();
         }
     }
 
-    wav_writer.finalize()?;
-    tracing::info!("WAV file written: {:?}", path);
+    writers.mixed.finalize()?;
+    if let Some(writer) = writers.mic {
+        writer.finalize()?;
+    }
+    if let Some(writer) = writers.system {
+        writer.finalize()?;
+    }
+    tracing::info!("Aligned meeting WAV files written: {:?}", log_path);
+    Ok(())
+}
 
+fn write_wav_file(
+    mut writer: MeetingWavWriter,
+    receiver: Receiver<Vec<f32>>,
+    log_path: &Path,
+) -> Result<()> {
+    let mut last_checkpoint = Instant::now();
+    while let Ok(samples) = receiver.recv() {
+        write_wav_samples(&mut writer, samples)?;
+        if last_checkpoint.elapsed() >= Duration::from_secs(5) {
+            writer.flush()?;
+            last_checkpoint = Instant::now();
+        }
+    }
+
+    writer.finalize()?;
+    tracing::info!("WAV file written: {:?}", log_path);
     Ok(())
 }
 
@@ -2005,20 +2251,21 @@ fn join_thread_with_timeout(handle: JoinHandle<()>, timeout: Duration, label: &s
     }
 }
 
-/// Compute SHA256 hash of a file
-fn compute_file_hash(path: &PathBuf) -> Result<String> {
-    let mut file = std::fs::File::open(path)?;
-    let mut hasher = Sha256::new();
-    let mut buffer = [0u8; 8192];
-    loop {
-        let read = std::io::Read::read(&mut file, &mut buffer)?;
-        if read == 0 {
-            break;
-        }
-        hasher.update(&buffer[..read]);
+fn join_writer_with_timeout(
+    handle: JoinHandle<Result<()>>,
+    timeout: Duration,
+    label: &str,
+) -> Result<()> {
+    let (done_tx, done_rx) = bounded::<std::thread::Result<Result<()>>>(1);
+    std::thread::spawn(move || {
+        let _ = done_tx.send(handle.join());
+    });
+
+    match done_rx.recv_timeout(timeout) {
+        Ok(Ok(result)) => result.with_context(|| format!("{} failed", label)),
+        Ok(Err(_)) => Err(anyhow::anyhow!("{} panicked", label)),
+        Err(_) => Err(anyhow::anyhow!("Timed out waiting for {}", label)),
     }
-    let result = hasher.finalize();
-    Ok(hex::encode(result))
 }
 
 fn boost_quiet_audio(samples: &mut [f32]) {
@@ -2223,6 +2470,49 @@ mod dictation_auto_stop_gate_tests {
         drive_dictation_auto_stop_gate(&loud_samples(6), 1, &gate, &session_id, None);
 
         assert!(gate.lock().unwrap().is_none());
+    }
+}
+
+#[cfg(test)]
+mod recording_writer_tests {
+    use super::prepare_mono_wav_writer;
+
+    #[test]
+    fn writer_setup_uses_create_new_without_truncating_an_existing_file() {
+        let root = std::env::temp_dir().join(format!(
+            "plainsong-writer-create-new-test-{}",
+            uuid::Uuid::new_v4()
+        ));
+        std::fs::create_dir_all(&root).unwrap();
+        let path = root.join("recording.wav");
+        std::fs::write(&path, b"do not truncate").unwrap();
+
+        assert!(prepare_mono_wav_writer(&path, 16_000).is_err());
+        assert_eq!(std::fs::read(&path).unwrap(), b"do not truncate");
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+}
+
+#[cfg(test)]
+mod system_audio_test_guard_tests {
+    use super::claim_system_audio_test;
+
+    #[test]
+    fn active_recording_and_overlapping_tests_are_rejected() {
+        let active_error = claim_system_audio_test(true)
+            .err()
+            .expect("active recording error");
+        assert!(active_error.to_string().contains("recording is active"));
+
+        let guard = claim_system_audio_test(false).expect("first test guard");
+        let overlap_error = claim_system_audio_test(false)
+            .err()
+            .expect("overlapping test error");
+        assert!(overlap_error.to_string().contains("already running"));
+        drop(guard);
+
+        assert!(claim_system_audio_test(false).is_ok());
     }
 }
 

@@ -1,14 +1,16 @@
-//! Ollama Cloud client for hosted LLM inference
-//!
-//! Uses Ollama's cloud service for running models
-//! API endpoint: https://api.ollama.ai/v1 (OpenAI-compatible)
+//! Ollama Cloud client using its existing OpenAI-compatible raw HTTP endpoint.
 
-use crate::llm::{ActionItem, AnalysisResult, Citation};
+use crate::llm::transport::{
+    classify_http_error, CompletionRequest, CompletionResponse, CompletionTransport, ErrorKind,
+    LlmError, Provider, RequestOptions,
+};
 use anyhow::{Context, Result};
+use async_trait::async_trait;
+use std::time::Duration;
 
 const OLLAMA_CLOUD_URL: &str = "https://ollama.com/v1";
 
-/// Ollama Cloud client for hosted LLM inference
+#[derive(Clone)]
 pub struct OllamaCloudClient {
     base_url: String,
     api_key: Option<String>,
@@ -16,222 +18,167 @@ pub struct OllamaCloudClient {
 }
 
 impl OllamaCloudClient {
-    /// Create a new Ollama Cloud client
     pub fn new() -> Self {
         Self::with_api_key(None)
     }
 
     pub fn with_api_key(api_key: Option<String>) -> Self {
-        let resolved_api_key = api_key.or_else(|| std::env::var("OLLAMA_CLOUD_API_KEY").ok());
-
         Self {
             base_url: OLLAMA_CLOUD_URL.to_string(),
-            api_key: resolved_api_key,
-            client: reqwest::Client::builder()
-                .timeout(std::time::Duration::from_secs(120))
-                .build()
-                .unwrap_or_default(),
+            api_key: api_key.or_else(|| std::env::var("OLLAMA_CLOUD_API_KEY").ok()),
+            client: reqwest::Client::new(),
         }
     }
 
-    /// List available models from Ollama Cloud
     pub async fn list_models(&self) -> Result<Vec<String>> {
         let Some(ref key) = self.api_key else {
             tracing::info!("No Ollama Cloud API key configured");
             return Ok(vec![]);
         };
-
         let response = self
             .client
             .get(format!("{}/models", self.base_url))
             .header("Authorization", format!("Bearer {}", key))
+            .timeout(Duration::from_secs(120))
             .send()
             .await
             .context("Failed to connect to Ollama Cloud")?;
-
         if !response.status().is_success() {
             let status = response.status();
-            let text = response.text().await.unwrap_or_default();
-            anyhow::bail!("Ollama Cloud returned status {}: {}", status, text);
+            let body = response.text().await.unwrap_or_default();
+            anyhow::bail!("Ollama Cloud returned status {}: {}", status, body);
         }
-
         let text = response
             .text()
             .await
             .context("Failed to read Ollama Cloud response body")?;
-
-        tracing::debug!(
-            "Ollama Cloud models response received ({} bytes)",
-            text.len()
-        );
-
         let data: serde_json::Value = serde_json::from_str(&text)
             .with_context(|| format!("Failed to parse Ollama Cloud response: {}", text))?;
-
-        let models: Vec<String> = data["data"]
+        let models = data["data"]
             .as_array()
             .or_else(|| data["models"].as_array())
-            .map(|arr| {
-                arr.iter()
-                    .filter_map(|m| {
-                        m["id"]
+            .map(|models| {
+                models
+                    .iter()
+                    .filter_map(|model| {
+                        model["id"]
                             .as_str()
-                            .or_else(|| m["name"].as_str())
-                            .map(|s| s.to_string())
+                            .or_else(|| model["name"].as_str())
+                            .map(str::to_string)
                     })
-                    .collect()
+                    .collect::<Vec<_>>()
             })
             .context("No models found in Ollama Cloud response")?;
-
         tracing::info!("Ollama Cloud returned {} models", models.len());
         Ok(models)
     }
 
-    /// Generate completion via the OpenAI-compatible chat completions endpoint
-    /// (base_url already ends in `/v1`, matching `list_models`'s `/models` path).
     pub async fn generate(&self, model: &str, prompt: &str) -> Result<String> {
-        let request_body = serde_json::json!({
-            "model": model,
-            "messages": [{ "role": "user", "content": prompt }],
-            "stream": false,
-            "temperature": 0.7,
-            "max_tokens": 1024,
-        });
+        let request = CompletionRequest {
+            model: model.to_string(),
+            system_prompt: None,
+            prompt: prompt.to_string(),
+            purpose: crate::llm::CompletionPurpose::Generic,
+            options: RequestOptions {
+                timeout: Duration::from_secs(120),
+                max_output_tokens: 1_024,
+                temperature: Some(0.7),
+                json_schema: None,
+                requested_context_tokens: None,
+            },
+        };
+        Ok(self.complete(&request).await?.text)
+    }
+}
 
-        let mut request = self
+#[async_trait]
+impl CompletionTransport for OllamaCloudClient {
+    fn provider(&self) -> Provider {
+        Provider::OllamaCloud
+    }
+
+    async fn complete(&self, request: &CompletionRequest) -> Result<CompletionResponse, LlmError> {
+        let key = self.api_key.as_deref().ok_or_else(|| {
+            LlmError::new(
+                Provider::OllamaCloud,
+                ErrorKind::Configuration,
+                "Ollama Cloud API key not configured",
+            )
+        })?;
+        let mut messages = Vec::new();
+        if let Some(system) = request.system_prompt.as_deref() {
+            messages.push(serde_json::json!({"role": "system", "content": system}));
+        }
+        messages.push(serde_json::json!({"role": "user", "content": request.prompt}));
+        let mut body = serde_json::json!({
+            "model": request.model,
+            "messages": messages,
+            "stream": false,
+            "max_tokens": request.options.max_output_tokens,
+        });
+        if let Some(temperature) = request.options.temperature {
+            body["temperature"] = serde_json::json!(temperature);
+        }
+        if let Some(schema) = request.options.json_schema.as_ref() {
+            body["response_format"] = serde_json::json!({
+                "type": "json_schema",
+                "json_schema": {
+                    "name": "nautilus_analysis_response",
+                    "strict": true,
+                    "schema": schema,
+                }
+            });
+        }
+
+        let response = self
             .client
             .post(format!("{}/chat/completions", self.base_url))
-            .json(&request_body);
-
-        if let Some(ref key) = self.api_key {
-            request = request.header("Authorization", format!("Bearer {}", key));
-        }
-
-        let response = request
+            .header("Authorization", format!("Bearer {}", key))
+            .timeout(request.options.timeout)
+            .json(&body)
             .send()
             .await
-            .context("Failed to send request to Ollama Cloud")?;
-
+            .map_err(|error| {
+                LlmError::from_reqwest(Provider::OllamaCloud, "Failed to send request", error)
+            })?;
         if !response.status().is_success() {
             let status = response.status();
-            let text = response.text().await.unwrap_or_default();
-            anyhow::bail!("Ollama Cloud returned status {}: {}", status, text);
+            let body = response.text().await.unwrap_or_default();
+            return Err(classify_http_error(Provider::OllamaCloud, status, body));
         }
-
-        let data: serde_json::Value = response
-            .json()
-            .await
-            .context("Failed to parse Ollama Cloud response")?;
-
-        Ok(data["choices"][0]["message"]["content"]
+        let data: serde_json::Value = response.json().await.map_err(|error| {
+            LlmError::from_reqwest(Provider::OllamaCloud, "Failed to parse response", error)
+        })?;
+        let finish_reason = data["choices"][0]["finish_reason"].as_str();
+        if matches!(finish_reason, Some("length")) {
+            return Err(LlmError::new(
+                Provider::OllamaCloud,
+                ErrorKind::OutputLimit,
+                "Ollama Cloud stopped because the output token limit was reached",
+            ));
+        }
+        if let Some(reason) = finish_reason.filter(|reason| *reason != "stop") {
+            return Err(LlmError::new(
+                Provider::OllamaCloud,
+                ErrorKind::Upstream,
+                format!("Ollama Cloud stopped before completion: {}", reason),
+            ));
+        }
+        let text = data["choices"][0]["message"]["content"]
             .as_str()
-            .unwrap_or("")
-            .to_string())
-    }
-
-    /// Analyze transcript with specific query
-    pub async fn analyze_transcript(
-        &self,
-        transcript: &str,
-        query: &str,
-        model: &str,
-    ) -> Result<AnalysisResult> {
-        let system_prompt = "You are an AI assistant analyzing meeting transcripts. \
-            Provide clear, concise answers based on the transcript provided. \
-            Always cite specific timestamps or quotes when making claims. \
-            If you're uncertain, say so.";
-
-        let prompt = format!(
-            "{system_prompt}\n\n\
-            Transcript:\n{transcript}\n\n\
-            Query: {query}\n\n\
-            Provide your analysis:"
-        );
-
-        let start_time = std::time::Instant::now();
-
-        let response = self.generate(model, &prompt).await?;
-
-        // Extract citations from response
-        let citations = extract_citations(&response, transcript);
-
-        Ok(AnalysisResult {
-            query: query.to_string(),
-            response,
-            citations,
-            model: model.to_string(),
-            processing_time_ms: start_time.elapsed().as_millis() as u64,
-            grounded: false,
+            .unwrap_or_default()
+            .to_string();
+        if text.trim().is_empty() {
+            return Err(LlmError::new(
+                Provider::OllamaCloud,
+                ErrorKind::EmptyResponse,
+                "Ollama Cloud returned an empty completion",
+            ));
+        }
+        Ok(CompletionResponse {
+            text,
+            model: data["model"].as_str().unwrap_or(&request.model).to_string(),
         })
-    }
-
-    /// Summarize meeting. A non-empty `custom_prompt` (the user's "Custom
-    /// Meeting Summary Prompt" setting) replaces the default instruction.
-    pub async fn summarize(
-        &self,
-        transcript: &str,
-        model: &str,
-        custom_prompt: Option<&str>,
-    ) -> Result<String> {
-        let prompt = match crate::llm::normalized_custom_summary_prompt(custom_prompt) {
-            Some(custom) => format!("{custom}\n\nTranscript:\n{transcript}\n\nSummary:"),
-            None => format!(
-                "Provide a concise summary of the following meeting transcript. \
-                Focus on key points, decisions, and outcomes:\n\n{transcript}\n\nSummary:"
-            ),
-        };
-
-        self.generate(model, &prompt).await
-    }
-
-    /// Extract action items
-    pub async fn extract_action_items(
-        &self,
-        transcript: &str,
-        model: &str,
-    ) -> Result<Vec<ActionItem>> {
-        let prompt = format!(
-            "You are an expert AI meeting assistant. Extract all actionable items from the following meeting transcript. \
-For each action item, clearly identify:\n\
-1. The specific task or deliverable\n\
-2. Who is responsible (if mentioned, otherwise mark as 'Unassigned')\n\
-3. Any deadlines or timeframes mentioned (if none, mark as 'No deadline')\n\n\
-Format as a clean, highly readable bulleted list. If there are no action items, simply output 'No action items identified.'\n\n\
-Transcript:\n{transcript}\n\n\
-Action Items:"
-        );
-
-        let response = self.generate(model, &prompt).await?;
-
-        // Parse action items from response (supports -, *, and numbered lists)
-        let items: Vec<ActionItem> = response
-            .lines()
-            .filter(|line| {
-                let trimmed = line.trim();
-                trimmed.starts_with('-')
-                    || trimmed.starts_with('*')
-                    || trimmed.starts_with("•")
-                    || trimmed.chars().next().is_some_and(|c| c.is_ascii_digit())
-                        && trimmed.chars().nth(1).is_some_and(|c| c == '.' || c == ')')
-            })
-            .map(|line| {
-                let task = line
-                    .trim()
-                    .trim_start_matches("- ")
-                    .trim_start_matches("* ")
-                    .trim_start_matches("• ")
-                    .trim_start_matches(|c: char| c.is_ascii_digit())
-                    .trim_start_matches(['.', ')'])
-                    .trim_start();
-                ActionItem {
-                    task: task.to_string(),
-                    assignee: None,
-                    deadline: None,
-                }
-            })
-            .collect();
-
-        Ok(items)
     }
 }
 
@@ -239,28 +186,4 @@ impl Default for OllamaCloudClient {
     fn default() -> Self {
         Self::new()
     }
-}
-
-/// Extract citations from response
-fn extract_citations(response: &str, transcript: &str) -> Vec<Citation> {
-    let mut citations = Vec::new();
-
-    for line in response.lines() {
-        if line.contains('"') {
-            let parts: Vec<&str> = line.split('"').collect();
-            for (i, part) in parts.iter().enumerate() {
-                if i % 2 == 1 && !part.is_empty() && transcript.contains(part) {
-                    citations.push(Citation {
-                        text: part.to_string(),
-                        start_time: None,
-                        end_time: None,
-                        recording_id: None,
-                        certainty: None,
-                    });
-                }
-            }
-        }
-    }
-
-    citations
 }
