@@ -376,6 +376,7 @@ async function run() {
 
     await sendCommand("save_settings", { settings: cloudSettings(originalSettings) });
     const cloudBackupInfo = await sendCommand("create_settings_backup_default", {});
+    await sendCommand("sync_backup_to_cloud", { backupId: cloudBackupInfo.id });
     const cloudLocalPath = path.join(workDir, cloudBackupInfo.id);
     const cloudBackupSettingsPath = path.join(cloudLocalPath, "settings.json");
     const cloudBackupHash = hashFile(cloudBackupSettingsPath);

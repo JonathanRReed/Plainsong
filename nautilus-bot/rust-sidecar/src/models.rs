@@ -1,5 +1,75 @@
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
+
+pub const ANALYSIS_PROVENANCE_VERSION: u32 = 1;
+
+/// Hashes persisted analysis content with an explicit schema/version prefix so
+/// future normalization changes can coexist with existing local data.
+pub fn analysis_content_hash(content: &str) -> String {
+    let digest = Sha256::digest(content.as_bytes());
+    format!(
+        "v{}:sha256:{}",
+        ANALYSIS_PROVENANCE_VERSION,
+        hex::encode(digest)
+    )
+}
+
+pub fn action_items_content_hash(action_items: &[String]) -> String {
+    let canonical = serde_json::to_string(action_items).unwrap_or_else(|_| "[]".to_string());
+    analysis_content_hash(&canonical)
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AnalysisCitation {
+    pub text: String,
+    #[serde(default)]
+    pub line_id: Option<String>,
+    #[serde(default)]
+    pub segment_id: Option<String>,
+    pub start_time: Option<f64>,
+    pub end_time: Option<f64>,
+    pub recording_id: Option<String>,
+    pub certainty: Option<f64>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AnalysisProvenance {
+    pub version: u32,
+    pub content_hash: String,
+    pub actual_provider: String,
+    pub actual_model: String,
+    pub prompt_source: String,
+    pub completed_at: DateTime<Utc>,
+    pub citations: Vec<AnalysisCitation>,
+    pub grounded: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ActionItemProvenance {
+    pub content_hash: String,
+    pub citations: Vec<AnalysisCitation>,
+    pub grounded: bool,
+    #[serde(default)]
+    pub generated: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ActionItemsProvenance {
+    pub version: u32,
+    pub content_hash: String,
+    pub actual_provider: String,
+    pub actual_model: String,
+    pub prompt_source: String,
+    pub completed_at: DateTime<Utc>,
+    pub citations: Vec<AnalysisCitation>,
+    pub grounded: bool,
+    pub items: Vec<ActionItemProvenance>,
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -17,6 +87,10 @@ pub struct Recording {
     pub summary: Option<String>,
     #[serde(default)]
     pub action_items: Option<Vec<String>>,
+    #[serde(default)]
+    pub summary_provenance: Option<AnalysisProvenance>,
+    #[serde(default)]
+    pub action_items_provenance: Option<ActionItemsProvenance>,
     #[serde(default)]
     pub meeting_notes: Option<String>,
     #[serde(default)]
@@ -210,7 +284,6 @@ pub struct DictationHistoryDetails {
     pub custom_mode_id: Option<String>,
     pub custom_mode_name: Option<String>,
     pub context_source: Option<String>,
-    pub context_preview: Option<String>,
     pub context_app_name: Option<String>,
     pub app_target: Option<String>,
     pub activation_matcher: Option<String>,

@@ -220,6 +220,10 @@ export function providerHostingLabel(
   providerType: AsrProviderType,
   modelId?: string | null,
 ): string {
+  if (providerType === "macos_apple_speech") {
+    return "On-device";
+  }
+
   // Handle providers that can be either local or cloud based on model
   if (providerType === "voxtral" && (modelId ?? "").trim() === "voxtral-cloud") {
     return "Cloud";

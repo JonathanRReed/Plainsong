@@ -1,8 +1,8 @@
 export {
-  checkSystemAudioAvailability,
   deleteRecording,
   deleteTranscriptSegments,
-  getLoopbackDeviceName,
+  editTranscriptSpeakerTurn,
+  getSystemAudioCapability,
   getMeetingChatMessages,
   getMeetingConsentAutomationStatus,
   getMeetingTranscriptDetails,
@@ -19,14 +19,17 @@ export {
   setRecordingSourceType,
   startRecording,
   stopRecording,
+  testSystemAudioCapture,
   updateMeetingChatMessages,
   updateRecordingAnalysis,
   updateRecordingNotes,
   updateRecordingTemplate,
-  updateTranscriptSegment,
 } from "../backend";
 export type {
   AudioInputDeviceInfo,
   AudioInputDeviceInventory,
   MeetingConsentAutomationStatus,
+  RecordingAnalysisPatch,
+  SystemAudioCapability,
+  SystemAudioTestResult,
 } from "../backend";

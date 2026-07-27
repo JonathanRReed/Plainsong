@@ -13,14 +13,29 @@ const setupStatusMock = vi.hoisted(() => ({
   },
   permissions: {
     microphoneReady: true,
+    microphonePermissionReady: true,
     speechRecognitionReady: true,
     accessibilityReady: true,
     cursorInsertionReady: true,
     automationReady: true,
     notes: [],
   },
+  microphoneReady: true,
   systemAudioAvailable: false,
   loopbackDevice: null as string | null,
+  systemAudioCapability: {
+    backend: "none",
+    nativeOsSupported: true,
+    nativeOsEnabled: true,
+    routeDevice: null,
+    routeId: null,
+    nativeSampleRate: null,
+    nativeChannels: null,
+    readiness: "unavailable",
+    ready: false,
+    reason: "no_eligible_route",
+    actionableReason: "Start in Mic only mode or configure a system-audio route.",
+  } as any,
   meetingCaptureMode: "mic_only" as "me_and_them" | "mic_only" | "unknown",
   dictationRoutePreference: "local" as "local" | "cloud",
   dictationLocalReady: true,
@@ -40,14 +55,15 @@ const setupStatusMock = vi.hoisted(() => ({
     provider: null,
     summary: "Parakeet · CTC 0.6B",
     ready: false,
-    reason: "Meetings need a meeting-grade ASR route.",
+    reason: "Meetings need a meeting-grade ASR route." as string | null,
   },
   dictationReady: true,
   meetingReady: false,
+  fullCaptureReady: false,
   dictationBlockers: [] as string[],
-  meetingBlockers: [
-    "System audio capture is not available yet.",
-    "No loopback device was detected for meeting capture.",
+  meetingBlockers: ["Meetings need a meeting-grade ASR route."],
+  fullCaptureBlockers: [
+    "Start in Mic only mode or configure a system-audio route.",
   ],
   providers: [
     {
@@ -97,7 +113,7 @@ const setupStatusMock = vi.hoisted(() => ({
       runtimeMessage: "Distil Whisper ready.",
       runtimeDetails: {},
     },
-  ],
+  ] as any[],
 }));
 
 const backendMocks = vi.hoisted(() => ({
@@ -106,6 +122,7 @@ const backendMocks = vi.hoisted(() => ({
   refreshAsrRuntimeProbes: vi.fn(async () => {}),
   repairCursorInsertPermissions: vi.fn(async () => {}),
   repairLocalModelCache: vi.fn(async () => ({ repairedCount: 0, removedPaths: [], notes: [] })),
+  requestAppleSpeechPermission: vi.fn(async () => {}),
   requestDictationPermissions: vi.fn(async () => {}),
   smokeTestCursorInsert: vi.fn(async () => ({
     text: "Plainsong insert test",
@@ -113,6 +130,28 @@ const backendMocks = vi.hoisted(() => ({
     pasted: true,
     copied: false,
     error: null,
+  })),
+  testSystemAudioCapture: vi.fn(async () => ({
+    capability: {
+      backend: "core_audio_process_tap",
+      nativeOsSupported: true,
+      nativeOsEnabled: true,
+      routeDevice: "MacBook Pro Speakers",
+      routeId: "coreaudio:BuiltInSpeakerDevice",
+      nativeSampleRate: 48000,
+      nativeChannels: 2,
+      readiness: "ready",
+      ready: true,
+      reason: null,
+      actionableReason: null,
+    },
+    callbacks: 10,
+    capturedFrames: 48000,
+    nonSilentFrames: 12000,
+    peak: 0.1,
+    expectedToneHz: 997,
+    detectedToneAmplitude: 0.05,
+    verificationMethod: "known_tone",
   })),
   verifyDictationSetup: vi.fn(async () => ({
     ok: true,
@@ -154,9 +193,13 @@ vi.mock("@/lib/backend/asr", () => ({
 vi.mock("@/lib/backend/dictation", () => ({
   smokeTestCursorInsert: backendMocks.smokeTestCursorInsert,
 }));
+vi.mock("@/lib/backend/recordings", () => ({
+  testSystemAudioCapture: backendMocks.testSystemAudioCapture,
+}));
 vi.mock("@/lib/backend/settings", () => ({
   openPermissionSettings: backendMocks.openPermissionSettings,
   repairCursorInsertPermissions: backendMocks.repairCursorInsertPermissions,
+  requestAppleSpeechPermission: backendMocks.requestAppleSpeechPermission,
   requestDictationPermissions: backendMocks.requestDictationPermissions,
   verifyDictationSetup: backendMocks.verifyDictationSetup,
   verifyMeetingSetup: backendMocks.verifyMeetingSetup,
@@ -168,6 +211,9 @@ vi.mock("@/lib/navigation", () => navigationMocks);
 describe("SetupView", () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    setupStatusMock.providers = setupStatusMock.providers.filter(
+      (provider) => provider.providerType !== "macos_apple_speech",
+    );
     setupStatusMock.loading = false;
     setupStatusMock.error = null;
     setupStatusMock.settings = {
@@ -177,24 +223,50 @@ describe("SetupView", () => {
     };
     setupStatusMock.permissions = {
       microphoneReady: true,
+      microphonePermissionReady: true,
       speechRecognitionReady: true,
       accessibilityReady: true,
       cursorInsertionReady: true,
       automationReady: true,
       notes: [],
     };
+    setupStatusMock.microphoneReady = true;
     setupStatusMock.systemAudioAvailable = false;
     setupStatusMock.loopbackDevice = null;
+    setupStatusMock.systemAudioCapability = {
+      backend: "none",
+      nativeOsSupported: true,
+      nativeOsEnabled: true,
+      routeDevice: null,
+      routeId: null,
+      nativeSampleRate: null,
+      nativeChannels: null,
+      readiness: "unavailable",
+      ready: false,
+      reason: "no_eligible_route",
+      actionableReason: "Start in Mic only mode or configure a system-audio route.",
+    };
     setupStatusMock.meetingCaptureMode = "mic_only";
     setupStatusMock.dictationRoutePreference = "local";
     setupStatusMock.dictationLocalReady = true;
     setupStatusMock.dictationCloudReady = false;
     setupStatusMock.meetingRoutePolicy = "prefer_local";
+    setupStatusMock.meetingRoute = {
+      providerType: "parakeet",
+      modelId: "parakeet-ctc-0.6b",
+      provider: null,
+      summary: "Parakeet · CTC 0.6B",
+      ready: false,
+      reason: "Meetings need a meeting-grade ASR route." as string | null,
+    };
     setupStatusMock.meetingReady = false;
+    setupStatusMock.fullCaptureReady = false;
     setupStatusMock.dictationBlockers = [];
     setupStatusMock.meetingBlockers = [
-      "System audio capture is not available yet.",
-      "No loopback device was detected for meeting capture.",
+      "Meetings need a meeting-grade ASR route.",
+    ];
+    setupStatusMock.fullCaptureBlockers = [
+      "Start in Mic only mode or configure a system-audio route.",
     ];
   });
 
@@ -207,6 +279,46 @@ describe("SetupView", () => {
     expect(screen.getAllByRole("button", { name: "Set up meetings" }).length).toBeGreaterThan(0);
     expect(screen.getByText(/every route's runtime state/i)).toBeInTheDocument();
     expect(screen.getByText(/Permission and insert tests may open macOS settings/i)).toBeInTheDocument();
+  });
+
+  it("offers Apple Speech permission recovery without making the route look ready", async () => {
+    setupStatusMock.providers.push({
+      ...setupStatusMock.providers[1],
+      providerType: "macos_apple_speech",
+      name: "Apple Speech (On-Device)",
+      description: "Dictation-only on-device route",
+      isAvailable: false,
+      selectedModelId: "macos_apple_speech",
+      modelOptions: [
+        { id: "macos_apple_speech", label: "Apple Speech · on-device dictation" },
+      ],
+      runtimeStatus: "error",
+      runtimeMessage: "Speech Recognition permission has not been decided.",
+      platformReadiness: {
+        status: "authorization_not_determined",
+        ready: false,
+        platformSupported: true,
+        helperPresent: true,
+        authorization: "not_determined",
+        locale: "en_US",
+        localeSupported: true,
+        onDeviceAvailable: true,
+        recognizerAvailable: true,
+        message: "Speech Recognition permission has not been decided.",
+        setupAction: "Request Speech Recognition permission.",
+      },
+    });
+
+    render(<SetupView />);
+
+    expect(screen.getByText("Permission required")).toBeInTheDocument();
+    expect(screen.getByText(/server fallback is disabled/i)).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "Request permission" }));
+
+    await waitFor(() => {
+      expect(backendMocks.requestAppleSpeechPermission).toHaveBeenCalledTimes(1);
+      expect(setupStatusMock.refresh).toHaveBeenCalled();
+    });
   });
 
   it("downloads a missing provider model and refreshes runtime probes", async () => {
@@ -230,15 +342,22 @@ describe("SetupView", () => {
     expect(screen.getByText("Best available")).toBeInTheDocument();
   });
 
-  it("shows meeting capture mode and current blockers", async () => {
+  it("shows mic-only readiness without claiming Me + Them is verified", async () => {
+    setupStatusMock.meetingRoute = {
+      ...setupStatusMock.meetingRoute,
+      ready: true,
+      reason: null,
+    };
+    setupStatusMock.meetingReady = true;
+    setupStatusMock.meetingBlockers = [];
+
     render(<SetupView />);
 
     expect(screen.getByText("Meeting capture mode")).toBeInTheDocument();
-    expect(screen.getByText("Mic only")).toBeInTheDocument();
-    expect(
-      screen.getByText(/Only microphone capture is ready/i)
-    ).toBeInTheDocument();
-    expect(screen.getAllByText("Current blockers").length).toBeGreaterThan(0);
+    expect(screen.getByText("Mic only ready")).toBeInTheDocument();
+    expect(screen.getAllByText(/Mic-only meetings are ready/i)).toHaveLength(2);
+    expect(screen.getByText("Me + Them not verified")).toBeInTheDocument();
+    expect(screen.queryByText("Me + Them verified")).not.toBeInTheDocument();
   });
 
   it("runs setup verification checks from the doctor actions", async () => {
@@ -251,6 +370,28 @@ describe("SetupView", () => {
       expect(
         screen.getByText(/Dictation verification: Dictation is ready/i)
       ).toBeInTheDocument();
+    });
+  });
+
+  it("runs the signal-based system audio test from setup", async () => {
+    setupStatusMock.systemAudioAvailable = true;
+    setupStatusMock.systemAudioCapability = {
+      ...setupStatusMock.systemAudioCapability,
+      backend: "core_audio_process_tap",
+      routeDevice: "MacBook Pro Speakers",
+      routeId: "coreaudio:BuiltInSpeakerDevice",
+      readiness: "unverified",
+      reason: null,
+      actionableReason: "Run Test system audio.",
+    };
+
+    render(<SetupView />);
+
+    fireEvent.click(screen.getByRole("button", { name: "Test system audio" }));
+
+    await waitFor(() => {
+      expect(backendMocks.testSystemAudioCapture).toHaveBeenCalledTimes(1);
+      expect(screen.getByText(/System audio test: Verified/i)).toBeInTheDocument();
     });
   });
 
@@ -287,6 +428,7 @@ describe("SetupView", () => {
     };
     setupStatusMock.permissions = {
       microphoneReady: true,
+      microphonePermissionReady: true,
       speechRecognitionReady: true,
       accessibilityReady: false,
       cursorInsertionReady: false,
@@ -303,6 +445,7 @@ describe("SetupView", () => {
   it("shows keyboard fallback when direct accessibility is unavailable", () => {
     setupStatusMock.permissions = {
       microphoneReady: true,
+      microphonePermissionReady: true,
       speechRecognitionReady: true,
       accessibilityReady: false,
       cursorInsertionReady: true,

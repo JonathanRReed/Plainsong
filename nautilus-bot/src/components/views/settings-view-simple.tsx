@@ -72,13 +72,18 @@ import {
 import {
   downloadDiarizationModel,
   downloadSileroVadModel,
+  getAsrProviders,
   isDiarizationModelAvailable,
+  refreshAsrRuntimeProbes,
   isSileroVadModelDownloaded,
 } from "@/lib/backend/asr";
 import {
+  getSystemAudioCapability,
   listAudioInputDevices,
+  testSystemAudioCapture,
   type AudioInputDeviceInfo,
   type AudioInputDeviceInventory,
+  type SystemAudioCapability,
 } from "@/lib/backend/recordings";
 import type {
   BackupConfig,
@@ -91,6 +96,7 @@ import type {
   SecurityStatus,
   ShortcutConflict,
 } from "@/lib/backend/settings";
+import type { AsrProviderInfo } from "@/types";
 import type { Settings } from "@/types/settings";
 import { applyThemeScheme, normalizeThemeScheme } from "@/lib/theme-schemes";
 import { formatShortcutForDisplay, normalizeShortcut } from "@/lib/shortcuts";
@@ -141,31 +147,19 @@ type SettingsSaveScheduler = {
 };
 
 type ShortcutFieldKey =
-  | "toggleRecording"
   | "toggleDictation"
   | "openWindow"
   | "repasteLastDictation"
-  | "recopyLastDictation"
-  | "quickExport"
-  | "focusSearch";
+  | "recopyLastDictation";
 
-// `wired: false` marks settings fields no registration path consumes yet
-// (neither globalShortcut.register nor the native helper, nor any renderer
-// keydown handler — see electron/shortcut-registration.ts precedence
-// comment). They render disabled with a "not active yet" note instead of
-// silently accepting a binding that will never fire.
 const SHORTCUT_FIELD_CONFIG: Array<{
   key: ShortcutFieldKey;
   label: string;
-  wired: boolean;
 }> = [
-  { key: "toggleDictation", label: "Dictation", wired: true },
-  { key: "repasteLastDictation", label: "Paste last result", wired: true },
-  { key: "recopyLastDictation", label: "Copy last result", wired: true },
-  { key: "toggleRecording", label: "Recording", wired: false },
-  { key: "openWindow", label: "Open window", wired: true },
-  { key: "quickExport", label: "Quick export", wired: false },
-  { key: "focusSearch", label: "Search", wired: false },
+  { key: "toggleDictation", label: "Dictation" },
+  { key: "repasteLastDictation", label: "Paste last result" },
+  { key: "recopyLastDictation", label: "Copy last result" },
+  { key: "openWindow", label: "Open window" },
 ];
 
 // Base characters for punctuation keys, keyed by KeyboardEvent.code, so a
@@ -296,7 +290,7 @@ const SETTINGS_TABS = [
     id: "storage" as TabId,
     label: "Storage",
     summary:
-      "Control export paths, retention, profile snapshots, and recovery workflows from one calmer storage workspace.",
+      "Control export paths, retention, settings snapshots, and recovery workflows from one calmer storage workspace.",
     railSummary: "Exports, retention, backups, and reset tools",
     icon: Database,
   },
@@ -480,6 +474,7 @@ function describeRecordingEncryption(
 function resolveDictationReadinessChip(
   settings: Settings | null,
   permissionDiagnostics: PermissionDiagnostics | null,
+  providers: AsrProviderInfo[] = [],
 ): ReadinessChipState {
   if (!permissionDiagnostics) {
     return {
@@ -500,6 +495,9 @@ function resolveDictationReadinessChip(
     : settings?.transcription.dictationProvider ??
       settings?.transcription.defaultProvider;
   const usesAppleSpeech = dictationProvider === "macos_apple_speech";
+  const appleSpeechReadiness = providers.find(
+    (provider) => provider.providerType === "macos_apple_speech",
+  )?.platformReadiness;
   const insertionMode = settings?.transcription.dictationInsertionMode ?? "auto";
   const cursorInsertionReady =
     insertionMode === "clipboard_only"
@@ -512,6 +510,25 @@ function resolveDictationReadinessChip(
     return {
       label: "Mic",
       status: "Needs setup",
+      tone: false,
+    };
+  }
+
+  if (usesAppleSpeech && appleSpeechReadiness && !appleSpeechReadiness.ready) {
+    return {
+      label: "Apple Speech",
+      status:
+        appleSpeechReadiness.status === "authorization_denied"
+          ? "Permission denied"
+          : appleSpeechReadiness.status === "authorization_not_determined"
+            ? "Permission required"
+            : appleSpeechReadiness.status === "unsupported_locale"
+              ? "Locale unsupported"
+              : appleSpeechReadiness.status === "helper_missing"
+                ? "Helper missing"
+                : appleSpeechReadiness.status === "on_device_unavailable"
+                  ? "On-device unavailable"
+                  : "Needs setup",
       tone: false,
     };
   }
@@ -567,6 +584,7 @@ export function SettingsView() {
     useState<CloudSetupReport | null>(null);
   const [permissionDiagnostics, setPermissionDiagnostics] =
     useState<PermissionDiagnostics | null>(null);
+  const [asrProviders, setAsrProviders] = useState<AsrProviderInfo[]>([]);
   const [nativeShortcutAvailable, setNativeShortcutAvailable] =
     useState(false);
   const [shortcutConflicts, setShortcutConflicts] = useState<
@@ -595,6 +613,10 @@ export function SettingsView() {
   );
   const [audioDeviceInventory, setAudioDeviceInventory] =
     useState<AudioInputDeviceInventory | null>(null);
+  const [systemAudioCapability, setSystemAudioCapability] =
+    useState<SystemAudioCapability | null>(null);
+  const [systemAudioTestLoading, setSystemAudioTestLoading] = useState(false);
+  const [systemAudioTestStatus, setSystemAudioTestStatus] = useState<string | null>(null);
   const micTestContextRef = useRef<AudioContext | null>(null);
   const micTestAnimFrameRef = useRef<number | null>(null);
   const micTestStreamRef = useRef<MediaStream | null>(null);
@@ -629,7 +651,7 @@ export function SettingsView() {
 
   const settings = draftSettings;
   const { toast } = useToast();
-  const latestProfileSnapshot = useMemo(
+  const latestSettingsSnapshot = useMemo(
     () => backups.find((backup) => backup.backupType === "settings") ?? null,
     [backups],
   );
@@ -642,8 +664,8 @@ export function SettingsView() {
     permissionDiagnostics?.microphoneReady ??
     false;
   const dictationReadinessChip = useMemo(
-    () => resolveDictationReadinessChip(settings, permissionDiagnostics),
-    [settings, permissionDiagnostics],
+    () => resolveDictationReadinessChip(settings, permissionDiagnostics, asrProviders),
+    [asrProviders, settings, permissionDiagnostics],
   );
   const recordingEncryptionSummary = useMemo(
     () => describeRecordingEncryption(securityStatus),
@@ -1070,12 +1092,16 @@ export function SettingsView() {
     let mounted = true;
     const loadPermissionDiagnostics = async () => {
       try {
-        const permissions = await withSettingsSectionTimeout(
-          "Permission status",
-          getPermissionDiagnostics(),
-        );
+        const [permissions, providers] = await Promise.all([
+          withSettingsSectionTimeout(
+            "Permission status",
+            getPermissionDiagnostics(),
+          ),
+          getAsrProviders().catch(() => []),
+        ]);
         if (mounted) {
           setPermissionDiagnostics(permissions);
+          setAsrProviders(providers);
         }
       } catch (e) {
         if (mounted) {
@@ -1565,6 +1591,42 @@ export function SettingsView() {
     }
   }, []);
 
+  const refreshSystemAudioCapability = useCallback(async () => {
+    try {
+      setSystemAudioCapability(await getSystemAudioCapability());
+    } catch (systemAudioError) {
+      console.warn("Failed to inspect system audio:", systemAudioError);
+      setSystemAudioCapability(null);
+    }
+  }, []);
+
+  const runSystemAudioTest = useCallback(async () => {
+    setSystemAudioTestLoading(true);
+    setSystemAudioTestStatus(
+      "Waiting for macOS and checking the current system-audio signal…",
+    );
+    try {
+      const result = await testSystemAudioCapture();
+      setSystemAudioCapability(result.capability);
+      setSystemAudioTestStatus(
+        result.capability.ready
+          ? result.verificationMethod === "external_audio"
+            ? `Verified non-silent system audio through ${result.capability.routeDevice ?? "the current external-audio route"}.`
+            : `Verified ${Math.round(result.expectedToneHz)} Hz system audio through ${result.capability.routeDevice ?? "the current route"}.`
+          : result.capability.actionableReason ??
+              "System audio was not verified. Check the route and macOS privacy settings.",
+      );
+    } catch (systemAudioError) {
+      setSystemAudioTestStatus(
+        systemAudioError instanceof Error
+          ? systemAudioError.message
+          : String(systemAudioError),
+      );
+    } finally {
+      setSystemAudioTestLoading(false);
+    }
+  }, []);
+
   const resolveAudioDevicePreference = useCallback(
     (deviceId: string | null): Settings["audio"]["preferredInputDevice"] => {
       if (!deviceId || !audioDeviceInventory) {
@@ -1639,7 +1701,8 @@ export function SettingsView() {
 
   useEffect(() => {
     void refreshAudioDevices();
-  }, [refreshAudioDevices]);
+    void refreshSystemAudioCapability();
+  }, [refreshAudioDevices, refreshSystemAudioCapability]);
 
   const stopMicTest = useCallback(() => {
     if (micTestAnimFrameRef.current !== null) {
@@ -1827,7 +1890,7 @@ export function SettingsView() {
         </p>
       </div>
       <div className="mt-4 grid gap-3">
-        {SHORTCUT_FIELD_CONFIG.map(({ key, label, wired }) => {
+        {SHORTCUT_FIELD_CONFIG.map(({ key, label }) => {
           const currentVal = settings.shortcuts[key]
             ? formatShortcutForDisplay(settings.shortcuts[key])
             : "None";
@@ -1839,32 +1902,20 @@ export function SettingsView() {
               className="flex flex-col gap-2 rounded-2xl border border-border/60 bg-muted/20 px-3 py-3"
             >
               <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
-                <span className="text-sm text-muted-foreground">
-                  {label}
-                  {!wired && (
-                    <span className="ml-2 rounded-full border border-border/60 px-2 py-0.5 text-[10px] uppercase tracking-wide text-muted-foreground/80">
-                      Coming soon
-                    </span>
-                  )}
-                </span>
+                <span className="text-sm text-muted-foreground">{label}</span>
                 <div className="flex items-center gap-2">
                   <Input
                     value={isCapturing ? "Listening..." : currentVal}
                     readOnly
-                    disabled={!wired}
                     aria-invalid={conflict ? true : undefined}
                     className={`h-9 w-36 text-center font-mono text-xs ${isCapturing ? "border-primary ring-1 ring-primary" : conflict ? "border-destructive/60" : ""}`}
-                    onFocus={() => {
-                      if (wired) {
-                        setCapturingShortcut(key);
-                      }
-                    }}
+                    onFocus={() => setCapturingShortcut(key)}
                     onBlur={() => {
                       if (capturingShortcut === key) {
                         setCapturingShortcut(null);
                       }
                     }}
-                    onKeyDown={wired ? handleShortcutKeyDown(key) : undefined}
+                    onKeyDown={handleShortcutKeyDown(key)}
                   />
                   <Button
                     variant="ghost"
@@ -1883,12 +1934,6 @@ export function SettingsView() {
                   </Button>
                 </div>
               </div>
-              {!wired && (
-                <p className="text-xs text-muted-foreground">
-                  This shortcut is not active yet — the binding is saved but
-                  does nothing until a future update wires it up.
-                </p>
-              )}
               {conflict && (
                 <div className="flex items-start gap-2 rounded-xl border border-destructive/25 bg-destructive/10 px-3 py-2 text-xs text-destructive">
                   <AlertCircle className="mt-0.5 h-3.5 w-3.5 shrink-0" />
@@ -2433,8 +2478,8 @@ export function SettingsView() {
               <div className="space-y-0.5">
                 <Label>Auto-request dictation permissions</Label>
                 <p className="text-sm text-muted-foreground">
-                  Prompt for speech and microphone permissions before dictation
-                  instead of failing silently.
+                  Prompt for microphone access before dictation, and Speech
+                  Recognition only when Apple Speech is the selected route.
                 </p>
               </div>
               <Switch
@@ -2467,8 +2512,13 @@ export function SettingsView() {
                     variant="outline"
                     size="sm"
                     onClick={async () => {
-                      const diagnostics = await getPermissionDiagnostics();
+                      await refreshAsrRuntimeProbes();
+                      const [diagnostics, providers] = await Promise.all([
+                        getPermissionDiagnostics(),
+                        getAsrProviders().catch(() => []),
+                      ]);
                       setPermissionDiagnostics(diagnostics);
+                      setAsrProviders(providers);
                       void reapplyGlobalShortcuts();
                     }}
                   >
@@ -2480,6 +2530,7 @@ export function SettingsView() {
                     onClick={async () => {
                       const diagnostics = await requestDictationPermissions();
                       setPermissionDiagnostics(diagnostics);
+                      setAsrProviders(await getAsrProviders().catch(() => []));
                       void reapplyGlobalShortcuts();
                     }}
                   >
@@ -3420,6 +3471,81 @@ export function SettingsView() {
                           </div>
                         </div>
 
+                        <div className="rounded-[24px] border border-border bg-muted/20 p-5 text-foreground">
+                          <div className="flex flex-col gap-4 lg:flex-row lg:items-start lg:justify-between">
+                            <div className="max-w-2xl">
+                              <p className="rubric mb-1.5">Meeting capture</p>
+                              <h3 className="font-serif text-xl font-semibold text-foreground">
+                                System audio
+                              </h3>
+                              {systemAudioCapability === null ? (
+                                <p className="mt-2 text-sm leading-6 text-muted-foreground">
+                                  Checking the native and virtual-loopback routes…
+                                </p>
+                              ) : systemAudioCapability.ready ? (
+                                <p className="mt-2 text-sm leading-6 text-gold-text">
+                                  Verified via {systemAudioCapability.backend === "core_audio_process_tap" ? "Core Audio process tap" : "virtual loopback"}
+                                  {systemAudioCapability.routeDevice ? ` on ${systemAudioCapability.routeDevice}` : ""}
+                                  {systemAudioCapability.nativeSampleRate && systemAudioCapability.nativeChannels
+                                    ? ` · ${systemAudioCapability.nativeSampleRate} Hz / ${systemAudioCapability.nativeChannels} ch`
+                                    : ""}
+                                  .
+                                </p>
+                              ) : systemAudioCapability.backend !== "none" ? (
+                                <p className="mt-2 text-sm leading-6 text-rust">
+                                  A route is detected, but Plainsong has not verified macOS permission and non-silent callbacks.
+                                </p>
+                              ) : (
+                                <p className="mt-2 text-sm leading-6 text-rust">
+                                  No eligible route is available. Duplex outputs are never treated as system audio because that could capture their physical microphone.
+                                </p>
+                              )}
+                              {systemAudioCapability?.actionableReason ? (
+                                <p className="mt-2 text-xs leading-5 text-muted-foreground">
+                                  {systemAudioCapability.actionableReason}
+                                </p>
+                              ) : null}
+                              <p className="mt-2 text-xs leading-5 text-muted-foreground">
+                                Test system audio waits for a first-use macOS prompt and plays a brief low-volume 997 Hz tone only for the native Core Audio process tap. Virtual loopback routes must carry external audio during the test. Ready means the expected non-silent verification signal came back through the capture callback, not merely that a stream opened.
+                              </p>
+                            </div>
+                            <div className="flex shrink-0 flex-wrap gap-2">
+                              <Button
+                                variant="outline"
+                                size="sm"
+                                disabled={
+                                  systemAudioTestLoading ||
+                                  systemAudioCapability === null ||
+                                  systemAudioCapability.backend === "none"
+                                }
+                                onClick={() => void runSystemAudioTest()}
+                              >
+                                {systemAudioTestLoading ? (
+                                  <Loader2 className="mr-2 h-4 w-4 animate-spin" />
+                                ) : null}
+                                Test system audio
+                              </Button>
+                              {systemAudioCapability?.reason === "permission_denied" ? (
+                                <Button
+                                  variant="ghost"
+                                  size="sm"
+                                  onClick={() => void openPermissionSettings("system_audio")}
+                                >
+                                  Open privacy settings
+                                </Button>
+                              ) : null}
+                            </div>
+                          </div>
+                          {systemAudioTestStatus ? (
+                            <p
+                              className={`mt-3 text-xs ${systemAudioCapability?.ready ? "text-gold-text" : "text-muted-foreground"}`}
+                              role="status"
+                            >
+                              {systemAudioTestStatus}
+                            </p>
+                          ) : null}
+                        </div>
+
                         <div className="h-px bg-border" />
 
                         <div className="flex items-center justify-between">
@@ -3830,6 +3956,20 @@ export function SettingsView() {
                           >
                             {recordingEncryptionSummary.chip}
                           </span>
+                        </div>
+
+                        <div className="rounded-2xl border border-border/60 bg-background/70 p-4">
+                          <Label className="flex items-center gap-2">
+                            <Mic className="h-4 w-4" />
+                            Apple Speech privacy boundary
+                          </Label>
+                          <p className="mt-1 text-sm text-muted-foreground">
+                            Apple Speech is an optional, dictation-only route. When
+                            ready, Plainsong requires on-device recognition and
+                            disables Apple's server fallback. It is never substituted
+                            for another provider and is never used for meeting
+                            transcription.
+                          </p>
                         </div>
 
                         <div className="flex items-center justify-between">
@@ -4346,75 +4486,49 @@ export function SettingsView() {
                               </div>
                             </div>
 
-                            <div className="flex items-center justify-between">
-                              <div className="space-y-0.5">
-                                <Label>Automatic backups</Label>
-                                <p className="text-sm text-muted-foreground">
-                                  Create local backups on schedule
-                                </p>
-                              </div>
-                              <Switch
-                                checked={backupConfig.enabled}
-                                onCheckedChange={(checked) =>
+                            <div className="rounded-2xl border border-border/60 bg-muted/20 p-4">
+                              <Label>Manual backups</Label>
+                              <p className="mt-1 text-sm text-muted-foreground">
+                                A local full backup or settings snapshot is created
+                                only when you press its Create button below.
+                              </p>
+                            </div>
+
+                            <div className="max-w-sm space-y-2">
+                              <Label>Manual backup retention</Label>
+                              <Input
+                                type="number"
+                                min={1}
+                                value={backupConfig.maxBackups}
+                                onChange={(
+                                  e: ChangeEvent<HTMLInputElement>,
+                                ) =>
                                   setBackupConfig({
                                     ...backupConfig,
-                                    enabled: checked,
+                                    maxBackups: Math.max(
+                                      1,
+                                      Number(e.target.value) || 7,
+                                    ),
                                   })
                                 }
                               />
+                              <p className="text-xs text-muted-foreground">
+                                After a manual backup is published, keep this many
+                                complete local generations.
+                              </p>
                             </div>
 
-                            <div className="grid grid-cols-2 gap-4">
-                              <div className="space-y-2">
-                                <Label>Backup interval (hours)</Label>
-                                <Input
-                                  type="number"
-                                  min={1}
-                                  value={backupConfig.intervalHours}
-                                  onChange={(
-                                    e: ChangeEvent<HTMLInputElement>,
-                                  ) =>
-                                    setBackupConfig({
-                                      ...backupConfig,
-                                      intervalHours: Math.max(
-                                        1,
-                                        Number(e.target.value) || 24,
-                                      ),
-                                    })
-                                  }
-                                />
-                              </div>
-                              <div className="space-y-2">
-                                <Label>Max backups</Label>
-                                <Input
-                                  type="number"
-                                  min={1}
-                                  value={backupConfig.maxBackups}
-                                  onChange={(
-                                    e: ChangeEvent<HTMLInputElement>,
-                                  ) =>
-                                    setBackupConfig({
-                                      ...backupConfig,
-                                      maxBackups: Math.max(
-                                        1,
-                                        Number(e.target.value) || 7,
-                                      ),
-                                    })
-                                  }
-                                />
-                              </div>
-                            </div>
-
-                            <div className="flex items-center justify-between">
+                            <div className="flex items-center justify-between gap-4">
                               <div className="space-y-0.5">
-                                <Label>Personal profile sync</Label>
+                                <Label>Manual cloud sync</Label>
                                 <p className="text-sm text-muted-foreground">
-                                  Sync settings, shortcuts, dictation flows,
-                                  dictionary, snippets, and preferences via
-                                  cloud storage
+                                  Allow explicit uploads when you press a Sync
+                                  button. Nothing uploads or downloads
+                                  automatically.
                                 </p>
                               </div>
                               <Switch
+                                aria-label="Enable manual cloud sync"
                                 checked={backupConfig.cloudSync}
                                 onCheckedChange={(checked) =>
                                   setBackupConfig({
@@ -4510,11 +4624,12 @@ export function SettingsView() {
                               <div className="flex items-start justify-between gap-4">
                                 <div>
                                   <Label className="text-sm">
-                                    Personal Profile Sync
+                                    Settings snapshots
                                   </Label>
                                   <p className="text-sm text-muted-foreground">
-                                    Profile snapshots save your personal setup
-                                    without copying recordings or transcripts.
+                                    A settings snapshot contains the settings file,
+                                    including keyboard shortcuts. Recordings and
+                                    transcripts stay out of it.
                                   </p>
                                 </div>
                                 <span className="text-xs uppercase tracking-wide text-muted-foreground">
@@ -4524,18 +4639,18 @@ export function SettingsView() {
                               <div className="grid gap-2 md:grid-cols-2">
                                 <div className="rounded border bg-background p-3">
                                   <p className="text-xs font-medium text-muted-foreground">
-                                    Latest profile snapshot
+                                    Latest settings snapshot
                                   </p>
                                   <p className="mt-1 text-sm">
-                                    {latestProfileSnapshot
+                                    {latestSettingsSnapshot
                                       ? new Date(
-                                          latestProfileSnapshot.timestamp,
+                                          latestSettingsSnapshot.timestamp,
                                         ).toLocaleString()
-                                      : "No profile snapshot yet"}
+                                      : "No settings snapshot yet"}
                                   </p>
                                   <p className="mt-1 text-xs text-muted-foreground">
-                                    {latestProfileSnapshot
-                                      ? `${latestProfileSnapshot.itemsCount} items · ${latestProfileSnapshot.id}`
+                                    {latestSettingsSnapshot
+                                      ? `${latestSettingsSnapshot.itemsCount} items · ${latestSettingsSnapshot.id}`
                                       : "Create one before syncing to another device."}
                                   </p>
                                 </div>
@@ -4583,7 +4698,7 @@ export function SettingsView() {
                                   }
                                 }}
                               >
-                                Save Sync Config
+                                Save Manual Sync Config
                               </Button>
                               <Button
                                 variant="outline"
@@ -4652,89 +4767,89 @@ export function SettingsView() {
                                     const info =
                                       await createSettingsBackupDefault();
                                     setBackupStatus(
-                                      `Profile snapshot created: ${info.id}`,
+                                      `Settings snapshot created: ${info.id}`,
                                     );
                                     await refreshBackups();
                                   } catch (e) {
                                     setError(
                                       e instanceof Error
                                         ? e.message
-                                        : "Profile snapshot failed",
+                                        : "Settings snapshot failed",
                                     );
                                   } finally {
                                     setBackupBusy(false);
                                   }
                                 }}
                               >
-                                Create Profile Snapshot
+                                Create Settings Snapshot
                               </Button>
                               <Button
                                 variant="outline"
                                 disabled={
                                   backupBusy ||
-                                  !latestProfileSnapshot ||
+                                  !latestSettingsSnapshot ||
                                   !backupConfig.cloudSync
                                 }
                                 onClick={async () => {
-                                  if (!latestProfileSnapshot) return;
+                                  if (!latestSettingsSnapshot) return;
                                   setBackupBusy(true);
                                   setBackupStatus(null);
                                   setError(null);
                                   try {
                                     await saveBackupConfig(backupConfig);
                                     await syncBackupToCloud(
-                                      latestProfileSnapshot.id,
+                                      latestSettingsSnapshot.id,
                                     );
                                     setBackupStatus(
-                                      `Synced profile snapshot ${latestProfileSnapshot.id} to cloud.`,
+                                      `Synced settings snapshot ${latestSettingsSnapshot.id} to cloud.`,
                                     );
                                   } catch (e) {
                                     setError(
                                       e instanceof Error
                                         ? e.message
-                                        : "Profile sync failed",
+                                        : "Settings snapshot sync failed",
                                     );
                                   } finally {
                                     setBackupBusy(false);
                                   }
                                 }}
                               >
-                                Sync Latest Profile Snapshot
+                                Sync Latest Settings Snapshot
                               </Button>
                               <Button
                                 variant="outline"
                                 disabled={
                                   backupBusy ||
-                                  !latestProfileSnapshot ||
+                                  !latestSettingsSnapshot ||
                                   hasUnsavedChanges
                                 }
                                 onClick={async () => {
-                                  if (!latestProfileSnapshot) return;
+                                  if (!latestSettingsSnapshot) return;
                                   setBackupBusy(true);
                                   setBackupStatus(null);
                                   setError(null);
                                   try {
                                     await restoreBackupDefault(
-                                      latestProfileSnapshot.id,
+                                      latestSettingsSnapshot.id,
                                     );
                                     const restored = await getSettings();
                                     setDraftSettings(restored);
                                     setPersistedSettings(restored);
                                     setBackupStatus(
-                                      `Restored profile snapshot ${latestProfileSnapshot.id}.`,
+                                      `Restored settings snapshot ${latestSettingsSnapshot.id}.`,
                                     );
                                   } catch (e) {
                                     setError(
                                       e instanceof Error
                                         ? e.message
-                                        : "Profile restore failed",
+                                        : "Settings snapshot restore failed",
                                     );
                                   } finally {
                                     setBackupBusy(false);
                                   }
                                 }}
                               >
-                                Restore Latest Profile Snapshot
+                                Restore Latest Settings Snapshot
                               </Button>
                               <Button
                                 disabled={backupBusy}
@@ -4766,20 +4881,19 @@ export function SettingsView() {
                                 variant="outline"
                                 disabled={
                                   backupBusy ||
-                                  backups.length === 0 ||
+                                  !latestFullBackup ||
                                   !backupConfig.cloudSync
                                 }
                                 onClick={async () => {
-                                  const latest = backups[0];
-                                  if (!latest) return;
+                                  if (!latestFullBackup) return;
                                   setBackupBusy(true);
                                   setBackupStatus(null);
                                   setError(null);
                                   try {
                                     await saveBackupConfig(backupConfig);
-                                    await syncBackupToCloud(latest.id);
+                                    await syncBackupToCloud(latestFullBackup.id);
                                     setBackupStatus(
-                                      `Synced backup ${latest.id} to cloud.`,
+                                      `Synced full backup ${latestFullBackup.id} to cloud.`,
                                     );
                                   } catch (e) {
                                     setError(
@@ -4804,7 +4918,7 @@ export function SettingsView() {
                             {hasUnsavedChanges ? (
                               <p className="text-xs text-rust">
                                 Save or discard local settings edits before
-                                restoring a profile snapshot.
+                                restoring a settings snapshot.
                               </p>
                             ) : null}
                             {backupSetupReport && (

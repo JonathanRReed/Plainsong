@@ -11,6 +11,7 @@ export {
   migrateToEncryptedStorage,
   openInstalledPlainsongApp,
   openPermissionSettings,
+  requestAppleSpeechPermission,
   requestDictationPermissions,
   repairCursorInsertPermissions,
   resetAppState,

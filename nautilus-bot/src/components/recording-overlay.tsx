@@ -1,12 +1,12 @@
-import { useState, useEffect } from "react";
+import { useState, useEffect, useRef } from "react";
 import { Button } from "@/components/ui/button";
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogDescription, DialogFooter } from "@/components/ui/dialog";
-import { Mic, Monitor, CheckCircle } from "lucide-react";
+import { Mic, Monitor, CheckCircle, Loader2 } from "lucide-react";
 import {
-  checkSystemAudioAvailability,
-  getLoopbackDeviceName,
   getMeetingConsentAutomationStatus,
+  getSystemAudioCapability,
   type MeetingConsentAutomationStatus,
+  type SystemAudioCapability,
 } from "@/lib/backend/recordings";
 import { MEETING_CONSENT_NOTICE_TEXT } from "@/lib/meeting-consent";
 import { getMeetingTemplateOption, MEETING_TEMPLATES } from "@/lib/meeting-templates";
@@ -18,34 +18,88 @@ interface ConsentDialogProps {
 }
 
 export function ConsentDialog({ open, onOpenChange, onStart }: ConsentDialogProps) {
-  const [captureMode, setCaptureMode] = useState<"mic_only" | "me_them">("me_them");
+  const [captureMode, setCaptureMode] = useState<"mic_only" | "me_them">("mic_only");
   const [template, setTemplate] = useState("auto");
-  const [systemAudioAvailable, setSystemAudioAvailable] = useState<boolean | null>(null);
-  const [loopbackDevice, setLoopbackDevice] = useState<string | null>(null);
+  const [systemAudioCapability, setSystemAudioCapability] =
+    useState<SystemAudioCapability | null>(null);
+  const systemAudioRouteDetected =
+    systemAudioCapability !== null && systemAudioCapability.backend !== "none";
+  const systemAudioReady =
+    systemAudioCapability?.ready === true &&
+    systemAudioCapability.readiness === "ready" &&
+    systemAudioCapability.backend !== "none";
   const [consentAutomation, setConsentAutomation] =
     useState<MeetingConsentAutomationStatus | null>(null);
   const [copiedNotice, setCopiedNotice] = useState(false);
+  const [isStarting, setIsStarting] = useState(false);
+  const [startError, setStartError] = useState<string | null>(null);
+  const isStartingRef = useRef(false);
+  const captureModeTouchedRef = useRef(false);
   const selectedTemplate = getMeetingTemplateOption(template);
-
-  useEffect(() => {
-    if (open) {
-      checkSystemAudioAvailability().then(setSystemAudioAvailable).catch(() => setSystemAudioAvailable(false));
-      getLoopbackDeviceName().then(setLoopbackDevice).catch(() => setLoopbackDevice(null));
-      getMeetingConsentAutomationStatus()
-        .then(setConsentAutomation)
-        .catch(() => setConsentAutomation(null));
-    }
-  }, [open]);
 
   useEffect(() => {
     if (!open) {
       return;
     }
 
-    if (systemAudioAvailable === false && captureMode === "me_them") {
-      setCaptureMode("mic_only");
-    }
-  }, [captureMode, open, systemAudioAvailable]);
+    let cancelled = false;
+    captureModeTouchedRef.current = false;
+    isStartingRef.current = false;
+    setCaptureMode("mic_only");
+    setSystemAudioCapability(null);
+    setConsentAutomation(null);
+    setCopiedNotice(false);
+    setIsStarting(false);
+    setStartError(null);
+
+    void getSystemAudioCapability()
+      .then((capability) => {
+        if (cancelled) {
+          return;
+        }
+        setSystemAudioCapability(capability);
+        if (
+          capability.ready &&
+          capability.readiness === "ready" &&
+          capability.backend !== "none" &&
+          !captureModeTouchedRef.current
+        ) {
+          setCaptureMode("me_them");
+        }
+      })
+      .catch(() => {
+        if (!cancelled) {
+          setSystemAudioCapability({
+            backend: "none",
+            nativeOsSupported: false,
+            nativeOsEnabled: false,
+            routeDevice: null,
+            routeId: null,
+            nativeSampleRate: null,
+            nativeChannels: null,
+            readiness: "unavailable",
+            ready: false,
+            reason: "stream_construction",
+            actionableReason: "Could not inspect system-audio routes.",
+          });
+        }
+      });
+    void getMeetingConsentAutomationStatus()
+      .then((status) => {
+        if (!cancelled) {
+          setConsentAutomation(status);
+        }
+      })
+      .catch(() => {
+        if (!cancelled) {
+          setConsentAutomation(null);
+        }
+      });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [open]);
 
   useEffect(() => {
     if (!open || !copiedNotice) {
@@ -56,8 +110,37 @@ export function ConsentDialog({ open, onOpenChange, onStart }: ConsentDialogProp
     return () => window.clearTimeout(id);
   }, [copiedNotice, open]);
 
+  const submitMeeting = async () => {
+    if (isStartingRef.current) {
+      return;
+    }
+
+    isStartingRef.current = true;
+    setIsStarting(true);
+    setStartError(null);
+    try {
+      await onStart({
+        mic: true,
+        systemAudio: captureMode === "me_them" && systemAudioReady,
+        template: template === "auto" ? undefined : template,
+      });
+    } catch (error) {
+      setStartError(error instanceof Error ? error.message : String(error));
+    } finally {
+      isStartingRef.current = false;
+      setIsStarting(false);
+    }
+  };
+
   return (
-    <Dialog open={open} onOpenChange={onOpenChange}>
+    <Dialog
+      open={open}
+      onOpenChange={(nextOpen) => {
+        if (!isStartingRef.current) {
+          onOpenChange(nextOpen);
+        }
+      }}
+    >
       <DialogContent onPointerDownOutside={(e) => e.preventDefault()} onCloseAutoFocus={(e) => e.preventDefault()}>
         <DialogHeader>
           <DialogTitle>Start Meeting</DialogTitle>
@@ -66,21 +149,23 @@ export function ConsentDialog({ open, onOpenChange, onStart }: ConsentDialogProp
           </DialogDescription>
         </DialogHeader>
 
-        <form onSubmit={(e) => {
-          e.preventDefault();
-          onStart({
-            mic: true,
-            systemAudio: captureMode === "me_them",
-            template: template === "auto" ? undefined : template,
-          });
-        }}>
+        <form
+          onSubmit={(event) => {
+            event.preventDefault();
+            void submitMeeting();
+          }}
+        >
           <div className="space-y-5 py-4">
           <div>
             <p className="rubric mb-2">Capture Mode</p>
             <div className="grid gap-2 md:grid-cols-2">
               <button
                 type="button"
-                onClick={() => setCaptureMode("mic_only")}
+                onClick={() => {
+                  captureModeTouchedRef.current = true;
+                  setCaptureMode("mic_only");
+                }}
+                disabled={isStarting}
                 className={`rounded-lg border p-3 text-left transition-smooth ${
                   captureMode === "mic_only"
                     ? "border-rust/40 bg-rust/8 text-rust"
@@ -98,11 +183,12 @@ export function ConsentDialog({ open, onOpenChange, onStart }: ConsentDialogProp
               <button
                 type="button"
                 onClick={() => {
-                  if (systemAudioAvailable) {
+                  if (systemAudioReady) {
+                    captureModeTouchedRef.current = true;
                     setCaptureMode("me_them");
                   }
                 }}
-                disabled={!systemAudioAvailable}
+                disabled={isStarting || !systemAudioReady}
                 className={`rounded-lg border p-3 text-left transition-smooth ${
                   captureMode === "me_them"
                     ? "border-rust/40 bg-rust/8 text-rust"
@@ -120,18 +206,20 @@ export function ConsentDialog({ open, onOpenChange, onStart }: ConsentDialogProp
                   <span
                     aria-hidden="true"
                     className={`neume mr-1.5 align-middle ${
-                      systemAudioAvailable === null
+                      systemAudioCapability === null
                         ? "neume-hollow"
-                        : systemAudioAvailable
+                        : systemAudioReady
                           ? "neume-lit"
                           : "neume-rust"
                     }`}
                   />
-                  {systemAudioAvailable === null
-                    ? "Checking system audio availability..."
-                    : systemAudioAvailable
-                      ? `Ready via ${loopbackDevice || "system audio capture"}.`
-                      : "System audio is not ready, so Plainsong will fall back to Mic only."}
+                  {systemAudioCapability === null
+                    ? "Checking the current system-audio capability..."
+                    : systemAudioReady
+                      ? `Verified via ${systemAudioCapability.routeDevice || "system audio capture"}.`
+                      : systemAudioRouteDetected
+                        ? `Route detected via ${systemAudioCapability.routeDevice || "system audio capture"}, but callbacks are unverified. Run Test system audio before using Me + Them.`
+                        : "Me + Them is unavailable right now. Mic only remains ready to use."}
                 </p>
               </button>
             </div>
@@ -145,6 +233,7 @@ export function ConsentDialog({ open, onOpenChange, onStart }: ConsentDialogProp
                   key={t.value}
                   type="button"
                   onClick={() => setTemplate(t.value)}
+                  disabled={isStarting}
                   className={`px-2 py-1.5 rounded text-xs text-left transition-smooth border ${
                     template === t.value
                       ? "border-rust/40 bg-rust/8 text-rust"
@@ -212,6 +301,7 @@ export function ConsentDialog({ open, onOpenChange, onStart }: ConsentDialogProp
                 type="button"
                 variant="outline"
                 size="sm"
+                disabled={isStarting}
                 onClick={async () => {
                   try {
                     await navigator.clipboard.writeText(
@@ -230,17 +320,35 @@ export function ConsentDialog({ open, onOpenChange, onStart }: ConsentDialogProp
               ) : null}
             </div>
           </div>
+          {startError ? (
+            <p role="alert" className="text-sm text-destructive">
+              {startError}
+            </p>
+          ) : null}
         </div>
 
         <DialogFooter>
-          <Button type="button" variant="outline" onClick={() => onOpenChange(false)}>
+          <Button
+            type="button"
+            variant="outline"
+            onClick={() => onOpenChange(false)}
+            disabled={isStarting}
+          >
             Cancel
           </Button>
           <button
             type="submit"
+            disabled={isStarting}
             className="inline-flex items-center justify-center whitespace-nowrap rounded-md text-sm font-medium ring-offset-background transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 disabled:pointer-events-none disabled:opacity-50 bg-primary text-primary-foreground hover:bg-primary/90 h-10 px-4 py-2"
           >
-            Start Meeting
+            {isStarting ? (
+              <>
+                <Loader2 className="mr-2 h-4 w-4 animate-spin" />
+                Starting…
+              </>
+            ) : (
+              "Start Meeting"
+            )}
           </button>
         </DialogFooter>
         </form>

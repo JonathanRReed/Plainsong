@@ -58,6 +58,7 @@ const ALLOWED_RENDERER_COMMANDS = new Set<string>([
   "ask_memory",
   "benchmark_asr_providers",
   "benchmark_asr_providers_bytes",
+  "cancel_analysis_run",
   "capture_selected_text_for_playback",
   "check_for_updates",
   "check_system_audio_availability",
@@ -81,6 +82,7 @@ const ALLOWED_RENDERER_COMMANDS = new Set<string>([
   "download_platform_assets",
   "download_silero_vad_model",
   "download_whisper_model",
+  "edit_transcript_speaker_turn",
   "export_backup_archive",
   "export_dictation_dictionary_csv",
   "export_recording",
@@ -106,6 +108,7 @@ const ALLOWED_RENDERER_COMMANDS = new Set<string>([
   "get_dictation_shortcut_capability_status",
   "get_embedding_status",
   "get_loopback_device_name",
+  "get_system_audio_capability",
   "get_meeting_chat_messages",
   "get_meeting_consent_automation_status",
   "get_meeting_transcript_details",
@@ -169,6 +172,7 @@ const ALLOWED_RENDERER_COMMANDS = new Set<string>([
   "repair_local_model_cache",
   "repaste_dictation_result",
   "reprocess_dictation_text",
+  "request_apple_speech_permission",
   "request_dictation_permissions",
   "reset_app_state",
   "restore_backup_default",
@@ -203,11 +207,11 @@ const ALLOWED_RENDERER_COMMANDS = new Set<string>([
   "update_recording_analysis",
   "update_recording_notes",
   "update_recording_template",
-  "update_transcript_segment",
   "upsert_dictation_command_preset",
   "verify_backup_cloud_connection",
   "verify_dictation_setup",
   "verify_meeting_setup",
+  "test_system_audio_capture",
   "verify_system_audio_setup",
 ]);
 
@@ -365,6 +369,16 @@ export class IpcBridge {
         const pending = this.pending.get(id);
         if (pending) {
           this.pending.delete(id);
+          try {
+            this.sendToSidecar({
+              jsonrpc: "2.0",
+              id: randomUUID(),
+              method: "$/cancelRequest",
+              params: { id },
+            });
+          } catch {
+            // The timeout still rejects even if the sidecar has already exited.
+          }
           reject(new Error(`Command timed out after ${getCommandTimeoutMs(command)}ms: ${command}`));
         }
       }, getCommandTimeoutMs(command));

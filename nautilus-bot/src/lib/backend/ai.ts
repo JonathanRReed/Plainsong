@@ -2,6 +2,7 @@ export {
   analyzeRecording,
   analyzeRecordings,
   askMemory,
+  cancelAnalysisRun,
   extractActionItems,
   extractActionItemsGrounded,
   getOllamaStatus,

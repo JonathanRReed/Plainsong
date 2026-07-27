@@ -8,6 +8,7 @@ export function useRecordings(projectId?: string) {
   const cache = useDataCache();
   const [recordings, setRecordings] = useState<Recording[]>(() => cache.peekRecordings(projectId) ?? []);
   const [isLoading, setIsLoading] = useState(() => !cache.peekRecordings(projectId));
+  const [hasLoaded, setHasLoaded] = useState(() => cache.peekRecordings(projectId) !== null);
   const [error, setError] = useState<string | null>(null);
 
   const fetchRecordings = useCallback(async (forceRefresh = false) => {
@@ -20,8 +21,11 @@ export function useRecordings(projectId?: string) {
         forceRefresh
       );
       setRecordings(data);
+      setHasLoaded(true);
     } catch (err) {
-      setError(err instanceof Error ? err.message : "Failed to fetch recordings");
+      const message =
+        err instanceof Error ? err.message : typeof err === "string" ? err : "";
+      setError(message.trim() || "Failed to fetch recordings");
     } finally {
       setIsLoading(false);
     }
@@ -65,6 +69,7 @@ export function useRecordings(projectId?: string) {
   return {
     recordings,
     isLoading,
+    hasLoaded,
     error,
     refetch: () => fetchRecordings(true),
   };

@@ -4,18 +4,214 @@
 //! with full CRUD operations.
 
 use crate::models::*;
+use crate::recording_audio::{
+    approved_regular_file, encrypted_path_for, historical_companion_candidates,
+    is_terminal_encrypted_path, validate_plaintext_wav, RecordingAudioAsset, RecordingAudioBundle,
+    RecordingAudioLifecycle, RecordingAudioOperation, RecordingAudioOperationItem,
+    RecordingAudioProtection, RecordingAudioRole, RecordingAudioValidation, RecordingCapturePlan,
+    ValidatedRecordingAudio,
+};
 use crate::store::{
     CaptureSessionRecord, ContextSnapshotRecord, InsertionActionRecord, MeetingArtifactRecord,
     PolicySnapshotRecord, RuntimeEventRecord, TranscriptArtifactRecord,
 };
 use anyhow::{Context, Result};
 use chrono::Utc;
-use rusqlite::{params, params_from_iter, types::Value, Connection};
-use std::collections::HashMap;
+use rusqlite::{params, params_from_iter, types::Value, Connection, TransactionBehavior};
+use std::collections::{HashMap, HashSet};
 use std::fs;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 pub type SpeakerAlias = (Option<String>, Option<String>, i64);
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SpeakerAliasUpsert {
+    pub speaker_id: String,
+    pub name: Option<String>,
+    pub color: Option<String>,
+    pub sample_count: i64,
+}
+
+const SENSITIVE_AUDIT_DETAIL_KEYS: [&str; 4] = [
+    "context_preview",
+    "selected_text",
+    "clipboard_text",
+    "captured_context_text",
+];
+
+const AUDIT_LOG_APPEND_ONLY_TRIGGER_SQL: &str = "CREATE TRIGGER IF NOT EXISTS audit_log_no_update
+     BEFORE UPDATE ON audit_log
+     BEGIN
+         SELECT RAISE(ABORT, 'audit_log is append-only');
+     END;
+     CREATE TRIGGER IF NOT EXISTS audit_log_no_delete
+     BEFORE DELETE ON audit_log
+     BEGIN
+         SELECT RAISE(ABORT, 'audit_log is append-only');
+     END;";
+
+/// Every application-owned table whose rows Reset Everything must remove.
+/// The delete SQL lives beside the classification so the schema-coverage test
+/// cannot classify a table as reset-scoped without also wiring it into purge.
+const RESET_SCOPED_TABLE_DELETES: [(&str, &str); 22] = [
+    ("speaker_aliases", "DELETE FROM speaker_aliases"),
+    ("transcript_fts", "DELETE FROM transcript_fts"),
+    ("transcript_embeddings", "DELETE FROM transcript_embeddings"),
+    ("transcript_artifacts", "DELETE FROM transcript_artifacts"),
+    ("meeting_artifacts", "DELETE FROM meeting_artifacts"),
+    ("insertion_actions", "DELETE FROM insertion_actions"),
+    ("transcripts", "DELETE FROM transcripts"),
+    (
+        "recording_audio_operation_items",
+        "DELETE FROM recording_audio_operation_items",
+    ),
+    (
+        "recording_audio_operations",
+        "DELETE FROM recording_audio_operations",
+    ),
+    (
+        "recording_audio_assets",
+        "DELETE FROM recording_audio_assets",
+    ),
+    ("recordings", "DELETE FROM recordings"),
+    ("asr_benchmarks", "DELETE FROM asr_benchmarks"),
+    ("runtime_events", "DELETE FROM runtime_events"),
+    ("capture_sessions", "DELETE FROM capture_sessions"),
+    ("context_snapshots", "DELETE FROM context_snapshots"),
+    ("policy_snapshots", "DELETE FROM policy_snapshots"),
+    (
+        "dictation_dictionary_entries",
+        "DELETE FROM dictation_dictionary_entries",
+    ),
+    ("dictation_snippets", "DELETE FROM dictation_snippets"),
+    (
+        "dictation_command_presets",
+        "DELETE FROM dictation_command_presets",
+    ),
+    (
+        "dictation_correction_suggestions",
+        "DELETE FROM dictation_correction_suggestions",
+    ),
+    ("projects", "DELETE FROM projects"),
+    ("audit_log", "DELETE FROM audit_log"),
+];
+
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+struct AuditDetailScrubCounts {
+    rows_scanned: usize,
+    rows_updated: usize,
+    malformed_rows: usize,
+    sensitive_fields_removed: usize,
+}
+
+fn remove_sensitive_audit_detail_fields(value: &mut serde_json::Value) -> usize {
+    match value {
+        serde_json::Value::Object(object) => {
+            let mut removed = 0;
+            for key in SENSITIVE_AUDIT_DETAIL_KEYS {
+                if object.remove(key).is_some() {
+                    removed += 1;
+                }
+            }
+            removed
+                + object
+                    .values_mut()
+                    .map(remove_sensitive_audit_detail_fields)
+                    .sum::<usize>()
+        }
+        serde_json::Value::Array(values) => values
+            .iter_mut()
+            .map(remove_sensitive_audit_detail_fields)
+            .sum(),
+        _ => 0,
+    }
+}
+
+fn create_audit_log_append_only_triggers(conn: &Connection) -> Result<()> {
+    conn.execute_batch(AUDIT_LOG_APPEND_ONLY_TRIGGER_SQL)
+        .context("Failed to create audit log append-only triggers")
+}
+
+fn drop_audit_log_append_only_triggers(conn: &Connection) -> Result<()> {
+    conn.execute_batch(
+        "DROP TRIGGER IF EXISTS audit_log_no_update;
+         DROP TRIGGER IF EXISTS audit_log_no_delete;",
+    )
+    .context("Failed to temporarily disable audit log append-only triggers")
+}
+
+fn verify_audit_log_append_only_triggers(conn: &Connection) -> Result<()> {
+    let trigger_count: i64 = conn.query_row(
+        "SELECT COUNT(*)
+         FROM sqlite_schema
+         WHERE type = 'trigger'
+           AND tbl_name = 'audit_log'
+           AND name IN ('audit_log_no_update', 'audit_log_no_delete')",
+        [],
+        |row| row.get(0),
+    )?;
+    if trigger_count != 2 {
+        anyhow::bail!(
+            "Audit log append-only trigger verification failed: expected 2 triggers, found {}",
+            trigger_count
+        );
+    }
+    Ok(())
+}
+
+fn table_exists(conn: &Connection, table_name: &str) -> Result<bool> {
+    conn.query_row(
+        "SELECT EXISTS(
+             SELECT 1 FROM sqlite_schema WHERE type = 'table' AND name = ?1
+         )",
+        [table_name],
+        |row| row.get(0),
+    )
+    .map_err(Into::into)
+}
+
+fn insert_recording_row(
+    conn: &Connection,
+    recording: &Recording,
+    primary_audio_path: &str,
+) -> Result<()> {
+    conn.execute(
+        "INSERT INTO recordings (
+            id, title, project_id, duration, created_at, updated_at, source_type, audio_path, status,
+            meeting_notes, meeting_template_id, meeting_capture_mode, notes_updated_at,
+            consent_prompt_shown, consent_notice_mode, consent_notice_surface,
+            consent_notice_message, consent_notice_updated_at
+         )
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18)",
+        params![
+            &recording.id,
+            &recording.title,
+            &recording.project_id,
+            recording.duration,
+            recording.created_at.to_rfc3339(),
+            recording.updated_at.to_rfc3339(),
+            &recording.source_type,
+            primary_audio_path,
+            &recording.status,
+            &recording.meeting_notes,
+            &recording.meeting_template_id,
+            &recording.meeting_capture_mode,
+            recording
+                .notes_updated_at
+                .as_ref()
+                .map(|value| value.to_rfc3339()),
+            if recording.consent_prompt_shown { 1 } else { 0 },
+            &recording.consent_notice_mode,
+            &recording.consent_notice_surface,
+            &recording.consent_notice_message,
+            recording
+                .consent_notice_updated_at
+                .as_ref()
+                .map(|value| value.to_rfc3339())
+        ],
+    )?;
+    Ok(())
+}
 
 /// Normalizes a dictionary/snippet `category_scope` value for persistence.
 /// Trims whitespace, drops blank values (-> `None`, meaning "applies
@@ -37,6 +233,79 @@ fn normalize_category_scope(value: Option<&str>) -> Result<Option<String>> {
     Ok(Some(
         crate::settings::dictation_app_category_to_key(category).to_string(),
     ))
+}
+
+fn validated_summary_provenance(
+    raw: Option<String>,
+    summary: Option<&str>,
+) -> Option<AnalysisProvenance> {
+    let provenance: AnalysisProvenance = serde_json::from_str(raw.as_deref()?).ok()?;
+    let summary = summary?;
+    (provenance.version == ANALYSIS_PROVENANCE_VERSION
+        && provenance.content_hash == analysis_content_hash(summary))
+    .then_some(provenance)
+}
+
+fn validated_action_items_provenance(
+    raw: Option<String>,
+    action_items: &[String],
+) -> Option<ActionItemsProvenance> {
+    let provenance: ActionItemsProvenance = serde_json::from_str(raw.as_deref()?).ok()?;
+    let items_match = provenance.items.len() == action_items.len()
+        && provenance
+            .items
+            .iter()
+            .zip(action_items)
+            .all(|(item_provenance, item)| {
+                item_provenance.content_hash == analysis_content_hash(item)
+            });
+    (provenance.version == ANALYSIS_PROVENANCE_VERSION
+        && provenance.content_hash == action_items_content_hash(action_items)
+        && items_match)
+        .then_some(provenance)
+}
+
+fn preserve_matching_action_item_provenance(
+    previous: &ActionItemsProvenance,
+    action_items: &[String],
+) -> Option<ActionItemsProvenance> {
+    let mut unmatched = previous.items.clone();
+    let items = action_items
+        .iter()
+        .map(|item| {
+            let content_hash = analysis_content_hash(item);
+            unmatched
+                .iter()
+                .position(|candidate| candidate.content_hash == content_hash)
+                .map(|index| unmatched.remove(index))
+                .unwrap_or(ActionItemProvenance {
+                    content_hash,
+                    citations: Vec::new(),
+                    grounded: false,
+                    generated: false,
+                })
+        })
+        .collect::<Vec<_>>();
+    if !items.iter().any(|item| item.generated) {
+        return None;
+    }
+
+    let mut seen = HashSet::new();
+    let citations = items
+        .iter()
+        .filter(|item| item.generated)
+        .flat_map(|item| item.citations.iter().cloned())
+        .filter(|citation| {
+            let key = serde_json::to_string(citation).unwrap_or_default();
+            seen.insert(key)
+        })
+        .collect();
+    let mut next = previous.clone();
+    next.content_hash = action_items_content_hash(action_items);
+    next.grounded = items.iter().all(|item| item.generated && item.grounded);
+    next.citations = citations;
+    next.items = items;
+    Some(next)
 }
 
 pub struct Database {
@@ -72,7 +341,7 @@ impl Database {
             conn.execute("SELECT count(*) FROM sqlite_master;", [])?;
         }
 
-        let db = Self { conn };
+        let mut db = Self { conn };
         db.init_tables()?;
 
         Ok(db)
@@ -81,6 +350,14 @@ impl Database {
     /// Create new database (default, no encryption)
     pub fn new() -> Result<Self> {
         Self::new_with_key(None)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn new_in_memory_for_test() -> Result<Self> {
+        let conn = Connection::open_in_memory()?;
+        let mut db = Self { conn };
+        db.init_tables()?;
+        Ok(db)
     }
 
     /// Write a transactionally-consistent snapshot of the live database to
@@ -170,7 +447,11 @@ impl Database {
         let id = uuid::Uuid::new_v4().to_string();
         let timestamp = Utc::now();
         let details_json = details
-            .map(|d| d.to_string())
+            .map(|mut details| {
+                remove_sensitive_audit_detail_fields(&mut details);
+                serde_json::to_string(&details)
+            })
+            .transpose()?
             .unwrap_or_else(|| "{}".to_string());
 
         self.conn.execute(
@@ -567,13 +848,16 @@ impl Database {
     pub fn save_meeting_artifact(&mut self, artifact: &MeetingArtifactRecord) -> Result<()> {
         self.conn.execute(
             "INSERT INTO meeting_artifacts (
-                id, recording_id, title, summary, action_items, decisions, deadlines,
-                template_id, chat_messages, created_at, updated_at
-             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)
+                id, recording_id, title, summary, action_items, summary_provenance,
+                action_items_provenance, decisions, deadlines, template_id, chat_messages,
+                created_at, updated_at
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)
              ON CONFLICT(recording_id) DO UPDATE SET
                 title = excluded.title,
                 summary = excluded.summary,
                 action_items = excluded.action_items,
+                summary_provenance = excluded.summary_provenance,
+                action_items_provenance = excluded.action_items_provenance,
                 decisions = excluded.decisions,
                 deadlines = excluded.deadlines,
                 template_id = excluded.template_id,
@@ -585,6 +869,16 @@ impl Database {
                 &artifact.title,
                 &artifact.summary,
                 serde_json::to_string(&artifact.action_items)?,
+                artifact
+                    .summary_provenance
+                    .as_ref()
+                    .map(serde_json::to_string)
+                    .transpose()?,
+                artifact
+                    .action_items_provenance
+                    .as_ref()
+                    .map(serde_json::to_string)
+                    .transpose()?,
                 serde_json::to_string(&artifact.decisions)?,
                 serde_json::to_string(&artifact.deadlines)?,
                 &artifact.template_id,
@@ -601,27 +895,36 @@ impl Database {
         recording_id: &str,
     ) -> Result<Option<MeetingArtifactRecord>> {
         let mut stmt = self.conn.prepare(
-            "SELECT id, recording_id, title, summary, action_items, decisions, deadlines,
-                    template_id, chat_messages, created_at, updated_at
+            "SELECT id, recording_id, title, summary, action_items, summary_provenance,
+                    action_items_provenance, decisions, deadlines, template_id, chat_messages,
+                    created_at, updated_at
              FROM meeting_artifacts
              WHERE recording_id = ?1",
         )?;
         let result = stmt.query_row([recording_id], |row| {
             let action_items_json: String = row.get(4)?;
-            let decisions_json: String = row.get(5)?;
-            let deadlines_json: String = row.get(6)?;
-            let chat_messages_json: String = row.get(8)?;
-            let created_at: String = row.get(9)?;
-            let updated_at: String = row.get(10)?;
+            let action_items: Vec<String> =
+                serde_json::from_str(&action_items_json).unwrap_or_default();
+            let summary: Option<String> = row.get(3)?;
+            let decisions_json: String = row.get(7)?;
+            let deadlines_json: String = row.get(8)?;
+            let chat_messages_json: String = row.get(10)?;
+            let created_at: String = row.get(11)?;
+            let updated_at: String = row.get(12)?;
             Ok(MeetingArtifactRecord {
                 id: row.get(0)?,
                 recording_id: row.get(1)?,
                 title: row.get(2)?,
-                summary: row.get(3)?,
-                action_items: serde_json::from_str(&action_items_json).unwrap_or_default(),
+                summary_provenance: validated_summary_provenance(row.get(5)?, summary.as_deref()),
+                action_items_provenance: validated_action_items_provenance(
+                    row.get(6)?,
+                    &action_items,
+                ),
+                summary,
+                action_items,
                 decisions: serde_json::from_str(&decisions_json).unwrap_or_default(),
                 deadlines: serde_json::from_str(&deadlines_json).unwrap_or_default(),
-                template_id: row.get(7)?,
+                template_id: row.get(9)?,
                 chat_messages: serde_json::from_str(&chat_messages_json).unwrap_or_default(),
                 created_at: chrono::DateTime::parse_from_rfc3339(&created_at)
                     .map(|dt| dt.with_timezone(&Utc))
@@ -638,7 +941,7 @@ impl Database {
         }
     }
 
-    fn init_tables(&self) -> Result<()> {
+    fn init_tables(&mut self) -> Result<()> {
         self.conn.execute(
             "CREATE TABLE IF NOT EXISTS projects (
                 id TEXT PRIMARY KEY,
@@ -684,6 +987,97 @@ impl Database {
         )?;
 
         self.conn.execute(
+            "CREATE TABLE IF NOT EXISTS recording_audio_assets (
+                recording_id TEXT NOT NULL,
+                role TEXT NOT NULL CHECK (role IN ('primary', 'mic', 'system')),
+                path TEXT NOT NULL CHECK (TRIM(path) <> ''),
+                lifecycle TEXT NOT NULL DEFAULT 'planned'
+                    CHECK (lifecycle IN ('planned', 'writing', 'ready', 'missing', 'failed')),
+                protection TEXT NOT NULL DEFAULT 'plaintext'
+                    CHECK (protection IN ('plaintext', 'encrypted')),
+                plaintext_bytes INTEGER CHECK (plaintext_bytes IS NULL OR plaintext_bytes >= 0),
+                plaintext_sha256 TEXT,
+                last_error TEXT,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
+                PRIMARY KEY (recording_id, role)
+            )",
+            [],
+        )?;
+        self.conn.execute(
+            "CREATE UNIQUE INDEX IF NOT EXISTS idx_recording_audio_assets_path
+             ON recording_audio_assets(path)",
+            [],
+        )?;
+        self.conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_recording_audio_assets_reconcile
+             ON recording_audio_assets(lifecycle, updated_at)",
+            [],
+        )?;
+        self.conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_recording_audio_assets_ready_protection
+             ON recording_audio_assets(protection, recording_id)
+             WHERE lifecycle = 'ready'",
+            [],
+        )?;
+
+        self.conn.execute(
+            "CREATE TABLE IF NOT EXISTS recording_audio_operations (
+                id TEXT PRIMARY KEY,
+                recording_id TEXT NOT NULL,
+                kind TEXT NOT NULL CHECK (kind = 'encrypt'),
+                state TEXT NOT NULL
+                    CHECK (state IN ('prepared', 'outputs_synced', 'published', 'db_switched', 'cleanup_pending', 'complete', 'failed')),
+                last_error TEXT,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            )",
+            [],
+        )?;
+        self.conn.execute(
+            "CREATE UNIQUE INDEX IF NOT EXISTS idx_recording_audio_operations_one_open
+             ON recording_audio_operations(recording_id, kind)
+             WHERE state <> 'complete'",
+            [],
+        )?;
+        self.conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_recording_audio_operations_reconcile
+             ON recording_audio_operations(state, updated_at)",
+            [],
+        )?;
+
+        self.conn.execute(
+            "CREATE TABLE IF NOT EXISTS recording_audio_operation_items (
+                operation_id TEXT NOT NULL,
+                recording_id TEXT NOT NULL,
+                role TEXT NOT NULL CHECK (role IN ('primary', 'mic', 'system')),
+                source_path TEXT NOT NULL,
+                staged_path TEXT NOT NULL,
+                target_path TEXT NOT NULL,
+                plaintext_bytes INTEGER NOT NULL CHECK (plaintext_bytes >= 0),
+                plaintext_sha256 TEXT NOT NULL,
+                state TEXT NOT NULL
+                    CHECK (state IN ('prepared', 'staged', 'published', 'switched', 'cleaned', 'failed')),
+                last_error TEXT,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
+                PRIMARY KEY (operation_id, recording_id, role),
+                UNIQUE (operation_id, target_path)
+            )",
+            [],
+        )?;
+        self.conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_recording_audio_operation_items_state
+             ON recording_audio_operation_items(operation_id, state)",
+            [],
+        )?;
+        self.conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_recording_audio_operation_items_recording
+             ON recording_audio_operation_items(recording_id, role)",
+            [],
+        )?;
+
+        self.conn.execute(
             "CREATE TABLE IF NOT EXISTS transcripts (
                 id TEXT PRIMARY KEY,
                 recording_id TEXT NOT NULL,
@@ -695,7 +1089,8 @@ impl Database {
                 model_id TEXT,
                 requested_provider TEXT,
                 actual_provider TEXT,
-                created_at TEXT NOT NULL
+                created_at TEXT NOT NULL,
+                revision INTEGER NOT NULL DEFAULT 0
             )",
             [],
         )?;
@@ -710,6 +1105,10 @@ impl Database {
         );
         let _ = self.conn.execute(
             "ALTER TABLE transcripts ADD COLUMN actual_provider TEXT",
+            [],
+        );
+        let _ = self.conn.execute(
+            "ALTER TABLE transcripts ADD COLUMN revision INTEGER NOT NULL DEFAULT 0",
             [],
         );
         self.migrate_transcripts_drop_fallback_columns()?;
@@ -841,6 +1240,8 @@ impl Database {
                 title TEXT,
                 summary TEXT,
                 action_items TEXT NOT NULL,
+                summary_provenance TEXT,
+                action_items_provenance TEXT,
                 decisions TEXT NOT NULL,
                 deadlines TEXT NOT NULL,
                 template_id TEXT,
@@ -854,6 +1255,8 @@ impl Database {
             "ALTER TABLE meeting_artifacts ADD COLUMN chat_messages TEXT NOT NULL DEFAULT '[]'",
             [],
         );
+        self.ensure_table_column("meeting_artifacts", "summary_provenance", "TEXT")?;
+        self.ensure_table_column("meeting_artifacts", "action_items_provenance", "TEXT")?;
         self.conn.execute(
             "CREATE INDEX IF NOT EXISTS idx_meeting_artifacts_updated_at
              ON meeting_artifacts(updated_at DESC)",
@@ -1037,23 +1440,7 @@ impl Database {
             [],
         )?;
 
-        self.conn.execute(
-            "CREATE TRIGGER IF NOT EXISTS audit_log_no_update
-             BEFORE UPDATE ON audit_log
-             BEGIN
-                 SELECT RAISE(ABORT, 'audit_log is append-only');
-             END;",
-            [],
-        )?;
-
-        self.conn.execute(
-            "CREATE TRIGGER IF NOT EXISTS audit_log_no_delete
-             BEFORE DELETE ON audit_log
-             BEGIN
-                 SELECT RAISE(ABORT, 'audit_log is append-only');
-             END;",
-            [],
-        )?;
+        self.scrub_sensitive_audit_details()?;
 
         self.conn.execute(
             "INSERT OR IGNORE INTO projects (id, name, description, created_at, updated_at) 
@@ -1112,6 +1499,121 @@ impl Database {
         Ok(())
     }
 
+    fn scrub_sensitive_audit_details(&mut self) -> Result<AuditDetailScrubCounts> {
+        let tx = self
+            .conn
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .context("Failed to start audit detail startup scrub transaction")?;
+        drop_audit_log_append_only_triggers(&tx)?;
+
+        let audit_rows = {
+            let mut stmt = tx.prepare(
+                "SELECT rowid, typeof(details), CAST(details AS BLOB)
+                 FROM audit_log
+                 WHERE details IS NOT NULL",
+            )?;
+            let rows = stmt.query_map([], |row| {
+                Ok((
+                    row.get::<_, i64>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, Vec<u8>>(2)?,
+                ))
+            })?;
+            rows.collect::<std::result::Result<Vec<_>, _>>()?
+        };
+
+        let mut counts = AuditDetailScrubCounts {
+            rows_scanned: audit_rows.len(),
+            ..AuditDetailScrubCounts::default()
+        };
+        for (rowid, storage_class, raw_details) in audit_rows {
+            if storage_class != "text" {
+                counts.malformed_rows += 1;
+                continue;
+            }
+            let Ok(details_json) = std::str::from_utf8(&raw_details) else {
+                counts.malformed_rows += 1;
+                continue;
+            };
+            let mut details = match serde_json::from_str::<serde_json::Value>(details_json) {
+                Ok(details) => details,
+                Err(_) => {
+                    counts.malformed_rows += 1;
+                    continue;
+                }
+            };
+            let removed = remove_sensitive_audit_detail_fields(&mut details);
+            if removed == 0 {
+                continue;
+            }
+
+            let scrubbed_json = serde_json::to_string(&details)?;
+            let updated = tx.execute(
+                "UPDATE audit_log SET details = ?1 WHERE rowid = ?2",
+                params![scrubbed_json, rowid],
+            )?;
+            if updated != 1 {
+                anyhow::bail!(
+                    "Audit detail startup scrub updated an unexpected number of rows: {}",
+                    updated
+                );
+            }
+            counts.rows_updated += 1;
+            counts.sensitive_fields_removed += removed;
+        }
+
+        create_audit_log_append_only_triggers(&tx)?;
+        verify_audit_log_append_only_triggers(&tx)?;
+        tx.commit()
+            .context("Failed to commit audit detail startup scrub")?;
+
+        tracing::info!(
+            rows_scanned = counts.rows_scanned,
+            rows_updated = counts.rows_updated,
+            malformed_rows = counts.malformed_rows,
+            sensitive_fields_removed = counts.sensitive_fields_removed,
+            "Completed audit detail startup scrub"
+        );
+        Ok(counts)
+    }
+
+    fn ensure_table_column(
+        &self,
+        table_name: &str,
+        column_name: &str,
+        column_definition: &str,
+    ) -> Result<()> {
+        if !table_name
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_')
+            || !column_name
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_')
+        {
+            anyhow::bail!("Invalid SQLite identifier in migration");
+        }
+        let mut stmt = self
+            .conn
+            .prepare(&format!("PRAGMA table_info({})", table_name))?;
+        let mut rows = stmt.query([])?;
+        while let Some(row) = rows.next()? {
+            let existing: String = row.get(1)?;
+            if existing == column_name {
+                return Ok(());
+            }
+        }
+        drop(rows);
+        drop(stmt);
+        self.conn.execute(
+            &format!(
+                "ALTER TABLE {} ADD COLUMN {} {}",
+                table_name, column_name, column_definition
+            ),
+            [],
+        )?;
+        Ok(())
+    }
+
     fn transcripts_has_column(&self, column_name: &str) -> Result<bool> {
         let mut stmt = self.conn.prepare("PRAGMA table_info(transcripts)")?;
         let mut rows = stmt.query([])?;
@@ -1145,7 +1647,8 @@ impl Database {
                 model_id TEXT,
                 requested_provider TEXT,
                 actual_provider TEXT,
-                created_at TEXT NOT NULL
+                created_at TEXT NOT NULL,
+                revision INTEGER NOT NULL DEFAULT 0
              );
              INSERT INTO transcripts (
                 id,
@@ -1158,7 +1661,8 @@ impl Database {
                 model_id,
                 requested_provider,
                 actual_provider,
-                created_at
+                created_at,
+                revision
              )
              SELECT
                 id,
@@ -1171,7 +1675,8 @@ impl Database {
                 model_id,
                 requested_provider,
                 actual_provider,
-                created_at
+                created_at,
+                revision
              FROM transcripts_legacy_fallback;
              DROP TABLE transcripts_legacy_fallback;
              COMMIT;",
@@ -1295,7 +1800,13 @@ impl Database {
                     recordings.audio_path,
                     recordings.status,
                     COALESCE(meeting_artifacts.summary, recordings.summary),
-                    COALESCE(meeting_artifacts.action_items, recordings.action_items),
+                    CASE
+                        WHEN recordings.action_items IS NULL
+                         AND meeting_artifacts.action_items = '[]'
+                         AND meeting_artifacts.action_items_provenance IS NULL
+                        THEN NULL
+                        ELSE COALESCE(meeting_artifacts.action_items, recordings.action_items)
+                    END,
                     recordings.meeting_notes,
                     COALESCE(meeting_artifacts.template_id, recordings.meeting_template_id),
                     recordings.meeting_capture_mode,
@@ -1304,7 +1815,9 @@ impl Database {
                     recordings.consent_notice_mode,
                     recordings.consent_notice_surface,
                     recordings.consent_notice_message,
-                    recordings.consent_notice_updated_at
+                    recordings.consent_notice_updated_at,
+                    meeting_artifacts.summary_provenance,
+                    meeting_artifacts.action_items_provenance
              FROM recordings
              LEFT JOIN meeting_artifacts ON meeting_artifacts.recording_id = recordings.id
              WHERE (?1 IS NULL OR recordings.project_id = ?1)
@@ -1314,8 +1827,15 @@ impl Database {
         let pid_param: Option<&str> = project_id;
 
         let recordings = stmt.query_map(params![pid_param], |row| {
+            let summary: Option<String> = row.get(9)?;
             let action_items_json: Option<String> = row.get(10)?;
-            let action_items = action_items_json.and_then(|s| serde_json::from_str(&s).ok());
+            let action_items: Option<Vec<String>> =
+                action_items_json.and_then(|s| serde_json::from_str(&s).ok());
+            let summary_provenance = validated_summary_provenance(row.get(20)?, summary.as_deref());
+            let action_items_provenance = validated_action_items_provenance(
+                row.get(21)?,
+                action_items.as_deref().unwrap_or_default(),
+            );
             let notes_updated_at = row
                 .get::<_, Option<String>>(14)?
                 .and_then(|value| value.parse().ok());
@@ -1338,8 +1858,10 @@ impl Database {
                 source_type: row.get(6)?,
                 audio_path: row.get(7)?,
                 status: row.get(8)?,
-                summary: row.get(9)?,
+                summary,
                 action_items,
+                summary_provenance,
+                action_items_provenance,
                 meeting_notes: row.get(11)?,
                 meeting_template_id: row.get(12)?,
                 meeting_capture_mode: row.get(13)?,
@@ -1369,7 +1891,13 @@ impl Database {
                     recordings.audio_path,
                     recordings.status,
                     COALESCE(meeting_artifacts.summary, recordings.summary),
-                    COALESCE(meeting_artifacts.action_items, recordings.action_items),
+                    CASE
+                        WHEN recordings.action_items IS NULL
+                         AND meeting_artifacts.action_items = '[]'
+                         AND meeting_artifacts.action_items_provenance IS NULL
+                        THEN NULL
+                        ELSE COALESCE(meeting_artifacts.action_items, recordings.action_items)
+                    END,
                     recordings.meeting_notes,
                     COALESCE(meeting_artifacts.template_id, recordings.meeting_template_id),
                     recordings.meeting_capture_mode,
@@ -1378,15 +1906,24 @@ impl Database {
                     recordings.consent_notice_mode,
                     recordings.consent_notice_surface,
                     recordings.consent_notice_message,
-                    recordings.consent_notice_updated_at
+                    recordings.consent_notice_updated_at,
+                    meeting_artifacts.summary_provenance,
+                    meeting_artifacts.action_items_provenance
              FROM recordings
              LEFT JOIN meeting_artifacts ON meeting_artifacts.recording_id = recordings.id
              WHERE recordings.id = ?1",
         )?;
 
         let result = stmt.query_row([recording_id], |row| {
+            let summary: Option<String> = row.get(9)?;
             let action_items_json: Option<String> = row.get(10)?;
-            let action_items = action_items_json.and_then(|s| serde_json::from_str(&s).ok());
+            let action_items: Option<Vec<String>> =
+                action_items_json.and_then(|s| serde_json::from_str(&s).ok());
+            let summary_provenance = validated_summary_provenance(row.get(20)?, summary.as_deref());
+            let action_items_provenance = validated_action_items_provenance(
+                row.get(21)?,
+                action_items.as_deref().unwrap_or_default(),
+            );
             let notes_updated_at = row
                 .get::<_, Option<String>>(14)?
                 .and_then(|value| value.parse().ok());
@@ -1409,8 +1946,10 @@ impl Database {
                 source_type: row.get(6)?,
                 audio_path: row.get(7)?,
                 status: row.get(8)?,
-                summary: row.get(9)?,
+                summary,
                 action_items,
+                summary_provenance,
+                action_items_provenance,
                 meeting_notes: row.get(11)?,
                 meeting_template_id: row.get(12)?,
                 meeting_capture_mode: row.get(13)?,
@@ -1430,58 +1969,76 @@ impl Database {
         }
     }
 
-    pub fn update_recording_path(
-        &mut self,
-        recording_id: &str,
-        audio_path: &str,
-        duration_seconds: i64,
-    ) -> Result<()> {
-        self.conn.execute(
-            "UPDATE recordings SET audio_path = ?1, duration = ?2, updated_at = ?3 WHERE id = ?4",
-            params![
-                audio_path,
-                duration_seconds,
-                Utc::now().to_rfc3339(),
-                recording_id
-            ],
-        )?;
-        Ok(())
-    }
-
-    /// Count stored recording files and how many of them are actually
-    /// encrypted, as `(encrypted, stored)`.
-    ///
-    /// Encryption is applied by the vault migration, which renames the file to
-    /// `.enc`; capture writes a plain WAV. So the vault-initialized bit says
-    /// only that a migration once ran, not that what is on disk now is
-    /// encrypted — the counts are the only honest answer.
+    /// Count ready owned audio assets and how many are protected ciphertext, as
+    /// `(encrypted, stored)`. The field name remains renderer-compatible even
+    /// though the unit is now files rather than recording rows.
     pub fn count_encrypted_recordings(&self) -> Result<(i64, i64)> {
         let stored: i64 = self.conn.query_row(
-            "SELECT COUNT(*) FROM recordings WHERE audio_path IS NOT NULL AND TRIM(audio_path) != ''",
+            "SELECT COUNT(*) FROM recording_audio_assets WHERE lifecycle = 'ready'",
             [],
             |row| row.get(0),
         )?;
         let encrypted: i64 = self.conn.query_row(
-            "SELECT COUNT(*) FROM recordings
-             WHERE audio_path IS NOT NULL AND TRIM(audio_path) != ''
-               AND LOWER(audio_path) LIKE '%.enc'",
+            "SELECT COUNT(*) FROM recording_audio_assets
+             WHERE lifecycle = 'ready' AND protection = 'encrypted'",
             [],
             |row| row.get(0),
         )?;
         Ok((encrypted, stored))
     }
 
-    pub fn clear_recording_audio_path(&mut self, recording_id: &str) -> Result<()> {
-        self.conn.execute(
-            "UPDATE recordings SET audio_path = '', updated_at = ?1 WHERE id = ?2",
-            params![Utc::now().to_rfc3339(), recording_id],
+    pub fn has_open_recording_audio_operations(&self) -> Result<bool> {
+        self.conn
+            .query_row(
+                "SELECT EXISTS(
+                    SELECT 1 FROM recording_audio_operations WHERE state <> 'complete'
+                 )",
+                [],
+                |row| row.get(0),
+            )
+            .map_err(Into::into)
+    }
+
+    pub fn recording_audio_encryption_incomplete(&self) -> Result<bool> {
+        self.conn
+            .query_row(
+                "SELECT EXISTS(
+                     SELECT 1 FROM recording_audio_assets
+                     WHERE lifecycle = 'ready' AND protection = 'plaintext'
+                     UNION ALL
+                     SELECT 1 FROM recording_audio_operations WHERE state <> 'complete'
+                 )",
+                [],
+                |row| row.get(0),
+            )
+            .map_err(Into::into)
+    }
+
+    pub fn recording_ids_with_ready_plaintext_audio(&self) -> Result<Vec<String>> {
+        let mut statement = self.conn.prepare(
+            "SELECT DISTINCT recording_id
+             FROM recording_audio_assets
+             WHERE lifecycle = 'ready' AND protection = 'plaintext'
+             ORDER BY recording_id",
         )?;
-        Ok(())
+        let rows = statement
+            .query_map([], |row| row.get::<_, String>(0))?
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+        Ok(rows)
     }
 
     pub fn get_transcript(&self, recording_id: &str) -> Result<Option<Transcript>> {
+        Ok(self
+            .get_transcript_with_revision(recording_id)?
+            .map(|(transcript, _revision)| transcript))
+    }
+
+    pub fn get_transcript_with_revision(
+        &self,
+        recording_id: &str,
+    ) -> Result<Option<(Transcript, i64)>> {
         let mut stmt = self.conn.prepare(
-            "SELECT id, recording_id, segments, full_text, language, confidence, model, model_id, requested_provider, actual_provider, created_at
+            "SELECT id, recording_id, segments, full_text, language, confidence, model, model_id, requested_provider, actual_provider, created_at, revision
              FROM transcripts WHERE recording_id = ?1",
         )?;
 
@@ -1510,7 +2067,7 @@ impl Database {
                 });
             }
 
-            Ok(Transcript {
+            let transcript = Transcript {
                 id: row.get(0)?,
                 recording_id: row.get(1)?,
                 segments,
@@ -1525,7 +2082,8 @@ impl Database {
                     .get::<_, String>(10)?
                     .parse()
                     .unwrap_or_else(|_| Utc::now()),
-            })
+            };
+            Ok((transcript, row.get(11)?))
         });
 
         match result {
@@ -1536,7 +2094,30 @@ impl Database {
     }
 
     pub fn create_recording(&mut self, recording: &Recording) -> Result<()> {
-        self.conn.execute(
+        insert_recording_row(&self.conn, recording, &recording.audio_path)
+    }
+
+    /// Atomically persist a renderer-compatible recording row and every enabled
+    /// audio asset before capture is allowed to create a file or play a stream.
+    pub fn create_recording_with_audio_plan(
+        &mut self,
+        recording: &Recording,
+        plan: &RecordingCapturePlan,
+    ) -> Result<()> {
+        if recording.id != plan.recording_id {
+            anyhow::bail!(
+                "Recording id '{}' does not match capture plan '{}'",
+                recording.id,
+                plan.recording_id
+            );
+        }
+        let now = Utc::now().to_rfc3339();
+        let primary_path = plan.primary_path.to_string_lossy().to_string();
+        let tx = self
+            .conn
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .context("Failed to start recording audio plan transaction")?;
+        tx.execute(
             "INSERT INTO recordings (
                 id, title, project_id, duration, created_at, updated_at, source_type, audio_path, status,
                 meeting_notes, meeting_template_id, meeting_capture_mode, notes_updated_at,
@@ -1552,7 +2133,7 @@ impl Database {
                 recording.created_at.to_rfc3339(),
                 recording.updated_at.to_rfc3339(),
                 &recording.source_type,
-                &recording.audio_path,
+                &primary_path,
                 &recording.status,
                 &recording.meeting_notes,
                 &recording.meeting_template_id,
@@ -1571,7 +2152,792 @@ impl Database {
                     .map(|value| value.to_rfc3339())
             ],
         )?;
+        for (role, path) in plan.paths() {
+            tx.execute(
+                "INSERT INTO recording_audio_assets (
+                    recording_id, role, path, lifecycle, protection, created_at, updated_at
+                 ) VALUES (?1, ?2, ?3, 'planned', 'plaintext', ?4, ?4)",
+                params![
+                    &recording.id,
+                    role.as_str(),
+                    path.to_string_lossy().as_ref(),
+                    &now
+                ],
+            )?;
+        }
+        tx.commit()
+            .context("Failed to commit recording audio plan transaction")?;
         Ok(())
+    }
+
+    pub fn load_recording_audio_bundle(&self, recording_id: &str) -> Result<RecordingAudioBundle> {
+        let mut statement = self.conn.prepare(
+            "SELECT role, path, lifecycle, protection, plaintext_bytes,
+                    plaintext_sha256, last_error
+             FROM recording_audio_assets
+             WHERE recording_id = ?1
+             ORDER BY CASE role WHEN 'primary' THEN 0 WHEN 'mic' THEN 1 ELSE 2 END",
+        )?;
+        let rows = statement.query_map(params![recording_id], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+                row.get::<_, String>(3)?,
+                row.get::<_, Option<i64>>(4)?,
+                row.get::<_, Option<String>>(5)?,
+                row.get::<_, Option<String>>(6)?,
+            ))
+        })?;
+
+        let mut bundle = RecordingAudioBundle::empty(recording_id);
+        for row in rows {
+            let (role, path, lifecycle, protection, plaintext_bytes, plaintext_sha256, last_error) =
+                row?;
+            bundle.insert(RecordingAudioAsset {
+                recording_id: recording_id.to_string(),
+                role: RecordingAudioRole::from_str(&role)?,
+                path: path.into(),
+                lifecycle: RecordingAudioLifecycle::from_str(&lifecycle)?,
+                protection: RecordingAudioProtection::from_str(&protection)?,
+                plaintext_bytes: plaintext_bytes.and_then(|value| u64::try_from(value).ok()),
+                plaintext_sha256,
+                last_error,
+            })?;
+        }
+        Ok(bundle)
+    }
+
+    pub fn mark_audio_assets_writing(&mut self, recording_id: &str) -> Result<()> {
+        let now = Utc::now().to_rfc3339();
+        let tx = self
+            .conn
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let asset_count: i64 = tx.query_row(
+            "SELECT COUNT(*) FROM recording_audio_assets WHERE recording_id = ?1",
+            params![recording_id],
+            |row| row.get(0),
+        )?;
+        if asset_count == 0 {
+            anyhow::bail!("Recording '{}' has no planned audio assets", recording_id);
+        }
+        tx.execute(
+            "UPDATE recording_audio_assets
+             SET lifecycle = 'writing', last_error = NULL, updated_at = ?1
+             WHERE recording_id = ?2 AND lifecycle = 'planned'",
+            params![&now, recording_id],
+        )?;
+        tx.commit()?;
+        Ok(())
+    }
+
+    pub fn finalize_recording_audio(
+        &mut self,
+        recording_id: &str,
+        validated: &[(RecordingAudioRole, ValidatedRecordingAudio)],
+        duration_seconds: i64,
+        recording_status: &str,
+    ) -> Result<()> {
+        if !validated
+            .iter()
+            .any(|(role, _)| *role == RecordingAudioRole::Primary)
+        {
+            anyhow::bail!(
+                "Recording '{}' has no validated primary audio",
+                recording_id
+            );
+        }
+        let now = Utc::now().to_rfc3339();
+        let tx = self
+            .conn
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        for (role, metadata) in validated {
+            let updated = tx.execute(
+                "UPDATE recording_audio_assets
+                 SET lifecycle = 'ready', protection = 'plaintext', plaintext_bytes = ?1,
+                     plaintext_sha256 = ?2, last_error = NULL, updated_at = ?3
+                 WHERE recording_id = ?4 AND role = ?5",
+                params![
+                    i64::try_from(metadata.plaintext_bytes)
+                        .context("Recording audio file is too large for SQLite metadata")?,
+                    &metadata.plaintext_sha256,
+                    &now,
+                    recording_id,
+                    role.as_str()
+                ],
+            )?;
+            if updated != 1 {
+                anyhow::bail!(
+                    "Recording '{}' has no planned '{}' audio asset",
+                    recording_id,
+                    role.as_str()
+                );
+            }
+        }
+        let primary_path: String = tx.query_row(
+            "SELECT path FROM recording_audio_assets
+             WHERE recording_id = ?1 AND role = 'primary' AND lifecycle = 'ready'",
+            params![recording_id],
+            |row| row.get(0),
+        )?;
+        let updated = tx.execute(
+            "UPDATE recordings
+             SET audio_path = ?1, duration = ?2, status = ?3, updated_at = ?4
+             WHERE id = ?5",
+            params![
+                primary_path,
+                duration_seconds,
+                recording_status,
+                &now,
+                recording_id
+            ],
+        )?;
+        if updated != 1 {
+            anyhow::bail!("Recording '{}' was not found", recording_id);
+        }
+        tx.commit()?;
+        Ok(())
+    }
+
+    pub fn set_audio_asset_validation_states(
+        &mut self,
+        recording_id: &str,
+        updates: &[(
+            RecordingAudioRole,
+            RecordingAudioLifecycle,
+            Option<ValidatedRecordingAudio>,
+            Option<String>,
+        )],
+        recording_status: &str,
+    ) -> Result<()> {
+        let now = Utc::now().to_rfc3339();
+        let tx = self
+            .conn
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        for (role, lifecycle, metadata, last_error) in updates {
+            let plaintext_bytes = metadata
+                .as_ref()
+                .map(|metadata| i64::try_from(metadata.plaintext_bytes))
+                .transpose()
+                .context("Recording audio file is too large for SQLite metadata")?;
+            let plaintext_sha256 = metadata
+                .as_ref()
+                .map(|metadata| metadata.plaintext_sha256.as_str());
+            let updated = tx.execute(
+                "UPDATE recording_audio_assets
+                 SET lifecycle = ?1, plaintext_bytes = ?2, plaintext_sha256 = ?3,
+                     last_error = ?4, updated_at = ?5
+                 WHERE recording_id = ?6 AND role = ?7",
+                params![
+                    lifecycle.as_str(),
+                    plaintext_bytes,
+                    plaintext_sha256,
+                    last_error,
+                    &now,
+                    recording_id,
+                    role.as_str()
+                ],
+            )?;
+            if updated != 1 {
+                anyhow::bail!(
+                    "Recording '{}' has no '{}' audio asset",
+                    recording_id,
+                    role.as_str()
+                );
+            }
+        }
+        tx.execute(
+            "UPDATE recordings SET status = ?1, updated_at = ?2 WHERE id = ?3",
+            params![recording_status, &now, recording_id],
+        )?;
+        tx.commit()?;
+        Ok(())
+    }
+
+    /// Remove ownership rows only after the caller deleted each corresponding
+    /// file or confirmed it was already absent.
+    pub fn delete_recording_audio_assets(
+        &mut self,
+        recording_id: &str,
+        roles: &[RecordingAudioRole],
+    ) -> Result<()> {
+        let now = Utc::now().to_rfc3339();
+        let tx = self
+            .conn
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        for role in roles {
+            tx.execute(
+                "DELETE FROM recording_audio_assets WHERE recording_id = ?1 AND role = ?2",
+                params![recording_id, role.as_str()],
+            )?;
+        }
+        if roles.contains(&RecordingAudioRole::Primary) {
+            tx.execute(
+                "UPDATE recordings SET audio_path = '', updated_at = ?1 WHERE id = ?2",
+                params![&now, recording_id],
+            )?;
+        }
+        tx.commit()?;
+        Ok(())
+    }
+
+    /// Atomically switch every selected member to durable ciphertext and update
+    /// the renderer-facing primary mirror in the same IMMEDIATE transaction.
+    pub fn switch_recording_audio_protection(
+        &mut self,
+        recording_id: &str,
+        replacements: &[(RecordingAudioRole, &Path)],
+    ) -> Result<()> {
+        if replacements.is_empty() {
+            return Ok(());
+        }
+        let now = Utc::now().to_rfc3339();
+        let tx = self
+            .conn
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        for (role, target_path) in replacements {
+            let updated = tx.execute(
+                "UPDATE recording_audio_assets
+                 SET path = ?1, protection = 'encrypted', last_error = NULL, updated_at = ?2
+                 WHERE recording_id = ?3 AND role = ?4 AND lifecycle = 'ready'",
+                params![
+                    target_path.to_string_lossy().as_ref(),
+                    &now,
+                    recording_id,
+                    role.as_str()
+                ],
+            )?;
+            if updated != 1 {
+                anyhow::bail!(
+                    "Recording '{}' has no ready '{}' audio asset to switch",
+                    recording_id,
+                    role.as_str()
+                );
+            }
+        }
+        if let Some((_, primary_path)) = replacements
+            .iter()
+            .find(|(role, _)| *role == RecordingAudioRole::Primary)
+        {
+            tx.execute(
+                "UPDATE recordings SET audio_path = ?1, updated_at = ?2 WHERE id = ?3",
+                params![primary_path.to_string_lossy().as_ref(), &now, recording_id],
+            )?;
+        }
+        tx.commit()?;
+        Ok(())
+    }
+
+    pub fn has_open_recording_audio_operation(&self) -> Result<bool> {
+        self.conn
+            .query_row(
+                "SELECT EXISTS(
+                     SELECT 1 FROM recording_audio_operations WHERE state <> 'complete'
+                 )",
+                [],
+                |row| row.get(0),
+            )
+            .map_err(Into::into)
+    }
+
+    pub fn load_open_recording_audio_operation(
+        &self,
+        recording_id: &str,
+    ) -> Result<Option<RecordingAudioOperation>> {
+        let operation = self.conn.query_row(
+            "SELECT id, state, last_error
+             FROM recording_audio_operations
+             WHERE recording_id = ?1 AND kind = 'encrypt' AND state <> 'complete'",
+            params![recording_id],
+            |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, Option<String>>(2)?,
+                ))
+            },
+        );
+        let (id, state, last_error) = match operation {
+            Ok(operation) => operation,
+            Err(rusqlite::Error::QueryReturnedNoRows) => return Ok(None),
+            Err(error) => return Err(error.into()),
+        };
+        let mut statement = self.conn.prepare(
+            "SELECT role, source_path, staged_path, target_path, plaintext_bytes,
+                    plaintext_sha256, state, last_error
+             FROM recording_audio_operation_items
+             WHERE operation_id = ?1
+             ORDER BY CASE role WHEN 'primary' THEN 0 WHEN 'mic' THEN 1 ELSE 2 END",
+        )?;
+        let rows = statement.query_map(params![&id], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+                row.get::<_, String>(3)?,
+                row.get::<_, i64>(4)?,
+                row.get::<_, String>(5)?,
+                row.get::<_, String>(6)?,
+                row.get::<_, Option<String>>(7)?,
+            ))
+        })?;
+        let mut items = Vec::new();
+        for row in rows {
+            let (
+                role,
+                source_path,
+                staged_path,
+                target_path,
+                plaintext_bytes,
+                plaintext_sha256,
+                item_state,
+                item_error,
+            ) = row?;
+            items.push(RecordingAudioOperationItem {
+                operation_id: id.clone(),
+                recording_id: recording_id.to_string(),
+                role: RecordingAudioRole::from_str(&role)?,
+                source_path: source_path.into(),
+                staged_path: staged_path.into(),
+                target_path: target_path.into(),
+                plaintext_bytes: u64::try_from(plaintext_bytes)
+                    .context("Invalid negative plaintext byte count")?,
+                plaintext_sha256,
+                state: item_state,
+                last_error: item_error,
+            });
+        }
+        Ok(Some(RecordingAudioOperation {
+            id,
+            recording_id: recording_id.to_string(),
+            state,
+            last_error,
+            items,
+        }))
+    }
+
+    pub fn list_open_recording_audio_operations(&self) -> Result<Vec<RecordingAudioOperation>> {
+        let recording_ids = {
+            let mut statement = self.conn.prepare(
+                "SELECT recording_id
+                 FROM recording_audio_operations
+                 WHERE state <> 'complete'
+                 ORDER BY created_at ASC",
+            )?;
+            let rows = statement
+                .query_map([], |row| row.get::<_, String>(0))?
+                .collect::<std::result::Result<Vec<_>, _>>()?;
+            rows
+        };
+        recording_ids
+            .into_iter()
+            .map(|recording_id| {
+                self.load_open_recording_audio_operation(&recording_id)?
+                    .with_context(|| {
+                        format!(
+                            "Open recording audio operation disappeared for '{}'",
+                            recording_id
+                        )
+                    })
+            })
+            .collect()
+    }
+
+    pub fn begin_recording_audio_encryption(
+        &mut self,
+        recording_id: &str,
+    ) -> Result<Option<RecordingAudioOperation>> {
+        if let Some(operation) = self.load_open_recording_audio_operation(recording_id)? {
+            return Ok(Some(operation));
+        }
+        let bundle = self.load_recording_audio_bundle(recording_id)?;
+        let mut assets = Vec::new();
+        for asset in bundle.assets().filter(|asset| {
+            asset.lifecycle == RecordingAudioLifecycle::Ready
+                && asset.protection == RecordingAudioProtection::Plaintext
+        }) {
+            let metadata = match validate_plaintext_wav(&asset.path) {
+                RecordingAudioValidation::Ready(metadata) => metadata,
+                RecordingAudioValidation::Missing(error)
+                | RecordingAudioValidation::Failed(error) => {
+                    anyhow::bail!(
+                        "Cannot encrypt '{}' audio for recording '{}': {}",
+                        asset.role.as_str(),
+                        recording_id,
+                        error
+                    )
+                }
+            };
+            assets.push((asset.role, asset.path.clone(), metadata));
+        }
+        if assets.is_empty() {
+            return Ok(None);
+        }
+
+        let operation_id = uuid::Uuid::new_v4().to_string();
+        let now = Utc::now().to_rfc3339();
+        let tx = self
+            .conn
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        tx.execute(
+            "INSERT INTO recording_audio_operations (
+                id, recording_id, kind, state, created_at, updated_at
+             ) VALUES (?1, ?2, 'encrypt', 'prepared', ?3, ?3)",
+            params![&operation_id, recording_id, &now],
+        )?;
+        for (role, source_path, metadata) in assets {
+            let target_path = encrypted_path_for(&source_path);
+            let staged_name = format!(
+                "{}.pending-{}-{}",
+                target_path
+                    .file_name()
+                    .and_then(|value| value.to_str())
+                    .unwrap_or("recording.enc"),
+                operation_id,
+                role.as_str()
+            );
+            let staged_path = target_path.with_file_name(staged_name);
+            tx.execute(
+                "INSERT INTO recording_audio_operation_items (
+                    operation_id, recording_id, role, source_path, staged_path,
+                    target_path, plaintext_bytes, plaintext_sha256, state,
+                    created_at, updated_at
+                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, 'prepared', ?9, ?9)",
+                params![
+                    &operation_id,
+                    recording_id,
+                    role.as_str(),
+                    source_path.to_string_lossy().as_ref(),
+                    staged_path.to_string_lossy().as_ref(),
+                    target_path.to_string_lossy().as_ref(),
+                    i64::try_from(metadata.plaintext_bytes)
+                        .context("Recording audio file is too large for SQLite metadata")?,
+                    &metadata.plaintext_sha256,
+                    &now
+                ],
+            )?;
+        }
+        tx.commit()?;
+        self.load_open_recording_audio_operation(recording_id)
+    }
+
+    pub fn set_recording_audio_operation_state(
+        &mut self,
+        operation_id: &str,
+        state: &str,
+        last_error: Option<&str>,
+    ) -> Result<()> {
+        self.conn.execute(
+            "UPDATE recording_audio_operations
+             SET state = ?1, last_error = ?2, updated_at = ?3
+             WHERE id = ?4",
+            params![state, last_error, Utc::now().to_rfc3339(), operation_id],
+        )?;
+        Ok(())
+    }
+
+    pub fn set_recording_audio_operation_item_state(
+        &mut self,
+        operation_id: &str,
+        role: RecordingAudioRole,
+        state: &str,
+        last_error: Option<&str>,
+    ) -> Result<()> {
+        self.conn.execute(
+            "UPDATE recording_audio_operation_items
+             SET state = ?1, last_error = ?2, updated_at = ?3
+             WHERE operation_id = ?4 AND role = ?5",
+            params![
+                state,
+                last_error,
+                Utc::now().to_rfc3339(),
+                operation_id,
+                role.as_str()
+            ],
+        )?;
+        Ok(())
+    }
+
+    /// Atomically publish every encrypted member and the primary compatibility
+    /// mirror after all ciphertext files are durable. Replaying a committed
+    /// switch is accepted only when every row already names the exact target.
+    pub fn switch_recording_audio_encryption(
+        &mut self,
+        operation: &RecordingAudioOperation,
+    ) -> Result<()> {
+        let now = Utc::now().to_rfc3339();
+        let tx = self
+            .conn
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        for item in &operation.items {
+            let current = tx.query_row(
+                "SELECT path, lifecycle, protection
+                 FROM recording_audio_assets
+                 WHERE recording_id = ?1 AND role = ?2",
+                params![&operation.recording_id, item.role.as_str()],
+                |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, String>(2)?,
+                    ))
+                },
+            );
+            let (current_path, lifecycle, protection) = match current {
+                Ok(current) => current,
+                Err(rusqlite::Error::QueryReturnedNoRows) => {
+                    anyhow::bail!(
+                        "Recording '{}' has no '{}' audio asset to switch",
+                        operation.recording_id,
+                        item.role.as_str()
+                    )
+                }
+                Err(error) => return Err(error.into()),
+            };
+            let source_path = item.source_path.to_string_lossy();
+            let target_path = item.target_path.to_string_lossy();
+            if lifecycle != RecordingAudioLifecycle::Ready.as_str() {
+                anyhow::bail!(
+                    "Recording '{}' '{}' audio is not ready for encryption switch",
+                    operation.recording_id,
+                    item.role.as_str()
+                );
+            }
+            if current_path == source_path
+                && protection == RecordingAudioProtection::Plaintext.as_str()
+            {
+                tx.execute(
+                    "UPDATE recording_audio_assets
+                     SET path = ?1, protection = 'encrypted', last_error = NULL, updated_at = ?2
+                     WHERE recording_id = ?3 AND role = ?4",
+                    params![
+                        target_path.as_ref(),
+                        &now,
+                        &operation.recording_id,
+                        item.role.as_str()
+                    ],
+                )?;
+            } else if current_path != target_path
+                || protection != RecordingAudioProtection::Encrypted.as_str()
+            {
+                anyhow::bail!(
+                    "Recording '{}' '{}' audio changed before encryption switch",
+                    operation.recording_id,
+                    item.role.as_str()
+                );
+            }
+            if item.role == RecordingAudioRole::Primary {
+                let updated = tx.execute(
+                    "UPDATE recordings SET audio_path = ?1, updated_at = ?2 WHERE id = ?3",
+                    params![target_path.as_ref(), &now, &operation.recording_id],
+                )?;
+                if updated != 1 {
+                    anyhow::bail!("Recording '{}' was not found", operation.recording_id);
+                }
+            }
+            tx.execute(
+                "UPDATE recording_audio_operation_items
+                 SET state = 'switched', last_error = NULL, updated_at = ?1
+                 WHERE operation_id = ?2 AND recording_id = ?3 AND role = ?4",
+                params![
+                    &now,
+                    &operation.id,
+                    &operation.recording_id,
+                    item.role.as_str()
+                ],
+            )?;
+        }
+        tx.execute(
+            "UPDATE recording_audio_operations
+             SET state = 'db_switched', last_error = NULL, updated_at = ?1
+             WHERE id = ?2",
+            params![&now, &operation.id],
+        )?;
+        tx.commit()?;
+        Ok(())
+    }
+
+    pub fn mark_recording_audio_cleanup_pending(&mut self, operation_id: &str) -> Result<()> {
+        self.conn.execute(
+            "UPDATE recording_audio_operations
+             SET state = 'cleanup_pending', last_error = NULL, updated_at = ?1
+             WHERE id = ?2 AND state <> 'complete'",
+            params![Utc::now().to_rfc3339(), operation_id],
+        )?;
+        Ok(())
+    }
+
+    pub fn complete_recording_audio_encryption_cleanup(
+        &mut self,
+        operation_id: &str,
+        cleaned_roles: &[RecordingAudioRole],
+        failures: &[(RecordingAudioRole, String)],
+    ) -> Result<()> {
+        let now = Utc::now().to_rfc3339();
+        let tx = self
+            .conn
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        for role in cleaned_roles {
+            tx.execute(
+                "UPDATE recording_audio_operation_items
+                 SET state = 'cleaned', last_error = NULL, updated_at = ?1
+                 WHERE operation_id = ?2 AND role = ?3",
+                params![&now, operation_id, role.as_str()],
+            )?;
+        }
+        for (role, error) in failures {
+            tx.execute(
+                "UPDATE recording_audio_operation_items
+                 SET state = 'failed', last_error = ?1, updated_at = ?2
+                 WHERE operation_id = ?3 AND role = ?4",
+                params![error, &now, operation_id, role.as_str()],
+            )?;
+        }
+        let remaining: i64 = tx.query_row(
+            "SELECT COUNT(*) FROM recording_audio_operation_items
+             WHERE operation_id = ?1 AND state <> 'cleaned'",
+            params![operation_id],
+            |row| row.get(0),
+        )?;
+        let (state, error) = if remaining == 0 {
+            ("complete", None)
+        } else {
+            (
+                "cleanup_pending",
+                Some(
+                    failures
+                        .iter()
+                        .map(|(_, error)| error.as_str())
+                        .collect::<Vec<_>>()
+                        .join("; "),
+                ),
+            )
+        };
+        tx.execute(
+            "UPDATE recording_audio_operations
+             SET state = ?1, last_error = ?2, updated_at = ?3
+             WHERE id = ?4",
+            params![state, error, &now, operation_id],
+        )?;
+        tx.commit()?;
+        Ok(())
+    }
+
+    /// Idempotently adopt only exact, explicitly referenced legacy audio files.
+    /// No directory scan or orphan inference is performed.
+    pub fn backfill_legacy_recording_audio(&mut self, approved_roots: &[PathBuf]) -> Result<usize> {
+        let legacy_rows = {
+            let mut statement = self.conn.prepare(
+                "SELECT id, source_type, audio_path
+                 FROM recordings
+                 WHERE audio_path IS NOT NULL AND TRIM(audio_path) <> ''",
+            )?;
+            let rows = statement
+                .query_map([], |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, String>(2)?,
+                    ))
+                })?
+                .collect::<std::result::Result<Vec<_>, _>>()?;
+            rows
+        };
+
+        let now = Utc::now().to_rfc3339();
+        let tx = self
+            .conn
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let mut inserted = 0_usize;
+        for (recording_id, source_type, raw_primary_path) in legacy_rows {
+            let primary_path = Path::new(raw_primary_path.trim());
+            if !primary_path.is_absolute() || !approved_regular_file(primary_path, approved_roots) {
+                continue;
+            }
+
+            let primary_exists: bool = tx.query_row(
+                "SELECT EXISTS(
+                     SELECT 1 FROM recording_audio_assets
+                     WHERE recording_id = ?1 AND role = 'primary'
+                 )",
+                params![&recording_id],
+                |row| row.get(0),
+            )?;
+            if !primary_exists {
+                let protection = if is_terminal_encrypted_path(primary_path) {
+                    RecordingAudioProtection::Encrypted
+                } else {
+                    RecordingAudioProtection::Plaintext
+                };
+                let (lifecycle, plaintext_bytes, plaintext_sha256, last_error) =
+                    legacy_asset_metadata(primary_path, protection);
+                inserted += tx.execute(
+                    "INSERT OR IGNORE INTO recording_audio_assets (
+                        recording_id, role, path, lifecycle, protection, plaintext_bytes,
+                        plaintext_sha256, last_error, created_at, updated_at
+                     ) VALUES (?1, 'primary', ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?8)",
+                    params![
+                        &recording_id,
+                        primary_path.to_string_lossy().as_ref(),
+                        lifecycle.as_str(),
+                        protection.as_str(),
+                        plaintext_bytes,
+                        plaintext_sha256,
+                        last_error,
+                        &now
+                    ],
+                )?;
+            }
+
+            if source_type != "meeting" {
+                continue;
+            }
+            for role in [RecordingAudioRole::Mic, RecordingAudioRole::System] {
+                let explicit_exists: bool = tx.query_row(
+                    "SELECT EXISTS(
+                         SELECT 1 FROM recording_audio_assets
+                         WHERE recording_id = ?1 AND role = ?2
+                     )",
+                    params![&recording_id, role.as_str()],
+                    |row| row.get(0),
+                )?;
+                if explicit_exists {
+                    continue;
+                }
+                let Some(candidate) = historical_companion_candidates(primary_path, role)
+                    .into_iter()
+                    .find(|path| approved_regular_file(path, approved_roots))
+                else {
+                    continue;
+                };
+                let protection = if is_terminal_encrypted_path(&candidate) {
+                    RecordingAudioProtection::Encrypted
+                } else {
+                    RecordingAudioProtection::Plaintext
+                };
+                let (lifecycle, plaintext_bytes, plaintext_sha256, last_error) =
+                    legacy_asset_metadata(&candidate, protection);
+                inserted += tx.execute(
+                    "INSERT OR IGNORE INTO recording_audio_assets (
+                        recording_id, role, path, lifecycle, protection, plaintext_bytes,
+                        plaintext_sha256, last_error, created_at, updated_at
+                     ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?9)",
+                    params![
+                        &recording_id,
+                        role.as_str(),
+                        candidate.to_string_lossy().as_ref(),
+                        lifecycle.as_str(),
+                        protection.as_str(),
+                        plaintext_bytes,
+                        plaintext_sha256,
+                        last_error,
+                        &now
+                    ],
+                )?;
+            }
+        }
+        tx.commit()?;
+        Ok(inserted)
     }
 
     pub fn update_recording_consent_state(
@@ -1610,12 +2976,18 @@ impl Database {
         meeting_notes: Option<&str>,
     ) -> Result<()> {
         let now = Utc::now();
-        self.conn.execute(
+        let tx = self.conn.transaction()?;
+        let updated = tx.execute(
             "UPDATE recordings
              SET meeting_notes = ?1, notes_updated_at = ?2, updated_at = ?2
              WHERE id = ?3",
             params![meeting_notes, now.to_rfc3339(), recording_id],
         )?;
+        if updated != 1 {
+            anyhow::bail!("Recording not found: {}", recording_id);
+        }
+        Self::invalidate_analysis_provenance_transaction(&tx, recording_id)?;
+        tx.commit()?;
         Ok(())
     }
 
@@ -1645,37 +3017,205 @@ impl Database {
         summary: Option<&str>,
         action_items: &[String],
     ) -> Result<()> {
-        let now = Utc::now();
-        let action_items_json = serde_json::to_string(action_items)?;
-        self.conn.execute(
-            "UPDATE recordings SET summary = ?1, action_items = ?2, updated_at = ?3 WHERE id = ?4",
-            params![summary, action_items_json, now.to_rfc3339(), recording_id],
+        self.patch_recording_analysis_with_provenance(
+            recording_id,
+            Some(summary),
+            Some(action_items),
+            None,
+            None,
         )?;
+        Ok(())
+    }
 
+    /// Patch analysis fields independently while keeping the legacy recording
+    /// columns and the richer meeting artifact in one transaction. Missing
+    /// fields preserve the last successful value. Provenance is retained when
+    /// content is unchanged and invalidated only for the field whose content
+    /// actually changed.
+    pub fn patch_recording_analysis_with_provenance(
+        &mut self,
+        recording_id: &str,
+        summary: Option<Option<&str>>,
+        action_items: Option<&[String]>,
+        summary_provenance: Option<&AnalysisProvenance>,
+        action_items_provenance: Option<&ActionItemsProvenance>,
+    ) -> Result<Recording> {
         let recording = self
             .get_recording(recording_id)?
             .ok_or_else(|| anyhow::anyhow!("Recording not found: {}", recording_id))?;
-        let mut artifact =
-            self.get_meeting_artifact(recording_id)?
-                .unwrap_or(MeetingArtifactRecord {
-                    id: uuid::Uuid::new_v4().to_string(),
-                    recording_id: recording_id.to_string(),
-                    title: Some(recording.title.clone()),
-                    summary: None,
-                    action_items: Vec::new(),
-                    decisions: Vec::new(),
-                    deadlines: Vec::new(),
-                    template_id: recording.meeting_template_id.clone(),
-                    chat_messages: Vec::new(),
-                    created_at: now,
-                    updated_at: now,
-                });
+        if summary.is_none() && action_items.is_none() {
+            return Ok(recording);
+        }
+
+        let now = Utc::now();
+        let existing_artifact = self.get_meeting_artifact(recording_id)?;
+        let previous_summary = recording.summary.clone();
+        let previous_action_items = recording.action_items.clone().unwrap_or_default();
+        let next_summary = summary
+            .map(|value| value.map(str::to_string))
+            .unwrap_or_else(|| previous_summary.clone());
+        let next_action_items = action_items
+            .map(|items| items.to_vec())
+            .unwrap_or_else(|| previous_action_items.clone());
+        let summary_changed = summary.is_some() && next_summary != previous_summary;
+        let action_items_changed =
+            action_items.is_some() && next_action_items != previous_action_items;
+
+        if let Some(provenance) = summary_provenance {
+            let content = next_summary.as_deref().ok_or_else(|| {
+                anyhow::anyhow!("Summary provenance cannot be stored without summary content")
+            })?;
+            if provenance.version != ANALYSIS_PROVENANCE_VERSION
+                || provenance.content_hash != analysis_content_hash(content)
+            {
+                anyhow::bail!("Summary provenance does not match the persisted summary");
+            }
+        }
+        if let Some(provenance) = action_items_provenance {
+            let valid_items = provenance.items.len() == next_action_items.len()
+                && provenance.items.iter().zip(&next_action_items).all(
+                    |(item_provenance, item)| {
+                        item_provenance.content_hash == analysis_content_hash(item)
+                    },
+                );
+            if provenance.version != ANALYSIS_PROVENANCE_VERSION
+                || provenance.content_hash != action_items_content_hash(&next_action_items)
+                || !valid_items
+            {
+                anyhow::bail!("Action-item provenance does not match the persisted action items");
+            }
+        }
+
+        let next_summary_provenance = match summary {
+            None => recording.summary_provenance.clone(),
+            Some(_) => summary_provenance.cloned().or_else(|| {
+                if summary_changed {
+                    None
+                } else {
+                    recording.summary_provenance.clone()
+                }
+            }),
+        };
+        let next_action_items_provenance = match action_items {
+            None => recording.action_items_provenance.clone(),
+            Some(_) => action_items_provenance.cloned().or_else(|| {
+                if action_items_changed {
+                    recording
+                        .action_items_provenance
+                        .as_ref()
+                        .and_then(|previous| {
+                            preserve_matching_action_item_provenance(previous, &next_action_items)
+                        })
+                } else {
+                    recording.action_items_provenance.clone()
+                }
+            }),
+        };
+
+        let mut artifact = existing_artifact.unwrap_or(MeetingArtifactRecord {
+            id: uuid::Uuid::new_v4().to_string(),
+            recording_id: recording_id.to_string(),
+            title: Some(recording.title.clone()),
+            summary: previous_summary,
+            action_items: previous_action_items,
+            summary_provenance: recording.summary_provenance.clone(),
+            action_items_provenance: recording.action_items_provenance.clone(),
+            decisions: Vec::new(),
+            deadlines: Vec::new(),
+            template_id: recording.meeting_template_id.clone(),
+            chat_messages: Vec::new(),
+            created_at: now,
+            updated_at: now,
+        });
         artifact.title = artifact.title.or(Some(recording.title));
-        artifact.summary = summary.map(|value| value.to_string());
-        artifact.action_items = action_items.to_vec();
+        artifact.summary = next_summary.clone();
+        artifact.action_items = next_action_items.clone();
+        artifact.summary_provenance = next_summary_provenance;
+        artifact.action_items_provenance = next_action_items_provenance;
         artifact.template_id = recording.meeting_template_id;
         artifact.updated_at = now;
-        self.save_meeting_artifact(&artifact)?;
+
+        let action_items_json = serde_json::to_string(&next_action_items)?;
+        let summary_provenance_json = artifact
+            .summary_provenance
+            .as_ref()
+            .map(serde_json::to_string)
+            .transpose()?;
+        let action_items_provenance_json = artifact
+            .action_items_provenance
+            .as_ref()
+            .map(serde_json::to_string)
+            .transpose()?;
+        let decisions_json = serde_json::to_string(&artifact.decisions)?;
+        let deadlines_json = serde_json::to_string(&artifact.deadlines)?;
+        let chat_messages_json = serde_json::to_string(&artifact.chat_messages)?;
+        let tx = self.conn.transaction()?;
+        tx.execute(
+            "UPDATE recordings
+             SET summary = ?1,
+                 action_items = CASE WHEN ?3 = 1 THEN ?2 ELSE action_items END,
+                 updated_at = ?4
+             WHERE id = ?5",
+            params![
+                &next_summary,
+                &action_items_json,
+                if action_items.is_some() { 1 } else { 0 },
+                now.to_rfc3339(),
+                recording_id
+            ],
+        )?;
+        tx.execute(
+            "INSERT INTO meeting_artifacts (
+                id, recording_id, title, summary, action_items, summary_provenance,
+                action_items_provenance, decisions, deadlines, template_id, chat_messages,
+                created_at, updated_at
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)
+             ON CONFLICT(recording_id) DO UPDATE SET
+                title = excluded.title,
+                summary = excluded.summary,
+                action_items = excluded.action_items,
+                summary_provenance = excluded.summary_provenance,
+                action_items_provenance = excluded.action_items_provenance,
+                decisions = excluded.decisions,
+                deadlines = excluded.deadlines,
+                template_id = excluded.template_id,
+                chat_messages = excluded.chat_messages,
+                updated_at = excluded.updated_at",
+            params![
+                &artifact.id,
+                &artifact.recording_id,
+                &artifact.title,
+                &artifact.summary,
+                &action_items_json,
+                &summary_provenance_json,
+                &action_items_provenance_json,
+                &decisions_json,
+                &deadlines_json,
+                &artifact.template_id,
+                &chat_messages_json,
+                artifact.created_at.to_rfc3339(),
+                artifact.updated_at.to_rfc3339(),
+            ],
+        )?;
+        tx.commit()?;
+
+        self.get_recording(recording_id)?
+            .ok_or_else(|| anyhow::anyhow!("Recording not found after analysis update"))
+    }
+
+    pub fn patch_recording_analysis(
+        &mut self,
+        recording_id: &str,
+        summary: Option<&str>,
+        action_items: Option<&[String]>,
+    ) -> Result<()> {
+        self.patch_recording_analysis_with_provenance(
+            recording_id,
+            summary.map(Some),
+            action_items,
+            None,
+            None,
+        )?;
         Ok(())
     }
 
@@ -1685,19 +3225,23 @@ impl Database {
         meeting_template_id: Option<&str>,
     ) -> Result<()> {
         let now = Utc::now();
-        self.conn.execute(
+        let tx = self.conn.transaction()?;
+        let updated = tx.execute(
             "UPDATE recordings
              SET meeting_template_id = ?1, updated_at = ?2
              WHERE id = ?3",
             params![meeting_template_id, now.to_rfc3339(), recording_id],
         )?;
-
-        if let Some(mut artifact) = self.get_meeting_artifact(recording_id)? {
-            artifact.template_id = meeting_template_id.map(|value| value.to_string());
-            artifact.updated_at = now;
-            self.save_meeting_artifact(&artifact)?;
+        if updated != 1 {
+            anyhow::bail!("Recording not found: {}", recording_id);
         }
-
+        tx.execute(
+            "UPDATE meeting_artifacts
+             SET template_id = ?1, summary_provenance = NULL, updated_at = ?2
+             WHERE recording_id = ?3",
+            params![meeting_template_id, now.to_rfc3339(), recording_id],
+        )?;
+        tx.commit()?;
         Ok(())
     }
 
@@ -1718,6 +3262,8 @@ impl Database {
                     title: Some(recording.title.clone()),
                     summary: recording.summary,
                     action_items: recording.action_items.unwrap_or_default(),
+                    summary_provenance: recording.summary_provenance,
+                    action_items_provenance: recording.action_items_provenance,
                     decisions: Vec::new(),
                     deadlines: Vec::new(),
                     template_id: recording.meeting_template_id,
@@ -1731,17 +3277,18 @@ impl Database {
         Ok(())
     }
 
-    pub fn save_transcript(&mut self, transcript: &Transcript) -> Result<()> {
+    fn write_transcript_transaction(
+        tx: &rusqlite::Transaction<'_>,
+        transcript: &Transcript,
+    ) -> Result<()> {
         let segments_json = serde_json::to_string(&transcript.segments)?;
-
-        let tx = self.conn.transaction()?;
         tx.execute(
             "DELETE FROM transcripts WHERE recording_id = ?1",
             params![&transcript.recording_id],
         )?;
         tx.execute(
-            "INSERT INTO transcripts (id, recording_id, segments, full_text, language, confidence, model, model_id, requested_provider, actual_provider, created_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
+            "INSERT INTO transcripts (id, recording_id, segments, full_text, language, confidence, model, model_id, requested_provider, actual_provider, created_at, revision)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, 0)",
             params![
                 &transcript.id,
                 &transcript.recording_id,
@@ -1756,23 +3303,90 @@ impl Database {
                 transcript.created_at.to_rfc3339()
             ],
         )?;
+        Self::invalidate_analysis_provenance_transaction(tx, &transcript.recording_id)?;
+        Self::invalidate_transcript_embeddings_transaction(tx, &transcript.recording_id)?;
+        Self::rebuild_transcript_fts_transaction(tx, &transcript.recording_id, &transcript.segments)
+    }
 
-        let _ = tx.execute(
+    pub fn invalidate_all_summary_provenance(&mut self) -> Result<usize> {
+        let updated = self.conn.execute(
+            "UPDATE meeting_artifacts
+             SET summary_provenance = NULL, updated_at = ?1
+             WHERE summary_provenance IS NOT NULL",
+            params![Utc::now().to_rfc3339()],
+        )?;
+        Ok(updated)
+    }
+
+    fn invalidate_analysis_provenance_transaction(
+        tx: &rusqlite::Transaction<'_>,
+        recording_id: &str,
+    ) -> Result<()> {
+        tx.execute(
+            "UPDATE meeting_artifacts
+             SET summary_provenance = NULL,
+                 action_items_provenance = NULL,
+                 updated_at = ?1
+             WHERE recording_id = ?2",
+            params![Utc::now().to_rfc3339(), recording_id],
+        )?;
+        Ok(())
+    }
+
+    fn invalidate_transcript_embeddings_transaction(
+        tx: &rusqlite::Transaction<'_>,
+        recording_id: &str,
+    ) -> Result<()> {
+        tx.execute(
+            "DELETE FROM transcript_embeddings WHERE recording_id = ?1",
+            params![recording_id],
+        )?;
+        Ok(())
+    }
+
+    fn rebuild_transcript_fts_transaction(
+        tx: &rusqlite::Transaction<'_>,
+        recording_id: &str,
+        segments: &[TranscriptSegment],
+    ) -> Result<()> {
+        tx.execute(
             "DELETE FROM transcript_fts WHERE recording_id = ?1",
-            params![&transcript.recording_id],
-        );
-        for segment in &transcript.segments {
-            let _ = tx.execute(
+            params![recording_id],
+        )?;
+        for segment in segments {
+            tx.execute(
                 "INSERT INTO transcript_fts (recording_id, segment_id, text, start_time, end_time)
                  VALUES (?1, ?2, ?3, ?4, ?5)",
                 params![
-                    &transcript.recording_id,
+                    recording_id,
                     &segment.id,
                     &segment.text,
                     segment.start_time,
                     segment.end_time
                 ],
-            );
+            )?;
+        }
+        Ok(())
+    }
+
+    pub fn save_transcript(&mut self, transcript: &Transcript) -> Result<()> {
+        let tx = self.conn.transaction()?;
+        Self::write_transcript_transaction(&tx, transcript)?;
+        tx.commit()?;
+        Ok(())
+    }
+
+    /// Persist a completed transcript, its FTS rows, and the recording status as
+    /// one durable unit. A failure in any write rolls the entire completion back.
+    pub fn save_completed_transcript(&mut self, transcript: &Transcript) -> Result<()> {
+        let tx = self.conn.transaction()?;
+        Self::write_transcript_transaction(&tx, transcript)?;
+        let updated = tx.execute(
+            "UPDATE recordings SET status = 'completed', updated_at = ?1 WHERE id = ?2",
+            params![Utc::now().to_rfc3339(), &transcript.recording_id],
+        )?;
+        if updated != 1 {
+            anyhow::bail!("Recording not found: {}", transcript.recording_id);
         }
         tx.commit()?;
         Ok(())
@@ -1813,16 +3427,150 @@ impl Database {
         let segments_json = serde_json::to_string(&transcript.segments)?;
         let tx = self.conn.transaction()?;
         tx.execute(
-            "UPDATE transcripts SET segments = ?1, full_text = ?2 WHERE recording_id = ?3",
+            "UPDATE transcripts
+             SET segments = ?1, full_text = ?2, revision = revision + 1
+             WHERE recording_id = ?3",
             params![segments_json, transcript.full_text, recording_id],
         )?;
-        // Update FTS
-        let _ = tx.execute(
-            "UPDATE transcript_fts SET text = ?1 WHERE recording_id = ?2 AND segment_id = ?3",
-            params![new_text, recording_id, segment_id],
-        );
+        Self::invalidate_analysis_provenance_transaction(&tx, recording_id)?;
+        Self::invalidate_transcript_embeddings_transaction(&tx, recording_id)?;
+        Self::rebuild_transcript_fts_transaction(&tx, recording_id, &transcript.segments)?;
         tx.commit()?;
         Ok(true)
+    }
+
+    /// Replace one speaker turn in a single transaction. The first requested
+    /// segment keeps its position and timing metadata; every remaining requested
+    /// segment is removed after all IDs have been proven unique and present.
+    pub fn edit_transcript_speaker_turn(
+        &mut self,
+        recording_id: &str,
+        segment_ids: &[String],
+        new_text: &str,
+    ) -> Result<()> {
+        if new_text.trim().is_empty() {
+            anyhow::bail!("Transcript text cannot be blank");
+        }
+        if segment_ids.is_empty() {
+            anyhow::bail!("At least one transcript segment is required");
+        }
+
+        let mut requested_ids = HashSet::with_capacity(segment_ids.len());
+        for segment_id in segment_ids {
+            if segment_id.trim().is_empty() {
+                anyhow::bail!("Transcript segment IDs cannot be blank");
+            }
+            if !requested_ids.insert(segment_id.as_str()) {
+                anyhow::bail!(
+                    "Transcript segment '{}' was requested more than once",
+                    segment_id
+                );
+            }
+        }
+
+        let tx = self.conn.transaction()?;
+        let stored = tx.query_row(
+            "SELECT t.segments, t.full_text, t.confidence, r.duration
+             FROM transcripts t
+             JOIN recordings r ON r.id = t.recording_id
+             WHERE t.recording_id = ?1",
+            params![recording_id],
+            |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, f64>(2)?,
+                    row.get::<_, i64>(3)?,
+                ))
+            },
+        );
+        let (segments_json, full_text, confidence, duration) = match stored {
+            Ok(stored) => stored,
+            Err(rusqlite::Error::QueryReturnedNoRows) => {
+                anyhow::bail!("Transcript not found for recording: {}", recording_id)
+            }
+            Err(error) => return Err(error.into()),
+        };
+        let mut segments: Vec<TranscriptSegment> = serde_json::from_str(&segments_json)
+            .with_context(|| {
+                format!(
+                    "Invalid transcript segments for recording: {}",
+                    recording_id
+                )
+            })?;
+        if segments.is_empty() && !full_text.trim().is_empty() {
+            segments.push(TranscriptSegment {
+                id: format!("{}-full-text", recording_id),
+                start_time: 0.0,
+                end_time: duration.max(0) as f64,
+                text: full_text,
+                speaker_id: None,
+                confidence,
+            });
+        }
+
+        let mut match_counts = segment_ids
+            .iter()
+            .map(|segment_id| (segment_id.as_str(), 0usize))
+            .collect::<HashMap<_, _>>();
+        for segment in &segments {
+            if let Some(count) = match_counts.get_mut(segment.id.as_str()) {
+                *count += 1;
+            }
+        }
+        for segment_id in segment_ids {
+            match match_counts.get(segment_id.as_str()).copied().unwrap_or(0) {
+                1 => {}
+                0 => anyhow::bail!(
+                    "Transcript segment '{}' was not found in recording '{}'",
+                    segment_id,
+                    recording_id
+                ),
+                count => anyhow::bail!(
+                    "Transcript segment '{}' appears {} times in recording '{}'",
+                    segment_id,
+                    count,
+                    recording_id
+                ),
+            }
+        }
+
+        let first_segment_id = segment_ids[0].as_str();
+        let removed_segment_ids = segment_ids[1..]
+            .iter()
+            .map(String::as_str)
+            .collect::<HashSet<_>>();
+        let mut edited_segments = Vec::with_capacity(segments.len() - removed_segment_ids.len());
+        for mut segment in segments {
+            if segment.id == first_segment_id {
+                segment.text = new_text.to_string();
+                edited_segments.push(segment);
+            } else if !removed_segment_ids.contains(segment.id.as_str()) {
+                edited_segments.push(segment);
+            }
+        }
+
+        let full_text = edited_segments
+            .iter()
+            .map(|segment| segment.text.trim())
+            .filter(|text| !text.is_empty())
+            .collect::<Vec<_>>()
+            .join(" ");
+        let segments_json = serde_json::to_string(&edited_segments)?;
+        let updated = tx.execute(
+            "UPDATE transcripts
+             SET segments = ?1, full_text = ?2, revision = revision + 1
+             WHERE recording_id = ?3",
+            params![segments_json, full_text, recording_id],
+        )?;
+        if updated != 1 {
+            anyhow::bail!("Transcript not found for recording: {}", recording_id);
+        }
+        Self::invalidate_analysis_provenance_transaction(&tx, recording_id)?;
+        Self::invalidate_transcript_embeddings_transaction(&tx, recording_id)?;
+        Self::rebuild_transcript_fts_transaction(&tx, recording_id, &edited_segments)?;
+        tx.commit()?;
+        Ok(())
     }
 
     pub fn delete_transcript_segments(
@@ -1860,17 +3608,14 @@ impl Database {
         let segments_json = serde_json::to_string(&transcript.segments)?;
         let tx = self.conn.transaction()?;
         tx.execute(
-            "UPDATE transcripts SET segments = ?1, full_text = ?2 WHERE recording_id = ?3",
+            "UPDATE transcripts
+             SET segments = ?1, full_text = ?2, revision = revision + 1
+             WHERE recording_id = ?3",
             params![segments_json, transcript.full_text, recording_id],
         )?;
-        {
-            let mut delete_stmt = tx.prepare(
-                "DELETE FROM transcript_fts WHERE recording_id = ?1 AND segment_id = ?2",
-            )?;
-            for segment_id in segment_ids {
-                let _ = delete_stmt.execute(params![recording_id, segment_id]);
-            }
-        }
+        Self::invalidate_analysis_provenance_transaction(&tx, recording_id)?;
+        Self::invalidate_transcript_embeddings_transaction(&tx, recording_id)?;
+        Self::rebuild_transcript_fts_transaction(&tx, recording_id, &transcript.segments)?;
         tx.commit()?;
         Ok(removed)
     }
@@ -2726,26 +4471,91 @@ impl Database {
         segments: &[TranscriptSegment],
     ) -> Result<()> {
         let segments_json = serde_json::to_string(segments)?;
-        self.conn.execute(
-            "UPDATE transcripts SET segments = ?1 WHERE recording_id = ?2",
-            params![segments_json, recording_id],
+        let full_text = segments
+            .iter()
+            .map(|segment| segment.text.trim())
+            .filter(|text| !text.is_empty())
+            .collect::<Vec<_>>()
+            .join(" ");
+        let tx = self.conn.transaction()?;
+        let updated = tx.execute(
+            "UPDATE transcripts
+             SET segments = ?1, full_text = ?2, revision = revision + 1
+             WHERE recording_id = ?3",
+            params![segments_json, full_text, recording_id],
         )?;
+        if updated != 1 {
+            anyhow::bail!("Transcript not found for recording: {}", recording_id);
+        }
+        Self::invalidate_analysis_provenance_transaction(&tx, recording_id)?;
+        Self::invalidate_transcript_embeddings_transaction(&tx, recording_id)?;
+        Self::rebuild_transcript_fts_transaction(&tx, recording_id, segments)?;
+        tx.commit()?;
         Ok(())
     }
 
-    pub fn upsert_speaker_alias(
+    pub fn apply_diarization_enrichment(
         &mut self,
+        recording_id: &str,
+        expected_revision: i64,
+        segments: &[TranscriptSegment],
+        aliases: &[SpeakerAliasUpsert],
+    ) -> Result<bool> {
+        let segments_json = serde_json::to_string(segments)?;
+        let full_text = segments
+            .iter()
+            .map(|segment| segment.text.trim())
+            .filter(|text| !text.is_empty())
+            .collect::<Vec<_>>()
+            .join(" ");
+        let tx = self.conn.transaction()?;
+        let updated = tx.execute(
+            "UPDATE transcripts
+             SET segments = ?1, full_text = ?2, revision = revision + 1
+             WHERE recording_id = ?3 AND revision = ?4",
+            params![segments_json, full_text, recording_id, expected_revision],
+        )?;
+        if updated == 0 {
+            return Ok(false);
+        }
+        Self::invalidate_analysis_provenance_transaction(&tx, recording_id)?;
+        Self::invalidate_transcript_embeddings_transaction(&tx, recording_id)?;
+        Self::rebuild_transcript_fts_transaction(&tx, recording_id, segments)?;
+        for alias in aliases {
+            Self::upsert_speaker_alias_transaction(
+                &tx,
+                recording_id,
+                &alias.speaker_id,
+                alias.name.as_deref(),
+                alias.color.as_deref(),
+                alias.sample_count,
+                true,
+            )?;
+        }
+        tx.commit()?;
+        Ok(true)
+    }
+
+    fn upsert_speaker_alias_transaction(
+        tx: &rusqlite::Transaction<'_>,
         recording_id: &str,
         speaker_id: &str,
         name: Option<&str>,
         color: Option<&str>,
         sample_count: i64,
+        preserve_existing_name: bool,
     ) -> Result<()> {
-        self.conn.execute(
+        tx.execute(
             "INSERT INTO speaker_aliases (recording_id, speaker_id, name, color, sample_count, updated_at)
              VALUES (?1, ?2, ?3, ?4, ?5, ?6)
              ON CONFLICT(recording_id, speaker_id) DO UPDATE SET
-                name = excluded.name,
+                name = CASE
+                    WHEN ?7 = 1
+                         AND speaker_aliases.name IS NOT NULL
+                         AND TRIM(speaker_aliases.name) != ''
+                    THEN speaker_aliases.name
+                    ELSE excluded.name
+                END,
                 color = COALESCE(excluded.color, speaker_aliases.color),
                 sample_count = CASE
                     WHEN excluded.sample_count > 0 THEN excluded.sample_count
@@ -2758,10 +4568,66 @@ impl Database {
                 name,
                 color,
                 sample_count,
-                Utc::now().to_rfc3339()
+                Utc::now().to_rfc3339(),
+                if preserve_existing_name { 1 } else { 0 }
             ],
         )?;
         Ok(())
+    }
+
+    pub fn upsert_speaker_alias(
+        &mut self,
+        recording_id: &str,
+        speaker_id: &str,
+        name: Option<&str>,
+        color: Option<&str>,
+        sample_count: i64,
+    ) -> Result<()> {
+        let tx = self.conn.transaction()?;
+        Self::upsert_speaker_alias_transaction(
+            &tx,
+            recording_id,
+            speaker_id,
+            name,
+            color,
+            sample_count,
+            false,
+        )?;
+        tx.commit()?;
+        Ok(())
+    }
+
+    pub fn rename_speaker(
+        &mut self,
+        recording_id: &str,
+        speaker_id: &str,
+        new_name: &str,
+    ) -> Result<()> {
+        let speaker_id = speaker_id.trim();
+        if speaker_id.is_empty() {
+            anyhow::bail!("Speaker ID cannot be blank");
+        }
+        let new_name = new_name.trim();
+        if new_name.is_empty() {
+            anyhow::bail!("Speaker name cannot be blank");
+        }
+
+        let transcript = self.get_transcript(recording_id)?.ok_or_else(|| {
+            anyhow::anyhow!("Transcript not found for recording: {}", recording_id)
+        })?;
+        let speaker_exists = transcript
+            .segments
+            .iter()
+            .any(|segment| segment.speaker_id.as_deref().map(str::trim) == Some(speaker_id));
+        if !speaker_exists {
+            anyhow::bail!(
+                "Speaker '{}' is not present in recording '{}'",
+                speaker_id,
+                recording_id
+            );
+        }
+
+        self.upsert_speaker_alias(recording_id, speaker_id, Some(new_name), None, 0)
     }
 
     pub fn get_speaker_aliases(&self, recording_id: &str) -> Result<HashMap<String, SpeakerAlias>> {
@@ -2790,16 +4656,29 @@ impl Database {
     /// vector embeddings. Returns the stored audio path so callers can remove
     /// the file(s) on disk as well.
     pub fn delete_recording(&mut self, recording_id: &str) -> Result<String> {
-        let audio_path: Option<String> = self
+        let tx = self
             .conn
-            .query_row(
-                "SELECT audio_path FROM recordings WHERE id = ?1",
-                params![recording_id],
-                |row| row.get(0),
-            )
-            .ok();
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let stored = tx.query_row(
+            "SELECT audio_path, status FROM recordings WHERE id = ?1",
+            params![recording_id],
+            |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
+        );
+        let (audio_path, status) = match stored {
+            Ok(stored) => stored,
+            Err(rusqlite::Error::QueryReturnedNoRows) => {
+                anyhow::bail!("Recording '{}' was not found", recording_id)
+            }
+            Err(error) => return Err(error.into()),
+        };
+        if matches!(status.as_str(), "recording" | "processing") {
+            anyhow::bail!(
+                "Recording '{}' cannot be deleted while its status is '{}'",
+                recording_id,
+                status
+            );
+        }
 
-        let tx = self.conn.transaction()?;
         tx.execute(
             "DELETE FROM speaker_aliases WHERE recording_id = ?1",
             params![recording_id],
@@ -2821,12 +4700,24 @@ impl Database {
             params![recording_id],
         )?;
         tx.execute(
+            "DELETE FROM recording_audio_operation_items WHERE recording_id = ?1",
+            params![recording_id],
+        )?;
+        tx.execute(
+            "DELETE FROM recording_audio_operations WHERE recording_id = ?1",
+            params![recording_id],
+        )?;
+        tx.execute(
+            "DELETE FROM recording_audio_assets WHERE recording_id = ?1",
+            params![recording_id],
+        )?;
+        tx.execute(
             "DELETE FROM recordings WHERE id = ?1",
             params![recording_id],
         )?;
         tx.commit()?;
 
-        Ok(audio_path.unwrap_or_default())
+        Ok(audio_path)
     }
 
     /// Rename a recording
@@ -2967,41 +4858,35 @@ impl Database {
 
     pub fn purge_user_content(&mut self) -> Result<()> {
         let now = Utc::now().to_rfc3339();
-        let tx = self.conn.transaction()?;
-        tx.execute("DELETE FROM speaker_aliases", [])?;
-        tx.execute("DELETE FROM transcripts", [])?;
-        let _ = tx.execute("DELETE FROM transcript_fts", []);
-        tx.execute("DELETE FROM meeting_artifacts", [])?;
-        tx.execute("DELETE FROM recordings", [])?;
-        tx.execute("DELETE FROM asr_benchmarks", [])?;
-        tx.execute("DELETE FROM transcript_embeddings", [])?;
-        tx.execute("DELETE FROM projects", [])?;
-        tx.execute("DROP TRIGGER IF EXISTS audit_log_no_update", [])?;
-        tx.execute("DROP TRIGGER IF EXISTS audit_log_no_delete", [])?;
-        tx.execute("DELETE FROM audit_log", [])?;
-        tx.execute_batch(
-            "CREATE TRIGGER IF NOT EXISTS audit_log_no_update
-             BEFORE UPDATE ON audit_log
-             BEGIN
-                 SELECT RAISE(ABORT, 'audit_log is append-only');
-             END;
-             CREATE TRIGGER IF NOT EXISTS audit_log_no_delete
-             BEFORE DELETE ON audit_log
-             BEGIN
-                 SELECT RAISE(ABORT, 'audit_log is append-only');
-             END;",
-        )?;
+        let tx = self
+            .conn
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .context("Failed to start Reset Everything database transaction")?;
+        drop_audit_log_append_only_triggers(&tx)?;
+
+        for (table_name, delete_sql) in RESET_SCOPED_TABLE_DELETES {
+            if table_exists(&tx, table_name)? {
+                tx.execute(delete_sql, []).with_context(|| {
+                    format!("Failed to purge reset-scoped table {}", table_name)
+                })?;
+            }
+        }
+
         tx.execute(
-            "INSERT OR IGNORE INTO projects (id, name, description, created_at, updated_at)
+            "INSERT INTO projects (id, name, description, created_at, updated_at)
              VALUES ('default', 'Inbox', 'Default inbox for new recordings', ?1, ?1)",
             params![&now],
         )?;
         tx.execute(
-            "INSERT OR IGNORE INTO projects (id, name, description, created_at, updated_at)
+            "INSERT INTO projects (id, name, description, created_at, updated_at)
              VALUES ('inbox', 'Inbox', 'Default inbox for new recordings', ?1, ?1)",
             params![&now],
         )?;
-        tx.commit()?;
+
+        create_audit_log_append_only_triggers(&tx)?;
+        verify_audit_log_append_only_triggers(&tx)?;
+        tx.commit()
+            .context("Failed to commit Reset Everything database purge")?;
         Ok(())
     }
 
@@ -3081,6 +4966,34 @@ impl Database {
     }
 }
 
+fn legacy_asset_metadata(
+    path: &Path,
+    protection: RecordingAudioProtection,
+) -> (
+    RecordingAudioLifecycle,
+    Option<i64>,
+    Option<String>,
+    Option<String>,
+) {
+    if protection == RecordingAudioProtection::Encrypted {
+        return (RecordingAudioLifecycle::Ready, None, None, None);
+    }
+    match validate_plaintext_wav(path) {
+        RecordingAudioValidation::Ready(metadata) => (
+            RecordingAudioLifecycle::Ready,
+            i64::try_from(metadata.plaintext_bytes).ok(),
+            Some(metadata.plaintext_sha256),
+            None,
+        ),
+        RecordingAudioValidation::Missing(error) => {
+            (RecordingAudioLifecycle::Missing, None, None, Some(error))
+        }
+        RecordingAudioValidation::Failed(error) => {
+            (RecordingAudioLifecycle::Failed, None, None, Some(error))
+        }
+    }
+}
+
 fn blob_to_f32_vec(blob: &[u8]) -> Vec<f32> {
     blob.chunks_exact(4)
         .map(|chunk| f32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]))
@@ -3113,10 +5026,11 @@ mod tests {
         PolicySnapshotRecord, RuntimeEventRecord, TranscriptArtifactRecord,
     };
     use chrono::Utc;
+    use std::collections::BTreeSet;
 
     fn in_memory_db() -> Database {
         let conn = Connection::open_in_memory().expect("in-memory db");
-        let db = Database { conn };
+        let mut db = Database { conn };
         db.init_tables().expect("init tables");
         db
     }
@@ -3142,6 +5056,8 @@ mod tests {
             status: "recording".to_string(),
             summary: None,
             action_items: None,
+            summary_provenance: None,
+            action_items_provenance: None,
             meeting_notes: None,
             meeting_template_id: None,
             meeting_capture_mode: None,
@@ -3152,6 +5068,20 @@ mod tests {
             consent_notice_message: None,
             consent_notice_updated_at: None,
         }
+    }
+
+    fn write_test_wav(path: &Path) {
+        let spec = hound::WavSpec {
+            channels: 1,
+            sample_rate: 16_000,
+            bits_per_sample: 16,
+            sample_format: hound::SampleFormat::Int,
+        };
+        let mut writer = hound::WavWriter::create(path, spec).expect("create wav fixture");
+        for sample in [100_i16, -100, 50, -50] {
+            writer.write_sample(sample).expect("write wav sample");
+        }
+        writer.finalize().expect("finalize wav fixture");
     }
 
     fn sample_transcript(recording_id: &str) -> Transcript {
@@ -3169,6 +5099,55 @@ mod tests {
             full_text: "Hello world".to_string(),
             language: "en".to_string(),
             confidence: 0.95,
+            model: "whisper-base".to_string(),
+            model_id: Some("base.en".to_string()),
+            requested_provider: Some("whisper".to_string()),
+            actual_provider: Some("whisper".to_string()),
+            created_at: Utc::now(),
+        }
+    }
+
+    fn sample_multi_segment_transcript(recording_id: &str) -> Transcript {
+        Transcript {
+            id: format!("t-{}", recording_id),
+            recording_id: recording_id.to_string(),
+            segments: vec![
+                TranscriptSegment {
+                    id: "s1".to_string(),
+                    start_time: 0.0,
+                    end_time: 1.0,
+                    text: "first segment".to_string(),
+                    speaker_id: Some("speaker_0".to_string()),
+                    confidence: 0.95,
+                },
+                TranscriptSegment {
+                    id: "s2".to_string(),
+                    start_time: 1.0,
+                    end_time: 2.0,
+                    text: "second segment".to_string(),
+                    speaker_id: Some("speaker_0".to_string()),
+                    confidence: 0.94,
+                },
+                TranscriptSegment {
+                    id: "s3".to_string(),
+                    start_time: 2.0,
+                    end_time: 3.0,
+                    text: "third segment".to_string(),
+                    speaker_id: Some("speaker_0".to_string()),
+                    confidence: 0.93,
+                },
+                TranscriptSegment {
+                    id: "s4".to_string(),
+                    start_time: 3.0,
+                    end_time: 4.0,
+                    text: "fourth segment".to_string(),
+                    speaker_id: Some("speaker_1".to_string()),
+                    confidence: 0.92,
+                },
+            ],
+            full_text: "first segment second segment third segment fourth segment".to_string(),
+            language: "en".to_string(),
+            confidence: 0.94,
             model: "whisper-base".to_string(),
             model_id: Some("base.en".to_string()),
             requested_provider: Some("whisper".to_string()),
@@ -3271,6 +5250,50 @@ mod tests {
         }
     }
 
+    fn sample_summary_provenance(summary: &str) -> AnalysisProvenance {
+        AnalysisProvenance {
+            version: ANALYSIS_PROVENANCE_VERSION,
+            content_hash: analysis_content_hash(summary),
+            actual_provider: "ollama".to_string(),
+            actual_model: "llama3.2".to_string(),
+            prompt_source: "meeting_playbook:auto".to_string(),
+            completed_at: Utc::now(),
+            citations: vec![AnalysisCitation {
+                text: "Canonical transcript evidence".to_string(),
+                line_id: Some("L1".to_string()),
+                segment_id: Some("s1".to_string()),
+                start_time: Some(10.0),
+                end_time: Some(12.0),
+                recording_id: Some("r1".to_string()),
+                certainty: Some(1.0),
+            }],
+            grounded: true,
+        }
+    }
+
+    fn sample_action_items_provenance(items: &[String]) -> ActionItemsProvenance {
+        let citations = sample_summary_provenance("unused").citations;
+        ActionItemsProvenance {
+            version: ANALYSIS_PROVENANCE_VERSION,
+            content_hash: action_items_content_hash(items),
+            actual_provider: "ollama".to_string(),
+            actual_model: "llama3.2".to_string(),
+            prompt_source: "plainsong_action_items_v1".to_string(),
+            completed_at: Utc::now(),
+            citations: citations.clone(),
+            grounded: true,
+            items: items
+                .iter()
+                .map(|item| ActionItemProvenance {
+                    content_hash: analysis_content_hash(item),
+                    citations: citations.clone(),
+                    grounded: true,
+                    generated: true,
+                })
+                .collect(),
+        }
+    }
+
     fn sample_meeting_artifact() -> MeetingArtifactRecord {
         let now = Utc::now();
         MeetingArtifactRecord {
@@ -3282,6 +5305,8 @@ mod tests {
                 "Ship onboarding polish".to_string(),
                 "Confirm launch checklist".to_string(),
             ],
+            summary_provenance: None,
+            action_items_provenance: None,
             decisions: vec!["Delay referral program to Q2".to_string()],
             deadlines: vec!["2026-03-10".to_string()],
             template_id: Some("exec-update".to_string()),
@@ -3321,6 +5346,178 @@ mod tests {
     }
 
     #[test]
+    fn recording_audio_schema_uses_the_synthesized_tables_and_status_checks() {
+        let db = in_memory_db();
+        for table in [
+            "recording_audio_assets",
+            "recording_audio_operations",
+            "recording_audio_operation_items",
+        ] {
+            let exists: bool = db
+                .conn
+                .query_row(
+                    "SELECT EXISTS(SELECT 1 FROM sqlite_schema WHERE type = 'table' AND name = ?1)",
+                    params![table],
+                    |row| row.get(0),
+                )
+                .unwrap();
+            assert!(exists, "missing canonical audio table {table}");
+        }
+        assert!(db
+            .conn
+            .execute(
+                "INSERT INTO recording_audio_assets (
+                    recording_id, role, path, lifecycle, protection, created_at, updated_at
+                 ) VALUES ('r', 'other', '/tmp/other.wav', 'planned', 'plaintext', 'now', 'now')",
+                [],
+            )
+            .is_err());
+        assert!(db
+            .conn
+            .execute(
+                "INSERT INTO recording_audio_operations (
+                    id, recording_id, kind, state, created_at, updated_at
+                 ) VALUES ('op', 'r', 'delete', 'prepared', 'now', 'now')",
+                [],
+            )
+            .is_err());
+    }
+
+    #[test]
+    fn planned_bundle_creation_commits_recording_mirror_and_assets_together() {
+        let mut db = in_memory_db();
+        let root =
+            std::env::temp_dir().join(format!("plainsong-plan-db-test-{}", uuid::Uuid::new_v4()));
+        let plan = RecordingCapturePlan {
+            recording_id: "planned-recording".to_string(),
+            primary_path: root.join("recording.wav"),
+            mic_path: Some(root.join("recording_mic.wav")),
+            system_path: Some(root.join("recording_system.wav")),
+        };
+        let mut recording = sample_recording("planned-recording", "inbox");
+        recording.audio_path.clear();
+
+        db.create_recording_with_audio_plan(&recording, &plan)
+            .unwrap();
+
+        let stored = db.get_recording("planned-recording").unwrap().unwrap();
+        assert_eq!(stored.audio_path, plan.primary_path.to_string_lossy());
+        let bundle = db.load_recording_audio_bundle("planned-recording").unwrap();
+        assert_eq!(bundle.assets().count(), 3);
+        assert!(bundle
+            .assets()
+            .all(|asset| asset.lifecycle == RecordingAudioLifecycle::Planned));
+        assert!(!plan.primary_path.exists());
+        assert!(!plan.mic_path.as_ref().unwrap().exists());
+        assert!(!plan.system_path.as_ref().unwrap().exists());
+    }
+
+    #[test]
+    fn encrypted_bundle_switch_updates_all_assets_and_primary_mirror_atomically() {
+        let mut db = in_memory_db();
+        let root = std::env::temp_dir().join(format!(
+            "plainsong-encryption-switch-test-{}",
+            uuid::Uuid::new_v4()
+        ));
+        std::fs::create_dir_all(&root).unwrap();
+        let plan = RecordingCapturePlan {
+            recording_id: "encrypt-bundle".to_string(),
+            primary_path: root.join("recording.wav"),
+            mic_path: Some(root.join("recording_mic.wav")),
+            system_path: Some(root.join("recording_system.wav")),
+        };
+        let mut recording = sample_recording("encrypt-bundle", "inbox");
+        recording.audio_path.clear();
+        db.create_recording_with_audio_plan(&recording, &plan)
+            .unwrap();
+        db.mark_audio_assets_writing(&recording.id).unwrap();
+        let mut validated = Vec::new();
+        for (role, path) in plan.paths() {
+            write_test_wav(path);
+            let RecordingAudioValidation::Ready(metadata) = validate_plaintext_wav(path) else {
+                panic!("valid wav fixture");
+            };
+            validated.push((role, metadata));
+        }
+        db.finalize_recording_audio(&recording.id, &validated, 1, "completed")
+            .unwrap();
+
+        let operation = db
+            .begin_recording_audio_encryption(&recording.id)
+            .unwrap()
+            .unwrap();
+        assert_eq!(operation.items.len(), 3);
+        db.switch_recording_audio_encryption(&operation).unwrap();
+
+        let switched = db.load_recording_audio_bundle(&recording.id).unwrap();
+        assert!(switched.assets().all(|asset| {
+            asset.protection == RecordingAudioProtection::Encrypted
+                && asset.path.to_string_lossy().ends_with(".enc")
+        }));
+        assert_eq!(
+            db.get_recording(&recording.id).unwrap().unwrap().audio_path,
+            switched.primary.as_ref().unwrap().path.to_string_lossy()
+        );
+        assert_eq!(
+            db.load_open_recording_audio_operation(&recording.id)
+                .unwrap()
+                .unwrap()
+                .state,
+            "db_switched"
+        );
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn legacy_backfill_is_exact_idempotent_and_prefers_encrypted_companions() {
+        let mut db = in_memory_db();
+        let root = std::env::temp_dir().join(format!(
+            "plainsong-audio-backfill-test-{}",
+            uuid::Uuid::new_v4()
+        ));
+        std::fs::create_dir_all(&root).unwrap();
+        let primary = root.join("recording_legacy.wav.enc");
+        let mic_plain = root.join("recording_legacy_mic.wav");
+        let mic_encrypted = root.join("recording_legacy_mic.wav.enc");
+        let system = root.join("recording_legacy_system.wav");
+        let wrong = root.join("recording_legacy.wav_mic.wav");
+        for path in [&primary, &mic_encrypted] {
+            std::fs::write(path, b"encrypted fixture").unwrap();
+        }
+        write_test_wav(&mic_plain);
+        write_test_wav(&system);
+        write_test_wav(&wrong);
+
+        let mut recording = sample_recording("legacy", "inbox");
+        recording.status = "completed".to_string();
+        recording.audio_path = primary.to_string_lossy().to_string();
+        db.create_recording(&recording).unwrap();
+
+        assert_eq!(
+            db.backfill_legacy_recording_audio(std::slice::from_ref(&root))
+                .unwrap(),
+            3
+        );
+        let bundle = db.load_recording_audio_bundle("legacy").unwrap();
+        assert_eq!(bundle.primary.as_ref().unwrap().path, primary);
+        assert_eq!(
+            bundle.primary.as_ref().unwrap().protection,
+            RecordingAudioProtection::Encrypted
+        );
+        assert_eq!(bundle.mic.as_ref().unwrap().path, mic_encrypted);
+        assert_eq!(bundle.system.as_ref().unwrap().path, system);
+        assert_ne!(bundle.mic.as_ref().unwrap().path, wrong);
+        assert_eq!(
+            db.backfill_legacy_recording_audio(std::slice::from_ref(&root))
+                .unwrap(),
+            0
+        );
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
     fn test_get_recordings_filtered_by_project() {
         let mut db = in_memory_db();
         db.create_recording(&sample_recording("r1", "inbox"))
@@ -3340,18 +5537,16 @@ mod tests {
     /// capture writes a plain WAV. Only the counts can say what is on disk.
     #[test]
     fn encrypted_recording_count_reflects_the_files_not_the_vault_bit() {
-        let mut db = in_memory_db();
-        db.create_recording(&sample_recording("r1", "inbox"))
-            .unwrap();
-        db.create_recording(&sample_recording("r2", "inbox"))
-            .unwrap();
-        db.create_recording(&sample_recording("r3", "inbox"))
-            .unwrap();
-        // Two were swept up by the vault migration; the third was recorded
-        // after it and is still plaintext.
-        db.update_recording_path("r1", "/tmp/r1.wav.enc", 60)
-            .unwrap();
-        db.update_recording_path("r2", "/tmp/r2.wav.ENC", 60)
+        let db = in_memory_db();
+        db.conn
+            .execute_batch(
+                "INSERT INTO recording_audio_assets (
+                    recording_id, role, path, lifecycle, protection, created_at, updated_at
+                 ) VALUES
+                    ('r1', 'primary', '/tmp/r1.wav.enc', 'ready', 'encrypted', 'now', 'now'),
+                    ('r2', 'primary', '/tmp/r2.wav.enc', 'ready', 'encrypted', 'now', 'now'),
+                    ('r3', 'primary', '/tmp/r3.wav', 'ready', 'plaintext', 'now', 'now');",
+            )
             .unwrap();
 
         assert_eq!(db.count_encrypted_recordings().unwrap(), (2, 3));
@@ -3359,14 +5554,15 @@ mod tests {
 
     #[test]
     fn recordings_without_a_file_are_not_counted_as_unencrypted() {
-        let mut db = in_memory_db();
-        db.create_recording(&sample_recording("r1", "inbox"))
+        let db = in_memory_db();
+        db.conn
+            .execute(
+                "INSERT INTO recording_audio_assets (
+                    recording_id, role, path, lifecycle, protection, created_at, updated_at
+                 ) VALUES ('r1', 'primary', '/tmp/r1.wav.enc', 'ready', 'encrypted', 'now', 'now')",
+                [],
+            )
             .unwrap();
-        db.update_recording_path("r1", "/tmp/r1.wav.enc", 60)
-            .unwrap();
-        db.create_recording(&sample_recording("r2", "inbox"))
-            .unwrap();
-        db.clear_recording_audio_path("r2").unwrap();
 
         assert_eq!(db.count_encrypted_recordings().unwrap(), (1, 1));
     }
@@ -3396,6 +5592,219 @@ mod tests {
         let t = fetched.unwrap();
         assert_eq!(t.full_text, "Hello world");
         assert_eq!(t.segments.len(), 1);
+    }
+
+    #[test]
+    fn processing_transcript_persistence_does_not_publish_completion() {
+        let mut db = in_memory_db();
+        db.create_recording(&sample_recording("r1", "inbox"))
+            .unwrap();
+        db.update_recording_status("r1", "processing").unwrap();
+
+        db.save_transcript(&sample_transcript("r1")).unwrap();
+
+        assert_eq!(
+            db.get_recording("r1").unwrap().unwrap().status,
+            "processing"
+        );
+        assert!(db.get_transcript("r1").unwrap().is_some());
+        assert_eq!(db.search_transcripts("hello", 10, None).unwrap().len(), 1);
+    }
+
+    #[test]
+    fn completed_transcript_persistence_updates_transcript_fts_and_status_together() {
+        let mut db = in_memory_db();
+        db.create_recording(&sample_recording("r1", "inbox"))
+            .unwrap();
+
+        db.save_completed_transcript(&sample_transcript("r1"))
+            .unwrap();
+
+        let recording = db.get_recording("r1").unwrap().unwrap();
+        assert_eq!(recording.status, "completed");
+        let transcript = db.get_transcript("r1").unwrap().unwrap();
+        assert_eq!(transcript.segments[0].text, "Hello world");
+        let hits = db.search_transcripts("hello", 10, None).unwrap();
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].segment_id, "s1");
+    }
+
+    #[test]
+    fn completed_transcript_persistence_rolls_back_when_fts_rebuild_fails() {
+        let mut db = in_memory_db();
+        db.create_recording(&sample_recording("r1", "inbox"))
+            .unwrap();
+        db.conn.execute("DROP TABLE transcript_fts", []).unwrap();
+
+        let error = db
+            .save_completed_transcript(&sample_transcript("r1"))
+            .expect_err("missing FTS table must fail the completion transaction");
+        assert!(error.to_string().contains("transcript_fts"));
+        assert!(db.get_transcript("r1").unwrap().is_none());
+        assert_eq!(db.get_recording("r1").unwrap().unwrap().status, "recording");
+    }
+
+    #[test]
+    fn enriched_segment_replacement_keeps_full_text_and_fts_consistent() {
+        let mut db = in_memory_db();
+        db.create_recording(&sample_recording("r1", "inbox"))
+            .unwrap();
+        db.save_completed_transcript(&sample_transcript("r1"))
+            .unwrap();
+
+        let enriched = vec![TranscriptSegment {
+            id: "enriched-1".to_string(),
+            start_time: 0.0,
+            end_time: 5.0,
+            text: "Diarized replacement".to_string(),
+            speaker_id: Some("S1".to_string()),
+            confidence: 0.95,
+        }];
+        db.update_transcript_segments("r1", &enriched).unwrap();
+
+        let transcript = db.get_transcript("r1").unwrap().unwrap();
+        assert_eq!(transcript.full_text, "Diarized replacement");
+        assert_eq!(transcript.segments[0].speaker_id.as_deref(), Some("S1"));
+        assert!(db.search_transcripts("hello", 10, None).unwrap().is_empty());
+        let hits = db.search_transcripts("diarized", 10, None).unwrap();
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].segment_id, "enriched-1");
+    }
+
+    #[test]
+    fn enriched_segment_replacement_rolls_back_when_fts_rebuild_fails() {
+        let mut db = in_memory_db();
+        db.create_recording(&sample_recording("r1", "inbox"))
+            .unwrap();
+        db.save_completed_transcript(&sample_transcript("r1"))
+            .unwrap();
+        db.conn.execute("DROP TABLE transcript_fts", []).unwrap();
+
+        let enriched = vec![TranscriptSegment {
+            id: "enriched-1".to_string(),
+            start_time: 0.0,
+            end_time: 5.0,
+            text: "Diarized replacement".to_string(),
+            speaker_id: Some("speaker_1".to_string()),
+            confidence: 0.95,
+        }];
+        let error = db
+            .update_transcript_segments("r1", &enriched)
+            .expect_err("missing FTS table must roll back segment replacement");
+        assert!(error.to_string().contains("transcript_fts"));
+
+        let transcript = db.get_transcript("r1").unwrap().unwrap();
+        assert_eq!(transcript.full_text, "Hello world");
+        assert_eq!(transcript.segments[0].id, "s1");
+    }
+
+    #[test]
+    fn stale_diarization_revision_cannot_overwrite_user_edits_or_deletes() {
+        let mut db = in_memory_db();
+        db.create_recording(&sample_recording("edited", "inbox"))
+            .unwrap();
+        db.save_completed_transcript(&sample_transcript("edited"))
+            .unwrap();
+        let (_, edit_revision) = db.get_transcript_with_revision("edited").unwrap().unwrap();
+        db.update_transcript_segment("edited", "s1", "User correction")
+            .unwrap();
+
+        let stale_segments = vec![TranscriptSegment {
+            id: "s1".to_string(),
+            start_time: 0.0,
+            end_time: 5.0,
+            text: "Hello world".to_string(),
+            speaker_id: Some("speaker_1".to_string()),
+            confidence: 0.95,
+        }];
+        assert!(!db
+            .apply_diarization_enrichment("edited", edit_revision, &stale_segments, &[])
+            .unwrap());
+        let edited = db.get_transcript("edited").unwrap().unwrap();
+        assert_eq!(edited.full_text, "User correction");
+        assert_eq!(edited.segments[0].speaker_id.as_deref(), Some("speaker_0"));
+
+        db.create_recording(&sample_recording("deleted", "inbox"))
+            .unwrap();
+        db.save_completed_transcript(&sample_transcript("deleted"))
+            .unwrap();
+        let (_, delete_revision) = db.get_transcript_with_revision("deleted").unwrap().unwrap();
+        db.delete_transcript_segments("deleted", &["s1".to_string()])
+            .unwrap();
+        assert!(!db
+            .apply_diarization_enrichment("deleted", delete_revision, &stale_segments, &[])
+            .unwrap());
+        let deleted = db.get_transcript("deleted").unwrap().unwrap();
+        assert!(deleted.segments.is_empty());
+        assert!(deleted.full_text.is_empty());
+    }
+
+    #[test]
+    fn diarization_transcript_fts_and_aliases_roll_back_as_one_transaction() {
+        let mut db = in_memory_db();
+        db.create_recording(&sample_recording("r1", "inbox"))
+            .unwrap();
+        db.save_completed_transcript(&sample_transcript("r1"))
+            .unwrap();
+        let (_, revision) = db.get_transcript_with_revision("r1").unwrap().unwrap();
+        db.conn
+            .execute_batch(
+                "CREATE TRIGGER fail_second_diarization_alias
+                 BEFORE INSERT ON speaker_aliases
+                 WHEN NEW.speaker_id = 'speaker_1'
+                 BEGIN
+                    SELECT RAISE(ABORT, 'injected alias failure');
+                 END;",
+            )
+            .unwrap();
+
+        let enriched = vec![
+            TranscriptSegment {
+                id: "enriched-0".to_string(),
+                start_time: 0.0,
+                end_time: 2.5,
+                text: "Diarized first".to_string(),
+                speaker_id: Some("speaker_0".to_string()),
+                confidence: 0.95,
+            },
+            TranscriptSegment {
+                id: "enriched-1".to_string(),
+                start_time: 2.5,
+                end_time: 5.0,
+                text: "Diarized second".to_string(),
+                speaker_id: Some("speaker_1".to_string()),
+                confidence: 0.95,
+            },
+        ];
+        let aliases = vec![
+            SpeakerAliasUpsert {
+                speaker_id: "speaker_0".to_string(),
+                name: Some("Alice".to_string()),
+                color: Some("#ff0000".to_string()),
+                sample_count: 1,
+            },
+            SpeakerAliasUpsert {
+                speaker_id: "speaker_1".to_string(),
+                name: Some("Bob".to_string()),
+                color: Some("#00ff00".to_string()),
+                sample_count: 1,
+            },
+        ];
+
+        let error = db
+            .apply_diarization_enrichment("r1", revision, &enriched, &aliases)
+            .expect_err("alias failure must roll back the full enrichment transaction");
+        assert!(error.to_string().contains("injected alias failure"));
+
+        let transcript = db.get_transcript("r1").unwrap().unwrap();
+        assert_eq!(transcript.full_text, "Hello world");
+        assert_eq!(transcript.segments[0].id, "s1");
+        assert_eq!(db.search_transcripts("hello", 10, None).unwrap().len(), 1);
+        assert!(db
+            .search_transcripts("diarized", 10, None)
+            .unwrap()
+            .is_empty());
+        assert!(db.get_speaker_aliases("r1").unwrap().is_empty());
     }
 
     #[test]
@@ -3458,6 +5867,210 @@ mod tests {
     }
 
     #[test]
+    fn atomic_speaker_turn_edit_preserves_order_and_updates_derived_state_once() {
+        let mut db = in_memory_db();
+        db.create_recording(&sample_recording("r1", "inbox"))
+            .unwrap();
+        db.save_transcript(&sample_multi_segment_transcript("r1"))
+            .unwrap();
+        let summary = "Generated summary";
+        let action_items = vec!["Generated action".to_string()];
+        db.patch_recording_analysis_with_provenance(
+            "r1",
+            Some(Some(summary)),
+            Some(&action_items),
+            Some(&sample_summary_provenance(summary)),
+            Some(&sample_action_items_provenance(&action_items)),
+        )
+        .unwrap();
+        db.save_embedding("r1", "s2", "second segment", &[0.1, 0.2], "m", 1.0, 2.0)
+            .unwrap();
+        let (_, before_revision) = db.get_transcript_with_revision("r1").unwrap().unwrap();
+
+        db.edit_transcript_speaker_turn(
+            "r1",
+            &["s2".to_string(), "s3".to_string()],
+            "corrected speaker turn",
+        )
+        .unwrap();
+
+        let (updated, after_revision) = db.get_transcript_with_revision("r1").unwrap().unwrap();
+        assert_eq!(after_revision, before_revision + 1);
+        assert_eq!(
+            updated
+                .segments
+                .iter()
+                .map(|segment| segment.id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["s1", "s2", "s4"]
+        );
+        assert_eq!(updated.segments[1].text, "corrected speaker turn");
+        assert_eq!(updated.segments[1].start_time, 1.0);
+        assert_eq!(
+            updated.full_text,
+            "first segment corrected speaker turn fourth segment"
+        );
+        assert!(db.search_transcripts("third", 10, None).unwrap().is_empty());
+        assert_eq!(
+            db.search_transcripts("corrected", 10, None).unwrap()[0].segment_id,
+            "s2"
+        );
+        assert!(!db.has_embeddings("r1"));
+        let recording = db.get_recording("r1").unwrap().unwrap();
+        assert_eq!(recording.summary.as_deref(), Some(summary));
+        assert_eq!(recording.action_items, Some(action_items));
+        assert!(recording.summary_provenance.is_none());
+        assert!(recording.action_items_provenance.is_none());
+    }
+
+    #[test]
+    fn atomic_speaker_turn_edit_rejects_blank_missing_and_non_unique_segments() {
+        let mut db = in_memory_db();
+        db.create_recording(&sample_recording("r1", "inbox"))
+            .unwrap();
+        db.save_transcript(&sample_multi_segment_transcript("r1"))
+            .unwrap();
+        let (_, before_revision) = db.get_transcript_with_revision("r1").unwrap().unwrap();
+
+        let blank = db
+            .edit_transcript_speaker_turn("r1", &["s1".to_string()], "   \n")
+            .expect_err("blank speaker-turn text must fail");
+        assert!(blank.to_string().contains("cannot be blank"));
+        let missing = db
+            .edit_transcript_speaker_turn("r1", &["missing".to_string()], "replacement")
+            .expect_err("missing segment IDs must fail");
+        assert!(missing.to_string().contains("was not found"));
+        let duplicate_request = db
+            .edit_transcript_speaker_turn(
+                "r1",
+                &["s1".to_string(), "s1".to_string()],
+                "replacement",
+            )
+            .expect_err("duplicate requested IDs must fail");
+        assert!(duplicate_request
+            .to_string()
+            .contains("requested more than once"));
+        assert_eq!(
+            db.get_transcript_with_revision("r1").unwrap().unwrap().1,
+            before_revision
+        );
+
+        let mut duplicate_segments = sample_multi_segment_transcript("r1");
+        duplicate_segments.segments[1].id = "s1".to_string();
+        db.save_transcript(&duplicate_segments).unwrap();
+        let duplicate_stored = db
+            .edit_transcript_speaker_turn("r1", &["s1".to_string()], "replacement")
+            .expect_err("stored duplicate segment IDs must fail");
+        assert!(duplicate_stored.to_string().contains("appears 2 times"));
+    }
+
+    #[test]
+    fn atomic_speaker_turn_edit_rolls_back_every_derived_write_on_fts_failure() {
+        let mut db = in_memory_db();
+        db.create_recording(&sample_recording("r1", "inbox"))
+            .unwrap();
+        db.save_transcript(&sample_multi_segment_transcript("r1"))
+            .unwrap();
+        let summary = "Generated summary";
+        let action_items = vec!["Generated action".to_string()];
+        db.patch_recording_analysis_with_provenance(
+            "r1",
+            Some(Some(summary)),
+            Some(&action_items),
+            Some(&sample_summary_provenance(summary)),
+            Some(&sample_action_items_provenance(&action_items)),
+        )
+        .unwrap();
+        db.save_embedding("r1", "s2", "second segment", &[0.1, 0.2], "m", 1.0, 2.0)
+            .unwrap();
+        let (_, before_revision) = db.get_transcript_with_revision("r1").unwrap().unwrap();
+        db.conn.execute("DROP TABLE transcript_fts", []).unwrap();
+
+        let error = db
+            .edit_transcript_speaker_turn(
+                "r1",
+                &["s2".to_string(), "s3".to_string()],
+                "corrected speaker turn",
+            )
+            .expect_err("FTS failure must roll back the speaker-turn edit");
+        assert!(error.to_string().contains("transcript_fts"));
+
+        let (transcript, after_revision) = db.get_transcript_with_revision("r1").unwrap().unwrap();
+        assert_eq!(after_revision, before_revision);
+        assert_eq!(
+            transcript.full_text,
+            sample_multi_segment_transcript("r1").full_text
+        );
+        assert!(db.has_embeddings("r1"));
+        let recording = db.get_recording("r1").unwrap().unwrap();
+        assert!(recording.summary_provenance.is_some());
+        assert!(recording.action_items_provenance.is_some());
+    }
+
+    #[test]
+    fn every_transcript_mutation_invalidates_embeddings_and_diarization_provenance() {
+        let mut db = in_memory_db();
+        db.create_recording(&sample_recording("r1", "inbox"))
+            .unwrap();
+        db.save_transcript(&sample_multi_segment_transcript("r1"))
+            .unwrap();
+
+        db.save_embedding("r1", "s1", "first segment", &[0.1, 0.2], "m", 0.0, 1.0)
+            .unwrap();
+        db.update_transcript_segment("r1", "s1", "edited first segment")
+            .unwrap();
+        assert!(!db.has_embeddings("r1"));
+
+        db.save_embedding("r1", "s3", "third segment", &[0.1, 0.2], "m", 2.0, 3.0)
+            .unwrap();
+        db.delete_transcript_segments("r1", &["s3".to_string()])
+            .unwrap();
+        assert!(!db.has_embeddings("r1"));
+
+        let replacement = db.get_transcript("r1").unwrap().unwrap().segments;
+        db.save_embedding("r1", "s2", "second segment", &[0.1, 0.2], "m", 1.0, 2.0)
+            .unwrap();
+        db.update_transcript_segments("r1", &replacement).unwrap();
+        assert!(!db.has_embeddings("r1"));
+
+        let summary = "Generated summary";
+        let action_items = vec!["Generated action".to_string()];
+        db.patch_recording_analysis_with_provenance(
+            "r1",
+            Some(Some(summary)),
+            Some(&action_items),
+            Some(&sample_summary_provenance(summary)),
+            Some(&sample_action_items_provenance(&action_items)),
+        )
+        .unwrap();
+        db.save_embedding("r1", "s2", "second segment", &[0.1, 0.2], "m", 1.0, 2.0)
+            .unwrap();
+        let (mut diarized, revision) = db.get_transcript_with_revision("r1").unwrap().unwrap();
+        diarized.segments[0].speaker_id = Some("speaker_9".to_string());
+        assert!(db
+            .apply_diarization_enrichment("r1", revision, &diarized.segments, &[])
+            .unwrap());
+        assert!(!db.has_embeddings("r1"));
+        let recording = db.get_recording("r1").unwrap().unwrap();
+        assert!(recording.summary_provenance.is_none());
+        assert!(recording.action_items_provenance.is_none());
+
+        db.save_embedding(
+            "r1",
+            "s1",
+            "edited first segment",
+            &[0.1, 0.2],
+            "m",
+            0.0,
+            1.0,
+        )
+        .unwrap();
+        db.save_transcript(&sample_multi_segment_transcript("r1"))
+            .unwrap();
+        assert!(!db.has_embeddings("r1"));
+    }
+
+    #[test]
     fn test_delete_transcript_segments() {
         let mut db = in_memory_db();
         db.create_recording(&sample_recording("r1", "inbox"))
@@ -3510,11 +6123,30 @@ mod tests {
     }
 
     #[test]
+    fn delete_recording_rejects_capture_and_processing_states() {
+        for status in ["recording", "processing"] {
+            let mut db = in_memory_db();
+            db.create_recording(&sample_recording("r1", "inbox"))
+                .unwrap();
+            db.save_transcript(&sample_transcript("r1")).unwrap();
+            db.update_recording_status("r1", status).unwrap();
+
+            let error = db
+                .delete_recording("r1")
+                .expect_err("active recording pipelines must not be deleted");
+            assert!(error.to_string().contains(status));
+            assert!(db.get_recording("r1").unwrap().is_some());
+            assert!(db.get_transcript("r1").unwrap().is_some());
+        }
+    }
+
+    #[test]
     fn test_delete_recording_removes_transcript() {
         let mut db = in_memory_db();
         db.create_recording(&sample_recording("r1", "inbox"))
             .unwrap();
         db.save_transcript(&sample_transcript("r1")).unwrap();
+        db.update_recording_status("r1", "completed").unwrap();
 
         let audio_path = db.delete_recording("r1").unwrap();
         assert_eq!(audio_path, "/tmp/r1.wav");
@@ -3536,6 +6168,7 @@ mod tests {
         db.save_embedding("r1", "s1", "hello world", &[0.1, 0.2, 0.3], "m", 0.0, 1.0)
             .unwrap();
         assert!(db.has_embeddings("r1"));
+        db.update_recording_status("r1", "completed").unwrap();
 
         db.delete_recording("r1").unwrap();
 
@@ -3554,6 +6187,233 @@ mod tests {
         db.purge_user_content().unwrap();
 
         assert!(db.get_meeting_artifact("r1").unwrap().is_none());
+    }
+
+    #[test]
+    fn purge_user_content_clears_every_reset_scoped_table_and_recreates_inboxes() {
+        let mut db = in_memory_db();
+        db.conn
+            .execute_batch(
+                "INSERT INTO projects (id, name, created_at, updated_at)
+                     VALUES ('user-project', 'User project', '2026-01-01', '2026-01-01');
+                 INSERT INTO recordings (
+                     id, title, project_id, created_at, updated_at, source_type, status
+                 ) VALUES (
+                     'recording-1', 'Recording', 'user-project', '2026-01-01',
+                     '2026-01-01', 'meeting', 'completed'
+                 );
+                 INSERT INTO transcripts (
+                     id, recording_id, segments, full_text, language, confidence, model, created_at
+                 ) VALUES (
+                     'transcript-1', 'recording-1', '[]', 'private transcript', 'en', 1.0,
+                     'test', '2026-01-01'
+                 );
+                 INSERT INTO transcript_fts (recording_id, segment_id, text, start_time, end_time)
+                     VALUES ('recording-1', 'segment-1', 'private transcript', 0, 1);
+                 INSERT INTO transcript_embeddings (
+                     recording_id, segment_id, text, embedding, model, created_at
+                 ) VALUES (
+                     'recording-1', 'segment-1', 'private transcript', X'00000000',
+                     'test', '2026-01-01'
+                 );
+                 INSERT INTO meeting_artifacts (
+                     id, recording_id, action_items, decisions, deadlines, chat_messages,
+                     created_at, updated_at
+                 ) VALUES (
+                     'artifact-1', 'recording-1', '[]', '[]', '[]', '[]',
+                     '2026-01-01', '2026-01-01'
+                 );
+                 INSERT INTO speaker_aliases (
+                     recording_id, speaker_id, name, sample_count, updated_at
+                 ) VALUES ('recording-1', 'speaker-1', 'Private Person', 1, '2026-01-01');
+                 INSERT INTO audit_log (id, timestamp, event, details, severity)
+                     VALUES ('audit-1', '2026-01-01', 'private', '{}', 'info');
+                 INSERT INTO runtime_events (id, event_type, payload, created_at)
+                     VALUES ('runtime-1', 'private', '{}', '2026-01-01');
+                 INSERT INTO capture_sessions (
+                     id, surface, state, started_at, audio_sources, created_at, updated_at
+                 ) VALUES (
+                     'capture-1', 'dictation', 'completed', '2026-01-01', '[]',
+                     '2026-01-01', '2026-01-01'
+                 );
+                 INSERT INTO context_snapshots (id, selected_text, clipboard_text, created_at)
+                     VALUES ('context-1', 'selected', 'clipboard', '2026-01-01');
+                 INSERT INTO policy_snapshots (
+                     id, retention_mode, storage_mode, provider_policy, ai_policy,
+                     insertion_policy, export_constraints, created_at
+                 ) VALUES (
+                     'policy-1', 'private', 'local', '{}', '{}', '{}', '{}', '2026-01-01'
+                 );
+                 INSERT INTO transcript_artifacts (id, recording_id, created_at)
+                     VALUES ('transcript-artifact-1', 'recording-1', '2026-01-01');
+                 INSERT INTO insertion_actions (
+                     id, requested_mode, actual_mode, created_at
+                 ) VALUES ('insertion-1', 'paste', 'paste', '2026-01-01');
+                 INSERT INTO asr_benchmarks (
+                     id, provider_type, provider_name, model_id, runtime_status,
+                     processing_time_ms, confidence, created_at
+                 ) VALUES (
+                     'benchmark-1', 'local', 'test', 'test', 'ready', 1, 1.0, '2026-01-01'
+                 );
+                 INSERT INTO dictation_dictionary_entries (
+                     id, spoken_form, replacement, created_at, updated_at
+                 ) VALUES ('dictionary-1', 'secret', 'replacement', '2026-01-01', '2026-01-01');
+                 INSERT INTO dictation_snippets (
+                     id, trigger, expansion, created_at, updated_at
+                 ) VALUES ('snippet-1', 'secret', 'private expansion', '2026-01-01', '2026-01-01');
+                 INSERT INTO dictation_command_presets (
+                     id, command_key, system_prompt, created_at, updated_at
+                 ) VALUES ('preset-1', 'private', 'private prompt', '2026-01-01', '2026-01-01');
+                 INSERT INTO dictation_correction_suggestions (
+                     id, original_text, corrected_text, spoken_form, replacement,
+                     created_at, updated_at
+                 ) VALUES (
+                     'correction-1', 'wrong', 'right', 'wrong', 'right',
+                     '2026-01-01', '2026-01-01'
+                 );",
+            )
+            .unwrap();
+
+        db.purge_user_content().unwrap();
+
+        for (table_name, _) in RESET_SCOPED_TABLE_DELETES {
+            let row_count: i64 = db
+                .conn
+                .query_row(&format!("SELECT COUNT(*) FROM {table_name}"), [], |row| {
+                    row.get(0)
+                })
+                .unwrap();
+            let expected = if table_name == "projects" { 2 } else { 0 };
+            assert_eq!(
+                row_count, expected,
+                "unexpected row count after reset for {table_name}"
+            );
+        }
+
+        let project_ids = db
+            .conn
+            .prepare("SELECT id FROM projects ORDER BY id")
+            .unwrap()
+            .query_map([], |row| row.get::<_, String>(0))
+            .unwrap()
+            .collect::<std::result::Result<Vec<_>, _>>()
+            .unwrap();
+        assert_eq!(
+            project_ids,
+            vec!["default".to_string(), "inbox".to_string()]
+        );
+
+        verify_audit_log_append_only_triggers(&db.conn).unwrap();
+        db.log_audit_event("after_reset", None, "info").unwrap();
+        assert!(db.conn.execute("DELETE FROM audit_log", []).is_err());
+        assert!(db
+            .conn
+            .execute("UPDATE audit_log SET event = 'changed'", [])
+            .is_err());
+    }
+
+    #[test]
+    fn reset_schema_coverage_requires_every_application_table_to_be_classified() {
+        const INTENTIONALLY_PRESERVED_APPLICATION_TABLES: [&str; 0] = [];
+        const FTS5_IMPLEMENTATION_TABLES: [&str; 5] = [
+            "transcript_fts_config",
+            "transcript_fts_content",
+            "transcript_fts_data",
+            "transcript_fts_docsize",
+            "transcript_fts_idx",
+        ];
+
+        let db = in_memory_db();
+        let actual_tables: BTreeSet<String> = db
+            .conn
+            .prepare(
+                "SELECT name
+                 FROM sqlite_schema
+                 WHERE type = 'table' AND name NOT LIKE 'sqlite_%'",
+            )
+            .unwrap()
+            .query_map([], |row| row.get::<_, String>(0))
+            .unwrap()
+            .collect::<std::result::Result<_, _>>()
+            .unwrap();
+
+        let reset_scoped: BTreeSet<String> = RESET_SCOPED_TABLE_DELETES
+            .iter()
+            .map(|(table_name, _)| (*table_name).to_string())
+            .collect();
+        let intentionally_preserved: BTreeSet<String> = INTENTIONALLY_PRESERVED_APPLICATION_TABLES
+            .iter()
+            .map(|table_name| (*table_name).to_string())
+            .collect();
+        assert!(
+            reset_scoped.is_disjoint(&intentionally_preserved),
+            "a table cannot be both reset-scoped and intentionally preserved"
+        );
+
+        let mut classified_tables = reset_scoped;
+        classified_tables.extend(intentionally_preserved);
+        classified_tables.extend(
+            FTS5_IMPLEMENTATION_TABLES
+                .iter()
+                .map(|table_name| (*table_name).to_string()),
+        );
+
+        assert_eq!(
+            actual_tables, classified_tables,
+            "Every new application table must be explicitly added to Reset Everything or to the intentionally-preserved classification"
+        );
+    }
+
+    #[test]
+    fn purge_user_content_rolls_back_all_rows_and_trigger_changes_on_failure() {
+        let mut db = in_memory_db();
+        db.conn
+            .execute_batch(
+                "INSERT INTO speaker_aliases (
+                     recording_id, speaker_id, name, sample_count, updated_at
+                 ) VALUES ('recording-1', 'speaker-1', 'Private Person', 1, '2026-01-01');
+                 INSERT INTO runtime_events (id, event_type, payload, created_at)
+                 VALUES ('runtime-1', 'private', '{}', '2026-01-01');",
+            )
+            .unwrap();
+        db.conn
+            .execute(
+                "INSERT INTO dictation_snippets (
+                     id, trigger, expansion, created_at, updated_at
+                 ) VALUES ('snippet-1', 'private', 'private', '2026-01-01', '2026-01-01')",
+                [],
+            )
+            .unwrap();
+        db.conn
+            .execute_batch(
+                "CREATE TRIGGER fail_runtime_event_reset
+                 BEFORE DELETE ON runtime_events
+                 BEGIN
+                     SELECT RAISE(ABORT, 'forced reset failure');
+                 END;",
+            )
+            .unwrap();
+
+        assert!(db.purge_user_content().is_err());
+
+        let speaker_alias_count: i64 = db
+            .conn
+            .query_row("SELECT COUNT(*) FROM speaker_aliases", [], |row| row.get(0))
+            .unwrap();
+        let runtime_count: i64 = db
+            .conn
+            .query_row("SELECT COUNT(*) FROM runtime_events", [], |row| row.get(0))
+            .unwrap();
+        let snippet_count: i64 = db
+            .conn
+            .query_row("SELECT COUNT(*) FROM dictation_snippets", [], |row| {
+                row.get(0)
+            })
+            .unwrap();
+        assert_eq!(speaker_alias_count, 1);
+        assert_eq!(runtime_count, 1);
+        assert_eq!(snippet_count, 1);
+        verify_audit_log_append_only_triggers(&db.conn).unwrap();
     }
 
     #[test]
@@ -3612,6 +6472,286 @@ mod tests {
         assert_eq!(log.len(), 1);
         assert_eq!(log[0].event, "test_event");
         assert_eq!(log[0].severity, "info");
+    }
+
+    #[test]
+    fn new_audit_details_recursively_drop_sensitive_context_fields() {
+        let mut db = in_memory_db();
+        db.log_audit_event(
+            "context_test",
+            Some(serde_json::json!({
+                "context_preview": "remove root",
+                "contextPreview": "preserve unrelated alias",
+                "keep": "root value",
+                "nested": {
+                    "selected_text": "remove nested",
+                    "selectedText": "preserve unrelated nested alias",
+                    "keep_nested": 42,
+                },
+                "items": [
+                    {
+                        "clipboard_text": "remove array object",
+                        "clipboardText": "preserve unrelated array alias",
+                        "keep_array": true,
+                    },
+                    [
+                        {
+                            "captured_context_text": "remove deeply nested",
+                            "capturedContextText": "preserve unrelated deep alias",
+                            "keep_deep": [1, 2, 3],
+                        }
+                    ]
+                ]
+            })),
+            "info",
+        )
+        .unwrap();
+
+        let details: String = db
+            .conn
+            .query_row(
+                "SELECT details FROM audit_log WHERE event = 'context_test'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        let details: serde_json::Value = serde_json::from_str(&details).unwrap();
+
+        assert_eq!(details["keep"], "root value");
+        assert_eq!(details["contextPreview"], "preserve unrelated alias");
+        assert_eq!(details["nested"]["keep_nested"], 42);
+        assert_eq!(
+            details["nested"]["selectedText"],
+            "preserve unrelated nested alias"
+        );
+        assert_eq!(details["items"][0]["keep_array"], true);
+        assert_eq!(
+            details["items"][0]["clipboardText"],
+            "preserve unrelated array alias"
+        );
+        assert_eq!(
+            details["items"][1][0]["keep_deep"],
+            serde_json::json!([1, 2, 3])
+        );
+        assert_eq!(
+            details["items"][1][0]["capturedContextText"],
+            "preserve unrelated deep alias"
+        );
+        for sensitive_key in SENSITIVE_AUDIT_DETAIL_KEYS {
+            assert!(
+                !details.to_string().contains(sensitive_key),
+                "sensitive audit key remained: {sensitive_key}"
+            );
+        }
+    }
+
+    #[test]
+    fn startup_scrub_updates_only_valid_sensitive_audit_details_and_restores_triggers() {
+        let mut db = in_memory_db();
+        let original_timestamp = "2026-07-25T12:34:56Z";
+        let sensitive_details = r#"{
+            "keep":"root",
+            "context_preview":"remove",
+            "contextPreview":"preserve root alias",
+            "nested":{
+                "selected_text":"remove",
+                "selectedText":"preserve nested alias",
+                "keep_nested":{"value":7}
+            },
+            "array":[{
+                "clipboard_text":"remove",
+                "clipboardText":"preserve array alias",
+                "keep_array":"yes"
+            }],
+            "captured_context_text":"remove",
+            "capturedContextText":"preserve captured alias"
+        }"#;
+        let malformed_details = r#"{"selected_text":"unterminated"#;
+        let clean_details = r#"{ "keep_formatting" : [1, 2, 3] }"#;
+        db.conn
+            .execute(
+                "INSERT INTO audit_log (id, timestamp, event, details, severity)
+                 VALUES ('sensitive', ?1, 'legacy_sensitive', ?2, 'warn')",
+                params![original_timestamp, sensitive_details],
+            )
+            .unwrap();
+        db.conn
+            .execute(
+                "INSERT INTO audit_log (id, timestamp, event, details, severity)
+                 VALUES ('malformed', ?1, 'legacy_malformed', ?2, 'error')",
+                params![original_timestamp, malformed_details],
+            )
+            .unwrap();
+        db.conn
+            .execute(
+                "INSERT INTO audit_log (id, timestamp, event, details, severity)
+                 VALUES ('clean', ?1, 'legacy_clean', ?2, 'info')",
+                params![original_timestamp, clean_details],
+            )
+            .unwrap();
+        db.conn
+            .execute(
+                "INSERT INTO audit_log (id, timestamp, event, details, severity)
+                 VALUES ('non-text', ?1, 'legacy_non_text', X'7BFF7D', 'error')",
+                [original_timestamp],
+            )
+            .unwrap();
+        db.conn
+            .execute(
+                "INSERT INTO audit_log (id, timestamp, event, details, severity)
+                 VALUES (
+                     'invalid-utf8', ?1, 'legacy_invalid_utf8', CAST(X'7BFF7D' AS TEXT), 'error'
+                 )",
+                [original_timestamp],
+            )
+            .unwrap();
+
+        db.init_tables().unwrap();
+
+        let sensitive_row: (String, String, String, String) = db
+            .conn
+            .query_row(
+                "SELECT timestamp, event, details, severity FROM audit_log WHERE id = 'sensitive'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+            )
+            .unwrap();
+        assert_eq!(sensitive_row.0, original_timestamp);
+        assert_eq!(sensitive_row.1, "legacy_sensitive");
+        assert_eq!(sensitive_row.3, "warn");
+        let scrubbed: serde_json::Value = serde_json::from_str(&sensitive_row.2).unwrap();
+        assert_eq!(
+            scrubbed,
+            serde_json::json!({
+                "keep": "root",
+                "contextPreview": "preserve root alias",
+                "nested": {
+                    "selectedText": "preserve nested alias",
+                    "keep_nested": {"value": 7}
+                },
+                "array": [{
+                    "clipboardText": "preserve array alias",
+                    "keep_array": "yes"
+                }],
+                "capturedContextText": "preserve captured alias",
+            })
+        );
+
+        let malformed_after: String = db
+            .conn
+            .query_row(
+                "SELECT details FROM audit_log WHERE id = 'malformed'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(malformed_after, malformed_details);
+        let clean_after: String = db
+            .conn
+            .query_row(
+                "SELECT details FROM audit_log WHERE id = 'clean'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(clean_after, clean_details);
+        let non_text_after: (String, String) = db
+            .conn
+            .query_row(
+                "SELECT typeof(details), hex(details) FROM audit_log WHERE id = 'non-text'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(non_text_after, ("blob".to_string(), "7BFF7D".to_string()));
+        let invalid_utf8_after: (String, String) = db
+            .conn
+            .query_row(
+                "SELECT typeof(details), hex(details) FROM audit_log WHERE id = 'invalid-utf8'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(
+            invalid_utf8_after,
+            ("text".to_string(), "7BFF7D".to_string())
+        );
+
+        let first_scrubbed_json = sensitive_row.2;
+        let second_counts = db.scrub_sensitive_audit_details().unwrap();
+        assert_eq!(second_counts.rows_scanned, 5);
+        assert_eq!(second_counts.rows_updated, 0);
+        assert_eq!(second_counts.malformed_rows, 3);
+        assert_eq!(second_counts.sensitive_fields_removed, 0);
+        let sensitive_after_second_scrub: String = db
+            .conn
+            .query_row(
+                "SELECT details FROM audit_log WHERE id = 'sensitive'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(sensitive_after_second_scrub, first_scrubbed_json);
+
+        verify_audit_log_append_only_triggers(&db.conn).unwrap();
+        assert!(db
+            .conn
+            .execute(
+                "UPDATE audit_log SET severity = 'info' WHERE id = 'sensitive'",
+                []
+            )
+            .is_err());
+        assert!(db
+            .conn
+            .execute("DELETE FROM audit_log WHERE id = 'sensitive'", [])
+            .is_err());
+    }
+
+    #[test]
+    fn startup_scrub_rolls_back_details_and_restores_triggers_on_failure() {
+        let mut db = in_memory_db();
+        let original_details = r#"{"context_preview":"must remain after rollback","keep":true}"#;
+        db.conn
+            .execute(
+                "INSERT INTO audit_log (id, timestamp, event, details, severity)
+                 VALUES ('sensitive', '2026-07-25T12:34:56Z', 'legacy_sensitive', ?1, 'warn')",
+                [original_details],
+            )
+            .unwrap();
+        db.conn
+            .execute_batch(
+                "CREATE TRIGGER fail_audit_detail_scrub
+                 BEFORE UPDATE ON audit_log
+                 WHEN OLD.id = 'sensitive'
+                 BEGIN
+                     SELECT RAISE(ABORT, 'forced audit scrub failure');
+                 END;",
+            )
+            .unwrap();
+
+        assert!(db.scrub_sensitive_audit_details().is_err());
+
+        let details_after: String = db
+            .conn
+            .query_row(
+                "SELECT details FROM audit_log WHERE id = 'sensitive'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(details_after, original_details);
+        verify_audit_log_append_only_triggers(&db.conn).unwrap();
+        assert!(db
+            .conn
+            .execute(
+                "UPDATE audit_log SET severity = 'info' WHERE id = 'sensitive'",
+                []
+            )
+            .is_err());
+        assert!(db
+            .conn
+            .execute("DELETE FROM audit_log WHERE id = 'sensitive'", [])
+            .is_err());
     }
 
     #[test]
@@ -3798,6 +6938,284 @@ mod tests {
     }
 
     #[test]
+    fn test_patch_recording_analysis_preserves_prior_success_on_partial_failure() {
+        let mut db = in_memory_db();
+        let mut recording = sample_recording("r1", "inbox");
+        recording.summary = Some("Prior summary".to_string());
+        recording.action_items = Some(vec!["Prior action".to_string()]);
+        db.create_recording(&recording).unwrap();
+        db.update_recording_analysis("r1", Some("Prior summary"), &["Prior action".to_string()])
+            .unwrap();
+
+        db.patch_recording_analysis("r1", None, Some(&["New action".to_string()]))
+            .unwrap();
+        let after_action_only = db.get_recording("r1").unwrap().unwrap();
+        assert_eq!(after_action_only.summary.as_deref(), Some("Prior summary"));
+        assert_eq!(
+            after_action_only.action_items,
+            Some(vec!["New action".to_string()])
+        );
+
+        db.patch_recording_analysis("r1", Some("New summary"), None)
+            .unwrap();
+        let after_summary_only = db.get_recording("r1").unwrap().unwrap();
+        assert_eq!(after_summary_only.summary.as_deref(), Some("New summary"));
+        assert_eq!(
+            after_summary_only.action_items,
+            Some(vec!["New action".to_string()])
+        );
+    }
+
+    #[test]
+    fn meeting_artifact_migration_adds_provenance_without_losing_legacy_content() {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            "CREATE TABLE meeting_artifacts (
+                id TEXT PRIMARY KEY,
+                recording_id TEXT NOT NULL UNIQUE,
+                title TEXT,
+                summary TEXT,
+                action_items TEXT NOT NULL,
+                decisions TEXT NOT NULL,
+                deadlines TEXT NOT NULL,
+                template_id TEXT,
+                chat_messages TEXT NOT NULL DEFAULT '[]',
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+             );
+             INSERT INTO meeting_artifacts (
+                id, recording_id, title, summary, action_items, decisions, deadlines,
+                template_id, chat_messages, created_at, updated_at
+             ) VALUES (
+                'legacy-artifact', 'legacy-recording', 'Legacy', 'Saved summary',
+                '[\"Saved action\"]', '[]', '[]', NULL, '[]',
+                '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z'
+             );",
+        )
+        .unwrap();
+        let mut db = Database { conn };
+        db.init_tables().unwrap();
+
+        let artifact = db
+            .get_meeting_artifact("legacy-recording")
+            .unwrap()
+            .unwrap();
+        assert_eq!(artifact.summary.as_deref(), Some("Saved summary"));
+        assert_eq!(artifact.action_items, vec!["Saved action".to_string()]);
+        assert!(artifact.summary_provenance.is_none());
+        assert!(artifact.action_items_provenance.is_none());
+
+        let columns = db
+            .conn
+            .prepare("PRAGMA table_info(meeting_artifacts)")
+            .unwrap()
+            .query_map([], |row| row.get::<_, String>(1))
+            .unwrap()
+            .collect::<std::result::Result<Vec<_>, _>>()
+            .unwrap();
+        assert!(columns.contains(&"summary_provenance".to_string()));
+        assert!(columns.contains(&"action_items_provenance".to_string()));
+    }
+
+    #[test]
+    fn persisted_analysis_reloads_citations_provider_model_and_grounded_state() {
+        let mut db = in_memory_db();
+        db.create_recording(&sample_recording("r1", "inbox"))
+            .unwrap();
+        let summary = "Persisted grounded summary";
+        let action_items = vec!["Ship the release".to_string()];
+        let summary_provenance = sample_summary_provenance(summary);
+        let action_items_provenance = sample_action_items_provenance(&action_items);
+
+        db.patch_recording_analysis_with_provenance(
+            "r1",
+            Some(Some(summary)),
+            Some(&action_items),
+            Some(&summary_provenance),
+            Some(&action_items_provenance),
+        )
+        .unwrap();
+
+        let reloaded = db.get_recording("r1").unwrap().unwrap();
+        let summary_reloaded = reloaded.summary_provenance.unwrap();
+        assert_eq!(summary_reloaded.actual_provider, "ollama");
+        assert_eq!(summary_reloaded.actual_model, "llama3.2");
+        assert_eq!(summary_reloaded.citations[0].line_id.as_deref(), Some("L1"));
+        assert_eq!(
+            summary_reloaded.citations[0].segment_id.as_deref(),
+            Some("s1")
+        );
+        assert_eq!(summary_reloaded.citations[0].start_time, Some(10.0));
+        assert!(summary_reloaded.grounded);
+        let actions_reloaded = reloaded.action_items_provenance.unwrap();
+        assert_eq!(actions_reloaded.items.len(), 1);
+        assert_eq!(
+            actions_reloaded.items[0].citations[0].text,
+            "Canonical transcript evidence"
+        );
+    }
+
+    #[test]
+    fn manual_summary_edit_invalidates_only_stale_summary_provenance() {
+        let mut db = in_memory_db();
+        db.create_recording(&sample_recording("r1", "inbox"))
+            .unwrap();
+        let summary = "Generated summary";
+        let action_items = vec!["Generated action".to_string()];
+        db.patch_recording_analysis_with_provenance(
+            "r1",
+            Some(Some(summary)),
+            Some(&action_items),
+            Some(&sample_summary_provenance(summary)),
+            Some(&sample_action_items_provenance(&action_items)),
+        )
+        .unwrap();
+
+        db.patch_recording_analysis_with_provenance(
+            "r1",
+            Some(Some("Edited by the user")),
+            None,
+            None,
+            None,
+        )
+        .unwrap();
+
+        let reloaded = db.get_recording("r1").unwrap().unwrap();
+        assert!(reloaded.summary_provenance.is_none());
+        assert!(reloaded.action_items_provenance.is_some());
+        assert_eq!(reloaded.action_items, Some(action_items));
+    }
+
+    #[test]
+    fn transcript_edit_invalidates_stale_citations_without_erasing_analysis_content() {
+        let mut db = in_memory_db();
+        db.create_recording(&sample_recording("r1", "inbox"))
+            .unwrap();
+        db.save_transcript(&sample_transcript("r1")).unwrap();
+        let summary = "Generated summary";
+        let action_items = vec!["Generated action".to_string()];
+        db.patch_recording_analysis_with_provenance(
+            "r1",
+            Some(Some(summary)),
+            Some(&action_items),
+            Some(&sample_summary_provenance(summary)),
+            Some(&sample_action_items_provenance(&action_items)),
+        )
+        .unwrap();
+
+        assert!(db
+            .update_transcript_segment("r1", "s1", "Corrected transcript text")
+            .unwrap());
+
+        let reloaded = db.get_recording("r1").unwrap().unwrap();
+        assert_eq!(reloaded.summary.as_deref(), Some(summary));
+        assert_eq!(reloaded.action_items, Some(action_items));
+        assert!(reloaded.summary_provenance.is_none());
+        assert!(reloaded.action_items_provenance.is_none());
+    }
+
+    #[test]
+    fn notes_and_playbook_changes_invalidate_only_affected_analysis_provenance() {
+        let mut db = in_memory_db();
+        db.create_recording(&sample_recording("r1", "inbox"))
+            .unwrap();
+        let summary = "Generated summary";
+        let action_items = vec!["Generated action".to_string()];
+        db.patch_recording_analysis_with_provenance(
+            "r1",
+            Some(Some(summary)),
+            Some(&action_items),
+            Some(&sample_summary_provenance(summary)),
+            Some(&sample_action_items_provenance(&action_items)),
+        )
+        .unwrap();
+
+        db.update_recording_meeting_template("r1", Some("standup"))
+            .unwrap();
+        let after_template = db.get_recording("r1").unwrap().unwrap();
+        assert!(after_template.summary_provenance.is_none());
+        assert!(after_template.action_items_provenance.is_some());
+
+        db.patch_recording_analysis_with_provenance(
+            "r1",
+            Some(Some(summary)),
+            None,
+            Some(&sample_summary_provenance(summary)),
+            None,
+        )
+        .unwrap();
+        db.update_recording_notes("r1", Some("New saved notes"))
+            .unwrap();
+        let after_notes = db.get_recording("r1").unwrap().unwrap();
+        assert!(after_notes.summary_provenance.is_none());
+        assert!(after_notes.action_items_provenance.is_none());
+        assert_eq!(after_notes.summary.as_deref(), Some(summary));
+        assert_eq!(after_notes.action_items, Some(action_items));
+    }
+
+    #[test]
+    fn summary_only_patch_preserves_absent_action_item_state() {
+        let mut db = in_memory_db();
+        db.create_recording(&sample_recording("r1", "inbox"))
+            .unwrap();
+        assert!(db
+            .get_recording("r1")
+            .unwrap()
+            .unwrap()
+            .action_items
+            .is_none());
+
+        db.patch_recording_analysis_with_provenance(
+            "r1",
+            Some(Some("Summary only")),
+            None,
+            Some(&sample_summary_provenance("Summary only")),
+            None,
+        )
+        .unwrap();
+
+        let reloaded = db.get_recording("r1").unwrap().unwrap();
+        assert_eq!(reloaded.summary.as_deref(), Some("Summary only"));
+        assert!(reloaded.action_items.is_none());
+    }
+
+    #[test]
+    fn partial_analysis_patch_preserves_previous_success_and_its_provenance() {
+        let mut db = in_memory_db();
+        db.create_recording(&sample_recording("r1", "inbox"))
+            .unwrap();
+        let old_summary = "Previous successful summary";
+        let old_actions = vec!["Previous successful action".to_string()];
+        db.patch_recording_analysis_with_provenance(
+            "r1",
+            Some(Some(old_summary)),
+            Some(&old_actions),
+            Some(&sample_summary_provenance(old_summary)),
+            Some(&sample_action_items_provenance(&old_actions)),
+        )
+        .unwrap();
+
+        let new_actions = vec!["New successful action".to_string()];
+        db.patch_recording_analysis_with_provenance(
+            "r1",
+            None,
+            Some(&new_actions),
+            None,
+            Some(&sample_action_items_provenance(&new_actions)),
+        )
+        .unwrap();
+
+        let reloaded = db.get_recording("r1").unwrap().unwrap();
+        assert_eq!(reloaded.summary.as_deref(), Some(old_summary));
+        assert_eq!(reloaded.action_items, Some(new_actions));
+        assert_eq!(
+            reloaded.summary_provenance.unwrap().content_hash,
+            analysis_content_hash(old_summary)
+        );
+        assert!(reloaded.action_items_provenance.is_some());
+    }
+
+    #[test]
     fn test_update_recording_meeting_template_updates_meeting_artifact_values() {
         let mut db = in_memory_db();
         db.create_recording(&sample_recording("r1", "inbox"))
@@ -3839,6 +7257,22 @@ mod tests {
         assert_eq!(name2.as_deref(), Some("Bob"));
         assert_eq!(color2.as_deref(), Some("#ff0000")); // color preserved
         assert_eq!(*count2, 100); // count preserved when 0 passed
+    }
+
+    #[test]
+    fn rename_speaker_trims_name_and_rejects_blank_or_unknown_speakers() {
+        let mut db = in_memory_db();
+        db.create_recording(&sample_recording("r1", "inbox"))
+            .unwrap();
+        db.save_transcript(&sample_transcript("r1")).unwrap();
+
+        db.rename_speaker("r1", "speaker_0", "  Alice  ").unwrap();
+        let aliases = db.get_speaker_aliases("r1").unwrap();
+        assert_eq!(aliases["speaker_0"].0.as_deref(), Some("Alice"));
+
+        assert!(db.rename_speaker("r1", "speaker_0", "   ").is_err());
+        assert!(db.rename_speaker("r1", "missing", "Bob").is_err());
+        assert_eq!(db.get_speaker_aliases("r1").unwrap().len(), 1);
     }
 
     #[test]

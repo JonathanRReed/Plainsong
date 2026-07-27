@@ -4,84 +4,87 @@ Plainsong is **local-first**: recordings, transcripts, and local secrets stay on
 
 Current product note:
 
-- cloud sync is a Friends Club entitlement in the current code
+- manual backup and cloud sync are available to every user
 - cloud providers are optional BYOC integrations
-- packaged launch certification for cloud sync is still pending in the QA matrix
+- Plainsong never uploads or downloads a backup automatically
 
 ## Supported Providers
 
-| Provider | Protocol | Free tier | Setup difficulty |
-|----------|----------|-----------|-----------------|
-| iCloud Drive | File system | 5 GB | Trivial |
-| Dropbox | File system | 2 GB | Easy |
-| Google Drive | File system | 15 GB | Easy |
-| S3-compatible | S3 API | Varies | Moderate |
-| Syncthing | P2P | Unlimited | Moderate |
+| Provider | Backup transport | Setup |
+|----------|------------------|-------|
+| iCloud Drive | Direct file copy | Choose or auto-detect the iCloud Drive root |
+| Google Drive | `rclone` | Create a Google Drive remote |
+| OneDrive | `rclone` | Create a OneDrive remote |
+| Proton Drive | `rclone` | Create a Proton Drive remote |
 
-## Quick Start: iCloud Drive / Dropbox / Google Drive
+## Manual Exports to a Synced Folder
 
 1. Open **Settings → Storage**.
-2. Set **Export root** to a folder inside your cloud provider's sync folder:
-   - iCloud: `~/Library/Mobile Documents/com~apple~CloudDocs/Plainsong`
-   - Dropbox: `~/Dropbox/Plainsong`
-   - Google Drive: `~/Google Drive/My Drive/Plainsong`
-3. Enable **Auto-export** so new transcripts are written there automatically.
-4. Your recordings and transcripts sync across any Mac with the same cloud folder.
+2. Set **Export root** to an absolute folder inside your provider's local sync
+   directory:
+   - iCloud: `/Users/you/Library/Mobile Documents/com~apple~CloudDocs/Plainsong`
+   - Dropbox: `/Users/you/Dropbox/Plainsong`
+   - Google Drive: `/Users/you/Google Drive/My Drive/Plainsong`
+3. Open a recording or the Exports view, choose the destination under that
+   root, and export it.
+4. Repeat the export when the transcript or notes change. The export-root
+   setting is a path boundary, not an automatic export service.
 
-> **Encryption note**: If you have Vault encryption enabled, exported files are encrypted at rest. The encryption key is stored in your macOS Keychain. You must transfer it manually to other machines via `security export` or by re-entering your Vault passphrase.
+> **Encryption note**: Markdown, JSON, and text exports are readable files.
+> Vault encryption protects Plainsong's managed database and recording store;
+> it does not encrypt files you explicitly export. Protect the destination with
+> the cloud provider's encryption and access controls.
 
-## S3-Compatible Storage (Advanced)
+## Manual Cloud Backup
 
-For users who want programmatic access or cross-platform sync via S3-compatible storage (AWS S3, Backblaze B2, MinIO, Cloudflare R2):
+Plainsong creates versioned backup generations locally, then uploads only when
+you press a Sync button:
 
-1. Create a bucket (e.g. `nautilus-backup`).
-2. Create an IAM user or application key with `PutObject` and `GetObject` permissions.
-3. Open **Settings → Storage → Backup**.
-4. Enter:
-   - **Endpoint** (leave blank for AWS S3)
-   - **Bucket name**
-   - **Access key ID**
-   - **Secret access key**
-   - **Region** (e.g. `us-east-1`)
-5. Click **Verify Connection** to test.
-6. Enable scheduled backups or trigger manual sync.
+1. Install and configure `rclone` for Google Drive, OneDrive, or Proton Drive.
+   iCloud Drive uses a direct filesystem path and does not require `rclone`.
+2. Open **Settings → Storage → Backup**.
+3. Enable **Manual cloud sync**, select the provider, and configure the cloud
+   folder and remote name.
+4. Run **Setup Checks** and **Verify Cloud Connection**.
+5. Create a settings snapshot or full backup.
+6. Press the matching **Sync Latest** button.
 
-### Cost Estimate
+Cloud sync is upload-only. To restore on another Mac, first make the backup
+generation available locally through iCloud Drive or an explicit `rclone copy`,
+set Plainsong's backup directory to that local folder, then use the matching
+Restore action.
 
-| Provider | Storage cost | Egress |
-|----------|-------------|--------|
-| AWS S3 | $0.023/GB/mo | $0.09/GB |
-| Backblaze B2 | $0.006/GB/mo | Free 1 GB/day |
-| Cloudflare R2 | $0.015/GB/mo | Free egress |
+## Syncthing and Other Folder-Sync Tools
 
-## Syncthing (P2P, No Cloud)
+Folder-sync tools can carry exported files or complete backup generations
+between devices. Point them at a dedicated export or backup folder.
 
-For maximum privacy, use [Syncthing](https://syncthing.net/) to sync directly between your devices with no cloud intermediary:
-
-1. Install Syncthing on all devices.
-2. Share the Plainsong data folder (`~/Library/Application Support/Plainsong`).
-3. Syncthing handles conflict resolution and versioning automatically.
-
-> **Warning**: Do not sync the SQLite database file while Plainsong is running. Only sync the `exports/` and `audio/` directories, or stop Plainsong before syncing.
+> **Warning**: Do not live-sync
+> `~/Library/Application Support/Plainsong`. The database and active recording
+> bundles are application-managed. Create a complete backup first, then sync
+> that published backup generation.
 
 ## Security Considerations
 
-- **Vault encryption**: Always enable Vault encryption before syncing sensitive recordings to any cloud provider.
-- **API keys**: Plainsong stores cloud credentials in OS secure storage, not plain text files.
+- **Vault encryption**: Enable Vault encryption before creating backups that
+  contain sensitive managed recordings.
+- **Cloud credentials**: iCloud uses the signed-in system account. Other
+  providers use your external `rclone` configuration; Plainsong does not ask
+  for or store those provider credentials.
 - **Zero-knowledge**: We have no access to your cloud storage. Plainsong talks directly to your provider.
-- **Selective sync**: You can choose to sync only transcripts (small) and skip audio files (large) to save bandwidth.
+- **Backup scope**: Settings snapshots exclude recordings and transcripts.
+  Full backups include the managed database, settings, and recording bundles.
 
 ## Troubleshooting
 
 | Issue | Solution |
 |-------|---------|
-| Files not syncing | Verify the export root path exists and your cloud app is running |
+| Export not appearing | Confirm the destination is under the configured export root, then export again |
+| Backup not uploading | Run Setup Checks, verify the `rclone` remote or iCloud path, then press Sync again |
 | Duplicate files | Check that only one Plainsong instance writes to the sync folder at a time |
-| Large audio files slow to sync | Use selective sync to skip `.wav` files, or compress exports |
-| Encryption key mismatch | Re-enter your Vault passphrase on the new machine, or export/import the keychain entry |
+| Full backup is large | Use a settings snapshot when recordings and transcripts are not needed |
+| Restore cannot find a cloud backup | Copy or mount the backup generation locally and point the backup directory at it |
 
-## Roadmap
-
-- **Scheduled sync**: Automatic periodic backup to S3-compatible storage (coming soon).
-- **Selective export**: Fine-grained control over which projects/recordings sync.
-- **Cross-platform**: Windows and Linux support for cloud sync paths.
+Automatic scheduling is intentionally absent in v1. Use the explicit create,
+sync, and restore actions so no recording or transcript leaves the Mac without
+a user action.

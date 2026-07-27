@@ -12,9 +12,18 @@
 use plainsong_lib::sidecar_handle::SidecarHandle;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use std::collections::{HashMap, HashSet};
 use std::io::{self, BufRead, Write};
-use std::sync::Arc;
-use tokio::sync::mpsc;
+use std::process::ExitCode;
+use std::sync::{Arc, Mutex};
+use std::time::Duration;
+use tokio::sync::{mpsc, oneshot};
+use tokio::task::AbortHandle;
+
+type ActiveAnalysisRun = (AbortHandle, Value, String);
+type ActiveAnalysisRuns = Arc<Mutex<HashMap<String, ActiveAnalysisRun>>>;
+type ActiveRequests = Arc<Mutex<HashMap<String, AbortHandle>>>;
+type ActiveResponseClaims = Arc<Mutex<HashSet<String>>>;
 
 #[derive(Debug, Deserialize)]
 struct JsonRpcRequest {
@@ -67,27 +76,96 @@ fn write_response(id: Value, result: Result<Value, String>) {
     }
 }
 
-fn main() {
-    tracing_subscriber::fmt().with_writer(io::stderr).init();
-
-    let runtime = tokio::runtime::Runtime::new().expect("Failed to create Tokio runtime");
-
-    runtime.block_on(async {
-        run_sidecar().await;
-    });
+fn response_key(id: &Value) -> Option<String> {
+    if id.is_null() {
+        None
+    } else {
+        serde_json::to_string(id).ok()
+    }
 }
 
-async fn run_sidecar() {
+fn claim_response(active_response_claims: &ActiveResponseClaims, request_key: &str) -> bool {
+    active_response_claims
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .remove(request_key)
+}
+
+fn abort_active_requests(
+    active_requests: &ActiveRequests,
+    active_analysis_runs: &ActiveAnalysisRuns,
+    active_response_claims: &ActiveResponseClaims,
+) -> usize {
+    let handles = {
+        let mut active = active_requests
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        active.drain().map(|(_, handle)| handle).collect::<Vec<_>>()
+    };
+    let analysis_handles = {
+        let mut active = active_analysis_runs
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        active
+            .drain()
+            .map(|(_, (handle, _, _))| handle)
+            .collect::<Vec<_>>()
+    };
+    let count = handles.len().max(analysis_handles.len());
+    for handle in handles {
+        handle.abort();
+    }
+    // Analysis handles normally refer to the same tasks as `active_requests`,
+    // but abort them explicitly as well so non-string JSON-RPC IDs cannot
+    // leave an analysis task running during teardown.
+    for handle in analysis_handles {
+        handle.abort();
+    }
+    active_response_claims
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .clear();
+    count
+}
+
+fn main() -> ExitCode {
+    tracing_subscriber::fmt().with_writer(io::stderr).init();
+
+    let runtime = match tokio::runtime::Runtime::new() {
+        Ok(runtime) => runtime,
+        Err(error) => {
+            eprintln!("[sidecar] Failed to create Tokio runtime: {error}");
+            return ExitCode::FAILURE;
+        }
+    };
+
+    let result = runtime.block_on(run_sidecar());
+    // Abort and join runtime-owned tasks before Rust values and whisper.cpp's
+    // process-global Metal cleanup run. `std::process::exit` skipped those
+    // drops and could trigger a ggml residency-set assertion after a successful
+    // transcription.
+    runtime.shutdown_timeout(Duration::from_secs(2));
+
+    match result {
+        Ok(()) => ExitCode::SUCCESS,
+        Err(error) => {
+            eprintln!("[sidecar] {error}");
+            ExitCode::FAILURE
+        }
+    }
+}
+
+async fn run_sidecar() -> Result<(), String> {
     let state = match plainsong_lib::build_app_state().await {
         Ok(s) => Arc::new(s),
-        Err(e) => {
-            eprintln!("[sidecar] Failed to initialize state: {}", e);
-            std::process::exit(1);
-        }
+        Err(error) => return Err(format!("Failed to initialize state: {error}")),
     };
 
     let (event_tx, mut event_rx) = mpsc::unbounded_channel::<String>();
     let handle = SidecarHandle::new(event_tx);
+    let active_requests: ActiveRequests = Arc::new(Mutex::new(HashMap::new()));
+    let active_analysis_runs: ActiveAnalysisRuns = Arc::new(Mutex::new(HashMap::new()));
+    let active_response_claims: ActiveResponseClaims = Arc::new(Mutex::new(HashSet::new()));
 
     // Spawn task to flush events from channel to stdout
     tokio::spawn(async move {
@@ -97,6 +175,16 @@ async fn run_sidecar() {
             let _ = writeln!(lock, "{}", line);
         }
     });
+
+    // Canonicalize only explicit legacy recording paths before any startup
+    // maintenance can inspect, retain, or delete recording audio.
+    match plainsong_lib::backfill_recording_audio_for_sidecar(&state).await {
+        Ok(inserted) if inserted > 0 => {
+            tracing::info!("Backfilled {} legacy recording audio assets", inserted)
+        }
+        Ok(_) => {}
+        Err(error) => tracing::warn!("Recording audio backfill failed: {}", error),
+    }
 
     // If hands-free dictation is enabled, start the idle-time monitor right away so
     // hands-free listening is live as soon as the app launches, not just after the
@@ -136,8 +224,71 @@ async fn run_sidecar() {
         };
 
         if request.method == "shutdown" {
-            tracing::info!("Received shutdown command, exiting");
-            std::process::exit(0);
+            write_response(request.id.unwrap_or(Value::Null), Ok(Value::Null));
+            let aborted = abort_active_requests(
+                &active_requests,
+                &active_analysis_runs,
+                &active_response_claims,
+            );
+            if aborted > 0 {
+                tracing::info!("Cancelled {aborted} active request(s) during shutdown");
+            }
+            plainsong_lib::shutdown_for_sidecar().await;
+            tracing::info!("Received shutdown command, exiting cleanly");
+            break;
+        }
+
+        if request.method == "$/cancelRequest" {
+            let cancelled_id = request.params.get("id").cloned();
+            if let Some((cancelled_id, cancelled_key)) = cancelled_id
+                .as_ref()
+                .and_then(|id| response_key(id).map(|key| (id.clone(), key)))
+            {
+                if let Some(abort_handle) = active_requests
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner())
+                    .remove(&cancelled_key)
+                {
+                    abort_handle.abort();
+                }
+                active_analysis_runs
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner())
+                    .retain(|_, (_, _, request_key)| request_key != &cancelled_key);
+                if claim_response(&active_response_claims, &cancelled_key) {
+                    write_response(cancelled_id, Err("Request cancelled".to_string()));
+                }
+            }
+            write_response(request.id.clone().unwrap_or(Value::Null), Ok(Value::Null));
+            continue;
+        }
+
+        if request.method == "cancel_analysis_run" {
+            let run_id = request
+                .params
+                .get("runId")
+                .and_then(Value::as_str)
+                .map(str::to_string);
+            if let Some(run_id) = run_id {
+                let active_run = {
+                    active_analysis_runs
+                        .lock()
+                        .unwrap_or_else(|poisoned| poisoned.into_inner())
+                        .remove(&run_id)
+                };
+                if let Some((abort_handle, request_id, request_key)) = active_run {
+                    abort_handle.abort();
+                    active_requests
+                        .lock()
+                        .unwrap_or_else(|poisoned| poisoned.into_inner())
+                        .remove(&request_key);
+                    if claim_response(&active_response_claims, &request_key) {
+                        write_response(request_id, Err("Analysis cancelled".to_string()));
+                    }
+                }
+            }
+            write_response(request.id.clone().unwrap_or(Value::Null), Ok(Value::Null));
+            continue;
         }
 
         // Dispatch each request on its own task so a slow command (model
@@ -147,13 +298,146 @@ async fn run_sidecar() {
         // inside AppState, and responses carry their request id, so out-of-order
         // completion is safe for the Electron side.
         let id = request.id.clone().unwrap_or(Value::Null);
+        let response_id_for_cancel = id.clone();
+        let request_key = response_key(&id);
+        let request_key_for_cancel = request_key.clone().unwrap_or_default();
         let state = Arc::clone(&state);
         let handle = handle.clone();
         let method = request.method;
+        let analysis_run_id = request
+            .params
+            .get("runId")
+            .and_then(Value::as_str)
+            .map(str::to_string);
         let params = request.params;
-        tokio::spawn(async move {
+        let active_requests_for_task = Arc::clone(&active_requests);
+        let active_analysis_runs_for_task = Arc::clone(&active_analysis_runs);
+        let active_response_claims_for_task = Arc::clone(&active_response_claims);
+        let request_key_for_task = request_key.clone();
+        let analysis_run_id_for_task = analysis_run_id.clone();
+        let (start_tx, start_rx) = oneshot::channel();
+        let task = tokio::spawn(async move {
+            let _ = start_rx.await;
             let result = plainsong_lib::dispatch_command(&state, &handle, &method, params).await;
-            write_response(id, result);
+            if let Some(request_key) = request_key_for_task.as_deref() {
+                active_requests_for_task
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner())
+                    .remove(request_key);
+            }
+            if let Some(run_id) = analysis_run_id_for_task {
+                active_analysis_runs_for_task
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner())
+                    .remove(&run_id);
+            }
+            if request_key_for_task.as_deref().is_none_or(|request_key| {
+                claim_response(&active_response_claims_for_task, request_key)
+            }) {
+                write_response(id, result);
+            }
         });
+        if let Some(request_key) = request_key {
+            active_requests
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .insert(request_key.clone(), task.abort_handle());
+            active_response_claims
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .insert(request_key);
+        }
+        if let Some(run_id) = analysis_run_id {
+            active_analysis_runs
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .insert(
+                    run_id,
+                    (
+                        task.abort_handle(),
+                        response_id_for_cancel,
+                        request_key_for_cancel,
+                    ),
+                );
+        }
+        let _ = start_tx.send(());
+    }
+
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn shutdown_aborts_and_clears_active_requests() {
+        let active_requests: ActiveRequests = Arc::new(Mutex::new(HashMap::new()));
+        let active_analysis_runs: ActiveAnalysisRuns = Arc::new(Mutex::new(HashMap::new()));
+        let active_response_claims: ActiveResponseClaims = Arc::new(Mutex::new(HashSet::new()));
+        let request = tokio::spawn(std::future::pending::<()>());
+        let analysis = tokio::spawn(std::future::pending::<()>());
+
+        active_requests
+            .lock()
+            .expect("active request lock")
+            .insert("request-1".to_string(), request.abort_handle());
+        active_analysis_runs
+            .lock()
+            .expect("active analysis lock")
+            .insert(
+                "run-1".to_string(),
+                (
+                    analysis.abort_handle(),
+                    Value::String("response-1".to_string()),
+                    "request-1".to_string(),
+                ),
+            );
+        active_response_claims
+            .lock()
+            .expect("active response claim lock")
+            .insert(response_key(&Value::String("request-1".to_string())).expect("response key"));
+
+        assert_eq!(
+            abort_active_requests(
+                &active_requests,
+                &active_analysis_runs,
+                &active_response_claims,
+            ),
+            1
+        );
+        assert!(request
+            .await
+            .expect_err("request must be aborted")
+            .is_cancelled());
+        assert!(analysis
+            .await
+            .expect_err("analysis must be aborted")
+            .is_cancelled());
+        assert!(active_requests
+            .lock()
+            .expect("active request lock")
+            .is_empty());
+        assert!(active_analysis_runs
+            .lock()
+            .expect("active analysis lock")
+            .is_empty());
+        assert!(active_response_claims
+            .lock()
+            .expect("active response claim lock")
+            .is_empty());
+    }
+
+    #[test]
+    fn response_claim_can_only_be_won_once() {
+        let claims: ActiveResponseClaims = Arc::new(Mutex::new(HashSet::new()));
+        let key = response_key(&Value::String("request-1".to_string())).expect("response key");
+        claims
+            .lock()
+            .expect("active response claim lock")
+            .insert(key.clone());
+
+        assert!(claim_response(&claims, &key));
+        assert!(!claim_response(&claims, &key));
     }
 }

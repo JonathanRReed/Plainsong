@@ -4,7 +4,10 @@ import {
   getLaneRoutes,
   getRecommendedLaneRoute,
 } from "@/lib/asr-route-catalog";
-import type { AsrProviderInfo } from "@/types";
+import type {
+  AppleSpeechReadinessStatus,
+  AsrProviderInfo,
+} from "@/types";
 
 const providers: AsrProviderInfo[] = [
   {
@@ -98,6 +101,54 @@ const providers: AsrProviderInfo[] = [
   },
 ];
 
+function appleProvider(status: AppleSpeechReadinessStatus): AsrProviderInfo {
+  const ready = status === "ready";
+  return {
+    providerType: "macos_apple_speech",
+    name: "Apple Speech (On-Device)",
+    description: "Dictation-only on-device route",
+    isAvailable: ready,
+    inferenceEnabled: true,
+    modelInfo: {
+      name: "Apple Speech (On-Device)",
+      version: "system",
+      sizeMb: 0,
+      parameters: "OS managed",
+      languages: ["system"],
+      license: "Apple platform terms",
+      sourceUrl: "https://developer.apple.com/documentation/speech",
+    },
+    selectedModelId: "macos_apple_speech",
+    modelOptions: [
+      { id: "macos_apple_speech", label: "Apple Speech · on-device dictation" },
+    ],
+    downloadStatus: "Downloaded",
+    runtimeStatus: ready ? "ready" : "error",
+    runtimeMessage: ready ? "Ready" : "Not ready",
+    runtimeDetails: {},
+    platformReadiness: {
+      status,
+      ready,
+      platformSupported: status !== "unsupported_platform",
+      helperPresent: !["unsupported_platform", "helper_missing"].includes(status),
+      authorization:
+        status === "ready"
+          ? "authorized"
+          : status === "authorization_denied"
+            ? "denied"
+            : status === "authorization_not_determined"
+              ? "not_determined"
+              : "authorized",
+      locale: "en_US",
+      localeSupported: status !== "unsupported_locale",
+      onDeviceAvailable: status !== "on_device_unavailable",
+      recognizerAvailable: status !== "recognizer_unavailable",
+      message: `Apple Speech status: ${status}`,
+      setupAction: ready ? null : "Fix Apple Speech setup.",
+    },
+  };
+}
+
 describe("asr-route-catalog", () => {
   it("keeps dictation-only routes out of meeting selectors and promotes the current Parakeet release", () => {
     const routes = buildAsrRouteCatalog(providers, "prefer_local");
@@ -166,5 +217,35 @@ describe("asr-route-catalog", () => {
 
     expect(openAiRoute?.readiness).toBe("requires_key");
     expect(openAiRoute?.actionLabel).toBe("Connect API key");
+  });
+
+  it.each([
+    ["authorization_not_determined", "Permission required", "request_permission"],
+    ["authorization_denied", "Permission denied", "open_system_setup"],
+    ["unsupported_locale", "Locale unsupported", "fix_setup"],
+    ["helper_missing", "Helper missing", "fix_setup"],
+    ["on_device_unavailable", "On-device unavailable", "fix_setup"],
+  ] as const)(
+    "keeps Apple Speech unselectable for %s with an actionable status",
+    (status, label, action) => {
+      const route = buildAsrRouteCatalog([appleProvider(status)], "prefer_local")[0];
+
+      expect(route.readiness).not.toBe("ready");
+      expect(route.selectable).toBe(false);
+      expect(route.readinessLabel).toBe(label);
+      expect(route.action).toBe(action);
+      expect(route.laneCompatibility.dictation).toBe(true);
+      expect(route.laneCompatibility.meeting).toBe(false);
+    },
+  );
+
+  it("makes Apple Speech selectable only when every on-device readiness check passes", () => {
+    const route = buildAsrRouteCatalog([appleProvider("ready")], "prefer_local")[0];
+
+    expect(route.readiness).toBe("ready");
+    expect(route.readinessLabel).toBe("Ready on-device");
+    expect(route.selectable).toBe(true);
+    expect(route.action).toBeNull();
+    expect(route.hosting).toBe("platform");
   });
 });

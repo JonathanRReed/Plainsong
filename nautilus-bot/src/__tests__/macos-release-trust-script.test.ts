@@ -6,6 +6,8 @@ import {
   mkdtempSync,
   mkdirSync,
   readFileSync,
+  readdirSync,
+  realpathSync,
   rmSync,
   writeFileSync,
 } from "node:fs";
@@ -80,29 +82,36 @@ function createFakeMacosApp(
   // The gate also inspects the disk image and archive the user downloads, not
   // just the bundle inside them.
   const releaseDir = path.join(tempRoot, "release");
-  writeFileSync(path.join(releaseDir, "Plainsong-1.0.0-arm64.dmg"), "dmg", "utf8");
-  writeFileSync(
-    path.join(releaseDir, "Plainsong-1.0.0-arm64-mac.zip"),
-    "zip",
-    "utf8",
-  );
+  const dmgPath = path.join(releaseDir, "Plainsong-1.0.0-arm64.dmg");
+  const zipPath = path.join(releaseDir, "Plainsong-1.0.0-arm64-mac.zip");
+  writeFileSync(dmgPath, "dmg", "utf8");
+  writeFileSync(zipPath, "zip", "utf8");
 
   const mainExecutable = path.join(macosDir, "Plainsong");
   const sidecarExecutable = path.join(sidecarDir, "plainsong-sidecar");
   const helperExecutable = path.join(shortcutHelperDir, "plainsong-native-shortcut-helper");
+  const speechHelperExecutable = path.join(
+    sidecarDir,
+    "nautilus-macos-speech-helper-aarch64-apple-darwin",
+  );
 
   writeFileSync(mainExecutable, "", "utf8");
   writeFileSync(sidecarExecutable, "", "utf8");
   writeFileSync(helperExecutable, "", "utf8");
+  writeFileSync(speechHelperExecutable, "", "utf8");
   chmodSync(mainExecutable, 0o755);
   chmodSync(sidecarExecutable, 0o755);
   chmodSync(helperExecutable, 0o755);
+  chmodSync(speechHelperExecutable, 0o755);
 
   return {
     appPath,
+    dmgPath,
     helperExecutable,
     mainExecutable,
     sidecarExecutable,
+    speechHelperExecutable,
+    zipPath,
   };
 }
 
@@ -189,6 +198,7 @@ function createMockedAppleTools(tempRoot: string) {
     String.raw`
 const childProcess = require("node:child_process");
 const fs = require("node:fs");
+const path = require("node:path");
 const { syncBuiltinESMExports } = require("node:module");
 
 function commandResult(status, stdout = "", stderr = "") {
@@ -209,7 +219,48 @@ childProcess.spawnSync = function mockedSpawnSync(command, args = []) {
     [command, ...args].join(" ") + "\n",
   );
 
+  if (command === "/usr/bin/ditto") {
+    const extractionRoot = String(args.at(-1) ?? "");
+    fs.mkdirSync(extractionRoot, { recursive: true });
+    fs.cpSync(
+      process.env.MOCK_ZIP_APP_PATH,
+      path.join(extractionRoot, "Plainsong.app"),
+      { recursive: true },
+    );
+    return commandResult(0);
+  }
+
   if (command === "/usr/bin/codesign") {
+    if (args.includes("--entitlements")) {
+      const target = String(args.at(-1) ?? "");
+      const basename = path.basename(target);
+      const isSpeechHelper =
+        basename === "nautilus-macos-speech-helper-aarch64-apple-darwin";
+      const isShortcutHelper = basename === "plainsong-native-shortcut-helper";
+      const speechEntitlement = isSpeechHelper
+        ? "<key>com.apple.security.personal-information.speech-recognition</key><true/>"
+        : "";
+      const unrelatedSpeechPrivilege =
+        isSpeechHelper && process.env.SPEECH_HELPER_ENTITLEMENTS === "overbroad"
+          ? "<key>com.apple.security.cs.allow-jit</key><true/>"
+          : "";
+      const shortcutPrivilege =
+        isShortcutHelper && process.env.SHORTCUT_HELPER_ENTITLEMENT
+          ? "<key>" + process.env.SHORTCUT_HELPER_ENTITLEMENT + "</key><true/>"
+          : "";
+      return commandResult(
+        0,
+        [
+          "<?xml version=\"1.0\" encoding=\"UTF-8\"?>",
+          "<plist version=\"1.0\"><dict>",
+          speechEntitlement,
+          unrelatedSpeechPrivilege,
+          shortcutPrivilege,
+          "</dict></plist>",
+          "",
+        ].join("\n"),
+      );
+    }
     const displayRequested = args.some(
       (arg) => arg === "--display" || String(arg).startsWith("-d"),
     );
@@ -268,9 +319,13 @@ function runTrustScript(
   mode: "accept" | "reject",
   expectedTeam = "AJ9VWBRNZN",
   harness: "mock-apple-tools" | "spoofed-path-only" = "mock-apple-tools",
+  speechHelperEntitlements: "minimal" | "overbroad" = "minimal",
+  shortcutHelperEntitlement = "",
 ) {
   const outPath = path.join(tempRoot, "artifacts", "qa", "macos", `${mode}-trust.json`);
   const markdownPath = path.join(tempRoot, "artifacts", "qa", "macos", `${mode}-trust.md`);
+  const zipTempParent = path.join(tempRoot, "zip-temp");
+  mkdirSync(zipTempParent, { recursive: true });
   const { binDir, tracePath: spoofedPathTracePath } =
     createSpoofedPathToolchain(tempRoot);
   const mockedTools =
@@ -279,8 +334,12 @@ function runTrustScript(
   const env = {
     ...process.env,
     PATH: `${binDir}${path.delimiter}${process.env.PATH ?? ""}`,
+    TMPDIR: zipTempParent,
     MOCK_APPLE_TOOLS_TRACE_LOG: mockedTools?.tracePath ?? "",
+    MOCK_ZIP_APP_PATH: appPath,
+    SHORTCUT_HELPER_ENTITLEMENT: shortcutHelperEntitlement,
     SPOOFED_PATH_TRACE_LOG: spoofedPathTracePath,
+    SPEECH_HELPER_ENTITLEMENTS: speechHelperEntitlements,
     TRUST_SPCTL_RESULT: mode,
     CSC_LINK: "dummy-csc-link",
     CSC_KEY_PASSWORD: "dummy-csc-key-password",
@@ -321,6 +380,7 @@ function runTrustScript(
     outPath,
     result,
     spoofedPathTracePath,
+    zipTempParent,
   };
 }
 
@@ -328,13 +388,22 @@ describe("verify-macos-release-trust.mjs", () => {
   it("writes secret-safe PASS artifacts for a trusted fake app bundle", () => {
     const { tempRoot, tempScript } = createTempRepo("verify-macos-release-trust.mjs");
     try {
-      const { appPath, helperExecutable, mainExecutable, sidecarExecutable } = createFakeMacosApp(tempRoot);
+      const {
+        appPath,
+        dmgPath,
+        helperExecutable,
+        mainExecutable,
+        sidecarExecutable,
+        speechHelperExecutable,
+        zipPath,
+      } = createFakeMacosApp(tempRoot);
       const {
         markdownPath,
         mockedToolsTracePath,
         outPath,
         result,
         spoofedPathTracePath,
+        zipTempParent,
       } = runTrustScript(tempScript, tempRoot, appPath, "accept");
 
       expect(result.error).toBeUndefined();
@@ -363,26 +432,52 @@ describe("verify-macos-release-trust.mjs", () => {
       expect(artifact.identity.appTeamIdentifier).toBe("AJ9VWBRNZN");
       expect(artifact.identity.sidecarTeamIdentifier).toBe("AJ9VWBRNZN");
       expect(artifact.identity.shortcutHelperTeamIdentifier).toBe("AJ9VWBRNZN");
+      expect(artifact.identity.speechHelperTeamIdentifier).toBe("AJ9VWBRNZN");
+      expect(artifact.identity.zipAppTeamIdentifier).toBe("AJ9VWBRNZN");
+      expect(artifact.identity.zipSidecarTeamIdentifier).toBe("AJ9VWBRNZN");
+      expect(artifact.identity.zipShortcutHelperTeamIdentifier).toBe("AJ9VWBRNZN");
+      expect(artifact.identity.zipSpeechHelperTeamIdentifier).toBe("AJ9VWBRNZN");
       expect(artifact.architectures.app).toContain("arm64");
       expect(artifact.architectures.sidecar).toContain("arm64");
       expect(artifact.architectures.shortcutHelper).toContain("arm64");
+      expect(artifact.architectures.speechHelper).toContain("arm64");
+      expect(artifact.architectures.zipApp).toContain("arm64");
+      expect(artifact.architectures.zipSidecar).toContain("arm64");
+      expect(artifact.architectures.zipShortcutHelper).toContain("arm64");
+      expect(artifact.architectures.zipSpeechHelper).toContain("arm64");
       expect(artifact.paths.app).toBe(appPath);
       expect(artifact.paths.mainExecutable).toBe(mainExecutable);
       expect(artifact.paths.sidecar).toBe(sidecarExecutable);
       expect(artifact.paths.shortcutHelper).toBe(helperExecutable);
+      expect(artifact.paths.speechHelper).toBe(speechHelperExecutable);
+      expect(artifact.paths.dmg).toBe(realpathSync(dmgPath));
+      expect(artifact.paths.zip).toBe(realpathSync(zipPath));
+      expect(path.basename(artifact.paths.zipApp)).toBe("Plainsong.app");
+      expect(existsSync(artifact.paths.zipApp)).toBe(false);
+      expect(existsSync(artifact.paths.zipExtractionRoot)).toBe(false);
       expect(artifact.checks.appExists).toBe(true);
       expect(artifact.checks.mainExecutablePresent).toBe(true);
       expect(artifact.checks.sidecarExecutablePresent).toBe(true);
       expect(artifact.checks.shortcutHelperExecutablePresent).toBe(true);
+      expect(artifact.checks.speechHelperExecutablePresent).toBe(true);
       expect(artifact.checks.appSignatureValid).toBe(true);
       expect(artifact.checks.sidecarSignatureValid).toBe(true);
       expect(artifact.checks.shortcutHelperSignatureValid).toBe(true);
+      expect(artifact.checks.speechHelperSignatureValid).toBe(true);
       expect(artifact.checks.appUsesDeveloperId).toBe(true);
       expect(artifact.checks.sidecarUsesDeveloperId).toBe(true);
       expect(artifact.checks.shortcutHelperUsesDeveloperId).toBe(true);
+      expect(artifact.checks.speechHelperUsesDeveloperId).toBe(true);
       expect(artifact.checks.appUsesHardenedRuntime).toBe(true);
       expect(artifact.checks.sidecarUsesHardenedRuntime).toBe(true);
       expect(artifact.checks.shortcutHelperUsesHardenedRuntime).toBe(true);
+      expect(artifact.checks.speechHelperUsesHardenedRuntime).toBe(true);
+      expect(artifact.checks.appHasNoSpeechEntitlement).toBe(true);
+      expect(artifact.checks.sidecarHasNoSpeechEntitlement).toBe(true);
+      expect(artifact.checks.shortcutHelperHasNoSpeechEntitlement).toBe(true);
+      expect(artifact.checks.shortcutHelperHasNoInheritedPrivileges).toBe(true);
+      expect(artifact.checks.speechHelperHasSpeechEntitlement).toBe(true);
+      expect(artifact.checks.speechHelperHasNoUnrelatedEntitlements).toBe(true);
       expect(artifact.checks.electronFusesReadable).toBe(true);
       expect(artifact.checks.fuseRunAsNodeDisabled).toBe(true);
       expect(artifact.checks.fuseNodeOptionsDisabled).toBe(true);
@@ -395,22 +490,73 @@ describe("verify-macos-release-trust.mjs", () => {
       expect(artifact.checks.appHasSecureTimestamp).toBe(true);
       expect(artifact.checks.sidecarHasSecureTimestamp).toBe(true);
       expect(artifact.checks.shortcutHelperHasSecureTimestamp).toBe(true);
+      expect(artifact.checks.speechHelperHasSecureTimestamp).toBe(true);
       expect(artifact.checks.expectedTeamConfigured).toBe(true);
       expect(artifact.checks.appTeamMatchesExpected).toBe(true);
       expect(artifact.checks.sidecarTeamMatchesApp).toBe(true);
       expect(artifact.checks.shortcutHelperTeamMatchesApp).toBe(true);
+      expect(artifact.checks.speechHelperTeamMatchesApp).toBe(true);
       expect(artifact.checks.appIsArm64).toBe(true);
       expect(artifact.checks.sidecarIsArm64).toBe(true);
       expect(artifact.checks.shortcutHelperIsArm64).toBe(true);
+      expect(artifact.checks.speechHelperIsArm64).toBe(true);
       expect(artifact.checks.notarizationTicketStapled).toBe(true);
       expect(artifact.checks.gatekeeperAccepted).toBe(true);
       expect(artifact.checks.gatekeeperSourceIsNotarizedDeveloperId).toBe(true);
+      expect(artifact.checks.zipPresent).toBe(true);
+      expect(artifact.checks.zipArchiveExtracted).toBe(true);
+      expect(artifact.checks.zipContainsSinglePlainsongApp).toBe(true);
+      expect(artifact.checks.zipExtractionDirectoryCleaned).toBe(true);
+      expect(artifact.checks.zipAppExists).toBe(true);
+      expect(artifact.checks.zipMainExecutablePresent).toBe(true);
+      expect(artifact.checks.zipSidecarExecutablePresent).toBe(true);
+      expect(artifact.checks.zipShortcutHelperExecutablePresent).toBe(true);
+      expect(artifact.checks.zipSpeechHelperExecutablePresent).toBe(true);
+      expect(artifact.checks.zipAppSignatureValid).toBe(true);
+      expect(artifact.checks.zipSidecarSignatureValid).toBe(true);
+      expect(artifact.checks.zipShortcutHelperSignatureValid).toBe(true);
+      expect(artifact.checks.zipSpeechHelperSignatureValid).toBe(true);
+      expect(artifact.checks.zipAppUsesDeveloperId).toBe(true);
+      expect(artifact.checks.zipSidecarUsesDeveloperId).toBe(true);
+      expect(artifact.checks.zipShortcutHelperUsesDeveloperId).toBe(true);
+      expect(artifact.checks.zipSpeechHelperUsesDeveloperId).toBe(true);
+      expect(artifact.checks.zipAppUsesHardenedRuntime).toBe(true);
+      expect(artifact.checks.zipSidecarUsesHardenedRuntime).toBe(true);
+      expect(artifact.checks.zipShortcutHelperUsesHardenedRuntime).toBe(true);
+      expect(artifact.checks.zipSpeechHelperUsesHardenedRuntime).toBe(true);
+      expect(artifact.checks.zipAppHasSecureTimestamp).toBe(true);
+      expect(artifact.checks.zipSidecarHasSecureTimestamp).toBe(true);
+      expect(artifact.checks.zipShortcutHelperHasSecureTimestamp).toBe(true);
+      expect(artifact.checks.zipSpeechHelperHasSecureTimestamp).toBe(true);
+      expect(artifact.checks.zipShortcutHelperHasNoInheritedPrivileges).toBe(true);
+      expect(artifact.checks.zipAppTeamMatchesExpected).toBe(true);
+      expect(artifact.checks.zipSidecarTeamMatchesApp).toBe(true);
+      expect(artifact.checks.zipShortcutHelperTeamMatchesApp).toBe(true);
+      expect(artifact.checks.zipSpeechHelperTeamMatchesApp).toBe(true);
+      expect(artifact.checks.zipAppIsArm64).toBe(true);
+      expect(artifact.checks.zipSidecarIsArm64).toBe(true);
+      expect(artifact.checks.zipShortcutHelperIsArm64).toBe(true);
+      expect(artifact.checks.zipSpeechHelperIsArm64).toBe(true);
+      expect(artifact.checks.zipNotarizationTicketStapled).toBe(true);
+      expect(artifact.checks.zipGatekeeperAccepted).toBe(true);
+      expect(artifact.checks.zipGatekeeperSourceIsNotarizedDeveloperId).toBe(true);
+      expect(artifact.checks.zipElectronFusesReadable).toBe(true);
+      expect(artifact.checks.zipFuseRunAsNodeDisabled).toBe(true);
+      expect(artifact.checks.zipFuseNodeOptionsDisabled).toBe(true);
+      expect(artifact.checks.zipFuseNodeCliInspectDisabled).toBe(true);
+      expect(artifact.checks.zipFuseAsarIntegrityEnabled).toBe(true);
+      expect(artifact.checks.zipFuseOnlyLoadAppFromAsarEnabled).toBe(true);
+      expect(artifact.checks.zipFuseFileProtocolPrivilegesDisabled).toBe(true);
+      expect(artifact.checks.zipTicketStapled).toBeUndefined();
       if (artifact.status) {
         expect(artifact.status).toMatch(/PASS|READY/);
       }
 
       const markdown = readFileSync(markdownPath, "utf8");
       expect(markdown).toMatch(/Status:\s+(PASS|READY)/);
+      expect(markdown).toContain("## ZIP Extraction");
+      expect(markdown).toContain("## Extracted ZIP App Gatekeeper");
+      expect(markdown).toContain("zipExtractionDirectoryCleaned: PASS");
       expect(markdown).not.toContain("dummy-csc-link");
       expect(markdown).not.toContain("dummy-csc-key-password");
       expect(markdown).not.toContain("dummy-app-specific-password");
@@ -418,14 +564,18 @@ describe("verify-macos-release-trust.mjs", () => {
 
       expect(mockedToolsTracePath).not.toBeNull();
       const trace = readFileSync(mockedToolsTracePath!, "utf8");
+      expect(trace).toContain("/usr/bin/ditto -x -k");
       expect(trace).toContain("/usr/bin/codesign");
       expect(trace).toContain("/usr/bin/xcrun stapler validate");
+      expect(trace).not.toMatch(/stapler validate .*\.zip/);
       expect(trace).toContain("/usr/sbin/spctl");
       expect(trace).toContain("/usr/bin/lipo");
       expect(trace).toContain(path.basename(mainExecutable));
       expect(trace).toContain(path.basename(sidecarExecutable));
       expect(trace).toContain(path.basename(helperExecutable));
+      expect(trace).toContain(path.basename(speechHelperExecutable));
       expect(readFileSync(spoofedPathTracePath, "utf8")).toBe("");
+      expect(readdirSync(zipTempParent)).toEqual([]);
     } finally {
       rmSync(tempRoot, { recursive: true, force: true });
     }
@@ -434,8 +584,8 @@ describe("verify-macos-release-trust.mjs", () => {
   it("fails closed when the Electron fuses are left permissive", () => {
     // The security property this gate exists to hold. With default fuses,
     // `ELECTRON_RUN_AS_NODE=1` on the signed binary runs arbitrary Node under a
-    // Developer ID carrying microphone, speech-recognition and Apple Events
-    // entitlements plus the app's Accessibility grant — and notarization cannot
+    // Developer ID carrying microphone and Apple Events entitlements plus the
+    // app's Accessibility grant — and notarization cannot
     // be retracted. Valid signatures everywhere must NOT be enough to pass.
     const { tempRoot, tempScript } = createTempRepo("verify-macos-release-trust.mjs");
     try {
@@ -462,9 +612,96 @@ describe("verify-macos-release-trust.mjs", () => {
       expect(artifact.checks.fuseNodeCliInspectDisabled).toBe(false);
       expect(artifact.checks.fuseAsarIntegrityEnabled).toBe(false);
       expect(artifact.checks.fuseOnlyLoadAppFromAsarEnabled).toBe(false);
+      expect(artifact.checks.zipFuseRunAsNodeDisabled).toBe(false);
+      expect(artifact.checks.zipFuseNodeOptionsDisabled).toBe(false);
+      expect(artifact.checks.zipFuseNodeCliInspectDisabled).toBe(false);
+      expect(artifact.checks.zipFuseAsarIntegrityEnabled).toBe(false);
+      expect(artifact.checks.zipFuseOnlyLoadAppFromAsarEnabled).toBe(false);
       // Signing is untouched, so this really is the fuses failing it.
       expect(artifact.checks.appSignatureValid).toBe(true);
       expect(artifact.checks.appUsesDeveloperId).toBe(true);
+    } finally {
+      rmSync(tempRoot, { recursive: true, force: true });
+    }
+  });
+
+  it("fails closed when the Speech helper inherits unrelated privileges", () => {
+    const { tempRoot, tempScript } = createTempRepo("verify-macos-release-trust.mjs");
+    try {
+      const { appPath } = createFakeMacosApp(tempRoot);
+      const { outPath, result } = runTrustScript(
+        tempScript,
+        tempRoot,
+        appPath,
+        "accept",
+        "AJ9VWBRNZN",
+        "mock-apple-tools",
+        "overbroad",
+      );
+
+      expect(result.status).not.toBe(0);
+      const artifact = JSON.parse(readFileSync(outPath, "utf8")) as {
+        checks: Record<string, boolean>;
+        pass: boolean;
+      };
+      expect(artifact.pass).toBe(false);
+      expect(artifact.checks.speechHelperHasSpeechEntitlement).toBe(true);
+      expect(artifact.checks.speechHelperHasNoUnrelatedEntitlements).toBe(false);
+    } finally {
+      rmSync(tempRoot, { recursive: true, force: true });
+    }
+  });
+
+  it.each([
+    "com.apple.security.device.audio-input",
+    "com.apple.security.device.microphone",
+    "com.apple.security.automation.apple-events",
+    "com.apple.security.temporary-exception.apple-events",
+    "com.apple.security.cs.allow-jit",
+    "com.apple.security.cs.allow-unsigned-executable-memory",
+    "com.apple.security.cs.disable-library-validation",
+    "com.apple.security.personal-information.speech-recognition",
+  ])("fails closed when the shortcut helper receives %s", (forbiddenEntitlement) => {
+    const { tempRoot, tempScript } = createTempRepo("verify-macos-release-trust.mjs");
+    try {
+      const { appPath } = createFakeMacosApp(tempRoot);
+      const { outPath, result } = runTrustScript(
+        tempScript,
+        tempRoot,
+        appPath,
+        "accept",
+        "AJ9VWBRNZN",
+        "mock-apple-tools",
+        "minimal",
+        forbiddenEntitlement,
+      );
+
+      expect(result.status).not.toBe(0);
+      const artifact = JSON.parse(readFileSync(outPath, "utf8")) as {
+        checks: Record<string, boolean>;
+        diagnostics: {
+          shortcutHelperEntitlements: {
+            forbiddenShortcutHelperEntitlements: string[];
+          };
+          zipApp: {
+            shortcutHelperEntitlements: {
+              forbiddenShortcutHelperEntitlements: string[];
+            };
+          };
+        };
+        pass: boolean;
+      };
+      expect(artifact.pass).toBe(false);
+      expect(artifact.checks.shortcutHelperHasNoInheritedPrivileges).toBe(false);
+      expect(artifact.checks.zipShortcutHelperHasNoInheritedPrivileges).toBe(false);
+      expect(
+        artifact.diagnostics.shortcutHelperEntitlements
+          .forbiddenShortcutHelperEntitlements,
+      ).toContain(forbiddenEntitlement);
+      expect(
+        artifact.diagnostics.zipApp.shortcutHelperEntitlements
+          .forbiddenShortcutHelperEntitlements,
+      ).toContain(forbiddenEntitlement);
     } finally {
       rmSync(tempRoot, { recursive: true, force: true });
     }

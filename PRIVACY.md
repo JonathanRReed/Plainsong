@@ -18,28 +18,24 @@ audio and text. The code is open — you can verify all of it.
   uses, the text is processed locally unless you chose a cloud provider for AI
   cleanup, and it is never persisted.
 
-## How we compare
+## What local-first means here
 
-Privacy here is a property of the architecture, not a setting you have to find.
-This is the one axis where the whole category is weak and we are not:
+Privacy is a property of Plainsong's architecture, not a comparison claim:
 
-| | Plainsong | Wispr Flow | Granola | superwhisper |
-|---|---|---|---|---|
-| Dictation audio leaves your machine | No (on-device by default) | Yes (cloud-only) | n/a | No |
-| Dictation audio written to disk | No (transient temp file, deleted immediately) | n/a (cloud) | n/a | **Yes, saved by default, no opt-out** |
-| Screenshots of your screen | **Never** | Yes — "Context Awareness" captured the active window (the 2026 scandal) | No | No |
-| Telemetry / analytics | None | Yes | Yes | Limited |
-| Account required | No | Yes | Yes | No |
-| API keys (BYOK) stored in | OS Keychain | n/a | n/a | **plaintext JSON** |
-| Notes/meetings shareable by default | No (local only) | n/a | Public-by-link drew an April-2026 backlash | Local |
-| Source you can audit | Yes (MIT) | No | No | No |
+- Local transcription is the default.
+- Dictation audio uses a temporary file and is removed after processing.
+- Meeting audio is saved only according to the storage and retention choices
+  shown in the app.
+- Remote transcription, analysis, and cloud backup require an explicit user
+  choice.
+- Provider credentials use the operating system's secure credential store.
+- Plainsong does not create public sharing links or upload local content to a
+  Plainsong-operated service.
+- The MIT-licensed source is available for inspection.
 
-Notes: "n/a" means the product doesn't offer that surface. Competitor facts are
-from public reporting as of mid-2026; verify current behavior against their docs.
-The point isn't that no one else is private — Handy (also MIT, on-device) is a
-fair tie — it's that **no cloud competitor can match this on all axes**, and we
-beat even local rivals on defaults (no audio saved to disk; keys in the Keychain,
-not a plaintext file).
+Competitor behavior changes and is outside this privacy contract. Public
+comparison claims should be sourced and re-verified separately for each
+release.
 
 ## Where your data lives
 
@@ -73,9 +69,22 @@ on your own machine, and optional cloud backup uses **your own** storage
 The app labels which path is local and which is cloud so you always know where a
 given request is going.
 
+### Apple Speech on-device dictation
+
+On supported Apple Silicon Macs, Apple Speech is an optional **dictation-only**
+provider. Plainsong makes it selectable only after the packaged helper is present,
+Speech Recognition permission is authorized, the requested locale is supported,
+and macOS reports on-device recognition and the recognizer itself as available.
+Both file and internal streaming requests set `requiresOnDeviceRecognition` to
+`true`; Apple server fallback is disabled. If any readiness check fails, Plainsong
+reports the specific status and does not silently substitute Whisper or another
+provider. Apple Speech is not used for meeting transcription.
+
 ## Permissions
 
 - **Microphone** — required to capture audio for dictation and meetings.
+- **Speech Recognition** (optional) — required only when you explicitly choose
+  Apple Speech for on-device dictation.
 - **Accessibility** — required to insert transcribed text into other apps.
 - **Screen/System audio** (optional) — only used to record system audio for
   meetings when you enable it.

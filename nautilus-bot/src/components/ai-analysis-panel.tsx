@@ -1,5 +1,6 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { cn } from "@/lib/utils";
+import { listen } from "@/lib/electron";
 import { useScopedRequestGuard } from "@/hooks/use-scoped-request-guard";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
@@ -8,11 +9,20 @@ import { Input } from "@/components/ui/input";
 import { Badge } from "@/components/ui/badge";
 import {
   analyzeRecording,
+  cancelAnalysisRun,
   extractActionItems,
   extractActionItemsGrounded,
   type MeetingChatMessage,
 } from "@/lib/backend/ai";
-import type { LlmAnalysisResult, ActionItem, AnalysisTemplate, LlmCitation } from "@/types";
+import type {
+  LlmAnalysisResult,
+  ActionItem,
+  AnalysisTemplate,
+  AnalysisProvenance,
+  LlmCitation,
+  RecordingAnalysisFailedEvent,
+  RecordingAnalysisProgressEvent,
+} from "@/types";
 import { 
   Sparkles, 
   FileText, 
@@ -39,12 +49,14 @@ interface AiAnalysisPanelProps {
       query: string;
       templateId: string | null;
       citations: LlmCitation[];
+      provenance: AnalysisProvenance;
     }) => void;
     isVisible?: (payload: {
       response: string;
       query: string;
       templateId: string | null;
       citations: LlmCitation[];
+      provenance: AnalysisProvenance;
     }) => boolean;
   }>;
   actionItemActions?: Array<{
@@ -107,7 +119,10 @@ export function AiAnalysisPanel({
   const [lastResult, setLastResult] = useState<LlmAnalysisResult | null>(null);
   const [actionItems, setActionItems] = useState<ActionItem[] | null>(null);
   const [actionItemCitations, setActionItemCitations] = useState<Array<LlmCitation[]>>([]);
+  const [actionItemsGrounded, setActionItemsGrounded] = useState<boolean | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [analysisProgress, setAnalysisProgress] =
+    useState<RecordingAnalysisProgressEvent | null>(null);
   const [showSetupGuide, setShowSetupGuide] = useState(false);
   const [lastQuery, setLastQuery] = useState("");
   const [lastTemplateId, setLastTemplateId] = useState<string | null>(null);
@@ -115,23 +130,102 @@ export function AiAnalysisPanel({
     chatMessages ?? []
   );
   const requestGuard = useScopedRequestGuard<string | null>();
+  const activeAnalysisRunRef = useRef<{
+    runId: string;
+    target: "ask" | "actionItems";
+  } | null>(null);
 
   useEffect(() => {
     setThreadMessages(chatMessages ?? []);
   }, [chatMessages]);
 
   useEffect(() => {
+    const activeRun = activeAnalysisRunRef.current;
+    if (activeRun) {
+      void cancelAnalysisRun(activeRun.runId);
+      activeAnalysisRunRef.current = null;
+    }
     requestGuard.setScope(recordingId);
     setIsAnalyzing(false);
     setCustomQuery("");
     setLastResult(null);
     setActionItems(null);
     setActionItemCitations([]);
+    setActionItemsGrounded(null);
+    activeAnalysisRunRef.current = null;
     setError(null);
+    setAnalysisProgress(null);
     setShowSetupGuide(false);
     setLastQuery("");
     setLastTemplateId(null);
   }, [recordingId, requestGuard]);
+
+  useEffect(() => {
+    let disposed = false;
+    let unlistenProgress: (() => void) | undefined;
+    let unlistenFailure: (() => void) | undefined;
+
+    const matchesActiveRun = (
+      payload: RecordingAnalysisProgressEvent | RecordingAnalysisFailedEvent
+    ) => {
+      const activeRun = activeAnalysisRunRef.current;
+      return Boolean(
+        activeRun &&
+          payload.recordingId === recordingId &&
+          payload.target === activeRun.target &&
+          payload.runId === activeRun.runId
+      );
+    };
+
+    void listen<RecordingAnalysisProgressEvent>(
+      "recording-analysis-progress",
+      (event) => {
+        if (event.payload && matchesActiveRun(event.payload)) {
+          setAnalysisProgress(
+            event.payload.stage === "completed" ? null : event.payload
+          );
+        }
+      }
+    ).then((unlisten) => {
+      if (disposed) {
+        unlisten();
+      } else {
+        unlistenProgress = unlisten;
+      }
+    });
+    void listen<RecordingAnalysisFailedEvent>(
+      "recording-analysis-failed",
+      (event) => {
+        if (event.payload && matchesActiveRun(event.payload)) {
+          setAnalysisProgress(null);
+          setError(
+            `${event.payload.reason} Previous successful analysis remains available.`
+          );
+        }
+      }
+    ).then((unlisten) => {
+      if (disposed) {
+        unlisten();
+      } else {
+        unlistenFailure = unlisten;
+      }
+    });
+    return () => {
+      disposed = true;
+      unlistenProgress?.();
+      unlistenFailure?.();
+    };
+  }, [recordingId]);
+
+  useEffect(() => {
+    return () => {
+      const activeRun = activeAnalysisRunRef.current;
+      activeAnalysisRunRef.current = null;
+      if (activeRun) {
+        void cancelAnalysisRun(activeRun.runId);
+      }
+    };
+  }, []);
 
   const appendThreadMessages = useCallback((messages: MeetingChatMessage[]) => {
     setThreadMessages((current) => {
@@ -147,12 +241,16 @@ export function AiAnalysisPanel({
     }
 
     const threadContext = threadMessages
+      .filter((message) => message.role === "user")
       .slice(-6)
-      .map((message) => `${message.role === "assistant" ? "Assistant" : "User"}: ${message.content}`)
+      .map((message) => `Earlier user question: ${message.content}`)
       .join("\n\n");
+    if (!threadContext) {
+      return query;
+    }
 
     return [
-      "Conversation so far:",
+      "Earlier user questions for conversational context:",
       threadContext,
       "",
       `New user question: ${query}`,
@@ -180,6 +278,9 @@ export function AiAnalysisPanel({
 
   const handleTemplateClick = async (template: AnalysisTemplate) => {
     const requestToken = requestGuard.beginRequest(recordingId);
+    const runId = crypto.randomUUID();
+    const target = template.id === "actions" ? "actionItems" : "ask";
+    activeAnalysisRunRef.current = { runId, target };
     setIsAnalyzing(true);
     setError(null);
     setShowSetupGuide(false);
@@ -197,12 +298,16 @@ export function AiAnalysisPanel({
     try {
       if (template.id === "actions") {
         if (analysisMode === "grounded") {
-          const result = await extractActionItemsGrounded(recordingId);
+          const result = await extractActionItemsGrounded(recordingId, undefined, {
+            persist: false,
+            runId,
+          });
           if (!requestGuard.isCurrent(requestToken)) {
             return;
           }
           setActionItems(result.items);
           setActionItemCitations(result.items.map((item) => item.citations ?? []));
+          setActionItemsGrounded(result.grounded !== false);
           appendThreadMessages([
             userMessage,
             {
@@ -215,12 +320,16 @@ export function AiAnalysisPanel({
             },
           ]);
         } else {
-          const items = await extractActionItems(recordingId);
+          const items = await extractActionItems(recordingId, undefined, {
+            persist: false,
+            runId,
+          });
           if (!requestGuard.isCurrent(requestToken)) {
             return;
           }
           setActionItems(items);
           setActionItemCitations([]);
+          setActionItemsGrounded(null);
           appendThreadMessages([
             userMessage,
             {
@@ -235,13 +344,19 @@ export function AiAnalysisPanel({
         }
         setLastResult(null);
       } else {
-        const result = await analyzeRecording(recordingId, template.query);
+        const result = await analyzeRecording(
+          recordingId,
+          template.query,
+          undefined,
+          runId
+        );
         if (!requestGuard.isCurrent(requestToken)) {
           return;
         }
         setLastResult(result);
         setActionItems(null);
         setActionItemCitations([]);
+        setActionItemsGrounded(null);
         appendThreadMessages([
           userMessage,
           {
@@ -275,6 +390,9 @@ export function AiAnalysisPanel({
     } finally {
       if (requestGuard.isCurrent(requestToken)) {
         setIsAnalyzing(false);
+        if (activeAnalysisRunRef.current?.runId === runId) {
+          activeAnalysisRunRef.current = null;
+        }
       }
     }
   };
@@ -282,6 +400,8 @@ export function AiAnalysisPanel({
   const handleCustomQuery = async () => {
     if (!customQuery.trim()) return;
     const requestToken = requestGuard.beginRequest(recordingId);
+    const runId = crypto.randomUUID();
+    activeAnalysisRunRef.current = { runId, target: "ask" };
 
     setIsAnalyzing(true);
     setError(null);
@@ -299,13 +419,19 @@ export function AiAnalysisPanel({
     };
     
     try {
-      const result = await analyzeRecording(recordingId, buildThreadedCustomQuery(rawQuery));
+      const result = await analyzeRecording(
+        recordingId,
+        buildThreadedCustomQuery(rawQuery),
+        undefined,
+        runId
+      );
       if (!requestGuard.isCurrent(requestToken)) {
         return;
       }
       setLastResult(result);
       setActionItems(null);
       setActionItemCitations([]);
+      setActionItemsGrounded(null);
       appendThreadMessages([
         userMessage,
         {
@@ -339,6 +465,9 @@ export function AiAnalysisPanel({
     } finally {
       if (requestGuard.isCurrent(requestToken)) {
         setIsAnalyzing(false);
+        if (activeAnalysisRunRef.current?.runId === runId) {
+          activeAnalysisRunRef.current = null;
+        }
       }
     }
   };
@@ -385,7 +514,9 @@ export function AiAnalysisPanel({
   })();
   const showUncertaintyBanner =
     citationCoverage !== null &&
-    (citationCoverage.ratio < 0.8 || citationCoverage.avgCertainty < 0.75);
+    (lastResult?.grounded === false ||
+      citationCoverage.ratio < 0.8 ||
+      citationCoverage.avgCertainty < 0.75);
 
   return (
     <div className={cn("space-y-4", className)}>
@@ -481,6 +612,24 @@ export function AiAnalysisPanel({
         </Card>
       )}
 
+      {analysisProgress && (
+        <div
+          role="status"
+          className="rounded-lg border border-border bg-muted/30 p-3 text-sm text-muted-foreground"
+        >
+          <div className="flex items-center gap-2">
+            <Loader2 className="h-4 w-4 animate-spin" />
+            <span>{analysisProgress.message}</span>
+          </div>
+          {analysisProgress.strategy === "chunked" && analysisProgress.total > 0 ? (
+            <p className="mt-1 text-xs">
+              Full transcript coverage · {analysisProgress.completed} of{" "}
+              {analysisProgress.total}
+            </p>
+          ) : null}
+        </div>
+      )}
+
       {/* Error Display */}
       {error && (
         <div className="p-3 bg-destructive/10 border border-destructive/20 rounded-lg flex items-start gap-2 text-sm text-destructive">
@@ -520,7 +669,9 @@ export function AiAnalysisPanel({
               </CardTitle>
               <div className="flex items-center gap-2">
                 <Badge variant="secondary" className="font-mono text-xs">
-                  {lastResult.model}
+                  {lastResult.actualProvider
+                    ? `${lastResult.actualProvider} · ${lastResult.model}`
+                    : lastResult.model}
                 </Badge>
                 <span className="font-mono text-xs text-muted-foreground tabular-nums">
                   {(lastResult.processingTimeMs / 1000).toFixed(1)}s
@@ -537,7 +688,9 @@ export function AiAnalysisPanel({
             
             {showUncertaintyBanner && (
               <div className="mt-4 p-2 rounded-md bg-rust/10 text-rust text-xs">
-                Uncertainty: citation coverage is below threshold (coverage {(((citationCoverage?.ratio ?? 0) * 100)).toFixed(0)}%, confidence {((citationCoverage?.avgCertainty ?? 0) * 100).toFixed(0)}%).
+                {lastResult.grounded === false
+                  ? "Not fully grounded: one or more citations were invalid or did not support the answer."
+                  : `Uncertainty: citation coverage is below threshold (coverage ${((citationCoverage?.ratio ?? 0) * 100).toFixed(0)}%, confidence ${((citationCoverage?.avgCertainty ?? 0) * 100).toFixed(0)}%).`}
               </div>
             )}
 
@@ -576,6 +729,7 @@ export function AiAnalysisPanel({
                       query: lastQuery,
                       templateId: lastTemplateId,
                       citations: lastResult.citations,
+                      provenance: lastResult.provenance,
                     }) ?? true
                   )
                   .map((action) => (
@@ -590,6 +744,7 @@ export function AiAnalysisPanel({
                           query: lastQuery,
                           templateId: lastTemplateId,
                           citations: lastResult.citations,
+                          provenance: lastResult.provenance,
                         })
                       }
                     >
@@ -646,6 +801,12 @@ export function AiAnalysisPanel({
                 </div>
               ))}
             </div>
+
+            {actionItemsGrounded === false && (
+              <div className="mt-4 rounded-md bg-rust/10 p-2 text-xs text-rust">
+                Not fully grounded: one or more follow-ups had invalid or unsupported transcript citations.
+              </div>
+            )}
 
             {actionItemActions.length > 0 && (
               <div className="mt-4 flex flex-wrap gap-2 border-t pt-4">

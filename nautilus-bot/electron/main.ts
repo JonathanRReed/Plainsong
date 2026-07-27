@@ -7,6 +7,7 @@ import {
   Menu,
   nativeImage,
   net,
+  protocol,
   screen,
   shell,
   Tray,
@@ -15,6 +16,7 @@ import {
 import { execFile } from "child_process";
 import { existsSync, readFileSync, writeFileSync } from "fs";
 import path from "path";
+import { pathToFileURL } from "url";
 import { autoUpdater, type AppUpdater } from "electron-updater";
 import {
   createDictationShortcutSignalRuntime,
@@ -45,11 +47,29 @@ import {
 } from "./overlay-placement";
 import { resolveUpdaterChannel, type UpdateChannel } from "./updater-channel";
 import { resolveWindowUiSettings } from "./window-ui-settings";
+import {
+  isRendererUrl,
+  RENDERER_HOST,
+  RENDERER_SCHEME,
+  rendererUrl,
+  resolveRendererAssetPath,
+} from "./renderer-protocol";
 import { createDictationOverlayWindow, createRecordingOverlayWindow } from "./windows";
 
 const isDev = process.env.NODE_ENV === "development" || !app.isPackaged;
 const devServerUrl = process.env.PLAINSONG_DEV_SERVER_URL ?? "http://127.0.0.1:1420";
 const rendererMode = process.env.PLAINSONG_RENDERER_MODE ?? "file";
+
+protocol.registerSchemesAsPrivileged([
+  {
+    scheme: RENDERER_SCHEME,
+    privileges: {
+      standard: true,
+      secure: true,
+      supportFetchAPI: true,
+    },
+  },
+]);
 
 if (isDev) {
   app.commandLine.appendSwitch("no-proxy-server");
@@ -118,13 +138,10 @@ let updateInstallBlockedReason: "unsigned" | undefined;
 
 type AppSettings = {
   shortcuts?: {
-    toggleRecording?: string;
     toggleDictation?: string;
     openWindow?: string;
     repasteLastDictation?: string;
     recopyLastDictation?: string;
-    quickExport?: string;
-    focusSearch?: string;
   };
   transcription?: {
     dictationPushToTalk?: boolean;
@@ -775,7 +792,7 @@ function createOverlayWindow(kind: OverlayKind): BrowserWindow {
   if (isDev && rendererMode === "server") {
     void overlay.loadURL(`${devServerUrl}?overlay=${kind}`);
   } else {
-    void overlay.loadFile(path.join(__dirname, "../dist/index.html"), { query });
+    void overlay.loadURL(rendererUrl(query));
   }
 
   return overlay;
@@ -1267,7 +1284,7 @@ function isRendererAppUrl(rawUrl: string): boolean {
   try {
     const url = new URL(rawUrl);
 
-    if (url.protocol === "file:") {
+    if (isRendererUrl(rawUrl)) {
       return true;
     }
 
@@ -1394,10 +1411,10 @@ function createMainWindow(): BrowserWindow {
     if (rendererMode === "server") {
       void win.loadURL(devServerUrl);
     } else {
-      void win.loadFile(path.join(__dirname, "../dist/index.html"));
+      void win.loadURL(rendererUrl());
     }
   } else {
-    void win.loadFile(path.join(__dirname, "../dist/index.html"));
+    void win.loadURL(rendererUrl());
   }
 
   // Applied here rather than at the bootstrap call site so the setting survives
@@ -1469,6 +1486,26 @@ async function bootstrap() {
 
   await app.whenReady();
 
+  if (!(isDev && rendererMode === "server")) {
+    await protocol.handle(RENDERER_SCHEME, (request) => {
+      try {
+        const rendererRoot = path.join(__dirname, "../dist");
+        const assetPath = resolveRendererAssetPath(rendererRoot, request.url);
+        return net.fetch(pathToFileURL(assetPath).toString());
+      } catch (error) {
+        console.error("[renderer] refused packaged asset request", {
+          host: RENDERER_HOST,
+          url: request.url,
+          error,
+        });
+        return new Response("Not found", {
+          status: 404,
+          headers: { "content-type": "text/plain; charset=utf-8" },
+        });
+      }
+    });
+  }
+
   if (isDev && rendererMode === "server") {
     const timeout = new Promise<never>((_, reject) => {
       setTimeout(() => reject(new Error("timed out")), 5000);
@@ -1521,6 +1558,10 @@ async function bootstrap() {
   ipcBridge.onEvent((eventName: string, payload: unknown) => {
     if (eventName === "settings-changed" && payload && typeof payload === "object") {
       applyUiSettings(payload as AppSettings);
+      // The sidecar emits this after both normal saves and backup restores.
+      // Re-read its now-live settings before re-registering so restored global
+      // and native hotkeys take effect without a restart or another save.
+      void applyElectronGlobalShortcuts("settings-changed");
     }
 
     if (
@@ -1587,7 +1628,7 @@ async function bootstrap() {
   });
 
   ipcBridge.onCommandResolved((command) => {
-    if (command === "save_settings" || command === "apply_global_shortcuts_now") {
+    if (command === "apply_global_shortcuts_now") {
       void applyElectronGlobalShortcuts(command);
     }
   });

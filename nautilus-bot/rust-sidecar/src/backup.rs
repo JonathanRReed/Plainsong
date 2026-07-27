@@ -1,4 +1,7 @@
-//! Automatic backup and cloud synchronization.
+//! Manual backup creation and cloud synchronization.
+//!
+//! Backups are only created and uploaded in response to explicit commands. The
+//! v1 sidecar does not run a scheduler.
 //!
 //! Supported cloud targets:
 //! - iCloud Drive (direct filesystem sync)
@@ -9,11 +12,13 @@
 use anyhow::{Context, Result};
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
+use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use tokio::process::Command;
 
 const SETTINGS_BACKUP_FILENAME: &str = "settings.json";
 const BACKUP_MANIFEST_FILENAME: &str = "manifest.json";
+const BACKUP_MANIFEST_FORMAT_VERSION: u32 = 1;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
@@ -39,15 +44,16 @@ impl CloudProvider {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default, rename_all = "camelCase")]
 pub struct BackupConfig {
-    /// Enable automatic backups
+    /// Legacy scheduler flag. Retained for config compatibility but always
+    /// forced off because v1 backups are manual.
     pub enabled: bool,
-    /// Backup interval in hours
+    /// Legacy scheduler interval. Retained for config compatibility and ignored.
     pub interval_hours: u32,
-    /// Maximum number of backups to keep
+    /// Maximum number of valid manual backups to keep.
     pub max_backups: u32,
     /// Backup directory path
     pub backup_dir: Option<PathBuf>,
-    /// Enable cloud sync
+    /// Enable explicit, user-triggered cloud uploads.
     pub cloud_sync: bool,
     /// Cloud provider (if cloud sync enabled)
     pub cloud_provider: Option<CloudProvider>,
@@ -62,7 +68,7 @@ pub struct BackupConfig {
 impl Default for BackupConfig {
     fn default() -> Self {
         Self {
-            enabled: true,
+            enabled: false,
             interval_hours: 24,
             max_backups: 7,
             backup_dir: Some(default_backup_dir()),
@@ -92,7 +98,7 @@ pub struct BackupInfo {
 }
 
 /// Backup type
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum BackupType {
     /// Full backup of everything
@@ -103,7 +109,7 @@ pub enum BackupType {
     Settings,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Hash)]
 #[serde(rename_all = "snake_case")]
 enum BackupComponent {
     Database,
@@ -114,10 +120,19 @@ enum BackupComponent {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct BackupManifest {
+    format_version: u32,
+    complete: bool,
     id: String,
     timestamp: DateTime<Utc>,
     backup_type: BackupType,
     components: Vec<BackupComponent>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct BackupRestoreOutcome {
+    pub restored_database: bool,
+    pub restored_recordings: bool,
+    pub restored_settings: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -156,6 +171,8 @@ impl BackupManager {
         if config.backup_dir.is_none() {
             config.backup_dir = Some(default_backup_dir());
         }
+        config.enabled = false;
+        config.max_backups = config.max_backups.max(1);
         Self { config }
     }
 
@@ -167,34 +184,37 @@ impl BackupManager {
         if config.backup_dir.is_none() {
             config.backup_dir = Some(default_backup_dir());
         }
+        config.enabled = false;
+        config.max_backups = config.max_backups.max(1);
         self.config = config;
         self.persist_config()?;
         Ok(())
     }
 
-    /// Create a full data backup now.
-    /// Create a full backup. `db_snapshot`, when provided, is a
-    /// transactionally-consistent copy of the live database (see
-    /// `Database::backup_to`) and is used as the source for the database
-    /// component instead of copying the live, possibly mid-write, file.
+    /// Create a full data backup now. If the live database exists, `db_snapshot`
+    /// must be a separate, non-empty `VACUUM INTO` snapshot. The live SQLite
+    /// file is never copied as a fallback.
     pub async fn create_backup(
         &self,
         data_dir: &Path,
         db_snapshot: Option<&Path>,
     ) -> Result<BackupInfo> {
-        self.create_backup_with_type(data_dir, BackupType::Full, db_snapshot)
+        let settings_path = crate::settings::settings_file_path()?;
+        self.create_backup_with_sources(data_dir, &settings_path, BackupType::Full, db_snapshot)
             .await
     }
 
-    /// Create a settings-only backup for profile sync and migration.
+    /// Create a settings-only snapshot for manual migration or cloud upload.
     pub async fn create_settings_backup(&self, data_dir: &Path) -> Result<BackupInfo> {
-        self.create_backup_with_type(data_dir, BackupType::Settings, None)
+        let settings_path = crate::settings::settings_file_path()?;
+        self.create_backup_with_sources(data_dir, &settings_path, BackupType::Settings, None)
             .await
     }
 
-    async fn create_backup_with_type(
+    async fn create_backup_with_sources(
         &self,
         data_dir: &Path,
+        settings_path: &Path,
         backup_type: BackupType,
         db_snapshot: Option<&Path>,
     ) -> Result<BackupInfo> {
@@ -203,11 +223,14 @@ impl BackupManager {
             .backup_dir
             .as_ref()
             .ok_or_else(|| anyhow::anyhow!("No backup directory configured"))?;
-
-        // Ensure backup directory exists
         tokio::fs::create_dir_all(backup_dir).await?;
 
-        // Generate backup ID
+        let database_source = if matches!(backup_type, BackupType::Full | BackupType::Incremental) {
+            validated_database_snapshot(data_dir, db_snapshot).await?
+        } else {
+            None
+        };
+
         let timestamp = Utc::now();
         let backup_prefix = match backup_type {
             BackupType::Full => "backup",
@@ -222,58 +245,135 @@ impl BackupManager {
             &nonce[..8]
         );
         let backup_path = backup_dir.join(&backup_id);
-        tokio::fs::create_dir_all(&backup_path).await?;
-        let mut components = Vec::new();
+        let partial_path = backup_dir.join(format!(".{}.partial-{}", backup_id, &nonce[8..16]));
+        tokio::fs::create_dir(&partial_path)
+            .await
+            .with_context(|| {
+                format!(
+                    "Failed to create partial backup generation {}",
+                    partial_path.display()
+                )
+            })?;
 
-        if matches!(backup_type, BackupType::Full | BackupType::Incremental) {
-            let db_path = data_dir.join("plainsong.db");
-            // Prefer a consistent VACUUM INTO snapshot of the live database;
-            // fall back to copying the file at rest only if no snapshot was
-            // provided (e.g. the database was never opened).
-            let db_source = db_snapshot.filter(|p| p.exists()).unwrap_or(&db_path);
-            if db_source.exists() {
-                let db_backup = backup_path.join("plainsong.db");
-                tokio::fs::copy(db_source, db_backup).await?;
-                components.push(BackupComponent::Database);
+        let build_result = async {
+            let mut components = Vec::new();
+
+            if matches!(backup_type, BackupType::Full | BackupType::Incremental) {
+                if let Some(db_source) = database_source.as_ref() {
+                    tokio::fs::copy(db_source, partial_path.join("plainsong.db"))
+                        .await
+                        .context("Failed to copy the database snapshot into the backup")?;
+                    components.push(BackupComponent::Database);
+                }
+
+                let recordings_dir = data_dir.join("recordings");
+                match tokio::fs::symlink_metadata(&recordings_dir).await {
+                    Ok(metadata) if metadata.file_type().is_dir() => {
+                        copy_dir_recursive(&recordings_dir, &partial_path.join("recordings"))
+                            .await
+                            .context("Failed to copy recordings into the backup")?;
+                        components.push(BackupComponent::Recordings);
+                    }
+                    Ok(_) => {
+                        return Err(anyhow::anyhow!(
+                            "Recordings source must be a real directory, not a file or symlink: {}",
+                            recordings_dir.display()
+                        ));
+                    }
+                    Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                    Err(error) => {
+                        return Err(error).with_context(|| {
+                            format!(
+                                "Failed to inspect recordings source {}",
+                                recordings_dir.display()
+                            )
+                        });
+                    }
+                }
             }
 
-            let recordings_dir = data_dir.join("recordings");
-            if recordings_dir.exists() {
-                let recordings_backup = backup_path.join("recordings");
-                copy_dir_recursive(&recordings_dir, &recordings_backup).await?;
-                components.push(BackupComponent::Recordings);
+            if settings_path.is_file() {
+                tokio::fs::copy(settings_path, partial_path.join(SETTINGS_BACKUP_FILENAME))
+                    .await
+                    .context("Failed to copy settings into the backup")?;
+                components.push(BackupComponent::Settings);
             }
+
+            if components.is_empty() {
+                return Err(anyhow::anyhow!(
+                    "Cannot create backup because no backup components were found"
+                ));
+            }
+
+            write_backup_manifest(
+                &partial_path,
+                &backup_id,
+                timestamp,
+                backup_type.clone(),
+                &components,
+            )
+            .await?;
+            validate_complete_backup(&partial_path, Some(&backup_id)).await?;
+            sync_backup_tree(&partial_path).await?;
+
+            let size_bytes = calculate_dir_size(&partial_path).await?;
+            let items_count = count_dir_items(&partial_path).await?;
+
+            // The hidden generation and its visible destination are siblings under
+            // `backup_dir`, so publication never relies on a cross-filesystem move.
+            // Refuse to replace anything already at the destination even though the
+            // random nonce makes a collision exceptionally unlikely.
+            match tokio::fs::symlink_metadata(&backup_path).await {
+                Ok(_) => {
+                    return Err(anyhow::anyhow!(
+                        "Refusing to replace pre-existing backup generation {}",
+                        backup_path.display()
+                    ));
+                }
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                Err(error) => {
+                    return Err(error).with_context(|| {
+                        format!(
+                            "Failed to inspect backup publication target {}",
+                            backup_path.display()
+                        )
+                    });
+                }
+            }
+
+            tokio::fs::rename(&partial_path, &backup_path)
+                .await
+                .with_context(|| {
+                    format!(
+                        "Failed to atomically publish backup {}",
+                        backup_path.display()
+                    )
+                })?;
+            sync_directory_best_effort(backup_dir).await;
+
+            Ok::<_, anyhow::Error>((size_bytes, items_count))
         }
+        .await;
 
-        let settings_path = crate::settings::settings_file_path()?;
-        if settings_path.exists() {
-            let settings_backup = backup_path.join(SETTINGS_BACKUP_FILENAME);
-            tokio::fs::copy(&settings_path, settings_backup).await?;
-            components.push(BackupComponent::Settings);
-        }
+        let (size_bytes, items_count) = match build_result {
+            Ok(result) => result,
+            Err(error) => {
+                if let Err(cleanup_error) = remove_path_if_exists(&partial_path).await {
+                    tracing::warn!(
+                        "Failed to remove partial backup generation {}: {}",
+                        partial_path.display(),
+                        cleanup_error
+                    );
+                }
+                return Err(error);
+            }
+        };
 
-        if components.is_empty() {
-            return Err(anyhow::anyhow!(
-                "Cannot create backup because no backup components were found"
-            ));
-        }
-
-        write_backup_manifest(
-            &backup_path,
-            &backup_id,
-            timestamp,
-            backup_type.clone(),
-            &components,
-        )
-        .await?;
-
-        let size_bytes = calculate_dir_size(&backup_path).await?;
-        let items_count = count_dir_items(&backup_path).await?;
-
-        self.clean_old_backups().await?;
-
-        if self.config.cloud_sync {
-            self.sync_backup_to_cloud(&backup_id).await?;
+        if let Err(error) = self.clean_old_backups().await {
+            tracing::warn!(
+                "Backup retention cleanup failed after publication: {}",
+                error
+            );
         }
 
         let info = BackupInfo {
@@ -288,23 +388,44 @@ impl BackupManager {
         Ok(info)
     }
 
-    /// Restore from backup
-    pub async fn restore_backup(&self, backup_id: &str, data_dir: &Path) -> Result<()> {
+    /// Restore a complete, validated backup generation.
+    pub async fn restore_backup(
+        &self,
+        backup_id: &str,
+        data_dir: &Path,
+    ) -> Result<BackupRestoreOutcome> {
+        let settings_path = crate::settings::settings_file_path()?;
+        self.restore_backup_to_targets(backup_id, data_dir, &settings_path)
+            .await
+    }
+
+    async fn restore_backup_to_targets(
+        &self,
+        backup_id: &str,
+        data_dir: &Path,
+        settings_path: &Path,
+    ) -> Result<BackupRestoreOutcome> {
         let backup_dir = self
             .config
             .backup_dir
             .as_ref()
             .ok_or_else(|| anyhow::anyhow!("No backup directory configured"))?;
-
         let backup_path = resolve_existing_backup_path(backup_dir, backup_id)?;
-        let settings_path = crate::settings::settings_file_path()?;
-        restore_backup_into_targets(&backup_path, data_dir, &settings_path).await?;
+        let manifest = validate_complete_backup(&backup_path, Some(backup_id)).await?;
 
+        restore_backup_into_targets(&backup_path, data_dir, settings_path, &manifest.components)
+            .await?;
+
+        let outcome = BackupRestoreOutcome {
+            restored_database: manifest.components.contains(&BackupComponent::Database),
+            restored_recordings: manifest.components.contains(&BackupComponent::Recordings),
+            restored_settings: manifest.components.contains(&BackupComponent::Settings),
+        };
         tracing::info!("Backup restored: {}", backup_id);
-        Ok(())
+        Ok(outcome)
     }
 
-    /// List available backups
+    /// List only complete, validated, visible backup generations.
     pub async fn list_backups(&self) -> Result<Vec<BackupInfo>> {
         let backup_dir = self
             .config
@@ -320,26 +441,45 @@ impl BackupManager {
         let mut entries = tokio::fs::read_dir(backup_dir).await?;
         while let Some(entry) = entries.next_entry().await? {
             let path = entry.path();
-            if path.is_dir() {
-                let metadata = tokio::fs::metadata(&path).await?;
-                let modified = metadata.modified()?;
-                let timestamp = DateTime::<Utc>::from(modified);
-                let size_bytes = calculate_dir_size(&path).await?;
-                let items_count = count_dir_items(&path).await?;
-                let backup_id = path
-                    .file_name()
-                    .and_then(|n| n.to_str())
-                    .unwrap_or("unknown")
-                    .to_string();
-
-                backups.push(BackupInfo {
-                    id: backup_id,
-                    timestamp,
-                    size_bytes,
-                    items_count,
-                    backup_type: infer_backup_type(&path),
-                });
+            let Some(backup_id) = path.file_name().and_then(|name| name.to_str()) else {
+                continue;
+            };
+            if backup_id.starts_with('.') {
+                continue;
             }
+            match tokio::fs::symlink_metadata(&path).await {
+                Ok(metadata) if metadata.file_type().is_dir() => {}
+                Ok(_) => continue,
+                Err(error) => {
+                    tracing::warn!(
+                        "Failed to inspect backup candidate {}: {}",
+                        path.display(),
+                        error
+                    );
+                    continue;
+                }
+            }
+
+            let manifest = match validate_complete_backup(&path, Some(backup_id)).await {
+                Ok(manifest) => manifest,
+                Err(error) => {
+                    tracing::warn!(
+                        "Ignoring incomplete or invalid backup generation {}: {}",
+                        path.display(),
+                        error
+                    );
+                    continue;
+                }
+            };
+            let size_bytes = calculate_dir_size(&path).await?;
+            let items_count = count_dir_items(&path).await?;
+            backups.push(BackupInfo {
+                id: backup_id.to_string(),
+                timestamp: manifest.timestamp,
+                size_bytes,
+                items_count,
+                backup_type: manifest.backup_type,
+            });
         }
 
         backups.sort_by_key(|backup| std::cmp::Reverse(backup.timestamp));
@@ -381,6 +521,7 @@ impl BackupManager {
 
         let safe_backup_id = validate_backup_id(backup_id)?;
         let source = resolve_existing_backup_path(backup_dir, &safe_backup_id)?;
+        validate_complete_backup(&source, Some(&safe_backup_id)).await?;
 
         let zip_path = target_path.join(format!("{}.zip", safe_backup_id));
         create_zip_archive(&source, &zip_path).await?;
@@ -395,14 +536,14 @@ impl BackupManager {
         if self.config.cloud_sync {
             checks.push(pass_check(
                 "cloud_sync_enabled",
-                "Cloud sync enabled",
-                "Cloud backup sync is enabled.",
+                "Manual cloud sync enabled",
+                "Explicit cloud uploads are enabled.",
             ));
         } else {
             checks.push(fail_check(
                 "cloud_sync_enabled",
-                "Cloud sync enabled",
-                "Cloud sync is disabled in backup settings.",
+                "Manual cloud sync enabled",
+                "Manual cloud uploads are disabled in backup settings.",
             ));
         }
 
@@ -607,7 +748,7 @@ impl BackupManager {
     /// Sync a backup directory to configured cloud provider.
     pub async fn sync_backup_to_cloud(&self, backup_id: &str) -> Result<()> {
         if !self.config.cloud_sync {
-            return Err(anyhow::anyhow!("Cloud sync is disabled"));
+            return Err(anyhow::anyhow!("Manual cloud sync is disabled"));
         }
         let provider = self
             .config
@@ -620,6 +761,7 @@ impl BackupManager {
             .as_ref()
             .ok_or_else(|| anyhow::anyhow!("No backup directory configured"))?;
         let source = resolve_existing_backup_path(backup_dir, backup_id)?;
+        validate_complete_backup(&source, Some(backup_id)).await?;
 
         match provider {
             CloudProvider::ICloud => sync_to_icloud(&self.config, &source).await,
@@ -640,16 +782,52 @@ impl BackupManager {
     }
 }
 
-fn infer_backup_type(path: &Path) -> BackupType {
-    let has_database = path.join("plainsong.db").exists();
-    let has_recordings = path.join("recordings").exists();
-    let has_settings = path.join(SETTINGS_BACKUP_FILENAME).exists();
+async fn validated_database_snapshot(
+    data_dir: &Path,
+    db_snapshot: Option<&Path>,
+) -> Result<Option<PathBuf>> {
+    let live_database = data_dir.join("plainsong.db");
+    let live_database_exists = live_database.is_file();
 
-    if has_settings && !has_database && !has_recordings {
-        return BackupType::Settings;
+    let Some(snapshot) = db_snapshot else {
+        if live_database_exists {
+            return Err(anyhow::anyhow!(
+                "Cannot create a full backup: the live database exists but no VACUUM INTO snapshot was supplied"
+            ));
+        }
+        return Ok(None);
+    };
+
+    let snapshot_metadata = tokio::fs::symlink_metadata(snapshot)
+        .await
+        .with_context(|| format!("Database snapshot does not exist: {}", snapshot.display()))?;
+    if !snapshot_metadata.file_type().is_file() || snapshot_metadata.len() == 0 {
+        return Err(anyhow::anyhow!(
+            "Database snapshot is not a non-empty regular file: {}",
+            snapshot.display()
+        ));
     }
 
-    BackupType::Full
+    if live_database_exists {
+        let canonical_live = tokio::fs::canonicalize(&live_database)
+            .await
+            .with_context(|| {
+                format!(
+                    "Failed to resolve live database {}",
+                    live_database.display()
+                )
+            })?;
+        let canonical_snapshot = tokio::fs::canonicalize(snapshot).await.with_context(|| {
+            format!("Failed to resolve database snapshot {}", snapshot.display())
+        })?;
+        if canonical_snapshot == canonical_live {
+            return Err(anyhow::anyhow!(
+                "The live SQLite file cannot be used as its own backup snapshot"
+            ));
+        }
+    }
+
+    Ok(Some(snapshot.to_path_buf()))
 }
 
 impl Default for BackupManager {
@@ -715,8 +893,13 @@ fn resolve_existing_backup_path(backup_dir: &Path, backup_id: &str) -> Result<Pa
     })?;
 
     let candidate = canonical_root.join(&safe_backup_id);
-    if !candidate.exists() {
-        return Err(anyhow::anyhow!("Backup not found: {}", safe_backup_id));
+    let candidate_metadata = std::fs::symlink_metadata(&candidate)
+        .with_context(|| format!("Backup not found: {}", safe_backup_id))?;
+    if !candidate_metadata.file_type().is_dir() {
+        return Err(anyhow::anyhow!(
+            "Backup is not a visible backup directory: {}",
+            safe_backup_id
+        ));
     }
 
     let canonical_candidate = candidate
@@ -801,6 +984,8 @@ async fn write_backup_manifest(
     components: &[BackupComponent],
 ) -> Result<()> {
     let manifest = BackupManifest {
+        format_version: BACKUP_MANIFEST_FORMAT_VERSION,
+        complete: true,
         id: backup_id.to_string(),
         timestamp,
         backup_type,
@@ -814,51 +999,194 @@ async fn write_backup_manifest(
     Ok(())
 }
 
-async fn read_backup_manifest(backup_path: &Path) -> Result<Option<BackupManifest>> {
+async fn read_backup_manifest(backup_path: &Path) -> Result<BackupManifest> {
     let manifest_path = backup_manifest_path(backup_path);
-    if !manifest_path.exists() {
-        return Ok(None);
+    let metadata = tokio::fs::symlink_metadata(&manifest_path)
+        .await
+        .with_context(|| {
+            format!(
+                "Backup manifest is missing or unreadable: {}",
+                manifest_path.display()
+            )
+        })?;
+    if !metadata.file_type().is_file() || metadata.len() == 0 {
+        return Err(anyhow::anyhow!(
+            "Backup manifest is not a non-empty regular file: {}",
+            manifest_path.display()
+        ));
     }
 
     let raw = tokio::fs::read_to_string(&manifest_path)
         .await
-        .with_context(|| format!("Failed to read backup manifest {}", manifest_path.display()))?;
-    let manifest: BackupManifest =
-        serde_json::from_str(&raw).context("Failed to parse backup manifest")?;
-    Ok(Some(manifest))
+        .with_context(|| {
+            format!(
+                "Backup manifest is missing or unreadable: {}",
+                manifest_path.display()
+            )
+        })?;
+    serde_json::from_str(&raw).context("Failed to parse backup manifest")
 }
 
-fn detect_backup_components(backup_path: &Path) -> Vec<BackupComponent> {
-    let mut components = Vec::new();
-    if backup_path.join("plainsong.db").exists() {
-        components.push(BackupComponent::Database);
+fn backup_type_id_prefix(backup_type: &BackupType) -> &'static str {
+    match backup_type {
+        BackupType::Full => "backup_",
+        BackupType::Incremental => "incremental_",
+        BackupType::Settings => "settings_",
     }
-    if backup_path.join("recordings").exists() {
-        components.push(BackupComponent::Recordings);
-    }
-    if backup_path.join(SETTINGS_BACKUP_FILENAME).exists() {
-        components.push(BackupComponent::Settings);
-    }
-    components
 }
 
-async fn restore_components_for_backup(backup_path: &Path) -> Result<Vec<BackupComponent>> {
-    if let Some(manifest) = read_backup_manifest(backup_path).await? {
-        if manifest.components.is_empty() {
-            return Err(anyhow::anyhow!(
-                "Backup manifest does not list any restorable components"
-            ));
-        }
-        return Ok(manifest.components);
+fn component_file_name(component: BackupComponent) -> &'static str {
+    match component {
+        BackupComponent::Database => "plainsong.db",
+        BackupComponent::Recordings => "recordings",
+        BackupComponent::Settings => SETTINGS_BACKUP_FILENAME,
     }
+}
 
-    let components = detect_backup_components(backup_path);
-    if components.is_empty() {
+fn component_path(backup_path: &Path, component: BackupComponent) -> PathBuf {
+    backup_path.join(component_file_name(component))
+}
+
+async fn validate_complete_backup(
+    backup_path: &Path,
+    expected_backup_id: Option<&str>,
+) -> Result<BackupManifest> {
+    let manifest = read_backup_manifest(backup_path).await?;
+    if manifest.format_version != BACKUP_MANIFEST_FORMAT_VERSION {
         return Err(anyhow::anyhow!(
-            "Backup does not contain any restorable components"
+            "Unsupported backup manifest format version {}",
+            manifest.format_version
         ));
     }
-    Ok(components)
+    if !manifest.complete {
+        return Err(anyhow::anyhow!("Backup manifest is not marked complete"));
+    }
+    let manifest_id = validate_backup_id(&manifest.id)?;
+    if let Some(expected) = expected_backup_id {
+        let expected = validate_backup_id(expected)?;
+        if manifest_id != expected {
+            return Err(anyhow::anyhow!(
+                "Backup manifest ID '{}' does not match directory ID '{}'",
+                manifest_id,
+                expected
+            ));
+        }
+    }
+    let expected_prefix = backup_type_id_prefix(&manifest.backup_type);
+    if !manifest_id.starts_with(expected_prefix) {
+        return Err(anyhow::anyhow!(
+            "Backup manifest type {:?} is inconsistent with generation ID '{}'",
+            manifest.backup_type,
+            manifest_id
+        ));
+    }
+    if manifest.components.is_empty() {
+        return Err(anyhow::anyhow!(
+            "Backup manifest does not list any components"
+        ));
+    }
+
+    let component_set: HashSet<BackupComponent> = manifest.components.iter().copied().collect();
+    if component_set.len() != manifest.components.len() {
+        return Err(anyhow::anyhow!(
+            "Backup manifest contains duplicate components"
+        ));
+    }
+    if manifest.backup_type == BackupType::Settings
+        && component_set != HashSet::from([BackupComponent::Settings])
+    {
+        return Err(anyhow::anyhow!(
+            "Settings snapshots must contain only the settings component"
+        ));
+    }
+    if matches!(
+        manifest.backup_type,
+        BackupType::Full | BackupType::Incremental
+    ) && !component_set.contains(&BackupComponent::Database)
+        && !component_set.contains(&BackupComponent::Recordings)
+    {
+        return Err(anyhow::anyhow!(
+            "Full and incremental backups must contain database or recording data"
+        ));
+    }
+
+    let mut allowed_root_entries = HashSet::from([BACKUP_MANIFEST_FILENAME]);
+    for component in &component_set {
+        allowed_root_entries.insert(component_file_name(*component));
+    }
+    let mut root_entries = tokio::fs::read_dir(backup_path)
+        .await
+        .with_context(|| format!("Failed to inspect backup {}", backup_path.display()))?;
+    while let Some(entry) = root_entries.next_entry().await? {
+        let entry_name = entry.file_name();
+        let entry_name = entry_name.to_str().ok_or_else(|| {
+            anyhow::anyhow!(
+                "Backup contains a root entry with an invalid file name: {}",
+                entry.path().display()
+            )
+        })?;
+        if !allowed_root_entries.contains(entry_name) {
+            return Err(anyhow::anyhow!(
+                "Backup contains undeclared root entry '{}'",
+                entry_name
+            ));
+        }
+    }
+
+    for component in [
+        BackupComponent::Database,
+        BackupComponent::Recordings,
+        BackupComponent::Settings,
+    ] {
+        let path = component_path(backup_path, component);
+        let metadata = tokio::fs::symlink_metadata(&path).await;
+        if !component_set.contains(&component) {
+            if metadata.is_ok() {
+                return Err(anyhow::anyhow!(
+                    "Backup contains undeclared {:?} component",
+                    component
+                ));
+            }
+            continue;
+        }
+
+        let metadata = metadata.with_context(|| {
+            format!(
+                "Backup manifest declares {:?}, but {} is missing",
+                component,
+                path.display()
+            )
+        })?;
+        match component {
+            BackupComponent::Database => {
+                if !metadata.file_type().is_file() || metadata.len() == 0 {
+                    return Err(anyhow::anyhow!(
+                        "Database component is not a non-empty regular file"
+                    ));
+                }
+            }
+            BackupComponent::Recordings => {
+                if !metadata.file_type().is_dir() {
+                    return Err(anyhow::anyhow!("Recordings component is not a directory"));
+                }
+                validate_directory_tree_without_symlinks(&path).await?;
+            }
+            BackupComponent::Settings => {
+                if !metadata.file_type().is_file() || metadata.len() == 0 {
+                    return Err(anyhow::anyhow!(
+                        "Settings component is not a non-empty regular file"
+                    ));
+                }
+                let raw = tokio::fs::read(&path).await.with_context(|| {
+                    format!("Failed to read settings component {}", path.display())
+                })?;
+                serde_json::from_slice::<crate::settings::Settings>(&raw)
+                    .context("Settings component is not a valid settings document")?;
+            }
+        }
+    }
+
+    Ok(manifest)
 }
 
 fn restore_artifact_path(
@@ -1060,17 +1388,20 @@ async fn restore_backup_into_targets(
     backup_path: &Path,
     data_dir: &Path,
     settings_path: &Path,
+    components: &[BackupComponent],
 ) -> Result<()> {
-    let components = restore_components_for_backup(backup_path).await?;
     let transaction_id = format!("{}-{}", Utc::now().timestamp_millis(), std::process::id());
     let units = build_restore_units(
         backup_path,
         data_dir,
         settings_path,
-        &components,
+        components,
         &transaction_id,
     );
-    stage_restore_units(&units).await?;
+    if let Err(error) = stage_restore_units(&units).await {
+        cleanup_restore_artifacts(&units).await;
+        return Err(error);
+    }
 
     if let Err(err) = commit_restore_units(&units).await {
         cleanup_restore_artifacts(&units).await;
@@ -1080,21 +1411,138 @@ async fn restore_backup_into_targets(
     Ok(())
 }
 
-/// Copy directory recursively
+async fn validate_directory_tree_without_symlinks(path: &Path) -> Result<()> {
+    let metadata = tokio::fs::symlink_metadata(path)
+        .await
+        .with_context(|| format!("Failed to inspect directory {}", path.display()))?;
+    if metadata.file_type().is_symlink() || !metadata.file_type().is_dir() {
+        return Err(anyhow::anyhow!(
+            "Backup directory tree contains a symlink or non-directory root: {}",
+            path.display()
+        ));
+    }
+
+    let mut entries = tokio::fs::read_dir(path)
+        .await
+        .with_context(|| format!("Failed to inspect directory {}", path.display()))?;
+    while let Some(entry) = entries.next_entry().await? {
+        let entry_path = entry.path();
+        let metadata = tokio::fs::symlink_metadata(&entry_path)
+            .await
+            .with_context(|| format!("Failed to inspect {}", entry_path.display()))?;
+        if metadata.file_type().is_symlink() {
+            return Err(anyhow::anyhow!(
+                "Backup directory tree contains a symlink: {}",
+                entry_path.display()
+            ));
+        }
+        if metadata.file_type().is_dir() {
+            Box::pin(validate_directory_tree_without_symlinks(&entry_path)).await?;
+        } else if !metadata.file_type().is_file() {
+            return Err(anyhow::anyhow!(
+                "Backup directory tree contains an unsupported entry: {}",
+                entry_path.display()
+            ));
+        }
+    }
+    Ok(())
+}
+
+/// Copy a directory tree without following symlinks.
 async fn copy_dir_recursive(src: &Path, dst: &Path) -> Result<()> {
+    let source_metadata = tokio::fs::symlink_metadata(src)
+        .await
+        .with_context(|| format!("Failed to inspect source directory {}", src.display()))?;
+    if source_metadata.file_type().is_symlink() || !source_metadata.file_type().is_dir() {
+        return Err(anyhow::anyhow!(
+            "Refusing to copy a symlink or non-directory source: {}",
+            src.display()
+        ));
+    }
     tokio::fs::create_dir_all(dst).await?;
     let mut entries = tokio::fs::read_dir(src).await?;
     while let Some(entry) = entries.next_entry().await? {
         let path = entry.path();
         let file_name = entry.file_name();
         let dest_path = dst.join(&file_name);
-        if path.is_dir() {
+        let metadata = tokio::fs::symlink_metadata(&path)
+            .await
+            .with_context(|| format!("Failed to inspect source entry {}", path.display()))?;
+        if metadata.file_type().is_symlink() {
+            return Err(anyhow::anyhow!(
+                "Refusing to copy symlink from backup directory tree: {}",
+                path.display()
+            ));
+        }
+        if metadata.file_type().is_dir() {
             Box::pin(copy_dir_recursive(&path, &dest_path)).await?;
-        } else {
+        } else if metadata.file_type().is_file() {
             tokio::fs::copy(&path, dest_path).await?;
+        } else {
+            return Err(anyhow::anyhow!(
+                "Refusing to copy unsupported directory entry: {}",
+                path.display()
+            ));
         }
     }
     Ok(())
+}
+
+async fn sync_backup_tree(path: &Path) -> Result<()> {
+    let root = path.to_path_buf();
+    tokio::task::spawn_blocking(move || -> Result<()> {
+        let mut directories = Vec::new();
+        for entry in walkdir::WalkDir::new(&root) {
+            let entry = entry.with_context(|| {
+                format!("Failed to inspect backup generation {}", root.display())
+            })?;
+            if entry.file_type().is_file() {
+                std::fs::File::open(entry.path())
+                    .with_context(|| format!("Failed to open {} for sync", entry.path().display()))?
+                    .sync_all()
+                    .with_context(|| format!("Failed to sync {}", entry.path().display()))?;
+            } else if entry.file_type().is_dir() {
+                directories.push(entry.path().to_path_buf());
+            }
+        }
+
+        #[cfg(unix)]
+        for directory in directories.into_iter().rev() {
+            std::fs::File::open(&directory)
+                .with_context(|| format!("Failed to open {} for sync", directory.display()))?
+                .sync_all()
+                .with_context(|| format!("Failed to sync {}", directory.display()))?;
+        }
+
+        Ok(())
+    })
+    .await
+    .context("Failed to join backup sync task")??;
+    Ok(())
+}
+
+async fn sync_directory_best_effort(path: &Path) {
+    #[cfg(unix)]
+    {
+        let directory = path.to_path_buf();
+        let sync_result = tokio::task::spawn_blocking(move || {
+            std::fs::File::open(&directory).and_then(|file| file.sync_all())
+        })
+        .await;
+        match sync_result {
+            Ok(Ok(())) => {}
+            Ok(Err(error)) => tracing::warn!(
+                "Failed to sync backup directory {} after publication: {}",
+                path.display(),
+                error
+            ),
+            Err(error) => tracing::warn!(
+                "Failed to join backup directory sync for {}: {}",
+                path.display(),
+                error
+            ),
+        }
+    }
 }
 
 async fn count_dir_items(path: &Path) -> Result<u32> {
@@ -1447,28 +1895,458 @@ mod tests {
         assert_eq!(value, "Plainsong/Backups/2026");
     }
 
+    #[cfg(unix)]
     #[test]
-    fn infer_backup_type_detects_settings_only_snapshots() {
-        let dir = unique_test_dir("settings");
-        fs::create_dir_all(&dir).expect("create test dir");
-        fs::write(dir.join(SETTINGS_BACKUP_FILENAME), "{}").expect("write settings backup");
+    fn recursive_copy_rejects_nested_file_and_directory_symlinks() {
+        use std::os::unix::fs::symlink;
 
-        let inferred = infer_backup_type(&dir);
-        let _ = fs::remove_dir_all(&dir);
+        let runtime = Runtime::new().expect("create tokio runtime");
+        runtime.block_on(async {
+            let root = unique_test_dir("nested-symlinks");
+            let source = root.join("source");
+            let destination = root.join("destination");
+            let external_file = root.join("private.txt");
+            let external_directory = root.join("private-directory");
+            fs::create_dir_all(source.join("nested")).expect("create source");
+            fs::create_dir_all(&external_directory).expect("create external directory");
+            fs::write(&external_file, "private").expect("write external file");
+            symlink(&external_file, source.join("nested/file-link"))
+                .expect("create nested file symlink");
 
-        assert!(matches!(inferred, BackupType::Settings));
+            let file_error = copy_dir_recursive(&source, &destination)
+                .await
+                .expect_err("nested file symlink must be rejected");
+            assert!(file_error.to_string().contains("symlink"));
+
+            fs::remove_file(source.join("nested/file-link")).expect("remove file symlink");
+            symlink(&external_directory, source.join("nested/directory-link"))
+                .expect("create nested directory symlink");
+            let directory_error = copy_dir_recursive(&source, &destination)
+                .await
+                .expect_err("nested directory symlink must be rejected");
+            assert!(directory_error.to_string().contains("symlink"));
+
+            let _ = fs::remove_dir_all(&root);
+        });
+    }
+
+    fn manager_for(backup_dir: PathBuf, max_backups: u32) -> BackupManager {
+        BackupManager::new(BackupConfig {
+            backup_dir: Some(backup_dir),
+            max_backups,
+            ..BackupConfig::default()
+        })
+    }
+
+    fn write_settings(path: &Path, theme: &str) {
+        let settings = crate::settings::Settings {
+            theme: theme.to_string(),
+            ..crate::settings::Settings::default()
+        };
+        let json = serde_json::to_string_pretty(&settings).expect("serialize settings");
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent).expect("create settings parent");
+        }
+        fs::write(path, json).expect("write settings");
+    }
+
+    fn directory_entry_names(path: &Path) -> Vec<String> {
+        let mut names: Vec<String> = fs::read_dir(path)
+            .expect("read directory")
+            .map(|entry| {
+                entry
+                    .expect("read entry")
+                    .file_name()
+                    .to_string_lossy()
+                    .to_string()
+            })
+            .collect();
+        names.sort();
+        names
     }
 
     #[test]
-    fn infer_backup_type_prefers_full_when_data_files_exist() {
-        let dir = unique_test_dir("full");
-        fs::create_dir_all(dir.join("recordings")).expect("create recordings dir");
-        fs::write(dir.join(SETTINGS_BACKUP_FILENAME), "{}").expect("write settings backup");
+    fn backup_config_disables_legacy_scheduler_fields() {
+        let manager = BackupManager::new(BackupConfig {
+            enabled: true,
+            max_backups: 0,
+            ..BackupConfig::default()
+        });
+        assert!(!manager.config().enabled);
+        assert_eq!(manager.config().max_backups, 1);
+    }
 
-        let inferred = infer_backup_type(&dir);
-        let _ = fs::remove_dir_all(&dir);
+    #[test]
+    fn full_backup_rejects_live_database_without_snapshot_before_publication() {
+        let runtime = Runtime::new().expect("create tokio runtime");
+        runtime.block_on(async {
+            let root = unique_test_dir("snapshot-required");
+            let data_dir = root.join("data");
+            let backup_dir = root.join("backups");
+            let settings_path = root.join("config/settings.json");
+            fs::create_dir_all(&data_dir).expect("create data dir");
+            fs::write(data_dir.join("plainsong.db"), "live-db").expect("write live database");
+            write_settings(&settings_path, "dark");
 
-        assert!(matches!(inferred, BackupType::Full));
+            let manager = manager_for(backup_dir.clone(), 7);
+            let error = manager
+                .create_backup_with_sources(&data_dir, &settings_path, BackupType::Full, None)
+                .await
+                .expect_err("full backup must require a snapshot");
+            assert!(error.to_string().contains("no VACUUM INTO snapshot"));
+            assert!(directory_entry_names(&backup_dir).is_empty());
+
+            let _ = fs::remove_dir_all(&root);
+        });
+    }
+
+    #[test]
+    fn full_backup_rejects_the_live_database_as_snapshot_source() {
+        let runtime = Runtime::new().expect("create tokio runtime");
+        runtime.block_on(async {
+            let root = unique_test_dir("live-db-fallback");
+            let data_dir = root.join("data");
+            let backup_dir = root.join("backups");
+            let settings_path = root.join("config/settings.json");
+            fs::create_dir_all(&data_dir).expect("create data dir");
+            let live_database = data_dir.join("plainsong.db");
+            fs::write(&live_database, "live-db").expect("write live database");
+            write_settings(&settings_path, "dark");
+
+            let manager = manager_for(backup_dir.clone(), 7);
+            let error = manager
+                .create_backup_with_sources(
+                    &data_dir,
+                    &settings_path,
+                    BackupType::Full,
+                    Some(&live_database),
+                )
+                .await
+                .expect_err("live database must not be copied as its own snapshot");
+            assert!(error.to_string().contains("live SQLite file"));
+            assert!(directory_entry_names(&backup_dir).is_empty());
+
+            let _ = fs::remove_dir_all(&root);
+        });
+    }
+
+    #[test]
+    fn invalid_settings_generation_is_never_published_and_only_partial_is_removed() {
+        let runtime = Runtime::new().expect("create tokio runtime");
+        runtime.block_on(async {
+            let root = unique_test_dir("atomic-failure");
+            let data_dir = root.join("data");
+            let backup_dir = root.join("backups");
+            let settings_path = root.join("config/settings.json");
+            let existing_id = "settings_20260409_115959_deadbeef";
+            let existing = backup_dir.join(existing_id);
+            fs::create_dir_all(&existing).expect("create existing generation");
+            write_settings(&existing.join(SETTINGS_BACKUP_FILENAME), "light");
+            write_backup_manifest(
+                &existing,
+                existing_id,
+                Utc::now(),
+                BackupType::Settings,
+                &[BackupComponent::Settings],
+            )
+            .await
+            .expect("write existing manifest");
+            fs::create_dir_all(&data_dir).expect("create data dir");
+            fs::create_dir_all(settings_path.parent().expect("settings parent"))
+                .expect("create config dir");
+            fs::write(&settings_path, "not-json").expect("write invalid settings");
+
+            let manager = manager_for(backup_dir.clone(), 7);
+            let error = manager
+                .create_backup_with_sources(&data_dir, &settings_path, BackupType::Settings, None)
+                .await
+                .expect_err("invalid settings must fail manifest validation");
+            assert!(error.to_string().contains("valid settings document"));
+            assert_eq!(
+                directory_entry_names(&backup_dir),
+                vec![existing_id.to_string()]
+            );
+            assert!(validate_complete_backup(&existing, Some(existing_id))
+                .await
+                .is_ok());
+
+            let _ = fs::remove_dir_all(&root);
+        });
+    }
+
+    #[test]
+    fn settings_snapshot_is_atomically_published_with_only_settings() {
+        let runtime = Runtime::new().expect("create tokio runtime");
+        runtime.block_on(async {
+            let root = unique_test_dir("settings-publication");
+            let data_dir = root.join("data");
+            let backup_dir = root.join("backups");
+            let settings_path = root.join("config/settings.json");
+            fs::create_dir_all(&data_dir).expect("create data dir");
+            fs::write(data_dir.join("plainsong.db"), "live-db").expect("write live database");
+            fs::create_dir_all(data_dir.join("recordings")).expect("create recordings");
+            fs::write(data_dir.join("recordings/meeting.wav"), "audio").expect("write recording");
+            write_settings(&settings_path, "dark");
+
+            let manager = manager_for(backup_dir.clone(), 7);
+            let info = manager
+                .create_backup_with_sources(&data_dir, &settings_path, BackupType::Settings, None)
+                .await
+                .expect("create settings snapshot");
+            let generation = backup_dir.join(&info.id);
+            assert!(generation.is_dir());
+            assert!(generation.join(SETTINGS_BACKUP_FILENAME).is_file());
+            assert!(!generation.join("plainsong.db").exists());
+            assert!(!generation.join("recordings").exists());
+            assert!(directory_entry_names(&backup_dir)
+                .iter()
+                .all(|name| !name.starts_with('.')));
+
+            let manifest = validate_complete_backup(&generation, Some(&info.id))
+                .await
+                .expect("validate published generation");
+            assert_eq!(manifest.backup_type, BackupType::Settings);
+            assert_eq!(manifest.components, vec![BackupComponent::Settings]);
+            let listed = manager.list_backups().await.expect("list backups");
+            assert_eq!(listed.len(), 1);
+            assert_eq!(listed[0].id, info.id);
+
+            let _ = fs::remove_dir_all(&root);
+        });
+    }
+
+    #[test]
+    fn full_and_settings_generations_remain_distinguishable() {
+        let runtime = Runtime::new().expect("create tokio runtime");
+        runtime.block_on(async {
+            let root = unique_test_dir("generation-types");
+            let data_dir = root.join("data");
+            let backup_dir = root.join("backups");
+            let settings_path = root.join("config/settings.json");
+            let snapshot_path = root.join("plainsong-snapshot.db");
+            fs::create_dir_all(&data_dir).expect("create data dir");
+            fs::write(data_dir.join("plainsong.db"), "live-db").expect("write live database");
+            fs::write(&snapshot_path, "snapshot-db").expect("write database snapshot");
+            write_settings(&settings_path, "dark");
+
+            let manager = manager_for(backup_dir, 7);
+            let settings_info = manager
+                .create_backup_with_sources(&data_dir, &settings_path, BackupType::Settings, None)
+                .await
+                .expect("create settings snapshot");
+            let full_info = manager
+                .create_backup_with_sources(
+                    &data_dir,
+                    &settings_path,
+                    BackupType::Full,
+                    Some(&snapshot_path),
+                )
+                .await
+                .expect("create full backup");
+
+            assert!(settings_info.id.starts_with("settings_"));
+            assert_eq!(settings_info.backup_type, BackupType::Settings);
+            assert!(full_info.id.starts_with("backup_"));
+            assert_eq!(full_info.backup_type, BackupType::Full);
+
+            let listed = manager.list_backups().await.expect("list backups");
+            assert_eq!(listed.len(), 2);
+            assert_eq!(
+                listed
+                    .iter()
+                    .find(|backup| backup.id == settings_info.id)
+                    .map(|backup| &backup.backup_type),
+                Some(&BackupType::Settings)
+            );
+            assert_eq!(
+                listed
+                    .iter()
+                    .find(|backup| backup.id == full_info.id)
+                    .map(|backup| &backup.backup_type),
+                Some(&BackupType::Full)
+            );
+
+            let _ = fs::remove_dir_all(&root);
+        });
+    }
+
+    #[test]
+    fn backup_creation_never_uploads_without_an_explicit_sync_command() {
+        let runtime = Runtime::new().expect("create tokio runtime");
+        runtime.block_on(async {
+            let root = unique_test_dir("manual-cloud-sync");
+            let data_dir = root.join("data");
+            let backup_dir = root.join("backups");
+            let settings_path = root.join("config/settings.json");
+            fs::create_dir_all(&data_dir).expect("create data dir");
+            write_settings(&settings_path, "dark");
+
+            let manager = BackupManager::new(BackupConfig {
+                backup_dir: Some(backup_dir.clone()),
+                cloud_sync: true,
+                cloud_provider: None,
+                ..BackupConfig::default()
+            });
+            let info = manager
+                .create_backup_with_sources(&data_dir, &settings_path, BackupType::Settings, None)
+                .await
+                .expect("manual backup creation must not attempt a cloud upload");
+            assert!(backup_dir.join(info.id).is_dir());
+
+            let _ = fs::remove_dir_all(&root);
+        });
+    }
+
+    #[test]
+    fn manual_backup_publication_applies_max_backup_retention() {
+        let runtime = Runtime::new().expect("create tokio runtime");
+        runtime.block_on(async {
+            let root = unique_test_dir("manual-retention");
+            let data_dir = root.join("data");
+            let backup_dir = root.join("backups");
+            let settings_path = root.join("config/settings.json");
+            fs::create_dir_all(&data_dir).expect("create data dir");
+            write_settings(&settings_path, "light");
+
+            let manager = manager_for(backup_dir.clone(), 1);
+            let first = manager
+                .create_backup_with_sources(&data_dir, &settings_path, BackupType::Settings, None)
+                .await
+                .expect("create first manual snapshot");
+            write_settings(&settings_path, "dark");
+            let second = manager
+                .create_backup_with_sources(&data_dir, &settings_path, BackupType::Settings, None)
+                .await
+                .expect("create second manual snapshot");
+
+            let listed = manager.list_backups().await.expect("list retained backups");
+            assert_eq!(listed.len(), 1);
+            assert_eq!(listed[0].id, second.id);
+            assert!(!backup_dir.join(first.id).exists());
+
+            let _ = fs::remove_dir_all(&root);
+        });
+    }
+
+    #[test]
+    fn listing_ignores_hidden_partials_and_invalid_visible_generations() {
+        let runtime = Runtime::new().expect("create tokio runtime");
+        runtime.block_on(async {
+            let root = unique_test_dir("listing-validation");
+            let backup_dir = root.join("backups");
+            let hidden = backup_dir.join(".backup_20260409_120000.partial-test");
+            let missing_manifest = backup_dir.join("backup_20260409_120001_deadbeef");
+            let missing_component = backup_dir.join("settings_20260409_120002_deadbeef");
+            let incomplete_manifest = backup_dir.join("settings_20260409_120003_deadbeef");
+            let mismatched_type = backup_dir.join("backup_20260409_120004_deadbeef");
+            let undeclared_entry = backup_dir.join("settings_20260409_120005_deadbeef");
+            fs::create_dir_all(&hidden).expect("create hidden partial");
+            fs::create_dir_all(&missing_manifest).expect("create invalid backup");
+            fs::create_dir_all(&missing_component).expect("create missing component backup");
+            fs::create_dir_all(&incomplete_manifest).expect("create incomplete backup");
+            fs::create_dir_all(&mismatched_type).expect("create type mismatch backup");
+            fs::create_dir_all(&undeclared_entry).expect("create undeclared entry backup");
+            write_backup_manifest(
+                &missing_component,
+                "settings_20260409_120002_deadbeef",
+                Utc::now(),
+                BackupType::Settings,
+                &[BackupComponent::Settings],
+            )
+            .await
+            .expect("write manifest");
+            write_settings(&incomplete_manifest.join(SETTINGS_BACKUP_FILENAME), "dark");
+            let incomplete = BackupManifest {
+                format_version: BACKUP_MANIFEST_FORMAT_VERSION,
+                complete: false,
+                id: "settings_20260409_120003_deadbeef".to_string(),
+                timestamp: Utc::now(),
+                backup_type: BackupType::Settings,
+                components: vec![BackupComponent::Settings],
+            };
+            fs::write(
+                backup_manifest_path(&incomplete_manifest),
+                serde_json::to_string_pretty(&incomplete).expect("serialize incomplete manifest"),
+            )
+            .expect("write incomplete manifest");
+
+            write_settings(&mismatched_type.join(SETTINGS_BACKUP_FILENAME), "dark");
+            write_backup_manifest(
+                &mismatched_type,
+                "backup_20260409_120004_deadbeef",
+                Utc::now(),
+                BackupType::Settings,
+                &[BackupComponent::Settings],
+            )
+            .await
+            .expect("write mismatched manifest");
+
+            write_settings(&undeclared_entry.join(SETTINGS_BACKUP_FILENAME), "dark");
+            fs::write(undeclared_entry.join("unexpected.json"), "{}").expect("write extra file");
+            write_backup_manifest(
+                &undeclared_entry,
+                "settings_20260409_120005_deadbeef",
+                Utc::now(),
+                BackupType::Settings,
+                &[BackupComponent::Settings],
+            )
+            .await
+            .expect("write manifest with undeclared entry");
+
+            let manager = manager_for(backup_dir, 7);
+            assert!(manager
+                .list_backups()
+                .await
+                .expect("list backups")
+                .is_empty());
+
+            let _ = fs::remove_dir_all(&root);
+        });
+    }
+
+    #[test]
+    fn settings_restore_copies_only_settings_and_reports_runtime_scope() {
+        let runtime = Runtime::new().expect("create tokio runtime");
+        runtime.block_on(async {
+            let root = unique_test_dir("settings-restore");
+            let data_dir = root.join("data");
+            let backup_dir = root.join("backups");
+            let settings_path = root.join("config/settings.json");
+            fs::create_dir_all(&data_dir).expect("create data dir");
+            fs::write(data_dir.join("plainsong.db"), "live-db").expect("write live database");
+            write_settings(&settings_path, "dark");
+
+            let manager = manager_for(backup_dir, 7);
+            let info = manager
+                .create_backup_with_sources(&data_dir, &settings_path, BackupType::Settings, None)
+                .await
+                .expect("create settings snapshot");
+            write_settings(&settings_path, "light");
+
+            let outcome = manager
+                .restore_backup_to_targets(&info.id, &data_dir, &settings_path)
+                .await
+                .expect("restore settings snapshot");
+            assert_eq!(
+                outcome,
+                BackupRestoreOutcome {
+                    restored_database: false,
+                    restored_recordings: false,
+                    restored_settings: true,
+                }
+            );
+            assert_eq!(
+                fs::read_to_string(data_dir.join("plainsong.db")).expect("read live database"),
+                "live-db"
+            );
+            let restored: crate::settings::Settings = serde_json::from_str(
+                &fs::read_to_string(&settings_path).expect("read restored settings"),
+            )
+            .expect("parse restored settings");
+            assert_eq!(restored.theme, "dark");
+
+            let _ = fs::remove_dir_all(&root);
+        });
     }
 
     #[test]
@@ -1527,15 +2405,21 @@ mod tests {
     }
 
     #[test]
-    fn restore_components_use_manifest_when_present() {
+    fn restore_rejects_manifest_with_missing_declared_component() {
         let runtime = Runtime::new().expect("create tokio runtime");
         runtime.block_on(async {
-            let backup_dir = unique_test_dir("manifest");
-            fs::create_dir_all(&backup_dir).expect("create backup dir");
-            fs::write(backup_dir.join("plainsong.db"), "db").expect("write db");
+            let root = unique_test_dir("restore-manifest-validation");
+            let backup_root = root.join("backups");
+            let backup_id = "settings_20260409_120000_deadbeef";
+            let generation = backup_root.join(backup_id);
+            let data_dir = root.join("data");
+            let settings_path = root.join("config/settings.json");
+            fs::create_dir_all(&generation).expect("create generation");
+            fs::create_dir_all(&data_dir).expect("create data dir");
+            write_settings(&settings_path, "light");
             write_backup_manifest(
-                &backup_dir,
-                "backup_20260409_120000",
+                &generation,
+                backup_id,
                 Utc::now(),
                 BackupType::Settings,
                 &[BackupComponent::Settings],
@@ -1543,12 +2427,74 @@ mod tests {
             .await
             .expect("write manifest");
 
-            let components = restore_components_for_backup(&backup_dir)
+            let manager = manager_for(backup_root, 7);
+            let error = manager
+                .restore_backup_to_targets(backup_id, &data_dir, &settings_path)
                 .await
-                .expect("read restore components");
-            assert_eq!(components, vec![BackupComponent::Settings]);
+                .expect_err("missing component must block restore");
+            assert!(error.to_string().contains("is missing"));
+            let live: crate::settings::Settings = serde_json::from_str(
+                &fs::read_to_string(&settings_path).expect("read live settings"),
+            )
+            .expect("parse live settings");
+            assert_eq!(live.theme, "light");
 
-            let _ = fs::remove_dir_all(&backup_dir);
+            let _ = fs::remove_dir_all(&root);
+        });
+    }
+
+    #[test]
+    fn restore_rejects_missing_and_type_inconsistent_manifests() {
+        let runtime = Runtime::new().expect("create tokio runtime");
+        runtime.block_on(async {
+            let root = unique_test_dir("restore-manifest-presence-and-type");
+            let backup_root = root.join("backups");
+            let missing_id = "settings_20260409_120010_deadbeef";
+            let inconsistent_id = "backup_20260409_120011_deadbeef";
+            let missing_generation = backup_root.join(missing_id);
+            let inconsistent_generation = backup_root.join(inconsistent_id);
+            let data_dir = root.join("data");
+            let settings_path = root.join("config/settings.json");
+            fs::create_dir_all(&missing_generation).expect("create missing manifest generation");
+            fs::create_dir_all(&inconsistent_generation)
+                .expect("create inconsistent manifest generation");
+            fs::create_dir_all(&data_dir).expect("create data dir");
+            write_settings(&settings_path, "light");
+            write_settings(&missing_generation.join(SETTINGS_BACKUP_FILENAME), "dark");
+            write_settings(
+                &inconsistent_generation.join(SETTINGS_BACKUP_FILENAME),
+                "dark",
+            );
+            write_backup_manifest(
+                &inconsistent_generation,
+                inconsistent_id,
+                Utc::now(),
+                BackupType::Settings,
+                &[BackupComponent::Settings],
+            )
+            .await
+            .expect("write inconsistent manifest");
+
+            let manager = manager_for(backup_root, 7);
+            let missing_error = manager
+                .restore_backup_to_targets(missing_id, &data_dir, &settings_path)
+                .await
+                .expect_err("missing manifest must block restore");
+            assert!(missing_error.to_string().contains("manifest"));
+
+            let inconsistent_error = manager
+                .restore_backup_to_targets(inconsistent_id, &data_dir, &settings_path)
+                .await
+                .expect_err("type mismatch must block restore");
+            assert!(inconsistent_error.to_string().contains("inconsistent"));
+
+            let live: crate::settings::Settings = serde_json::from_str(
+                &fs::read_to_string(&settings_path).expect("read live settings"),
+            )
+            .expect("parse live settings");
+            assert_eq!(live.theme, "light");
+
+            let _ = fs::remove_dir_all(&root);
         });
     }
 

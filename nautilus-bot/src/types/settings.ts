@@ -180,20 +180,10 @@ interface UpdateSettings {
 }
 
 interface KeyboardShortcuts {
-  // toggleRecording/quickExport/focusSearch are not fields on the Rust
-  // KeyboardShortcuts struct (rust-sidecar/src/settings.rs) -- they are
-  // stripped from settings.json on load (see REMOVED_SETTINGS_KEYS) and
-  // never present on a real `get_settings` response. The Settings UI still
-  // renders them as "Coming soon" (wired: false) placeholders, so the keys
-  // stay here, but as optional -- required non-optional strings the backend
-  // never sends is a real type-safety lie, not just documentation.
-  toggleRecording?: string;
   toggleDictation: string;
   toggleDictationAlternates?: string[];
   openWindow: string;
   // Recovery bindings for the last dictation result. Empty string = unbound.
   repasteLastDictation?: string;
   recopyLastDictation?: string;
-  quickExport?: string;
-  focusSearch?: string;
 }

@@ -79,6 +79,12 @@ type RecordingStatusChangedEvent = {
   consentPromptShown?: boolean | null;
 };
 
+type TranscriptUpdatedEvent = {
+  recordingId: string;
+  reason: "diarization";
+  updatedAt: string;
+};
+
 type UseRecordingDetailOptions = {
   isOpen: boolean;
   onRecordingLoaded?: (recording: Recording) => void;
@@ -97,6 +103,9 @@ export function useRecordingDetail({
   const [isLoadingDetail, setIsLoadingDetail] = useState(false);
   const [detailError, setDetailError] = useState<string | null>(null);
   const detailRequestGuard = useScopedRequestGuard<string | null>();
+  const transcriptRequestGuard = useScopedRequestGuard<string | null>();
+  const transcriptDetailsRequestGuard = useScopedRequestGuard<string | null>();
+  const speakerNamesRequestGuard = useScopedRequestGuard<string | null>();
   const selectedRecordingId = selectedRecording?.id ?? null;
 
   const applyLatestRecording = useCallback(
@@ -156,31 +165,60 @@ export function useRecordingDetail({
 
   const refreshTranscript = useCallback(
     async (recordingId: string) => {
+      const requestToken = transcriptRequestGuard.beginRequest(recordingId);
       const transcript = await fetchTranscript(recordingId);
-      if (detailRequestGuard.activeScopeRef.current !== recordingId) {
+      if (
+        detailRequestGuard.activeScopeRef.current !== recordingId ||
+        !transcriptRequestGuard.isCurrent(requestToken)
+      ) {
         return null;
       }
       setSelectedTranscript(transcript);
       return transcript;
     },
-    [detailRequestGuard, fetchTranscript]
+    [detailRequestGuard, fetchTranscript, transcriptRequestGuard]
   );
 
   const refreshTranscriptDetails = useCallback(
     async (recordingId: string) => {
+      const requestToken = transcriptDetailsRequestGuard.beginRequest(recordingId);
       const details = await fetchTranscriptDetails(recordingId);
-      if (detailRequestGuard.activeScopeRef.current !== recordingId) {
+      if (
+        detailRequestGuard.activeScopeRef.current !== recordingId ||
+        !transcriptDetailsRequestGuard.isCurrent(requestToken)
+      ) {
         return null;
       }
       setSelectedTranscriptDetails(details);
       return details;
     },
-    [detailRequestGuard, fetchTranscriptDetails]
+    [detailRequestGuard, fetchTranscriptDetails, transcriptDetailsRequestGuard]
+  );
+
+  const refreshSpeakerNames = useCallback(
+    async (recordingId: string) => {
+      const requestToken = speakerNamesRequestGuard.beginRequest(recordingId);
+      const names = await fetchSpeakerNames(recordingId);
+      if (
+        detailRequestGuard.activeScopeRef.current !== recordingId ||
+        !speakerNamesRequestGuard.isCurrent(requestToken)
+      ) {
+        return null;
+      }
+      setSpeakerNames(names);
+      return names;
+    },
+    [detailRequestGuard, fetchSpeakerNames, speakerNamesRequestGuard]
   );
 
   const loadRecordingDetail = useCallback(
     async (recording: Recording) => {
       const requestToken = detailRequestGuard.beginRequest(recording.id);
+      const transcriptRequestToken = transcriptRequestGuard.beginRequest(recording.id);
+      const transcriptDetailsRequestToken =
+        transcriptDetailsRequestGuard.beginRequest(recording.id);
+      const speakerNamesRequestToken =
+        speakerNamesRequestGuard.beginRequest(recording.id);
       setSelectedRecording(recording);
       setIsLoadingDetail(true);
       setDetailError(null);
@@ -217,18 +255,24 @@ export function useRecordingDetail({
           hadAnyFailure = true;
         }
 
-        if (transcriptResult.status === "fulfilled") {
-          setSelectedTranscript(transcriptResult.value);
-        } else {
-          hadAnyFailure = true;
-          setSelectedTranscript(null);
+        if (transcriptRequestGuard.isCurrent(transcriptRequestToken)) {
+          if (transcriptResult.status === "fulfilled") {
+            setSelectedTranscript(transcriptResult.value);
+          } else {
+            hadAnyFailure = true;
+            setSelectedTranscript(null);
+          }
         }
 
-        if (transcriptDetailsResult.status === "fulfilled") {
-          setSelectedTranscriptDetails(transcriptDetailsResult.value);
-        } else {
-          hadAnyFailure = true;
-          setSelectedTranscriptDetails(null);
+        if (
+          transcriptDetailsRequestGuard.isCurrent(transcriptDetailsRequestToken)
+        ) {
+          if (transcriptDetailsResult.status === "fulfilled") {
+            setSelectedTranscriptDetails(transcriptDetailsResult.value);
+          } else {
+            hadAnyFailure = true;
+            setSelectedTranscriptDetails(null);
+          }
         }
 
         if (waveformResult.status === "fulfilled") {
@@ -238,11 +282,13 @@ export function useRecordingDetail({
           setWaveformData([]);
         }
 
-        if (speakersResult.status === "fulfilled") {
-          setSpeakerNames(speakersResult.value);
-        } else {
-          hadAnyFailure = true;
-          setSpeakerNames({});
+        if (speakerNamesRequestGuard.isCurrent(speakerNamesRequestToken)) {
+          if (speakersResult.status === "fulfilled") {
+            setSpeakerNames(speakersResult.value);
+          } else {
+            hadAnyFailure = true;
+            setSpeakerNames({});
+          }
         }
 
         if (hadAnyFailure) {
@@ -271,11 +317,17 @@ export function useRecordingDetail({
       fetchTranscript,
       fetchTranscriptDetails,
       fetchWaveform,
+      speakerNamesRequestGuard,
+      transcriptDetailsRequestGuard,
+      transcriptRequestGuard,
     ]
   );
 
   const clearRecordingDetail = useCallback(() => {
     detailRequestGuard.setScope(null);
+    transcriptRequestGuard.setScope(null);
+    transcriptDetailsRequestGuard.setScope(null);
+    speakerNamesRequestGuard.setScope(null);
     setSelectedRecording(null);
     setSelectedTranscript(null);
     setSelectedTranscriptDetails(null);
@@ -283,7 +335,12 @@ export function useRecordingDetail({
     setWaveformData([]);
     setIsLoadingDetail(false);
     setDetailError(null);
-  }, [detailRequestGuard]);
+  }, [
+    detailRequestGuard,
+    speakerNamesRequestGuard,
+    transcriptDetailsRequestGuard,
+    transcriptRequestGuard,
+  ]);
 
   useEffect(() => {
     if (!isOpen || !selectedRecordingId) {
@@ -293,6 +350,7 @@ export function useRecordingDetail({
     let unlistenAnalysis: (() => void) | undefined;
     let unlistenTitle: (() => void) | undefined;
     let unlistenStatus: (() => void) | undefined;
+    let unlistenTranscriptUpdated: (() => void) | undefined;
 
     const setup = async () => {
       unlistenAnalysis = await listen<{ recordingId: string }>(
@@ -318,6 +376,19 @@ export function useRecordingDetail({
           void refreshTranscriptDetails(selectedRecordingId);
         }
       });
+
+      unlistenTranscriptUpdated = await listen<TranscriptUpdatedEvent>(
+        "transcript-updated",
+        (event) => {
+          if (event.payload?.recordingId !== selectedRecordingId) {
+            return;
+          }
+
+          void refreshTranscript(selectedRecordingId);
+          void refreshTranscriptDetails(selectedRecordingId);
+          void refreshSpeakerNames(selectedRecordingId);
+        }
+      );
 
       unlistenStatus = await listen<RecordingStatusChangedEvent>(
         "recording-status-changed",
@@ -355,10 +426,12 @@ export function useRecordingDetail({
       unlistenAnalysis?.();
       unlistenTitle?.();
       unlistenStatus?.();
+      unlistenTranscriptUpdated?.();
     };
   }, [
     isOpen,
     refreshSelectedRecording,
+    refreshSpeakerNames,
     refreshTranscript,
     refreshTranscriptDetails,
     selectedRecordingId,
@@ -431,6 +504,7 @@ export function useRecordingDetail({
     detailError,
     loadRecordingDetail,
     refreshSelectedRecording,
+    refreshSpeakerNames,
     refreshTranscript,
     refreshTranscriptDetails,
     clearRecordingDetail,

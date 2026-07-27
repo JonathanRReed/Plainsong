@@ -23,20 +23,20 @@ impl Default for MacosAppleSpeechProvider {
 #[async_trait]
 impl AsrProvider for MacosAppleSpeechProvider {
     fn name(&self) -> &str {
-        "Apple Native Speech"
+        "Apple Speech (On-Device)"
     }
 
     fn description(&self) -> &str {
-        "Apple Speech framework transcription managed by macOS."
+        "Dictation-only transcription through Apple's Speech framework with server fallback disabled."
     }
 
     fn is_available(&self) -> bool {
-        PlatformEngine::MacosAppleSpeech.probe().ready
+        platform::macos_speech::readiness().ready
     }
 
     fn model_info(&self) -> ModelInfo {
         ModelInfo {
-            name: "Apple Native Speech".to_string(),
+            name: "Apple Speech (On-Device)".to_string(),
             version: "system".to_string(),
             size_mb: 0.0,
             parameters: "OS managed".to_string(),
@@ -60,7 +60,7 @@ impl AsrProvider for MacosAppleSpeechProvider {
             language: result.language,
             confidence: result.confidence,
             processing_time_ms: result.processing_time_ms,
-            model_name: "Apple Native Speech".to_string(),
+            model_name: "Apple Speech (On-Device)".to_string(),
             model_id: "macos_apple_speech".to_string(),
             requested_provider: super::AsrProviderType::MacosAppleSpeech,
             actual_provider: super::AsrProviderType::MacosAppleSpeech,
@@ -83,7 +83,7 @@ impl AsrProvider for MacosAppleSpeechProvider {
             language: result.language,
             confidence: result.confidence,
             processing_time_ms: result.processing_time_ms,
-            model_name: "Apple Native Speech".to_string(),
+            model_name: "Apple Speech (On-Device)".to_string(),
             model_id: "macos_apple_speech".to_string(),
             requested_provider: super::AsrProviderType::MacosAppleSpeech,
             actual_provider: super::AsrProviderType::MacosAppleSpeech,

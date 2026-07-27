@@ -123,15 +123,19 @@ impl DiarizationEngine {
             ));
         }
 
-        let clusterer = EmbeddingClusterer::new();
-        let labels = clusterer.cluster(&embeddings);
-        let smoothed = clusterer.smooth_segments(&segments, &labels);
+        let segments_for_clustering: Vec<(f64, f64)> = embeddings
+            .iter()
+            .map(|(start_time, end_time, _)| (*start_time, *end_time))
+            .collect();
+        let smoothed = tokio::task::spawn_blocking(move || {
+            let clusterer = EmbeddingClusterer::new();
+            let labels = clusterer.cluster(&embeddings);
+            clusterer.smooth_segments(&segments_for_clustering, &labels)
+        })
+        .await
+        .context("Failed to join diarization clustering task")?;
 
         let mut speaker_segments = Vec::new();
-        let mut unique_labels: Vec<usize> = labels.to_vec();
-        unique_labels.sort();
-        unique_labels.dedup();
-
         for (start, end, label) in smoothed {
             let speaker_id = format!("S{}", label + 1);
             if !self.speakers.contains_key(&speaker_id) {
@@ -147,7 +151,18 @@ impl DiarizationEngine {
             });
         }
 
-        let speakers: Vec<Speaker> = self.speakers.values().cloned().collect();
+        let mut speakers: Vec<Speaker> = Vec::new();
+        for segment in &speaker_segments {
+            if speakers
+                .iter()
+                .any(|speaker| speaker.id == segment.speaker_id)
+            {
+                continue;
+            }
+            if let Some(speaker) = self.speakers.get(&segment.speaker_id) {
+                speakers.push(speaker.clone());
+            }
+        }
 
         tracing::info!(
             "Diarization complete: {} speakers, {} segments",
@@ -163,8 +178,9 @@ impl DiarizationEngine {
         })
     }
 
-    /// Merge diarization results with transcript segments
-    /// Splits transcript segments at diarization boundaries to assign correct speakers
+    /// Merge diarization results with transcript segments.
+    /// Splits transcript segments at diarization boundaries while keeping any
+    /// uncovered speech explicitly anonymous (`speaker_id: None`).
     pub fn merge_with_transcript(
         &self,
         diarization: &DiarizationResult,
@@ -176,97 +192,67 @@ impl DiarizationEngine {
             transcript_segments.len()
         );
 
-        if diarization.segments.is_empty() || transcript_segments.is_empty() {
+        if transcript_segments.is_empty() {
             return;
         }
 
-        // Sort diarization segments by start time
         let mut sorted_diarization = diarization.segments.clone();
-        sorted_diarization.sort_by(|a, b| {
-            a.start_time
-                .partial_cmp(&b.start_time)
-                .unwrap_or(std::cmp::Ordering::Equal)
+        sorted_diarization.retain(|segment| {
+            segment.start_time.is_finite()
+                && segment.end_time.is_finite()
+                && segment.end_time > segment.start_time
+        });
+        sorted_diarization.sort_by(|left, right| {
+            left.start_time
+                .total_cmp(&right.start_time)
+                .then_with(|| left.end_time.total_cmp(&right.end_time))
+                .then_with(|| left.speaker_id.cmp(&right.speaker_id))
         });
 
-        // Build new segments list by splitting transcript at diarization boundaries
         let mut new_segments: Vec<crate::models::TranscriptSegment> = Vec::new();
+        for transcript_segment in transcript_segments.iter() {
+            let words: Vec<&str> = transcript_segment.text.split_whitespace().collect();
+            let total_duration = transcript_segment.end_time - transcript_segment.start_time;
+            if words.is_empty() || !total_duration.is_finite() || total_duration <= 0.0 {
+                let mut preserved = transcript_segment.clone();
+                preserved.speaker_id = None;
+                new_segments.push(preserved);
+                continue;
+            }
 
-        for ts in transcript_segments.iter() {
-            tracing::debug!(
-                "Processing transcript segment {}-{}s",
-                ts.start_time,
-                ts.end_time
-            );
-
-            // Find all diarization segments that overlap with this transcript segment
-            let mut split_points: Vec<(f64, String)> = Vec::new();
-
-            for ds in &sorted_diarization {
-                // Check if diarization segment overlaps with transcript segment
-                if ds.start_time < ts.end_time && ds.end_time > ts.start_time {
-                    // Add split point at diarization start (clamped to transcript bounds)
-                    let split_start = ds.start_time.max(ts.start_time);
-                    if split_start > ts.start_time
-                        && !split_points
-                            .iter()
-                            .any(|(t, _)| (*t - split_start).abs() < 0.001)
-                    {
-                        split_points.push((split_start, ds.speaker_id.clone()));
-                    }
-                    // Add split point at diarization end (clamped to transcript bounds)
-                    let split_end = ds.end_time.min(ts.end_time);
-                    if split_end < ts.end_time
-                        && !split_points
-                            .iter()
-                            .any(|(t, _)| (*t - split_end).abs() < 0.001)
-                    {
-                        split_points.push((split_end, ds.speaker_id.clone()));
-                    }
+            let mut boundaries = vec![transcript_segment.start_time, transcript_segment.end_time];
+            for diarization_segment in &sorted_diarization {
+                if diarization_segment.start_time < transcript_segment.end_time
+                    && diarization_segment.end_time > transcript_segment.start_time
+                {
+                    boundaries.push(
+                        diarization_segment
+                            .start_time
+                            .max(transcript_segment.start_time),
+                    );
+                    boundaries.push(
+                        diarization_segment
+                            .end_time
+                            .min(transcript_segment.end_time),
+                    );
                 }
             }
+            boundaries.sort_by(f64::total_cmp);
+            boundaries.dedup_by(|left, right| (*left - *right).abs() < 0.001);
 
-            // Sort split points by time
-            split_points.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal));
-
-            tracing::debug!(
-                "Split points for segment: {:?}",
-                split_points.iter().map(|(t, _)| t).collect::<Vec<_>>()
-            );
-
-            // Split text by word boundaries proportional to time
-            let words: Vec<&str> = ts.text.split_whitespace().collect();
-            let total_duration = ts.end_time - ts.start_time;
-            let mut current_start = ts.start_time;
-
-            // Build time boundaries list: [(start, end, speaker_id)]
-            let mut boundaries: Vec<(f64, f64, String)> = Vec::new();
-            let mut prev_time = ts.start_time;
-            for (split_time, _) in split_points.iter() {
-                let speaker = sorted_diarization
-                    .iter()
-                    .find(|ds| ds.start_time <= prev_time && ds.end_time > prev_time)
-                    .map(|ds| ds.speaker_id.clone())
-                    .unwrap_or_else(|| "S1".to_string());
-                boundaries.push((prev_time, *split_time, speaker));
-                prev_time = *split_time;
-            }
-            // Final boundary
-            let final_speaker = sorted_diarization
-                .iter()
-                .find(|ds| ds.start_time <= prev_time && ds.end_time > prev_time)
-                .map(|ds| ds.speaker_id.clone())
-                .unwrap_or_else(|| "S1".to_string());
-            boundaries.push((prev_time, ts.end_time, final_speaker));
-
-            // Assign words to boundaries by proportion
             let total_words = words.len();
-            for (seg_start, seg_end, speaker) in &boundaries {
-                if *seg_end <= *seg_start || total_duration <= 0.0 {
+            for window in boundaries.windows(2) {
+                let segment_start = window[0];
+                let segment_end = window[1];
+                if segment_end <= segment_start {
                     continue;
                 }
-                let word_start = ((seg_start - ts.start_time) / total_duration * total_words as f64)
+
+                let word_start = ((segment_start - transcript_segment.start_time) / total_duration
+                    * total_words as f64)
                     .round() as usize;
-                let word_end = ((seg_end - ts.start_time) / total_duration * total_words as f64)
+                let word_end = ((segment_end - transcript_segment.start_time) / total_duration
+                    * total_words as f64)
                     .round() as usize;
                 let word_start = word_start.min(total_words);
                 let word_end = word_end.min(total_words);
@@ -274,35 +260,35 @@ impl DiarizationEngine {
                     continue;
                 }
 
-                let sub_text = words[word_start..word_end].join(" ");
-                if sub_text.trim().is_empty() {
-                    continue;
+                let mut speaker_id = None;
+                let mut best_overlap = 0.0f64;
+                for diarization_segment in &sorted_diarization {
+                    let overlap = segment_end.min(diarization_segment.end_time)
+                        - segment_start.max(diarization_segment.start_time);
+                    if overlap > best_overlap {
+                        best_overlap = overlap;
+                        speaker_id = Some(diarization_segment.speaker_id.clone());
+                    }
                 }
 
-                tracing::debug!(
-                    "Creating sub-segment {}-{}s speaker={} text='{}'",
-                    seg_start,
-                    seg_end,
-                    speaker,
-                    &sub_text.chars().take(30).collect::<String>()
-                );
-
+                let sub_text = words[word_start..word_end].join(" ");
+                let id = if boundaries.len() == 2 {
+                    transcript_segment.id.clone()
+                } else {
+                    uuid::Uuid::new_v4().to_string()
+                };
                 new_segments.push(crate::models::TranscriptSegment {
-                    id: uuid::Uuid::new_v4().to_string(),
-                    start_time: *seg_start,
-                    end_time: *seg_end,
+                    id,
+                    start_time: segment_start,
+                    end_time: segment_end,
                     text: sub_text,
-                    speaker_id: Some(speaker.clone()),
-                    confidence: ts.confidence,
+                    speaker_id,
+                    confidence: transcript_segment.confidence,
                 });
-                current_start = *seg_end;
             }
-            let _ = current_start;
         }
 
-        // Replace original segments with split segments
         *transcript_segments = new_segments;
-
         tracing::debug!(
             "Merge complete: {} segments after splitting",
             transcript_segments.len()
@@ -343,11 +329,14 @@ pub async fn run_diarization(audio_path: &Path) -> Result<DiarizationResult> {
 
 /// Get audio file duration
 async fn get_audio_duration(audio_path: &Path) -> Result<f64> {
-    use hound::WavReader;
-
-    let reader = WavReader::open(audio_path)?;
-    let duration = reader.duration() as f64 / reader.spec().sample_rate as f64;
-    Ok(duration)
+    let audio_path = audio_path.to_path_buf();
+    tokio::task::spawn_blocking(move || -> Result<f64> {
+        let reader = hound::WavReader::open(audio_path)?;
+        let duration = reader.duration() as f64 / reader.spec().sample_rate as f64;
+        Ok(duration)
+    })
+    .await
+    .context("Failed to join diarization WAV duration task")?
 }
 
 #[cfg(test)]
@@ -407,5 +396,172 @@ mod tests {
         assert_eq!(labels[0], labels[1]);
         assert_eq!(labels[1], labels[2]);
         assert_ne!(labels[0], labels[3]);
+    }
+
+    fn reference_single_linkage(
+        embeddings: &[(f64, f64, ndarray::Array1<f32>)],
+        threshold: f32,
+    ) -> Vec<usize> {
+        fn distance(left: &ndarray::Array1<f32>, right: &ndarray::Array1<f32>) -> f32 {
+            let dot = left
+                .iter()
+                .zip(right.iter())
+                .map(|(a, b)| a * b)
+                .sum::<f32>();
+            let left_norm = left.iter().map(|value| value * value).sum::<f32>().sqrt();
+            let right_norm = right.iter().map(|value| value * value).sum::<f32>().sqrt();
+            1.0 - dot / (left_norm * right_norm)
+        }
+
+        let mut clusters: Vec<Vec<usize>> =
+            (0..embeddings.len()).map(|index| vec![index]).collect();
+        loop {
+            let mut closest = None;
+            let mut closest_distance = f32::INFINITY;
+            for left in 0..clusters.len() {
+                for right in (left + 1)..clusters.len() {
+                    let linkage = clusters[left]
+                        .iter()
+                        .flat_map(|left_index| {
+                            clusters[right].iter().map(move |right_index| {
+                                distance(&embeddings[*left_index].2, &embeddings[*right_index].2)
+                            })
+                        })
+                        .fold(f32::INFINITY, f32::min);
+                    if linkage < closest_distance {
+                        closest_distance = linkage;
+                        closest = Some((left, right));
+                    }
+                }
+            }
+            let Some((left, right)) = closest else {
+                break;
+            };
+            if closest_distance > threshold {
+                break;
+            }
+            let merged = clusters.remove(right);
+            clusters[left].extend(merged);
+        }
+
+        let mut labels = vec![0; embeddings.len()];
+        for (label, members) in clusters.iter().enumerate() {
+            for member in members {
+                labels[*member] = label;
+            }
+        }
+        labels
+    }
+
+    #[test]
+    fn union_find_clustering_matches_single_linkage_and_is_deterministic() {
+        use ndarray::array;
+
+        let embeddings = vec![
+            (0.0, 2.0, array![1.0, 0.0, 0.0]),
+            (2.0, 4.0, array![0.0, 1.0, 0.0]),
+            (4.0, 6.0, array![0.92, 0.08, 0.0]),
+            (6.0, 8.0, array![0.0, 0.0, 1.0]),
+            (8.0, 10.0, array![0.08, 0.92, 0.0]),
+        ];
+        let threshold = 0.25;
+        let expected = reference_single_linkage(&embeddings, threshold);
+        let clusterer = EmbeddingClusterer::new().with_threshold(threshold);
+
+        for _ in 0..10 {
+            assert_eq!(clusterer.cluster(&embeddings), expected);
+        }
+        assert_eq!(expected, vec![0, 1, 0, 2, 1]);
+    }
+
+    #[test]
+    fn merge_preserves_uncovered_prefix_gaps_and_suffix_as_none() {
+        let diarization = DiarizationResult {
+            segments: vec![
+                SpeakerSegment {
+                    start_time: 2.0,
+                    end_time: 4.0,
+                    speaker_id: "S1".to_string(),
+                    confidence: 0.9,
+                },
+                SpeakerSegment {
+                    start_time: 6.0,
+                    end_time: 8.0,
+                    speaker_id: "S2".to_string(),
+                    confidence: 0.9,
+                },
+            ],
+            speakers: Vec::new(),
+            duration: 10.0,
+            method: DiarizationMethod::Embedding,
+        };
+        let original_text = "one two three four five six seven eight nine ten";
+        let mut transcript = vec![crate::models::TranscriptSegment {
+            id: "segment-1".to_string(),
+            start_time: 0.0,
+            end_time: 10.0,
+            text: original_text.to_string(),
+            speaker_id: None,
+            confidence: 0.9,
+        }];
+
+        DiarizationEngine::new().merge_with_transcript(&diarization, &mut transcript);
+
+        assert_eq!(
+            transcript
+                .iter()
+                .map(|segment| segment.speaker_id.as_deref())
+                .collect::<Vec<_>>(),
+            vec![None, Some("S1"), None, Some("S2"), None]
+        );
+        assert_eq!(
+            transcript
+                .iter()
+                .map(|segment| segment.text.as_str())
+                .collect::<Vec<_>>()
+                .join(" "),
+            original_text
+        );
+    }
+
+    #[test]
+    fn merge_keeps_short_runs_removed_by_smoothing_anonymous() {
+        let clusterer = EmbeddingClusterer::new();
+        let smoothed =
+            clusterer.smooth_segments(&[(0.0, 6.0), (6.0, 8.0), (8.0, 14.0)], &[0, 1, 0]);
+        assert_eq!(smoothed, vec![(0.0, 6.0, 0), (8.0, 14.0, 0)]);
+        let diarization = DiarizationResult {
+            segments: smoothed
+                .into_iter()
+                .map(|(start_time, end_time, label)| SpeakerSegment {
+                    start_time,
+                    end_time,
+                    speaker_id: format!("S{}", label + 1),
+                    confidence: 0.9,
+                })
+                .collect(),
+            speakers: Vec::new(),
+            duration: 14.0,
+            method: DiarizationMethod::Embedding,
+        };
+        let mut transcript = vec![crate::models::TranscriptSegment {
+            id: "segment-1".to_string(),
+            start_time: 0.0,
+            end_time: 14.0,
+            text:
+                "one two three four five six seven eight nine ten eleven twelve thirteen fourteen"
+                    .to_string(),
+            speaker_id: None,
+            confidence: 0.9,
+        }];
+
+        DiarizationEngine::new().merge_with_transcript(&diarization, &mut transcript);
+
+        assert_eq!(transcript.len(), 3);
+        assert_eq!(transcript[0].speaker_id.as_deref(), Some("S1"));
+        assert_eq!(transcript[1].speaker_id, None);
+        assert_eq!(transcript[1].start_time, 6.0);
+        assert_eq!(transcript[1].end_time, 8.0);
+        assert_eq!(transcript[2].speaker_id.as_deref(), Some("S1"));
     }
 }

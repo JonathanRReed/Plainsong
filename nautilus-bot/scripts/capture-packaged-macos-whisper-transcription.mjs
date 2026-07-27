@@ -143,6 +143,10 @@ function stderrEvidence(chunks) {
   };
 }
 
+function hasFatalShutdownEvidence(value) {
+  return /GGML_ASSERT|assertion failed|fatal error|SIGABRT/i.test(value);
+}
+
 async function writeArtifact(artifact) {
   fs.mkdirSync(path.dirname(outPath), { recursive: true });
   fs.writeFileSync(outPath, `${JSON.stringify(artifact, null, 2)}\n`, "utf8");
@@ -186,15 +190,25 @@ async function run() {
     artifact.error = error instanceof Error ? error.message : String(error);
   } finally {
     artifact.timedOut = didTimeOut;
-    artifact.stderr = stderrEvidence(stderr);
     artifact.sidecarExit = await shutdown();
-    artifact.pass = Boolean(
-      !didTimeOut &&
-        artifact.whisperDiagnostics?.runtimeStatus === "ready" &&
+    const completeStderr = stderr.join("");
+    artifact.stderr = stderrEvidence(stderr);
+    artifact.checks = {
+      whisperReady: artifact.whisperDiagnostics?.runtimeStatus === "ready",
+      nonEmptyTranscript:
         artifact.whisper?.providerType === "whisper" &&
         artifact.whisper?.runtimeStatus === "ready" &&
         artifact.whisper?.nonEmptyTranscript &&
-        transcriptionLooksValid(artifact.whisper?.transcription)
+        transcriptionLooksValid(artifact.whisper?.transcription),
+      singleWhisperModelLoad:
+        (completeStderr.match(/Loading Whisper model from/g) ?? []).length === 1,
+      sidecarCleanExit:
+        artifact.sidecarExit?.code === 0 && artifact.sidecarExit?.signal === null,
+      noFatalShutdownEvidence: !hasFatalShutdownEvidence(completeStderr),
+    };
+    artifact.pass = Boolean(
+      !didTimeOut &&
+        Object.values(artifact.checks).every(Boolean)
     );
 
     if (artifact.whisper) {

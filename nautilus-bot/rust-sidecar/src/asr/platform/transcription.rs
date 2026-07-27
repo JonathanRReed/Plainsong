@@ -1,5 +1,6 @@
 use super::PlatformEngine;
 use anyhow::{Context, Result};
+use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::time::Instant;
 
@@ -11,37 +12,67 @@ pub struct PlatformTranscription {
     pub processing_time_ms: u64,
 }
 
+#[derive(Debug)]
+struct ManagedAudioPath {
+    path: PathBuf,
+    remove_on_drop: bool,
+}
+
+impl ManagedAudioPath {
+    fn borrowed(path: &Path) -> Self {
+        Self {
+            path: path.to_path_buf(),
+            remove_on_drop: false,
+        }
+    }
+
+    fn temporary(path: PathBuf) -> Self {
+        Self {
+            path,
+            remove_on_drop: true,
+        }
+    }
+}
+
+impl Drop for ManagedAudioPath {
+    fn drop(&mut self) {
+        if self.remove_on_drop {
+            let _ = std::fs::remove_file(&self.path);
+        }
+    }
+}
+
 pub fn transcribe_with_engine(
     engine: PlatformEngine,
     file_path: Option<&Path>,
     audio_data: Option<&[u8]>,
 ) -> Result<PlatformTranscription> {
-    let (resolved_audio_path, is_temp_file) = resolve_audio_path(file_path, audio_data)?;
-    let (engine_audio_path, is_engine_temp_file) =
-        prepare_audio_for_engine(engine, &resolved_audio_path)?;
+    transcribe_with_engine_in_temp_dir(engine, file_path, audio_data, &std::env::temp_dir())
+}
+
+fn transcribe_with_engine_in_temp_dir(
+    engine: PlatformEngine,
+    file_path: Option<&Path>,
+    audio_data: Option<&[u8]>,
+    temp_dir: &Path,
+) -> Result<PlatformTranscription> {
+    let resolved_audio = resolve_audio_path(file_path, audio_data, temp_dir)?;
+    let engine_audio = prepare_audio_for_engine(engine, &resolved_audio.path, temp_dir)?;
     let started = Instant::now();
 
-    let result = match engine {
+    let (text, language, confidence) = match engine {
         PlatformEngine::MacosAppleSpeech => {
-            super::macos_speech::transcribe_file(&engine_audio_path)
+            super::macos_speech::transcribe_file(&engine_audio.path)
         }
         PlatformEngine::WindowsSdkDictation => {
-            super::windows_sdk_dictation::transcribe_file(&engine_audio_path)
+            super::windows_sdk_dictation::transcribe_file(&engine_audio.path)
         }
         _ => Err(anyhow::anyhow!(
             "Engine '{}' does not expose a native transcription path",
             engine.id()
         )),
-    };
+    }?;
 
-    if is_engine_temp_file {
-        let _ = std::fs::remove_file(&engine_audio_path);
-    }
-    if is_temp_file {
-        let _ = std::fs::remove_file(&resolved_audio_path);
-    }
-
-    let (text, language, confidence) = result?;
     Ok(PlatformTranscription {
         text,
         language,
@@ -50,14 +81,29 @@ pub fn transcribe_with_engine(
     })
 }
 
-fn prepare_audio_for_engine(engine: PlatformEngine, audio_path: &Path) -> Result<(PathBuf, bool)> {
+fn prepare_audio_for_engine(
+    engine: PlatformEngine,
+    audio_path: &Path,
+    temp_dir: &Path,
+) -> Result<ManagedAudioPath> {
     match engine {
-        PlatformEngine::MacosAppleSpeech => stage_macos_speech_input(audio_path),
-        _ => Ok((audio_path.to_path_buf(), false)),
+        PlatformEngine::MacosAppleSpeech => stage_macos_speech_input(audio_path, temp_dir),
+        _ => Ok(ManagedAudioPath::borrowed(audio_path)),
     }
 }
 
-fn stage_macos_speech_input(audio_path: &Path) -> Result<(PathBuf, bool)> {
+fn stage_macos_speech_input(audio_path: &Path, temp_dir: &Path) -> Result<ManagedAudioPath> {
+    let staged_path = temp_dir.join(format!(
+        "nautilus-macos-speech-staged-{}.wav",
+        uuid::Uuid::new_v4()
+    ));
+    stage_macos_speech_input_at(audio_path, staged_path)
+}
+
+fn stage_macos_speech_input_at(
+    audio_path: &Path,
+    staged_path: PathBuf,
+) -> Result<ManagedAudioPath> {
     const PREPENDED_SILENCE_MS: u32 = 750;
 
     let mut reader = hound::WavReader::open(audio_path).with_context(|| {
@@ -68,17 +114,26 @@ fn stage_macos_speech_input(audio_path: &Path) -> Result<(PathBuf, bool)> {
     })?;
     let spec = reader.spec();
     if spec.sample_rate == 0 || spec.channels == 0 {
-        return Ok((audio_path.to_path_buf(), false));
+        return Ok(ManagedAudioPath::borrowed(audio_path));
+    }
+    if !matches!(
+        (spec.sample_format, spec.bits_per_sample),
+        (hound::SampleFormat::Int, 16) | (hound::SampleFormat::Float, 32)
+    ) {
+        return Ok(ManagedAudioPath::borrowed(audio_path));
     }
 
-    let staged_path = std::env::temp_dir().join(format!(
-        "nautilus-macos-speech-staged-{}.wav",
-        uuid::Uuid::new_v4()
-    ));
-    let mut writer = hound::WavWriter::create(&staged_path, spec).with_context(|| {
+    let staged_audio = ManagedAudioPath::temporary(staged_path);
+    let staged_file = create_private_file(&staged_audio.path).with_context(|| {
         format!(
             "Failed to create staged macOS Speech audio file '{}'",
-            staged_path.display()
+            staged_audio.path.display()
+        )
+    })?;
+    let mut writer = hound::WavWriter::new(staged_file, spec).with_context(|| {
+        format!(
+            "Failed to initialize staged macOS Speech audio file '{}'",
+            staged_audio.path.display()
         )
     })?;
 
@@ -104,7 +159,7 @@ fn stage_macos_speech_input(audio_path: &Path) -> Result<(PathBuf, bool)> {
                     .with_context(|| {
                         format!(
                             "Failed writing sample to staged macOS Speech file '{}'",
-                            staged_path.display()
+                            staged_audio.path.display()
                         )
                     })?;
             }
@@ -126,42 +181,48 @@ fn stage_macos_speech_input(audio_path: &Path) -> Result<(PathBuf, bool)> {
                     .with_context(|| {
                         format!(
                             "Failed writing sample to staged macOS Speech file '{}'",
-                            staged_path.display()
+                            staged_audio.path.display()
                         )
                     })?;
             }
         }
-        _ => {
-            return Ok((audio_path.to_path_buf(), false));
-        }
+        _ => unreachable!("unsupported formats return before staged file creation"),
     }
 
     writer.finalize().with_context(|| {
         format!(
             "Failed to finalize staged macOS Speech audio file '{}'",
-            staged_path.display()
+            staged_audio.path.display()
         )
     })?;
 
-    Ok((staged_path, true))
+    Ok(staged_audio)
 }
 
 fn resolve_audio_path(
     file_path: Option<&Path>,
     audio_data: Option<&[u8]>,
-) -> Result<(PathBuf, bool)> {
+    temp_dir: &Path,
+) -> Result<ManagedAudioPath> {
     match (file_path, audio_data) {
-        (Some(path), None) => Ok((path.to_path_buf(), false)),
+        (Some(path), None) => Ok(ManagedAudioPath::borrowed(path)),
         (None, Some(bytes)) => {
-            let path = std::env::temp_dir()
-                .join(format!("nautilus-native-asr-{}.wav", uuid::Uuid::new_v4()));
-            std::fs::write(&path, bytes).with_context(|| {
+            let audio = ManagedAudioPath::temporary(
+                temp_dir.join(format!("nautilus-native-asr-{}.wav", uuid::Uuid::new_v4())),
+            );
+            let mut file = create_private_file(&audio.path).with_context(|| {
                 format!(
-                    "Failed to materialize native-engine audio bytes to '{}'",
-                    path.display()
+                    "Failed to create native-engine audio file '{}'",
+                    audio.path.display()
                 )
             })?;
-            Ok((path, true))
+            file.write_all(bytes).with_context(|| {
+                format!(
+                    "Failed to materialize native-engine audio bytes to '{}'",
+                    audio.path.display()
+                )
+            })?;
+            Ok(audio)
         }
         _ => Err(anyhow::anyhow!(
             "Invalid native-engine input: exactly one of file_path or audio_data is required"
@@ -169,14 +230,32 @@ fn resolve_audio_path(
     }
 }
 
+fn create_private_file(path: &Path) -> std::io::Result<std::fs::File> {
+    let mut options = std::fs::OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+    options.open(path)
+}
+
 #[cfg(test)]
 mod tests {
-    use super::stage_macos_speech_input;
+    use super::{stage_macos_speech_input, transcribe_with_engine_in_temp_dir};
+    use crate::asr::platform::PlatformEngine;
+
+    fn temp_root(label: &str) -> std::path::PathBuf {
+        let root = std::env::temp_dir().join(format!("nautilus-{label}-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&root).expect("create test temp directory");
+        root
+    }
 
     #[test]
-    fn stage_macos_speech_input_prepends_silence() {
-        let input_path =
-            std::env::temp_dir().join(format!("nautilus-stage-input-{}.wav", uuid::Uuid::new_v4()));
+    fn stage_macos_speech_input_prepends_silence_and_cleans_up_on_drop() {
+        let root = temp_root("stage-input");
+        let input_path = root.join("input.wav");
         let spec = hound::WavSpec {
             channels: 1,
             sample_rate: 16_000,
@@ -189,8 +268,8 @@ mod tests {
         }
         writer.finalize().unwrap();
 
-        let (staged_path, cleanup) = stage_macos_speech_input(&input_path).unwrap();
-        assert!(cleanup);
+        let staged_audio = stage_macos_speech_input(&input_path, &root).unwrap();
+        let staged_path = staged_audio.path.clone();
 
         let mut reader = hound::WavReader::open(&staged_path).unwrap();
         let samples: Vec<i16> = reader
@@ -205,7 +284,60 @@ mod tests {
             .take(32)
             .all(|sample| *sample == 1200));
 
-        let _ = std::fs::remove_file(input_path);
-        let _ = std::fs::remove_file(staged_path);
+        drop(reader);
+        drop(staged_audio);
+        assert!(!staged_path.exists());
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn truncated_wav_removes_staged_file_after_copy_failure() {
+        let root = temp_root("truncated-stage");
+        let input_path = root.join("truncated.wav");
+        let mut wav = Vec::new();
+        wav.extend_from_slice(b"RIFF");
+        wav.extend_from_slice(&40_u32.to_le_bytes());
+        wav.extend_from_slice(b"WAVEfmt ");
+        wav.extend_from_slice(&16_u32.to_le_bytes());
+        wav.extend_from_slice(&1_u16.to_le_bytes());
+        wav.extend_from_slice(&1_u16.to_le_bytes());
+        wav.extend_from_slice(&16_000_u32.to_le_bytes());
+        wav.extend_from_slice(&32_000_u32.to_le_bytes());
+        wav.extend_from_slice(&2_u16.to_le_bytes());
+        wav.extend_from_slice(&16_u16.to_le_bytes());
+        wav.extend_from_slice(b"data");
+        wav.extend_from_slice(&4_u32.to_le_bytes());
+        wav.extend_from_slice(&1200_i16.to_le_bytes());
+        std::fs::write(&input_path, wav).expect("write truncated WAV");
+
+        stage_macos_speech_input(&input_path, &root)
+            .expect_err("truncated sample data must fail during staging");
+        let remaining = std::fs::read_dir(&root)
+            .expect("read staging directory")
+            .map(|entry| entry.expect("read staging entry").path())
+            .collect::<Vec<_>>();
+        assert_eq!(remaining, vec![input_path]);
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn malformed_audio_bytes_leave_no_materialized_or_staged_files() {
+        let root = temp_root("malformed-native-asr");
+        let error = transcribe_with_engine_in_temp_dir(
+            PlatformEngine::MacosAppleSpeech,
+            None,
+            Some(b"not a wave file"),
+            &root,
+        )
+        .expect_err("malformed WAV bytes must fail before helper execution");
+        assert!(error.to_string().contains("for macOS Speech input staging"));
+        assert_eq!(
+            std::fs::read_dir(&root)
+                .expect("read test temp directory")
+                .count(),
+            0,
+            "temporary raw audio must be removed on staging errors"
+        );
+        let _ = std::fs::remove_dir_all(root);
     }
 }

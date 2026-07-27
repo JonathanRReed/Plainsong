@@ -3,7 +3,8 @@
 **Status: IMPLEMENTED** (the re-decode-a-separate-accumulator approach below),
 hardened via a 4-reviewer adversarial pass. The partial path is UI-only and
 provably never changes the final inserted text; it is gated behind the existing
-Live Preview setting and local providers only. What still needs a real
+Live Preview setting and local providers only, with Apple Speech explicitly
+excluded because the generic path would restart its batch helper every tick. What still needs a real
 microphone is *feel tuning* — the 700ms tick, 0.5s minimum, ~30s re-decode
 window, and greedy whole-window decode are first-cut values to validate and
 adjust on-device. The design notes below are retained as the rationale of

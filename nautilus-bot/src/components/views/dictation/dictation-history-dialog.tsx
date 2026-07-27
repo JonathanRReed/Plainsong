@@ -331,34 +331,21 @@ export function DictationHistoryDialog({
                       </div>
                     </div>
                   )}
-                  {(historyDetails.contextPreview ||
-                    historyDetails.promptPreview) && (
-                    <div className="grid gap-4 md:grid-cols-2">
-                      <div className="space-y-2">
-                        <p className="text-sm font-medium">Captured context</p>
-                        <div className="min-h-[110px] rounded-md bg-muted p-4 text-sm">
-                          <p className="whitespace-pre-wrap">
-                            {historyDetails.contextPreview ||
-                              "No saved context preview."}
-                          </p>
-                        </div>
-                      </div>
-                      <div className="space-y-2">
-                        <p className="text-sm font-medium">Prompt preview</p>
-                        <div className="min-h-[110px] rounded-md bg-muted p-4 text-sm">
-                          <p className="whitespace-pre-wrap">
-                            {historyDetails.promptPreview ||
-                              "Using the standard prompt for this path."}
-                          </p>
-                        </div>
+                  {historyDetails.promptPreview && (
+                    <div className="space-y-2">
+                      <p className="text-sm font-medium">Prompt preview</p>
+                      <div className="min-h-[110px] rounded-md bg-muted p-4 text-sm">
+                        <p className="whitespace-pre-wrap">
+                          {historyDetails.promptPreview}
+                        </p>
                       </div>
                     </div>
                   )}
                 </div>
               ) : (
                 <p className="text-sm text-muted-foreground">
-                  Prompt/context inspection is available for newer dictations
-                  saved after this update.
+                  Processing details are available for newer dictations saved
+                  after this update.
                 </p>
               )}
             </div>

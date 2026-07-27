@@ -8,6 +8,16 @@ const eventMocks = vi.hoisted(() => ({
   listeners: new Map<string, (event: { payload: any }) => void>(),
 }));
 
+function deferred<T>() {
+  let resolve!: (value: T) => void;
+  let reject!: (reason?: unknown) => void;
+  const promise = new Promise<T>((res, rej) => {
+    resolve = res;
+    reject = rej;
+  });
+  return { promise, resolve, reject };
+}
+
 const mockRecordings = [
   {
     id: "r1",
@@ -52,7 +62,71 @@ describe("useRecordings", () => {
     });
     expect(result.current.recordings[0].title).toBe("Meeting 1");
     expect(result.current.isLoading).toBe(false);
+    expect(result.current.hasLoaded).toBe(true);
     expect(result.current.error).toBeNull();
+  });
+
+  it("does not mark a failed first request as a successful load", async () => {
+    const { getRecordings } = await import("@/lib/backend");
+    vi.mocked(getRecordings).mockRejectedValueOnce(new Error("Recordings unavailable"));
+
+    const { result } = renderHook(() => useRecordings("failed-project"), { wrapper });
+
+    expect(result.current.hasLoaded).toBe(false);
+    await waitFor(() => {
+      expect(result.current.error).toBe("Recordings unavailable");
+    });
+    expect(result.current.isLoading).toBe(false);
+    expect(result.current.hasLoaded).toBe(false);
+  });
+
+  it("uses an actionable fallback when a failed request has no message", async () => {
+    const { getRecordings } = await import("@/lib/backend");
+    vi.mocked(getRecordings).mockRejectedValueOnce(new Error("   "));
+
+    const { result } = renderHook(() => useRecordings("blank-error-project"), { wrapper });
+
+    await waitFor(() => {
+      expect(result.current.error).toBe("Failed to fetch recordings");
+    });
+    expect(result.current.hasLoaded).toBe(false);
+    expect(result.current.recordings).toEqual([]);
+  });
+
+  it("keeps cached meetings visible when a background refresh fails", async () => {
+    const { getRecordings } = await import("@/lib/backend");
+    const refresh = deferred<typeof mockRecordings>();
+    vi.mocked(getRecordings)
+      .mockResolvedValueOnce(mockRecordings)
+      .mockReturnValueOnce(refresh.promise);
+
+    const { result } = renderHook(() => useRecordings("refresh-project"), { wrapper });
+
+    await waitFor(() => {
+      expect(result.current.recordings).toEqual(mockRecordings);
+      expect(result.current.hasLoaded).toBe(true);
+    });
+    await waitFor(() => {
+      expect(eventMocks.listeners.get("recording-status-changed")).toBeDefined();
+    });
+
+    await act(async () => {
+      eventMocks.listeners.get("recording-status-changed")?.({ payload: {} });
+    });
+
+    expect(result.current.isLoading).toBe(true);
+    expect(result.current.recordings).toEqual(mockRecordings);
+
+    await act(async () => {
+      refresh.reject(new Error("Refresh unavailable"));
+      await refresh.promise.catch(() => undefined);
+    });
+
+    await waitFor(() => {
+      expect(result.current.error).toBe("Refresh unavailable");
+    });
+    expect(result.current.hasLoaded).toBe(true);
+    expect(result.current.recordings).toEqual(mockRecordings);
   });
 
   it("passes projectId to fetch", async () => {

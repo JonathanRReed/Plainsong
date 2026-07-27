@@ -10,6 +10,8 @@ import type {
   ActionItem,
   GroundedSummaryResult,
   GroundedActionItemsResult,
+  AnalysisProvenance,
+  ActionItemsProvenance,
   SearchHit,
   MeetingTranscriptDetails,
 } from "@/types";
@@ -33,7 +35,6 @@ export interface DictationHistoryDetails {
   customModeId: string | null;
   customModeName: string | null;
   contextSource: string | null;
-  contextPreview: string | null;
   contextAppName: string | null;
   appTarget: string | null;
   activationMatcher: string | null;
@@ -333,12 +334,18 @@ export async function updateRecordingNotes(
   await invoke("update_recording_notes", { recordingId, meetingNotes });
 }
 
+export interface RecordingAnalysisPatch {
+  summary?: string | null;
+  actionItems?: string[];
+  summaryProvenance?: AnalysisProvenance;
+  actionItemsProvenance?: ActionItemsProvenance;
+}
+
 export async function updateRecordingAnalysis(
   recordingId: string,
-  summary: string | null,
-  actionItems: string[]
-): Promise<void> {
-  await invoke("update_recording_analysis", { recordingId, summary, actionItems });
+  patch: RecordingAnalysisPatch
+): Promise<Recording> {
+  return await invoke("update_recording_analysis", { recordingId, ...patch });
 }
 
 export async function updateRecordingTemplate(
@@ -361,12 +368,12 @@ export async function updateMeetingChatMessages(
   await invoke("update_meeting_chat_messages", { recordingId, messages });
 }
 
-export async function updateTranscriptSegment(
+export async function editTranscriptSpeakerTurn(
   recordingId: string,
-  segmentId: string,
+  segmentIds: string[],
   newText: string
-): Promise<boolean> {
-  return await invoke("update_transcript_segment", { recordingId, segmentId, newText });
+): Promise<void> {
+  await invoke("edit_transcript_speaker_turn", { recordingId, segmentIds, newText });
 }
 
 export async function deleteTranscriptSegments(
@@ -708,12 +715,17 @@ export async function repairLocalModelCache(): Promise<LocalModelRepairReport> {
 }
 
 // LLM / AI Analysis APIs
+export async function cancelAnalysisRun(runId: string): Promise<void> {
+  await invoke("cancel_analysis_run", { runId });
+}
+
 export async function analyzeRecording(
   recordingId: string,
   query: string,
-  model?: string
+  model?: string,
+  runId?: string
 ): Promise<LlmAnalysisResult> {
-  return await invoke("analyze_recording", { recordingId, query, model });
+  return await invoke("analyze_recording", { recordingId, query, model, runId });
 }
 
 export async function analyzeRecordings(
@@ -733,16 +745,28 @@ export async function summarizeRecordingGrounded(
 
 export async function extractActionItems(
   recordingId: string,
-  model?: string
+  model?: string,
+  options: { persist?: boolean; runId?: string } = {}
 ): Promise<ActionItem[]> {
-  return await invoke("extract_action_items", { recordingId, model });
+  return await invoke("extract_action_items", {
+    recordingId,
+    model,
+    persist: options.persist,
+    runId: options.runId,
+  });
 }
 
 export async function extractActionItemsGrounded(
   recordingId: string,
-  model?: string
+  model?: string,
+  options: { persist?: boolean; runId?: string } = {}
 ): Promise<GroundedActionItemsResult> {
-  return await invoke("extract_action_items_grounded", { recordingId, model });
+  return await invoke("extract_action_items_grounded", {
+    recordingId,
+    model,
+    persist: options.persist,
+    runId: options.runId,
+  });
 }
 
 /** Ask a question across all meeting transcripts (AutoRAG Memory). */
@@ -785,12 +809,53 @@ export async function listOllamaCloudModels(): Promise<string[]> {
 }
 
 // System Audio APIs
-export async function checkSystemAudioAvailability(): Promise<boolean> {
-  return await invoke("check_system_audio_availability");
+export type SystemAudioBackend =
+  | "core_audio_process_tap"
+  | "virtual_loopback"
+  | "none";
+
+export type SystemAudioReadiness = "ready" | "unverified" | "unavailable";
+
+export type SystemAudioFailureKind =
+  | "unsupported_os"
+  | "permission_denied"
+  | "route_changed"
+  | "silent_stream"
+  | "no_eligible_route"
+  | "stream_construction"
+  | "stream_runtime";
+
+export interface SystemAudioCapability {
+  backend: SystemAudioBackend;
+  nativeOsSupported: boolean;
+  nativeOsEnabled: boolean;
+  routeDevice: string | null;
+  routeId: string | null;
+  nativeSampleRate: number | null;
+  nativeChannels: number | null;
+  readiness: SystemAudioReadiness;
+  ready: boolean;
+  reason: SystemAudioFailureKind | null;
+  actionableReason: string | null;
 }
 
-export async function getLoopbackDeviceName(): Promise<string | null> {
-  return await invoke("get_loopback_device_name");
+export interface SystemAudioTestResult {
+  capability: SystemAudioCapability;
+  callbacks: number;
+  capturedFrames: number;
+  nonSilentFrames: number;
+  peak: number;
+  expectedToneHz: number;
+  detectedToneAmplitude: number;
+  verificationMethod: "known_tone" | "external_audio" | null;
+}
+
+export async function getSystemAudioCapability(): Promise<SystemAudioCapability> {
+  return await invoke("get_system_audio_capability");
+}
+
+export async function testSystemAudioCapture(): Promise<SystemAudioTestResult> {
+  return await invoke("test_system_audio_capture");
 }
 
 export interface PermissionDiagnostics {
@@ -850,7 +915,12 @@ export async function verifySystemAudioSetup(): Promise<SetupVerificationResult>
 }
 
 export async function openPermissionSettings(
-  section: "microphone" | "speech" | "accessibility" | "automation"
+  section:
+    | "microphone"
+    | "speech"
+    | "accessibility"
+    | "automation"
+    | "system_audio"
 ): Promise<void> {
   await invoke("open_permission_settings", { section });
 }
@@ -861,6 +931,10 @@ export async function openInstalledPlainsongApp(): Promise<void> {
 
 export async function requestDictationPermissions(): Promise<PermissionDiagnostics> {
   return await invoke("request_dictation_permissions");
+}
+
+export async function requestAppleSpeechPermission(): Promise<PermissionDiagnostics> {
+  return await invoke("request_apple_speech_permission");
 }
 
 export async function repairCursorInsertPermissions(): Promise<PermissionDiagnostics> {
@@ -880,12 +954,9 @@ export async function getDictationShortcutCapabilityStatus(): Promise<DictationS
 // ShortcutFieldKey: conflicts are reported by field from there.
 export type ShortcutFieldKey =
   | "toggleDictation"
-  | "toggleRecording"
   | "openWindow"
   | "repasteLastDictation"
-  | "recopyLastDictation"
-  | "quickExport"
-  | "focusSearch";
+  | "recopyLastDictation";
 
 export interface ShortcutConflict {
   field: ShortcutFieldKey;
@@ -976,6 +1047,7 @@ export async function getSettings(): Promise<Settings> {
 interface ResetAppStateResult {
   deletedRecordings: number;
   deletedAudioFiles: number;
+  deletedRuntimeAudioDirectory: boolean;
   failedAudioFileDeletions: string[];
   clearedProviderSecrets: string[];
   failedProviderSecretClears: string[];

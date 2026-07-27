@@ -6,8 +6,8 @@ import {
   type PermissionDiagnostics,
 } from "@/lib/backend/settings";
 import {
-  checkSystemAudioAvailability,
-  getLoopbackDeviceName,
+  getSystemAudioCapability,
+  type SystemAudioCapability,
 } from "@/lib/backend/recordings";
 import {
   isMeetingEligibleProvider,
@@ -32,6 +32,7 @@ interface SetupStatusSnapshot {
   permissions: PermissionDiagnostics | null;
   systemAudioAvailable: boolean | null;
   loopbackDevice: string | null;
+  systemAudioCapability: SystemAudioCapability | null;
   meetingCaptureMode: "me_and_them" | "mic_only" | "unknown";
   dictationRoutePreference: "local" | "cloud";
   dictationLocalReady: boolean;
@@ -39,10 +40,13 @@ interface SetupStatusSnapshot {
   meetingRoutePolicy: "prefer_local" | "best_available";
   dictationRoute: SetupRouteStatus;
   meetingRoute: SetupRouteStatus;
+  microphoneReady: boolean;
   dictationReady: boolean;
   meetingReady: boolean;
+  fullCaptureReady: boolean;
   dictationBlockers: string[];
   meetingBlockers: string[];
+  fullCaptureBlockers: string[];
 }
 
 function resolveSharedSelection(settings: Settings | null, kind: "dictation" | "meeting") {
@@ -123,6 +127,21 @@ function buildRouteStatus(
 
   if (
     provider.providerType === "macos_apple_speech" &&
+    provider.platformReadiness &&
+    !provider.platformReadiness.ready
+  ) {
+    return {
+      providerType,
+      modelId,
+      provider,
+      summary: routeSummary,
+      ready: false,
+      reason: provider.platformReadiness.message,
+    };
+  }
+
+  if (
+    provider.providerType === "macos_apple_speech" &&
     permissions &&
     !permissions.speechRecognitionReady
   ) {
@@ -132,7 +151,7 @@ function buildRouteStatus(
       provider,
       summary: routeSummary,
       ready: false,
-      reason: "Speech Recognition permission is still required for Apple Native dictation.",
+      reason: "Speech Recognition permission is still required for Apple Speech dictation.",
     };
   }
 
@@ -153,10 +172,21 @@ export function buildSnapshot(
   providers: AsrProviderInfo[],
   permissions: PermissionDiagnostics | null,
   systemAudioAvailable: boolean | null,
-  loopbackDevice: string | null
+  loopbackDevice: string | null,
+  systemAudioCapability: SystemAudioCapability | null = null
 ): SetupStatusSnapshot {
   const dictationRoute = buildRouteStatus("dictation", settings, providers, permissions);
   const meetingRoute = buildRouteStatus("meeting", settings, providers, permissions);
+  const effectiveSystemAudioAvailable = systemAudioCapability
+    ? systemAudioCapability.backend !== "none"
+    : systemAudioAvailable;
+  const systemAudioVerified = Boolean(
+    systemAudioCapability?.ready &&
+      systemAudioCapability.readiness === "ready" &&
+      systemAudioCapability.backend !== "none"
+  );
+  const effectiveLoopbackDevice =
+    systemAudioCapability?.routeDevice ?? loopbackDevice;
   const dictationInsertionMode = settings?.transcription.dictationInsertionMode ?? "auto";
   const cursorInsertionRequired = dictationInsertionMode !== "clipboard_only";
   const cursorInsertionReady =
@@ -180,21 +210,28 @@ export function buildSnapshot(
       provider.runtimeStatus === "ready" &&
       providerHostingPreference(provider.providerType, provider.selectedModelId) === "cloud"
   );
+  const microphonePermissionReady =
+    permissions?.microphonePermissionReady ?? permissions?.microphoneReady ?? false;
+  const microphoneReady = Boolean(
+    permissions?.microphoneReady && microphonePermissionReady
+  );
+  const microphoneBlocker = !microphonePermissionReady
+    ? "Microphone permission is still required."
+    : !microphoneReady
+      ? "No microphone input device is currently available."
+      : null;
   const dictationReady = Boolean(
-    permissions?.microphoneReady && dictationRoute.ready && cursorInsertionReady
+    microphoneReady && dictationRoute.ready && cursorInsertionReady
   );
   const speechRecognitionRequiredForDictation =
     dictationRoute.providerType === "macos_apple_speech";
-  const meetingReady = Boolean(
-    permissions?.microphoneReady &&
-      meetingRoute.ready &&
-      (systemAudioAvailable ?? false)
-  );
+  const meetingReady = Boolean(microphoneReady && meetingRoute.ready);
+  const fullCaptureReady = Boolean(meetingReady && systemAudioVerified);
   const dictationBlockers = [
-    !permissions?.microphoneReady ? "Microphone permission is still required." : null,
+    microphoneBlocker,
     speechRecognitionRequiredForDictation &&
     !(permissions?.speechRecognitionReady ?? true)
-      ? "Speech Recognition permission is still required for Apple Native dictation."
+      ? "Speech Recognition permission is still required for Apple Speech dictation."
       : null,
     !cursorInsertionReady && cursorInsertionRequired
       ? "Cursor insertion is still required for the current dictation mode."
@@ -202,19 +239,27 @@ export function buildSnapshot(
     !dictationRoute.ready ? dictationRoute.reason : null,
   ].filter((value): value is string => Boolean(value));
   const meetingBlockers = [
-    !permissions?.microphoneReady ? "Microphone permission is still required." : null,
+    microphoneBlocker,
     !meetingRoute.ready ? meetingRoute.reason : null,
-    systemAudioAvailable === false
-      ? "System audio capture is not available yet."
+  ].filter((value): value is string => Boolean(value));
+  const fullCaptureBlockers = [
+    ...meetingBlockers,
+    effectiveSystemAudioAvailable === false
+      ? systemAudioCapability?.actionableReason ??
+        "System audio capture is not available yet. Start in Mic only mode or configure a route."
       : null,
-    !loopbackDevice && systemAudioAvailable === false
-      ? "No loopback device was detected for meeting capture."
+    effectiveSystemAudioAvailable === true && !systemAudioVerified
+      ? systemAudioCapability?.actionableReason ??
+        "A system-audio route was detected, but callbacks are unverified. Run Test system audio before using Me + Them."
+      : null,
+    !effectiveLoopbackDevice && effectiveSystemAudioAvailable === false
+      ? "No native or virtual-loopback route was detected for Me + Them capture."
       : null,
   ].filter((value): value is string => Boolean(value));
   const meetingCaptureMode =
-    systemAudioAvailable === null
+    effectiveSystemAudioAvailable === null
       ? "unknown"
-      : systemAudioAvailable
+      : fullCaptureReady
         ? "me_and_them"
         : "mic_only";
 
@@ -222,8 +267,9 @@ export function buildSnapshot(
     settings,
     providers,
     permissions,
-    systemAudioAvailable,
-    loopbackDevice,
+    systemAudioAvailable: effectiveSystemAudioAvailable,
+    loopbackDevice: effectiveLoopbackDevice,
+    systemAudioCapability,
     meetingCaptureMode,
     dictationRoutePreference,
     dictationLocalReady,
@@ -231,10 +277,13 @@ export function buildSnapshot(
     meetingRoutePolicy,
     dictationRoute,
     meetingRoute,
+    microphoneReady,
     dictationReady,
     meetingReady,
+    fullCaptureReady,
     dictationBlockers,
     meetingBlockers,
+    fullCaptureBlockers,
   };
 }
 
@@ -242,8 +291,8 @@ export function useSetupStatus() {
   const [settings, setSettings] = useState<Settings | null>(null);
   const [providers, setProviders] = useState<AsrProviderInfo[]>([]);
   const [permissions, setPermissions] = useState<PermissionDiagnostics | null>(null);
-  const [systemAudioAvailable, setSystemAudioAvailable] = useState<boolean | null>(null);
-  const [loopbackDevice, setLoopbackDevice] = useState<string | null>(null);
+  const [systemAudioCapability, setSystemAudioCapability] =
+    useState<SystemAudioCapability | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
 
@@ -256,21 +305,18 @@ export function useSetupStatus() {
         nextSettings,
         nextProviders,
         nextPermissions,
-        nextSystemAudioAvailable,
-        nextLoopbackDevice,
+        nextSystemAudioCapability,
       ] = await Promise.all([
         getSettings(),
         getAsrProviders(),
         getPermissionDiagnostics().catch(() => null),
-        checkSystemAudioAvailability().catch(() => null),
-        getLoopbackDeviceName().catch(() => null),
+        getSystemAudioCapability().catch(() => null),
       ]);
 
       setSettings(nextSettings);
       setProviders(nextProviders);
       setPermissions(nextPermissions);
-      setSystemAudioAvailable(nextSystemAudioAvailable);
-      setLoopbackDevice(nextLoopbackDevice);
+      setSystemAudioCapability(nextSystemAudioCapability);
     } catch (nextError) {
       setError(nextError instanceof Error ? nextError.message : String(nextError));
     } finally {
@@ -284,8 +330,17 @@ export function useSetupStatus() {
 
   const snapshot = useMemo(
     () =>
-      buildSnapshot(settings, providers, permissions, systemAudioAvailable, loopbackDevice),
-    [loopbackDevice, permissions, providers, settings, systemAudioAvailable]
+      buildSnapshot(
+        settings,
+        providers,
+        permissions,
+        systemAudioCapability
+          ? systemAudioCapability.backend !== "none"
+          : null,
+        systemAudioCapability?.routeDevice ?? null,
+        systemAudioCapability
+      ),
+    [permissions, providers, settings, systemAudioCapability]
   );
 
   return {

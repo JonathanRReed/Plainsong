@@ -34,6 +34,7 @@ import {
 import {
   deleteRecording,
   deleteTranscriptSegments,
+  editTranscriptSpeakerTurn,
   getMeetingChatMessages,
   getRecording,
   openRecordingAudio,
@@ -45,7 +46,6 @@ import {
   updateRecordingAnalysis,
   updateRecordingNotes,
   updateRecordingTemplate,
-  updateTranscriptSegment,
 } from "@/lib/backend/recordings";
 import { exportRecordingV2, openExportPath } from "@/lib/backend/exports";
 import { isDiarizationModelAvailable, renameSpeaker, runDiarization } from "@/lib/backend/asr";
@@ -56,7 +56,12 @@ import type {
   PersonMemoryProfile,
   RelationshipMemory,
 } from "@/lib/backend/ai";
-import type { MeetingTranscriptDetails, Recording } from "@/types";
+import type {
+  MeetingTranscriptDetails,
+  Recording,
+  RecordingAnalysisFailedEvent,
+  RecordingAnalysisProgressEvent,
+} from "@/types";
 import {
   buildMeetingTemplateOutline,
   getMeetingTemplateOption,
@@ -206,11 +211,54 @@ type EnhancedMeetingNotesDraft = {
   }>;
 };
 
+type MeetingNotesSaveStatus = {
+  recordingId: string;
+  surface: "live" | "review";
+  revision: number;
+  state: "saving" | "saved" | "error";
+};
+
+function MeetingNotesSaveIndicator({
+  status,
+  onRetry,
+}: {
+  status: MeetingNotesSaveStatus | null;
+  onRetry(): void;
+}) {
+  if (!status) {
+    return null;
+  }
+
+  if (status.state === "error") {
+    return (
+      <div
+        className="flex items-center gap-1 text-xs text-rust"
+        role="status"
+        aria-live="polite"
+      >
+        <span>Not saved —</span>{" "}
+        <button
+          type="button"
+          className="font-medium underline underline-offset-2 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+          onClick={onRetry}
+        >
+          Retry
+        </button>
+      </div>
+    );
+  }
+
+  return (
+    <p className="text-xs text-muted-foreground" role="status" aria-live="polite">
+      {status.state === "saving" ? "Saving…" : "Saved just now"}
+    </p>
+  );
+}
+
 /**
- * Which hand set a recap field down, as far as this session can actually tell.
- * Nothing persists authorship alongside the summary or the action items, so
- * text that came back from storage gets its own state — calling it the user's
- * would hand them the model's words as their own.
+ * Which hand set a recap field down. Current analysis stores verified
+ * provenance; legacy text without it keeps an explicit unrecorded state rather
+ * than being handed to either the user or the model.
  */
 type RecapAuthorship = "plainsong" | "user" | "unrecorded";
 
@@ -228,14 +276,14 @@ const RECAP_AUTHORSHIP_TREATMENT: Record<RecapAuthorship, string> = {
 // The button under these captions is labelled "Regenerate". The only "Refresh"
 // on this page belongs to the transcript rail and does something else.
 const SUMMARY_AUTHORSHIP_CAPTION: Record<RecapAuthorship, string> = {
-  plainsong: "Written by Plainsong this session from transcript and notes.",
+  plainsong: "Written by Plainsong from transcript and notes.",
   user: "Your text. Regenerate to have Plainsong rewrite it from the transcript.",
   unrecorded:
     "Authorship not recorded — nothing stored says whether you or Plainsong wrote this. Regenerate to have Plainsong rewrite it from the transcript.",
 };
 
 const ACTION_ITEMS_AUTHORSHIP_CAPTION: Record<RecapAuthorship, string> = {
-  plainsong: "Extracted by Plainsong this session from transcript and notes.",
+  plainsong: "Extracted by Plainsong from transcript and notes.",
   user: "Your text. Regenerate to have Plainsong extract them from the transcript.",
   unrecorded:
     "Authorship not recorded — nothing stored says whether you or Plainsong wrote these. Regenerate to have Plainsong extract them from the transcript.",
@@ -344,6 +392,9 @@ function describeTranscriptProvenance(
   }
 
   const providerType = normalized as AsrProviderType;
+  if (providerType === "macos_apple_speech") {
+    return { source: "apple_on_device" };
+  }
   const hosting = providerHostingPreference(providerType, modelId);
   if (hosting === "cloud" || isCloudProvider(providerType)) {
     return {
@@ -499,6 +550,22 @@ function canRetranscribeRecording(recording: Recording | null): boolean {
     return false;
   }
   return recording.status !== "recording" && recording.status !== "processing";
+}
+
+function canDeleteRecording(recording: Recording | null): boolean {
+  return Boolean(
+    recording && recording.status !== "recording" && recording.status !== "processing"
+  );
+}
+
+function deleteRecordingActionLabel(recording: Recording | null): string {
+  if (recording?.status === "recording") {
+    return "Delete (stop recording first)";
+  }
+  if (recording?.status === "processing") {
+    return "Delete (wait for processing)";
+  }
+  return "Delete";
 }
 
 function qualityToneClasses(tone: "good" | "warn" | "muted"): string {
@@ -765,7 +832,7 @@ const REGENERATE_SCOPE_LABEL: Record<RegenerateScope, string> = {
 
 /**
  * Regeneration replaces text in place, so it has to say what it is about to
- * throw away. Only text this session watched Plainsong write is safe to
+ * throw away. Text with matching persisted Plainsong provenance is safe to
  * replace silently; anything else is either the reader's own or has no
  * recorded author, and both deserve the question first.
  */
@@ -852,7 +919,13 @@ function buildRelationshipRecallPrompts(args: {
 }
 
 export function RecordingsView() {
-  const { recordings, refetch } = useRecordings();
+  const {
+    recordings,
+    isLoading: recordingsLoading,
+    hasLoaded: recordingsHaveLoaded,
+    error: recordingsError,
+    refetch,
+  } = useRecordings();
   const { startMeeting, stopMeeting, isRecording, recordingId, formattedDuration } = useRecording();
   const { toast } = useToast();
   const [recordingStatusOverrides, setRecordingStatusOverrides] = useState<
@@ -909,21 +982,23 @@ export function RecordingsView() {
   const [liveMeetingConsentShown, setLiveMeetingConsentShown] = useState(false);
   const [meetingNotes, setMeetingNotes] = useState("");
   const [meetingNotesTargetId, setMeetingNotesTargetId] = useState<string | null>(null);
+  const [meetingNotesSaveStatus, setMeetingNotesSaveStatus] =
+    useState<MeetingNotesSaveStatus | null>(null);
   const [meetingTemplateId, setMeetingTemplateId] = useState("auto");
   const [meetingSummary, setMeetingSummary] = useState("");
   const [meetingActionItemsText, setMeetingActionItemsText] = useState("");
   const [enhancedMeetingNotesDraft, setEnhancedMeetingNotesDraft] =
     useState<EnhancedMeetingNotesDraft | null>(null);
   // Provenance for the recap the user is looking at: which transcript lines the
-  // model cited for the summary, and for each action item. Held only for text
-  // this session generated — a hand-typed or previously saved line has no
-  // citations and must say so rather than borrow someone else's.
+  // model cited for the summary, and for each action item. Hydrated from storage
+  // and retained only while it still matches the visible content.
   const [meetingSummaryProvenance, setMeetingSummaryProvenance] = useState<{
     summary: string;
     citations: LlmCitation[];
+    grounded: boolean;
   } | null>(null);
   const [meetingActionItemProvenance, setMeetingActionItemProvenance] = useState<
-    Array<{ item: string; citations: LlmCitation[] }>
+    Array<{ item: string; citations: LlmCitation[]; grounded: boolean }>
   >([]);
   // The recap text the reader typed in this session, held the same way the
   // citations above are: the claim "Your text." only stands while what is on
@@ -943,6 +1018,12 @@ export function RecordingsView() {
   const [meetingRecallError, setMeetingRecallError] = useState<string | null>(null);
   const [isRefreshingSummary, setIsRefreshingSummary] = useState(false);
   const [isRefreshingActionItems, setIsRefreshingActionItems] = useState(false);
+  const [analysisProgressByTarget, setAnalysisProgressByTarget] = useState<
+    Partial<Record<string, RecordingAnalysisProgressEvent>>
+  >({});
+  const [analysisFailureByTarget, setAnalysisFailureByTarget] = useState<
+    Partial<Record<string, RecordingAnalysisFailedEvent>>
+  >({});
   const [activeSpeechTarget, setActiveSpeechTarget] = useState<string | null>(null);
   const meetingChatRequestGuard = useScopedRequestGuard<string | null>();
   const meetingSummaryRequestGuard = useScopedRequestGuard<string | null>();
@@ -958,6 +1039,10 @@ export function RecordingsView() {
   // what is actually stored instead of clobbering it.
   const meetingNotesWriteRevisionRef = useRef(0);
   const pendingMeetingNotesWritesRef = useRef(0);
+  // Serialize writes per meeting. Revision checks keep stale responses from
+  // changing the indicator, but ordering the actual writes is what keeps an
+  // older request from landing last on disk after a newer edit was reported saved.
+  const meetingNotesWriteChainsRef = useRef(new Map<string, Promise<void>>());
   const meetingNotesRef = useRef("");
   const lastSavedMeetingTemplateRef = useRef("auto");
   const lastSavedMeetingSummaryRef = useRef("");
@@ -1025,6 +1110,7 @@ export function RecordingsView() {
     detailError,
     loadRecordingDetail,
     refreshSelectedRecording,
+    refreshSpeakerNames,
     refreshTranscript,
     refreshTranscriptDetails,
     clearRecordingDetail,
@@ -1058,8 +1144,91 @@ export function RecordingsView() {
   });
 
   useEffect(() => {
+    if (!selectedRecording?.id) {
+      setAnalysisProgressByTarget({});
+      setAnalysisFailureByTarget({});
+      return;
+    }
+
+    let unlistenProgress: (() => void) | undefined;
+    let unlistenFailure: (() => void) | undefined;
+    const recordingId = selectedRecording.id;
+    void Promise.all([
+      listen<RecordingAnalysisProgressEvent>(
+        "recording-analysis-progress",
+        (event) => {
+          const payload = event.payload;
+          if (!payload || payload.recordingId !== recordingId) return;
+          setAnalysisProgressByTarget((current) => {
+            const next = { ...current };
+            if (payload.stage === "completed") {
+              delete next[payload.target];
+            } else {
+              next[payload.target] = payload;
+            }
+            return next;
+          });
+          setAnalysisFailureByTarget((current) => {
+            const next = { ...current };
+            delete next[payload.target];
+            return next;
+          });
+        }
+      ).then((unlisten) => {
+        unlistenProgress = unlisten;
+      }),
+      listen<RecordingAnalysisFailedEvent>(
+        "recording-analysis-failed",
+        (event) => {
+          const payload = event.payload;
+          if (!payload || payload.recordingId !== recordingId) return;
+          setAnalysisFailureByTarget((current) => ({
+            ...current,
+            [payload.target]: payload,
+          }));
+          setAnalysisProgressByTarget((current) => {
+            const next = { ...current };
+            delete next[payload.target];
+            return next;
+          });
+        }
+      ).then((unlisten) => {
+        unlistenFailure = unlisten;
+      }),
+    ]);
+
+    return () => {
+      unlistenProgress?.();
+      unlistenFailure?.();
+    };
+  }, [selectedRecording?.id]);
+
+  useEffect(() => {
     meetingNotesRef.current = meetingNotes;
   }, [meetingNotes]);
+
+  const enqueueMeetingNotesWrite = useCallback(
+    async <T,>(recordingId: string, write: () => Promise<T>): Promise<T> => {
+      const previousWrite = meetingNotesWriteChainsRef.current.get(recordingId);
+      const result = (previousWrite ?? Promise.resolve())
+        .catch(() => undefined)
+        .then(write);
+      const settled = result.then(
+        () => undefined,
+        () => undefined
+      );
+      meetingNotesWriteChainsRef.current.set(recordingId, settled);
+
+      try {
+        return await result;
+      } finally {
+        if (meetingNotesWriteChainsRef.current.get(recordingId) === settled) {
+          meetingNotesWriteChainsRef.current.delete(recordingId);
+        }
+      }
+    },
+    []
+  );
 
   // The one place meeting notes are written. Callers hand over the buffer they
   // hold plus the marker for the text that buffer was based on; if the record
@@ -1071,49 +1240,126 @@ export function RecordingsView() {
       notes: string;
       savedRef: { current: string };
       onRebase: (notes: string) => void;
+      surface: "live" | "review";
+      revision?: number;
+      invalidateVisibleAnalysis?: boolean;
     }) => {
-      const revision = (meetingNotesWriteRevisionRef.current += 1);
+      const revision =
+        target.revision ?? (meetingNotesWriteRevisionRef.current += 1);
       pendingMeetingNotesWritesRef.current += 1;
-      try {
-        let stored = target.savedRef.current;
-        try {
-          stored = (await getRecording(target.recordingId))?.meetingNotes ?? "";
-        } catch (error) {
-          // A read failure must not block the save; fall back to a plain write.
-          console.error("Failed to read stored meeting notes before autosave:", error);
-        }
-
-        const nextNotes = rebaseMeetingNotes({
-          base: target.savedRef.current,
-          local: target.notes,
-          stored,
+      if (revision === meetingNotesWriteRevisionRef.current) {
+        setMeetingNotesSaveStatus({
+          recordingId: target.recordingId,
+          surface: target.surface,
+          revision,
+          state: "saving",
         });
-        await updateRecordingNotes(target.recordingId, nextNotes);
+      }
+      try {
+        await enqueueMeetingNotesWrite(target.recordingId, async () => {
+          let stored = target.savedRef.current;
+          try {
+            stored = (await getRecording(target.recordingId))?.meetingNotes ?? "";
+          } catch (error) {
+            // A read failure must not block the save; fall back to a plain write.
+            console.error("Failed to read stored meeting notes before autosave:", error);
+          }
 
-        if (revision !== meetingNotesWriteRevisionRef.current) {
-          return;
-        }
-        target.savedRef.current = nextNotes;
-        if (nextNotes !== target.notes) {
-          target.onRebase(nextNotes);
-        }
-        setSelectedRecording((current) =>
-          current?.id === target.recordingId
-            ? {
-                ...current,
-                meetingNotes: nextNotes.trim() ? nextNotes : null,
-                notesUpdatedAt: new Date().toISOString(),
-              }
-            : current
-        );
+          const nextNotes = rebaseMeetingNotes({
+            base: target.savedRef.current,
+            local: target.notes,
+            stored,
+          });
+          await updateRecordingNotes(target.recordingId, nextNotes);
+
+          // Even a superseded write is now the persisted base for the queued
+          // write behind it. Only visible state and status are revision-gated.
+          target.savedRef.current = nextNotes;
+          if (revision !== meetingNotesWriteRevisionRef.current) {
+            return;
+          }
+          if (nextNotes !== target.notes) {
+            target.onRebase(nextNotes);
+          }
+          setSelectedRecording((current) =>
+            current?.id === target.recordingId
+              ? {
+                  ...current,
+                  meetingNotes: nextNotes.trim() ? nextNotes : null,
+                  notesUpdatedAt: new Date().toISOString(),
+                  summaryProvenance: undefined,
+                  actionItemsProvenance: undefined,
+                }
+              : current
+          );
+          if (target.invalidateVisibleAnalysis) {
+            setMeetingSummaryProvenance(null);
+            setMeetingActionItemProvenance([]);
+          }
+          setMeetingNotesSaveStatus({
+            recordingId: target.recordingId,
+            surface: target.surface,
+            revision,
+            state: "saved",
+          });
+        });
       } catch (error) {
         console.error("Failed to update meeting notes:", error);
-        notifyAutosaveFailure("Meeting notes");
+        if (revision === meetingNotesWriteRevisionRef.current) {
+          setMeetingNotesSaveStatus({
+            recordingId: target.recordingId,
+            surface: target.surface,
+            revision,
+            state: "error",
+          });
+          notifyAutosaveFailure("Meeting notes");
+        }
       } finally {
         pendingMeetingNotesWritesRef.current -= 1;
       }
     },
-    [notifyAutosaveFailure, setSelectedRecording]
+    [enqueueMeetingNotesWrite, notifyAutosaveFailure, setSelectedRecording]
+  );
+
+  const retryMeetingNotesSave = useCallback(
+    (surface: "live" | "review") => {
+      if (surface === "live") {
+        if (!recordingId) {
+          return;
+        }
+        const revision = (meetingNotesWriteRevisionRef.current += 1);
+        void persistMeetingNotes({
+          recordingId,
+          notes: liveMeetingNotes,
+          savedRef: lastSavedLiveMeetingNotesRef,
+          onRebase: setLiveMeetingNotes,
+          surface,
+          revision,
+        });
+        return;
+      }
+
+      if (!meetingNotesTargetId) {
+        return;
+      }
+      const revision = (meetingNotesWriteRevisionRef.current += 1);
+      void persistMeetingNotes({
+        recordingId: meetingNotesTargetId,
+        notes: meetingNotes,
+        savedRef: lastSavedMeetingNotesRef,
+        onRebase: setMeetingNotes,
+        surface,
+        revision,
+        invalidateVisibleAnalysis: true,
+      });
+    },
+    [
+      liveMeetingNotes,
+      meetingNotes,
+      meetingNotesTargetId,
+      persistMeetingNotes,
+      recordingId,
+    ]
   );
 
   useEffect(() => {
@@ -1148,6 +1394,7 @@ export function RecordingsView() {
         refreshSelectedRecording(selectedRecording.id),
         refreshTranscript(selectedRecording.id),
         refreshTranscriptDetails(selectedRecording.id),
+        refreshSpeakerNames(selectedRecording.id),
       ]);
       toast("Transcript panel refreshed.", "success");
     } catch (error) {
@@ -1227,15 +1474,29 @@ export function RecordingsView() {
 
     const normalizedNotes = liveMeetingNotes.trim();
     if (normalizedNotes === lastSavedLiveMeetingNotesRef.current.trim()) {
+      setMeetingNotesSaveStatus((current) =>
+        current?.surface === "live" && current.recordingId === recordingId
+          ? null
+          : current
+      );
       return;
     }
 
+    const revision = (meetingNotesWriteRevisionRef.current += 1);
+    setMeetingNotesSaveStatus({
+      recordingId,
+      surface: "live",
+      revision,
+      state: "saving",
+    });
     const timeoutId = window.setTimeout(() => {
       void persistMeetingNotes({
         recordingId,
         notes: liveMeetingNotes,
         savedRef: lastSavedLiveMeetingNotesRef,
         onRebase: setLiveMeetingNotes,
+        surface: "live",
+        revision,
       });
     }, 350);
 
@@ -1249,15 +1510,30 @@ export function RecordingsView() {
 
     const normalizedNotes = meetingNotes.trim();
     if (normalizedNotes === lastSavedMeetingNotesRef.current.trim()) {
+      setMeetingNotesSaveStatus((current) =>
+        current?.surface === "review" && current.recordingId === meetingNotesTargetId
+          ? null
+          : current
+      );
       return;
     }
 
+    const revision = (meetingNotesWriteRevisionRef.current += 1);
+    setMeetingNotesSaveStatus({
+      recordingId: meetingNotesTargetId,
+      surface: "review",
+      revision,
+      state: "saving",
+    });
     const timeoutId = window.setTimeout(() => {
       void persistMeetingNotes({
         recordingId: meetingNotesTargetId,
         notes: meetingNotes,
         savedRef: lastSavedMeetingNotesRef,
         onRebase: setMeetingNotes,
+        surface: "review",
+        revision,
+        invalidateVisibleAnalysis: true,
       });
     }, 350);
 
@@ -1287,9 +1563,11 @@ export function RecordingsView() {
                   ...current,
                   meetingTemplateId:
                     normalizedTemplateId === "auto" ? null : normalizedTemplateId,
+                  summaryProvenance: undefined,
                 }
               : current
           );
+          setMeetingSummaryProvenance(null);
         })
         .catch((error) => {
           console.error("Failed to update meeting template:", error);
@@ -1309,28 +1587,42 @@ export function RecordingsView() {
     const normalizedActionItems = actionItemsFromText(meetingActionItemsText);
     const nextActionItemsKey = JSON.stringify(normalizedActionItems);
 
-    if (
-      normalizedSummary === lastSavedMeetingSummaryRef.current.trim() &&
-      nextActionItemsKey === lastSavedMeetingActionItemsRef.current
-    ) {
+    const summaryChanged =
+      normalizedSummary !== lastSavedMeetingSummaryRef.current.trim();
+    const actionItemsChanged =
+      nextActionItemsKey !== lastSavedMeetingActionItemsRef.current;
+    if (!summaryChanged && !actionItemsChanged) {
       return;
     }
 
     const timeoutId = window.setTimeout(() => {
-      void updateRecordingAnalysis(
-        meetingNotesTargetId,
-        normalizedSummary || null,
-        normalizedActionItems
-      )
+      void updateRecordingAnalysis(meetingNotesTargetId, {
+        ...(summaryChanged ? { summary: normalizedSummary || null } : {}),
+        ...(actionItemsChanged ? { actionItems: normalizedActionItems } : {}),
+      })
         .then(() => {
-          lastSavedMeetingSummaryRef.current = normalizedSummary;
-          lastSavedMeetingActionItemsRef.current = nextActionItemsKey;
+          if (summaryChanged) {
+            lastSavedMeetingSummaryRef.current = normalizedSummary;
+          }
+          if (actionItemsChanged) {
+            lastSavedMeetingActionItemsRef.current = nextActionItemsKey;
+          }
           setSelectedRecording((current) =>
             current?.id === meetingNotesTargetId
               ? {
                   ...current,
-                  summary: normalizedSummary || undefined,
-                  actionItems: normalizedActionItems,
+                  ...(summaryChanged
+                    ? {
+                        summary: normalizedSummary || undefined,
+                        summaryProvenance: undefined,
+                      }
+                    : {}),
+                  ...(actionItemsChanged
+                    ? {
+                        actionItems: normalizedActionItems,
+                        actionItemsProvenance: undefined,
+                      }
+                    : {}),
                 }
               : current
           );
@@ -1430,15 +1722,37 @@ export function RecordingsView() {
     const nextTemplateId = selectedRecording.meetingTemplateId ?? "auto";
     const nextSummary = selectedRecording.summary ?? "";
     const nextActionItemsText = actionItemsToText(selectedRecording.actionItems);
+    const isNewMeeting = lastSelectedMeetingIdRef.current !== selectedRecording.id;
     setMeetingTemplateId(nextTemplateId);
     setMeetingSummary(nextSummary);
     setMeetingActionItemsText(nextActionItemsText);
-    if (lastSelectedMeetingIdRef.current !== selectedRecording.id) {
+    if (selectedRecording.summaryProvenance && nextSummary) {
+      setMeetingSummaryProvenance({
+        summary: nextSummary,
+        citations: selectedRecording.summaryProvenance.citations ?? [],
+        grounded: selectedRecording.summaryProvenance.grounded !== false,
+      });
+    } else if (isNewMeeting) {
+      setMeetingSummaryProvenance(null);
+    }
+    if (selectedRecording.actionItemsProvenance) {
+      setMeetingActionItemProvenance(
+        normalizeActionItems(selectedRecording.actionItems ?? []).map((item, index) => ({
+          item,
+          citations:
+            selectedRecording.actionItemsProvenance?.items[index]?.citations ?? [],
+          grounded:
+            selectedRecording.actionItemsProvenance?.items[index]?.grounded !== false &&
+            selectedRecording.actionItemsProvenance?.grounded !== false,
+        }))
+      );
+    } else if (isNewMeeting) {
+      setMeetingActionItemProvenance([]);
+    }
+    if (isNewMeeting) {
       setEnhancedMeetingNotesDraft(null);
       // Evidence and authorship belong to one meeting's text; neither may
       // follow the reader into the next meeting.
-      setMeetingSummaryProvenance(null);
-      setMeetingActionItemProvenance([]);
       setUserEditedSummary(null);
       setUserEditedActionItemsText(null);
       lastSelectedMeetingIdRef.current = selectedRecording.id;
@@ -1450,9 +1764,11 @@ export function RecordingsView() {
     );
   }, [
     selectedRecording?.actionItems,
+    selectedRecording?.actionItemsProvenance,
     selectedRecording?.id,
     selectedRecording?.meetingTemplateId,
     selectedRecording?.summary,
+    selectedRecording?.summaryProvenance,
   ]);
 
   useEffect(() => {
@@ -1491,23 +1807,36 @@ export function RecordingsView() {
       return;
     }
     let unlisten: (() => void) | undefined;
+    let scrollTimeout: ReturnType<typeof setTimeout> | undefined;
     listen<RecordingTranscriptionStreamEvent>(
       RECORDING_TRANSCRIPTION_STREAM_EVENT,
       (event) => {
         if (event.payload.recordingId !== recordingId) return;
         setPreviewDelay(describeTranscriptDelay(event.payload));
         setStreamChunks((prev) => appendTranscriptStreamLine(prev, event.payload));
-        setTimeout(() => {
-          streamScrollRef.current?.scrollTo({
-            top: streamScrollRef.current.scrollHeight,
-            behavior: "smooth",
-          });
+        if (scrollTimeout) {
+          clearTimeout(scrollTimeout);
+        }
+        scrollTimeout = setTimeout(() => {
+          const scrollContainer = streamScrollRef.current;
+          if (!scrollContainer) return;
+          if (typeof scrollContainer.scrollTo === "function") {
+            scrollContainer.scrollTo({
+              top: scrollContainer.scrollHeight,
+              behavior: "smooth",
+            });
+          } else {
+            scrollContainer.scrollTop = scrollContainer.scrollHeight;
+          }
         }, 50);
       }
     ).then((fn) => {
       unlisten = fn;
     });
     return () => {
+      if (scrollTimeout) {
+        clearTimeout(scrollTimeout);
+      }
       unlisten?.();
     };
   }, [isRecording, recordingId]);
@@ -1634,8 +1963,26 @@ export function RecordingsView() {
     setIsEditingActionItems(false);
     setPendingRegenerate(null);
     setAudioPlaybackIssue(null);
-    setMeetingSummaryProvenance(null);
-    setMeetingActionItemProvenance([]);
+    setMeetingSummaryProvenance(
+      recording.summaryProvenance && recording.summary
+        ? {
+            summary: recording.summary,
+            citations: recording.summaryProvenance.citations ?? [],
+            grounded: recording.summaryProvenance.grounded !== false,
+          }
+        : null
+    );
+    setMeetingActionItemProvenance(
+      recording.actionItemsProvenance
+        ? normalizeActionItems(recording.actionItems ?? []).map((item, index) => ({
+            item,
+            citations: recording.actionItemsProvenance?.items[index]?.citations ?? [],
+            grounded:
+              recording.actionItemsProvenance?.items[index]?.grounded !== false &&
+              recording.actionItemsProvenance?.grounded !== false,
+          }))
+        : []
+    );
     setUserEditedSummary(null);
     setUserEditedActionItemsText(null);
     setDiarizationMessage(null);
@@ -1731,10 +2078,20 @@ export function RecordingsView() {
 
   const handleRenameSpeaker = async (speakerId: string, newName: string) => {
     if (!selectedRecording) {
-      return;
+      const error = new Error("No recording is open for speaker renaming.");
+      toast(error.message, "error");
+      throw error;
     }
-    setSpeakerNames((prev) => ({ ...prev, [speakerId]: newName }));
-    await renameSpeaker(selectedRecording.id, speakerId, newName);
+
+    try {
+      await renameSpeaker(selectedRecording.id, speakerId, newName);
+      setSpeakerNames((prev) => ({ ...prev, [speakerId]: newName }));
+    } catch (error) {
+      const message =
+        error instanceof Error ? error.message : "Failed to rename this speaker.";
+      toast(message, "error");
+      throw error;
+    }
   };
 
   const handleDeleteTranscriptSegments = async (segmentIds: string[]) => {
@@ -1749,9 +2106,12 @@ export function RecordingsView() {
         return;
       }
 
+      await refreshSelectedRecording(selectedRecording.id);
       await refreshTranscript(selectedRecording.id);
       await refreshTranscriptDetails(selectedRecording.id);
       await refetch();
+      setMeetingSummaryProvenance(null);
+      setMeetingActionItemProvenance([]);
       toast(
         removed === 1
           ? "Transcript section removed."
@@ -1780,31 +2140,21 @@ export function RecordingsView() {
         return;
       }
       const nextSummary = result.summary.trim();
-      const currentActionItems = actionItemsFromText(meetingActionItemsText);
-
-      await updateRecordingAnalysis(
-        selectedRecording.id,
-        nextSummary || null,
-        currentActionItems
-      );
-      if (!meetingSummaryRequestGuard.isCurrent(requestToken)) {
-        return;
-      }
       setMeetingSummary(nextSummary);
       // Keep the evidence beside the text it produced, so the recap can say
       // which transcript lines it came from — and admit when it has none.
       setMeetingSummaryProvenance({
         summary: nextSummary,
         citations: result.citations ?? [],
+        grounded: result.grounded !== false,
       });
       lastSavedMeetingSummaryRef.current = nextSummary;
-      lastSavedMeetingActionItemsRef.current = JSON.stringify(currentActionItems);
       setSelectedRecording((current) =>
         current?.id === selectedRecording.id
           ? {
               ...current,
               summary: nextSummary || undefined,
-              actionItems: currentActionItems,
+              summaryProvenance: result.provenance,
             }
           : current
       );
@@ -1839,31 +2189,21 @@ export function RecordingsView() {
         result.items.map((item) => formatGroundedActionItem(item))
       );
       const nextActionItemsText = actionItemsToText(nextActionItems);
-      const normalizedSummary = meetingSummary.trim();
-
-      await updateRecordingAnalysis(
-        selectedRecording.id,
-        normalizedSummary || null,
-        nextActionItems
-      );
-      if (!meetingActionItemsRequestGuard.isCurrent(requestToken)) {
-        return;
-      }
       setMeetingActionItemsText(nextActionItemsText);
       setMeetingActionItemProvenance(
         result.items.map((item, index) => ({
           item: nextActionItems[index] ?? item.task,
           citations: item.citations ?? [],
+          grounded: item.grounded !== false && result.grounded !== false,
         }))
       );
-      lastSavedMeetingSummaryRef.current = normalizedSummary;
       lastSavedMeetingActionItemsRef.current = JSON.stringify(nextActionItems);
       setSelectedRecording((current) =>
         current?.id === selectedRecording.id
           ? {
               ...current,
-              summary: normalizedSummary || undefined,
               actionItems: nextActionItems,
+              actionItemsProvenance: result.provenance,
             }
           : current
       );
@@ -1907,9 +2247,11 @@ export function RecordingsView() {
             ? {
                 ...current,
                 meetingTemplateId: templateId === "auto" ? null : templateId,
+                summaryProvenance: undefined,
               }
             : current
         );
+        setMeetingSummaryProvenance(null);
       } catch (error) {
         console.error("Failed to switch meeting playbook before regenerating:", error);
         toast(
@@ -1955,48 +2297,70 @@ export function RecordingsView() {
     const requestToken = meetingEnhanceRequestGuard.beginRequest(selectedRecording.id);
     setIsEnhancingMeetingNotes(true);
     try {
-      const [summaryResult, actionItemsResult] = await Promise.all([
+      const [summaryOutcome, actionItemsOutcome] = await Promise.allSettled([
         summarizeRecordingGrounded(selectedRecording.id),
         extractActionItemsGrounded(selectedRecording.id),
       ]);
       if (!meetingEnhanceRequestGuard.isCurrent(requestToken)) {
         return;
       }
+      if (summaryOutcome.status === "rejected" && actionItemsOutcome.status === "rejected") {
+        throw new Error(
+          [summaryOutcome.reason, actionItemsOutcome.reason]
+            .map((reason) => (reason instanceof Error ? reason.message : String(reason)))
+            .join("; ")
+        );
+      }
 
-      const nextSummary = summaryResult.summary.trim();
-      const nextActionItems = normalizeActionItems(
-        actionItemsResult.items.map((item) => formatGroundedActionItem(item))
-      );
+      const summaryResult =
+        summaryOutcome.status === "fulfilled" ? summaryOutcome.value : null;
+      const actionItemsResult =
+        actionItemsOutcome.status === "fulfilled" ? actionItemsOutcome.value : null;
+      const nextSummary = summaryResult?.summary.trim() ?? meetingSummary.trim();
+      const nextActionItems = actionItemsResult
+        ? normalizeActionItems(
+            actionItemsResult.items.map((item) => formatGroundedActionItem(item))
+          )
+        : actionItemsFromText(meetingActionItemsText);
       const nextActionItemsText = actionItemsToText(nextActionItems);
 
-      await updateRecordingAnalysis(
-        selectedRecording.id,
-        nextSummary || null,
-        nextActionItems
-      );
-      if (!meetingEnhanceRequestGuard.isCurrent(requestToken)) {
-        return;
+      if (summaryResult) {
+        setMeetingSummary(nextSummary);
+        setMeetingSummaryProvenance({
+          summary: nextSummary,
+          citations: summaryResult.citations ?? [],
+          grounded: summaryResult.grounded !== false,
+        });
+        lastSavedMeetingSummaryRef.current = nextSummary;
       }
-      setMeetingSummary(nextSummary);
-      setMeetingActionItemsText(nextActionItemsText);
-      setMeetingSummaryProvenance({
-        summary: nextSummary,
-        citations: summaryResult.citations ?? [],
-      });
-      setMeetingActionItemProvenance(
-        actionItemsResult.items.map((item, index) => ({
-          item: nextActionItems[index] ?? item.task,
-          citations: item.citations ?? [],
-        }))
-      );
-      lastSavedMeetingSummaryRef.current = nextSummary;
-      lastSavedMeetingActionItemsRef.current = JSON.stringify(nextActionItems);
+      if (actionItemsResult) {
+        setMeetingActionItemsText(nextActionItemsText);
+        setMeetingActionItemProvenance(
+          actionItemsResult.items.map((item, index) => ({
+            item: nextActionItems[index] ?? item.task,
+            citations: item.citations ?? [],
+            grounded:
+              item.grounded !== false && actionItemsResult.grounded !== false,
+          }))
+        );
+        lastSavedMeetingActionItemsRef.current = JSON.stringify(nextActionItems);
+      }
       setSelectedRecording((current) =>
         current?.id === selectedRecording.id
           ? {
               ...current,
-              summary: nextSummary || undefined,
-              actionItems: nextActionItems,
+              ...(summaryResult
+                ? {
+                    summary: nextSummary || undefined,
+                    summaryProvenance: summaryResult.provenance,
+                  }
+                : {}),
+              ...(actionItemsResult
+                ? {
+                    actionItems: nextActionItems,
+                    actionItemsProvenance: actionItemsResult.provenance,
+                  }
+                : {}),
             }
           : current
       );
@@ -2010,13 +2374,27 @@ export function RecordingsView() {
         text: draftText,
         generatedAt: new Date().toISOString(),
         rawNotesSnapshot: meetingNotes,
-        summaryCitations: summaryResult.citations ?? [],
-        actionItemCitations: actionItemsResult.items.map((item, index) => ({
-          label: nextActionItems[index] ?? item.task,
-          citations: item.citations ?? [],
-        })),
+        summaryCitations:
+          summaryResult?.citations ?? meetingSummaryProvenance?.citations ?? [],
+        actionItemCitations: actionItemsResult
+          ? actionItemsResult.items.map((item, index) => ({
+              label: nextActionItems[index] ?? item.task,
+              citations: item.citations ?? [],
+            }))
+          : meetingActionItemProvenance.map((entry) => ({
+              label: entry.item,
+              citations: entry.citations,
+            })),
       });
-      toast("Enhanced notes draft ready.", "success");
+      if (!summaryResult || !actionItemsResult) {
+        const failedPart = summaryResult ? "action items" : "summary";
+        toast(
+          `Enhanced notes are ready with the saved ${failedPart} kept unchanged because that analysis failed.`,
+          "info"
+        );
+      } else {
+        toast("Enhanced notes draft ready.", "success");
+      }
     } catch (error) {
       if (!meetingEnhanceRequestGuard.isCurrent(requestToken)) {
         return;
@@ -2304,12 +2682,26 @@ export function RecordingsView() {
 
   const handleDeleteRecording = async () => {
     if (!showDeleteConfirm) return;
+    if (!canDeleteRecording(showDeleteConfirm)) {
+      toast(
+        showDeleteConfirm.status === "recording"
+          ? "Stop the meeting before deleting it."
+          : "Wait for meeting processing to finish before deleting it.",
+        "error"
+      );
+      return;
+    }
     try {
       await deleteRecording(showDeleteConfirm.id);
       refetch();
     } catch (err) {
       console.error("Failed to delete recording:", err);
-      toast("Couldn't delete that meeting — it's still in your list.", "error");
+      toast(
+        err instanceof Error
+          ? err.message
+          : "Couldn't delete that meeting — it's still in your list.",
+        "error"
+      );
     } finally {
       setShowDeleteConfirm(null);
     }
@@ -2618,19 +3010,28 @@ export function RecordingsView() {
   }, [meetingSummary, meetingSummaryProvenance]);
   const actionItemProvenance = useMemo(() => {
     const byItem = new Map(
-      meetingActionItemProvenance.map((entry) => [entry.item.trim(), entry.citations])
+      meetingActionItemProvenance.map((entry) => [
+        entry.item.trim(),
+        { citations: entry.citations, grounded: entry.grounded },
+      ])
     );
-    return selectedMeetingActionItems.map((item) => ({
-      item,
-      citations: byItem.get(item.trim()) ?? null,
-    }));
+    return selectedMeetingActionItems.map((item) => {
+      const provenance = byItem.get(item.trim());
+      return {
+        item,
+        citations: provenance?.citations ?? null,
+        grounded: provenance?.grounded ?? false,
+      };
+    });
   }, [meetingActionItemProvenance, selectedMeetingActionItems]);
-  // Only the action items still matching text the model produced this session
-  // carry evidence; the rest are the user's own and are left alone.
+  // Only action items still matching persisted model output carry evidence;
+  // the rest are the user's own or legacy unattributed text and are left alone.
   const generatedActionItemProvenance = useMemo(
     () =>
       actionItemProvenance.flatMap((entry) =>
-        entry.citations ? [{ item: entry.item, citations: entry.citations }] : []
+        entry.citations
+          ? [{ item: entry.item, citations: entry.citations, grounded: entry.grounded }]
+          : []
       ),
     [actionItemProvenance]
   );
@@ -3115,15 +3516,15 @@ export function RecordingsView() {
                     <DropdownMenuSeparator />
                     <DropdownMenuItem
                       className="text-destructive"
-                      disabled={isLiveSelectedMeeting}
+                      disabled={!canDeleteRecording(selectedRecording)}
                       onClick={() => {
-                        if (selectedRecording) {
+                        if (selectedRecording && canDeleteRecording(selectedRecording)) {
                           setShowDeleteConfirm(selectedRecording);
                         }
                       }}
                     >
                       <Trash2 className="mr-2 h-4 w-4" />
-                      {isLiveSelectedMeeting ? "Delete (stop recording first)" : "Delete"}
+                      {deleteRecordingActionLabel(selectedRecording)}
                     </DropdownMenuItem>
                   </DropdownMenuContent>
                 </DropdownMenu>
@@ -3267,6 +3668,18 @@ export function RecordingsView() {
                               value={meetingSummary}
                               onChange={(next) => {
                                 setMeetingSummary(next);
+                                setMeetingSummaryProvenance(
+                                  selectedRecording?.summaryProvenance &&
+                                    next.trim() === (selectedRecording.summary ?? "").trim()
+                                    ? {
+                                        summary: selectedRecording.summary ?? "",
+                                        citations:
+                                          selectedRecording.summaryProvenance.citations ?? [],
+                                        grounded:
+                                          selectedRecording.summaryProvenance.grounded !== false,
+                                      }
+                                    : null
+                                );
                                 setUserEditedSummary(next);
                               }}
                               isEditing={isEditingSummary}
@@ -3351,6 +3764,17 @@ export function RecordingsView() {
                                 </>
                               }
                             />
+                            {analysisProgressByTarget.summary ? (
+                              <p role="status" className="text-sm text-muted-foreground">
+                                {analysisProgressByTarget.summary.message}
+                              </p>
+                            ) : null}
+                            {analysisFailureByTarget.summary ? (
+                              <p role="alert" className="text-sm text-rust">
+                                Summary analysis failed. The previous saved summary was kept. {" "}
+                                {analysisFailureByTarget.summary.reason}
+                              </p>
+                            ) : null}
 
                             <div className="border-t pt-5">
                               <DocumentField
@@ -3374,7 +3798,7 @@ export function RecordingsView() {
                                       ? // The two hands mix line by line here, so
                                         // the caption says so rather than handing
                                         // the whole list to either one.
-                                        `Extracted by Plainsong this session, plus ${unattributedActionItemCount} line${
+                                        `Extracted by Plainsong, plus ${unattributedActionItemCount} line${
                                           unattributedActionItemCount === 1 ? "" : "s"
                                         } Plainsong did not write.`
                                       : ACTION_ITEMS_AUTHORSHIP_CAPTION[actionItemsAuthorship]
@@ -3423,6 +3847,17 @@ export function RecordingsView() {
                                   </>
                                 }
                               />
+                              {analysisProgressByTarget.actionItems ? (
+                                <p role="status" className="mt-2 text-sm text-muted-foreground">
+                                  {analysisProgressByTarget.actionItems.message}
+                                </p>
+                              ) : null}
+                              {analysisFailureByTarget.actionItems ? (
+                                <p role="alert" className="mt-2 text-sm text-rust">
+                                  Action-item analysis failed. The previous saved action items were kept. {" "}
+                                  {analysisFailureByTarget.actionItems.reason}
+                                </p>
+                              ) : null}
                             </div>
                           </section>
                           {/* Provenance. The boxes above carry the authorship mark —
@@ -3437,30 +3872,39 @@ export function RecordingsView() {
                               <div className="min-w-0">
                                 <p className="section-heading">Where this recap came from</p>
                                 <p className="mt-1 max-w-prose text-sm text-muted-foreground">
-                                  Evidence for the lines Plainsong wrote this session. Text you typed here
-                                  is your own; text that came back from storage has no recorded author.
-                                  Neither is listed below — Plainsong makes no evidence claim about
-                                  either.
+                                  Saved evidence for the lines Plainsong wrote. Text you type here is
+                                  your own and invalidates only the evidence for the field you changed.
+                                  Older records without saved provenance remain explicitly unattributed.
                                 </p>
                               </div>
                             </div>
 
                             {!hasRecapProvenance ? (
                               <p className="mt-3 text-sm text-muted-foreground">
-                                Nothing on this recap was generated in this session, so there is no
-                                evidence to show. Regenerate the summary or action items to attach
-                                transcript citations.
+                                This recap has no saved analysis provenance. Regenerate the summary or
+                                action items to attach transcript citations and provider metadata.
                               </p>
                             ) : (
                               <div className="mt-3 space-y-4">
                                 {summaryProvenance ? (
                                   <div>
                                     <p className="rubric-muted">Summary</p>
-                                    {summaryProvenance.citations.length === 0 ? (
+                                    {selectedRecording?.summaryProvenance ? (
+                                      <p className="mt-1 text-xs text-muted-foreground">
+                                        {selectedRecording.summaryProvenance.actualProvider} ·{" "}
+                                        {selectedRecording.summaryProvenance.actualModel} · completed{" "}
+                                        {new Date(
+                                          selectedRecording.summaryProvenance.completedAt
+                                        ).toLocaleString()}
+                                      </p>
+                                    ) : null}
+                                    {!summaryProvenance.grounded ||
+                                    summaryProvenance.citations.length === 0 ? (
                                       <p className="mt-1.5 inline-flex items-center gap-1.5 text-sm text-rust">
                                         <span className="neume neume-hollow" aria-hidden="true" />
-                                        Not grounded — the model returned no transcript citation for this
-                                        summary.
+                                        {summaryProvenance.citations.length === 0
+                                          ? "Not grounded — the model returned no transcript citation for this summary."
+                                          : "Not fully grounded — one or more citations were invalid or did not support this summary."}
                                       </p>
                                     ) : (
                                       <div className="mt-2 grid gap-1.5">
@@ -3496,17 +3940,27 @@ export function RecordingsView() {
                                 {generatedActionItemProvenance.length > 0 ? (
                                   <div>
                                     <p className="rubric-muted">Action items</p>
+                                    {selectedRecording?.actionItemsProvenance ? (
+                                      <p className="mt-1 text-xs text-muted-foreground">
+                                        {selectedRecording.actionItemsProvenance.actualProvider} ·{" "}
+                                        {selectedRecording.actionItemsProvenance.actualModel} · completed{" "}
+                                        {new Date(
+                                          selectedRecording.actionItemsProvenance.completedAt
+                                        ).toLocaleString()}
+                                      </p>
+                                    ) : null}
                                     <div className="mt-1.5 space-y-3">
                                       {generatedActionItemProvenance.map((entry, entryIndex) => (
                                         <div key={`action-provenance-${entryIndex}`}>
                                           <p className="manuscript max-w-prose border-l-2 border-gold-ambient/50 pl-3 text-sm leading-relaxed text-muted-foreground">
                                             {entry.item}
                                           </p>
-                                          {entry.citations.length === 0 ? (
+                                          {!entry.grounded || entry.citations.length === 0 ? (
                                             <p className="mt-1 inline-flex items-center gap-1.5 text-sm text-rust">
                                               <span className="neume neume-hollow" aria-hidden="true" />
-                                              Not grounded — no transcript citation was returned for this
-                                              follow-up.
+                                              {entry.citations.length === 0
+                                                ? "Not grounded — no transcript citation was returned for this follow-up."
+                                                : "Not fully grounded — one or more citations were invalid or did not support this follow-up."}
                                             </p>
                                           ) : (
                                             <div className="mt-1.5 grid gap-1.5">
@@ -3597,9 +4051,20 @@ export function RecordingsView() {
                             ) : null}
                           </div>
                           <div className="mt-4 flex flex-wrap items-center justify-between gap-2">
-                            <p className="text-sm text-muted-foreground">
-                              Sections autosave to the same meeting note as you type.
-                            </p>
+                            <div className="space-y-1">
+                              <p className="text-sm text-muted-foreground">
+                                Sections autosave to the same meeting note as you type.
+                              </p>
+                              <MeetingNotesSaveIndicator
+                                status={
+                                  meetingNotesSaveStatus?.surface === "review" &&
+                                  meetingNotesSaveStatus.recordingId === meetingNotesTargetId
+                                    ? meetingNotesSaveStatus
+                                    : null
+                                }
+                                onRetry={() => retryMeetingNotesSave("review")}
+                              />
+                            </div>
                             <Button
                               type="button"
                               size="sm"
@@ -4196,7 +4661,42 @@ export function RecordingsView() {
                           responseActions={[
                             {
                               label: "Replace Summary",
-                              onAction: ({ response }) => setMeetingSummary(response),
+                              onAction: ({ response, citations, provenance }) => {
+                                if (!selectedRecording) return;
+                                void updateRecordingAnalysis(selectedRecording.id, {
+                                  summary: response,
+                                  summaryProvenance: provenance,
+                                })
+                                  .then((recording) => {
+                                    const savedSummary =
+                                      recording?.summary ?? response.trim();
+                                    setMeetingSummary(savedSummary);
+                                    setMeetingSummaryProvenance({
+                                      summary: savedSummary,
+                                      citations,
+                                      grounded: provenance.grounded !== false,
+                                    });
+                                    lastSavedMeetingSummaryRef.current = savedSummary;
+                                    setSelectedRecording((current) =>
+                                      current?.id === selectedRecording.id
+                                        ? {
+                                            ...current,
+                                            ...(recording ?? {}),
+                                            summary: savedSummary,
+                                            summaryProvenance: provenance,
+                                          }
+                                        : current
+                                    );
+                                  })
+                                  .catch((error) => {
+                                    toast(
+                                      error instanceof Error
+                                        ? error.message
+                                        : "Failed to save this analysis as the summary.",
+                                      "error"
+                                    );
+                                  });
+                              },
                               isVisible: ({ templateId }) => templateId !== "follow_up",
                             },
                             {
@@ -4452,17 +4952,19 @@ export function RecordingsView() {
                       onEditSegment={async (segmentIds, newText) => {
                         if (!selectedRecording || segmentIds.length === 0) return;
                         try {
-                          // The edited text covers the whole speaker turn: it
-                          // replaces the first segment, and the remaining
-                          // segments are removed so their old text can't
-                          // duplicate alongside the correction.
-                          const [firstSegmentId, ...restSegmentIds] = segmentIds;
-                          await updateTranscriptSegment(selectedRecording.id, firstSegmentId, newText);
-                          if (restSegmentIds.length > 0) {
-                            await deleteTranscriptSegments(selectedRecording.id, restSegmentIds);
-                          }
+                          // The sidecar validates and rewrites the whole turn in
+                          // one transaction, so a failed remove can never leave
+                          // duplicated old text beside the correction.
+                          await editTranscriptSpeakerTurn(
+                            selectedRecording.id,
+                            segmentIds,
+                            newText
+                          );
+                          await refreshSelectedRecording(selectedRecording.id);
                           await refreshTranscript(selectedRecording.id);
                           await refreshTranscriptDetails(selectedRecording.id);
+                          setMeetingSummaryProvenance(null);
+                          setMeetingActionItemProvenance([]);
                           toast("Transcript updated.", "success");
                         } catch (error) {
                           const message =
@@ -4664,6 +5166,35 @@ export function RecordingsView() {
             </Card>
           )}
 
+          {recordingsError ? (
+            <div
+              role="alert"
+              className="mb-4 flex flex-wrap items-center justify-between gap-3 rounded-xl border border-rust/35 bg-rust/10 px-4 py-3"
+            >
+              <div className="flex min-w-0 items-start gap-2 text-sm text-rust">
+                <AlertCircle className="mt-0.5 h-4 w-4 shrink-0" aria-hidden="true" />
+                <div>
+                  <p className="font-medium">Meetings could not be refreshed.</p>
+                  <p className="mt-0.5 text-rust/90">{recordingsError}</p>
+                </div>
+              </div>
+              <Button
+                type="button"
+                size="sm"
+                variant="outline"
+                disabled={recordingsLoading}
+                onClick={() => void refetch()}
+              >
+                {recordingsLoading ? (
+                  <Loader2 className="mr-2 h-4 w-4 animate-spin" aria-hidden="true" />
+                ) : (
+                  <RefreshCw className="mr-2 h-4 w-4" aria-hidden="true" />
+                )}
+                Retry
+              </Button>
+            </div>
+          ) : null}
+
           <section className="surface-panel-subtle mb-4 rounded-2xl p-4">
             <div className="grid gap-3 md:grid-cols-[1fr_auto] md:items-center">
               <div>
@@ -4674,10 +5205,10 @@ export function RecordingsView() {
               </div>
               <div className="grid grid-cols-2 gap-2 sm:grid-cols-4">
                 {[
-                  ["Total", meetingStats.total],
-                  ["Completed", meetingStats.completed],
-                  ["Hours", `${meetingStats.totalHours.toFixed(1)}h`],
-                  ["Errors", meetingStats.errors],
+                  ["Total", recordingsHaveLoaded ? meetingStats.total : "—"],
+                  ["Completed", recordingsHaveLoaded ? meetingStats.completed : "—"],
+                  ["Hours", recordingsHaveLoaded ? `${meetingStats.totalHours.toFixed(1)}h` : "—"],
+                  ["Errors", recordingsHaveLoaded ? meetingStats.errors : "—"],
                 ].map(([label, value]) => (
                   <div
                     key={label}
@@ -4928,11 +5459,23 @@ export function RecordingsView() {
                           (grounds summary, actions, and Ask)
                         </span>
                       </p>
-                      <p className="text-sm text-muted-foreground">Autosaves to this meeting</p>
+                      <div className="text-right">
+                        <p className="text-sm text-muted-foreground">Autosaves to this meeting</p>
+                        <MeetingNotesSaveIndicator
+                          status={
+                            meetingNotesSaveStatus?.surface === "live" &&
+                            meetingNotesSaveStatus.recordingId === recordingId
+                              ? meetingNotesSaveStatus
+                              : null
+                          }
+                          onRetry={() => retryMeetingNotesSave("live")}
+                        />
+                      </div>
                     </div>
                     <textarea
                       value={liveMeetingNotes}
                       onChange={(e) => setLiveMeetingNotes(e.target.value)}
+                      aria-label="Live meeting notes"
                       placeholder="Capture decisions, names, risks, and next steps as the conversation moves."
                       rows={8}
                       className="w-full resize-none rounded-md border border-border bg-background px-3 py-2 text-sm placeholder:text-muted-foreground/50 focus:outline-none focus:ring-1 focus:ring-gold"
@@ -4973,7 +5516,11 @@ export function RecordingsView() {
             </Card>
           )}
 
-          {filteredMeetings.length === 0 ? (
+          {!recordingsHaveLoaded && recordingsLoading ? (
+            <div className="surface-panel-subtle rounded-2xl px-6 py-8">
+              <WorkspaceSkeleton label="Loading your meetings…" lines={6} />
+            </div>
+          ) : !recordingsHaveLoaded && recordingsError ? null : filteredMeetings.length === 0 ? (
             <div className="surface-panel-subtle rounded-2xl px-6 py-14 text-center">
               <span
                 className="neume neume-hollow mx-auto mb-5 !block size-2.5"
@@ -5118,16 +5665,18 @@ export function RecordingsView() {
                             <DropdownMenuSeparator />
                             <DropdownMenuItem
                               className="text-destructive"
-                              // Deleting the meeting that is still recording would
-                              // pull the file out from under the capture pipeline.
-                              disabled={isLiveRow}
+                              // Both capture and post-processing can still write
+                              // transcript rows for this meeting.
+                              disabled={!canDeleteRecording(recording)}
                               onClick={(e) => {
                                 e.stopPropagation();
-                                setShowDeleteConfirm(recording);
+                                if (canDeleteRecording(recording)) {
+                                  setShowDeleteConfirm(recording);
+                                }
                               }}
                             >
                               <Trash2 className="h-4 w-4 mr-2" />
-                              {isLiveRow ? "Delete (stop recording first)" : "Delete"}
+                              {deleteRecordingActionLabel(recording)}
                             </DropdownMenuItem>
                           </DropdownMenuContent>
                         </DropdownMenu>
@@ -5242,9 +5791,13 @@ export function RecordingsView() {
             <Button variant="outline" onClick={() => setShowDeleteConfirm(null)}>
               Cancel
             </Button>
-            <Button variant="destructive" onClick={handleDeleteRecording}>
+            <Button
+              variant="destructive"
+              disabled={!canDeleteRecording(showDeleteConfirm)}
+              onClick={handleDeleteRecording}
+            >
               <Trash2 className="h-4 w-4 mr-2" />
-              Delete
+              {deleteRecordingActionLabel(showDeleteConfirm)}
             </Button>
           </DialogFooter>
         </DialogContent>

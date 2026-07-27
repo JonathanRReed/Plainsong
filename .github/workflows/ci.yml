@@ -42,10 +42,16 @@ jobs:
       - name: Setup Bun
         uses: oven-sh/setup-bun@v2
         with:
-          bun-version: 1.3.12
+          bun-version: 1.3.14
 
       - name: Install dependencies
         run: bun install --frozen-lockfile
+
+      - name: Verify IPC contract
+        run: bun run gate:ipc-contract
+
+      - name: Verify dead-code hygiene
+        run: bun run gate:dead-code
 
       - name: Typecheck
         run: bun run typecheck
@@ -55,6 +61,7 @@ jobs:
 
   verify-build:
     name: Production build
+    needs: verify-web
     runs-on: ubuntu-latest
     timeout-minutes: 20
     defaults:
@@ -67,7 +74,7 @@ jobs:
       - name: Setup Bun
         uses: oven-sh/setup-bun@v2
         with:
-          bun-version: 1.3.12
+          bun-version: 1.3.14
 
       - name: Install dependencies
         run: bun install --frozen-lockfile
@@ -80,6 +87,7 @@ jobs:
 
   verify-rust:
     name: Rust format, clippy, and tests
+    needs: verify-web
     runs-on: macos-latest
     timeout-minutes: 45
     defaults:
@@ -112,6 +120,7 @@ jobs:
 
   verify-package:
     name: Package and verify (macOS)
+    needs: [verify-build, verify-rust]
     # Build the ZIP target so electron-builder emits the same app-update.yml,
     # latest-mac.yml, ZIP, and blockmap used by the updater. Runs on main
     # pushes and a weekly cron (not on PRs) to keep macOS runner cost in check.
@@ -128,7 +137,7 @@ jobs:
       - name: Setup Bun
         uses: oven-sh/setup-bun@v2
         with:
-          bun-version: 1.3.12
+          bun-version: 1.3.14
 
       - name: Setup Rust
         uses: dtolnay/rust-toolchain@stable
@@ -144,25 +153,19 @@ jobs:
       - name: Build macOS ZIP without publishing
         run: bun run electron:build:mac
 
-      - name: Verify update metadata
-        run: bun run qa:packaged:macos:update-metadata
-
-      # The sidecar and shortcut helper are compiled for the host arch; the mac
-      # artifact is declared arm64-only, so both bundled binaries must be arm64.
-      - name: Verify packaged native binaries
-        run: |
-          APP="release/mac-arm64/Plainsong.app"
-          SIDECAR="$APP/Contents/Resources/sidecar/plainsong-sidecar"
-          HELPER="$APP/Contents/Resources/shortcut-helper/plainsong-native-shortcut-helper"
-          test -x "$SIDECAR"
-          test -x "$HELPER"
-          lipo -archs "$SIDECAR" | grep -qw arm64
-          lipo -archs "$HELPER" | grep -qw arm64
-
       # Without these TCC usage strings macOS terminates the app the moment it
       # touches the microphone / speech recognition.
       - name: Verify TCC usage strings
         run: |
           PLIST="release/mac-arm64/Plainsong.app/Contents/Info.plist"
           /usr/libexec/PlistBuddy -c "Print :NSMicrophoneUsageDescription" "$PLIST"
+          /usr/libexec/PlistBuddy -c "Print :NSAudioCaptureUsageDescription" "$PLIST"
           /usr/libexec/PlistBuddy -c "Print :NSSpeechRecognitionUsageDescription" "$PLIST"
+
+      # Reuse the package hook's verifier so CI checks the app and every bundled
+      # native executable against the same arm64-only contract.
+      - name: Verify packaged native executables
+        run: bun run gate:packaged:macos:native
+
+      - name: Verify update metadata
+        run: bun run qa:packaged:macos:update-metadata

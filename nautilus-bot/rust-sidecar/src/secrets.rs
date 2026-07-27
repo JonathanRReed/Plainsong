@@ -7,7 +7,8 @@
 use anyhow::{Context, Result};
 use keyring::{Entry, Error as KeyringError};
 use std::collections::HashMap;
-use std::path::PathBuf;
+use std::io::Read;
+use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
 
 const SERVICE_NAME: &str = "com.plainsong.app";
@@ -118,23 +119,52 @@ fn migrate_legacy_file_if_needed() {
     });
 }
 
-fn migrate_legacy_file_inner() -> Result<()> {
-    let path = legacy_secrets_file_path()?;
-
-    // Open file with exclusive access to prevent TOCTOU attacks
-    let file = std::fs::File::open(&path)
-        .with_context(|| format!("Failed to open legacy secrets file {}", path.display()))?;
-
-    // Validate it's a regular file (not a symlink)
-    let metadata = file
-        .metadata()
-        .with_context(|| format!("Failed to read metadata for {}", path.display()))?;
-    if !metadata.is_file() {
+fn read_legacy_secrets_file(path: &Path) -> Result<Option<String>> {
+    let path_metadata = match std::fs::symlink_metadata(path) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => {
+            return Err(error).with_context(|| {
+                format!("Failed to inspect legacy secrets file {}", path.display())
+            })
+        }
+    };
+    if path_metadata.file_type().is_symlink() || !path_metadata.is_file() {
         return Err(anyhow::anyhow!("Legacy secrets path is not a regular file"));
     }
 
-    let raw = std::fs::read_to_string(&path)
+    let mut file = std::fs::File::open(path)
+        .with_context(|| format!("Failed to open legacy secrets file {}", path.display()))?;
+    let opened_metadata = file
+        .metadata()
+        .with_context(|| format!("Failed to read metadata for {}", path.display()))?;
+    if !opened_metadata.is_file() {
+        return Err(anyhow::anyhow!("Legacy secrets path is not a regular file"));
+    }
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        if path_metadata.dev() != opened_metadata.dev()
+            || path_metadata.ino() != opened_metadata.ino()
+        {
+            return Err(anyhow::anyhow!(
+                "Legacy secrets file changed while it was being opened"
+            ));
+        }
+    }
+
+    let mut raw = String::new();
+    file.read_to_string(&mut raw)
         .with_context(|| format!("Failed to read legacy secrets file {}", path.display()))?;
+    Ok(Some(raw))
+}
+
+fn migrate_legacy_file_inner() -> Result<()> {
+    let path = legacy_secrets_file_path()?;
+    let Some(raw) = read_legacy_secrets_file(&path)? else {
+        return Ok(());
+    };
     if raw.trim().is_empty() {
         std::fs::remove_file(&path).with_context(|| {
             format!(
@@ -207,4 +237,64 @@ pub fn clear_internal_secret(key: &str) -> Result<()> {
     migrate_legacy_file_if_needed();
     let account = internal_account_name(key)?;
     clear_secret_for_account(&account)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn unique_test_dir(label: &str) -> PathBuf {
+        std::env::temp_dir().join(format!(
+            "plainsong-secrets-{label}-{}",
+            uuid::Uuid::new_v4()
+        ))
+    }
+
+    #[test]
+    fn missing_legacy_file_is_a_normal_no_op() {
+        let root = unique_test_dir("missing");
+        let path = root.join("legacy.json");
+
+        assert_eq!(
+            read_legacy_secrets_file(&path).expect("missing file must not fail"),
+            None
+        );
+    }
+
+    #[test]
+    fn regular_legacy_file_is_read_from_the_validated_handle() {
+        let root = unique_test_dir("regular");
+        std::fs::create_dir_all(&root).expect("create test directory");
+        let path = root.join("legacy.json");
+        std::fs::write(&path, "{\"provider:test\":\"secret\"}").expect("write legacy file");
+
+        assert_eq!(
+            read_legacy_secrets_file(&path)
+                .expect("regular file must be readable")
+                .as_deref(),
+            Some("{\"provider:test\":\"secret\"}")
+        );
+
+        std::fs::remove_dir_all(root).expect("remove test directory");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn legacy_file_symlinks_are_rejected() {
+        use std::os::unix::fs::symlink;
+
+        let root = unique_test_dir("symlink");
+        std::fs::create_dir_all(&root).expect("create test directory");
+        let target = root.join("target.json");
+        let path = root.join("legacy.json");
+        std::fs::write(&target, "{}").expect("write target");
+        symlink(&target, &path).expect("create symlink");
+
+        let error = read_legacy_secrets_file(&path).expect_err("symlink must be rejected");
+        assert!(error
+            .to_string()
+            .contains("Legacy secrets path is not a regular file"));
+
+        std::fs::remove_dir_all(root).expect("remove test directory");
+    }
 }

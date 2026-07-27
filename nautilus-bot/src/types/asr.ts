@@ -1,3 +1,30 @@
+export type AppleSpeechReadinessStatus =
+  | "ready"
+  | "unsupported_platform"
+  | "helper_missing"
+  | "authorization_not_determined"
+  | "authorization_denied"
+  | "authorization_restricted"
+  | "unsupported_locale"
+  | "on_device_unavailable"
+  | "recognizer_unavailable"
+  | "unknown_authorization"
+  | "runtime_unavailable";
+
+export interface AppleSpeechReadiness {
+  status: AppleSpeechReadinessStatus;
+  ready: boolean;
+  platformSupported: boolean;
+  helperPresent: boolean;
+  authorization: string;
+  locale?: string | null;
+  localeSupported: boolean;
+  onDeviceAvailable: boolean;
+  recognizerAvailable: boolean;
+  message: string;
+  setupAction?: string | null;
+}
+
 export interface AsrProviderInfo {
   providerType: AsrProviderType;
   name: string;
@@ -12,6 +39,7 @@ export interface AsrProviderInfo {
   runtimeMessage?: string;
   runtimeDetails: AsrRuntimeDetails;
   engineDiagnostics?: AsrEngineDiagnostics;
+  platformReadiness?: AppleSpeechReadiness | null;
 }
 
 export interface AsrProviderInventory {
@@ -23,6 +51,7 @@ export interface AsrProviderInventory {
   selectedModelId: string;
   modelOptions: AsrModelOption[];
   downloadStatus: DownloadStatus;
+  platformReadiness?: AppleSpeechReadiness | null;
 }
 
 interface AsrModelOption {
@@ -98,8 +127,10 @@ export interface LlmAnalysisResult {
   query: string;
   response: string;
   citations: LlmCitation[];
+  actualProvider: string;
   model: string;
   processingTimeMs: number;
+  provenance: AnalysisProvenance;
   /** False when the model's citations could not be verified and the
    * response is returned uncited instead of discarded. */
   grounded?: boolean;
@@ -107,10 +138,54 @@ export interface LlmAnalysisResult {
 
 export interface LlmCitation {
   text: string;
+  lineId?: string;
+  segmentId?: string;
   startTime?: number;
   endTime?: number;
   recordingId?: string;
   certainty?: number;
+}
+
+export interface AnalysisProvenance {
+  version: number;
+  contentHash: string;
+  actualProvider: string;
+  actualModel: string;
+  promptSource: string;
+  completedAt: string;
+  citations: LlmCitation[];
+  grounded: boolean;
+}
+
+export interface ActionItemProvenance {
+  contentHash: string;
+  citations: LlmCitation[];
+  grounded: boolean;
+}
+
+export interface ActionItemsProvenance extends AnalysisProvenance {
+  items: ActionItemProvenance[];
+}
+
+export interface RecordingAnalysisProgressEvent {
+  recordingId: string;
+  runId?: string;
+  target: "summary" | "actionItems" | "ask" | string;
+  stage: "planning" | "mapping" | "reducing" | "synthesizing" | "completed";
+  strategy: "direct" | "chunked";
+  completed: number;
+  total: number;
+  pass: number;
+  message: string;
+  updatedAt: string;
+}
+
+export interface RecordingAnalysisFailedEvent {
+  recordingId: string;
+  runId?: string;
+  target: "summary" | "actionItems" | "ask" | string;
+  reason: string;
+  updatedAt: string;
 }
 
 export interface ActionItem {
@@ -122,21 +197,27 @@ export interface ActionItem {
 export interface GroundedSummaryResult {
   summary: string;
   citations: LlmCitation[];
+  actualProvider: string;
   model: string;
   processingTimeMs: number;
   /** False when the model's citations could not be verified and the
    * summary is returned uncited instead of discarded. */
   grounded?: boolean;
+  provenance: AnalysisProvenance;
 }
 
-interface GroundedActionItem extends ActionItem {
+export interface GroundedActionItem extends ActionItem {
   citations: LlmCitation[];
+  grounded?: boolean;
 }
 
 export interface GroundedActionItemsResult {
   items: GroundedActionItem[];
+  actualProvider: string;
   model: string;
   processingTimeMs: number;
+  grounded?: boolean;
+  provenance: ActionItemsProvenance;
 }
 
 export interface SearchHit {

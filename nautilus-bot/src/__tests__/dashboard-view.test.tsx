@@ -23,6 +23,7 @@ const {
     setupStatus: {
       dictationReady: true as boolean,
       meetingReady: true as boolean,
+      fullCaptureReady: true as boolean,
       loading: false as boolean,
     },
     recordings: [
@@ -97,6 +98,7 @@ describe("DashboardView memory chat", () => {
     dashboardState.setupStatus = {
       dictationReady: true,
       meetingReady: true,
+      fullCaptureReady: true,
       loading: false,
     };
     dashboardState.recordings = [
@@ -175,10 +177,32 @@ describe("DashboardView memory chat", () => {
     expect(requestMainView).toHaveBeenNthCalledWith(7, "settings");
   });
 
+  it("opens meetings for mic-only-ready users instead of restarting onboarding", async () => {
+    dashboardState.setupStatus = {
+      dictationReady: true,
+      meetingReady: true,
+      fullCaptureReady: false,
+      loading: false,
+    };
+
+    render(<DashboardView />);
+
+    expect(
+      await screen.findByText("Dictation and mic-only meetings are ready")
+    ).toBeInTheDocument();
+    expect(screen.getByText("Mic-only ready")).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", { name: /Meetings\s*Open/ }));
+
+    expect(requestMainView).toHaveBeenCalledWith("recordings");
+    expect(requestOnboarding).not.toHaveBeenCalled();
+  });
+
   it("sends readiness cards to onboarding when setup is incomplete", async () => {
     dashboardState.setupStatus = {
       dictationReady: false,
       meetingReady: false,
+      fullCaptureReady: false,
       loading: false,
     };
 
