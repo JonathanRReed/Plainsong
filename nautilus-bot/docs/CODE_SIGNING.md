@@ -4,11 +4,11 @@ App bundle identifier: `com.plainsong.app`
 
 Plainsong v1 is an Apple Silicon macOS application packaged with
 `electron-builder`. The package includes the Electron application, Rust
-sidecar, and native macOS shortcut helper.
+sidecar, native macOS shortcut helper, and Apple Speech helper.
 
 ## Current candidate
 
-The fresh v1.0.0 candidate built on July 23, 2026 includes:
+The fresh v1.0.0 candidate built on July 27, 2026 includes:
 
 - `release/Plainsong-1.0.0-arm64.dmg`
 - `release/Plainsong-1.0.0-arm64-mac.zip`
@@ -18,12 +18,15 @@ The fresh v1.0.0 candidate built on July 23, 2026 includes:
 
 Developer ID signing, hardened runtime, secure timestamps, embedded executable
 signatures, arm64 architecture, update metadata, TCC usage strings, and the
-package size gate all pass. The app, sidecar, and shortcut helper are signed by
+package size gate all pass. The app, sidecar, shortcut helper, and Apple Speech
+helper are signed by
 `Developer ID Application: Jonathan Reed (AJ9VWBRNZN)`.
 
-This candidate is not notarized. The local environment did not contain the
-required Apple ID credential variables, so it has no stapled notarization
-ticket. The trust report correctly records:
+This candidate is intentionally not notarized. A supported local Keychain
+profile is available, but notarization was explicitly deferred before any
+Plainsong submission was made. The candidate was rebuilt with notarization
+inputs removed, so it has no stapled ticket. The trust report correctly
+records:
 
 ```text
 Plainsong.app does not have a ticket stapled to it.
@@ -44,11 +47,11 @@ workflow after the required credentials are configured.
 
 The release environment must provide:
 
-- `CSC_LINK`
-- `CSC_KEY_PASSWORD`
-- `APPLE_ID`
-- `APPLE_APP_SPECIFIC_PASSWORD`
-- `APPLE_TEAM_ID`
+- `CSC_LINK` plus `CSC_KEY_PASSWORD`, or `CSC_NAME`
+- `APPLE_KEYCHAIN_PROFILE`, or all of:
+  - `APPLE_ID`
+  - `APPLE_APP_SPECIFIC_PASSWORD`
+  - `APPLE_TEAM_ID`
 
 The GitHub Actions workflow maps those values from:
 
@@ -58,9 +61,11 @@ The GitHub Actions workflow maps those values from:
 - `APPLE_APP_SPECIFIC_PASSWORD`
 - `APPLE_TEAM_ID`
 
-Keep credentials in the local environment or GitHub Actions secrets. Never add
-certificate files, passwords, tokens, or generated credential reports
-containing secret values to source control.
+`APPLE_KEYCHAIN_PROFILE` is intended for local release builds whose
+`notarytool` credentials are already stored in the login Keychain. GitHub
+Actions uses the explicit secret variables because hosted runners do not share
+the local Keychain. Never add certificate files, passwords, tokens, or
+generated credential reports containing secret values to source control.
 
 ## Credential preflight
 
@@ -125,17 +130,19 @@ report `accepted` with `source=Notarized Developer ID`.
 
 ## Embedded executable scope
 
-The packaged application contains two important native executables under
+The packaged application contains three important native executables under
 `Contents/Resources`:
 
 ```text
 sidecar/plainsong-sidecar
+sidecar/nautilus-macos-speech-helper-aarch64-apple-darwin
 shortcut-helper/plainsong-native-shortcut-helper
 ```
 
-Both must use the same Developer ID identity and Apple team as the main
+All three must use the same Developer ID identity and Apple team as the main
 application. The release trust gate checks them independently, in addition to
-the deep application signature.
+the deep application signature. The Speech helper alone receives the Speech
+Recognition entitlement.
 
 ## Official release behavior
 

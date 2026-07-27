@@ -543,6 +543,7 @@ async function run() {
     recordingId: null,
     recordingAfterStop: null,
     recordingAfterTranscriptWait: null,
+    systemAudioVerification: null,
     transcript: null,
     transcriptDetails: null,
     transcriptWait: null,
@@ -562,6 +563,24 @@ async function run() {
   try {
     const originalSettings = await sidecar.sendCommand("get_settings", {});
     await sidecar.sendCommand("save_settings", { settings: qaSettings(originalSettings) });
+
+    if (includeSystemAudio) {
+      artifact.systemAudioVerification = await sidecar.sendCommand(
+        "test_system_audio_capture",
+        {},
+      );
+      if (
+        artifact.systemAudioVerification?.capability?.ready !== true ||
+        Number(artifact.systemAudioVerification?.callbacks) <= 0 ||
+        Number(artifact.systemAudioVerification?.nonSilentFrames) <= 0 ||
+        Number(artifact.systemAudioVerification?.detectedToneAmplitude) < 0.005 ||
+        artifact.systemAudioVerification?.verificationMethod !== "known_tone"
+      ) {
+        throw new Error(
+          "Packaged system-audio verification did not capture the known tone in this sidecar session.",
+        );
+      }
+    }
 
     const setup = await sidecar.sendCommand("verify_meeting_setup", {});
     artifact.meetingSetup = setup;
@@ -663,6 +682,13 @@ async function run() {
 
   artifact.checks = {
     meetingSetupReady: Boolean(artifact.meetingSetup?.ok),
+    systemAudioVerifiedForCombinedCapture:
+      !includeSystemAudio ||
+      (artifact.systemAudioVerification?.capability?.ready === true &&
+        Number(artifact.systemAudioVerification?.callbacks) > 0 &&
+        Number(artifact.systemAudioVerification?.nonSilentFrames) > 0 &&
+        Number(artifact.systemAudioVerification?.detectedToneAmplitude) >= 0.005 &&
+        artifact.systemAudioVerification?.verificationMethod === "known_tone"),
     minimumDurationRequested: artifact.recordMs >= artifact.minRecordMs,
     recordingIdReturned: Boolean(artifact.recordingId),
     overlayEnteredRecording: artifact.overlayWhileRecording?.phase === "recording",

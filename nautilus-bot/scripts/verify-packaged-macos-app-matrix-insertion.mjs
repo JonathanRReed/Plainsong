@@ -111,8 +111,15 @@ if (artifact.sidecarExit?.code !== 0) {
 if (artifact.sidecarResult?.pasted !== true) {
   violations.push("sidecarResult.pasted must be true.");
 }
-if (typeof artifact.sidecarResult?.targetApp !== "string" || artifact.sidecarResult.targetApp.length === 0) {
-  violations.push("sidecarResult.targetApp must be present.");
+if (
+  !(
+    (typeof artifact.sidecarResult?.targetApp === "string" &&
+      artifact.sidecarResult.targetApp.length > 0) ||
+    (typeof artifact.sidecarResult?.targetBundleId === "string" &&
+      artifact.sidecarResult.targetBundleId.length > 0)
+  )
+) {
+  violations.push("sidecarResult.targetApp or targetBundleId must be present.");
 }
 
 for (const line of [

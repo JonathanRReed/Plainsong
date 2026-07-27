@@ -1,4 +1,4 @@
-//! Ollama local LLM adapter using `/api/generate` and typed `/api/show` metadata.
+//! Ollama local LLM adapter using `/api/chat` and typed `/api/show` metadata.
 
 use crate::llm::transport::{
     classify_http_error, CompletionRequest, CompletionResponse, CompletionTransport, ErrorKind,
@@ -145,18 +145,25 @@ impl CompletionTransport for OllamaClient {
     }
 
     async fn complete(&self, request: &CompletionRequest) -> Result<CompletionResponse, LlmError> {
-        let prompt = match request.system_prompt.as_deref() {
-            Some(system) => format!("{}\n\n{}", system, request.prompt),
-            None => request.prompt.clone(),
-        };
         let num_ctx = request
             .options
             .requested_context_tokens
             .and_then(|tokens| i32::try_from(tokens).ok())
             .filter(|tokens| *tokens > 0);
-        let body = GenerateRequest {
+        let mut messages = Vec::with_capacity(2);
+        if let Some(system) = request.system_prompt.as_deref() {
+            messages.push(ChatMessage {
+                role: "system".to_string(),
+                content: system.to_string(),
+            });
+        }
+        messages.push(ChatMessage {
+            role: "user".to_string(),
+            content: request.prompt.clone(),
+        });
+        let body = ChatRequest {
             model: request.model.clone(),
-            prompt,
+            messages,
             stream: false,
             format: request.options.json_schema.clone(),
             options: Some(GenerationOptions {
@@ -167,7 +174,7 @@ impl CompletionTransport for OllamaClient {
         };
         let response = self
             .client
-            .post(format!("{}/api/generate", self.base_url))
+            .post(format!("{}/api/chat", self.base_url))
             .timeout(request.options.timeout)
             .json(&body)
             .send()
@@ -180,7 +187,7 @@ impl CompletionTransport for OllamaClient {
             let body = response.text().await.unwrap_or_default();
             return Err(classify_http_error(Provider::Ollama, status, body));
         }
-        let data: GenerateResponse = response.json().await.map_err(|error| {
+        let data: ChatResponse = response.json().await.map_err(|error| {
             LlmError::from_reqwest(Provider::Ollama, "Failed to parse response", error)
         })?;
         if matches!(data.done_reason.as_deref(), Some("length")) {
@@ -201,7 +208,7 @@ impl CompletionTransport for OllamaClient {
                 format!("Ollama stopped before completion: {}", reason),
             ));
         }
-        if data.response.trim().is_empty() {
+        if data.message.content.trim().is_empty() {
             return Err(LlmError::new(
                 Provider::Ollama,
                 ErrorKind::EmptyResponse,
@@ -209,7 +216,7 @@ impl CompletionTransport for OllamaClient {
             ));
         }
         Ok(CompletionResponse {
-            text: data.response,
+            text: data.message.content,
             model: request.model.clone(),
         })
     }
@@ -345,13 +352,19 @@ fn extract_configured_num_ctx(parameters: &str) -> Option<usize> {
 }
 
 #[derive(Debug, Serialize)]
-struct GenerateRequest {
+struct ChatRequest {
     model: String,
-    prompt: String,
+    messages: Vec<ChatMessage>,
     stream: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     format: Option<serde_json::Value>,
     options: Option<GenerationOptions>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+struct ChatMessage {
+    role: String,
+    content: String,
 }
 
 #[derive(Debug, Serialize)]
@@ -367,8 +380,8 @@ fn invalid_num_ctx(value: &Option<i32>) -> bool {
 }
 
 #[derive(Debug, Deserialize)]
-struct GenerateResponse {
-    response: String,
+struct ChatResponse {
+    message: ChatMessage,
     #[serde(default)]
     done_reason: Option<String>,
 }
@@ -560,7 +573,7 @@ mod tests {
         let base_url = spawn_show_server(
             vec![(
                 200,
-                r#"{"response":"{\"response\":\"partial\",\"lineIds\":[\"L1\"]}","done_reason":"length"}"#,
+                r#"{"message":{"role":"assistant","content":"{\"response\":\"partial\",\"lineIds\":[\"L1\"]}"},"done_reason":"length"}"#,
                 Duration::ZERO,
             )],
             requests,
@@ -584,6 +597,45 @@ mod tests {
             .await
             .unwrap_err();
         assert_eq!(error.kind, ErrorKind::OutputLimit);
+    }
+
+    #[tokio::test]
+    async fn structured_chat_completion_uses_assistant_message_content() {
+        let requests = Arc::new(AtomicUsize::new(0));
+        let base_url = spawn_show_server(
+            vec![(
+                200,
+                r#"{"message":{"role":"assistant","content":"{\"response\":\"ok\",\"lineIds\":[\"L1\"]}","thinking":"internal trace"},"done_reason":"stop"}"#,
+                Duration::ZERO,
+            )],
+            requests,
+        )
+        .await;
+        let client = OllamaClient::with_base_url_and_timeout(base_url, Duration::from_secs(1));
+        let response = client
+            .complete(&CompletionRequest {
+                model: "gpt-oss:20b".to_string(),
+                system_prompt: Some("Return JSON.".to_string()),
+                prompt: "Summarize L1.".to_string(),
+                purpose: crate::llm::CompletionPurpose::Summary,
+                options: RequestOptions {
+                    timeout: Duration::from_secs(1),
+                    max_output_tokens: 128,
+                    temperature: Some(0.1),
+                    json_schema: Some(serde_json::json!({
+                        "type": "object",
+                        "properties": {
+                            "response": {"type": "string"},
+                            "lineIds": {"type": "array", "items": {"type": "string"}}
+                        },
+                        "required": ["response", "lineIds"]
+                    })),
+                    requested_context_tokens: Some(4096),
+                },
+            })
+            .await
+            .unwrap();
+        assert_eq!(response.text, r#"{"response":"ok","lineIds":["L1"]}"#);
     }
 
     #[tokio::test]

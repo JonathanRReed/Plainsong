@@ -17,6 +17,7 @@ const ENV_VARS = [
   "APPLE_ID",
   "APPLE_APP_SPECIFIC_PASSWORD",
   "APPLE_TEAM_ID",
+  "APPLE_KEYCHAIN_PROFILE",
 ];
 
 const envPresence = Object.fromEntries(
@@ -44,7 +45,8 @@ const codesigningIdentityCount = countCodesigningIdentities();
 const hasCertificateInput =
   (envPresence.CSC_LINK && envPresence.CSC_KEY_PASSWORD) || envPresence.CSC_NAME;
 const hasNotarizationInputs =
-  envPresence.APPLE_ID && envPresence.APPLE_APP_SPECIFIC_PASSWORD && envPresence.APPLE_TEAM_ID;
+  envPresence.APPLE_KEYCHAIN_PROFILE ||
+  (envPresence.APPLE_ID && envPresence.APPLE_APP_SPECIFIC_PASSWORD && envPresence.APPLE_TEAM_ID);
 
 const artifact = {
   generatedAt: new Date().toISOString(),
@@ -73,7 +75,7 @@ ${ENV_VARS.map((name) => `- ${name}: ${envPresence[name] ? "set" : "missing"}`).
 
 - Developer ID codesigning identities in keychain: ${codesigningIdentityCount ?? "n/a (not macOS)"}
 - Certificate input (CSC_LINK + CSC_KEY_PASSWORD, or CSC_NAME): ${hasCertificateInput ? "PASS" : "FAIL"}
-- Notarization inputs (APPLE_ID + APPLE_APP_SPECIFIC_PASSWORD + APPLE_TEAM_ID): ${hasNotarizationInputs ? "PASS" : "FAIL"}
+- Notarization inputs (APPLE_KEYCHAIN_PROFILE, or APPLE_ID + APPLE_APP_SPECIFIC_PASSWORD + APPLE_TEAM_ID): ${hasNotarizationInputs ? "PASS" : "FAIL"}
 `;
 
 fs.mkdirSync(path.dirname(outPath), { recursive: true });

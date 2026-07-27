@@ -82,6 +82,7 @@ describe("release-credentials-preflight.mjs", () => {
           APPLE_ID: true,
           APPLE_APP_SPECIFIC_PASSWORD: true,
           APPLE_TEAM_ID: true,
+          APPLE_KEYCHAIN_PROFILE: false,
         },
         hasCertificateInput: true,
         hasNotarizationInputs: true,
@@ -104,5 +105,66 @@ describe("release-credentials-preflight.mjs", () => {
     }
     // Spawns the preflight script in a subprocess, so it loses the default 5s
     // race whenever the rest of the suite is running in parallel.
+  }, 30_000);
+
+  it("accepts a Developer ID identity and a Keychain notarization profile", () => {
+    const { tempRoot, tempScript } = createTempRepo("release-credentials-preflight.mjs");
+    try {
+      const tempBinDir = path.join(tempRoot, "bin");
+      mkdirSync(tempBinDir, { recursive: true });
+
+      const securityScript = path.join(tempBinDir, "security");
+      writeFileSync(
+        securityScript,
+        "#!/bin/sh\nprintf '%s\\n' '1 valid identities found'\n",
+        "utf8",
+      );
+      chmodSync(securityScript, 0o755);
+
+      const result = spawnSync("node", [tempScript], {
+        encoding: "utf8",
+        env: {
+          PATH: `${tempBinDir}${path.delimiter}${process.env.PATH ?? ""}`,
+          CSC_NAME: "Developer ID Application: Example (EXAMPLETEAM)",
+          APPLE_KEYCHAIN_PROFILE: "example-notary-profile",
+        },
+      });
+
+      expect(result.error).toBeUndefined();
+      expect(result.status).toBe(0);
+
+      const artifact = JSON.parse(
+        readFileSync(
+          path.join(tempRoot, "artifacts", "release-credential-preflight.json"),
+          "utf8",
+        ),
+      ) as {
+        envPresence: Record<string, boolean>;
+        hasCertificateInput: boolean;
+        hasNotarizationInputs: boolean;
+        ready: boolean;
+      };
+
+      expect(artifact).toMatchObject({
+        envPresence: {
+          CSC_NAME: true,
+          APPLE_ID: false,
+          APPLE_APP_SPECIFIC_PASSWORD: false,
+          APPLE_TEAM_ID: false,
+          APPLE_KEYCHAIN_PROFILE: true,
+        },
+        hasCertificateInput: true,
+        hasNotarizationInputs: true,
+        ready: true,
+      });
+
+      const markdown = readFileSync(
+        path.join(tempRoot, "artifacts", "release-credential-preflight.md"),
+        "utf8",
+      );
+      expect(markdown).not.toContain("example-notary-profile");
+    } finally {
+      rmSync(tempRoot, { recursive: true, force: true });
+    }
   }, 30_000);
 });

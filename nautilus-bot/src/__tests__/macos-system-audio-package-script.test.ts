@@ -51,4 +51,27 @@ describe("macOS system-audio packaging gates", () => {
     expect(qaScript).toContain("Number(result.detectedToneAmplitude) >= 0.005");
     expect(qaScript).toContain('result.verificationMethod === "known_tone"');
   });
+
+  it("verifies the known tone before combined meeting capture in the same sidecar", () => {
+    for (const scriptName of [
+      "capture-packaged-macos-meeting-mic.mjs",
+      "capture-packaged-macos-meeting-soak.mjs",
+    ]) {
+      const qaScript = fs.readFileSync(
+        path.join(repoRoot, "scripts", scriptName),
+        "utf8",
+      );
+      const verificationIndex = qaScript.indexOf(
+        'sendCommand(\n        "test_system_audio_capture"',
+      );
+      const setupIndex = qaScript.indexOf('sendCommand("verify_meeting_setup"');
+
+      expect(verificationIndex).toBeGreaterThan(-1);
+      expect(setupIndex).toBeGreaterThan(verificationIndex);
+      expect(qaScript).toContain("systemAudioVerifiedForCombinedCapture");
+      expect(qaScript).toContain(
+        'artifact.systemAudioVerification?.verificationMethod === "known_tone"',
+      );
+    }
+  });
 });
