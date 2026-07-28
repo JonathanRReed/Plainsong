@@ -46,9 +46,9 @@ ort = { version = "2.0.0-rc.12", optional = true }
 ndarray = { version = "0.17", optional = true }
 
 # Candle for HuggingFace models (Canary, etc.)
-candle-core = { version = "0.10", optional = true }
-candle-nn = { version = "0.10", optional = true }
-candle-transformers = { version = "0.10", optional = true }
+candle-core = { version = "0.11", optional = true }
+candle-nn = { version = "0.11", optional = true }
+candle-transformers = { version = "0.11", optional = true }
 
 # Tokenizers for HuggingFace models
 tokenizers = { version = "0.23", optional = true }
@@ -57,7 +57,7 @@ tokenizers = { version = "0.23", optional = true }
 # resamples whichever of the mic/loopback devices is running at the lower rate
 # onto the session's target rate, so this has to be present in every build, not
 # only the ones that happen to enable an ASR provider.
-rubato = "3.0"
+rubato = "4.0"
 
 # FFT for FBank feature extraction in diarization
 rustfft = { version = "6.2", optional = true }
@@ -72,7 +72,7 @@ rand = "0.10"
 async-trait = "0.1"
 hex = "0.4"
 argon2 = "0.5"
-aes-gcm = "0.10"
+aes-gcm = "0.11"
 zeroize = "1.8"
 keyring = "3.6"
 regex = "1.11"
@@ -86,7 +86,7 @@ indicatif = { version = "0.18", optional = true }
 
 # PDF generation
 genpdf = { version = "0.2", optional = true }
-base64 = { version = "0.22", optional = true }
+base64 = { version = "0.23", optional = true }
 
 # Platform-specific dependencies
 [target.'cfg(target_os = "macos")'.dependencies]
