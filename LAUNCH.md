@@ -64,6 +64,11 @@ item under "External release gates" is complete.
 
 ## Packaged QA completed in this run
 
+Every row below was re-run on July 28 against a rebuilt app carrying the merged
+dependency groups — Electron 42 -> 43, TypeScript 6 -> 7, React 19.2.6 ->
+19.2.8, the Radix and Vite bumps, and the Rust group. Eleven suites, zero
+failures. Two numbers moved and are called out after the table.
+
 | Check | Result | Scope |
 | --- | --- | --- |
 | native helper/package gate | pass | Presence, arm64 architecture, deployment floor, entitlements |
@@ -83,8 +88,18 @@ item under "External release gates" is complete.
 | combined meeting capture | pass | Same-session system-audio verification plus mic, system, and mixed WAV output |
 | meeting soak preflight | pass | 30-second mic capture, completed transcript, event lifecycle, restore, cleanup |
 | local Ollama analysis | pass | `gpt-oss:20b` summary and action items with grounded citations |
-| idle CPU | pass | 0.05% average, 0.9% maximum, 0.1% p95, clean exit |
+| idle CPU | pass | 0.45% average, 5.7% maximum, 2% p95, clean exit. Was 0.05% / 0.9% / 0.1% on Electron 42 — see below |
 | release trust | expected fail | Every local signature check passes; notarization checks fail closed |
+
+### Idle CPU rose on Electron 43 and still passes
+
+Average idle CPU went from 0.05% to 0.45% against a 1% gate, with the maximum
+moving 0.9% -> 5.7% and p95 0.1% -> 2%. The gate passes and 0.45% is still low
+in absolute terms, but it is a nine-fold move and the only change between the
+two measurements is the July 28 dependency group, of which Electron 42 -> 43 is
+the plausible cause. Recorded rather than rounded away: if it climbs again on a
+future bump, the gate is close enough to matter, and the number to compare
+against is this one, not the 0.05% it replaced.
 
 ### First launch after a build is not a representative cold start
 
