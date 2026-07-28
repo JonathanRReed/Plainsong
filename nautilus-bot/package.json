@@ -47,6 +47,7 @@
     "qa:packaged:macos:whisper": "node scripts/capture-packaged-macos-whisper-transcription.mjs",
     "qa:packaged:macos:ollama": "node scripts/capture-packaged-macos-ollama-analysis.mjs",
     "qa:packaged:macos:dictation-hotkey": "node scripts/capture-packaged-macos-dictation-hotkey.mjs",
+    "qa:packaged:macos:recovery-shortcuts": "node scripts/capture-packaged-macos-recovery-shortcuts.mjs",
     "qa:packaged:macos:app-matrix:preflight": "node scripts/capture-packaged-macos-app-matrix-preflight.mjs",
     "qa:packaged:macos:app-matrix:insertion": "node scripts/run-packaged-macos-app-matrix-insertion.mjs",
     "qa:packaged:macos:idle-cpu": "node scripts/capture-packaged-macos-idle-cpu.mjs",
