@@ -85,7 +85,7 @@ jobs:
           printf 'RELEASE_REF=%s\n' "$RELEASE_REF" >> "$GITHUB_ENV"
           printf 'ref=%s\n' "$RELEASE_REF" >> "$GITHUB_OUTPUT"
 
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
         with:
           ref: ${{ steps.release-ref.outputs.ref }}
           fetch-tags: true
