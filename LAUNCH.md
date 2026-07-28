@@ -240,8 +240,32 @@ releases apart. That gap has not been exercised, because CI has not run.
 - [ ] Verify transcript, summary, action items, diarization enrichment,
       retention, and export on the real recordings.
 - [ ] Install an update end to end from the signed ZIP and
-      `latest-mac.yml`.
+      `latest-mac.yml`. **Deliberately not attempted locally — see below.**
 - [ ] Recapture public screenshots from the final notarized build.
+
+### Why the updater test is deferred rather than run locally
+
+A local N-to-N+1 install is mechanically possible: build a 1.0.1 candidate with
+the same Developer ID, serve `release/` from `127.0.0.1` with
+`-c.publish.provider=generic`, and let Squirrel swap the bundle. It was not run,
+and the reason is that **it would pass for the wrong reason.**
+
+Locally built fixtures carry no `com.apple.quarantine` attribute, so Gatekeeper
+never assesses them the way it assesses a downloaded DMG. An unnotarized swap
+between two locally built bundles therefore succeeds regardless of whether the
+real path works. The app's own install gate agrees with this reading: `main.ts`
+sets `updateInstallBlockedReason` from `isMacAppCodeSigned()` alone, which these
+candidates satisfy while remaining unnotarized.
+
+What such a run *would* prove — manifest parsing, version comparison, channel
+resolution, download, and the Squirrel swap — is either already covered by
+`bun run qa:packaged:macos:update-metadata` (which validates the manifest,
+SHA-512, and size against the built ZIP, and passes) or is the part least likely
+to differ once notarized.
+
+So this box stays open on purpose, and it should be closed the first time it can
+be closed honestly: install the notarized 1.0.0 DMG on a clean Mac, then take a
+notarized 1.0.1 through the published feed.
 
 ## Publication sequence
 
