@@ -12,7 +12,14 @@ As of July 27, 2026:
   Developer ID signed
 - hardened runtime and secure timestamps are present
 - the packaged arm64 DMG, ZIP, blockmap, and updater manifest were built
-- a supported local `notarytool` Keychain profile is available
+- **no** `notarytool` Keychain profile is stored on this machine. Re-checked on
+  July 28, 2026: the login Keychain holds no generic-password item under
+  `com.apple.gs.appleid.auth`, `notarytool`, `Xcode`, or `altool`, and
+  `xcrun notarytool history --keychain-profile <name>` reports
+  "No Keychain password item found" for every plausible profile name. An
+  earlier revision of this file claimed a profile was available; that was
+  wrong. Creating one is step 4 below and needs the account holder, because it
+  takes an Apple ID and an app-specific password
 - notarization was explicitly deferred before a Plainsong submission was made
 - the current candidate was rebuilt without notarization inputs
 - stapler reports that no ticket is attached
@@ -92,9 +99,33 @@ APPLE_TEAM_ID="AJ9VWBRNZN" bun run gate:release:macos:trust
 bun run gate:size
 ```
 
-For a local machine with an existing `notarytool` Keychain profile, use
-`CSC_NAME` and `APPLE_KEYCHAIN_PROFILE` instead of exporting the certificate
-and Apple ID password:
+### Creating the `notarytool` Keychain profile
+
+No profile exists on this machine yet, so this step comes first and only the
+account holder can perform it: it takes an Apple ID and an app-specific
+password, which nobody else should handle.
+
+1. Create an app-specific password at
+   [account.apple.com](https://account.apple.com/) under Sign-In and Security →
+   App-Specific Passwords. It is shown once.
+2. Store it against a profile name. The command prompts for the password; it is
+   written to the login Keychain and never echoed:
+
+   ```bash
+   xcrun notarytool store-credentials "plainsong-notary" --apple-id "<apple-id-email>" --team-id "AJ9VWBRNZN"
+   ```
+
+3. Confirm the profile resolves. An empty submission history is the expected
+   result before the first submission — the point is that it authenticates
+   rather than reporting a missing Keychain item:
+
+   ```bash
+   xcrun notarytool history --keychain-profile "plainsong-notary"
+   ```
+
+For a local machine with that profile in place, use `CSC_NAME` and
+`APPLE_KEYCHAIN_PROFILE` instead of exporting the certificate and Apple ID
+password:
 
 ```bash
 CSC_NAME="Jonathan Reed (AJ9VWBRNZN)" \
