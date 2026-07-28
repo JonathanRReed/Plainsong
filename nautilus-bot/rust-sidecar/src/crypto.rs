@@ -41,10 +41,11 @@ impl ProjectKeyManager {
 
         let mut nonce_bytes = [0u8; NONCE_LEN];
         rand::rng().fill_bytes(&mut nonce_bytes);
-        let nonce = Nonce::from_slice(&nonce_bytes);
+        let nonce = Nonce::try_from(&nonce_bytes[..])
+            .map_err(|_| anyhow::anyhow!("Invalid AES-GCM nonce length"))?;
 
         let ciphertext = cipher
-            .encrypt(nonce, data)
+            .encrypt(&nonce, data)
             .map_err(|_| anyhow::anyhow!("Encryption failed"))?;
 
         let mut result = Vec::with_capacity(NONCE_LEN + ciphertext.len());
@@ -63,10 +64,11 @@ impl ProjectKeyManager {
             Aes256Gcm::new_from_slice(key).map_err(|_| anyhow::anyhow!("Invalid AES key"))?;
 
         let (nonce_bytes, ciphertext) = encrypted.split_at(NONCE_LEN);
-        let nonce = Nonce::from_slice(nonce_bytes);
+        let nonce = Nonce::try_from(nonce_bytes)
+            .map_err(|_| anyhow::anyhow!("Invalid encrypted payload"))?;
 
         cipher
-            .decrypt(nonce, ciphertext)
+            .decrypt(&nonce, ciphertext)
             .map_err(|_| anyhow::anyhow!("Decryption failed or integrity check mismatch"))
     }
 

@@ -6,7 +6,7 @@ use anyhow::{Context, Result};
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use crossbeam::channel::TrySendError;
 use rubato::audioadapter_buffers::direct::InterleavedSlice;
-use rubato::{Fft, FixedSync, Indexing, Resampler};
+use rubato::{Fft, FixedSync, Indexing, Resampler, WindowFunction};
 use serde::Serialize;
 use std::collections::{HashMap, VecDeque};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -142,12 +142,19 @@ struct SourceResampler {
 
 impl SourceResampler {
     fn new(source_rate: u32, target_rate: u32) -> Result<Self> {
-        let resampler = Fft::<f32>::new(
+        // `new_custom`, not `new`: rubato 4's `new` derives `sub_chunks` from the
+        // chunk size (1024 / 256 = 4), which would shorten the internal FFT block
+        // and change this path's conversion latency. One sub-chunk is what this
+        // resampler has always used, and it is what rounds the input chunk to the
+        // 1029 frames documented on `RESAMPLE_CHUNK_FRAMES`. `BlackmanHarris2` is
+        // the window rubato 3 applied unconditionally.
+        let resampler = Fft::<f32>::new_custom(
             source_rate as usize,
             target_rate as usize,
             RESAMPLE_CHUNK_FRAMES,
             1,
             1,
+            WindowFunction::BlackmanHarris2,
             FixedSync::Input,
         )
         .map_err(|error| {
@@ -3332,6 +3339,26 @@ mod tests {
         let steady = &mono[mono.len() / 4..];
         let peak = steady.iter().fold(0.0f32, |acc, s| acc.max(s.abs()));
         assert!((peak - 0.5).abs() < 0.05, "peak amplitude {peak}");
+    }
+
+    #[test]
+    fn resampler_keeps_one_sub_chunk_of_conversion_latency() {
+        // Pins the geometry `RESAMPLE_CHUNK_FRAMES` documents. rubato's plain
+        // `Fft::new` derives `sub_chunks` from the chunk size, which would split
+        // this into four shorter FFT blocks and quietly change how much latency
+        // the mic/system conversion adds ahead of the mixer. Both capture sources
+        // are aligned against that latency, so it is a correctness property here,
+        // not a tuning knob.
+        let resampler = SourceResampler::new(44_100, 48_000).expect("resampler");
+
+        // One sub-chunk rounds 1024 up to seven 147-frame rate-ratio periods, so
+        // the internal FFT spans 1029 input frames against 1120 output frames and
+        // the conversion delay is half of that. Four sub-chunks would instead land
+        // on 320 output frames and a 160-frame delay.
+        assert_eq!(resampler.resampler.output_delay(), 560);
+
+        // The input side stays fixed at the requested chunk regardless.
+        assert_eq!(resampler.resampler.input_frames_next(), RESAMPLE_CHUNK_FRAMES);
     }
 
     #[test]
