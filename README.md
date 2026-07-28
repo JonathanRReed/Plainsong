@@ -43,7 +43,7 @@ into searchable notes without sending a bot into your call.
 
 Plainsong v1 runs on **macOS 13 or later on Apple Silicon (arm64)**.
 
-> Launch status, July 23, 2026: the v1.0.0 arm64 candidate is built and
+> Launch status, July 28, 2026: the v1.0.0 arm64 candidate is built and
 > Developer ID signed, but it is not notarized or published. The repository is
 > still private, so there is no public download yet.
 
