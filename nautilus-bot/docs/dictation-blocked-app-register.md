@@ -4,6 +4,10 @@ Date: 2026-03-12
 
 This register tracks target apps that are in the launch matrix but are not yet proven to meet the dictation parity bar.
 
+**v1 scope: macOS only.** DA-004, DA-005, and DA-006 are Windows entries and do
+not gate the macOS v1 release; they stay open against a future Windows build.
+See the scope note in `docs/dictation-app-compatibility-matrix.md`.
+
 Status values:
 
 - `OPEN`
