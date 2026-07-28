@@ -139,6 +139,36 @@ describe("macOS Apple Speech helper contract", () => {
     );
   });
 
+  it("calls a signing entry point @electron/osx-sign actually exports", () => {
+    // The signing hook only runs during a packaged release build, so a renamed
+    // export surfaces for the first time mid-release. 2.x dropped the default
+    // export and `signAsync`; assert the name we call still resolves.
+    const resolved = execFileSync(
+      process.execPath,
+      [
+        "--input-type=module",
+        "--eval",
+        `
+          const osxSign = await import("@electron/osx-sign");
+          console.log(JSON.stringify({
+            exports: Object.keys(osxSign).sort(),
+            signIsCallable: typeof osxSign.sign === "function",
+          }));
+        `,
+      ],
+      { cwd: repoRoot, encoding: "utf8" },
+    );
+    const { signIsCallable } = JSON.parse(resolved) as {
+      exports: string[];
+      signIsCallable: boolean;
+    };
+
+    expect(signIsCallable).toBe(true);
+    expect(
+      fs.readFileSync(path.join(repoRoot, "scripts/sign-macos.mjs"), "utf8"),
+    ).toContain('import { sign } from "@electron/osx-sign"');
+  });
+
   it("keeps native live recognition separate from generic batch preview", () => {
     const helper = fs.readFileSync(
       path.join(repoRoot, "rust-sidecar/native/macos_speech_helper.swift"),

@@ -1,4 +1,7 @@
-import osxSign from "@electron/osx-sign";
+// @electron/osx-sign 2.x dropped the default export and renamed `signAsync` to
+// a named `sign`. Nothing here type-checks or unit-tests the call itself, so an
+// unported import fails for the first time partway through a release build.
+import { sign } from "@electron/osx-sign";
 import path from "node:path";
 
 const speechHelperName = "nautilus-macos-speech-helper-aarch64-apple-darwin";
@@ -17,8 +20,10 @@ const shortcutHelperEntitlements = path.resolve(
   "entitlements.mac.shortcut-helper.plist",
 );
 
-export function optionsForSignedFile(filePath, inheritedOptionsForFile) {
-  const inherited = inheritedOptionsForFile?.(filePath) ?? {};
+export function optionsForSignedFile(filePath, inheritedOptionsForFile, signContext) {
+  // 2.x passes a context object as the second argument. Forward it so an
+  // inherited callback that reads it sees the same thing osx-sign would.
+  const inherited = inheritedOptionsForFile?.(filePath, signContext) ?? {};
   if (path.basename(filePath) === shortcutHelperName) {
     return {
       ...inherited,
@@ -36,8 +41,9 @@ export function optionsForSignedFile(filePath, inheritedOptionsForFile) {
 
 export default async function signMacos(configuration) {
   const inheritedOptionsForFile = configuration.optionsForFile;
-  await osxSign.signAsync({
+  await sign({
     ...configuration,
-    optionsForFile: (filePath) => optionsForSignedFile(filePath, inheritedOptionsForFile),
+    optionsForFile: (filePath, signContext) =>
+      optionsForSignedFile(filePath, inheritedOptionsForFile, signContext),
   });
 }

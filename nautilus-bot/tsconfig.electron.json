@@ -1,9 +1,11 @@
 {
   "compilerOptions": {
     "target": "ES2020",
-    "module": "CommonJS",
-    "moduleResolution": "node",
-    "ignoreDeprecations": "6.0",
+    // TypeScript 7 removed the legacy node10 resolver, which `"node"` selected.
+    // `node16` is its supported replacement; because package.json has no
+    // `"type": "module"`, the main process still emits CommonJS as before.
+    "module": "node16",
+    "moduleResolution": "node16",
     "lib": ["ES2020"],
     "outDir": "dist-electron",
     "rootDir": "electron",
