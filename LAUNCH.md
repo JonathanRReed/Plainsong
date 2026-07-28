@@ -250,13 +250,65 @@ releases apart. That gap has not been exercised, because CI has not run.
       known audible tone.
 - [ ] Extend insertion coverage to an installed browser and code editor, and
       exercise toggle, hold-to-talk, and hands-free modes on the clean Mac.
-- [ ] Confirm paste-last, copy-last, and open-window shortcuts behave as
-      labeled on the clean Mac.
+      Partially advanced on July 28 — see "Activation modes and insertion
+      coverage" below. Browser-process insertion is now proven; the named
+      browser rows and both editor rows are not closable by any script.
+- [x] Confirm paste-last, copy-last, and open-window shortcuts behave as
+      labeled. `bun run qa:packaged:macos:recovery-shortcuts` passes against the
+      packaged signed build, carried entirely by external read-backs: the system
+      clipboard through `pbpaste`, the pasted transcript read back out of a real
+      TextEdit document, and an AX window count going 0 to 1. Still worth a
+      repeat on the clean Mac, but the behaviour itself is now evidenced.
 - [ ] Verify transcript, summary, action items, diarization enrichment,
       retention, and export on the real recordings.
 - [ ] Install an update end to end from the signed ZIP and
       `latest-mac.yml`. **Deliberately not attempted locally — see below.**
 - [ ] Recapture public screenshots from the final notarized build.
+
+### Activation modes and insertion coverage
+
+Three harnesses were added on July 28. What they establish, and what they
+deliberately refuse to claim:
+
+| Run | Result | What it means |
+| --- | --- | --- |
+| `qa:packaged:macos:recovery-shortcuts` | pass | paste-last, copy-last, and open-window all evidenced externally |
+| `qa:packaged:macos:dictation-hotkey` | pass | toggle activation, unchanged from the previous evidence |
+| `qa:packaged:macos:dictation-hotkey:hold` | blocked | see below |
+| `qa:packaged:macos:dictation-hotkey:hands-free` | blocked | see below |
+| app-matrix insertion, Chrome, local probe | pass, out of scope | browser-process insertion proven; closes no matrix row |
+
+**The insertion harness no longer accepts an attestation.** Its pass used to be
+three self-reports ANDed with a typed human answer, and only that answer spoke
+to whether text landed anywhere. `pasted: true` was never a confirmation —
+`paste_text_systemwide` returns it as soon as `CGEvent::post` returns, and
+`CGEvent::post` returns nothing. The pass is now carried only by reading the
+target surface back, with a pre-insert measurement so pre-existing text cannot
+masquerade as an insert, and the verifier rejects any artifact that puts the old
+self-reports back into `checks`.
+
+**Hold-to-talk is blocked, not failing.** The native helper stayed alive and an
+8-second synthetic `CGEvent` hold was posted, but the app logged no shortcut
+signal. From outside the process there is no way to tell "the event never
+reached the app" from "the app ignored it", so the harness stops. It explicitly
+does not accept the toggle fallback as a hold-to-talk pass — that fallback is
+what a degraded run looks like, and counting it would be the exact false pass
+this file exists to prevent. Closing this needs a physical `Cmd+Shift+Space`
+hold on a Mac where the packaged app holds Accessibility.
+
+**Hands-free is blocked for a different reason.** The fixture plays through the
+speakers, and no external check can prove the microphone heard it. A VAD failure
+is therefore indistinguishable from muted output, headphones, or an input device
+that cannot hear the speakers. It needs someone to speak into the microphone.
+
+**The browser and editor rows cannot be closed by a script at all.** The matrix's
+only browser rows are Google Docs and HubSpot, both of which require a
+signed-in account. VS Code, Cursor, and Notion are not installed, and DA-001 /
+DA-002 additionally demand command-mode and long-utterance evidence that a
+single-string paste cannot produce. A Chrome run against a local probe page
+reports `PASS_OUT_OF_SCOPE`: every external check passed, so insertion into a
+browser process is genuinely proven, but the probe page is not Google Docs and
+the artifact says so instead of closing the row.
 
 ### Why the updater test is deferred rather than run locally
 
