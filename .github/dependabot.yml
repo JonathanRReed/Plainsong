@@ -17,6 +17,18 @@ updates:
       rust-dependencies:
         patterns:
           - "*"
+    ignore:
+      # candle 0.11 calls the NEON f16 intrinsics behind the unstable
+      # `stdarch_neon_f16` feature gate, so it cannot build on any released
+      # stable toolchain for aarch64 — which is the only architecture this app
+      # ships. Held at 0.10 until rust-lang/rust#136306 stabilizes. Re-check by
+      # dropping these entries and running `bun run lint:rust`.
+      - dependency-name: "candle-core"
+        versions: ["0.11.x"]
+      - dependency-name: "candle-nn"
+        versions: ["0.11.x"]
+      - dependency-name: "candle-transformers"
+        versions: ["0.11.x"]
 
   - package-ecosystem: "github-actions"
     directory: "/"
