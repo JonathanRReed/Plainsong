@@ -3358,7 +3358,10 @@ mod tests {
         assert_eq!(resampler.resampler.output_delay(), 560);
 
         // The input side stays fixed at the requested chunk regardless.
-        assert_eq!(resampler.resampler.input_frames_next(), RESAMPLE_CHUNK_FRAMES);
+        assert_eq!(
+            resampler.resampler.input_frames_next(),
+            RESAMPLE_CHUNK_FRAMES
+        );
     }
 
     #[test]
