@@ -3772,7 +3772,43 @@ fn lsappinfo_value_for_key(asn: &str, key: &str) -> Option<String> {
         return None;
     }
 
-    let stdout = String::from_utf8_lossy(&output.stdout);
+    parse_lsappinfo_value(&String::from_utf8_lossy(&output.stdout))
+}
+
+/// `lsappinfo info -only <key>` uses two different shapes for its value.
+///
+/// Most keys are reported as `key="value"` somewhere after the ASN:
+///
+/// ```text
+/// [ NULL ]  ASN:0x0-0x7f57f5: (in front)
+///     bundleID="com.apple.Notes"
+/// ```
+///
+/// The name keys instead lead with a bare quoted token and never emit `="` at
+/// all:
+///
+/// ```text
+/// "Notes" ASN:0x0-0x25025: (in front)
+///     bundleID=[ NULL ]
+/// ```
+///
+/// Reading only the `key="value"` shape made every name lookup return `None` on
+/// every app, so `reactivate_target_application` could not confirm that a target
+/// without a bundle id had come back to the front: it spent its full 18-poll
+/// budget, warned, and dispatched the paste anyway. Try the leading token first
+/// so a populated name can never be shadowed by an unrelated `="` later in the
+/// same output.
+#[cfg(any(test, target_os = "macos"))]
+fn parse_lsappinfo_value(stdout: &str) -> Option<String> {
+    if let Some(rest) = stdout.trim_start().strip_prefix('"') {
+        if let Some(end) = rest.find('"') {
+            let value = rest[..end].trim();
+            if !value.is_empty() {
+                return Some(value.to_string());
+            }
+        }
+    }
+
     let value_start = stdout.find("=\"")? + 2;
     let value_end = stdout[value_start..]
         .find('"')
@@ -6631,6 +6667,45 @@ mod recent_dictation_result_tests {
 mod tests {
     use super::*;
     use std::path::PathBuf;
+
+    #[test]
+    fn lsappinfo_name_is_read_from_the_leading_quoted_token() {
+        // Verbatim `lsappinfo info -only name <asn>` output. The name never
+        // appears as `name="..."`, so a parser that only understands the
+        // `key="value"` shape returns None for every app on the system.
+        let stdout = concat!(
+            "\"Notes\" ASN:0x0-0x25025: (in front) \n",
+            "    bundleID=[ NULL ] \n",
+            "    bundle path=[ NULL ] \n",
+            "    executable path=[ NULL ] \n",
+            " !cgsConnection !signalled type=[ NULL ]  flavor=[ NULL ]  Version=[ NULL ]  Arch=!!none \n",
+        );
+
+        assert_eq!(parse_lsappinfo_value(stdout).as_deref(), Some("Notes"));
+    }
+
+    #[test]
+    fn lsappinfo_bundle_id_is_read_from_the_key_value_shape() {
+        // Verbatim `lsappinfo info -only bundleid <asn>` output: here the
+        // leading token is `[ NULL ]`, and the value uses `key="value"`.
+        let stdout = concat!(
+            "[ NULL ]  ASN:0x0-0x25025: (in front) \n",
+            "    bundleID=\"com.apple.Notes\" \n",
+            "    bundle path=[ NULL ] \n",
+        );
+
+        assert_eq!(
+            parse_lsappinfo_value(stdout).as_deref(),
+            Some("com.apple.Notes")
+        );
+    }
+
+    #[test]
+    fn lsappinfo_reports_none_when_the_key_is_unset() {
+        let stdout = "[ NULL ]  ASN:0x0-0x25025: (in front) \n    bundleID=[ NULL ] \n";
+
+        assert_eq!(parse_lsappinfo_value(stdout), None);
+    }
 
     fn temp_models_root() -> PathBuf {
         let root = std::env::temp_dir().join(format!(
