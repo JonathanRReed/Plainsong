@@ -6,6 +6,7 @@
     "electron/main.ts",
     "electron/preload.ts",
     "scripts/capture-packaged-macos-app-matrix-insertion.mjs",
+    "scripts/capture-packaged-macos-recovery-shortcuts.mjs",
     "scripts/sign-macos.mjs",
     "scripts/verify-macos-speech-helper.mjs",
     "scripts/verify-macos-system-audio.mjs",
@@ -28,6 +29,9 @@
     "ditto",
     "hdiutil",
     "osascript",
+    "pbcopy",
+    "pbpaste",
+    "pgrep",
     "say",
     "sqlite3",
     "swiftc"
