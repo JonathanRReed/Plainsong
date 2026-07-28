@@ -1,6 +1,6 @@
 # Plainsong launch checklist
 
-Release state as of **July 27, 2026**.
+Release state as of **July 28, 2026**.
 
 The current working tree contains a locally verified Plainsong v1.0.0 release
 candidate for Apple Silicon Macs. The app, DMG, ZIP, sidecar, shortcut helper,
@@ -41,7 +41,8 @@ item under "External release gates" is complete.
 - [x] `nautilus-bot/release/Plainsong-1.0.0-arm64.dmg`.
 - [x] `nautilus-bot/release/Plainsong-1.0.0-arm64-mac.zip`.
 - [x] ZIP blockmap and `latest-mac.yml`.
-- [x] 343.29 MB app size, below the 450 MB gate.
+- [x] 351.53 MB app size, below the 450 MB gate. The rise from 343.29 MB is
+      Electron 43.
 - [x] arm64 app and every native executable.
 - [x] macOS 13.0 deployment floor in bundle metadata, sidecar, shortcut
       helper, and Apple Speech helper.
@@ -67,14 +68,14 @@ item under "External release gates" is complete.
 | --- | --- | --- |
 | native helper/package gate | pass | Presence, arm64 architecture, deployment floor, entitlements |
 | update metadata | pass | Version, ZIP, blockmap, size, SHA-512 |
-| size gate | pass | 343.29 MB of 450 MB maximum |
+| size gate | pass | 351.53 MB of 450 MB maximum |
 | component smoke | pass | Sidecar, permissions diagnostics, insertion components, setup checks |
 | local Whisper fixture | pass | Nonempty transcript, one model load, clean sidecar exit |
 | retention | pass | Transcript-only, audio-only, and audio-plus-transcript policies |
 | backup and restore | pass | Local create/restore plus explicit iCloud-provider sync/restore path |
 | exports | pass | Markdown, JSON, text, all seven templates, database restore, fixture cleanup |
 | packaged renderer | pass | Main window and Dictation render through the production protocol |
-| cold start | pass | Production renderer emitted `App rendered` in 1,822 ms against a 2.5 s gate |
+| cold start | pass | Production renderer emitted `App rendered` in 1,118 ms against a 2.5 s gate. See the first-launch note below |
 | dictation hotkey | pass | Packaged global shortcut, microphone capture, Whisper transcript, clipboard delivery |
 | Apple Notes insertion | pass | Real packaged insertion into Notes, including native-paste fallback and bundle-ID evidence |
 | microphone meeting | pass | Real capture, overlays, persisted audio, database/settings restore, cleanup |
@@ -84,6 +85,19 @@ item under "External release gates" is complete.
 | local Ollama analysis | pass | `gpt-oss:20b` summary and action items with grounded citations |
 | idle CPU | pass | 0.05% average, 0.9% maximum, 0.1% p95, clean exit |
 | release trust | expected fail | Every local signature check passes; notarization checks fail closed |
+
+### First launch after a build is not a representative cold start
+
+The cold-start gate fails on the very first launch of a freshly signed bundle
+and passes on every launch after it. Measured on July 28: first launch exceeded
+the 2,500 ms gate; the next four were 1,118 / 853 / 970 / 1,334 ms. macOS
+validates the whole 351 MB signature once and caches the result, so the first
+number is signature validation, not renderer readiness.
+
+This matters twice. Run `bun run gate:cold-start` a second time after any
+release build before believing a failure. And expect real users to pay that
+cost once on first launch, because their first launch is also a first launch —
+the gate does not measure what they will feel on day one.
 
 The retention, backup, and export harnesses restore the original database and
 settings after each run. The export harness tests the supported plain export
@@ -147,11 +161,23 @@ release gate.
 
 ### Apple notarization
 
-Developer ID signing and a local Keychain notarization profile are available.
-The credentialed build was stopped before submission when notarization was
-explicitly deferred. A fresh signed candidate was then rebuilt with all
-notarization inputs removed, and no Plainsong submission appears in
-`notarytool` history. The trust gate therefore reports:
+Developer ID signing is available and working: the July 28 rebuild signed the
+app, sidecar, shortcut helper, Speech helper, and DMG with
+`Developer ID Application: Jonathan Reed (AJ9VWBRNZN)`.
+
+**No notarization credential exists on this machine.** An earlier revision of
+this file said a local Keychain profile was available; that was wrong. Verified
+July 28: the login Keychain holds no generic-password item under
+`com.apple.gs.appleid.auth`, `notarytool`, `Xcode`, or `altool`, and
+`xcrun notarytool history --keychain-profile <name>` returns "No Keychain
+password item found" for every plausible name. Creating one requires an Apple
+ID and an app-specific password, so it is the account holder's step — see
+"Creating the `notarytool` Keychain profile" in
+`nautilus-bot/docs/APPLE_DEVELOPER_SETUP.md`.
+
+The current candidate was built with all notarization inputs absent, and no
+Plainsong submission appears in `notarytool` history. The trust gate therefore
+reports:
 
 - app: `source=Unnotarized Developer ID`
 - ZIP-contained app: `source=Unnotarized Developer ID`
@@ -160,11 +186,14 @@ notarization inputs removed, and no Plainsong submission appears in
 
 Complete these only when notarization is resumed:
 
-- [x] Confirm a Developer ID identity and supported notarization credential
-      route are available.
+- [x] Confirm a Developer ID identity is available.
+- [ ] Create a `notarytool` credential — no route currently exists. Account
+      holder only.
 - [ ] Resume a credentialed build with `APPLE_KEYCHAIN_PROFILE`, or with
       `APPLE_ID`, `APPLE_APP_SPECIFIC_PASSWORD`, and `APPLE_TEAM_ID`.
 - [ ] Run `bun run gate:release-credentials:preflight`.
+- [ ] Restore GitHub Actions billing — see below. The release workflow cannot
+      start until this is fixed.
 - [ ] Build through `.github/workflows/release.yml`.
 - [ ] Submit and staple the signed DMG.
 - [ ] Require `bun run gate:release:macos:trust` to pass for the app, DMG, and
@@ -172,6 +201,25 @@ Complete these only when notarization is resumed:
 
 See `nautilus-bot/docs/APPLE_DEVELOPER_SETUP.md` and
 `nautilus-bot/docs/CODE_SIGNING.md`.
+
+### GitHub Actions billing is blocking every workflow run
+
+Every run since at least July 27 has failed within seconds, on all four jobs,
+with the annotation:
+
+> The job was not started because recent account payments have failed or your
+> spending limit needs to be increased.
+
+This is an account-billing state, not a repository or code problem — the same
+commits pass every gate locally. It blocks the release workflow, so it blocks
+notarized publication, and it also means CI has not actually verified any
+commit for at least a day. Fix it under GitHub Settings → Billing and plans,
+then re-run one CI workflow and confirm the jobs start before relying on any
+green check.
+
+Worth knowing while it is broken: local Rust is 1.93.0 while CI resolves
+`dtolnay/rust-toolchain@stable` to 1.97.1, so local gate runs and CI are four
+releases apart. That gap has not been exercised, because CI has not run.
 
 ### User-present acceptance
 
