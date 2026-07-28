@@ -2,6 +2,13 @@
 
 Frozen Phase 0 launch matrix as of 2026-03-12.
 
+**v1 scope: macOS only.** v1 ships an Apple Silicon macOS build; the Windows
+release leg was removed. The Windows table below is retained as the plan for a
+later release and is not a v1 gate — read the exit gate at the bottom as
+applying to the macOS table alone. `scripts/capture-packaged-macos-app-matrix-preflight.mjs`
+already behaves this way: it skips every row whose platform heading is not
+`macOS`.
+
 Status values:
 - `PENDING`: not yet validated in packaged QA.
 - `SUPPORTED`: direct paste path is reliable.
@@ -38,4 +45,5 @@ This matrix is the default source of truth for DP-02 in `docs/evals/dictation-pa
 | Outlook | PENDING | clipboard_only | Launch-problematic sales target; capture rich-text compose limitations. |
 
 ## Exit Gate
-- Mark launch-ready only when all target apps are `SUPPORTED` or `PARTIAL` with documented workaround.
+- Mark launch-ready only when all **macOS** target apps are `SUPPORTED` or `PARTIAL` with documented workaround.
+- The Windows table is out of scope until a Windows build ships.
