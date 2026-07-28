@@ -1,0 +1,206 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="referrer" content="no-referrer" />
+    <title>Plainsong insertion probe</title>
+    <style>
+      /* No external resources of any kind: no fonts, no images, no scripts, no stylesheets. */
+      :root {
+        color-scheme: light dark;
+      }
+      html,
+      body {
+        margin: 0;
+        padding: 0;
+      }
+      body {
+        font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+        font-size: 14px;
+        line-height: 1.5;
+        padding: 24px;
+        background: #faf7f0;
+        color: #24211c;
+      }
+      h1 {
+        font-size: 16px;
+        margin: 0 0 4px;
+        letter-spacing: 0.02em;
+      }
+      p {
+        margin: 0 0 16px;
+        color: #6d675c;
+      }
+      textarea {
+        display: block;
+        width: 100%;
+        max-width: 900px;
+        min-height: 220px;
+        box-sizing: border-box;
+        padding: 12px;
+        font: inherit;
+        color: inherit;
+        background: #fffdf8;
+        border: 2px solid #bcb2a0;
+        border-radius: 6px;
+        resize: vertical;
+      }
+      textarea:focus {
+        outline: 2px solid #9a6a2f;
+        outline-offset: 1px;
+      }
+      dl {
+        display: grid;
+        grid-template-columns: max-content 1fr;
+        gap: 2px 16px;
+        margin: 16px 0 0;
+        max-width: 900px;
+      }
+      dt {
+        color: #6d675c;
+      }
+      dd {
+        margin: 0;
+        overflow-wrap: anywhere;
+      }
+      @media (prefers-color-scheme: dark) {
+        body {
+          background: #17150f;
+          color: #ece5d6;
+        }
+        p,
+        dt {
+          color: #9d9583;
+        }
+        textarea {
+          background: #201d15;
+          border-color: #4a4436;
+        }
+      }
+    </style>
+  </head>
+  <body>
+    <h1>Plainsong insertion probe</h1>
+    <p>
+      Disposable QA surface. Every keystroke and paste in the field below is reported to the local
+      capture harness. Nothing here is a real product surface.
+    </p>
+
+    <textarea
+      id="probe"
+      autofocus
+      autocomplete="off"
+      autocapitalize="off"
+      autocorrect="off"
+      spellcheck="false"
+      aria-label="Insertion probe field"
+    ></textarea>
+
+    <dl>
+      <dt>Run nonce</dt>
+      <dd id="nonce-view">(missing)</dd>
+      <dt>Beacons sent</dt>
+      <dd id="sent-view">0</dd>
+      <dt>Field length</dt>
+      <dd id="length-view">0</dd>
+      <dt>Last beacon</dt>
+      <dd id="phase-view">(none)</dd>
+    </dl>
+
+    <script>
+      (function () {
+        "use strict";
+
+        var probe = document.getElementById("probe");
+        var nonceView = document.getElementById("nonce-view");
+        var sentView = document.getElementById("sent-view");
+        var lengthView = document.getElementById("length-view");
+        var phaseView = document.getElementById("phase-view");
+
+        var params = new URLSearchParams(window.location.search);
+        var nonce = params.get("nonce") || "";
+        var sequence = 0;
+        var sent = 0;
+
+        nonceView.textContent = nonce || "(missing)";
+
+        // Recorded once, before we force focus, so the harness can tell real autofocus
+        // apart from the focus this script applies as a safety net.
+        var autofocusHeld = document.activeElement === probe;
+
+        function beacon(phase) {
+          sequence += 1;
+          var payload = {
+            nonce: nonce,
+            phase: phase,
+            sequence: sequence,
+            value: probe.value,
+            length: probe.value.length,
+            focused: document.activeElement === probe,
+            autofocusHeld: autofocusHeld,
+            windowFocused: document.hasFocus(),
+            visibility: document.visibilityState,
+            at: new Date().toISOString()
+          };
+          try {
+            fetch("/beacon", {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify(payload),
+              cache: "no-store",
+              keepalive: true
+            }).then(
+              function () {
+                sent += 1;
+                sentView.textContent = String(sent);
+              },
+              function () {}
+            );
+          } catch (error) {
+            /* The harness treats missing beacons as BLOCKED; never throw here. */
+          }
+          lengthView.textContent = String(probe.value.length);
+          phaseView.textContent = phase + " #" + sequence;
+        }
+
+        probe.addEventListener("input", function () {
+          beacon("input");
+        });
+        probe.addEventListener("paste", function () {
+          // Fires before the value is committed; read it on the next tick.
+          window.setTimeout(function () {
+            beacon("paste");
+          }, 0);
+        });
+        probe.addEventListener("focus", function () {
+          beacon("focus");
+        });
+        probe.addEventListener("blur", function () {
+          beacon("blur");
+        });
+
+        function announceReady() {
+          try {
+            probe.focus();
+          } catch (error) {
+            /* Reported through the ready beacon's focused flag. */
+          }
+          beacon("ready");
+        }
+
+        if (document.readyState === "complete") {
+          announceReady();
+        } else {
+          window.addEventListener("load", announceReady);
+        }
+
+        // Heartbeat: accessibility-based insertion can set the field value without firing
+        // an input event, so the harness must not depend on DOM events alone.
+        window.setInterval(function () {
+          beacon("heartbeat");
+        }, 1000);
+      })();
+    </script>
+  </body>
+</html>
