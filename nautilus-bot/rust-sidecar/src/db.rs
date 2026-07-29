@@ -5220,7 +5220,7 @@ mod tests {
             transcript_id: Some("transcript-1".to_string()),
             segment_count: 3,
             model_id: Some("distil-large-v3.5".to_string()),
-            requested_provider: Some("voxtral".to_string()),
+            requested_provider: Some("parakeet".to_string()),
             actual_provider: Some("distil-whisper".to_string()),
             quality_score: Some(0.94),
             startup_latency_ms: Some(90),

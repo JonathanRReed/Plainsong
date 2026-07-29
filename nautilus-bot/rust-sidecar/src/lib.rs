@@ -13675,27 +13675,6 @@ fn remove_artifact(
     }
 }
 
-fn remove_invalid_safetensors_files(
-    model_dir: &Path,
-    min_bytes: u64,
-    removed_paths: &mut Vec<String>,
-    notes: &mut Vec<String>,
-) {
-    let Ok(entries) = std::fs::read_dir(model_dir) else {
-        return;
-    };
-    for entry in entries.flatten() {
-        let path = entry.path();
-        let is_safetensors = path
-            .extension()
-            .map(|ext| ext == "safetensors")
-            .unwrap_or(false);
-        if is_safetensors && !is_valid_binary_artifact(&path, min_bytes) {
-            remove_artifact(&path, "invalid safetensors weights", removed_paths, notes);
-        }
-    }
-}
-
 fn remove_download_temp_files(
     model_dir: &Path,
     removed_paths: &mut Vec<String>,
@@ -13900,33 +13879,13 @@ fn repair_local_model_cache_at(models_root: &Path) -> LocalModelRepairReport {
         remove_download_temp_files(&distil_dir, &mut removed_paths, &mut notes);
     }
 
-    let voxtral_dir = models_root.join("voxtral");
-    if voxtral_dir.exists() {
-        for json_name in ["config.json", "processor_config.json", "tekken.json"] {
-            let path = voxtral_dir.join(json_name);
-            if path.exists() && !is_valid_json_artifact(&path, 64) {
-                remove_artifact(
-                    &path,
-                    "invalid Voxtral JSON artifact",
-                    &mut removed_paths,
-                    &mut notes,
-                );
-            }
-        }
-        for weight_name in ["model.safetensors", "consolidated.safetensors"] {
-            let path = voxtral_dir.join(weight_name);
-            if path.exists() && !is_valid_binary_artifact(&path, 1024) {
-                remove_artifact(
-                    &path,
-                    "invalid Voxtral safetensors weight",
-                    &mut removed_paths,
-                    &mut notes,
-                );
-            }
-        }
-        remove_invalid_safetensors_files(&voxtral_dir, 1024, &mut removed_paths, &mut notes);
-        remove_download_temp_files(&voxtral_dir, &mut removed_paths, &mut notes);
-    }
+    // Voxtral had a repair sweep here, validating its JSON and safetensors
+    // artifacts. The engine is gone, so validating its cache is dead work: no
+    // code path can produce or consume those files any more. A user upgrading
+    // from a build that had Voxtral may still have `models/voxtral/` on disk
+    // with weights in it. Reclaiming that space is a product decision about
+    // deleting a user's files, not a repair, so it is deliberately not done
+    // here rather than smuggled into a function called "repair".
 
     let repaired_count = removed_paths.len();
     if repaired_count == 0 {
