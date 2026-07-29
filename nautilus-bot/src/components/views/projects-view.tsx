@@ -10,10 +10,10 @@ import { ScrollArea } from "@/components/ui/scroll-area";
 import { useProjects } from "@/hooks/use-projects";
 import { useRecordings } from "@/hooks/use-recordings";
 import { requestMainView } from "@/lib/navigation";
-import { ChevronRight, Folder, Plus } from "lucide-react";
+import { AlertCircle, ChevronRight, Folder, Loader2, Plus } from "lucide-react";
 
 export function ProjectsView() {
-  const { projects, isLoading, error, createProject } = useProjects();
+  const { projects, isLoading, error, createProject, refetch } = useProjects();
   const { recordings } = useRecordings();
   const [showNewProject, setShowNewProject] = useState(false);
   const [newProjectName, setNewProjectName] = useState("");
@@ -58,9 +58,36 @@ export function ProjectsView() {
 
       <ScrollArea className="flex-1">
         <div className="mx-auto w-full max-w-7xl px-6 py-6 lg:px-8">
+          {/* Same treatment Meetings uses for the same class of failure: a
+              sentence the reader can act on, the technical detail underneath
+              rather than instead of it, and a way to try again. This box used
+              to render `error` alone, so a load failure showed the user
+              "[electron] window.electronAPI not available, is the preload
+              script loaded?" and nothing else. */}
           {error ? (
-            <div className="rounded-lg border border-rust/30 bg-rust/10 px-4 py-3 text-sm text-rust">
-              {error}
+            <div
+              role="alert"
+              className="mb-4 flex flex-wrap items-center justify-between gap-3 rounded-lg border border-rust/30 bg-rust/10 px-4 py-3"
+            >
+              <div className="flex min-w-0 items-start gap-2 text-sm text-rust">
+                <AlertCircle className="mt-0.5 h-4 w-4 shrink-0" aria-hidden="true" />
+                <div className="min-w-0">
+                  <p className="font-medium">Projects could not be loaded.</p>
+                  <p className="mt-0.5 break-words text-rust/90">{error}</p>
+                </div>
+              </div>
+              <Button
+                type="button"
+                size="sm"
+                variant="outline"
+                disabled={isLoading}
+                onClick={() => void refetch()}
+              >
+                {isLoading ? (
+                  <Loader2 className="mr-2 h-4 w-4 animate-spin" aria-hidden="true" />
+                ) : null}
+                Try again
+              </Button>
             </div>
           ) : null}
 
