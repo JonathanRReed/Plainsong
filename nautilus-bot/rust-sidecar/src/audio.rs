@@ -34,6 +34,23 @@ use std::sync::Arc;
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
+/// How much longer capture keeps running after the user asks it to stop.
+///
+/// This is deliberate extra recording, not slack waiting for a device to drain.
+/// A speaker's final consonant is still arriving when the key comes up, and
+/// cutting at the gesture clips it — the worst failure this path has.
+///
+/// It is also the single largest component of felt dictation latency. Measured
+/// end to end on a packaged build: stop-press to text-delivered ~265ms, of which
+/// Whisper was 69ms and this tail was 120ms.
+///
+/// An attempt to make it adaptive — poll `dictation_callback_count` and return
+/// as soon as the input stops delivering — was tried and reverted. It saves
+/// ~7ms (133ms -> 126ms) and cannot save more: the capture callback fires
+/// continuously until `is_dictating` goes false, which happens *after* this
+/// wait, so there is no quiet period to detect. Anything faster here is a real
+/// trade against clipping the end of the last word, and needs testing against
+/// human speech rather than a `say` fixture.
 const DICTATION_STOP_CAPTURE_TAIL_MS: u64 = 120;
 const DICTATION_MIN_CAPTURE_SECONDS: f32 = 0.35;
 const DICTATION_SHORT_CAPTURE_PEAK_THRESHOLD: f32 = 0.008;
