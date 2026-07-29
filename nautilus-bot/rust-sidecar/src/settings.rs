@@ -427,16 +427,56 @@ impl Default for UiSettings {
 #[serde(default, rename_all = "camelCase")]
 pub struct ExportSettings {}
 
+/// One AI lane: which analysis provider runs a class of work, and on which
+/// model.
+///
+/// There are two lanes because the two classes of work have opposite
+/// constraints. Dictation cleanup runs on every capture behind a short
+/// timeout, so it needs a model that answers fast. Meeting summaries, action
+/// items, and Q&A are batch work that can afford a slower, smarter model. A
+/// single global choice could only ever be right for one of them.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default, rename_all = "camelCase")]
+pub struct AiLaneSettings {
+    /// Analysis LLM provider for this lane
+    pub provider: String,
+    /// Model ID for this lane (provider-specific; `None` means the provider's
+    /// own default model)
+    pub model_id: Option<String>,
+}
+
+impl Default for AiLaneSettings {
+    fn default() -> Self {
+        Self {
+            provider: "ollama".to_string(),
+            model_id: None,
+        }
+    }
+}
+
+/// Which AI lane a piece of work belongs to. Every consumer of an analysis
+/// provider names its lane so the choice is made once, at the call site that
+/// knows what kind of work it is doing.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AiLane {
+    /// Dictation cleanup and formatting.
+    Dictation,
+    /// Meeting summaries, action items, and meeting Q&A.
+    Meetings,
+}
+
 /// Privacy settings
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(default, rename_all = "camelCase")]
 pub struct PrivacySettings {
     /// Allow remote provider processing (local-first default)
     pub remote_processing_enabled: bool,
-    /// Default analysis LLM provider
-    pub llm_provider: String,
-    /// Default LLM model ID (provider-specific)
-    pub llm_model_id: Option<String>,
+    /// AI lane for dictation cleanup and formatting. Latency-critical: this
+    /// runs on every capture behind a short timeout.
+    pub dictation_ai: AiLaneSettings,
+    /// AI lane for meeting summaries, action items, and meeting Q&A. Batch
+    /// work, so it can afford a slower model.
+    pub meetings_ai: AiLaneSettings,
     /// Optional absolute export root constraint
     pub export_root: Option<PathBuf>,
     /// Whether vault migration has completed
@@ -445,15 +485,12 @@ pub struct PrivacySettings {
     pub vault_salt: Option<String>,
 }
 
-impl Default for PrivacySettings {
-    fn default() -> Self {
-        Self {
-            remote_processing_enabled: false,
-            llm_provider: "ollama".to_string(),
-            llm_model_id: None,
-            export_root: None,
-            vault_initialized: false,
-            vault_salt: None,
+impl PrivacySettings {
+    /// The provider/model pair that runs `lane`.
+    pub fn ai_lane(&self, lane: AiLane) -> &AiLaneSettings {
+        match lane {
+            AiLane::Dictation => &self.dictation_ai,
+            AiLane::Meetings => &self.meetings_ai,
         }
     }
 }
@@ -552,6 +589,15 @@ fn normalize_keyboard_shortcuts(shortcuts: &mut KeyboardShortcuts) {
     shortcuts.toggle_dictation_alternates.clear();
 }
 
+/// Collapse a stored provider name onto one that still exists.
+///
+/// The catch-all is the migration path, not a fallback for typos: a settings
+/// file written before `mlx_audio`, `voxtral`, or the managed-Python Parakeet
+/// routes were deleted will still name them, and the honest answer is to land
+/// that user on `whisper` rather than keep a name no engine answers to. Adding
+/// an arm here for a provider that no longer ships would make the retired name
+/// the canonical output of the settings layer, which is how a deleted feature
+/// comes back as a ghost.
 fn normalize_transcription_provider_value(provider: &str) -> String {
     match provider.trim() {
         "canary" => "whisper_candle".to_string(),
@@ -559,10 +605,8 @@ fn normalize_transcription_provider_value(provider: &str) -> String {
         "whisper" => "whisper".to_string(),
         "parakeet" => "parakeet".to_string(),
         "distil_whisper" => "distil_whisper".to_string(),
-        "mlx_audio" => "mlx_audio".to_string(),
         "macos_apple_speech" => "macos_apple_speech".to_string(),
         "moonshine" => "moonshine".to_string(),
-        "voxtral" => "voxtral".to_string(),
         "windows_sdk_dictation" => "windows_sdk_dictation".to_string(),
         "elevenlabs_scribe" => "elevenlabs_scribe".to_string(),
         "openai_cloud" => "openai_cloud".to_string(),
@@ -580,23 +624,16 @@ fn normalize_transcription_model_id(provider: &str, model_id: &str) -> String {
         },
         "parakeet" => match model_id.trim() {
             "parakeet-tdt-0.6b-v2" | "parakeet-tdt-0.6b-v3" => "parakeet-tdt-0.6b-v3".to_string(),
-            "parakeet-ctc-0.6b" => "parakeet-ctc-0.6b".to_string(),
-            "parakeet-ctc-1.1b" => "parakeet-ctc-1.1b".to_string(),
             "parakeet-tdt-ctc-110m" | "parakeet-legacy-110m" => "parakeet-tdt-ctc-110m".to_string(),
             _ => "parakeet-tdt-0.6b-v3".to_string(),
         },
         "whisper_candle" => "whisper-large-v3-turbo".to_string(),
         "distil_whisper" => "distil-large-v3.5".to_string(),
-        "mlx_audio" => model_id.trim().to_string(),
         "macos_apple_speech" => "macos_apple_speech".to_string(),
         "moonshine" => match model_id.trim() {
             "moonshine" | "moonshine-base" => "moonshine-base".to_string(),
             "moonshine-tiny" => "moonshine-tiny".to_string(),
             _ => "moonshine-base".to_string(),
-        },
-        "voxtral" => match model_id.trim() {
-            "voxtral-cloud" => "voxtral-cloud".to_string(),
-            _ => "voxtral-local".to_string(),
         },
         "windows_sdk_dictation" => "windows_sdk_dictation".to_string(),
         "elevenlabs_scribe" => match model_id.trim() {
@@ -797,20 +834,25 @@ fn normalize_loaded_transcription_settings(transcription: &mut TranscriptionSett
     };
 }
 
-fn normalize_loaded_privacy_settings(privacy: &mut PrivacySettings) {
+fn normalize_ai_lane_settings(lane: &mut AiLaneSettings) {
     // Normalize LLM provider to ensure it's a valid value
-    privacy.llm_provider = privacy.llm_provider.trim().to_lowercase();
-    if privacy.llm_provider.is_empty() {
-        privacy.llm_provider = "ollama".to_string();
+    lane.provider = lane.provider.trim().to_lowercase();
+    if lane.provider.is_empty() {
+        lane.provider = "ollama".to_string();
     }
 
     // Normalize model ID if present
-    if let Some(model_id) = privacy.llm_model_id.as_mut() {
+    if let Some(model_id) = lane.model_id.as_mut() {
         *model_id = model_id.trim().to_string();
         if model_id.is_empty() {
-            privacy.llm_model_id = None;
+            lane.model_id = None;
         }
     }
+}
+
+fn normalize_loaded_privacy_settings(privacy: &mut PrivacySettings) {
+    normalize_ai_lane_settings(&mut privacy.dictation_ai);
+    normalize_ai_lane_settings(&mut privacy.meetings_ai);
 }
 
 /// Update channel (stable or beta)
@@ -987,12 +1029,17 @@ pub fn resolve_dictation_app_category_with_overrides_and_hint(
         .unwrap_or(DictationAppCategory::Other)
 }
 
-/// Settings keys that were removed from the schema because they had no
-/// runtime reader (placebo settings). Serde already ignores unknown keys on
-/// load; this list drives the load-time migration that rewrites
-/// settings.json without them so stale keys don't linger on disk implying
-/// behavior that doesn't exist. Paths are `(section, camelCase key)`; an
-/// empty section means a top-level key.
+/// Settings keys that are no longer part of the schema, either because they
+/// had no runtime reader (placebo settings) or because a migration moved
+/// their value somewhere else. Serde already ignores unknown keys on load;
+/// this list drives the load-time migration that rewrites settings.json
+/// without them so stale keys don't linger on disk implying behavior that
+/// doesn't exist. Paths are `(section, camelCase key)`; an empty section
+/// means a top-level key.
+///
+/// A key whose value still matters must be read out of the raw payload
+/// before it is dropped — see `migrate_legacy_ai_lane_settings` for the
+/// `privacy.llmProvider` / `privacy.llmModelId` pair.
 const REMOVED_SETTINGS_KEYS: &[(&str, &str)] = &[
     ("", "defaultTemplate"),
     ("audio", "sampleRate"),
@@ -1024,6 +1071,10 @@ const REMOVED_SETTINGS_KEYS: &[(&str, &str)] = &[
     ("privacy", "requirePassword"),
     ("privacy", "auditLogging"),
     ("privacy", "cloudSync"),
+    // Superseded by the `dictationAi` / `meetingsAi` lanes; the value is
+    // carried over by `migrate_legacy_ai_lane_settings` before it is dropped.
+    ("privacy", "llmProvider"),
+    ("privacy", "llmModelId"),
     ("shortcuts", "toggleRecording"),
     ("shortcuts", "quickExport"),
     ("shortcuts", "focusSearch"),
@@ -1042,6 +1093,57 @@ fn raw_settings_contain_removed_keys(raw: &serde_json::Value) -> bool {
     })
 }
 
+/// Carry a pre-lane settings.json onto the two AI lanes.
+///
+/// Before the split, `privacy.llmProvider` / `privacy.llmModelId` was a single
+/// choice serving dictation cleanup, meeting summaries, action items, and
+/// meeting Q&A. Copying that one pair into both lanes is what makes the
+/// upgrade silent: every job keeps running on exactly the model it ran on
+/// before, and the user only sees a difference once they deliberately point a
+/// lane somewhere else.
+///
+/// A lane that the file already carries is never touched, even when a stale
+/// legacy key sits beside it — the explicit per-lane choice is the newer
+/// intent. Lanes are considered independently, so a file carrying only one of
+/// them still gets the legacy value copied into the other.
+fn migrate_legacy_ai_lane_settings(raw: &serde_json::Value, privacy: &mut PrivacySettings) {
+    let Some(raw_privacy) = raw.get("privacy") else {
+        return;
+    };
+
+    let legacy_provider = raw_privacy
+        .get("llmProvider")
+        .and_then(serde_json::Value::as_str);
+    let legacy_model_id = raw_privacy.get("llmModelId");
+    if legacy_provider.is_none() && legacy_model_id.is_none() {
+        return;
+    }
+
+    // `llmModelId` was nullable, so a present-but-null key is a real "no
+    // model chosen" and must land on the lanes as `None` rather than being
+    // treated as absent.
+    let legacy_model_id = legacy_model_id.and_then(|value| match value {
+        serde_json::Value::Null => Some(None),
+        serde_json::Value::String(model_id) => Some(Some(model_id.clone())),
+        _ => None,
+    });
+
+    for (lane_key, lane) in [
+        ("dictationAi", &mut privacy.dictation_ai),
+        ("meetingsAi", &mut privacy.meetings_ai),
+    ] {
+        if raw_privacy.get(lane_key).is_some() {
+            continue;
+        }
+        if let Some(provider) = legacy_provider {
+            lane.provider = provider.to_string();
+        }
+        if let Some(model_id) = legacy_model_id.as_ref() {
+            lane.model_id = model_id.clone();
+        }
+    }
+}
+
 /// Settings manager
 pub struct SettingsManager {
     settings: Settings,
@@ -1058,8 +1160,12 @@ impl SettingsManager {
         let mut needs_migration_rewrite = false;
         let mut settings = if config_path.exists() {
             match Self::load_from_file(&config_path) {
-                Ok((settings, raw)) => {
+                Ok((mut settings, raw)) => {
                     needs_migration_rewrite = raw_settings_contain_removed_keys(&raw);
+                    // Must run before the removed keys are dropped from disk
+                    // by the rewrite below: it is the only thing that reads
+                    // the retired single AI provider/model pair.
+                    migrate_legacy_ai_lane_settings(&raw, &mut settings.privacy);
                     settings
                 }
                 Err(err) => {
@@ -1196,14 +1302,50 @@ impl Default for SettingsManager {
 mod tests {
     use super::{
         dictation_app_category_from_key, dictation_app_category_to_key,
-        normalize_audio_input_device_preference, normalize_dictation_active_languages,
+        migrate_legacy_ai_lane_settings, normalize_audio_input_device_preference,
+        normalize_dictation_active_languages, normalize_loaded_privacy_settings,
         normalize_loaded_transcription_settings, resolve_dictation_app_category_with_overrides,
-        AudioInputDevicePreference, DictationAppCategoryOverride, DictationCustomMode,
-        PlatformOptimizationSettings, Settings, SettingsManager, TranscriptionSettings,
+        AiLane, AiLaneSettings, AudioInputDevicePreference, DictationAppCategoryOverride,
+        DictationCustomMode, PlatformOptimizationSettings, PrivacySettings, Settings,
+        SettingsManager, TranscriptionSettings,
     };
     use crate::text::format::DictationAppCategory;
     use std::fs;
     use std::time::{SystemTime, UNIX_EPOCH};
+
+    #[test]
+    fn settings_written_before_the_python_providers_were_deleted_land_on_whisper() {
+        // mlx_audio, voxtral and the managed-Python Parakeet routes are gone.
+        // A settings.json from before that still names them, and normalization
+        // is the only thing standing between that file and a provider slot
+        // pointing at an engine that cannot answer. Keeping an arm for a
+        // retired name would make it the canonical output of the settings
+        // layer, so these must fall through.
+        let mut retired_providers = TranscriptionSettings {
+            default_provider: "mlx_audio".to_string(),
+            dictation_provider: "voxtral".to_string(),
+            ..Default::default()
+        };
+        normalize_loaded_transcription_settings(&mut retired_providers);
+        assert_eq!(retired_providers.default_provider, "whisper");
+        assert_eq!(retired_providers.dictation_provider, "whisper");
+        // The model id is normalized against its own provider, so a slot that
+        // fell back to whisper must carry a whisper model, not the orphaned id
+        // of the engine that just went away.
+        assert_eq!(retired_providers.dictation_model_id, "base.en");
+
+        // Parakeet itself survives; only its managed-Python model ids went. A
+        // stale id collapses to the shipping v3 route rather than taking the
+        // whole provider down with it.
+        let mut retired_model = TranscriptionSettings {
+            dictation_provider: "parakeet".to_string(),
+            dictation_model_id: "parakeet-ctc-1.1b".to_string(),
+            ..Default::default()
+        };
+        normalize_loaded_transcription_settings(&mut retired_model);
+        assert_eq!(retired_model.dictation_provider, "parakeet");
+        assert_eq!(retired_model.dictation_model_id, "parakeet-tdt-0.6b-v3");
+    }
 
     #[test]
     fn reload_from_disk_replaces_live_settings_and_runs_load_normalization() {
@@ -1289,6 +1431,242 @@ mod tests {
         .expect("legacy settings should deserialize");
         assert!(!parsed.privacy.vault_initialized);
         assert_eq!(parsed.theme, "system");
+    }
+
+    fn lane(provider: &str, model_id: Option<&str>) -> AiLaneSettings {
+        AiLaneSettings {
+            provider: provider.to_string(),
+            model_id: model_id.map(str::to_string),
+        }
+    }
+
+    /// A fresh install must not silently change which model runs anything, so
+    /// both lanes start where the single setting used to.
+    #[test]
+    fn ai_lane_defaults_match_the_single_setting_they_replaced() {
+        let privacy = PrivacySettings::default();
+        assert_eq!(privacy.dictation_ai, lane("ollama", None));
+        assert_eq!(privacy.meetings_ai, lane("ollama", None));
+    }
+
+    #[test]
+    fn ai_lane_accessor_returns_the_lane_it_names() {
+        let privacy = PrivacySettings {
+            dictation_ai: lane("ollama", Some("qwen3:4b")),
+            meetings_ai: lane("anthropic", Some("claude-opus-4-1")),
+            ..PrivacySettings::default()
+        };
+        assert_eq!(privacy.ai_lane(AiLane::Dictation), &privacy.dictation_ai);
+        assert_eq!(privacy.ai_lane(AiLane::Meetings), &privacy.meetings_ai);
+    }
+
+    /// Direction 1: a settings.json written before the split. The one choice
+    /// it carries was serving dictation cleanup *and* summaries/action
+    /// items/Q&A, so it has to land on both lanes or the upgrade would quietly
+    /// move some of that work onto a different model.
+    #[test]
+    fn legacy_single_ai_setting_migrates_into_both_lanes() {
+        let raw = serde_json::json!({
+            "privacy": {
+                "llmProvider": "anthropic",
+                "llmModelId": "claude-sonnet-4-5",
+            }
+        });
+        let mut privacy = PrivacySettings::default();
+        migrate_legacy_ai_lane_settings(&raw, &mut privacy);
+
+        assert_eq!(
+            privacy.dictation_ai,
+            lane("anthropic", Some("claude-sonnet-4-5"))
+        );
+        assert_eq!(
+            privacy.meetings_ai,
+            lane("anthropic", Some("claude-sonnet-4-5"))
+        );
+    }
+
+    /// The provider was required but the model id was nullable, and "no model
+    /// chosen" is a real state that means "use the provider's default". A
+    /// present-but-null value must not be mistaken for an absent key.
+    #[test]
+    fn legacy_single_ai_setting_migrates_a_null_model_id() {
+        let raw = serde_json::json!({
+            "privacy": { "llmProvider": "openai", "llmModelId": null }
+        });
+        let mut privacy = PrivacySettings {
+            dictation_ai: lane("gemini", Some("stale")),
+            meetings_ai: lane("gemini", Some("stale")),
+            ..PrivacySettings::default()
+        };
+        migrate_legacy_ai_lane_settings(&raw, &mut privacy);
+
+        assert_eq!(privacy.dictation_ai, lane("openai", None));
+        assert_eq!(privacy.meetings_ai, lane("openai", None));
+    }
+
+    /// Direction 2: a settings.json already carrying lanes is left alone, even
+    /// when a stale legacy key is still sitting beside it — the per-lane
+    /// choice is the newer, deliberate one.
+    #[test]
+    fn settings_already_carrying_lanes_are_left_alone() {
+        let raw = serde_json::json!({
+            "privacy": {
+                "dictationAi": { "provider": "ollama", "modelId": "qwen3:4b" },
+                "meetingsAi": { "provider": "anthropic", "modelId": "claude-opus-4-1" },
+                "llmProvider": "deepseek",
+                "llmModelId": "deepseek-chat",
+            }
+        });
+        let mut privacy = PrivacySettings {
+            dictation_ai: lane("ollama", Some("qwen3:4b")),
+            meetings_ai: lane("anthropic", Some("claude-opus-4-1")),
+            ..PrivacySettings::default()
+        };
+        migrate_legacy_ai_lane_settings(&raw, &mut privacy);
+
+        assert_eq!(privacy.dictation_ai, lane("ollama", Some("qwen3:4b")));
+        assert_eq!(
+            privacy.meetings_ai,
+            lane("anthropic", Some("claude-opus-4-1"))
+        );
+    }
+
+    /// A half-written file (one lane saved, the legacy pair never cleaned up)
+    /// keeps the lane it has and fills the other from the legacy value.
+    #[test]
+    fn a_partially_split_file_only_fills_the_missing_lane() {
+        let raw = serde_json::json!({
+            "privacy": {
+                "dictationAi": { "provider": "ollama", "modelId": "qwen3:4b" },
+                "llmProvider": "gemini",
+                "llmModelId": "gemini-2.5-pro",
+            }
+        });
+        let mut privacy = PrivacySettings {
+            dictation_ai: lane("ollama", Some("qwen3:4b")),
+            ..PrivacySettings::default()
+        };
+        migrate_legacy_ai_lane_settings(&raw, &mut privacy);
+
+        assert_eq!(privacy.dictation_ai, lane("ollama", Some("qwen3:4b")));
+        assert_eq!(privacy.meetings_ai, lane("gemini", Some("gemini-2.5-pro")));
+    }
+
+    /// Direction 3: a blob carrying neither the legacy pair nor the lanes.
+    /// Nothing to migrate, so the defaults survive untouched.
+    #[test]
+    fn settings_with_neither_legacy_keys_nor_lanes_keep_the_defaults() {
+        let mut privacy = PrivacySettings::default();
+
+        migrate_legacy_ai_lane_settings(&serde_json::json!({ "theme": "dark" }), &mut privacy);
+        assert_eq!(privacy.dictation_ai, lane("ollama", None));
+        assert_eq!(privacy.meetings_ai, lane("ollama", None));
+
+        migrate_legacy_ai_lane_settings(
+            &serde_json::json!({ "privacy": { "remoteProcessingEnabled": true } }),
+            &mut privacy,
+        );
+        assert_eq!(privacy.dictation_ai, lane("ollama", None));
+        assert_eq!(privacy.meetings_ai, lane("ollama", None));
+    }
+
+    /// The retired keys go through the same rewrite that strips every other
+    /// removed key, so the migrated value doesn't linger on disk next to the
+    /// lanes that superseded it.
+    #[test]
+    fn retired_single_ai_setting_keys_trigger_the_migration_rewrite() {
+        use super::raw_settings_contain_removed_keys;
+
+        assert!(raw_settings_contain_removed_keys(&serde_json::json!({
+            "privacy": { "llmProvider": "anthropic" }
+        })));
+        assert!(raw_settings_contain_removed_keys(&serde_json::json!({
+            "privacy": { "llmModelId": null }
+        })));
+        assert!(!raw_settings_contain_removed_keys(
+            &serde_json::to_value(Settings::default()).expect("settings serialize")
+        ));
+    }
+
+    /// End to end through the real load path: a pre-split file on disk comes
+    /// back with both lanes set, and is rewritten without the retired keys.
+    #[test]
+    fn loading_a_pre_split_settings_file_lands_on_both_lanes_and_rewrites_it() {
+        let suffix = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("system time before epoch")
+            .as_nanos();
+        let root = std::env::temp_dir().join(format!("nautilus-settings-ai-lanes-{suffix}"));
+        let settings_path = root.join("settings.json");
+        fs::create_dir_all(&root).expect("create settings test directory");
+        fs::write(
+            &settings_path,
+            r#"{
+                "privacy": {
+                    "remoteProcessingEnabled": true,
+                    "llmProvider": "  OpenAI  ",
+                    "llmModelId": "  gpt-4o  "
+                }
+            }"#,
+        )
+        .expect("write pre-split settings");
+
+        let manager = SettingsManager::load_from_path(settings_path.clone())
+            .expect("load pre-split settings");
+        let privacy = &manager.settings().privacy;
+        // Normalization runs per lane, exactly as it ran on the single pair.
+        assert_eq!(privacy.dictation_ai, lane("openai", Some("gpt-4o")));
+        assert_eq!(privacy.meetings_ai, lane("openai", Some("gpt-4o")));
+        assert!(privacy.remote_processing_enabled);
+
+        let rewritten: serde_json::Value =
+            serde_json::from_str(&fs::read_to_string(&settings_path).expect("read rewritten file"))
+                .expect("rewritten settings parse");
+        let rewritten_privacy = rewritten.get("privacy").expect("privacy section");
+        assert!(rewritten_privacy.get("llmProvider").is_none());
+        assert!(rewritten_privacy.get("llmModelId").is_none());
+        assert_eq!(
+            rewritten_privacy["dictationAi"]["provider"],
+            serde_json::json!("openai")
+        );
+        assert_eq!(
+            rewritten_privacy["meetingsAi"]["modelId"],
+            serde_json::json!("gpt-4o")
+        );
+
+        // Reloading the rewritten file must be a no-op, not a second migration.
+        let reloaded =
+            SettingsManager::load_from_path(settings_path.clone()).expect("reload rewritten file");
+        assert_eq!(
+            reloaded.settings().privacy.dictation_ai,
+            lane("openai", Some("gpt-4o"))
+        );
+        assert_eq!(
+            reloaded.settings().privacy.meetings_ai,
+            lane("openai", Some("gpt-4o"))
+        );
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    /// Normalization is per lane: each one lowercases its own provider, falls
+    /// back to the default when it is blank, and drops a whitespace-only model
+    /// id — matching what the single pair did before the split.
+    #[test]
+    fn ai_lane_normalization_applies_to_each_lane_independently() {
+        let mut privacy = PrivacySettings {
+            dictation_ai: lane("  Ollama  ", Some("   ")),
+            meetings_ai: lane("   ", Some("  Claude-Sonnet-4-5  ")),
+            ..PrivacySettings::default()
+        };
+        normalize_loaded_privacy_settings(&mut privacy);
+
+        assert_eq!(privacy.dictation_ai, lane("ollama", None));
+        assert_eq!(
+            privacy.meetings_ai,
+            lane("ollama", Some("Claude-Sonnet-4-5")),
+            "a blank provider falls back to the default, and a model id keeps its case"
+        );
     }
 
     #[test]

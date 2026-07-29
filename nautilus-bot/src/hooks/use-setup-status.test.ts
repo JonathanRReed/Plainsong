@@ -12,7 +12,7 @@ function createSettings(dictationInsertionMode: "auto" | "clipboard_only"): Sett
       dictationProvider: "distil_whisper",
       dictationModelId: "distil-large-v3",
       meetingProvider: "parakeet",
-      meetingModelId: "parakeet-ctc-0.6b",
+      meetingModelId: "parakeet-tdt-0.6b-v3",
       selectedModelId: "distil-large-v3",
       dictationRoutePreference: "local",
       meetingRoutePolicy: "prefer_local",
@@ -38,8 +38,8 @@ function createProviders(): AsrProviderInfo[] {
       inferenceEnabled: true,
       runtimeStatus: "ready",
       runtimeMessage: "ready",
-      selectedModelId: "parakeet-ctc-0.6b",
-      modelOptions: [{ id: "parakeet-ctc-0.6b", label: "CTC 0.6B" }],
+      selectedModelId: "parakeet-tdt-0.6b-v3",
+      modelOptions: [{ id: "parakeet-tdt-0.6b-v3", label: "TDT 0.6B v3" }],
     },
   ] as AsrProviderInfo[];
 }
@@ -61,8 +61,8 @@ function createLocalProviders(): AsrProviderInfo[] {
       inferenceEnabled: true,
       runtimeStatus: "ready",
       runtimeMessage: "ready",
-      selectedModelId: "parakeet-ctc-0.6b",
-      modelOptions: [{ id: "parakeet-ctc-0.6b", label: "CTC 0.6B" }],
+      selectedModelId: "parakeet-tdt-0.6b-v3",
+      modelOptions: [{ id: "parakeet-tdt-0.6b-v3", label: "TDT 0.6B v3" }],
     },
   ] as AsrProviderInfo[];
 }
@@ -257,7 +257,7 @@ describe("buildSnapshot", () => {
           dictationProvider: "moonshine",
           dictationModelId: "moonshine-tiny",
           meetingProvider: "parakeet",
-          meetingModelId: "parakeet-ctc-0.6b",
+          meetingModelId: "parakeet-tdt-0.6b-v3",
           selectedModelId: "moonshine-tiny",
           dictationRoutePreference: "local",
           meetingRoutePolicy: "prefer_local",
@@ -286,7 +286,7 @@ describe("buildSnapshot", () => {
         dictationProvider: "macos_apple_speech",
         dictationModelId: "macos_apple_speech",
         meetingProvider: "parakeet",
-        meetingModelId: "parakeet-ctc-0.6b",
+        meetingModelId: "parakeet-tdt-0.6b-v3",
         selectedModelId: "macos_apple_speech",
         dictationRoutePreference: "local",
         meetingRoutePolicy: "prefer_local",

@@ -70,7 +70,7 @@ const providers: AsrProviderInfo[] = [
     selectedModelId: "parakeet-tdt-0.6b-v3",
     modelOptions: [
       { id: "parakeet-tdt-0.6b-v3", label: "Parakeet TDT 0.6B v3" },
-      { id: "parakeet-ctc-1.1b", label: "Parakeet CTC 1.1B experimental" },
+      { id: "parakeet-tdt-ctc-110m", label: "Parakeet TDT CTC 110M legacy" },
     ],
     downloadStatus: "Downloaded",
     runtimeStatus: "ready",

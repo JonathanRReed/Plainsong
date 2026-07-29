@@ -121,27 +121,6 @@ const providers: AsrProviderInfo[] = [
     runtimeDetails: {},
   },
   {
-    providerType: "voxtral",
-    name: "Voxtral",
-    description: "",
-    isAvailable: true,
-    inferenceEnabled: true,
-    modelInfo: {
-      name: "Voxtral",
-      version: "voxtral-local",
-      sizeMb: 0,
-      parameters: "",
-      languages: ["en"],
-      license: "MIT",
-      sourceUrl: "https://example.com",
-    },
-    selectedModelId: "voxtral-local",
-    modelOptions: [{ id: "voxtral-local", label: "voxtral-local" }],
-    downloadStatus: "Downloaded",
-    runtimeStatus: "ready",
-    runtimeDetails: {},
-  },
-  {
     providerType: "openai_cloud",
     name: "OpenAI Cloud",
     description: "",
@@ -176,9 +155,6 @@ function makeTranscriptionSettings(
     meetingProvider: "distil_whisper",
     meetingModelId: "distil-large-v3.5",
     meetingRoutePolicy: "prefer_local",
-    mlxAcceleratedProviders: [],
-    dictationMlxEnabled: false,
-    meetingMlxEnabled: false,
     enableDiarization: true,
     language: null,
     silenceSkipEnabled: false,
@@ -205,8 +181,6 @@ const baseState: AsrRouteSelectionState = {
   dictationModelId: "distil-large-v3.5",
   meetingProvider: "distil_whisper",
   meetingModelId: "distil-large-v3.5",
-  dictationMlxEnabled: false,
-  meetingMlxEnabled: false,
   meetingRoutePolicy: "prefer_local",
 };
 
@@ -247,20 +221,22 @@ describe("asr-route-selection", () => {
     expect(selection.meetingProvider).toBe("distil_whisper");
   });
 
-  it("migrates legacy mlx routes into visible providers and slot mlx flags", () => {
+  it("falls back to a real engine when settings name a deleted one", () => {
+    // Settings are bare strings on the wire, so a file written before the
+    // Python-backed engines were removed can still say "mlx_audio". Nothing
+    // downstream can start it, so the lane must not stay pinned to the name.
     const selection = selectionStateFromSettings(
       providers,
       makeTranscriptionSettings({
         defaultProvider: "mlx_audio",
         selectedModelId: "UsefulSensors/moonshine-base",
-        dictationProvider: "mlx_audio",
-        dictationModelId: "UsefulSensors/moonshine-base",
+        dictationProvider: "voxtral",
+        dictationModelId: "voxtral-local",
       })
     );
 
-    expect(selection.defaultProvider).toBe("moonshine");
-    expect(selection.defaultModelId).toBe("moonshine-base");
-    expect(selection.dictationMlxEnabled).toBe(true);
+    expect(selection.defaultProvider).toBe("whisper");
+    expect(selection.dictationProvider).not.toBe("voxtral");
   });
 
   it("keeps explicit meeting provider when split routes are valid", () => {
@@ -296,23 +272,6 @@ describe("asr-route-selection", () => {
     );
 
     expect(selection.meetingProvider).toBe("openai_cloud");
-  });
-
-  it("drops mlx flags when the chosen model no longer supports mlx", () => {
-    const selection = mergeSelectionStateUpdate(providers, baseState, {
-      defaultProvider: "whisper",
-      defaultModelId: "base.en",
-      useSharedAsrSelection: false,
-      dictationProvider: "whisper",
-      dictationModelId: "base.en",
-      dictationMlxEnabled: true,
-      meetingProvider: "distil_whisper",
-      meetingModelId: "distil-large-v3.5",
-      meetingMlxEnabled: true,
-    });
-
-    expect(selection.dictationMlxEnabled).toBe(true);
-    expect(selection.meetingMlxEnabled).toBe(false);
   });
 
   it("forces split routes when turning shared selection on for a dictation-only default", () => {

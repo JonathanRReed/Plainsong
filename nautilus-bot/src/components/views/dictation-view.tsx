@@ -1512,8 +1512,9 @@ export function DictationView() {
         setUseSharedAsrSelection(
           settings.transcription.useSharedAsrSelection ?? true,
         );
-        setCurrentAiProvider(settings.privacy.llmProvider ?? null);
-        setCurrentAiModelId(settings.privacy.llmModelId ?? null);
+        // Dictation cleanup runs on the dictation lane, never the meetings one.
+        setCurrentAiProvider(settings.privacy.dictationAi?.provider ?? null);
+        setCurrentAiModelId(settings.privacy.dictationAi?.modelId ?? null);
         setDefaultProjectId(
           settings.transcription.dictationProjectId || "inbox",
         );
@@ -1972,9 +1973,12 @@ export function DictationView() {
         settings.transcription.dictationLivePreviewEnabled =
           mode.livePreviewEnabled ??
           settings.transcription.dictationLivePreviewEnabled;
-        if (mode.aiProvider) settings.privacy.llmProvider = mode.aiProvider;
-        settings.privacy.llmModelId =
-          mode.aiModelId ?? settings.privacy.llmModelId ?? null;
+        // A dictation mode only ever moves the dictation lane; meeting
+        // summaries keep whichever provider the AI settings tab chose.
+        settings.privacy.dictationAi = {
+          provider: mode.aiProvider || settings.privacy.dictationAi.provider,
+          modelId: mode.aiModelId ?? settings.privacy.dictationAi.modelId ?? null,
+        };
         await saveSettings(settings);
       } catch (error) {
         console.warn("Failed to apply custom mode engine settings:", error);
@@ -2040,10 +2044,13 @@ export function DictationView() {
       settings.transcription.dictationLivePreviewEnabled =
         nextMode.livePreviewEnabled ??
         settings.transcription.dictationLivePreviewEnabled;
-      settings.privacy.llmProvider =
-        nextMode.aiProvider ?? settings.privacy.llmProvider;
-      settings.privacy.llmModelId =
-        nextMode.aiModelId ?? settings.privacy.llmModelId ?? null;
+      // A dictation mode only ever moves the dictation lane; meeting
+      // summaries keep whichever provider the AI settings tab chose.
+      settings.privacy.dictationAi = {
+        provider: nextMode.aiProvider || settings.privacy.dictationAi.provider,
+        modelId:
+          nextMode.aiModelId ?? settings.privacy.dictationAi.modelId ?? null,
+      };
       await saveSettings(settings);
     } catch (error) {
       console.warn("Failed to persist custom mode engine snapshot:", error);
@@ -2145,10 +2152,13 @@ export function DictationView() {
       settings.transcription.dictationLivePreviewEnabled =
         nextMode.livePreviewEnabled ??
         settings.transcription.dictationLivePreviewEnabled;
-      settings.privacy.llmProvider =
-        nextMode.aiProvider ?? settings.privacy.llmProvider;
-      settings.privacy.llmModelId =
-        nextMode.aiModelId ?? settings.privacy.llmModelId ?? null;
+      // A dictation mode only ever moves the dictation lane; meeting
+      // summaries keep whichever provider the AI settings tab chose.
+      settings.privacy.dictationAi = {
+        provider: nextMode.aiProvider || settings.privacy.dictationAi.provider,
+        modelId:
+          nextMode.aiModelId ?? settings.privacy.dictationAi.modelId ?? null,
+      };
       await saveSettings(settings);
     } catch (error) {
       console.warn("Failed to persist recommended profile:", error);
@@ -3795,7 +3805,6 @@ export function DictationView() {
                       {currentDictationProvider
                         ? providerHostingPreference(
                             currentDictationProvider as AsrProviderType,
-                            currentDictationModelId,
                           ) === "cloud"
                           ? "in the cloud."
                           : "on this Mac."

@@ -20,7 +20,11 @@ import {
   type TranscriptMatch,
   type TranscriptProvenance,
 } from "@/components/transcript-viewer";
-import { isCloudProvider, providerHostingPreference } from "@/lib/asr-capabilities";
+import {
+  isCloudProvider,
+  isKnownAsrProvider,
+  providerHostingPreference,
+} from "@/lib/asr-capabilities";
 import { cn } from "@/lib/utils";
 import { RecordingWaveform, WaveformVisualizer } from "@/components/waveform-visualizer";
 import { AiAnalysisPanel } from "@/components/ai-analysis-panel";
@@ -350,30 +354,15 @@ function formatTranscriptQuality(details: MeetingTranscriptDetails | null): {
   return { label: "Low confidence", tone: "warn" };
 }
 
-// Every provider Plainsong knows how to run. A name outside this list is a
-// name we cannot classify, and an unclassified name is never called "local".
-const KNOWN_ASR_PROVIDERS = new Set<AsrProviderType>([
-  "whisper",
-  "parakeet",
-  "whisper_candle",
-  "distil_whisper",
-  "mlx_audio",
-  "macos_apple_speech",
-  "moonshine",
-  "voxtral",
-  "windows_sdk_dictation",
-  "elevenlabs_scribe",
-  "openai_cloud",
-  "groq",
-  "cohere_transcribe",
-]);
-
+// A name Plainsong cannot classify is never called "local". The list itself
+// lives in asr-capabilities so it is checked against `AsrProviderType` at
+// compile time -- this file used to keep its own copy, which is how it went on
+// recognising `mlx_audio` and `voxtral` after both engines were deleted.
 const CLOUD_PROVIDER_DISPLAY_NAMES: Record<string, string> = {
   elevenlabs_scribe: "ElevenLabs Scribe",
   openai_cloud: "OpenAI",
   groq: "Groq",
   cohere_transcribe: "Cohere",
-  voxtral: "Voxtral Cloud",
 };
 
 /**
@@ -383,20 +372,17 @@ const CLOUD_PROVIDER_DISPLAY_NAMES: Record<string, string> = {
  * it cannot both be true.
  */
 function describeTranscriptProvenance(
-  provider: string | null | undefined,
-  modelId: string | null | undefined
+  provider: string | null | undefined
 ): TranscriptProvenance {
-  const normalized = provider?.trim();
-  if (!normalized || !KNOWN_ASR_PROVIDERS.has(normalized as AsrProviderType)) {
+  if (!isKnownAsrProvider(provider)) {
     return { source: "unknown" };
   }
 
-  const providerType = normalized as AsrProviderType;
+  const providerType = provider.trim() as AsrProviderType;
   if (providerType === "macos_apple_speech") {
     return { source: "apple_on_device" };
   }
-  const hosting = providerHostingPreference(providerType, modelId);
-  if (hosting === "cloud" || isCloudProvider(providerType)) {
+  if (providerHostingPreference(providerType) === "cloud" || isCloudProvider(providerType)) {
     return {
       source: "cloud",
       provider: CLOUD_PROVIDER_DISPLAY_NAMES[providerType] ?? providerType,
@@ -2842,15 +2828,9 @@ export function RecordingsView() {
   const selectedTranscriptProvenance = useMemo(
     () =>
       describeTranscriptProvenance(
-        selectedTranscriptDetails?.actualProvider ?? selectedTranscript?.actualProvider,
-        selectedTranscriptDetails?.modelId ?? selectedTranscript?.modelId
+        selectedTranscriptDetails?.actualProvider ?? selectedTranscript?.actualProvider
       ),
-    [
-      selectedTranscript?.actualProvider,
-      selectedTranscript?.modelId,
-      selectedTranscriptDetails?.actualProvider,
-      selectedTranscriptDetails?.modelId,
-    ]
+    [selectedTranscript?.actualProvider, selectedTranscriptDetails?.actualProvider]
   );
   const effectiveRecordings = useMemo(
     () =>

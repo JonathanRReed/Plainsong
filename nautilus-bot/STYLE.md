@@ -50,8 +50,10 @@ One coherent OKLCH system. **Dark (the candle-lit folio) is the default; light i
 1. **Text gold = `text-gold-text`; decorative gold = `text-gold`/`bg-gold`.** `--brand-warm` (70% L) fails WCAG AA as body text on light vellum; `--brand-warm-text` (48% L) clears it. On dark both are the bright gold. **Never set gold as TEXT on a light surface with `text-gold` — use `text-gold-text`.** Gold as fill/border/glyph/ring is fine.
 2. **Burnished gold is earned.** Moving/full-chroma `--gold-leaf` is only for: the active "setting down" moment, the versal-P, the primary CTA. Everything else uses the quieter `--gold-ambient`.
 
-### Legacy semantic aliases (being retired)
-`trusted/active/success/warning/info` are temporarily bridged onto gold/rust in `@theme inline`. **Do not introduce new uses.** They map: `active/success/trusted → gold`, `warning → rust`, `info → bronze`. They are a migration shim and get deleted once every call site is re-pointed to an explicit `gold`/`rust`/`muted` utility.
+### Legacy semantic aliases (deleted)
+`trusted/active/success/warning/info` no longer exist as color tokens. The `@theme inline` shim that bridged them onto gold/rust is **gone**, along with every call site — there is no `bg-success`, `text-warning`, `border-trusted`, or `bg-active`. Reach for an explicit `gold`/`rust`/`muted` utility; do not re-add the aliases.
+
+One of those words survives as a **component variant name**: `<Button variant="active">` (the gold-tinted selected state), resolved centrally onto gold inside `ui/button.tsx` — see §5. A variant name is not a color token. The others survive nowhere.
 
 ---
 
@@ -63,7 +65,7 @@ One coherent OKLCH system. **Dark (the candle-lit folio) is the default; light i
 | **IBM Plex Mono** | `--font-mono` / `font-mono` | rubrics, eyebrows, metadata, specs, keycaps/shortcuts, timestamps, status/network readouts, code-like chrome. The *apparatus* — precise, honest. |
 | **IBM Plex Sans** | `--font-sans` / `font-sans` (default body) | quiet running body & long prose where neither display nor mono fits. |
 
-**Rubric convention** — eyebrows & section labels are mono, UPPERCASE, wide tracking (~0.14–0.18em), usually rust. Use the `.rubric` (rust) / `.rubric-muted` (neutral) utilities. (`.quiet-label` is the legacy shim — migrate to `.rubric-muted`.)
+**Rubric convention** — eyebrows & section labels are mono, UPPERCASE, wide tracking (~0.14–0.18em), usually rust. Use the `.rubric` (rust) / `.rubric-muted` (neutral) utilities. (The old `.quiet-label` shim is deleted; `.rubric-muted` replaced it everywhere.)
 
 **Rubric budget: one rust `.rubric` eyebrow per page.** It belongs to the page header (`ui/page-header.tsx`) only. A card or section inside that page does **not** get its own eyebrow restating what its heading/icon already say — that reads as a wall of alarmed telegrams, not hierarchy. Use `.section-heading` (below) or nothing instead. `.rubric-muted` (bronze, not rust) is still fine as a genuine secondary label — e.g. a compact status line in a sidebar rail — because it isn't competing with the page's one rust rubric for attention.
 
@@ -110,7 +112,7 @@ App-only vs website-only: the app uses **neume, rubric, staff, gilt, versal, man
 ## 5. Component conventions
 
 - **Button** (`ui/button.tsx`) — `default` = the gilded gold CTA (`bg-primary`, ink text) — *one earned CTA per surface*. `destructive` = rust. `outline`/`secondary`/`ghost` = neutral. `active` = gold-tinted selected state.
-- **Badge** (`ui/badge.tsx`) — keep variant names; the `success`→gold, `warning`→rust, `info`→neutral internals are fixed once centrally. Prefer a leading neume for state.
+- **Badge** (`ui/badge.tsx`) — the live variants are `default`, `secondary`, `outline`, `destructive` (rust). Prefer a leading neume for state over a coloured badge. (`success`/`warning`/`info` variants are still declared in `badge.tsx` but have **zero call sites** and are slated for deletion — do not reach for them.)
 - **Sidebar** (`sidebar.tsx`) — the **spine**: a clean neutral surface with section labels as `.rubric`. Do not use continuous staff lines or an active side stripe. Expanded active items use a quiet neutral tint and trailing gold neume; collapsed active items use a restrained full-border gold tint. Recording chip = rust pulse. Local/cloud status = `neume-lit` (local) / `neume-hollow` (cloud).
 - **Page header** (`ui/page-header.tsx`) — Newsreader title; a mono UPPERCASE rust eyebrow (`.rubric`) above it.
 - **Signature surfaces** (`dictation-view`, `recording-overlay`, `*-popup`, `waveform-visualizer`) — the earned gilt moments. The **active recording/dictation state** is where burnished gold belongs. But **mode/template/capture SELECTORS are rubric controls → rust**, not gold (gold there would cheapen the earned moment). Consent/ready ticks → gold + `neume-lit`.
@@ -133,7 +135,7 @@ App-only vs website-only: the app uses **neume, rubric, staff, gilt, versal, man
 
 **Do** — lead with one true thing · one gold accent + one rust rubric per page · reserve burnished gold for the earned moment · plain scribe voice · neumes/rubrics for state · give one idea room per view · `text-gold-text` for gold text on light · `text-sm` as the body/label floor · flatten nested cards to one level · head every selector grid so two "General, Active" tiles never sit unexplained back-to-back.
 
-**Don't** — add a green/blue/amber status hue · use the stoplight convention · flood the page with gold · give every card its own rust eyebrow · `text-xs` for anything read as a sentence · `text-gold` as text on a light surface · `aria-hidden` a real versal letter · animate a filter on scroll · ship a near-duplicate of a window/section that already exists (check for a repeated title+description before you're done, not after a user reports it) · introduce new `success/warning/info` semantic-class uses.
+**Don't** — add a green/blue/amber status hue · use the stoplight convention · flood the page with gold · give every card its own rust eyebrow · `text-xs` for anything read as a sentence · `text-gold` as text on a light surface · `aria-hidden` a real versal letter · animate a filter on scroll · ship a near-duplicate of a window/section that already exists (check for a repeated title+description before you're done, not after a user reports it) · re-add a `trusted/active/success/warning/info` color alias (they were deleted — use gold/rust/muted).
 
 ---
 

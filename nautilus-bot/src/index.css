@@ -117,15 +117,6 @@
   --color-rust: var(--brand-rust);
   --color-paper-rule: var(--paper-rule);
 
-  /* Status semantics, re-pointed onto the brand (no green/amber/blue) */
-  --color-trusted: var(--brand-warm);
-  --color-trusted-foreground: var(--primary-foreground);
-  --color-active: var(--brand-warm);
-  --color-active-foreground: var(--primary-foreground);
-  --color-success: var(--brand-warm);
-  --color-warning: var(--brand-rust);
-  --color-info: var(--gold-ambient);
-
   --color-sidebar: var(--sidebar);
   --color-sidebar-foreground: var(--sidebar-foreground);
   --color-sidebar-primary: var(--sidebar-primary);
@@ -444,16 +435,6 @@
     text-transform: none;
     color: var(--foreground);
   }
-  /* Legacy alias kept so existing markup keeps working. */
-  .quiet-label {
-    font-family: var(--font-mono);
-    text-transform: uppercase;
-    letter-spacing: 0.14em;
-    color: var(--muted-foreground);
-    font-size: 0.6875rem;
-    font-weight: 500;
-  }
-
   /* Neume — a notation diamond (rotated square). FILLED gold = set down /
      local / on; HOLLOW = optional / not-yet / cloud. */
   .neume {
@@ -514,58 +495,13 @@
     }
   }
 
-  /* Retained utility animations (kept compositor-only). */
+  /* The shared transition utility (compositor-only). */
   .transition-smooth {
     transition-property: transform, opacity, color, background-color, border-color;
     transition-duration: 200ms;
     transition-timing-function: var(--ease-settle);
   }
-  .transition-medium {
-    transition-property: transform, opacity, color, background-color, border-color;
-    transition-duration: 300ms;
-    transition-timing-function: var(--ease-settle);
-  }
-  .hover-lift {
-    transition: transform 200ms var(--ease-settle), box-shadow 200ms var(--ease-settle);
-  }
-  .hover-lift:hover {
-    transform: translateY(-2px);
-    box-shadow: 0 10px 28px color-mix(in oklab, oklch(12% 0.02 80) 16%, transparent);
-  }
-  .btn-click:active {
-    transform: scale(0.98);
-  }
-  .glass {
-    background: color-mix(in oklab, var(--background) 80%, transparent);
-    backdrop-filter: blur(12px);
-    -webkit-backdrop-filter: blur(12px);
-    border: 1px solid color-mix(in oklab, var(--border) 55%, transparent);
-  }
-  .focus-ring:focus-visible {
-    outline: none;
-    box-shadow: 0 0 0 2px var(--background), 0 0 0 4px var(--ring);
-  }
 
-  @keyframes fade-in {
-    from { opacity: 0; }
-    to { opacity: 1; }
-  }
-  .animate-fade-in { animation: fade-in 0.3s var(--ease-settle); }
-  @keyframes slide-in-from-top {
-    from { transform: translateY(-10px); opacity: 0; }
-    to { transform: translateY(0); opacity: 1; }
-  }
-  .animate-slide-in-top { animation: slide-in-from-top 0.3s var(--ease-settle); }
-  @keyframes slide-in-from-bottom {
-    from { transform: translateY(10px); opacity: 0; }
-    to { transform: translateY(0); opacity: 1; }
-  }
-  .animate-slide-in-bottom { animation: slide-in-from-bottom 0.3s var(--ease-settle); }
-  @keyframes scale-in {
-    from { transform: scale(0.95); opacity: 0; }
-    to { transform: scale(1); opacity: 1; }
-  }
-  .animate-scale-in { animation: scale-in 0.2s var(--ease-settle); }
   @keyframes pulse-subtle {
     0%, 100% { opacity: 1; }
     50% { opacity: 0.65; }
@@ -581,9 +517,7 @@
   }
 
   /* Folio layering — y-offset elevation in warm ink, no color/blur to flash. */
-  .surface-elevation-1 { box-shadow: 0 1px 2px color-mix(in oklab, oklch(14% 0.02 75) 14%, transparent); }
   .surface-elevation-2 { box-shadow: 0 6px 16px color-mix(in oklab, oklch(14% 0.02 75) 16%, transparent); }
-  .surface-elevation-3 { box-shadow: 0 16px 40px color-mix(in oklab, oklch(14% 0.02 75) 20%, transparent); }
 
   /* Gilt halo — layered gold seating for the ONE earned live mark (e.g. the mic). */
   .gilt-halo {
@@ -627,10 +561,6 @@
     pointer-events: none;
   }
   @keyframes commit-shine { to { transform: translateX(110%); } }
-
-  /* Gilt reveal — the versal catches the light once, on first paint. */
-  .gilt-reveal { animation: gilt-reveal 0.5s var(--ease-settle) both; }
-  @keyframes gilt-reveal { from { opacity: 0; } to { opacity: 1; } }
 
   /* The live-capture neume — a slow, scoped breath (never a stoplight blink). */
   .neume-live { animation: neume-live 1.4s var(--ease-settle) infinite; }
@@ -679,9 +609,7 @@
     background-image: none;
   }
   .gilt-halo,
-  .surface-elevation-1,
-  .surface-elevation-2,
-  .surface-elevation-3 {
+  .surface-elevation-2 {
     box-shadow: none;
   }
   .commit-shine::after {

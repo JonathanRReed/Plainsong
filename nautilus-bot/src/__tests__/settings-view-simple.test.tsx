@@ -39,8 +39,8 @@ const baseSettings = {
   export: {},
   privacy: {
     remoteProcessingEnabled: false,
-    llmProvider: "ollama",
-    llmModelId: null,
+    dictationAi: { provider: "ollama", modelId: null },
+    meetingsAi: { provider: "ollama", modelId: null },
     exportRoot: null,
     vaultInitialized: false,
     vaultSalt: null,
@@ -844,7 +844,10 @@ describe("SettingsView performance behavior", () => {
       settingsChangedHandler?.({
         payload: {
           ...baseSettings,
-          privacy: { ...baseSettings.privacy, llmProvider: "anthropic" },
+          privacy: {
+            ...baseSettings.privacy,
+            meetingsAi: { provider: "anthropic", modelId: null },
+          },
         },
       });
     });
@@ -863,7 +866,7 @@ describe("SettingsView performance behavior", () => {
     expect(lastCall?.[0]?.ui?.alwaysOnTop).toBe(true);
     // ...while the untouched section still picks up the broadcast instead
     // of being reverted by this view's own stale whole-object save.
-    expect(lastCall?.[0]?.privacy?.llmProvider).toBe("anthropic");
+    expect(lastCall?.[0]?.privacy?.meetingsAi?.provider).toBe("anthropic");
   });
 
   it("keeps the Key Manager's credential-provider selector independent of the default analysis provider", async () => {
@@ -909,15 +912,15 @@ describe("SettingsView performance behavior", () => {
 
     expect(credentialProviderSelect.value).toBe("anthropic");
     // Picking a different provider to manage credentials for must not
-    // silently steer the app's actual default analysis provider away from
-    // ollama -- this selector no longer writes settings.privacy.llmProvider,
-    // so it must not trigger a settings save at all.
+    // silently steer the app's actual analysis provider away from ollama --
+    // this selector no longer writes settings.privacy.meetingsAi, so it must
+    // not trigger a settings save at all.
     expect(defaultProviderSelect.value).toBe("ollama");
     expect(vi.mocked(backend.saveSettings).mock.calls.length).toBe(
       saveCallsBeforeChange,
     );
     for (const [savedSettings] of vi.mocked(backend.saveSettings).mock.calls) {
-      expect(savedSettings.privacy.llmProvider).toBe("ollama");
+      expect(savedSettings.privacy.meetingsAi.provider).toBe("ollama");
     }
   });
 
@@ -928,7 +931,7 @@ describe("SettingsView performance behavior", () => {
       privacy: {
         ...baseSettings.privacy,
         remoteProcessingEnabled: true,
-        llmProvider: "anthropic",
+        meetingsAi: { provider: "anthropic", modelId: null },
       },
     } as unknown as Awaited<ReturnType<typeof backend.getSettings>>);
 
@@ -952,12 +955,33 @@ describe("SettingsView performance behavior", () => {
 
     fireEvent.click(within(row as HTMLElement).getByRole("switch"));
 
+    // Opening the AI tab saves on its own — each lane pins an explicit model
+    // as soon as its provider's list arrives — so neither "saveSettings was
+    // called" nor "the newest call" identifies the toggle's write. Wait for
+    // the write that actually carries it.
     await waitFor(() => {
-      expect(backend.saveSettings).toHaveBeenCalled();
+      const toggledSave = vi
+        .mocked(backend.saveSettings)
+        .mock.calls.find(
+          ([next]) => next?.transcription?.enableAutoAnalysis === false,
+        );
+      expect(toggledSave).toBeDefined();
     });
+
+    // ...and nothing lands after it that quietly turns analysis back on.
     const saveCalls = vi.mocked(backend.saveSettings).mock.calls;
     const lastCall = saveCalls[saveCalls.length - 1];
     expect(lastCall?.[0]?.transcription?.enableAutoAnalysis).toBe(false);
+
+    // The switch itself has to agree. The model-coercion pass writes a whole
+    // Settings object once a provider's model list arrives, and React flushes
+    // it after this click but before the re-render — built from its own
+    // closure it would put the switch back on and re-enable the very thing
+    // the user just turned off.
+    expect(within(row as HTMLElement).getByRole("switch")).toHaveAttribute(
+      "aria-checked",
+      "false",
+    );
   });
 
   it("clears the stale 'no stored key' warning as soon as a key is saved for the default analysis provider", async () => {
@@ -967,7 +991,7 @@ describe("SettingsView performance behavior", () => {
       privacy: {
         ...baseSettings.privacy,
         remoteProcessingEnabled: true,
-        llmProvider: "anthropic",
+        meetingsAi: { provider: "anthropic", modelId: null },
       },
     } as unknown as Awaited<ReturnType<typeof backend.getSettings>>);
     vi.mocked(backend.hasProviderSecret).mockResolvedValue(false);
@@ -1071,8 +1095,7 @@ describe("SettingsView performance behavior", () => {
       privacy: {
         ...baseSettings.privacy,
         remoteProcessingEnabled: true,
-        llmProvider: "openai",
-        llmModelId: "gpt-4o",
+        meetingsAi: { provider: "openai", modelId: "gpt-4o" },
       },
     } as unknown as Awaited<ReturnType<typeof backend.getSettings>>);
     vi.mocked(backend.listOllamaModels).mockResolvedValueOnce([
@@ -1105,8 +1128,7 @@ describe("SettingsView performance behavior", () => {
       expect(backend.saveSettings).toHaveBeenCalledWith(
         expect.objectContaining({
           privacy: expect.objectContaining({
-            llmProvider: "ollama",
-            llmModelId: "llama3.2",
+            meetingsAi: { provider: "ollama", modelId: "llama3.2" },
           }),
         }),
       );

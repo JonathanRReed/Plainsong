@@ -13,7 +13,8 @@ vi.mock("@/hooks/use-recording", () => ({
 vi.mock("@/lib/backend/settings", () => ({
   getSettings: vi.fn(async () => ({
     privacy: {
-      llmProvider: "ollama",
+      dictationAi: { provider: "ollama", modelId: null },
+      meetingsAi: { provider: "ollama", modelId: null },
       remoteProcessingEnabled: false,
     },
   })),

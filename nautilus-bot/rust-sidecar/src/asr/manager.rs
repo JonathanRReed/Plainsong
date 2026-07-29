@@ -11,9 +11,21 @@ use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use tokio::sync::RwLock;
 
-// Parakeet: native ONNX inference, sherpa-onnx format (encoder.onnx + tokens.txt)
-const PARAKEET_ONNX_NAMES: [&str; 1] = ["encoder.onnx"];
+// Parakeet legacy 110M: one sherpa-onnx CTC graph plus tokens. `encoder.onnx`
+// is what `scripts/provision-asr-assets.mjs` writes; `model.onnx` is what older
+// in-app downloads left behind. `asr/parakeet.rs` accepts either, so diagnostics
+// must too — checking only one is how "Ready" and "model missing" came to
+// disagree.
+const PARAKEET_ONNX_NAMES: [&str; 2] = ["encoder.onnx", "model.onnx"];
 const PARAKEET_VOCAB_NAMES: [&str; 1] = ["tokens.txt"];
+// Parakeet TDT v3: three ONNX graphs plus tokens, with the same size floors as
+// `PARAKEET_V3_ARTIFACTS` in `asr/parakeet.rs`.
+const PARAKEET_V3_REQUIRED_FILES: [(&str, u64); 4] = [
+    ("encoder.int8.onnx", 64 * 1024 * 1024),
+    ("decoder.int8.onnx", 1024 * 1024),
+    ("joiner.int8.onnx", 512 * 1024),
+    ("tokens.txt", 4096),
+];
 // Whisper Candle: Whisper Large V3 Turbo via Candle (no Python)
 const WHISPER_CANDLE_REQUIRED_FILES: [&str; 4] = [
     "model.safetensors",
@@ -100,21 +112,15 @@ impl AsrManager {
         };
 
         match provider_type {
+            // Only two Parakeet routes exist, and both are pure ONNX. Anything
+            // else -- including the retired managed-Python `parakeet-ctc-*`
+            // ids -- resolves to v3 so an old settings file still lands on a
+            // route that runs.
             AsrProviderType::Parakeet => match candidate {
-                "parakeet-tdt-0.6b-v3" | "parakeet-tdt-0.6b-v2" => {
-                    "parakeet-tdt-0.6b-v3".to_string()
-                }
-                "parakeet-ctc-0.6b" => "parakeet-ctc-0.6b".to_string(),
-                "parakeet-ctc-1.1b" => "parakeet-ctc-1.1b".to_string(),
                 "parakeet-tdt-ctc-110m" | "parakeet-legacy-110m" => {
                     "parakeet-tdt-ctc-110m".to_string()
                 }
                 _ => "parakeet-tdt-0.6b-v3".to_string(),
-            },
-            AsrProviderType::Voxtral => match candidate {
-                "voxtral-mini-4b" => "voxtral-local".to_string(),
-                "voxtral-local" | "voxtral-cloud" => candidate.to_string(),
-                _ => "voxtral-local".to_string(),
             },
             _ => candidate.to_string(),
         }
@@ -304,22 +310,12 @@ impl AsrManager {
         mlx_enabled: bool,
     ) -> EffectiveProviderSelection {
         let normalized_model_id = Self::normalize_model_id(requested_provider, requested_model_id);
-        if requested_provider != AsrProviderType::MlxAudio
-            && cfg!(all(target_os = "macos", target_arch = "aarch64"))
-            && optimization.macos.mlx_enabled
-            && mlx_enabled
-        {
-            if let Some(mlx_model_id) = crate::asr::mlx_audio::mapped_model_for_visible_route(
-                requested_provider,
-                normalized_model_id.as_str(),
-            ) {
-                return EffectiveProviderSelection {
-                    provider_type: AsrProviderType::MlxAudio,
-                    model_id: mlx_model_id.to_string(),
-                    mlx_accelerated: true,
-                };
-            }
-        }
+        // The MLX Audio provider used to hijack this selection and swap in a
+        // managed-Python route. It is gone, so the requested provider is always
+        // the effective one. `optimization` and `mlx_enabled` are kept in the
+        // signature because callers still thread real settings through here and
+        // a future accelerated route would need them.
+        let _ = (optimization, mlx_enabled);
 
         EffectiveProviderSelection {
             provider_type: requested_provider,
@@ -347,8 +343,8 @@ impl AsrManager {
             | AsrProviderType::WhisperCandle
             | AsrProviderType::DistilWhisper
             | AsrProviderType::Moonshine
-            | AsrProviderType::MlxAudio => true,
-            AsrProviderType::Parakeet => effective.model_id == "parakeet-tdt-ctc-110m",
+            // Both Parakeet routes are native ONNX and hold cached sessions.
+            | AsrProviderType::Parakeet => true,
             _ => false,
         }
     }
@@ -379,10 +375,7 @@ impl AsrManager {
                 };
                 super::moonshine::clear_cached_runtime(&model_dir);
             }
-            AsrProviderType::MlxAudio => {
-                let _ = effective.model_id;
-            }
-            AsrProviderType::Parakeet if effective.model_id == "parakeet-tdt-ctc-110m" => {
+            AsrProviderType::Parakeet => {
                 super::parakeet::clear_cached_session();
             }
             _ => {}
@@ -1370,78 +1363,34 @@ fn runtime_diagnostics_for_provider(
         }
         AsrProviderType::Parakeet => {
             let normalized_model = AsrManager::normalize_model_id(provider_type, selected_model_id);
-            if normalized_model == "parakeet-tdt-ctc-110m" {
-                let model_dir = models_root.join("parakeet");
-                let has_onnx = PARAKEET_ONNX_NAMES
-                    .iter()
-                    .any(|f| is_valid_onnx_artifact(&model_dir.join(f)));
-                let has_vocab = PARAKEET_VOCAB_NAMES
-                    .iter()
-                    .any(|f| is_valid_token_list_artifact(&model_dir.join(f), 128));
-                let model_ready = has_onnx && has_vocab;
-                let mut missing_files = Vec::new();
-                if !has_onnx {
-                    missing_files.push("encoder.onnx (valid ONNX export)".to_string());
-                }
-                if !has_vocab {
-                    missing_files.push("tokens.txt (valid token list)".to_string());
-                }
-                if !model_ready {
-                    return RuntimeDiagnosticsInternal {
-                        runtime_status: RuntimeStatus::MissingModel,
-                        runtime_message: Some(
-                            "Parakeet legacy model not downloaded. Download encoder.onnx + tokens.txt from Settings -> ASR Models."
-                                .to_string(),
+            let legacy = normalized_model == "parakeet-tdt-ctc-110m";
+
+            let (model_dir, missing_files) =
+                parakeet_model_dir_and_missing_files(models_root.as_path(), &normalized_model);
+
+            if !missing_files.is_empty() {
+                let (message, setup_action) = if legacy {
+                    (
+                        "Parakeet legacy model not downloaded. Download encoder.onnx + tokens.txt from Settings -> ASR Models.".to_string(),
+                        "Download Parakeet legacy artifacts (encoder.onnx + tokens.txt) in Settings -> ASR Models.".to_string(),
+                    )
+                } else {
+                    (
+                        format!(
+                            "Parakeet model '{}' is not downloaded yet.",
+                            normalized_model
                         ),
-                        runtime_details: RuntimeDetails {
-                            model_path: Some(model_dir.to_string_lossy().to_string()),
-                            python_path: None,
-                            missing_files,
-                            setup_action: Some(
-                                "Download Parakeet legacy artifacts (encoder.onnx + tokens.txt) in Settings -> ASR Models.".to_string(),
-                            ),
-                        },
-                    };
-                }
+                        "Download Parakeet TDT v3 (encoder + decoder + joiner + tokens) in Settings -> ASR Models.".to_string(),
+                    )
+                };
                 return RuntimeDiagnosticsInternal {
-                    runtime_status: if provider_available {
-                        RuntimeStatus::Ready
-                    } else {
-                        RuntimeStatus::Error
-                    },
-                    runtime_message: Some(
-                        last_error
-                            .map(ToString::to_string)
-                            .unwrap_or_else(|| "Parakeet legacy ONNX runtime ready.".to_string()),
-                    ),
+                    runtime_status: RuntimeStatus::MissingModel,
+                    runtime_message: Some(message),
                     runtime_details: RuntimeDetails {
                         model_path: Some(model_dir.to_string_lossy().to_string()),
                         python_path: None,
-                        missing_files: Vec::new(),
-                        setup_action: None,
-                    },
-                };
-            }
-
-            let model_dir = models_root.join(normalized_model.replace('-', "_"));
-            let manifest = model_dir.join("manifest.json");
-            let detected_python = super::python_runtime::find_python_for_provider("parakeet_ctc")
-                .or_else(super::python_runtime::managed_python_path);
-            if !manifest.exists() {
-                return RuntimeDiagnosticsInternal {
-                    runtime_status: RuntimeStatus::MissingModel,
-                    runtime_message: Some(format!(
-                        "Parakeet model '{}' is not downloaded yet.",
-                        normalized_model
-                    )),
-                    runtime_details: RuntimeDetails {
-                        model_path: Some(model_dir.to_string_lossy().to_string()),
-                        python_path: detected_python,
-                        missing_files: vec!["manifest.json".to_string()],
-                        setup_action: Some(
-                            "Download the selected Parakeet bundle in Settings -> ASR Models."
-                                .to_string(),
-                        ),
+                        missing_files,
+                        setup_action: Some(setup_action),
                     },
                 };
             }
@@ -1453,11 +1402,15 @@ fn runtime_diagnostics_for_provider(
                     RuntimeStatus::Error
                 },
                 runtime_message: Some(last_error.map(ToString::to_string).unwrap_or_else(|| {
-                    format!("Parakeet runtime ready for {}.", normalized_model)
+                    if legacy {
+                        "Parakeet legacy ONNX runtime ready.".to_string()
+                    } else {
+                        "Parakeet TDT v3 native ONNX runtime ready.".to_string()
+                    }
                 })),
                 runtime_details: RuntimeDetails {
                     model_path: Some(model_dir.to_string_lossy().to_string()),
-                    python_path: detected_python,
+                    python_path: None,
                     missing_files: Vec::new(),
                     setup_action: None,
                 },
@@ -1506,85 +1459,6 @@ fn runtime_diagnostics_for_provider(
                 "Distil-Whisper native Candle inference ready.",
                 last_error,
             )
-        }
-        AsrProviderType::MlxAudio => {
-            if !cfg!(all(target_os = "macos", target_arch = "aarch64")) {
-                return RuntimeDiagnosticsInternal {
-                    runtime_status: RuntimeStatus::MissingRuntime,
-                    runtime_message: Some("MLX Audio requires macOS on Apple Silicon.".to_string()),
-                    runtime_details: RuntimeDetails {
-                        model_path: None,
-                        python_path: None,
-                        missing_files: vec!["Apple Silicon (M-series)".to_string()],
-                        setup_action: Some(
-                            "Use an Apple Silicon Mac, or choose another ASR provider.".to_string(),
-                        ),
-                    },
-                };
-            }
-
-            let normalized_model = crate::asr::mlx_audio::normalize_model_id(selected_model_id);
-            let model_dir = crate::asr::mlx_audio::model_dir_for(normalized_model.as_str());
-            let model_ready = crate::asr::mlx_audio::model_is_ready(normalized_model.as_str());
-            let detected_python = super::python_runtime::find_python_for_provider("mlx_audio_stt")
-                .or_else(super::python_runtime::managed_python_path);
-
-            if detected_python.is_none() {
-                return RuntimeDiagnosticsInternal {
-                    runtime_status: RuntimeStatus::MissingRuntime,
-                    runtime_message: Some(
-                        "MLX Audio runtime missing: install mlx-audio 0.4.1+ in the managed runtime."
-                            .to_string(),
-                    ),
-                    runtime_details: RuntimeDetails {
-                        model_path: Some(model_dir.to_string_lossy().to_string()),
-                        python_path: None,
-                        missing_files: vec!["mlx-audio[stt]>=0.4.1".to_string()],
-                        setup_action: Some(
-                            "Use Download on the selected MLX Audio model to bootstrap the managed MLX runtime."
-                                .to_string(),
-                        ),
-                    },
-                };
-            }
-
-            if !model_ready {
-                return RuntimeDiagnosticsInternal {
-                    runtime_status: RuntimeStatus::MissingModel,
-                    runtime_message: Some(format!(
-                        "MLX Audio model '{}' is not downloaded yet.",
-                        normalized_model
-                    )),
-                    runtime_details: RuntimeDetails {
-                        model_path: Some(model_dir.to_string_lossy().to_string()),
-                        python_path: detected_python,
-                        missing_files: vec!["model artifacts".to_string()],
-                        setup_action: Some(
-                            "Download the selected MLX Audio model in Settings -> ASR / Providers."
-                                .to_string(),
-                        ),
-                    },
-                };
-            }
-
-            RuntimeDiagnosticsInternal {
-                runtime_status: if provider_available {
-                    RuntimeStatus::Ready
-                } else {
-                    RuntimeStatus::Error
-                },
-                runtime_message: Some(
-                    last_error
-                        .map(ToString::to_string)
-                        .unwrap_or_else(|| "MLX Audio runtime ready.".to_string()),
-                ),
-                runtime_details: RuntimeDetails {
-                    model_path: Some(model_dir.to_string_lossy().to_string()),
-                    python_path: detected_python,
-                    missing_files: Vec::new(),
-                    setup_action: None,
-                },
-            }
         }
         AsrProviderType::MacosAppleSpeech => {
             use crate::asr::platform::macos_speech::AppleSpeechReadinessStatus;
@@ -1641,101 +1515,6 @@ fn runtime_diagnostics_for_provider(
             )
         }
 
-        AsrProviderType::Voxtral => {
-            let cloud_mode = selected_model_id.trim() == "voxtral-cloud";
-            let has_key = has_provider_secret_or_env("mistral", "MISTRAL_API_KEY");
-            let model_dir = models_root.join("voxtral");
-            if cloud_mode {
-                return RuntimeDiagnosticsInternal {
-                    runtime_status: if has_key {
-                        RuntimeStatus::Ready
-                    } else {
-                        RuntimeStatus::MissingRuntime
-                    },
-                    runtime_message: Some(if has_key {
-                        "Voxtral cloud runtime ready (Mistral API key present).".to_string()
-                    } else {
-                        "Voxtral cloud mode requires MISTRAL_API_KEY.".to_string()
-                    }),
-                    runtime_details: RuntimeDetails {
-                        model_path: None,
-                        python_path: None,
-                        missing_files: if has_key {
-                            Vec::new()
-                        } else {
-                            vec!["MISTRAL_API_KEY".to_string()]
-                        },
-                        setup_action: if has_key {
-                            None
-                        } else {
-                            Some("Set MISTRAL_API_KEY in Settings -> API Keys.".to_string())
-                        },
-                    },
-                };
-            }
-
-            let missing_files = missing_or_invalid_voxtral_local_files(&model_dir);
-            let has_local = missing_files.is_empty();
-            let python = super::python_runtime::find_python_for_provider("voxtral_local");
-            let managed_python = super::python_runtime::managed_python_path();
-            let detected_python = python.or(managed_python);
-
-            if !has_local {
-                return RuntimeDiagnosticsInternal {
-                    runtime_status: RuntimeStatus::MissingModel,
-                    runtime_message: Some(
-                        "Voxtral local model not downloaded. Download model assets before use."
-                            .to_string(),
-                    ),
-                    runtime_details: RuntimeDetails {
-                        model_path: Some(model_dir.to_string_lossy().to_string()),
-                        python_path: detected_python,
-                        missing_files,
-                        setup_action: Some(
-                            "Use Download on Voxtral (local mode) to fetch assets and bootstrap runtime."
-                                .to_string(),
-                        ),
-                    },
-                };
-            }
-
-            if detected_python.is_none() {
-                return RuntimeDiagnosticsInternal {
-                    runtime_status: RuntimeStatus::MissingRuntime,
-                    runtime_message: Some(
-                        "Voxtral local runtime missing: bootstrap managed Python runtime for local mode."
-                            .to_string(),
-                    ),
-                    runtime_details: RuntimeDetails {
-                        model_path: Some(model_dir.to_string_lossy().to_string()),
-                        python_path: None,
-                        missing_files: Vec::new(),
-                        setup_action: Some(
-                            "Click Download or Re-check runtime to bootstrap managed runtime.".to_string(),
-                        ),
-                    },
-                };
-            }
-
-            RuntimeDiagnosticsInternal {
-                runtime_status: if provider_available {
-                    RuntimeStatus::Ready
-                } else {
-                    RuntimeStatus::Error
-                },
-                runtime_message: Some(
-                    last_error
-                        .map(ToString::to_string)
-                        .unwrap_or_else(|| "Voxtral local runtime ready.".to_string()),
-                ),
-                runtime_details: RuntimeDetails {
-                    model_path: Some(model_dir.to_string_lossy().to_string()),
-                    python_path: detected_python,
-                    missing_files: Vec::new(),
-                    setup_action: None,
-                },
-            }
-        }
         AsrProviderType::WindowsSdkDictation => {
             let probe = PlatformEngine::WindowsSdkDictation.probe();
             RuntimeDiagnosticsInternal {
@@ -1958,39 +1737,53 @@ fn missing_or_invalid_moonshine_files(model_dir: &Path) -> Vec<String> {
     missing
 }
 
-fn has_any_safetensors(model_dir: &Path, min_bytes: u64) -> bool {
-    std::fs::read_dir(model_dir)
-        .ok()
-        .map(|entries| {
-            entries.flatten().any(|entry| {
-                let path = entry.path();
-                path.extension()
-                    .map(|ext| ext == "safetensors")
-                    .unwrap_or(false)
-                    && is_valid_binary_artifact(&path, min_bytes)
-            })
-        })
-        .unwrap_or(false)
-}
+/// Where a Parakeet route keeps its artifacts, and which of them are missing or
+/// unusable.
+///
+/// Both routes are native ONNX, so neither reports a `python_path`. The legacy
+/// 110M export sits directly in `models/parakeet`; TDT v3 gets a subdirectory
+/// beside it. These paths and filenames have to match `asr/parakeet.rs` exactly
+/// -- when they drifted apart, diagnostics reported Ready for a model that
+/// transcription then could not find.
+fn parakeet_model_dir_and_missing_files(
+    models_root: &Path,
+    normalized_model: &str,
+) -> (PathBuf, Vec<String>) {
+    let mut missing_files = Vec::new();
 
-fn missing_or_invalid_voxtral_local_files(model_dir: &Path) -> Vec<String> {
-    let mut missing = Vec::new();
-    if !is_valid_json_artifact(&model_dir.join("config.json"), 64) {
-        missing.push("config.json (valid JSON)".to_string());
+    if normalized_model == "parakeet-tdt-ctc-110m" {
+        let model_dir = models_root.join("parakeet");
+        let has_onnx = PARAKEET_ONNX_NAMES
+            .iter()
+            .any(|f| is_valid_onnx_artifact(&model_dir.join(f)));
+        let has_vocab = PARAKEET_VOCAB_NAMES
+            .iter()
+            .any(|f| is_valid_token_list_artifact(&model_dir.join(f), 128));
+        if !has_onnx {
+            missing_files.push(format!(
+                "{} (valid ONNX export)",
+                PARAKEET_ONNX_NAMES.join(" or ")
+            ));
+        }
+        if !has_vocab {
+            missing_files.push("tokens.txt (valid token list)".to_string());
+        }
+        return (model_dir, missing_files);
     }
-    if !is_valid_json_artifact(&model_dir.join("processor_config.json"), 64) {
-        missing.push("processor_config.json (valid JSON)".to_string());
+
+    let model_dir = models_root.join("parakeet").join(normalized_model);
+    for (file_name, min_bytes) in PARAKEET_V3_REQUIRED_FILES {
+        let path = model_dir.join(file_name);
+        let ok = if file_name == "tokens.txt" {
+            is_valid_token_list_artifact(&path, 128)
+        } else {
+            is_valid_sized_artifact(&path, min_bytes)
+        };
+        if !ok {
+            missing_files.push(file_name.to_string());
+        }
     }
-    if !is_valid_json_artifact(&model_dir.join("tekken.json"), 64) {
-        missing.push("tekken.json (valid JSON)".to_string());
-    }
-    let has_weights = is_valid_binary_artifact(&model_dir.join("model.safetensors"), 1024)
-        || is_valid_binary_artifact(&model_dir.join("consolidated.safetensors"), 1024)
-        || has_any_safetensors(model_dir, 1024);
-    if !has_weights {
-        missing.push("model.safetensors|consolidated.safetensors|*.safetensors".to_string());
-    }
-    missing
+    (model_dir, missing_files)
 }
 
 fn migrate_legacy_local_artifacts(models_root: &Path) {
@@ -2031,11 +1824,21 @@ fn migrate_legacy_local_artifacts(models_root: &Path) {
 }
 
 fn is_valid_onnx_artifact(path: &Path) -> bool {
+    is_valid_sized_artifact(path, 4096)
+}
+
+/// A binary artifact that exists, clears `min_bytes`, and does not begin with
+/// an HTML or JSON error marker.
+///
+/// The size floor is the part that matters for the large ONNX graphs: a stub or
+/// half-extracted file passes the "not an error page" check and then fails deep
+/// inside ONNX Runtime, where the message tells the user nothing actionable.
+fn is_valid_sized_artifact(path: &Path, min_bytes: u64) -> bool {
     use std::io::Read;
     let Ok(meta) = std::fs::metadata(path) else {
         return false;
     };
-    if meta.len() < 4096 {
+    if meta.len() < min_bytes.max(4096) {
         return false;
     }
     let Ok(mut file) = std::fs::File::open(path) else {
@@ -2106,24 +1909,6 @@ fn is_valid_json_artifact(path: &Path, min_bytes: u64) -> bool {
     serde_json::from_slice::<serde_json::Value>(&raw).is_ok()
 }
 
-fn is_valid_binary_artifact(path: &Path, min_bytes: u64) -> bool {
-    use std::io::Read;
-    let Ok(meta) = std::fs::metadata(path) else {
-        return false;
-    };
-    if meta.len() < min_bytes {
-        return false;
-    }
-    let Ok(mut file) = std::fs::File::open(path) else {
-        return false;
-    };
-    let mut buf = [0u8; 1];
-    if file.read_exact(&mut buf).is_err() {
-        return false;
-    }
-    buf[0] != b'<' && buf[0] != b'{'
-}
-
 fn sanitize_whisper_model_id(model_id: &str) -> &'static str {
     match model_id {
         "tiny" => "tiny",
@@ -2143,7 +1928,7 @@ fn sanitize_whisper_model_id(model_id: &str) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::{
-        migrate_legacy_local_artifacts, missing_or_invalid_voxtral_local_files,
+        migrate_legacy_local_artifacts, parakeet_model_dir_and_missing_files,
         runtime_diagnostics_for_provider, AsrManager, AsrProviderType,
     };
     use crate::asr::AsrProviderFactory;
@@ -2157,6 +1942,87 @@ mod tests {
         ));
         std::fs::create_dir_all(&root).expect("create temp models root");
         root
+    }
+
+    /// Diagnostics must look for the same files `asr/parakeet.rs` loads.
+    /// When they disagreed, the UI said Ready and transcription said missing.
+    #[test]
+    fn parakeet_v3_diagnostics_name_every_artifact_that_is_missing() {
+        let models_root = temp_models_root();
+
+        let (model_dir, missing) =
+            parakeet_model_dir_and_missing_files(&models_root, "parakeet-tdt-0.6b-v3");
+        assert_eq!(
+            model_dir,
+            models_root.join("parakeet").join("parakeet-tdt-0.6b-v3"),
+            "v3 lives in its own subdirectory, beside the legacy export"
+        );
+        assert_eq!(
+            missing,
+            vec![
+                "encoder.int8.onnx",
+                "decoder.int8.onnx",
+                "joiner.int8.onnx",
+                "tokens.txt"
+            ]
+        );
+
+        let _ = std::fs::remove_dir_all(models_root);
+    }
+
+    #[test]
+    fn parakeet_v3_diagnostics_reject_an_undersized_encoder() {
+        let models_root = temp_models_root();
+        let model_dir = models_root.join("parakeet").join("parakeet-tdt-0.6b-v3");
+        std::fs::create_dir_all(&model_dir).expect("create v3 dir");
+
+        for (file_name, min_bytes) in [
+            ("decoder.int8.onnx", 1024 * 1024u64),
+            ("joiner.int8.onnx", 512 * 1024),
+        ] {
+            let file = std::fs::File::create(model_dir.join(file_name)).expect("create");
+            file.set_len(min_bytes + 1).expect("size");
+        }
+        // Big enough to look like a binary, far too small to be a 622 MB encoder.
+        let encoder = std::fs::File::create(model_dir.join("encoder.int8.onnx")).expect("create");
+        encoder.set_len(8192).expect("size");
+        let vocab = (0..100)
+            .map(|i| format!("tok{i} {i}\n"))
+            .collect::<String>();
+        std::fs::write(model_dir.join("tokens.txt"), vocab).expect("write tokens");
+
+        let (_, missing) =
+            parakeet_model_dir_and_missing_files(&models_root, "parakeet-tdt-0.6b-v3");
+        assert_eq!(missing, vec!["encoder.int8.onnx"]);
+
+        let _ = std::fs::remove_dir_all(models_root);
+    }
+
+    /// The legacy export is named `encoder.onnx` by the provisioning script and
+    /// `model.onnx` by older in-app downloads. `asr/parakeet.rs` accepts both,
+    /// so diagnostics must too.
+    #[test]
+    fn parakeet_legacy_diagnostics_accept_either_graph_filename() {
+        for graph_name in ["encoder.onnx", "model.onnx"] {
+            let models_root = temp_models_root();
+            let model_dir = models_root.join("parakeet");
+            std::fs::create_dir_all(&model_dir).expect("create parakeet dir");
+            std::fs::write(model_dir.join(graph_name), vec![0u8; 5000]).expect("write graph");
+            let vocab = (0..100)
+                .map(|i| format!("tok{i} {i}\n"))
+                .collect::<String>();
+            std::fs::write(model_dir.join("tokens.txt"), vocab).expect("write tokens");
+
+            let (dir, missing) =
+                parakeet_model_dir_and_missing_files(&models_root, "parakeet-tdt-ctc-110m");
+            assert_eq!(dir, model_dir);
+            assert!(
+                missing.is_empty(),
+                "{graph_name} should satisfy diagnostics"
+            );
+
+            let _ = std::fs::remove_dir_all(models_root);
+        }
     }
 
     #[test]
@@ -2200,43 +2066,6 @@ mod tests {
         let tokens = std::fs::read(parakeet.join("tokens.txt")).expect("read tokens");
         assert_eq!(encoder, b"new-model");
         assert_eq!(tokens, b"new-vocab");
-        let _ = std::fs::remove_dir_all(models_root);
-    }
-
-    #[test]
-    fn voxtral_diagnostics_report_invalid_local_payloads() {
-        let models_root = temp_models_root();
-        let voxtral = models_root.join("voxtral");
-        std::fs::create_dir_all(&voxtral).expect("create voxtral dir");
-
-        std::fs::write(voxtral.join("config.json"), b"<html>not json</html>")
-            .expect("write invalid config");
-        std::fs::write(
-            voxtral.join("processor_config.json"),
-            serde_json::json!({"processor": "ok", "padding": "long-enough-for-min-size-check"})
-                .to_string(),
-        )
-        .expect("write processor config");
-        std::fs::write(
-            voxtral.join("tekken.json"),
-            serde_json::json!({"tokens": ["a", "b", "c"], "meta": "long-enough-for-min-size-check"})
-                .to_string(),
-        )
-        .expect("write tekken");
-        std::fs::write(voxtral.join("model.safetensors"), b"tiny").expect("write invalid weights");
-
-        let missing = missing_or_invalid_voxtral_local_files(&voxtral);
-        assert!(
-            missing.iter().any(|entry| entry.contains("config.json")),
-            "config should be reported invalid"
-        );
-        assert!(
-            missing
-                .iter()
-                .any(|entry| entry.contains("model.safetensors")),
-            "weights should be reported invalid"
-        );
-
         let _ = std::fs::remove_dir_all(models_root);
     }
 
@@ -2294,47 +2123,6 @@ mod tests {
             .available_engines
             .iter()
             .any(|engine| engine == "macos_apple_speech"));
-    }
-
-    #[tokio::test]
-    async fn mlx_acceleration_reuses_visible_provider_slot() {
-        let manager = AsrManager::new();
-        manager
-            .set_mlx_accelerated_providers(std::iter::once(AsrProviderType::Moonshine).collect())
-            .await;
-
-        let (provider, model_id, accelerated) = manager
-            .resolve_effective_provider_and_model(AsrProviderType::Moonshine, "moonshine-base")
-            .await;
-
-        if cfg!(all(target_os = "macos", target_arch = "aarch64")) {
-            assert_eq!(provider, AsrProviderType::MlxAudio);
-            assert_eq!(model_id, "UsefulSensors/moonshine-base");
-            assert!(accelerated);
-        } else {
-            assert_eq!(provider, AsrProviderType::Moonshine);
-            assert_eq!(model_id, "moonshine-base");
-            assert!(!accelerated);
-        }
-    }
-
-    #[tokio::test]
-    async fn mlx_audio_no_longer_reports_sidecar_as_active_engine() {
-        let diagnostics = AsrManager::engine_diagnostics_for_provider(
-            AsrProviderType::MlxAudio,
-            crate::asr::mlx_audio::default_model_id(),
-            &PlatformOptimizationSettings::default(),
-            false,
-            None,
-        );
-        assert_eq!(
-            diagnostics.active_engine.as_deref(),
-            Some("provider_default")
-        );
-        assert!(!diagnostics
-            .available_engines
-            .iter()
-            .any(|engine| engine == "macos_mlx_sidecar"));
     }
 
     #[test]
@@ -2478,22 +2266,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn mlx_audio_provider_honors_selected_model_id() {
-        let manager = AsrManager::new();
-        manager
-            .set_provider_model_id(
-                AsrProviderType::MlxAudio,
-                "mlx-community/SenseVoiceSmall".to_string(),
-            )
-            .await;
-
-        let provider = manager.get_provider(AsrProviderType::MlxAudio).await;
-        let model = provider.model_info();
-
-        assert_eq!(model.version, "mlx-community/SenseVoiceSmall");
-    }
-
-    #[tokio::test]
     async fn mlx_keep_warm_helpers_are_runtime_safe() {
         let manager = AsrManager::new();
         manager
@@ -2518,13 +2290,13 @@ mod tests {
             .set_provider_model_id(AsrProviderType::Whisper, "base.en".to_string())
             .await;
         manager
-            .set_provider_model_id(AsrProviderType::Parakeet, "parakeet-ctc-1.1b".to_string())
+            .set_provider_model_id(
+                AsrProviderType::Parakeet,
+                "parakeet-tdt-ctc-110m".to_string(),
+            )
             .await;
         manager
             .set_provider_model_id(AsrProviderType::Moonshine, "moonshine-tiny".to_string())
-            .await;
-        manager
-            .set_provider_model_id(AsrProviderType::Voxtral, "voxtral-cloud".to_string())
             .await;
         manager
             .set_provider_model_id(
@@ -2552,13 +2324,12 @@ mod tests {
         assert_eq!(selected_model_id(AsrProviderType::Whisper), "base.en");
         assert_eq!(
             selected_model_id(AsrProviderType::Parakeet),
-            "parakeet-ctc-1.1b"
+            "parakeet-tdt-ctc-110m"
         );
         assert_eq!(
             selected_model_id(AsrProviderType::Moonshine),
             "moonshine-tiny"
         );
-        assert_eq!(selected_model_id(AsrProviderType::Voxtral), "voxtral-cloud");
         assert_eq!(
             selected_model_id(AsrProviderType::OpenAiCloud),
             "gpt-4o-mini-transcribe"

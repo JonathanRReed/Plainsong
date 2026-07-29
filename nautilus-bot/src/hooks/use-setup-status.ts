@@ -202,13 +202,13 @@ export function buildSnapshot(
     (provider) =>
       provider.inferenceEnabled &&
       provider.runtimeStatus === "ready" &&
-      providerHostingPreference(provider.providerType, provider.selectedModelId) === "local"
+      providerHostingPreference(provider.providerType) === "local"
   );
   const dictationCloudReady = providers.some(
     (provider) =>
       provider.inferenceEnabled &&
       provider.runtimeStatus === "ready" &&
-      providerHostingPreference(provider.providerType, provider.selectedModelId) === "cloud"
+      providerHostingPreference(provider.providerType) === "cloud"
   );
   const microphonePermissionReady =
     permissions?.microphonePermissionReady ?? permissions?.microphoneReady ?? false;

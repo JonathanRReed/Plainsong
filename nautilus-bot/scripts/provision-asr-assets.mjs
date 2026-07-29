@@ -5,7 +5,6 @@ import path from "node:path";
 import { Readable } from "node:stream";
 import { pipeline } from "node:stream/promises";
 import { spawnSync } from "node:child_process";
-import { fileURLToPath } from "node:url";
 
 const args = process.argv.slice(2);
 
@@ -26,8 +25,6 @@ const strictAssets = !flag("--allow-missing-assets");
 const provisionRequested = flag("--provision");
 const provisionEnabled = !flag("--no-provision") && (provisionRequested || !flag("--validate-only"));
 const outFile = valueFor("--out");
-const scriptDir = path.dirname(fileURLToPath(import.meta.url));
-const pythonRunnerPath = path.join(scriptDir, "..", "rust-sidecar", "python", "asr", "runner.py");
 const hfToken = process.env.HF_TOKEN || process.env.HUGGINGFACE_HUB_TOKEN || "";
 
 function defaultDataDir() {
@@ -45,19 +42,24 @@ const modelsRoot =
   valueFor("--models-root") ||
   process.env.PLAINSONG_MODELS_ROOT ||
   path.join(nautilusDataDir, "models");
-const runtimeRoot =
-  valueFor("--runtime-root") ||
-  process.env.PLAINSONG_RUNTIME_ROOT ||
-  path.join(nautilusDataDir, "runtime", "python");
-
-const managedVenvDir = path.join(runtimeRoot, "asr");
-const managedPythonPath =
-  process.platform === "win32"
-    ? path.join(managedVenvDir, "Scripts", "python.exe")
-    : path.join(managedVenvDir, "bin", "python3");
-
 const bundlePathArg = valueFor("--asset-bundle") || process.env.PLAINSONG_ASR_ASSET_BUNDLE || null;
 const bundleUrlArg = valueFor("--asset-bundle-url") || process.env.PLAINSONG_ASR_ASSET_BUNDLE_URL || null;
+// Parakeet v3 is ~639 MB. Opt in rather than making every runner pay for it.
+const provisionParakeetV3 =
+  flag("--parakeet-v3") || process.env.PLAINSONG_PROVISION_PARAKEET_V3 === "1";
+
+const PARAKEET_LEGACY_REPO = "csukuangfj/sherpa-onnx-nemo-parakeet_tdt_ctc_110m-en-36000";
+const PARAKEET_LEGACY_GRAPH_NAMES = ["encoder.onnx", "model.onnx"];
+
+// Kept in step with PARAKEET_V3_ARTIFACTS in
+// `rust-sidecar/src/asr/parakeet.rs`: `[filename, minimum plausible bytes]`.
+const PARAKEET_V3_REPO = "csukuangfj/sherpa-onnx-nemo-parakeet-tdt-0.6b-v3-int8";
+const PARAKEET_V3_ARTIFACTS = [
+  ["encoder.int8.onnx", 64 * 1024 * 1024],
+  ["decoder.int8.onnx", 1024 * 1024],
+  ["joiner.int8.onnx", 512 * 1024],
+  ["tokens.txt", 4096],
+];
 
 function exists(pathname) {
   try {
@@ -160,13 +162,43 @@ function checkWhisper() {
   return providerCheck("whisper", { modelDir: dir, missing });
 }
 
-function checkParakeet() {
+// The legacy English 110M CTC export: one graph plus tokens. model.onnx is
+// 458,161,021 bytes (437 MiB) upstream -- still the smaller of the two Parakeet
+// routes against v3's 639 MiB, which is why this is the one the script fetches
+// by default, but it is not the ~170 MB this comment used to claim.
+function checkParakeetLegacy() {
   const dir = path.join(modelsRoot, "parakeet");
   const missing = [];
-  if (!isLikelyBinaryArtifact(path.join(dir, "encoder.onnx"), 4096)) missing.push("encoder.onnx");
-  const tokensPath = path.join(dir, "tokens.txt");
-  if (!hasParakeetTokens(tokensPath)) missing.push("tokens.txt");
-  return providerCheck("parakeet", { modelDir: dir, missing });
+  // `encoder.onnx` is the name this script writes and the name
+  // `rust-sidecar/src/asr/manager.rs` diagnostics look for; `model.onnx` is what
+  // older in-app downloads left behind. The Rust provider accepts either.
+  const hasGraph = PARAKEET_LEGACY_GRAPH_NAMES.some((name) =>
+    isLikelyBinaryArtifact(path.join(dir, name), 4096)
+  );
+  if (!hasGraph) missing.push(PARAKEET_LEGACY_GRAPH_NAMES.join("|"));
+  if (!hasParakeetTokens(path.join(dir, "tokens.txt"))) missing.push("tokens.txt");
+  return providerCheck("parakeet_legacy_110m", { modelDir: dir, missing });
+}
+
+// The default Parakeet route: sherpa-onnx's int8 export of
+// `nvidia/parakeet-tdt-0.6b-v3`, three graphs plus tokens. Reported always,
+// provisioned only on request — see PARAKEET_V3_ARTIFACTS.
+function checkParakeetV3() {
+  const dir = path.join(modelsRoot, "parakeet", "parakeet-tdt-0.6b-v3");
+  const missing = [];
+  for (const [file, minBytes] of PARAKEET_V3_ARTIFACTS) {
+    const fullPath = path.join(dir, file);
+    const ok =
+      file === "tokens.txt"
+        ? hasParakeetTokens(fullPath)
+        : isLikelyBinaryArtifact(fullPath, minBytes);
+    if (!ok) missing.push(file);
+  }
+  return providerCheck("parakeet_tdt_v3", {
+    modelDir: dir,
+    missing,
+    optional: !provisionParakeetV3,
+  });
 }
 
 function checkCanary() {
@@ -222,47 +254,17 @@ function checkMoonshine() {
   return providerCheck("moonshine", { modelDir: dir, missing });
 }
 
-function hasAnyValidSafetensors(dir, minBytes = 1024) {
-  if (!exists(dir)) return false;
-  const entries = fs.readdirSync(dir);
-  return entries.some(
-    (entry) => entry.endsWith(".safetensors") && isLikelyBinaryArtifact(path.join(dir, entry), minBytes)
-  );
-}
-
-function checkVoxtralLocal() {
-  const dir = path.join(modelsRoot, "voxtral");
-  const missing = [];
-  if (!parseJson(path.join(dir, "config.json"), 64)) missing.push("config.json");
-  if (!parseJson(path.join(dir, "processor_config.json"), 64)) missing.push("processor_config.json");
-  if (!parseJson(path.join(dir, "tekken.json"), 64)) missing.push("tekken.json");
-
-  const primaryWeight =
-    isLikelyBinaryArtifact(path.join(dir, "model.safetensors"), 1024) ||
-    isLikelyBinaryArtifact(path.join(dir, "consolidated.safetensors"), 1024);
-  if (!primaryWeight && !hasAnyValidSafetensors(dir, 1024)) {
-    missing.push("model.safetensors|consolidated.safetensors|*.safetensors");
-  }
-
-  return providerCheck("voxtral_local", { modelDir: dir, missing });
-}
-
 function checkCloudSecrets() {
-  const required = ["OPENAI_API_KEY", "ELEVENLABS_API_KEY", "MISTRAL_API_KEY"];
+  // MISTRAL_API_KEY used to be here for Voxtral. Voxtral is gone, and no
+  // surviving ASR provider reads a Mistral key, so requiring one would fail
+  // runs for a capability that no longer exists.
+  const required = ["OPENAI_API_KEY", "ELEVENLABS_API_KEY"];
   const entries = required.map((name) => {
     const value = process.env[name] || "";
     return { name, present: value.trim().length > 0 };
   });
   const missing = entries.filter((entry) => !entry.present).map((entry) => entry.name);
   return { entries, missing, ready: missing.length === 0 };
-}
-
-function runCommand(program, commandArgs, opts = {}) {
-  return spawnSync(program, commandArgs, {
-    encoding: "utf8",
-    stdio: "pipe",
-    ...opts,
-  });
 }
 
 async function downloadFile(url, destination) {
@@ -317,100 +319,26 @@ async function downloadWithFallback(urls, destination, validate) {
   return { ok: false, failures };
 }
 
-function probePythonCandidate(candidate, probeCode) {
-  const result = runCommand(candidate, ["-c", probeCode]);
-  return result.status === 0;
-}
-
-function resolvePython() {
-  const explicit = valueFor("--python") || process.env.PLAINSONG_PYTHON;
-  const candidates = [
-    explicit,
-    managedPythonPath,
-    "python3.12",
-    "python3.11",
-    "python3.10",
-    "python3",
-    "python",
-  ].filter(Boolean);
-
-  const seen = new Set();
-  return candidates.filter((candidate) => {
-    if (seen.has(candidate)) return false;
-    seen.add(candidate);
-    return true;
-  });
-}
-
-const PYTHON_PROVIDER_REQUIREMENTS = {
-  voxtral_local: [
-    "torch>=2.3.0",
-    "transformers>=5.2.0,<6",
-    "mistral-common[audio]>=1.9.0",
-    "huggingface_hub>=0.29.0",
-    "soundfile>=0.12.1",
-    "librosa>=0.10.2",
-    "numpy>=1.26.0",
-  ],
-};
-
-function checkPythonRuntimes() {
-  const probes = {
-    voxtral_local: "import torch; import soundfile; import librosa; import transformers; import mistral_common",
-  };
-
-  const candidates = resolvePython();
-  const result = {
-    candidates,
-    selected: null,
-    checks: {
-      voxtral_local: { ready: false },
-    },
-  };
-
-  for (const candidate of candidates) {
-    const voxOk = probePythonCandidate(candidate, probes.voxtral_local);
-    if (voxOk) {
-      if (!result.selected) result.selected = candidate;
-      if (voxOk) result.checks.voxtral_local = { ready: true, python: candidate };
-    }
-    if (result.checks.voxtral_local.ready) break;
-  }
-
-  if (!result.checks.voxtral_local.ready) {
-    result.checks.voxtral_local = {
-      ready: false,
-      reason: "No Python runtime with required Voxtral modules",
-    };
-  }
-
-  return result;
-}
-
 function collectReadiness() {
   const providers = {
     whisper: checkWhisper(),
-    parakeet: checkParakeet(),
+    parakeet_legacy_110m: checkParakeetLegacy(),
+    parakeet_tdt_v3: checkParakeetV3(),
     canary: checkCanary(),
     distil_whisper: checkDistil(),
     moonshine: checkMoonshine(),
-    voxtral_local: checkVoxtralLocal(),
   };
 
-  const python = checkPythonRuntimes();
-  if (!python.checks.voxtral_local.ready) {
-    providers.voxtral_local.missing.push("python runtime modules for voxtral_local");
-    providers.voxtral_local.ready = false;
-  }
-
   const cloudSecrets = checkCloudSecrets();
+  // Optional providers are reported but never fail the run. Parakeet v3 is
+  // ~639 MB, so pulling it on every CI runner is a cost nobody asked for; the
+  // report still says plainly whether it is present.
   const failingProviders = Object.values(providers)
-    .filter((provider) => !provider.ready)
+    .filter((provider) => !provider.ready && !provider.optional)
     .map((provider) => ({ provider: provider.name, missing: provider.missing }));
 
   return {
     cloudSecrets,
-    python,
     providers,
     summary: {
       providerCount: Object.keys(providers).length,
@@ -421,72 +349,17 @@ function collectReadiness() {
   };
 }
 
-function chooseBootstrapPython() {
-  const candidates = resolvePython().filter((candidate) => candidate !== managedPythonPath);
-  for (const candidate of candidates) {
-    const probe = runCommand(candidate, ["-c", "import venv"]);
-    if (probe.status === 0) return candidate;
-  }
-  return null;
-}
-
-function ensureManagedPythonBase(actions) {
-  fs.mkdirSync(path.dirname(managedVenvDir), { recursive: true });
-  if (!exists(managedPythonPath)) {
-    const bootstrap = chooseBootstrapPython();
-    if (!bootstrap) {
-      actions.push({ step: "python.create_venv", ok: false, detail: "No bootstrap python with venv available" });
-      return null;
-    }
-    const created = runCommand(bootstrap, ["-m", "venv", managedVenvDir]);
-    if (created.status !== 0) {
-      actions.push({
-        step: "python.create_venv",
-        ok: false,
-        detail: (created.stderr || created.stdout || "venv creation failed").trim(),
-      });
-      return null;
-    }
-    actions.push({ step: "python.create_venv", ok: true, python: managedPythonPath });
-  }
-
-  const pipBootstrap = runCommand(managedPythonPath, ["-m", "pip", "install", "--upgrade", "pip", "setuptools", "wheel"]);
-  if (pipBootstrap.status !== 0) {
-    actions.push({
-      step: "python.bootstrap_tools",
-      ok: false,
-      detail: (pipBootstrap.stderr || pipBootstrap.stdout || "pip bootstrap failed").trim(),
-    });
-    return null;
-  }
-
-  actions.push({ step: "python.bootstrap_tools", ok: true, python: managedPythonPath });
-  return managedPythonPath;
-}
-
-function installPythonProvider(provider, actions) {
-  const requirements = PYTHON_PROVIDER_REQUIREMENTS[provider] || [];
-  if (requirements.length === 0) return;
-
-  const python = ensureManagedPythonBase(actions);
-  if (!python) return;
-
-  const install = runCommand(python, ["-m", "pip", "install", "--upgrade", ...requirements]);
-  if (install.status !== 0) {
-    actions.push({
-      step: `python.install.${provider}`,
-      ok: false,
-      detail: (install.stderr || install.stdout || "dependency install failed").trim(),
-    });
-    return;
-  }
-
-  actions.push({ step: `python.install.${provider}`, ok: true, python });
-}
-
 async function downloadBundle(url, destination) {
   await downloadFile(url, destination);
   return destination;
+}
+
+function runCommand(program, commandArgs, opts = {}) {
+  return spawnSync(program, commandArgs, {
+    encoding: "utf8",
+    stdio: "pipe",
+    ...opts,
+  });
 }
 
 function extractBundle(archivePath, destination, actions) {
@@ -503,11 +376,6 @@ function extractBundle(archivePath, destination, actions) {
   }
   actions.push({ step: "assets.extract_bundle", ok: true, archivePath, destination });
   return true;
-}
-
-function providerMissingModelArtifacts(providerCheckResult) {
-  if (!providerCheckResult || !Array.isArray(providerCheckResult.missing)) return true;
-  return providerCheckResult.missing.some((item) => !item.includes("python runtime modules"));
 }
 
 async function provisionNativeProviderAssets(readiness, actions) {
@@ -536,57 +404,56 @@ async function provisionNativeProviderAssets(readiness, actions) {
     }
   }
 
-  const parakeet = readiness.providers.parakeet;
-  if (parakeet && !parakeet.ready) {
-    const onnxTarget = path.join(modelsRoot, "parakeet", "encoder.onnx");
-    const tokensTarget = path.join(modelsRoot, "parakeet", "tokens.txt");
-    const onnx = await downloadWithFallback(
-      [
-        "https://huggingface.co/csukuangfj/sherpa-onnx-nemo-parakeet_tdt_ctc_110m-en-36000/resolve/main/model.onnx",
-        "https://huggingface.co/k2-fsa/sherpa-onnx-nemo-parakeet-tdt-0.6b-en/resolve/main/encoder.onnx",
-      ],
-      onnxTarget,
-      (pathname) => isLikelyBinaryArtifact(pathname, 4096)
-    );
-    if (onnx.ok) {
+  const parakeetLegacy = readiness.providers.parakeet_legacy_110m;
+  if (parakeetLegacy && !parakeetLegacy.ready) {
+    const dir = path.join(modelsRoot, "parakeet");
+    const files = [
+      ["model.onnx", "encoder.onnx", (pathname) => isLikelyBinaryArtifact(pathname, 4096)],
+      ["tokens.txt", "tokens.txt", hasParakeetTokens],
+    ];
+    for (const [remoteName, localName, validate] of files) {
+      const target = path.join(dir, localName);
+      const result = await downloadWithFallback(
+        [`https://huggingface.co/${PARAKEET_LEGACY_REPO}/resolve/main/${remoteName}`],
+        target,
+        validate
+      );
       actions.push({
-        step: "assets.download.parakeet.encoder",
-        ok: true,
-        destination: onnxTarget,
-        url: onnx.url,
-      });
-    } else {
-      actions.push({
-        step: "assets.download.parakeet.encoder",
-        ok: false,
-        destination: onnxTarget,
-        detail: onnx.failures.join("; "),
+        step: `assets.download.parakeet_legacy_110m.${localName}`,
+        ok: result.ok,
+        destination: target,
+        ...(result.ok ? { url: result.url } : { detail: result.failures.join("; ") }),
       });
     }
+  }
 
-    const tokens = await downloadWithFallback(
-      [
-        "https://huggingface.co/csukuangfj/sherpa-onnx-nemo-parakeet_tdt_ctc_110m-en-36000/resolve/main/tokens.txt",
-        "https://huggingface.co/k2-fsa/sherpa-onnx-nemo-parakeet-tdt-0.6b-en/resolve/main/tokens.txt",
-      ],
-      tokensTarget,
-      hasParakeetTokens
-    );
-    if (tokens.ok) {
+  const parakeetV3 = readiness.providers.parakeet_tdt_v3;
+  if (provisionParakeetV3 && parakeetV3 && !parakeetV3.ready) {
+    const dir = path.join(modelsRoot, "parakeet", "parakeet-tdt-0.6b-v3");
+    for (const [file, minBytes] of PARAKEET_V3_ARTIFACTS) {
+      const target = path.join(dir, file);
+      const result = await downloadWithFallback(
+        [`https://huggingface.co/${PARAKEET_V3_REPO}/resolve/main/${file}`],
+        target,
+        file === "tokens.txt"
+          ? hasParakeetTokens
+          : (pathname) => isLikelyBinaryArtifact(pathname, minBytes)
+      );
       actions.push({
-        step: "assets.download.parakeet.tokens",
-        ok: true,
-        destination: tokensTarget,
-        url: tokens.url,
-      });
-    } else {
-      actions.push({
-        step: "assets.download.parakeet.tokens",
-        ok: false,
-        destination: tokensTarget,
-        detail: tokens.failures.join("; "),
+        step: `assets.download.parakeet_tdt_v3.${file}`,
+        ok: result.ok,
+        destination: target,
+        ...(result.ok ? { url: result.url } : { detail: result.failures.join("; ") }),
       });
     }
+  } else if (parakeetV3 && !parakeetV3.ready) {
+    actions.push({
+      step: "assets.download.parakeet_tdt_v3",
+      ok: true,
+      skipped: true,
+      detail:
+        "Parakeet TDT v3 (~639 MB) not provisioned. Pass --parakeet-v3 or set PLAINSONG_PROVISION_PARAKEET_V3=1 to fetch it.",
+    });
   }
 
   const canary = readiness.providers.canary;
@@ -667,45 +534,6 @@ async function provisionNativeProviderAssets(readiness, actions) {
   }
 }
 
-function downloadPythonModelWithRunner(provider, modelDir, actions) {
-  if (!exists(pythonRunnerPath)) {
-    actions.push({
-      step: `assets.download.${provider}`,
-      ok: false,
-      detail: `Python ASR runner not found at ${pythonRunnerPath}`,
-    });
-    return;
-  }
-
-  const python = ensureManagedPythonBase(actions);
-  if (!python) return;
-
-  const env = { ...process.env };
-  if (hfToken) {
-    env.HF_TOKEN = hfToken;
-    env.HUGGINGFACE_HUB_TOKEN = hfToken;
-  }
-
-  const result = runCommand(python, [pythonRunnerPath, "--provider", provider, "--action", "download", "--model-dir", modelDir], {
-    env,
-  });
-
-  if (result.status !== 0) {
-    actions.push({
-      step: `assets.download.${provider}`,
-      ok: false,
-      detail: (result.stderr || result.stdout || `download failed with status ${result.status}`).trim(),
-    });
-    return;
-  }
-
-  actions.push({
-    step: `assets.download.${provider}`,
-    ok: true,
-    modelDir,
-  });
-}
-
 async function provisionAssets() {
   const actions = [];
   fs.mkdirSync(modelsRoot, { recursive: true });
@@ -743,17 +571,6 @@ async function provisionAssets() {
   await provisionNativeProviderAssets(readiness, actions);
   readiness = collectReadiness();
 
-  if (readiness.python.checks.voxtral_local.ready === false) {
-    installPythonProvider("voxtral_local", actions);
-  }
-
-  readiness = collectReadiness();
-  if (readiness.providers.voxtral_local && !readiness.providers.voxtral_local.ready) {
-    if (providerMissingModelArtifacts(readiness.providers.voxtral_local)) {
-      downloadPythonModelWithRunner("voxtral_local", path.join(modelsRoot, "voxtral"), actions);
-    }
-  }
-
   return actions;
 }
 
@@ -779,7 +596,6 @@ async function main() {
       actions: provisionActions,
     },
     cloudSecrets: after.cloudSecrets,
-    python: after.python,
     providers: after.providers,
     summary: after.summary,
   };

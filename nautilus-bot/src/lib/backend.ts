@@ -1086,6 +1086,13 @@ export interface SecurityStatus {
    */
   recordingsEncryptedCount: number;
   recordingsStoredCount: number;
+  /**
+   * The *meetings* AI lane's provider. There are two lanes
+   * (`privacy.dictationAi` / `privacy.meetingsAi`) but only one field here:
+   * lib.rs reports the meetings lane because it is the one that ships whole
+   * transcripts off the machine, which is the answer a security readout is
+   * being asked for.
+   */
   llmProvider: string;
   remoteProcessingEnabled: boolean;
   exportRoot: string | null;

@@ -79,12 +79,10 @@ export interface TranscriptionSettings {
   meetingModelId?: string;
   meetingRoutePolicy?: "prefer_local" | "best_available";
   providerModelIds?: Record<string, string>;
-  /** @deprecated, kept for migration; use dictationMlxEnabled / meetingMlxEnabled instead */
-  mlxAcceleratedProviders?: string[];
-  /** MLX acceleration for the dictation route slot only */
-  dictationMlxEnabled?: boolean;
-  /** MLX acceleration for the meeting route slot only */
-  meetingMlxEnabled?: boolean;
+  // `mlxAcceleratedProviders`, `dictationMlxEnabled` and `meetingMlxEnabled`
+  // were removed: no MLX inference path was ever shipped, so every one of them
+  // could only ever describe a route that did not exist. The Rust side still
+  // accepts the keys for now, so old settings files load without error.
   enableDiarization: boolean;
   language: string | null;
   silenceSkipEnabled: boolean;
@@ -163,10 +161,30 @@ interface UiSettings {
 // and was removed (see rust-sidecar/src/settings.rs's REMOVED_SETTINGS_KEYS).
 type ExportSettings = Record<string, never>;
 
+/**
+ * One AI lane: which analysis provider runs a class of work, and on which
+ * model. Mirrors `AiLaneSettings` in rust-sidecar/src/settings.rs.
+ *
+ * `modelId: null` means "the provider's own default model", not "unset".
+ */
+export interface AiLaneSettings {
+  provider: string;
+  modelId: string | null;
+}
+
 interface PrivacySettings {
   remoteProcessingEnabled: boolean;
-  llmProvider: string;
-  llmModelId: string | null;
+  /**
+   * Dictation cleanup and formatting. Latency-critical — it runs on every
+   * capture behind a short timeout, so it usually wants a smaller, faster
+   * model than the meetings lane.
+   */
+  dictationAi: AiLaneSettings;
+  /**
+   * Meeting summaries, action items, and meeting Q&A. Batch work, so it can
+   * afford a slower, smarter model.
+   */
+  meetingsAi: AiLaneSettings;
   exportRoot: string | null;
   vaultInitialized: boolean;
   vaultSalt: string | null;

@@ -98,9 +98,6 @@ export function AsrRouteCombobox({
           {route.experimental ? (
             <Badge variant="outline">Experimental</Badge>
           ) : null}
-          {route.supportsMlxAcceleration ? (
-            <Badge variant="outline">Apple Silicon accel</Badge>
-          ) : null}
         </div>
         <p className="mt-1 truncate text-xs text-muted-foreground">
           {route.readinessDetail ?? route.summary}

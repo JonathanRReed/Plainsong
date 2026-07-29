@@ -1,9 +1,8 @@
 import {
+  isKnownAsrProvider,
   isMeetingEligibleModel as sharedIsMeetingEligibleModel,
   isMeetingEligibleProvider,
   isSharedMeetingCompatible,
-  modelSupportsMlxAcceleration,
-  visibleRouteForMlxModel,
 } from "@/lib/asr-capabilities";
 import { laneProviderOrder } from "@/lib/asr-route-catalog";
 import type {
@@ -21,8 +20,6 @@ export interface AsrRouteSelectionState {
   dictationModelId: string;
   meetingProvider: AsrProviderType;
   meetingModelId: string;
-  dictationMlxEnabled: boolean;
-  meetingMlxEnabled: boolean;
   meetingRoutePolicy: "prefer_local" | "best_available";
 }
 
@@ -111,31 +108,6 @@ function normalizeProviderModelSelection(
   };
 }
 
-function migrateLegacyMlxSelection(providerType: AsrProviderType, modelId: string) {
-  if (providerType !== "mlx_audio") {
-    return {
-      providerType,
-      modelId,
-      migratedProviderType: null as AsrProviderType | null,
-    };
-  }
-
-  const mapped = visibleRouteForMlxModel(modelId);
-  if (!mapped) {
-    return {
-      providerType,
-      modelId,
-      migratedProviderType: null as AsrProviderType | null,
-    };
-  }
-
-  return {
-    providerType: mapped.providerType,
-    modelId: mapped.modelId,
-    migratedProviderType: mapped.providerType,
-  };
-}
-
 function preferredMeetingProviderCandidates(
   meetingRoutePolicy: "prefer_local" | "best_available",
   defaultProvider: AsrProviderType,
@@ -191,45 +163,39 @@ function fallbackMeetingModel(
   );
 }
 
-function sanitizeMlxFlag(
-  enabled: boolean,
-  providerType: AsrProviderType,
-  modelId: string
-) {
-  return enabled && modelSupportsMlxAcceleration(providerType, modelId);
+/**
+ * Settings arrive as bare strings, so a file written before the Python-backed
+ * engines were deleted can still name `mlx_audio` or `voxtral`. Those names are
+ * in no provider list, and `normalizeProviderModelSelection` cannot rescue them
+ * -- it replaces an unknown *model* but keeps whatever provider it was handed.
+ * Falling back here is what stops a stale file pinning a lane to an engine that
+ * no longer exists.
+ */
+function knownProviderOr(
+  providerType: string | null | undefined,
+  fallback: AsrProviderType
+): AsrProviderType {
+  return isKnownAsrProvider(providerType) ? providerType : fallback;
 }
 
 export function selectionStateFromSettings(
   providerList: RouteSelectableInventory[],
   transcription: TranscriptionSettings
 ): AsrRouteSelectionState {
-  const migratedDefault = migrateLegacyMlxSelection(
-    (transcription.defaultProvider as AsrProviderType) ?? DEFAULT_PROVIDER,
-    transcription.selectedModelId ?? DEFAULT_MODEL_ID
-  );
-  const migratedDictation = migrateLegacyMlxSelection(
-    (transcription.dictationProvider as AsrProviderType) ?? migratedDefault.providerType,
-    transcription.dictationModelId ?? migratedDefault.modelId
-  );
-  const migratedMeeting = migrateLegacyMlxSelection(
-    (transcription.meetingProvider as AsrProviderType) ?? migratedDefault.providerType,
-    transcription.meetingModelId ?? migratedDefault.modelId
-  );
-
   const normalizedDefault = normalizeProviderModelSelection(
     providerList,
-    migratedDefault.providerType,
-    migratedDefault.modelId
+    knownProviderOr(transcription.defaultProvider, DEFAULT_PROVIDER),
+    transcription.selectedModelId ?? DEFAULT_MODEL_ID
   );
   const normalizedDictation = normalizeProviderModelSelection(
     providerList,
-    migratedDictation.providerType,
-    migratedDictation.modelId
+    knownProviderOr(transcription.dictationProvider, normalizedDefault.providerType),
+    transcription.dictationModelId ?? normalizedDefault.modelId
   );
   const normalizedMeeting = normalizeProviderModelSelection(
     providerList,
-    migratedMeeting.providerType,
-    migratedMeeting.modelId
+    knownProviderOr(transcription.meetingProvider, normalizedDefault.providerType),
+    transcription.meetingModelId ?? normalizedDefault.modelId
   );
   const meetingRoutePolicy = normalizeMeetingRoutePolicy(transcription.meetingRoutePolicy);
   const useRequestedShared = transcription.useSharedAsrSelection ?? true;
@@ -260,26 +226,6 @@ export function selectionStateFromSettings(
           : undefined
       );
 
-  let dictationMlxEnabled = transcription.dictationMlxEnabled ?? false;
-  let meetingMlxEnabled = transcription.meetingMlxEnabled ?? false;
-  if (!dictationMlxEnabled && !meetingMlxEnabled) {
-    const legacyMlxProviders = (transcription.mlxAcceleratedProviders ?? []) as AsrProviderType[];
-    if (
-      legacyMlxProviders.includes(dictationSelection.providerType) ||
-      migratedDefault.migratedProviderType === dictationSelection.providerType ||
-      migratedDictation.migratedProviderType === dictationSelection.providerType
-    ) {
-      dictationMlxEnabled = true;
-    }
-    if (
-      legacyMlxProviders.includes(meetingProvider) ||
-      migratedDefault.migratedProviderType === meetingProvider ||
-      migratedMeeting.migratedProviderType === meetingProvider
-    ) {
-      meetingMlxEnabled = true;
-    }
-  }
-
   return {
     defaultProvider: normalizedDefault.providerType,
     defaultModelId: normalizedDefault.modelId,
@@ -288,12 +234,6 @@ export function selectionStateFromSettings(
     dictationModelId: dictationSelection.modelId,
     meetingProvider,
     meetingModelId,
-    dictationMlxEnabled: sanitizeMlxFlag(
-      dictationMlxEnabled,
-      dictationSelection.providerType,
-      dictationSelection.modelId
-    ),
-    meetingMlxEnabled: sanitizeMlxFlag(meetingMlxEnabled, meetingProvider, meetingModelId),
     meetingRoutePolicy,
   };
 }
@@ -358,16 +298,6 @@ export function mergeSelectionStateUpdate(
     dictationModelId: dictationSelection.modelId,
     meetingProvider,
     meetingModelId,
-    dictationMlxEnabled: sanitizeMlxFlag(
-      updates.dictationMlxEnabled ?? currentSelection.dictationMlxEnabled,
-      dictationSelection.providerType,
-      dictationSelection.modelId
-    ),
-    meetingMlxEnabled: sanitizeMlxFlag(
-      updates.meetingMlxEnabled ?? currentSelection.meetingMlxEnabled,
-      meetingProvider,
-      meetingModelId
-    ),
     meetingRoutePolicy,
   };
 }

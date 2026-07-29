@@ -107,15 +107,17 @@ export interface BenchmarkResult {
   confidence: number;
 }
 
+// Kept in lockstep with `AsrProviderType` in rust-sidecar/src/asr/mod.rs. Any
+// engine listed here is offered to users, so an engine that cannot start must
+// not appear -- `mlx_audio` and `voxtral` were removed because both required a
+// managed Python venv with torch/transformers that no install ever provisioned.
 export type AsrProviderType =
   | "whisper"
   | "parakeet"
   | "whisper_candle"
   | "distil_whisper"
-  | "mlx_audio"
   | "macos_apple_speech"
   | "moonshine"
-  | "voxtral"
   | "windows_sdk_dictation"
   | "elevenlabs_scribe"
   | "openai_cloud"

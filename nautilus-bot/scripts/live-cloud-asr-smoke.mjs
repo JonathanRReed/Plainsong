@@ -3,8 +3,12 @@ import { createHash } from "node:crypto";
 import fs from "node:fs/promises";
 import path from "node:path";
 
-const requiredKeys = ["OPENAI_API_KEY", "ELEVENLABS_API_KEY", "MISTRAL_API_KEY"];
-const requiredProviders = ["openai", "elevenlabs", "mistral"];
+// Mistral used to be smoke-tested here for Voxtral. Voxtral is gone and no
+// surviving ASR provider reads a Mistral key, so requiring one would fail the
+// run for a capability the app can no longer route to. Mistral remains a valid
+// *LLM* provider; that is a different gate.
+const requiredKeys = ["OPENAI_API_KEY", "ELEVENLABS_API_KEY"];
+const requiredProviders = ["openai", "elevenlabs"];
 const thresholdMs = 6000;
 const fixtureRelativePath = "scripts/fixtures/live-cloud-smoke.wav";
 const missing = requiredKeys.filter((key) => !process.env[key] || !process.env[key].trim());
@@ -86,29 +90,7 @@ async function callElevenLabs() {
   return resultFor("elevenlabs", elapsedMs, parsed.text);
 }
 
-async function callMistral() {
-  const started = Date.now();
-  const form = new FormData();
-  form.append("file", new Blob([audio], { type: "audio/wav" }), "live-cloud-smoke.wav");
-  form.append("model", "voxtral-mini-4b-2602");
-
-  const response = await fetch("https://api.mistral.ai/v1/audio/transcriptions", {
-    method: "POST",
-    headers: { "x-api-key": process.env.MISTRAL_API_KEY },
-    body: form,
-  });
-
-  const elapsedMs = Date.now() - started;
-  const body = await response.text();
-  if (!response.ok) {
-    throw new Error(`Mistral ASR failed (${response.status}): ${body}`);
-  }
-
-  const parsed = JSON.parse(body);
-  return resultFor("mistral", elapsedMs, parsed.text);
-}
-
-const results = [await callOpenAI(), await callElevenLabs(), await callMistral()];
+const results = [await callOpenAI(), await callElevenLabs()];
 const latencies = results.map((result) => result.elapsedMs).sort((a, b) => a - b);
 const medianLatencyMs = latencies[Math.floor(latencies.length / 2)];
 const providers = results.map((result) => result.provider);

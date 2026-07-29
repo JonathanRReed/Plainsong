@@ -90,7 +90,7 @@ import type {
   ShortcutConflict,
 } from "@/lib/backend/settings";
 import type { AsrProviderInfo } from "@/types";
-import type { Settings } from "@/types/settings";
+import type { AiLaneSettings, Settings } from "@/types/settings";
 import { applyThemeScheme, normalizeThemeScheme } from "@/lib/theme-schemes";
 import { formatShortcutForDisplay, normalizeShortcut } from "@/lib/shortcuts";
 import {
@@ -367,30 +367,175 @@ type ReadinessChipState = {
  * Where an automatically analyzed transcript actually goes. Naming the
  * destination is the difference between disclosure and a switch label.
  */
+// The two AI lanes, as they are keyed on `Settings["privacy"]`. Dictation
+// cleanup runs on every capture behind a short timeout and wants a fast
+// model; meeting summaries are batch work that can afford a slower one, so
+// each lane picks its own provider and model.
+const AI_LANE_KEYS = ["dictationAi", "meetingsAi"] as const;
+type AiLaneKey = (typeof AI_LANE_KEYS)[number];
+
+// Every analysis provider we can name, and whether using it sends the
+// transcript off this machine. A provider missing from this map is a provider
+// we cannot make a claim about — see `isRemoteAnalysisProvider`.
+const ANALYSIS_PROVIDER_DESTINATIONS: Record<string, { label: string; remote: boolean }> = {
+  ollama: { label: "Ollama on this machine", remote: false },
+  openai: { label: "OpenAI", remote: true },
+  anthropic: { label: "Anthropic", remote: true },
+  gemini: { label: "Google Gemini", remote: true },
+  deepseek: { label: "DeepSeek", remote: true },
+  "ollama-cloud": { label: "Ollama Cloud", remote: true },
+};
+
 /// Whether analysis with this provider would leave the machine. Remote
 /// providers are refused outright when remote processing is off, so the
 /// disclosure must not promise a summary that policy will block.
-function isRemoteAnalysisProvider(llmProvider: string): boolean {
-  return llmProvider !== "ollama";
+///
+/// An absent or unrecognized provider returns false on purpose. The old
+/// `provider !== "ollama"` shape treated `undefined` as remote, so any drift
+/// in the settings schema made the UI announce that transcripts were leaving
+/// the machine when they were not. A claim we can't substantiate is worse
+/// than no claim, so an unknown provider suppresses the disclosure instead of
+/// inventing one; `describeAnalysisDestination` renders it as unknown.
+function isRemoteAnalysisProvider(provider: string | undefined): boolean {
+  return ANALYSIS_PROVIDER_DESTINATIONS[provider ?? ""]?.remote ?? false;
 }
 
-function describeAnalysisDestination(llmProvider: string): string {
-  switch (llmProvider) {
-    case "ollama":
-      return "Ollama on this machine";
+function describeAnalysisDestination(provider: string | undefined): string {
+  return (
+    ANALYSIS_PROVIDER_DESTINATIONS[provider ?? ""]?.label ??
+    "an unrecognized analysis provider"
+  );
+}
+
+// The models a provider actually offers for analysis. OpenAI's /models
+// endpoint also returns embedding, audio and moderation models, and Google's
+// returns non-Gemini endpoints; none of them can write a summary, so they
+// never belong in this picker.
+function analysisModelChoices(
+  providerName: string,
+  models: string[],
+): string[] {
+  switch (providerName) {
     case "openai":
-      return "OpenAI";
-    case "anthropic":
-      return "Anthropic";
+      return models
+        .filter(
+          (model) =>
+            model.includes("gpt") ||
+            model.includes("o1") ||
+            model.includes("o3") ||
+            model.includes("o4"),
+        )
+        .sort();
     case "gemini":
-      return "Google Gemini";
-    case "deepseek":
-      return "DeepSeek";
-    case "ollama-cloud":
-      return "Ollama Cloud";
+      return models.filter((model) => model.includes("gemini"));
     default:
-      return "the configured analysis provider";
+      return models;
   }
+}
+
+type AnalysisLanePickerProps = {
+  lane: AiLaneKey;
+  label: string;
+  help: string;
+  value: AiLaneSettings;
+  remoteProcessingEnabled: boolean;
+  models: string[];
+  modelsLoading: boolean;
+  onProviderChange: (lane: AiLaneKey, providerName: string) => void;
+  onModelChange: (lane: AiLaneKey, modelId: string | null) => void;
+};
+
+// One lane's provider + model. Rendered once per lane so that the two-lane
+// schema the backend reads is actually settable — a lane with no control is a
+// setting that can never be anything but its default.
+function AnalysisLanePicker({
+  lane,
+  label,
+  help,
+  value,
+  remoteProcessingEnabled,
+  models,
+  modelsLoading,
+  onProviderChange,
+  onModelChange,
+}: AnalysisLanePickerProps) {
+  const choices = analysisModelChoices(value.provider, models);
+
+  return (
+    <div className="space-y-4">
+      <div className="space-y-2">
+        <Label htmlFor={`${lane}-provider`}>{label}</Label>
+        <p className="text-sm text-muted-foreground">{help}</p>
+        <select
+          id={`${lane}-provider`}
+          value={value.provider}
+          onChange={(event: ChangeEvent<HTMLSelectElement>) =>
+            onProviderChange(lane, event.target.value)
+          }
+          className="w-full p-2 border rounded-md bg-background"
+        >
+          <option value="ollama">Ollama (on this Mac)</option>
+          <option value="openai">OpenAI</option>
+          <option value="anthropic">Anthropic</option>
+          <option value="gemini">Google Gemini</option>
+          <option value="deepseek">DeepSeek</option>
+          <option value="ollama-cloud">Ollama Cloud</option>
+        </select>
+        {!remoteProcessingEnabled &&
+        isRemoteAnalysisProvider(value.provider) ? (
+          <p className="text-sm text-rust">
+            This one runs in the cloud, but cloud AI is turned off — so nothing
+            will be written until you allow it below.
+          </p>
+        ) : null}
+      </div>
+
+      <div className="space-y-2">
+        <Label htmlFor={`${lane}-model`} className="flex items-center gap-2">
+          Model
+          {modelsLoading && <Loader2 className="h-3 w-3 animate-spin" />}
+        </Label>
+        {choices.length > 0 ? (
+          <>
+            <select
+              id={`${lane}-model`}
+              value={value.modelId ?? choices[0]}
+              onChange={(event: ChangeEvent<HTMLSelectElement>) =>
+                onModelChange(lane, event.target.value || null)
+              }
+              className="w-full p-2 border rounded-md bg-background"
+            >
+              {choices.map((model) => (
+                <option key={model} value={model}>
+                  {model}
+                </option>
+              ))}
+            </select>
+            <p className="text-sm text-muted-foreground">
+              This list comes from the service itself.
+            </p>
+          </>
+        ) : value.provider === "ollama" ? (
+          <div className="p-3 rounded border bg-muted/30 text-sm">
+            <p className="text-muted-foreground">
+              No Ollama models found. Run{" "}
+              <code className="bg-muted px-1 rounded">
+                ollama pull llama3.2
+              </code>{" "}
+              to download a model.
+            </p>
+          </div>
+        ) : (
+          <div className="p-3 rounded border border-rust/30 bg-rust/10 text-sm">
+            <p className="text-rust">
+              Add your {describeAnalysisDestination(value.provider)} API key
+              under Advanced below to see models.
+            </p>
+          </div>
+        )}
+      </div>
+    </div>
+  );
 }
 
 type RecordingEncryptionSummary = {
@@ -555,8 +700,8 @@ export function SettingsView() {
   const [apiKey, setApiKey] = useState("");
   const [hasApiKey, setHasApiKey] = useState(false);
   // Whether the Key Manager's currently-selected credential provider (`provider`,
-  // independent of settings.privacy.llmProvider) has a stored secret. Kept separate
-  // from `hasApiKey` (which tracks the actual default analysis provider) so browsing
+  // independent of settings.privacy.meetingsAi.provider) has a stored secret. Kept
+  // separate from `hasApiKey` (which tracks the meetings analysis provider) so browsing
   // Key Manager never has to rewrite the analysis provider just to stay accurate.
   const [keyManagerHasApiKey, setKeyManagerHasApiKey] = useState(false);
   const [savingApiKey, setSavingApiKey] = useState(false);
@@ -635,6 +780,16 @@ export function SettingsView() {
   const persistedSettingsRef = useRef<Settings | null>(null);
 
   const settings = draftSettings;
+  // The newest draft, for effects that write a whole Settings object back.
+  // Such an effect can run a commit behind — a provider's model list resolves
+  // in a promise, and React flushes the effect that resolution scheduled
+  // before rendering whatever the user did in the meantime — so rebuilding
+  // the object from the effect's own closure silently reverts that newer
+  // edit. `updateSettings` republishes this ref as it writes, so an effect
+  // reading it changes only its own field. Kept in sync on render too, for
+  // the setters that go straight to `setDraftSettings`.
+  const latestSettingsRef = useRef<Settings | null>(null);
+  latestSettingsRef.current = settings;
   const { toast } = useToast();
   const latestSettingsSnapshot = useMemo(
     () => backups.find((backup) => backup.backupType === "settings") ?? null,
@@ -675,7 +830,9 @@ export function SettingsView() {
             // recordingsEncrypted and its counts are read off the files on
             // disk (lib.rs build_security_status), so a settings save cannot
             // re-derive them and must leave them alone.
-            llmProvider: next.privacy.llmProvider,
+            // SecurityStatus.llmProvider is the meetings lane (see lib.rs's
+            // build_security_status) — mirror that lane, not the dictation one.
+            llmProvider: next.privacy.meetingsAi.provider,
             remoteProcessingEnabled: next.privacy.remoteProcessingEnabled,
             exportRoot: next.privacy.exportRoot ?? null,
           }
@@ -1029,7 +1186,7 @@ export function SettingsView() {
     if (!settings) return;
       withSettingsSectionTimeout(
         "Provider secret status",
-        hasProviderSecret(settings.privacy.llmProvider),
+        hasProviderSecret(settings.privacy.meetingsAi.provider),
       )
       .then((value) => {
         if (mounted) {
@@ -1044,7 +1201,7 @@ export function SettingsView() {
     return () => {
       mounted = false;
     };
-  }, [settings?.privacy.llmProvider]);
+  }, [settings?.privacy.meetingsAi.provider]);
 
   useEffect(() => {
     let mounted = true;
@@ -1222,19 +1379,15 @@ export function SettingsView() {
     };
   }, [activeTab, hasLoadedStorageTab]);
 
+  // Open the Key Manager on the credential the meetings lane needs, since
+  // that's the lane whose provider the "no key saved" warning is about.
   useEffect(() => {
     if (!settings) return;
-    const llmProvider = settings.privacy.llmProvider;
-    if (
-      llmProvider === "openai" ||
-      llmProvider === "anthropic" ||
-      llmProvider === "gemini" ||
-      llmProvider === "deepseek" ||
-      llmProvider === "ollama-cloud"
-    ) {
-      setProvider(llmProvider);
+    const meetingsProvider = settings.privacy.meetingsAi.provider;
+    if (isRemoteAnalysisProvider(meetingsProvider)) {
+      setProvider(meetingsProvider);
     }
-  }, [settings?.privacy.llmProvider]);
+  }, [settings?.privacy.meetingsAi.provider]);
 
   // Function to refresh models for a specific provider
   const refreshModelsForProvider = useCallback(async (providerName: string) => {
@@ -1400,6 +1553,12 @@ export function SettingsView() {
       next: Settings,
       options?: { immediate?: boolean; debounceMs?: number },
     ) => {
+      // Publish before the state update, not after: React flushes pending
+      // passive effects *before* it renders the change, so an effect scheduled
+      // by an earlier commit runs between this call and the re-render. Setting
+      // the ref here is what lets that effect see this edit instead of the
+      // snapshot it closed over.
+      latestSettingsRef.current = next;
       setDraftSettings(next);
       setError(null);
 
@@ -1411,6 +1570,40 @@ export function SettingsView() {
       queueSettingsSave(next, options?.debounceMs ?? SETTINGS_SAVE_DEBOUNCE_MS);
     },
     [flushPendingSettingsSave, queueSettingsSave],
+  );
+
+  // Change one field of the newest settings, for writes the user did not ask
+  // for (a background correction, not an edit). `updateSettings` takes a whole
+  // Settings object and hands it to the scheduler, where it *replaces* any
+  // save still waiting out its debounce -- so a whole-object write from an
+  // effect does not merely lose a race with a concurrent edit, it deletes that
+  // edit's save outright and the edit never reaches disk at all. Folding the
+  // one field into the queued write instead, and letting that write's own
+  // timer carry both, is the same discipline the settings-changed listener
+  // above uses on the same queue.
+  const patchSettings = useCallback(
+    (applyPatch: (previous: Settings) => Settings) => {
+      const current = latestSettingsRef.current;
+      if (!current) {
+        return;
+      }
+
+      const scheduler = saveSchedulerRef.current;
+      if (scheduler.pending) {
+        scheduler.pending = {
+          version: scheduler.pending.version,
+          settings: applyPatch(scheduler.pending.settings),
+        };
+        latestSettingsRef.current = applyPatch(current);
+        setDraftSettings((previous) =>
+          previous ? applyPatch(previous) : previous,
+        );
+        return;
+      }
+
+      updateSettings(applyPatch(current), { immediate: true });
+    },
+    [updateSettings],
   );
 
   const getCachedModelsForProvider = useCallback(
@@ -1443,7 +1636,7 @@ export function SettingsView() {
   );
 
   const updateAnalysisModel = useCallback(
-    (modelId: string | null) => {
+    (lane: AiLaneKey, modelId: string | null) => {
       if (!settings) {
         return;
       }
@@ -1452,7 +1645,7 @@ export function SettingsView() {
         ...settings,
         privacy: {
           ...settings.privacy,
-          llmModelId: modelId,
+          [lane]: { ...settings.privacy[lane], modelId },
         },
       });
     },
@@ -1460,22 +1653,21 @@ export function SettingsView() {
   );
 
   const updateAnalysisProvider = useCallback(
-    async (providerName: string) => {
+    async (lane: AiLaneKey, providerName: string) => {
       if (!settings) {
         return;
       }
 
       const cachedModels = getCachedModelsForProvider(providerName);
       const initialModelId = coerceProviderModelId(
-        settings.privacy.llmModelId,
+        settings.privacy[lane].modelId,
         cachedModels,
       );
       const initialSettings = {
         ...settings,
         privacy: {
           ...settings.privacy,
-          llmProvider: providerName,
-          llmModelId: initialModelId,
+          [lane]: { provider: providerName, modelId: initialModelId },
         },
       };
 
@@ -1493,7 +1685,7 @@ export function SettingsView() {
             ...initialSettings,
             privacy: {
               ...initialSettings.privacy,
-              llmModelId: refreshedModelId,
+              [lane]: { provider: providerName, modelId: refreshedModelId },
             },
           },
           { immediate: true },
@@ -1508,37 +1700,49 @@ export function SettingsView() {
     ],
   );
 
+  // Pin each lane to a model the provider actually offers, so the picker's
+  // displayed value is the value that gets used. Nobody asked for this write,
+  // so it changes the one lane's `modelId` and nothing else — see
+  // `patchSettings`.
   useEffect(() => {
     if (!settings || activeTab !== "ai") {
       return;
     }
 
-    const cachedModels = getCachedModelsForProvider(
-      settings.privacy.llmProvider,
-    );
-    if (cachedModels.length === 0) {
-      return;
-    }
+    for (const lane of AI_LANE_KEYS) {
+      const current = latestSettingsRef.current;
+      if (!current) {
+        return;
+      }
 
-    const nextModelId = coerceProviderModelId(
-      settings.privacy.llmModelId,
-      cachedModels,
-    );
-    if (nextModelId === settings.privacy.llmModelId) {
-      return;
-    }
+      const cachedModels = getCachedModelsForProvider(
+        current.privacy[lane].provider,
+      );
+      if (cachedModels.length === 0) {
+        continue;
+      }
 
-    void updateSettings(
-      {
-        ...settings,
+      const nextModelId = coerceProviderModelId(
+        current.privacy[lane].modelId,
+        cachedModels,
+      );
+      if (nextModelId === current.privacy[lane].modelId) {
+        continue;
+      }
+
+      patchSettings((previous) => ({
+        ...previous,
         privacy: {
-          ...settings.privacy,
-          llmModelId: nextModelId,
+          ...previous.privacy,
+          [lane]: { ...previous.privacy[lane], modelId: nextModelId },
         },
-      },
-      { immediate: true },
-    );
-  }, [activeTab, getCachedModelsForProvider, settings, updateSettings]);
+      }));
+      // One lane per pass: the draft is about to change, and correcting the
+      // other lane from the pre-write snapshot would undo what we just did.
+      // The re-run this write triggers picks the other lane up.
+      return;
+    }
+  }, [activeTab, getCachedModelsForProvider, patchSettings, settings]);
 
   useEffect(() => {
     if (!settings) {
@@ -2610,7 +2814,7 @@ export function SettingsView() {
                   onChange={(e: ChangeEvent<HTMLSelectElement>) => {
                     // This only chooses which provider's credential is being
                     // viewed/edited below -- it must not rewrite the default
-                    // analysis provider (settings.privacy.llmProvider), which
+                    // analysis provider (settings.privacy.meetingsAi.provider), which
                     // has its own selector on the AI tab.
                     const next = e.target.value;
                     setProvider(next);
@@ -2635,7 +2839,7 @@ export function SettingsView() {
                         await setProviderSecret(provider, apiKey.trim());
                         setApiKey("");
                         setKeyManagerHasApiKey(true);
-                        if (provider === settings.privacy.llmProvider) {
+                        if (provider === settings.privacy.meetingsAi.provider) {
                           setHasApiKey(true);
                         }
                       } catch (e) {
@@ -2665,11 +2869,11 @@ export function SettingsView() {
                 </p>
               ) : null}
               {settings.privacy.remoteProcessingEnabled &&
-              isRemoteAnalysisProvider(settings.privacy.llmProvider) &&
+              isRemoteAnalysisProvider(settings.privacy.meetingsAi.provider) &&
               !hasApiKey ? (
                 <p className="text-sm text-rust">
                   No key saved for{" "}
-                  {describeAnalysisDestination(settings.privacy.llmProvider)},
+                  {describeAnalysisDestination(settings.privacy.meetingsAi.provider)},
                   the service picked under “Who writes summaries, answers, and
                   actions” — summaries and answers will fail until you add one.
                 </p>
@@ -2699,7 +2903,7 @@ export function SettingsView() {
                       await setProviderSecret(provider, apiKey.trim());
                       setApiKey("");
                       setKeyManagerHasApiKey(true);
-                      if (provider === settings.privacy.llmProvider) {
+                      if (provider === settings.privacy.meetingsAi.provider) {
                         setHasApiKey(true);
                       }
                       await refreshModelsForProvider(provider);
@@ -2725,7 +2929,7 @@ export function SettingsView() {
                       await setProviderSecret(provider, apiKey.trim());
                       setApiKey("");
                       setKeyManagerHasApiKey(true);
-                      if (provider === settings.privacy.llmProvider) {
+                      if (provider === settings.privacy.meetingsAi.provider) {
                         setHasApiKey(true);
                       }
                       await refreshModelsForProvider(provider);
@@ -2752,7 +2956,7 @@ export function SettingsView() {
                       await clearProviderSecret(provider);
                       setApiKey("");
                       setKeyManagerHasApiKey(false);
-                      if (provider === settings.privacy.llmProvider) {
+                      if (provider === settings.privacy.meetingsAi.provider) {
                         setHasApiKey(false);
                       }
                     } catch (e) {
@@ -2792,11 +2996,11 @@ export function SettingsView() {
                       );
                     }
                     const keyPresent = await hasProviderSecret(
-                      settings.privacy.llmProvider,
+                      settings.privacy.meetingsAi.provider,
                     );
                     if (!keyPresent) {
                       checks.push(
-                        `No key saved for ${describeAnalysisDestination(settings.privacy.llmProvider)}.`,
+                        `No key saved for ${describeAnalysisDestination(settings.privacy.meetingsAi.provider)}.`,
                       );
                     }
                     if (checks.length === 0) {
@@ -4724,10 +4928,10 @@ export function SettingsView() {
                           {!settings.transcription.enableAutoAnalysis
                             ? "Meetings are summarized only when you ask for it from the meeting itself."
                             : isRemoteAnalysisProvider(
-                                  settings.privacy.llmProvider,
+                                  settings.privacy.meetingsAi.provider,
                                 ) && !settings.privacy.remoteProcessingEnabled
-                              ? `Every finished meeting would go to ${describeAnalysisDestination(settings.privacy.llmProvider)}, but cloud AI is turned off — so no summary is written.`
-                              : `Every finished meeting transcript goes to ${describeAnalysisDestination(settings.privacy.llmProvider)} for a summary and action items, without asking first.`}
+                              ? `Every finished meeting would go to ${describeAnalysisDestination(settings.privacy.meetingsAi.provider)}, but cloud AI is turned off — so no summary is written.`
+                              : `Every finished meeting transcript goes to ${describeAnalysisDestination(settings.privacy.meetingsAi.provider)} for a summary and action items, without asking first.`}
                         </p>
                       </div>
                       <Switch
@@ -4744,235 +4948,41 @@ export function SettingsView() {
                       />
                     </div>
 
-                    <div className="space-y-2">
-                      <Label>Who writes summaries, answers, and actions</Label>
-                      <select
-                        value={settings.privacy.llmProvider}
-                        onChange={(event) =>
-                          void updateAnalysisProvider(event.target.value)
-                        }
-                        className="w-full p-2 border rounded-md bg-background"
-                      >
-                        <option value="ollama">Ollama (on this Mac)</option>
-                        <option value="openai">OpenAI</option>
-                        <option value="anthropic">Anthropic</option>
-                        <option value="gemini">Google Gemini</option>
-                        <option value="deepseek">DeepSeek</option>
-                        <option value="ollama-cloud">Ollama Cloud</option>
-                      </select>
-                      {!settings.privacy.remoteProcessingEnabled &&
-                      settings.privacy.llmProvider !== "ollama" ? (
-                        <p className="text-sm text-rust">
-                          This one runs in the cloud, but cloud AI is turned
-                          off — so nothing will be written until you allow it
-                          below.
-                        </p>
-                      ) : null}
-                    </div>
-
-                    <div className="space-y-2">
-                      <Label className="flex items-center gap-2">
-                        Model
-                        {modelsLoading && (
-                          <Loader2 className="h-3 w-3 animate-spin" />
-                        )}
-                      </Label>
-
-                      {settings.privacy.llmProvider === "ollama" ? (
-                        ollamaModels.length > 0 ? (
-                          <select
-                            value={
-                              settings.privacy.llmModelId ??
-                              ollamaModels[0] ??
-                              ""
-                            }
-                            onChange={(
-                              event: ChangeEvent<HTMLSelectElement>,
-                            ) =>
-                              updateAnalysisModel(event.target.value || null)
-                            }
-                            className="w-full p-2 border rounded-md bg-background"
-                          >
-                            {ollamaModels.map((model) => (
-                              <option key={model} value={model}>
-                                {model}
-                              </option>
-                            ))}
-                          </select>
-                        ) : (
-                          <div className="p-3 rounded border bg-muted/30 text-sm">
-                            <p className="text-muted-foreground">
-                              No Ollama models found. Run{" "}
-                              <code className="bg-muted px-1 rounded">
-                                ollama pull llama3.2
-                              </code>{" "}
-                              to download a model.
-                            </p>
-                          </div>
-                        )
-                      ) : settings.privacy.llmProvider === "openai" ? (
-                        openaiModels.length > 0 ? (
-                          <select
-                            value={
-                              settings.privacy.llmModelId ?? openaiModels[0]
-                            }
-                            onChange={(
-                              event: ChangeEvent<HTMLSelectElement>,
-                            ) =>
-                              updateAnalysisModel(event.target.value || null)
-                            }
-                            className="w-full p-2 border rounded-md bg-background"
-                          >
-                            {openaiModels
-                              .filter(
-                                (m) =>
-                                  m.includes("gpt") ||
-                                  m.includes("o1") ||
-                                  m.includes("o3") ||
-                                  m.includes("o4"),
-                              )
-                              .sort()
-                              .map((model) => (
-                                <option key={model} value={model}>
-                                  {model}
-                                </option>
-                              ))}
-                          </select>
-                        ) : (
-                          <div className="p-3 rounded border border-rust/30 bg-rust/10 text-sm">
-                            <p className="text-rust">
-                              Add your OpenAI API key under Advanced below to see models.
-                            </p>
-                          </div>
-                        )
-                      ) : settings.privacy.llmProvider === "anthropic" ? (
-                        anthropicModels.length > 0 ? (
-                          <select
-                            value={
-                              settings.privacy.llmModelId ??
-                              anthropicModels[0]
-                            }
-                            onChange={(
-                              event: ChangeEvent<HTMLSelectElement>,
-                            ) =>
-                              updateAnalysisModel(event.target.value || null)
-                            }
-                            className="w-full p-2 border rounded-md bg-background"
-                          >
-                            {anthropicModels.map((model) => (
-                              <option key={model} value={model}>
-                                {model}
-                              </option>
-                            ))}
-                          </select>
-                        ) : (
-                          <div className="p-3 rounded border border-rust/30 bg-rust/10 text-sm">
-                            <p className="text-rust">
-                              Add your Anthropic API key under Advanced below to see models.
-                            </p>
-                          </div>
-                        )
-                      ) : settings.privacy.llmProvider === "gemini" ? (
-                        geminiModels.length > 0 ? (
-                          <select
-                            value={
-                              settings.privacy.llmModelId ??
-                              geminiModels[0]
-                            }
-                            onChange={(
-                              event: ChangeEvent<HTMLSelectElement>,
-                            ) =>
-                              updateAnalysisModel(event.target.value || null)
-                            }
-                            className="w-full p-2 border rounded-md bg-background"
-                          >
-                          {geminiModels
-                              .filter((m) => m.includes("gemini"))
-                              .map((model) => (
-                                <option key={model} value={model}>
-                                  {model}
-                                </option>
-                              ))}
-                          </select>
-                        ) : (
-                          <div className="p-3 rounded border border-rust/30 bg-rust/10 text-sm">
-                            <p className="text-rust">
-                              Add your Google AI API key under Advanced below to see models.
-                            </p>
-                          </div>
-                        )
-                      ) : settings.privacy.llmProvider === "deepseek" ? (
-                        deepseekModels.length > 0 ? (
-                          <select
-                            value={
-                              settings.privacy.llmModelId ??
-                              deepseekModels[0]
-                            }
-                            onChange={(
-                              event: ChangeEvent<HTMLSelectElement>,
-                            ) =>
-                              updateAnalysisModel(event.target.value || null)
-                            }
-                            className="w-full p-2 border rounded-md bg-background"
-                          >
-                            {deepseekModels.map((model) => (
-                              <option key={model} value={model}>
-                                {model}
-                              </option>
-                            ))}
-                          </select>
-                        ) : (
-                          <div className="p-3 rounded border border-rust/30 bg-rust/10 text-sm">
-                            <p className="text-rust">
-                              Add your DeepSeek API key under Advanced below to see models.
-                            </p>
-                          </div>
-                        )
-                      ) : settings.privacy.llmProvider ===
-                        "ollama-cloud" ? (
-                        ollamaCloudModels.length > 0 ? (
-                          <select
-                            value={
-                              settings.privacy.llmModelId ??
-                              ollamaCloudModels[0]
-                            }
-                            onChange={(
-                              event: ChangeEvent<HTMLSelectElement>,
-                            ) =>
-                              updateAnalysisModel(event.target.value || null)
-                            }
-                            className="w-full p-2 border rounded-md bg-background"
-                          >
-                            {ollamaCloudModels.map((model) => (
-                              <option key={model} value={model}>
-                                {model}
-                              </option>
-                            ))}
-                          </select>
-                        ) : (
-                          <div className="p-3 rounded border border-rust/30 bg-rust/10 text-sm">
-                            <p className="text-rust">
-                              Add your Ollama Cloud API key under Advanced below to see models.
-                            </p>
-                          </div>
-                        )
-                      ) : (
-                        <div className="p-3 rounded border bg-muted/30 text-sm">
-                          <p className="text-muted-foreground">
-                            Choose one above to see its models.
-                          </p>
-                        </div>
+                    <AnalysisLanePicker
+                      lane="meetingsAi"
+                      label="Who writes summaries, answers, and actions"
+                      help="Runs once a meeting has ended, so it can afford a slower, smarter model."
+                      value={settings.privacy.meetingsAi}
+                      remoteProcessingEnabled={
+                        settings.privacy.remoteProcessingEnabled
+                      }
+                      models={getCachedModelsForProvider(
+                        settings.privacy.meetingsAi.provider,
                       )}
-                      <p className="text-sm text-muted-foreground">
-                        {settings.privacy.llmProvider === "ollama" &&
-                        ollamaModels.length === 0
-                          ? "Get a model with `ollama pull llama3.2` in Terminal, then refresh."
-                          : settings.privacy.llmProvider !== "ollama" &&
-                              !hasApiKey
-                            ? "Add your API key under Advanced below to see the list."
-                            : "This list comes from the service itself."}
-                      </p>
-                    </div>
+                      modelsLoading={modelsLoading}
+                      onProviderChange={(lane, providerName) =>
+                        void updateAnalysisProvider(lane, providerName)
+                      }
+                      onModelChange={updateAnalysisModel}
+                    />
+
+                    <AnalysisLanePicker
+                      lane="dictationAi"
+                      label="Who cleans up dictation"
+                      help="Runs on every capture behind a short timeout, so a smaller, faster model usually wins here. A dictation mode that carries its own AI provider overrides this while that mode is selected."
+                      value={settings.privacy.dictationAi}
+                      remoteProcessingEnabled={
+                        settings.privacy.remoteProcessingEnabled
+                      }
+                      models={getCachedModelsForProvider(
+                        settings.privacy.dictationAi.provider,
+                      )}
+                      modelsLoading={modelsLoading}
+                      onProviderChange={(lane, providerName) =>
+                        void updateAnalysisProvider(lane, providerName)
+                      }
+                      onModelChange={updateAnalysisModel}
+                    />
 
                     <div className="flex items-center justify-between">
                       <div className="space-y-0.5">
@@ -4996,7 +5006,11 @@ export function SettingsView() {
                       />
                     </div>
 
-                    {settings.privacy.llmProvider === "ollama" && (
+                    {/* Either lane on Ollama makes the local daemon's state
+                        worth reporting. */}
+                    {AI_LANE_KEYS.some(
+                      (lane) => settings.privacy[lane].provider === "ollama",
+                    ) && (
                       <div className="border-t pt-4">
                         <p className="flex items-center gap-2 text-sm font-medium">
                           <span

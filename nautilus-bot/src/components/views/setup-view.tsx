@@ -661,10 +661,7 @@ export function SetupView() {
                               {providerCapabilityLabel(provider.providerType)}
                             </Badge>
                             <Badge variant="outline">
-                              {providerHostingLabel(
-                                provider.providerType,
-                                provider.selectedModelId,
-                              )}
+                              {providerHostingLabel(provider.providerType)}
                             </Badge>
                           </div>
                           <p className="text-sm text-muted-foreground">{modelLabel}</p>

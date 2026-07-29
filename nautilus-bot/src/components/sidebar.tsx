@@ -104,8 +104,16 @@ const UNKNOWN_LOCAL_MODE_STATUS: LocalModeStatus = {
   detail: "Couldn't read privacy settings, so the processing mode is unknown.",
 };
 
+// The only analysis provider that runs on this machine. Everything else in
+// AnalysisProvider is a network call.
+const LOCAL_ANALYSIS_PROVIDER = "ollama";
+
+// Two lanes now choose an analysis provider — dictation cleanup and meeting
+// analysis — and either one leaving the machine is enough to break a "Local
+// only" claim, so the chip has to look at both.
 function deriveLocalModeStatus(
-  llmProvider: string,
+  dictationProvider: string | undefined,
+  meetingsProvider: string | undefined,
   remoteProcessingEnabled: boolean
 ): LocalModeStatus {
   if (!remoteProcessingEnabled) {
@@ -116,18 +124,33 @@ function deriveLocalModeStatus(
     };
   }
 
-  if (llmProvider === "ollama") {
+  // A missing lane means the settings payload isn't the shape we understand.
+  // Guessing "Local" would be a privacy promise we can't verify and guessing
+  // "Cloud" would smear a provider that may well be local, so refuse to
+  // answer instead of asserting either.
+  if (!dictationProvider || !meetingsProvider) {
+    return UNKNOWN_LOCAL_MODE_STATUS;
+  }
+
+  const remoteLanes = [
+    { label: "dictation cleanup", provider: dictationProvider },
+    { label: "meeting summaries", provider: meetingsProvider },
+  ].filter((lane) => lane.provider !== LOCAL_ANALYSIS_PROVIDER);
+
+  if (remoteLanes.length === 0) {
     return {
       active: true,
       label: "Local only",
-      detail: "Default analysis provider is local (Ollama).",
+      detail: "Both analysis lanes run locally (Ollama).",
     };
   }
 
   return {
     active: false,
     label: "Cloud Enabled",
-    detail: `Remote processing enabled with '${llmProvider}' as default analysis provider.`,
+    detail: `Remote processing enabled: ${remoteLanes
+      .map((lane) => `${lane.label} uses '${lane.provider}'`)
+      .join("; ")}.`,
   };
 }
 
@@ -164,7 +187,8 @@ export function Sidebar({
         }
         setLocalModeStatus(
           deriveLocalModeStatus(
-            settings.privacy.llmProvider,
+            settings.privacy.dictationAi?.provider,
+            settings.privacy.meetingsAi?.provider,
             settings.privacy.remoteProcessingEnabled
           )
         );

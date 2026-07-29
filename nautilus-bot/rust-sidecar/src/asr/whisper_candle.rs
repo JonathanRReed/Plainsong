@@ -134,7 +134,7 @@ impl Default for WhisperCandleProvider {
 // Native Candle inference (feature-gated)
 // ---------------------------------------------------------------------------
 /// Public entry point for running Whisper-Large-V3-Turbo inference on raw f32 samples.
-/// Called by whisper_candle.rs and voxtral.rs (which reuses the same encoder architecture).
+/// Shared with `distil_whisper.rs`, which is the same encoder-decoder architecture.
 #[cfg(feature = "asr-canary")]
 pub(super) fn run_whisper_candle_inference_on_samples(
     samples: Vec<f32>,

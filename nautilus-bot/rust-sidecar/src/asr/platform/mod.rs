@@ -43,11 +43,11 @@ impl PlatformEngine {
         match self {
             PlatformEngine::ProviderDefault => true,
             PlatformEngine::MacosAppleSpeech => provider == AsrProviderType::MacosAppleSpeech,
-            PlatformEngine::WindowsSdkDictation => {
-                !provider.is_remote() && provider != AsrProviderType::MlxAudio
-            }
+            // Both of these used to exclude the MLX Audio provider explicitly.
+            // That provider has been removed, so the exclusion is gone with it.
+            PlatformEngine::WindowsSdkDictation => !provider.is_remote(),
             PlatformEngine::MacosMlxSidecar | PlatformEngine::WindowsFoundryLocal => {
-                provider.is_local() && provider != AsrProviderType::MlxAudio
+                provider.is_local()
             }
         }
     }

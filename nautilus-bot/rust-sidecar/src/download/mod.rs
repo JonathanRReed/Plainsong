@@ -628,30 +628,42 @@ impl DownloadManager {
             }
         }
 
-        // Check Parakeet models
-        for (dir_name, label) in [
-            ("parakeet", "Parakeet Legacy"),
-            ("parakeet_ctc_0.6b", "Parakeet CTC 0.6B"),
-            ("parakeet_ctc_1.1b", "Parakeet CTC 1.1B"),
-        ] {
-            let model_dir = self.models_dir.join(dir_name);
-            if !model_dir.exists() {
-                continue;
-            }
-
-            let mut entries = tokio::fs::read_dir(&model_dir).await?;
-            while let Some(entry) = entries.next_entry().await? {
-                let metadata = entry.metadata().await?;
-                if metadata.is_file() {
-                    let name = entry.file_name().to_string_lossy().to_string();
-                    models.push(DownloadedModel {
-                        name: format!("{} {}", label, name),
-                        provider: "parakeet".to_string(),
-                        path: entry.path(),
-                        size_bytes: metadata.len(),
-                        downloaded_at: metadata.modified()?,
-                    });
-                }
+        // Check Parakeet models.
+        //
+        // The legacy 110M export sits directly in `models/parakeet`; TDT v3
+        // gets a subdirectory beside it. Walking recursively is what makes the
+        // v3 bundle visible here at all -- a flat `read_dir` would list the
+        // legacy files and silently omit 639 MB the user cannot then see or
+        // delete. The retired `parakeet_ctc_0.6b` / `parakeet_ctc_1.1b`
+        // directories are gone with their providers.
+        let parakeet_dir = self.models_dir.join("parakeet");
+        if parakeet_dir.exists() {
+            for entry in walkdir::WalkDir::new(&parakeet_dir)
+                .into_iter()
+                .filter_map(Result::ok)
+            {
+                let metadata = match entry.metadata() {
+                    Ok(metadata) if metadata.is_file() => metadata,
+                    _ => continue,
+                };
+                // `parakeet/tokens.txt` is the legacy export;
+                // `parakeet/parakeet-tdt-0.6b-v3/tokens.txt` is v3. Label by
+                // the subdirectory so the two are told apart.
+                let label = entry
+                    .path()
+                    .parent()
+                    .filter(|parent| *parent != parakeet_dir)
+                    .and_then(|parent| parent.file_name())
+                    .map(|name| name.to_string_lossy().to_string())
+                    .unwrap_or_else(|| "legacy-110m".to_string());
+                let name = entry.file_name().to_string_lossy().to_string();
+                models.push(DownloadedModel {
+                    name: format!("Parakeet {} {}", label, name),
+                    provider: "parakeet".to_string(),
+                    path: entry.path().to_path_buf(),
+                    size_bytes: metadata.len(),
+                    downloaded_at: metadata.modified()?,
+                });
             }
         }
 
@@ -735,58 +747,6 @@ impl DownloadManager {
                         downloaded_at: metadata.modified()?,
                     });
                 }
-            }
-        }
-
-        // Check MLX Audio model bundles
-        let mlx_audio_dir = self.models_dir.join("mlx_audio");
-        if mlx_audio_dir.exists() {
-            let mut entries = tokio::fs::read_dir(&mlx_audio_dir).await?;
-            while let Some(entry) = entries.next_entry().await? {
-                let metadata = entry.metadata().await?;
-                if !metadata.is_dir() {
-                    continue;
-                }
-
-                let manifest_path = entry.path().join("manifest.json");
-                let bundle_size = walkdir::WalkDir::new(entry.path())
-                    .into_iter()
-                    .filter_map(Result::ok)
-                    .filter_map(|item| item.metadata().ok())
-                    .filter(|metadata| metadata.is_file())
-                    .map(|metadata| metadata.len())
-                    .sum();
-                if bundle_size == 0 {
-                    continue;
-                }
-
-                let manifest = if manifest_path.exists() {
-                    tokio::fs::read_to_string(&manifest_path)
-                        .await
-                        .ok()
-                        .and_then(|raw| serde_json::from_str::<serde_json::Value>(&raw).ok())
-                } else {
-                    None
-                };
-                let fallback_name = entry.file_name().to_string_lossy().to_string();
-                let model_id = manifest
-                    .as_ref()
-                    .and_then(|payload| payload.get("model_id"))
-                    .and_then(|value| value.as_str())
-                    .unwrap_or(fallback_name.as_str())
-                    .to_string();
-
-                models.push(DownloadedModel {
-                    name: format!("MLX Audio {}", model_id),
-                    provider: "mlx_audio".to_string(),
-                    path: if manifest_path.exists() {
-                        manifest_path
-                    } else {
-                        entry.path()
-                    },
-                    size_bytes: bundle_size,
-                    downloaded_at: metadata.modified()?,
-                });
             }
         }
 
@@ -1172,6 +1132,51 @@ mod tests {
     #[test]
     fn test_download_client_builds_without_total_timeout() {
         build_download_client().expect("download client should build");
+    }
+
+    /// Parakeet TDT v3 lives in a subdirectory of the legacy model dir, so a
+    /// flat `read_dir` of `models/parakeet` would report the legacy files and
+    /// silently omit the 639 MB v3 bundle -- leaving the user unable to see or
+    /// delete the largest thing the app downloads.
+    #[tokio::test]
+    async fn downloaded_model_listing_includes_the_parakeet_v3_subdirectory() {
+        let models_dir = std::env::temp_dir()
+            .join("plainsong-download-listing")
+            .join(uuid::Uuid::new_v4().to_string());
+        let v3_dir = models_dir.join("parakeet").join("parakeet-tdt-0.6b-v3");
+        std::fs::create_dir_all(&v3_dir).expect("create v3 dir");
+        std::fs::write(models_dir.join("parakeet").join("tokens.txt"), b"legacy")
+            .expect("write legacy tokens");
+        std::fs::write(v3_dir.join("encoder.int8.onnx"), b"v3-encoder").expect("write v3 encoder");
+
+        let manager = DownloadManager {
+            client: build_download_client().expect("client"),
+            models_dir: models_dir.clone(),
+        };
+        let listed = manager
+            .list_downloaded_models()
+            .await
+            .expect("listing should succeed");
+
+        let names: Vec<&str> = listed.iter().map(|model| model.name.as_str()).collect();
+        assert!(
+            names
+                .iter()
+                .any(|name| name.contains("parakeet-tdt-0.6b-v3") && name.contains("encoder")),
+            "v3 bundle should be listed, got {names:?}"
+        );
+        assert!(
+            names
+                .iter()
+                .any(|name| name.contains("legacy-110m") && name.contains("tokens.txt")),
+            "legacy export should still be listed, got {names:?}"
+        );
+        assert!(
+            listed.iter().all(|model| model.provider == "parakeet"),
+            "both routes report the parakeet provider"
+        );
+
+        std::fs::remove_dir_all(&models_dir).ok();
     }
 
     #[test]

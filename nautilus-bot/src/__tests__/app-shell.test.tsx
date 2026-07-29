@@ -58,7 +58,8 @@ const settings = {
   theme: "dark",
   ui: { colorScheme: "default" },
   privacy: {
-    llmProvider: "ollama",
+    dictationAi: { provider: "ollama", modelId: null },
+    meetingsAi: { provider: "ollama", modelId: null },
     remoteProcessingEnabled: false,
   },
   shortcuts: {

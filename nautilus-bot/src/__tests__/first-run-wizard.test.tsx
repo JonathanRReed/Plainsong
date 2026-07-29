@@ -97,8 +97,8 @@ const createSettings = () => ({
   export: {},
   privacy: {
     remoteProcessingEnabled: false,
-    llmProvider: "ollama",
-    llmModelId: null,
+    dictationAi: { provider: "ollama", modelId: null },
+    meetingsAi: { provider: "ollama", modelId: null },
     exportRoot: null,
     vaultInitialized: false,
     vaultSalt: null,
@@ -132,7 +132,7 @@ function deferred<T>() {
 
 function getMeetingVerificationResult() {
   const provider = currentSettings.transcription.meetingProvider;
-  const ready = provider === "distil_whisper" || provider === "parakeet" || provider === "voxtral";
+  const ready = provider === "distil_whisper" || provider === "parakeet";
 
   if (ready) {
     return {

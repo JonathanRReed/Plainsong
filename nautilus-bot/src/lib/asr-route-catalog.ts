@@ -1,11 +1,13 @@
 import { normalizeDownloadStatus } from "@/lib/download-status";
 import {
+  describeAsrModel,
+  getAsrModelCapability,
   isDownloadableProvider,
   isMeetingEligibleModel,
   isSharedMeetingCompatible,
-  modelSupportsMlxAcceleration,
   providerHostingPreference,
 } from "@/lib/asr-capabilities";
+import type { AsrModelCapability } from "@/lib/asr-capabilities";
 import type {
   AsrProviderInfo,
   AsrProviderInventory,
@@ -47,12 +49,15 @@ export interface AsrRouteCatalogEntry {
   selectable: boolean;
   downloadable: boolean;
   experimental: boolean;
-  supportsMlxAcceleration: boolean;
   capabilityBadge: "Best for dictation" | "Best for meetings" | "Shared";
   readinessLabel: string;
   action: AsrRouteAction;
   actionLabel: string | null;
   summary: string;
+  /** Size, language coverage, tier and pause behaviour. Null for cloud routes. */
+  capability: AsrModelCapability | null;
+  /** One honest sentence including the downside. Null when no metadata exists. */
+  capabilitySummary: string | null;
   recommendedRank: Record<AsrRouteLane, number | null>;
 }
 
@@ -72,7 +77,6 @@ const DICTATION_PROVIDER_ORDER: AsrProviderType[] = [
   "groq",
   "cohere_transcribe",
   "parakeet",
-  "voxtral",
 ];
 
 const MEETING_PROVIDER_ORDER_BY_POLICY: Record<
@@ -82,7 +86,6 @@ const MEETING_PROVIDER_ORDER_BY_POLICY: Record<
   prefer_local: [
     "distil_whisper",
     "parakeet",
-    "voxtral",
     "openai_cloud",
     "elevenlabs_scribe",
     "groq",
@@ -95,7 +98,6 @@ const MEETING_PROVIDER_ORDER_BY_POLICY: Record<
     "cohere_transcribe",
     "distil_whisper",
     "parakeet",
-    "voxtral",
   ],
 };
 
@@ -113,10 +115,7 @@ export function laneProviderOrder(
   return MEETING_PROVIDER_ORDER_BY_POLICY[meetingRoutePolicy];
 }
 
-function routeHosting(
-  providerType: AsrProviderType,
-  modelId: string,
-): AsrRouteHosting {
+function routeHosting(providerType: AsrProviderType): AsrRouteHosting {
   if (
     providerType === "macos_apple_speech" ||
     providerType === "windows_sdk_dictation"
@@ -124,9 +123,7 @@ function routeHosting(
     return "platform";
   }
 
-  return providerHostingPreference(providerType, modelId) === "cloud"
-    ? "cloud"
-    : "local";
+  return providerHostingPreference(providerType) === "cloud" ? "cloud" : "local";
 }
 
 function routeReadiness(
@@ -275,9 +272,7 @@ function isExperimentalRoute(providerType: AsrProviderType, modelId: string) {
   return (
     providerType === "whisper_candle" ||
     normalized.includes("experimental") ||
-    normalized === "parakeet-ctc-1.1b" ||
-    normalized === "parakeet-tdt-ctc-110m" ||
-    normalized === "voxtral-small"
+    normalized === "parakeet-tdt-ctc-110m"
   );
 }
 
@@ -285,7 +280,6 @@ function routeSummary(
   providerType: AsrProviderType,
   modelId: string,
   capabilityBadge: AsrRouteCatalogEntry["capabilityBadge"],
-  hosting: AsrRouteHosting,
 ) {
   if (providerType === "moonshine") {
     return "Lowest-friction local dictation route for fast everyday writing.";
@@ -294,9 +288,11 @@ function routeSummary(
     return "Balanced default with strong local speed and good meeting coverage.";
   }
   if (providerType === "parakeet") {
+    // The only surviving non-v3 route is the legacy 110M export, which is
+    // English-only and short-form -- it must not claim meeting coverage.
     return modelId === "parakeet-tdt-0.6b-v3"
       ? "Higher-accuracy local meeting route with the current recommended Parakeet release."
-      : "Parakeet accuracy route for meetings and longer recordings.";
+      : "Legacy English-only Parakeet export, kept as a short-form dictation fallback.";
   }
   if (providerType === "openai_cloud") {
     return "Cloud transcription route tuned for higher-quality meeting and dictation output.";
@@ -321,11 +317,6 @@ function routeSummary(
   }
   if (providerType === "whisper") {
     return "Flexible Whisper family for local power users who want finer model control.";
-  }
-  if (providerType === "voxtral") {
-    return hosting === "cloud"
-      ? "Cloud Voxtral route for users who want managed setup over local assets."
-      : "Meeting-capable local route with MLX acceleration support on Apple Silicon.";
   }
   return capabilityBadge === "Shared"
     ? "One route that stays viable for both dictation and meetings."
@@ -432,53 +423,41 @@ export function buildAsrRouteCatalog(
   meetingRoutePolicy: MeetingRoutePolicy,
 ): AsrRouteCatalogEntry[] {
   const baseRoutes = providers.flatMap((provider) =>
-    provider.providerType === "mlx_audio"
-      ? []
-      : provider.modelOptions.map((option) => {
-          const hosting = routeHosting(provider.providerType, option.id);
-          const readiness = routeReadiness(provider, hosting);
-          const capabilityBadge = routeCapabilityBadge(
-            provider.providerType,
-            option.id,
-          );
-          const actionState = routeAction(provider, readiness, hosting);
+    provider.modelOptions.map((option) => {
+      const hosting = routeHosting(provider.providerType);
+      const readiness = routeReadiness(provider, hosting);
+      const capabilityBadge = routeCapabilityBadge(provider.providerType, option.id);
+      const actionState = routeAction(provider, readiness, hosting);
 
-          return {
-            routeId: routeIdFor(provider.providerType, option.id),
-            providerType: provider.providerType,
-            modelId: option.id,
-            label: option.label,
-            providerLabel: provider.name,
-            providerDescription: provider.description,
-            laneCompatibility: routeLaneCompatibility(provider.providerType, option.id),
-            hosting,
-            readiness,
-            readinessDetail: provider.platformReadiness?.message ?? null,
-            selectable:
-              provider.providerType !== "macos_apple_speech" || readiness === "ready",
-            downloadable: isDownloadableProvider(provider.providerType),
-            experimental: isExperimentalRoute(provider.providerType, option.id),
-            supportsMlxAcceleration: modelSupportsMlxAcceleration(
-              provider.providerType,
-              option.id,
-            ),
-            capabilityBadge,
-            readinessLabel: routeReadinessLabel(provider, readiness),
-            action: actionState.action,
-            actionLabel: actionState.actionLabel,
-            summary: routeSummary(
-              provider.providerType,
-              option.id,
-              capabilityBadge,
-              hosting,
-            ),
-            recommendedRank: {
-              dictation: null,
-              meeting: null,
-              shared: null,
-            } as Record<AsrRouteLane, number | null>,
-          } satisfies AsrRouteCatalogEntry;
-        }),
+      return {
+        routeId: routeIdFor(provider.providerType, option.id),
+        providerType: provider.providerType,
+        modelId: option.id,
+        label: option.label,
+        providerLabel: provider.name,
+        providerDescription: provider.description,
+        laneCompatibility: routeLaneCompatibility(provider.providerType, option.id),
+        hosting,
+        readiness,
+        readinessDetail: provider.platformReadiness?.message ?? null,
+        selectable:
+          provider.providerType !== "macos_apple_speech" || readiness === "ready",
+        downloadable: isDownloadableProvider(provider.providerType),
+        experimental: isExperimentalRoute(provider.providerType, option.id),
+        capabilityBadge,
+        readinessLabel: routeReadinessLabel(provider, readiness),
+        action: actionState.action,
+        actionLabel: actionState.actionLabel,
+        summary: routeSummary(provider.providerType, option.id, capabilityBadge),
+        capability: getAsrModelCapability(provider.providerType, option.id),
+        capabilitySummary: describeAsrModel(provider.providerType, option.id),
+        recommendedRank: {
+          dictation: null,
+          meeting: null,
+          shared: null,
+        } as Record<AsrRouteLane, number | null>,
+      } satisfies AsrRouteCatalogEntry;
+    }),
   );
 
   for (const lane of ["shared", "dictation", "meeting"] as const) {

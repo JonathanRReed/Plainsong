@@ -2,20 +2,58 @@ import type { AsrProviderInfo, AsrProviderType } from "@/types";
 
 export type DictationRoutePreference = "local" | "cloud";
 
-const HIDDEN_PROVIDER_SET = new Set<AsrProviderType>(["mlx_audio"]);
+/**
+ * Every provider the app can actually run, as a runtime value rather than a
+ * type-only union. Settings files and stored transcripts carry provider names
+ * as bare strings, so the only way to reject a name for an engine that no
+ * longer exists -- `mlx_audio` in an old settings file, say -- is to check it
+ * against a list that survives type erasure.
+ *
+ * The `satisfies Record<AsrProviderType, true>` clause is what keeps this
+ * honest: it fails to compile both when a variant is missing and when a name
+ * here is not a real variant. That is the check the duplicated copy of this
+ * list in recordings-view.tsx never had, which is how `mlx_audio` and
+ * `voxtral` stayed in it after the engines were deleted.
+ */
+const ASR_PROVIDER_TYPE_FLAGS = {
+  whisper: true,
+  parakeet: true,
+  whisper_candle: true,
+  distil_whisper: true,
+  macos_apple_speech: true,
+  moonshine: true,
+  windows_sdk_dictation: true,
+  elevenlabs_scribe: true,
+  openai_cloud: true,
+  groq: true,
+  cohere_transcribe: true,
+} satisfies Record<AsrProviderType, true>;
+
+export const ASR_PROVIDER_TYPES = Object.keys(
+  ASR_PROVIDER_TYPE_FLAGS
+) as AsrProviderType[];
+
+/** True only for a provider name this build can still run. */
+export function isKnownAsrProvider(
+  providerType: string | null | undefined
+): providerType is AsrProviderType {
+  return Object.prototype.hasOwnProperty.call(
+    ASR_PROVIDER_TYPE_FLAGS,
+    (providerType ?? "").trim()
+  );
+}
+
 const DOWNLOADABLE_PROVIDER_SET = new Set<AsrProviderType>([
   "whisper",
   "parakeet",
   "whisper_candle",
   "distil_whisper",
   "moonshine",
-  "voxtral",
 ]);
 
 const MEETING_GRADE_PROVIDER_SET = new Set<AsrProviderType>([
   "distil_whisper",
   "parakeet",
-  "voxtral",
   "groq",
   "openai_cloud",
   "elevenlabs_scribe",
@@ -41,106 +79,6 @@ export function isDownloadableProvider(providerType: AsrProviderType) {
   return DOWNLOADABLE_PROVIDER_SET.has(providerType);
 }
 
-export function isVisibleAsrProvider(providerType: AsrProviderType) {
-  return !HIDDEN_PROVIDER_SET.has(providerType);
-}
-
-export function mlxMappedModelId(
-  providerType: AsrProviderType,
-  modelId: string | null | undefined
-) {
-  const normalized = (modelId ?? "").trim();
-  switch (providerType) {
-    case "moonshine":
-      if (normalized === "moonshine-tiny") return "UsefulSensors/moonshine-tiny";
-      if (normalized === "moonshine-base" || normalized === "moonshine") {
-        return "UsefulSensors/moonshine-base";
-      }
-      return null;
-    case "whisper":
-      switch (normalized) {
-        case "tiny":
-          return "mlx-community/whisper-tiny-asr-fp16";
-        case "tiny.en":
-          return "mlx-community/whisper-tiny.en-asr-fp16";
-        case "base":
-          return "mlx-community/whisper-base-asr-fp16";
-        case "base.en":
-          return "mlx-community/whisper-base.en-asr-fp16";
-        case "small":
-          return "mlx-community/whisper-small-asr-fp16";
-        case "small.en":
-          return "mlx-community/whisper-small.en-asr-fp16";
-        case "medium":
-          return "mlx-community/whisper-medium-asr-fp16";
-        case "medium.en":
-          return "mlx-community/whisper-medium.en-asr-fp16";
-        case "large-v3":
-          return "mlx-community/whisper-large-v3-asr-fp16";
-        case "large-v3-turbo":
-          return "mlx-community/whisper-large-v3-turbo-asr-fp16";
-        default:
-          return null;
-      }
-    case "parakeet":
-      if (normalized === "parakeet-ctc-0.6b" || normalized === "parakeet-tdt-0.6b-v3") {
-        return "mlx-community/parakeet-tdt-0.6b-v3";
-      }
-      return null;
-    case "voxtral":
-      if (normalized === "voxtral-local") return "mlx-community/Voxtral-Mini-3B-2507-bf16";
-      return null;
-    default:
-      return null;
-  }
-}
-
-export function modelSupportsMlxAcceleration(
-  providerType: AsrProviderType,
-  modelId: string | null | undefined
-) {
-  return mlxMappedModelId(providerType, modelId) !== null;
-}
-
-export function visibleRouteForMlxModel(modelId: string | null | undefined): {
-  providerType: AsrProviderType;
-  modelId: string;
-} | null {
-  const normalized = (modelId ?? "").trim();
-  switch (normalized) {
-    case "UsefulSensors/moonshine-tiny":
-      return { providerType: "moonshine", modelId: "moonshine-tiny" };
-    case "UsefulSensors/moonshine-base":
-      return { providerType: "moonshine", modelId: "moonshine-base" };
-    case "mlx-community/whisper-tiny-asr-fp16":
-      return { providerType: "whisper", modelId: "tiny" };
-    case "mlx-community/whisper-tiny.en-asr-fp16":
-      return { providerType: "whisper", modelId: "tiny.en" };
-    case "mlx-community/whisper-base-asr-fp16":
-      return { providerType: "whisper", modelId: "base" };
-    case "mlx-community/whisper-base.en-asr-fp16":
-      return { providerType: "whisper", modelId: "base.en" };
-    case "mlx-community/whisper-small-asr-fp16":
-      return { providerType: "whisper", modelId: "small" };
-    case "mlx-community/whisper-small.en-asr-fp16":
-      return { providerType: "whisper", modelId: "small.en" };
-    case "mlx-community/whisper-medium-asr-fp16":
-      return { providerType: "whisper", modelId: "medium" };
-    case "mlx-community/whisper-medium.en-asr-fp16":
-      return { providerType: "whisper", modelId: "medium.en" };
-    case "mlx-community/whisper-large-v3-asr-fp16":
-      return { providerType: "whisper", modelId: "large-v3" };
-    case "mlx-community/whisper-large-v3-turbo-asr-fp16":
-      return { providerType: "whisper", modelId: "large-v3-turbo" };
-    case "mlx-community/parakeet-tdt-0.6b-v3":
-      return { providerType: "parakeet", modelId: "parakeet-tdt-0.6b-v3" };
-    case "mlx-community/Voxtral-Mini-3B-2507-bf16":
-      return { providerType: "voxtral", modelId: "voxtral-local" };
-    default:
-      return null;
-  }
-}
-
 export function isMeetingGradeProvider(providerType: AsrProviderType) {
   return MEETING_GRADE_PROVIDER_SET.has(providerType);
 }
@@ -154,13 +92,8 @@ export function isCloudProvider(providerType: AsrProviderType) {
 }
 
 export function providerHostingPreference(
-  providerType: AsrProviderType,
-  modelId?: string | null
+  providerType: AsrProviderType
 ): DictationRoutePreference {
-  if (providerType === "voxtral" && (modelId ?? "").trim() === "voxtral-cloud") {
-    return "cloud";
-  }
-
   return isCloudProvider(providerType) ? "cloud" : "local";
 }
 
@@ -182,14 +115,9 @@ export function isMeetingEligibleModel(providerType: AsrProviderType, modelId: s
     case "distil_whisper":
       return normalizedModelId.startsWith("distil");
     case "parakeet":
-      return (
-        normalizedModelId.startsWith("parakeet-ctc") ||
-        normalizedModelId.startsWith("parakeet-tdt-0.6b")
-      );
-    case "mlx_audio":
-      return !normalizedModelId.includes("moonshine");
-    case "voxtral":
-      return normalizedModelId.startsWith("voxtral");
+      // Only the v3 TDT route is long-form capable. The legacy 110M export is
+      // a short-form English model and stays out of the meeting lane.
+      return normalizedModelId.startsWith("parakeet-tdt-0.6b");
     case "groq":
     case "openai_cloud":
     case "elevenlabs_scribe":
@@ -216,17 +144,9 @@ export function providerCapabilityLabel(providerType: AsrProviderType) {
   return "General";
 }
 
-export function providerHostingLabel(
-  providerType: AsrProviderType,
-  modelId?: string | null,
-): string {
+export function providerHostingLabel(providerType: AsrProviderType): string {
   if (providerType === "macos_apple_speech") {
     return "On-device";
-  }
-
-  // Handle providers that can be either local or cloud based on model
-  if (providerType === "voxtral" && (modelId ?? "").trim() === "voxtral-cloud") {
-    return "Cloud";
   }
 
   return isCloudProvider(providerType) ? "Cloud" : "Local";
@@ -257,4 +177,312 @@ export function providerActionLabel(provider: AsrProviderInfo) {
   }
 
   return "Re-check";
+}
+
+// ---------------------------------------------------------------------------
+// Per-model capability metadata
+//
+// The UI had no language field at all, which is why six multilingual Whisper
+// builds shipped visually indistinguishable from the English-only `.en` ones.
+// Everything below is the metadata needed to tell them apart honestly.
+// ---------------------------------------------------------------------------
+
+/**
+ * What a model does when the speaker stops talking mid-utterance. This is not
+ * trivia -- it is the single most user-visible difference between the two
+ * families during dictation.
+ *
+ * `encoder_decoder` (Whisper and its derivatives) runs an autoregressive
+ * decoder that always wants to emit the next token, so a long pause gets filled
+ * with invented text: repeated phrases, stray thank-yous, subtitle boilerplate
+ * absorbed from the training data.
+ *
+ * `transducer` (Parakeet) emits a blank per frame, so silence produces silence.
+ * The legacy 110M export runs its CTC head rather than the transducer head, but
+ * it shares the property that matters here: blank frames produce no text.
+ */
+export type AsrPauseBehavior = "encoder_decoder" | "transducer";
+
+/**
+ * Where a model sits in the picker. Exactly three routes are promoted; the rest
+ * live behind a "More models" disclosure so the default list stays readable.
+ */
+export type AsrModelTier = "promoted" | "more";
+
+export interface AsrModelLanguageSupport {
+  /** True when the model was trained on English alone and will mistranscribe anything else. */
+  englishOnly: boolean;
+  /** Approximate count claimed upstream; 1 for the English-only builds. */
+  count: number;
+  /** Short renderable label, e.g. "English only", "~100 languages". */
+  label: string;
+}
+
+export interface AsrModelCapability {
+  providerType: AsrProviderType;
+  modelId: string;
+  languages: AsrModelLanguageSupport;
+  /**
+   * Download size in **MiB** (2^20 bytes), not MB (10^6). The unit is not
+   * cosmetic: `ggml-base.en.bin` is 147,964,211 bytes, which is 141.1 MiB but
+   * 148.0 MB, and the table previously carried one entry in each unit while
+   * rendering them side by side.
+   *
+   * Every number here mirrors the Rust side, whose `size_mb` fields are also
+   * MiB despite the name -- see `min_expected_model_bytes` in
+   * rust-sidecar/src/download/mod.rs, which multiplies by 1024*1024. The
+   * sources are that file's table for whisper.cpp and each provider's own
+   * `model_info` for the rest. `formatModelSize` is the only renderer and it
+   * divides by 1024, so the displayed unit matches the stored one.
+   */
+  sizeMib: number;
+  tier: AsrModelTier;
+  pauseBehavior: AsrPauseBehavior;
+  /** What picking this model costs you. Never a selling point. */
+  tradeoff: string;
+}
+
+const ENGLISH_ONLY: AsrModelLanguageSupport = {
+  englishOnly: true,
+  count: 1,
+  label: "English only",
+};
+
+const WHISPER_MULTILINGUAL: AsrModelLanguageSupport = {
+  englishOnly: false,
+  count: 99,
+  label: "~100 languages",
+};
+
+const PARAKEET_V3_LANGUAGES: AsrModelLanguageSupport = {
+  englishOnly: false,
+  count: 25,
+  label: "25 European languages",
+};
+
+const ASR_MODEL_CAPABILITIES: readonly AsrModelCapability[] = [
+  {
+    providerType: "whisper",
+    modelId: "tiny",
+    languages: WHISPER_MULTILINGUAL,
+    sizeMib: 75,
+    tier: "more",
+    pauseBehavior: "encoder_decoder",
+    tradeoff:
+      "it garbles proper nouns and accented speech often enough that you will retype sentences.",
+  },
+  {
+    providerType: "whisper",
+    modelId: "tiny.en",
+    languages: ENGLISH_ONLY,
+    sizeMib: 75,
+    tier: "more",
+    pauseBehavior: "encoder_decoder",
+    tradeoff:
+      "it has the same accuracy problems as tiny, without the option of another language.",
+  },
+  {
+    providerType: "whisper",
+    modelId: "base",
+    languages: WHISPER_MULTILINGUAL,
+    sizeMib: 142,
+    tier: "more",
+    pauseBehavior: "encoder_decoder",
+    tradeoff:
+      "the multilingual weights cost accuracy on English against base.en at effectively the same size.",
+  },
+  {
+    providerType: "whisper",
+    modelId: "base.en",
+    languages: ENGLISH_ONLY,
+    // Same file size as `base` -- 147,964,211 bytes measured on disk. The two
+    // must stay equal, because the `base` tradeoff below says so in words.
+    sizeMib: 142,
+    tier: "promoted",
+    pauseBehavior: "encoder_decoder",
+    tradeoff:
+      "speak Spanish or German into it and it returns English-sounding nonsense rather than admitting it cannot.",
+  },
+  {
+    providerType: "whisper",
+    modelId: "small",
+    languages: WHISPER_MULTILINGUAL,
+    sizeMib: 466,
+    tier: "more",
+    pauseBehavior: "encoder_decoder",
+    tradeoff:
+      "about three times the download of base.en for a gain you may not notice on short dictation.",
+  },
+  {
+    providerType: "whisper",
+    modelId: "small.en",
+    languages: ENGLISH_ONLY,
+    sizeMib: 466,
+    tier: "more",
+    pauseBehavior: "encoder_decoder",
+    tradeoff:
+      "about three times the download of base.en for a gain you may not notice on short dictation.",
+  },
+  {
+    providerType: "whisper",
+    modelId: "medium",
+    languages: WHISPER_MULTILINGUAL,
+    sizeMib: 1500,
+    tier: "more",
+    pauseBehavior: "encoder_decoder",
+    tradeoff:
+      "roughly ten times the size of base.en, and proportionally slower on every utterance.",
+  },
+  {
+    providerType: "whisper",
+    modelId: "medium.en",
+    languages: ENGLISH_ONLY,
+    sizeMib: 1500,
+    tier: "more",
+    pauseBehavior: "encoder_decoder",
+    tradeoff:
+      "roughly ten times the size of base.en, and proportionally slower on every utterance.",
+  },
+  {
+    providerType: "whisper",
+    modelId: "large-v3",
+    languages: WHISPER_MULTILINGUAL,
+    sizeMib: 2900,
+    tier: "more",
+    pauseBehavior: "encoder_decoder",
+    tradeoff:
+      "roughly twenty times the size of base.en and slower again than large-v3-turbo, for a narrow accuracy difference.",
+  },
+  {
+    providerType: "whisper",
+    modelId: "large-v3-turbo",
+    languages: WHISPER_MULTILINGUAL,
+    sizeMib: 1620,
+    tier: "promoted",
+    pauseBehavior: "encoder_decoder",
+    tradeoff:
+      "about eleven times the size of base.en and slower per utterance; take it for the language coverage, not the speed.",
+  },
+  {
+    providerType: "parakeet",
+    modelId: "parakeet-tdt-0.6b-v3",
+    languages: PARAKEET_V3_LANGUAGES,
+    sizeMib: 639,
+    tier: "promoted",
+    pauseBehavior: "transducer",
+    tradeoff:
+      "Mandarin, Hindi and Arabic are not covered at all, and the download is four separate ONNX files rather than one.",
+  },
+  {
+    providerType: "parakeet",
+    modelId: "parakeet-tdt-ctc-110m",
+    languages: ENGLISH_ONLY,
+    // 458,161,021 bytes for model.onnx upstream = 436.9 MiB. Mirrors
+    // `size_mb: 437.0` in rust-sidecar/src/asr/parakeet.rs `model_info`.
+    sizeMib: 437,
+    tier: "more",
+    pauseBehavior: "transducer",
+    tradeoff:
+      "an older English-only export kept as a fallback; less accurate than the v3 model and short-form only.",
+  },
+  {
+    providerType: "whisper_candle",
+    modelId: "whisper-large-v3-turbo",
+    languages: WHISPER_MULTILINGUAL,
+    sizeMib: 1600,
+    tier: "more",
+    pauseBehavior: "encoder_decoder",
+    tradeoff:
+      "the same weights as the whisper.cpp large-v3-turbo route, run through Candle -- a fallback engine, not extra accuracy.",
+  },
+  {
+    providerType: "distil_whisper",
+    modelId: "distil-large-v3.5",
+    languages: ENGLISH_ONLY,
+    sizeMib: 1530,
+    tier: "more",
+    pauseBehavior: "encoder_decoder",
+    tradeoff: "that is a lot of disk for a model that cannot switch out of English.",
+  },
+  {
+    providerType: "moonshine",
+    modelId: "moonshine-tiny",
+    languages: ENGLISH_ONLY,
+    sizeMib: 120,
+    tier: "more",
+    pauseBehavior: "encoder_decoder",
+    tradeoff: "tuned for very short utterances; accuracy drops on anything longer.",
+  },
+  {
+    providerType: "moonshine",
+    modelId: "moonshine-base",
+    languages: ENGLISH_ONLY,
+    sizeMib: 246,
+    tier: "more",
+    pauseBehavior: "encoder_decoder",
+    tradeoff: "tuned for short utterances; longer recordings drift.",
+  },
+];
+
+const CAPABILITY_BY_ROUTE = new Map<string, AsrModelCapability>(
+  ASR_MODEL_CAPABILITIES.map((entry) => [
+    `${entry.providerType}:${entry.modelId}`,
+    entry,
+  ])
+);
+
+/**
+ * Metadata for a specific provider/model pair, or null when we have no measured
+ * numbers for it -- cloud routes have no download and are deliberately absent
+ * rather than given invented sizes.
+ */
+export function getAsrModelCapability(
+  providerType: AsrProviderType,
+  modelId: string | null | undefined
+): AsrModelCapability | null {
+  return CAPABILITY_BY_ROUTE.get(`${providerType}:${(modelId ?? "").trim()}`) ?? null;
+}
+
+export function asrModelTier(
+  providerType: AsrProviderType,
+  modelId: string | null | undefined
+): AsrModelTier {
+  return getAsrModelCapability(providerType, modelId)?.tier ?? "more";
+}
+
+/**
+ * Renders an `AsrModelCapability.sizeMib` value. The divisor is 1024 and the
+ * suffix says MiB/GiB, because the stored numbers are binary units -- dividing
+ * by 1000 and printing "MB" understated every size in the picker by ~5%.
+ */
+export function formatModelSize(sizeMib: number): string {
+  if (!Number.isFinite(sizeMib) || sizeMib <= 0) {
+    return "size unknown";
+  }
+  return sizeMib >= 1024
+    ? `${(sizeMib / 1024).toFixed(1)} GiB`
+    : `${Math.round(sizeMib)} MiB`;
+}
+
+export function describePauseBehavior(behavior: AsrPauseBehavior): string {
+  return behavior === "transducer"
+    ? "Stays quiet through pauses: silence produces no text."
+    : "Its decoder keeps emitting through long pauses, so silence can become invented words.";
+}
+
+/**
+ * One sentence a user can act on: size, language coverage, and the downside.
+ * Returns null for routes we have no measured metadata for, so callers render
+ * nothing rather than a plausible-sounding guess.
+ */
+export function describeAsrModel(
+  providerType: AsrProviderType,
+  modelId: string | null | undefined
+): string | null {
+  const capability = getAsrModelCapability(providerType, modelId);
+  if (!capability) {
+    return null;
+  }
+
+  return `${formatModelSize(capability.sizeMib)}, ${capability.languages.label} — ${capability.tradeoff}`;
 }
