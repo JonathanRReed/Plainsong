@@ -113,15 +113,14 @@ impl WhisperProvider {
         // Enable GPU acceleration on supported platforms
         let mut params = whisper_rs::WhisperContextParameters::default();
 
-        // On macOS with Metal/CoreML support, use_gpu is automatically enabled
-        // when whisper-rs is compiled with "metal" and "coreml" features
+        // On macOS, use_gpu is automatically enabled when whisper-rs is
+        // compiled with the "metal" feature. CoreML is deliberately not enabled
+        // — see the whisper-gpu feature in Cargo.toml for why.
         #[cfg(target_os = "macos")]
         {
             params.use_gpu = true;
             params.flash_attn = true; // Flash attention for faster decoding
-            tracing::info!(
-                "Whisper: enabling GPU acceleration (Metal/CoreML) with flash attention"
-            );
+            tracing::info!("Whisper: enabling GPU acceleration (Metal) with flash attention");
         }
 
         #[cfg(not(target_os = "macos"))]
