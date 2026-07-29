@@ -109,10 +109,25 @@ asr-parakeet = ["ort", "ndarray", "download-manager", "audio-processing"]
 asr-canary = ["candle-core", "candle-nn", "candle-transformers", "tokenizers", "download-manager", "audio-processing"]
 asr-all = ["asr-whisper", "asr-parakeet", "asr-canary", "diarization"]
 
-# Whisper GPU acceleration (Metal + CoreML — macOS only). No CUDA feature is
-# wired; non-macOS builds must use --no-default-features and re-enable
+# Whisper GPU acceleration (Metal — macOS only). No CUDA feature is wired;
+# non-macOS builds must use --no-default-features and re-enable
 # asr-all/sqlcipher explicitly, or the whisper.cpp CMake build fails.
-whisper-gpu = ["whisper-rs?/metal", "whisper-rs?/coreml"]
+#
+# CoreML is deliberately NOT enabled. It was, and it never worked: with the
+# feature on, whisper.cpp tries to load `ggml-<model>-encoder.mlmodelc` on every
+# model init, but nothing in this repo ever downloads that artifact — not
+# scripts/provision-asr-assets.mjs, not src/download/, not asr/whisper.rs. The
+# models directory only ever contains `ggml-<model>.bin`. So every user on every
+# machine paid a failed load and an alarming
+# "failed to load Core ML model from ..." line in the log on every init, then
+# silently ran the Metal path anyway.
+#
+# Turning it back on means shipping the encoder too: it is published alongside
+# the ggml weights as a `.mlmodelc.zip` that has to be fetched and unpacked, and
+# it costs a one-time on-device compile the first time it loads. Worth doing
+# only with a measurement behind it. The Metal baseline to beat, measured on an
+# M4 Pro with base.en: 66ms p50 at 1s of audio, 101ms at 5.3s, 569ms at 44s.
+whisper-gpu = ["whisper-rs?/metal"]
 
 # SQLCipher for encrypted SQLite (optional, requires OpenSSL)
 sqlcipher = ["rusqlite/sqlcipher", "libsqlite3-sys/bundled-sqlcipher"]
