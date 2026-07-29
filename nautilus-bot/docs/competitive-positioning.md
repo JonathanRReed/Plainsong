@@ -1,6 +1,6 @@
 # Competitive positioning and roadmap
 
-Last reviewed: 2026-07-27
+Last reviewed: 2026-07-28
 
 This document keeps product claims tied to current, first-party evidence. It is
 not launch copy and it should not be used as a substitute for release QA.
@@ -13,7 +13,11 @@ not launch copy and it should not be used as a substitute for release QA.
 - Local dictation plus local meeting capture is not unique. Muesli describes
   local dictation, simultaneous microphone and system-audio meeting capture,
   live transcripts, diarization, and local model support in its
-  [public MIT repository](https://github.com/pHequals7/muesli).
+  [public MIT repository](https://github.com/Muesli-HQ/muesli). Its own
+  one-line description is "local meeting transcription + dictation for macOS
+  (Granola + WisprFlow alternative)" — the same sentence we would write about
+  ourselves.
+
 - Superwhisper offers both voice typing and device-side
   [meeting transcription](https://superwhisper.com/meeting-transcription),
   including optional speaker separation.
@@ -29,6 +33,29 @@ not launch copy and it should not be used as a substitute for release QA.
 Do not use star counts, fundraising estimates, review scores, legal allegations,
 or competitor incident claims in public copy unless they are re-verified from a
 primary source during the release review.
+
+## Install size, measured 2026-07-28
+
+Read from the GitHub releases API, exact bytes, not vendor marketing. Ours is
+`bun run gate:size` on the packaged signed build.
+
+| Product | Download | Note |
+| --- | --- | --- |
+| Handy `v0.9.4` aarch64 | 17 MB | MIT, Tauri, also Intel/Windows/Linux |
+| VoiceInk `v2.1` | 30 MB | closest architectural comparison: macOS-only, Apple Silicon, local-first |
+| Muesli `v0.8.0` | 90 MB | does both surfaces, as we do |
+| **Plainsong `v1.0.0`** | **136 MB** | 352 MB installed, ~493 MB once `base.en` lands |
+
+There is no architecture defence: 275 MB of our 352 MB installed is the Electron
+framework. Every competitor above also ships a small-model option (Handy's
+Moonshine V2 Tiny is ~31 MB against our 148 MB `base.en`), so their realistic
+floor is far below ours. We are large on disk and small in memory — 1.9 MB idle
+RSS on the sidecar, 0.45% average idle CPU — but nobody else publishes idle RSS,
+so that is a number we have rather than a comparison we win.
+
+**Do not publish a comparison table.** On these figures we lose most rows, and
+the table invites exactly the diff that embarrasses us.
+
 
 ## Plainsong's defensible position
 
