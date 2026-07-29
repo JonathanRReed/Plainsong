@@ -8,6 +8,13 @@ import {
   type KeyboardEvent,
 } from "react";
 import { AsrProviderManager } from "@/components/asr-provider-manager";
+import { ModelsScreen } from "@/components/models/models-screen";
+import {
+  AI_LANE_KEYS,
+  describeAnalysisDestination,
+  isRemoteAnalysisProvider,
+  type AiLaneKey,
+} from "@/components/models/ai-lanes";
 import { invoke, listen } from "@/lib/electron";
 import { Button } from "@/components/ui/button";
 import { Switch } from "@/components/ui/switch";
@@ -90,7 +97,7 @@ import type {
   ShortcutConflict,
 } from "@/lib/backend/settings";
 import type { AsrProviderInfo } from "@/types";
-import type { AiLaneSettings, Settings } from "@/types/settings";
+import type { Settings } from "@/types/settings";
 import { applyThemeScheme, normalizeThemeScheme } from "@/lib/theme-schemes";
 import { formatShortcutForDisplay, normalizeShortcut } from "@/lib/shortcuts";
 import {
@@ -104,6 +111,7 @@ import {
   Cloud,
   Database,
   Key,
+  Layers,
   Lock,
   Mic,
   Monitor,
@@ -118,6 +126,7 @@ import { UpdateStatusWidget, BetaChannelToggle } from "@/components/update";
 import { useToast } from "@/components/toast";
 
 type TabId =
+  | "models"
   | "asr"
   | "general"
   | "security"
@@ -254,9 +263,15 @@ async function withSettingsSectionTimeout<T>(
 
 const SETTINGS_TABS = [
   {
+    id: "models" as TabId,
+    label: "Models",
+    summary: "Which engine hears you, and which AI tidies the text",
+    icon: Layers,
+  },
+  {
     id: "asr" as TabId,
     label: "Transcription",
-    summary: "Microphones, speech engine, and dictation behavior",
+    summary: "Microphones, dictation behavior, and engine diagnostics",
     icon: Mic,
   },
   {
@@ -362,181 +377,6 @@ type ReadinessChipState = {
   status: string;
   tone: boolean | "neutral";
 };
-
-/**
- * Where an automatically analyzed transcript actually goes. Naming the
- * destination is the difference between disclosure and a switch label.
- */
-// The two AI lanes, as they are keyed on `Settings["privacy"]`. Dictation
-// cleanup runs on every capture behind a short timeout and wants a fast
-// model; meeting summaries are batch work that can afford a slower one, so
-// each lane picks its own provider and model.
-const AI_LANE_KEYS = ["dictationAi", "meetingsAi"] as const;
-type AiLaneKey = (typeof AI_LANE_KEYS)[number];
-
-// Every analysis provider we can name, and whether using it sends the
-// transcript off this machine. A provider missing from this map is a provider
-// we cannot make a claim about — see `isRemoteAnalysisProvider`.
-const ANALYSIS_PROVIDER_DESTINATIONS: Record<string, { label: string; remote: boolean }> = {
-  ollama: { label: "Ollama on this machine", remote: false },
-  openai: { label: "OpenAI", remote: true },
-  anthropic: { label: "Anthropic", remote: true },
-  gemini: { label: "Google Gemini", remote: true },
-  deepseek: { label: "DeepSeek", remote: true },
-  "ollama-cloud": { label: "Ollama Cloud", remote: true },
-};
-
-/// Whether analysis with this provider would leave the machine. Remote
-/// providers are refused outright when remote processing is off, so the
-/// disclosure must not promise a summary that policy will block.
-///
-/// An absent or unrecognized provider returns false on purpose. The old
-/// `provider !== "ollama"` shape treated `undefined` as remote, so any drift
-/// in the settings schema made the UI announce that transcripts were leaving
-/// the machine when they were not. A claim we can't substantiate is worse
-/// than no claim, so an unknown provider suppresses the disclosure instead of
-/// inventing one; `describeAnalysisDestination` renders it as unknown.
-function isRemoteAnalysisProvider(provider: string | undefined): boolean {
-  return ANALYSIS_PROVIDER_DESTINATIONS[provider ?? ""]?.remote ?? false;
-}
-
-function describeAnalysisDestination(provider: string | undefined): string {
-  return (
-    ANALYSIS_PROVIDER_DESTINATIONS[provider ?? ""]?.label ??
-    "an unrecognized analysis provider"
-  );
-}
-
-// The models a provider actually offers for analysis. OpenAI's /models
-// endpoint also returns embedding, audio and moderation models, and Google's
-// returns non-Gemini endpoints; none of them can write a summary, so they
-// never belong in this picker.
-function analysisModelChoices(
-  providerName: string,
-  models: string[],
-): string[] {
-  switch (providerName) {
-    case "openai":
-      return models
-        .filter(
-          (model) =>
-            model.includes("gpt") ||
-            model.includes("o1") ||
-            model.includes("o3") ||
-            model.includes("o4"),
-        )
-        .sort();
-    case "gemini":
-      return models.filter((model) => model.includes("gemini"));
-    default:
-      return models;
-  }
-}
-
-type AnalysisLanePickerProps = {
-  lane: AiLaneKey;
-  label: string;
-  help: string;
-  value: AiLaneSettings;
-  remoteProcessingEnabled: boolean;
-  models: string[];
-  modelsLoading: boolean;
-  onProviderChange: (lane: AiLaneKey, providerName: string) => void;
-  onModelChange: (lane: AiLaneKey, modelId: string | null) => void;
-};
-
-// One lane's provider + model. Rendered once per lane so that the two-lane
-// schema the backend reads is actually settable — a lane with no control is a
-// setting that can never be anything but its default.
-function AnalysisLanePicker({
-  lane,
-  label,
-  help,
-  value,
-  remoteProcessingEnabled,
-  models,
-  modelsLoading,
-  onProviderChange,
-  onModelChange,
-}: AnalysisLanePickerProps) {
-  const choices = analysisModelChoices(value.provider, models);
-
-  return (
-    <div className="space-y-4">
-      <div className="space-y-2">
-        <Label htmlFor={`${lane}-provider`}>{label}</Label>
-        <p className="text-sm text-muted-foreground">{help}</p>
-        <select
-          id={`${lane}-provider`}
-          value={value.provider}
-          onChange={(event: ChangeEvent<HTMLSelectElement>) =>
-            onProviderChange(lane, event.target.value)
-          }
-          className="w-full p-2 border rounded-md bg-background"
-        >
-          <option value="ollama">Ollama (on this Mac)</option>
-          <option value="openai">OpenAI</option>
-          <option value="anthropic">Anthropic</option>
-          <option value="gemini">Google Gemini</option>
-          <option value="deepseek">DeepSeek</option>
-          <option value="ollama-cloud">Ollama Cloud</option>
-        </select>
-        {!remoteProcessingEnabled &&
-        isRemoteAnalysisProvider(value.provider) ? (
-          <p className="text-sm text-rust">
-            This one runs in the cloud, but cloud AI is turned off — so nothing
-            will be written until you allow it below.
-          </p>
-        ) : null}
-      </div>
-
-      <div className="space-y-2">
-        <Label htmlFor={`${lane}-model`} className="flex items-center gap-2">
-          Model
-          {modelsLoading && <Loader2 className="h-3 w-3 animate-spin" />}
-        </Label>
-        {choices.length > 0 ? (
-          <>
-            <select
-              id={`${lane}-model`}
-              value={value.modelId ?? choices[0]}
-              onChange={(event: ChangeEvent<HTMLSelectElement>) =>
-                onModelChange(lane, event.target.value || null)
-              }
-              className="w-full p-2 border rounded-md bg-background"
-            >
-              {choices.map((model) => (
-                <option key={model} value={model}>
-                  {model}
-                </option>
-              ))}
-            </select>
-            <p className="text-sm text-muted-foreground">
-              This list comes from the service itself.
-            </p>
-          </>
-        ) : value.provider === "ollama" ? (
-          <div className="p-3 rounded border bg-muted/30 text-sm">
-            <p className="text-muted-foreground">
-              No Ollama models found. Run{" "}
-              <code className="bg-muted px-1 rounded">
-                ollama pull llama3.2
-              </code>{" "}
-              to download a model.
-            </p>
-          </div>
-        ) : (
-          <div className="p-3 rounded border border-rust/30 bg-rust/10 text-sm">
-            <p className="text-rust">
-              Add your {describeAnalysisDestination(value.provider)} API key
-              under Advanced below to see models.
-            </p>
-          </div>
-        )}
-      </div>
-    </div>
-  );
-}
 
 type RecordingEncryptionSummary = {
   chip: string;
@@ -1472,8 +1312,11 @@ export function SettingsView() {
     };
   }, []);
 
+  // Both tabs that can change an AI lane need the provider model lists: the
+  // Models screen renders the two lane pickers, and AI & Keys still names the
+  // destination of an automatic summary.
   useEffect(() => {
-    if (activeTab !== "ai") {
+    if (activeTab !== "ai" && activeTab !== "models") {
       return;
     }
     let mounted = true;
@@ -1709,7 +1552,7 @@ export function SettingsView() {
   // so it changes the one lane's `modelId` and nothing else — see
   // `patchSettings`.
   useEffect(() => {
-    if (!settings || activeTab !== "ai") {
+    if (!settings || (activeTab !== "ai" && activeTab !== "models")) {
       return;
     }
 
@@ -3270,6 +3113,21 @@ export function SettingsView() {
 
             <section className="overflow-hidden rounded-[24px] border border-border bg-card shadow-sm">
               <div className="space-y-6 px-4 py-5 sm:px-6 sm:py-6">
+                {activeTab === "models" && (
+                  <ModelsScreen
+                    settings={settings}
+                    onPatchSettings={patchSettings}
+                    aiModelsForProvider={getCachedModelsForProvider}
+                    aiModelsLoading={modelsLoading}
+                    onAiProviderChange={(lane, providerName) =>
+                      void updateAnalysisProvider(lane, providerName)
+                    }
+                    onAiModelChange={updateAnalysisModel}
+                    onOpenKeySettings={() => setActiveTab("ai")}
+                    onOpenDiagnostics={() => setActiveTab("asr")}
+                  />
+                )}
+
                 {activeTab === "asr" && (
                   <div className="space-y-5">
                     <div className="space-y-3">
@@ -4952,41 +4810,21 @@ export function SettingsView() {
                       />
                     </div>
 
-                    <AnalysisLanePicker
-                      lane="meetingsAi"
-                      label="Who writes summaries, answers, and actions"
-                      help="Runs once a meeting has ended, so it can afford a slower, smarter model."
-                      value={settings.privacy.meetingsAi}
-                      remoteProcessingEnabled={
-                        settings.privacy.remoteProcessingEnabled
-                      }
-                      models={getCachedModelsForProvider(
-                        settings.privacy.meetingsAi.provider,
-                      )}
-                      modelsLoading={modelsLoading}
-                      onProviderChange={(lane, providerName) =>
-                        void updateAnalysisProvider(lane, providerName)
-                      }
-                      onModelChange={updateAnalysisModel}
-                    />
-
-                    <AnalysisLanePicker
-                      lane="dictationAi"
-                      label="Who cleans up dictation"
-                      help="Runs on every capture behind a short timeout, so a smaller, faster model usually wins here. A dictation mode that carries its own AI provider overrides this while that mode is selected."
-                      value={settings.privacy.dictationAi}
-                      remoteProcessingEnabled={
-                        settings.privacy.remoteProcessingEnabled
-                      }
-                      models={getCachedModelsForProvider(
-                        settings.privacy.dictationAi.provider,
-                      )}
-                      modelsLoading={modelsLoading}
-                      onProviderChange={(lane, providerName) =>
-                        void updateAnalysisProvider(lane, providerName)
-                      }
-                      onModelChange={updateAnalysisModel}
-                    />
+                    {/* Which model writes them is chosen in Models, with the
+                        speech engines and the presets that set all four lanes
+                        at once. A second copy of those two pickers here would
+                        be two controls for one pair of settings keys. */}
+                    <div className="flex flex-col gap-3 rounded-md border border-border/60 bg-muted/20 p-4 lg:flex-row lg:items-center lg:justify-between">
+                      <p className="max-w-2xl text-sm leading-6 text-muted-foreground">
+                        {`Summaries are written by ${describeAnalysisDestination(settings.privacy.meetingsAi.provider)}, and dictation cleanup by ${describeAnalysisDestination(settings.privacy.dictationAi.provider)}. Both are chosen in Models.`}
+                      </p>
+                      <Button
+                        variant="secondary"
+                        onClick={() => setActiveTab("models")}
+                      >
+                        Open Models
+                      </Button>
+                    </div>
 
                     <div className="flex items-center justify-between">
                       <div className="space-y-0.5">

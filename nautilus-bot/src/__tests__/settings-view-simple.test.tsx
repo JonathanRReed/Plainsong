@@ -150,6 +150,9 @@ vi.mock("@/lib/backend", () => ({
   })),
   getBackupSetupReport: vi.fn(),
   getAsrProviders: vi.fn(async () => []),
+  getAsrProviderInventory: vi.fn(async () => []),
+  listDownloadedModels: vi.fn(async () => []),
+  downloadAsrModels: vi.fn(async () => {}),
   getDictationShortcutCapabilityStatus: vi.fn(async () => ({
     nativeShortcutAvailable: false,
   })),
@@ -888,15 +891,16 @@ describe("SettingsView performance behavior", () => {
       await Promise.resolve();
     });
 
-    const defaultProviderSelect = screen
-      .getByText("Who writes summaries, answers, and actions")
-      .closest("div")
-      ?.querySelector("select") as HTMLSelectElement;
+    // The lane pickers themselves moved to the Models tab; what this tab still
+    // states is where an automatic summary goes, which is the same setting.
+    const analysisDisclosure = screen
+      .getByText("Summarize every meeting automatically")
+      .closest(".flex.items-start.justify-between") as HTMLElement;
     const credentialProviderSelect = screen
       .getByText("API keys")
       .closest("div")
       ?.querySelector("select") as HTMLSelectElement;
-    expect(defaultProviderSelect.value).toBe("ollama");
+    expect(analysisDisclosure.textContent).toContain("Ollama on this machine");
 
     const saveCallsBeforeChange = vi.mocked(backend.saveSettings).mock.calls.length;
     fireEvent.change(credentialProviderSelect, {
@@ -915,7 +919,7 @@ describe("SettingsView performance behavior", () => {
     // silently steer the app's actual analysis provider away from ollama --
     // this selector no longer writes settings.privacy.meetingsAi, so it must
     // not trigger a settings save at all.
-    expect(defaultProviderSelect.value).toBe("ollama");
+    expect(analysisDisclosure.textContent).toContain("Ollama on this machine");
     expect(vi.mocked(backend.saveSettings).mock.calls.length).toBe(
       saveCallsBeforeChange,
     );
@@ -1110,7 +1114,7 @@ describe("SettingsView performance behavior", () => {
     );
 
     await screen.findByText("How Plainsong listens, writes, and what it keeps.");
-    fireEvent.click(screen.getByText("AI & Keys"));
+    fireEvent.click(screen.getByText("Models"));
     await screen.findByText("Who writes summaries, answers, and actions");
 
     const providerSection = screen

@@ -706,6 +706,23 @@ interface LocalModelRepairReport {
   notes: string[];
 }
 
+/**
+ * One model file the sidecar found under its managed models directory. The
+ * size is `metadata.len()` read off the file itself, so a footprint summed
+ * from these is measured rather than inferred from the catalogue's expected
+ * sizes -- a half-finished download counts as what it actually occupies.
+ */
+export interface DownloadedModelFile {
+  name: string;
+  provider: string;
+  path: string;
+  sizeBytes: number;
+}
+
+export async function listDownloadedModels(): Promise<DownloadedModelFile[]> {
+  return await invoke("list_downloaded_models");
+}
+
 export async function refreshAsrRuntimeProbes(): Promise<void> {
   await invoke("refresh_asr_runtime_probes");
 }

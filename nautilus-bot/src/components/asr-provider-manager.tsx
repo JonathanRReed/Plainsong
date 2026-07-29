@@ -7,14 +7,6 @@ import {
   selectionStateFromSettings,
 } from "@/lib/asr-route-selection";
 import {
-  buildAsrRouteCatalog,
-  getLaneRoutes,
-  getRecommendedLaneRoute,
-  routeIdFor,
-  type AsrRouteCatalogEntry,
-  type AsrRouteLane,
-} from "@/lib/asr-route-catalog";
-import {
   refreshAsrRuntimeProbes,
   repairLocalModelCache,
   getAsrProviderInventory,
@@ -39,7 +31,6 @@ import {
 } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
-import { AsrRouteCombobox } from "@/components/asr-route-combobox";
 import { Progress } from "@/components/ui/progress";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import {
@@ -121,9 +112,6 @@ export function AsrProviderManager({ className }: AsrProviderManagerProps) {
     null,
   );
   const [showAdvancedTools, setShowAdvancedTools] = useState(false);
-  const [routeTab, setRouteTab] = useState<"shared" | "dictation" | "meeting">(
-    "shared",
-  );
   const [permissionActionBusy, setPermissionActionBusy] = useState(false);
   const [permissionDiagnostics, setPermissionDiagnostics] =
     useState<PermissionDiagnostics | null>(null);
@@ -137,8 +125,6 @@ export function AsrProviderManager({ className }: AsrProviderManagerProps) {
   ] as const;
 
   type SelectionProvider = AsrProviderInfo | AsrProviderInventory;
-
-  type WorkflowLane = AsrRouteLane;
 
   const defaultPlatformSettings = (): PlatformOptimizationSettings => ({
     mode: "auto",
@@ -519,11 +505,6 @@ export function AsrProviderManager({ className }: AsrProviderManagerProps) {
     const provider = providerByType(providerType);
     return provider ? provider.name : providerType;
   };
-
-  const routeCatalog = useMemo(
-    () => buildAsrRouteCatalog(selectionProviders, meetingRoutePolicy),
-    [meetingRoutePolicy, selectionProviders],
-  );
 
   const inventoryReadiness = (provider: SelectionProvider) => {
     const status = normalizeDownloadStatus(provider.downloadStatus);
@@ -960,10 +941,6 @@ export function AsrProviderManager({ className }: AsrProviderManagerProps) {
     : dictationProvider === "macos_apple_speech";
 
   useEffect(() => {
-    setRouteTab(useSharedAsrSelection ? "shared" : "dictation");
-  }, [useSharedAsrSelection]);
-
-  useEffect(() => {
     if (!selectedRouteUsesAppleNative || permissionActionBusy) {
       return;
     }
@@ -1012,292 +989,6 @@ export function AsrProviderManager({ className }: AsrProviderManagerProps) {
     selectedRouteUsesAppleNative,
     useSharedAsrSelection,
   ]);
-
-  const activeRouteForLane = (lane: WorkflowLane) => {
-    const providerType =
-      lane === "shared"
-        ? defaultProvider
-        : lane === "meeting"
-          ? meetingProvider
-          : dictationProvider;
-    const modelId =
-      lane === "shared"
-        ? defaultModelId
-        : lane === "meeting"
-          ? meetingModelId
-          : dictationModelId;
-
-    return (
-      routeCatalog.find(
-        (route) => route.routeId === routeIdFor(providerType, modelId),
-      ) ?? null
-    );
-  };
-
-  const applyLaneRouteSelection = async (
-    lane: WorkflowLane,
-    route: AsrRouteCatalogEntry,
-  ) => {
-    if (!route.selectable) {
-      return;
-    }
-
-    const updates =
-      lane === "shared"
-        ? {
-            defaultProvider: route.providerType,
-            selectedModelId: route.modelId,
-          }
-        : lane === "meeting"
-          ? {
-              meetingProvider: route.providerType,
-              meetingModelId: route.modelId,
-            }
-          : {
-              dictationProvider: route.providerType,
-              dictationModelId: route.modelId,
-            };
-
-    await persistSelectionSettings(updates);
-
-    const updatedInventory = await loadInventory();
-    await loadSelectionSettings(updatedInventory);
-  };
-
-  const routeActionVariant = (
-    route: AsrRouteCatalogEntry,
-  ): "default" | "outline" => (route.action === "download" ? "default" : "outline");
-
-  const routeReadinessBadgeVariant = (
-    route: AsrRouteCatalogEntry,
-  ): "default" | "secondary" | "outline" | "destructive" => {
-    switch (route.readiness) {
-      case "ready":
-        return "default";
-      case "needs_download":
-        return "secondary";
-      case "unavailable":
-        return "destructive";
-      default:
-        return "outline";
-    }
-  };
-
-  const handleRouteAction = async (route: AsrRouteCatalogEntry) => {
-    if (route.action === "request_permission") {
-      await requestAppleSpeechPermission();
-      await refreshAppleNativeReadiness();
-      return;
-    }
-    if (route.action === "download") {
-      await handleDownload(route.providerType);
-      return;
-    }
-    if (route.action === "open_system_setup") {
-      if (route.providerType === "macos_apple_speech") {
-        await openPermissionSettings("speech");
-      } else {
-        await copySetupCommand(route.providerType);
-      }
-      return;
-    }
-    if (route.action === "fix_setup" || route.action === "connect_api_key") {
-      setShowAdvancedTools(true);
-      await copySetupCommand(route.providerType);
-    }
-  };
-
-  const renderWorkflowLane = (lane: WorkflowLane) => {
-    const laneRoutes = getLaneRoutes(routeCatalog, lane, meetingRoutePolicy);
-    const activeRoute = activeRouteForLane(lane);
-    const recommendedRoute = getRecommendedLaneRoute(
-      routeCatalog,
-      lane,
-      meetingRoutePolicy,
-    );
-    const laneTitle =
-      lane === "shared"
-        ? "Shared route"
-        : lane === "meeting"
-          ? "Meetings"
-          : "Dictation";
-    const laneDescription =
-      lane === "shared"
-        ? "One route that stays good enough for both dictation and meetings."
-        : lane === "meeting"
-          ? "Only meeting-capable routes appear here."
-          : "Fast everyday dictation and editing routes.";
-
-    return (
-      <div className="space-y-4">
-        <div className="rounded-xl border bg-muted/10 p-4">
-          <div className="flex flex-wrap items-start justify-between gap-3">
-            <div>
-              <p className="font-serif text-base font-semibold">{laneTitle}</p>
-              <p className="mt-1 text-sm text-muted-foreground">
-                {laneDescription}
-              </p>
-            </div>
-            {activeRoute ? (
-              <Badge variant="outline" className="bg-background/70">
-                Current: {activeRoute.label}
-              </Badge>
-            ) : null}
-          </div>
-          {recommendedRoute ? (
-            <div className="mt-4 rounded-lg border border-gold/30 bg-background/80 p-4">
-              <div className="flex flex-wrap items-start justify-between gap-3">
-                <div>
-                  <div className="flex flex-wrap items-center gap-2">
-                    <p className="text-sm font-medium">
-                      {recommendedRoute.label}
-                    </p>
-                    <Badge variant="outline">Recommended</Badge>
-                    <Badge variant="outline">
-                      {recommendedRoute.hosting === "platform"
-                        ? "Platform"
-                        : recommendedRoute.hosting === "cloud"
-                          ? "Cloud"
-                          : "Local"}
-                    </Badge>
-                    <Badge variant={routeReadinessBadgeVariant(recommendedRoute)}>
-                      {recommendedRoute.readinessLabel}
-                    </Badge>
-                    <Badge variant="outline">
-                      {recommendedRoute.capabilityBadge}
-                    </Badge>
-                  </div>
-                  <p className="mt-1 text-xs text-muted-foreground">
-                    {recommendedRoute.summary}
-                  </p>
-                </div>
-                <div className="flex flex-wrap gap-2">
-                  <Button
-                    size="sm"
-                    variant={
-                      activeRoute?.routeId === recommendedRoute.routeId
-                        ? "default"
-                        : "outline"
-                    }
-                    disabled={!recommendedRoute.selectable}
-                    onClick={() =>
-                      void applyLaneRouteSelection(lane, recommendedRoute)
-                    }
-                  >
-                    {!recommendedRoute.selectable
-                      ? "Setup required"
-                      : activeRoute?.routeId === recommendedRoute.routeId
-                        ? "Selected"
-                        : "Use recommended"}
-                  </Button>
-                  {recommendedRoute.action && recommendedRoute.actionLabel ? (
-                    <Button
-                      size="sm"
-                      variant={routeActionVariant(recommendedRoute)}
-                      onClick={() => void handleRouteAction(recommendedRoute)}
-                    >
-                      {recommendedRoute.actionLabel}
-                    </Button>
-                  ) : null}
-                </div>
-              </div>
-            </div>
-          ) : null}
-          <div className="mt-4 space-y-1.5">
-            <Label className="text-sm text-muted-foreground">
-              {laneTitle} selector
-            </Label>
-            <AsrRouteCombobox
-              routes={laneRoutes}
-              value={activeRoute?.routeId ?? null}
-              placeholder={`Choose a ${lane === "meeting" ? "meeting" : lane === "shared" ? "shared" : "dictation"} route`}
-              onSelect={(route) => {
-                void applyLaneRouteSelection(lane, route).catch((error) => {
-                  console.error("Failed to update ASR route:", error);
-                });
-              }}
-            />
-          </div>
-        </div>
-
-        <div className="grid gap-4 2xl:grid-cols-[minmax(0,1fr)_280px]">
-          <div className="rounded-xl border bg-background/70 p-4">
-            {activeRoute ? (
-              <div className="space-y-3">
-                <div className="flex flex-wrap items-center gap-2">
-                  <Badge variant="outline">{activeRoute.providerLabel}</Badge>
-                  <Badge variant="outline">
-                    {activeRoute.hosting === "platform"
-                      ? "Platform"
-                      : activeRoute.hosting === "cloud"
-                        ? "Cloud"
-                        : "Local"}
-                  </Badge>
-                  <Badge variant="outline">{activeRoute.capabilityBadge}</Badge>
-                  <Badge variant={routeReadinessBadgeVariant(activeRoute)}>
-                    {activeRoute.readinessLabel}
-                  </Badge>
-                  {activeRoute.experimental ? (
-                    <Badge variant="outline">Experimental</Badge>
-                  ) : null}
-                </div>
-                <div>
-                  <p className="text-sm font-medium">{activeRoute.label}</p>
-                  <p className="mt-1 text-sm text-muted-foreground">
-                    {activeRoute.summary}
-                  </p>
-                </div>
-                {activeRoute.action && activeRoute.actionLabel ? (
-                  <div className="flex flex-wrap gap-2">
-                    <Button
-                      size="sm"
-                      variant={routeActionVariant(activeRoute)}
-                      disabled={isLoading}
-                      onClick={() => void handleRouteAction(activeRoute)}
-                    >
-                      {activeRoute.actionLabel}
-                    </Button>
-                    {(activeRoute.action === "fix_setup" ||
-                      activeRoute.action === "connect_api_key") ? (
-                      <p className="self-center text-xs text-muted-foreground">
-                        The action copies the exact setup step and opens the
-                        advanced panel.
-                      </p>
-                    ) : null}
-                  </div>
-                ) : null}
-              </div>
-            ) : (
-              <p className="text-sm text-muted-foreground">
-                Choose a route for this workflow.
-              </p>
-            )}
-          </div>
-
-          <div className="rounded-xl border bg-muted/10 p-4">
-            <p className="rubric-muted">
-              Route notes
-            </p>
-            <p className="mt-2 text-sm font-medium">
-              {activeRoute ? activeRoute.label : "No route selected"}
-            </p>
-            <p className="mt-1 text-xs text-muted-foreground">
-              {activeRoute
-                ? `${activeRoute.providerLabel} · ${activeRoute.capabilityBadge}`
-                : "Choose a route for this workflow."}
-            </p>
-            <p className="mt-3 text-xs text-muted-foreground">
-              {lane === "dictation"
-                ? "Pick the fastest route that stays accurate enough for your everyday writing."
-                : lane === "meeting"
-                  ? "Pick the strongest route you trust for longer recordings and summary quality."
-                  : "Shared is best when you want one model family and minimal setup complexity."}
-            </p>
-          </div>
-        </div>
-      </div>
-    );
-  };
 
   const appleNativePermissionRows = [
     {
@@ -1990,204 +1681,55 @@ export function AsrProviderManager({ className }: AsrProviderManagerProps) {
         <TabsContent value="providers" className="space-y-4">
           <Card>
             <CardHeader className="pb-3">
-              <p className="rubric mb-1.5">SPEECH ENGINE</p>
-              <CardTitle className="font-serif text-lg font-semibold">Model Routes</CardTitle>
+              <CardTitle className="font-serif text-lg font-semibold">
+                Engine status
+              </CardTitle>
               <CardDescription>
-                Choose by workflow first. Downloads, runtime repair, and raw
-                provider details live below.
+                Which model each task uses is chosen in Settings &rarr; Models.
+                This is the state of the engines behind that choice.
               </CardDescription>
             </CardHeader>
             <CardContent className="space-y-4">
-              <div className="grid gap-3 xl:grid-cols-[minmax(0,1fr)_240px]">
-                <div className="rounded-xl border bg-muted/10 p-4">
-                  <div className="grid gap-2 sm:grid-cols-2">
-                    <Button
-                      variant={useSharedAsrSelection ? "default" : "outline"}
-                      size="sm"
-                      className="h-auto min-h-10 justify-start whitespace-normal px-3 py-2 text-left leading-snug"
-                      onClick={() => {
-                        void persistSelectionSettings({
-                          useSharedAsrSelection: true,
-                        }).catch((error) => {
-                          console.error(
-                            "Failed to enable shared ASR selection:",
-                            error,
-                          );
-                        });
-                      }}
-                    >
-                      Shared route
-                    </Button>
-                    <Button
-                      variant={!useSharedAsrSelection ? "default" : "outline"}
-                      size="sm"
-                      className="h-auto min-h-10 justify-start whitespace-normal px-3 py-2 text-left leading-snug"
-                      onClick={() => {
-                        void persistSelectionSettings({
-                          useSharedAsrSelection: false,
-                        }).catch((error) => {
-                          console.error("Failed to split ASR routes:", error);
-                        });
-                      }}
-                    >
-                      Split dictation + meetings
-                    </Button>
-                  </div>
-                  <p className="mt-3 text-sm text-muted-foreground">
-                    Shared is simpler. Split gives you a faster dictation route
-                    and a stronger meeting route.
-                  </p>
-                </div>
-
-                <div className="space-y-1.5 rounded-xl border bg-background/70 p-4">
-                  <Label className="text-sm text-muted-foreground">
-                    Meeting quality policy
-                  </Label>
-                  <Select
-                    value={meetingRoutePolicy}
-                    onValueChange={(value) => {
-                      void persistSelectionSettings({
-                        meetingRoutePolicy: value as
-                          | "prefer_local"
-                          | "best_available",
-                      }).catch((error) => {
-                        console.error(
-                          "Failed to update meeting route policy:",
-                          error,
-                        );
-                      });
-                    }}
-                  >
-                    <SelectTrigger className="w-full" aria-label="Meeting quality policy">
-                      <SelectValue />
-                    </SelectTrigger>
-                    <SelectContent>
-                      <SelectItem value="prefer_local">Prefer local</SelectItem>
-                      <SelectItem value="best_available">Best available</SelectItem>
-                    </SelectContent>
-                  </Select>
-                  <p className="text-xs text-muted-foreground">
-                    Controls how aggressively meetings favor cloud routes over
-                    strong local ones.
-                  </p>
-                </div>
+              <div className="max-w-md space-y-1.5 rounded-xl border bg-background/70 p-4">
+                <Label className="text-sm text-muted-foreground">
+                  Meeting quality policy
+                </Label>
+                <Select
+                  value={meetingRoutePolicy}
+                  onValueChange={(value) => {
+                    void persistSelectionSettings({
+                      meetingRoutePolicy: value as
+                        | "prefer_local"
+                        | "best_available",
+                    }).catch((error) => {
+                      console.error(
+                        "Failed to update meeting route policy:",
+                        error,
+                      );
+                    });
+                  }}
+                >
+                  <SelectTrigger className="w-full" aria-label="Meeting quality policy">
+                    <SelectValue />
+                  </SelectTrigger>
+                  <SelectContent>
+                    <SelectItem value="prefer_local">Prefer local</SelectItem>
+                    <SelectItem value="best_available">Best available</SelectItem>
+                  </SelectContent>
+                </Select>
+                <p className="text-sm leading-6 text-muted-foreground">
+                  Which meeting engine Models offers first: the strongest
+                  local one, or a cloud route when you have a key for it.
+                </p>
               </div>
 
               {inventory.length === 0 && isLoading ? (
                 <div className="rounded-xl border bg-muted/10 p-6 text-center">
                   <p className="text-sm text-muted-foreground">
-                    Loading model routes…
-                  </p>
-                  <p className="mt-2 text-xs text-muted-foreground">
-                    The first inventory load is now lightweight. Runtime
-                    diagnostics load only in Advanced.
+                    Reading the installed engines…
                   </p>
                 </div>
               ) : null}
-
-              {useSharedAsrSelection ? (
-                renderWorkflowLane("shared")
-              ) : (
-                <Tabs
-                  value={routeTab}
-                  onValueChange={(value) =>
-                    setRouteTab(value as "dictation" | "meeting" | "shared")
-                  }
-                >
-                  <TabsList className="grid w-full grid-cols-2">
-                    <TabsTrigger value="dictation">Dictation</TabsTrigger>
-                    <TabsTrigger value="meeting">Meetings</TabsTrigger>
-                  </TabsList>
-                  <TabsContent value="dictation" className="mt-4">
-                    {renderWorkflowLane("dictation")}
-                  </TabsContent>
-                  <TabsContent value="meeting" className="mt-4">
-                    {renderWorkflowLane("meeting")}
-                  </TabsContent>
-                </Tabs>
-              )}
-
-              <div className="rounded-xl border bg-muted/10 p-4">
-                <div className="flex flex-wrap items-center justify-between gap-3">
-                  <div>
-                    <p className="font-serif text-base font-semibold">Current routing</p>
-                    <p className="mt-1 text-xs text-muted-foreground">
-                      A quick summary of what Plainsong will use right now.
-                    </p>
-                  </div>
-                  <Badge variant="outline">
-                    {useSharedAsrSelection ? "Shared" : "Split"}
-                  </Badge>
-                </div>
-                <div className="mt-4 grid gap-3 xl:grid-cols-2">
-                  <div className="rounded-lg border bg-background/70 p-3">
-                    <p className="rubric-muted">
-                      Dictation
-                    </p>
-                    <p className="mt-1 text-sm font-medium">
-                      {selectionProviderByType(
-                        useSharedAsrSelection
-                          ? defaultProvider
-                          : dictationProvider,
-                      )
-                        ? selectionProviderByType(
-                            useSharedAsrSelection
-                              ? defaultProvider
-                              : dictationProvider,
-                          )!.name
-                        : "No route selected"}
-                    </p>
-                    <p className="mt-1 text-xs text-muted-foreground">
-                      {selectionProviderByType(
-                        useSharedAsrSelection
-                          ? defaultProvider
-                          : dictationProvider,
-                      )
-                        ? inventoryReadiness(
-                            selectionProviderByType(
-                              useSharedAsrSelection
-                                ? defaultProvider
-                                : dictationProvider,
-                            )!,
-                          ).label
-                        : "Choose a dictation route"}
-                    </p>
-                  </div>
-                  <div className="rounded-lg border bg-background/70 p-3">
-                    <p className="rubric-muted">
-                      Meetings
-                    </p>
-                    <p className="mt-1 text-sm font-medium">
-                      {selectionProviderByType(
-                        useSharedAsrSelection
-                          ? defaultProvider
-                          : meetingProvider,
-                      )
-                        ? selectionProviderByType(
-                            useSharedAsrSelection
-                              ? defaultProvider
-                              : meetingProvider,
-                          )!.name
-                        : "No route selected"}
-                    </p>
-                    <p className="mt-1 text-xs text-muted-foreground">
-                      {selectionProviderByType(
-                        useSharedAsrSelection
-                          ? defaultProvider
-                          : meetingProvider,
-                      )
-                        ? inventoryReadiness(
-                            selectionProviderByType(
-                              useSharedAsrSelection
-                                ? defaultProvider
-                                : meetingProvider,
-                            )!,
-                          ).label
-                        : "Choose a meeting route"}
-                    </p>
-                  </div>
-                </div>
-              </div>
 
               {renderAppleNativeSetupCard()}
               {renderCursorInsertToolsCard()}

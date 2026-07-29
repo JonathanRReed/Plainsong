@@ -1,0 +1,509 @@
+import { useState } from "react";
+import { fireEvent, render, screen, waitFor, within } from "@testing-library/react";
+import { beforeEach, describe, expect, it, vi } from "vitest";
+import { ModelsScreen } from "@/components/models/models-screen";
+import type { AsrProviderInventory } from "@/types";
+import type { Settings } from "@/types/settings";
+
+const getAsrProviderInventoryMock = vi.fn();
+const listDownloadedModelsMock = vi.fn();
+const downloadAsrModelsMock = vi.fn();
+
+vi.mock("@/lib/backend/asr", () => ({
+  getAsrProviderInventory: () => getAsrProviderInventoryMock(),
+  listDownloadedModels: () => listDownloadedModelsMock(),
+  downloadAsrModels: (providerType: string) =>
+    downloadAsrModelsMock(providerType),
+}));
+
+vi.mock("@/lib/electron", () => ({
+  listen: vi.fn(async () => () => {}),
+}));
+
+const WHISPER_MODEL_OPTIONS = [
+  { id: "tiny", label: "tiny (fastest)" },
+  { id: "tiny.en", label: "tiny.en (fastest, English)" },
+  { id: "base", label: "base (balanced)" },
+  { id: "base.en", label: "base.en (balanced, English)" },
+  { id: "small", label: "small (better accuracy)" },
+  { id: "small.en", label: "small.en (better accuracy, English)" },
+  { id: "medium", label: "medium (high accuracy)" },
+  { id: "medium.en", label: "medium.en (high accuracy, English)" },
+  { id: "large-v3-turbo", label: "large-v3-turbo (fast + accurate)" },
+  { id: "large-v3", label: "large-v3 (best accuracy)" },
+];
+
+function inventoryFixture(
+  overrides: Partial<Record<string, Partial<AsrProviderInventory>>> = {},
+): AsrProviderInventory[] {
+  const base = [
+    {
+      providerType: "whisper",
+      name: "Whisper",
+      description: "Local Whisper",
+      isAvailable: true,
+      inferenceEnabled: true,
+      selectedModelId: "base.en",
+      modelOptions: WHISPER_MODEL_OPTIONS,
+      downloadStatus: "Downloaded",
+    },
+    {
+      providerType: "parakeet",
+      name: "Parakeet",
+      description: "Local Parakeet",
+      isAvailable: true,
+      inferenceEnabled: true,
+      selectedModelId: "parakeet-tdt-0.6b-v3",
+      modelOptions: [
+        { id: "parakeet-tdt-0.6b-v3", label: "Parakeet TDT 0.6B v3" },
+        { id: "parakeet-tdt-ctc-110m", label: "Parakeet TDT CTC 110M legacy" },
+      ],
+      downloadStatus: "NotDownloaded",
+    },
+    {
+      providerType: "distil_whisper",
+      name: "Distil-Whisper",
+      description: "Local Distil",
+      isAvailable: true,
+      inferenceEnabled: true,
+      selectedModelId: "distil-large-v3.5",
+      modelOptions: [
+        { id: "distil-large-v3.5", label: "Distil Whisper Large v3.5" },
+      ],
+      downloadStatus: "Downloaded",
+    },
+    {
+      providerType: "macos_apple_speech",
+      name: "Apple Speech (On-Device)",
+      description: "Dictation-only Apple Speech",
+      isAvailable: true,
+      inferenceEnabled: true,
+      selectedModelId: "macos_apple_speech",
+      modelOptions: [
+        { id: "macos_apple_speech", label: "Apple Speech · on-device dictation" },
+      ],
+      downloadStatus: "Downloaded",
+      platformReadiness: {
+        status: "ready",
+        ready: true,
+        platformSupported: true,
+        helperPresent: true,
+        authorization: "authorized",
+        locale: "en_US",
+        localeSupported: true,
+        onDeviceAvailable: true,
+        recognizerAvailable: true,
+        message: "Apple Speech is ready.",
+        setupAction: null,
+      },
+    },
+  ] as unknown as AsrProviderInventory[];
+
+  return base.map((provider) => ({
+    ...provider,
+    ...(overrides[provider.providerType] ?? {}),
+  })) as AsrProviderInventory[];
+}
+
+function settingsFixture(): Settings {
+  return {
+    transcription: {
+      defaultProvider: "distil_whisper",
+      selectedModelId: "distil-large-v3.5",
+      useSharedAsrSelection: true,
+      dictationProvider: "distil_whisper",
+      dictationModelId: "distil-large-v3.5",
+      meetingProvider: "distil_whisper",
+      meetingModelId: "distil-large-v3.5",
+      meetingRoutePolicy: "prefer_local",
+    },
+    privacy: {
+      remoteProcessingEnabled: false,
+      dictationAi: { provider: "ollama", modelId: "llama3.2" },
+      meetingsAi: { provider: "ollama", modelId: "llama3.2" },
+    },
+  } as unknown as Settings;
+}
+
+const savedSettings: Settings[] = [];
+
+/**
+ * The screen is controlled: it hands a patch back and the owner applies it to
+ * the newest settings. The harness mirrors that, so a test can click a preset
+ * and then read what the screen says about the settings it produced.
+ */
+function Harness({ initial }: { initial?: Settings }) {
+  const [settings, setSettings] = useState<Settings>(
+    () => initial ?? settingsFixture(),
+  );
+
+  return (
+    <ModelsScreen
+      settings={settings}
+      onPatchSettings={(apply) =>
+        setSettings((previous) => {
+          const next = apply(previous);
+          savedSettings.push(next);
+          return next;
+        })
+      }
+      aiModelsForProvider={(provider) =>
+        provider === "ollama" ? ["llama3.2"] : []
+      }
+      aiModelsLoading={false}
+      onAiProviderChange={vi.fn()}
+      onAiModelChange={vi.fn()}
+      onOpenKeySettings={vi.fn()}
+      onOpenDiagnostics={vi.fn()}
+    />
+  );
+}
+
+function lastSaved(): Settings {
+  const latest = savedSettings[savedSettings.length - 1];
+  if (!latest) {
+    throw new Error("No settings patch was applied");
+  }
+  return latest;
+}
+
+describe("Models screen", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    savedSettings.length = 0;
+    getAsrProviderInventoryMock.mockResolvedValue(inventoryFixture());
+    listDownloadedModelsMock.mockResolvedValue([
+      {
+        name: "Whisper ggml-base.en.bin",
+        provider: "whisper",
+        path: "/models/whisper/ggml-base.en.bin",
+        sizeBytes: 148_000_000,
+      },
+    ]);
+    downloadAsrModelsMock.mockResolvedValue(undefined);
+  });
+
+  it("shows one row per task and a measured disk total", async () => {
+    render(<Harness />);
+
+    expect(await screen.findByText("Speech for dictation")).toBeInTheDocument();
+    expect(screen.getByText("Speech for meetings")).toBeInTheDocument();
+    expect(screen.getByText("Who cleans up dictation")).toBeInTheDocument();
+    expect(
+      screen.getByText("Who writes summaries, answers, and actions"),
+    ).toBeInTheDocument();
+
+    // 148,000,000 bytes measured off the one file on disk.
+    expect(
+      screen.getByText(/Speech models on this Mac: 141 MiB across 1 file\./),
+    ).toBeInTheDocument();
+  });
+
+  it("applies a preset to every lane and then names it", async () => {
+    render(<Harness />);
+    const presets = await screen.findByRole("radiogroup", {
+      name: "Model preset",
+    });
+
+    fireEvent.click(within(presets).getByRole("radio", { name: /Light/ }));
+
+    await waitFor(() => {
+      expect(lastSaved().transcription.dictationModelId).toBe("base.en");
+    });
+    const saved = lastSaved();
+    expect(saved.transcription.dictationProvider).toBe("whisper");
+    expect(saved.transcription.meetingProvider).toBe("parakeet");
+    expect(saved.transcription.useSharedAsrSelection).toBe(false);
+    expect(saved.privacy.dictationAi.provider).toBe("ollama");
+
+    // The indicator names the preset, and the tile is checked.
+    expect(screen.getByText(/^Active preset/).textContent).toContain("Light");
+    expect(
+      within(presets).getByRole("radio", { name: /Light/ }),
+    ).toHaveAttribute("aria-checked", "true");
+  });
+
+  it("moves the preset indicator to Custom when one lane is changed", async () => {
+    render(<Harness />);
+    const presets = await screen.findByRole("radiogroup", {
+      name: "Model preset",
+    });
+    fireEvent.click(within(presets).getByRole("radio", { name: /Balanced/ }));
+
+    await waitFor(() => {
+      expect(screen.getByText(/^Active preset/).textContent).toContain(
+        "Balanced",
+      );
+    });
+
+    // Distil is not a promoted route, so the change comes from the drawer --
+    // which is also how a lane gets a model the main list never offers.
+    fireEvent.click(screen.getByRole("button", { name: /Show \d+ more models/ }));
+    const drawer = screen.getByRole("region", { name: "More models" });
+    const distilRow = within(drawer)
+      .getByText("Distil Whisper Large v3.5")
+      .closest("div")?.parentElement as HTMLElement;
+    fireEvent.click(
+      within(distilRow).getByRole("button", { name: "Use for meetings" }),
+    );
+
+    await waitFor(() => {
+      expect(screen.getByText(/^Active preset/).textContent).toContain("Custom");
+    });
+  });
+
+  it("leaves the AI lanes alone when a preset is applied", async () => {
+    // The preset tiles talk about speech. Applying one used to rewrite both AI
+    // lanes to the preset's provider, so a deliberate cloud setup -- provider
+    // and model id -- disappeared on a click, and the replacement pointed at
+    // whatever the new provider had listed first, or at nothing.
+    const cloudAi = {
+      ...settingsFixture(),
+      privacy: {
+        ...settingsFixture().privacy,
+        dictationAi: { provider: "anthropic", modelId: "claude-x" },
+        meetingsAi: { provider: "openai", modelId: "gpt-x" },
+      },
+    } as unknown as Settings;
+
+    render(<Harness initial={cloudAi} />);
+    const presets = await screen.findByRole("radiogroup", {
+      name: "Model preset",
+    });
+
+    fireEvent.click(within(presets).getByRole("radio", { name: /Balanced/ }));
+
+    await waitFor(() => {
+      expect(lastSaved().transcription.dictationProvider).toBe("parakeet");
+    });
+    const saved = lastSaved();
+    expect(saved.privacy.dictationAi).toEqual({
+      provider: "anthropic",
+      modelId: "claude-x",
+    });
+    expect(saved.privacy.meetingsAi).toEqual({
+      provider: "openai",
+      modelId: "gpt-x",
+    });
+
+    // And the tile still names itself, rather than reading Custom because of
+    // two lanes it never claimed to set.
+    expect(screen.getByText(/^Active preset/).textContent).toContain("Balanced");
+  });
+
+  it("does not call a lane ready when that lane's model is missing", async () => {
+    // The provider carries one download status for every build it lists, and
+    // the sidecar keeps one model per provider. Point the two lanes at two
+    // Parakeet builds and the provider's answer is right for one of them.
+    getAsrProviderInventoryMock.mockResolvedValue(
+      inventoryFixture({
+        parakeet: { downloadStatus: "Downloaded" } as Partial<AsrProviderInventory>,
+      }),
+    );
+    listDownloadedModelsMock.mockResolvedValue([
+      {
+        name: "Whisper ggml-base.en.bin",
+        provider: "whisper",
+        path: "/models/whisper/ggml-base.en.bin",
+        sizeBytes: 148_000_000,
+      },
+      {
+        name: "Parakeet encoder.int8.onnx",
+        provider: "parakeet",
+        path: "/models/parakeet/parakeet-tdt-0.6b-v3/encoder.int8.onnx",
+        sizeBytes: 652_000_000,
+      },
+    ]);
+
+    render(<Harness />);
+    const presets = await screen.findByRole("radiogroup", {
+      name: "Model preset",
+    });
+    fireEvent.click(within(presets).getByRole("radio", { name: /Balanced/ }));
+    await waitFor(() => {
+      expect(screen.getByText(/^Active preset/).textContent).toContain(
+        "Balanced",
+      );
+    });
+
+    // Move dictation onto the 110M build, which is not on disk. Meetings stay
+    // on v3, which is.
+    fireEvent.click(screen.getByRole("button", { name: /Show \d+ more models/ }));
+    const drawer = screen.getByRole("region", { name: "More models" });
+    const legacyRow = within(drawer)
+      .getByText("Parakeet TDT CTC 110M legacy")
+      .closest("div")?.parentElement as HTMLElement;
+    fireEvent.click(
+      within(legacyRow).getByRole("button", { name: "Use for dictation" }),
+    );
+
+    const dictation = await screen.findByRole("region", {
+      name: "Speech for dictation",
+    });
+    await waitFor(() => {
+      expect(within(dictation).getByText("Needs download")).toBeInTheDocument();
+    });
+    expect(within(dictation).queryByText("Ready")).toBeNull();
+
+    // The action the brief requires, and it actually downloads.
+    fireEvent.click(within(dictation).getByRole("button", { name: "Download" }));
+    await waitFor(() => {
+      expect(downloadAsrModelsMock).toHaveBeenCalledWith("parakeet");
+    });
+
+    // The other half of the same contradiction: the meeting lane's model is
+    // measurably here, so it must not be told to download it again.
+    const meetings = screen.getByRole("region", { name: "Speech for meetings" });
+    expect(within(meetings).getByText("Ready")).toBeInTheDocument();
+    expect(
+      within(meetings).queryByRole("button", { name: "Download" }),
+    ).toBeNull();
+  });
+
+  it("surfaces the download the chosen model still needs, and runs it", async () => {
+    render(<Harness />);
+    const meetings = await screen.findByRole("region", {
+      name: "Speech for meetings",
+    });
+
+    fireEvent.click(
+      within(meetings).getByRole("radio", { name: /Parakeet TDT 0\.6B v3/ }),
+    );
+
+    const meetingsRow = await screen.findByRole("region", {
+      name: "Speech for meetings",
+    });
+    await waitFor(() => {
+      expect(within(meetingsRow).getByText("Needs download")).toBeInTheDocument();
+    });
+
+    fireEvent.click(within(meetingsRow).getByRole("button", { name: "Download" }));
+
+    await waitFor(() => {
+      expect(downloadAsrModelsMock).toHaveBeenCalledWith("parakeet");
+    });
+  });
+
+  it("never offers a dictation-only engine for meetings", async () => {
+    render(<Harness />);
+    const meetings = await screen.findByRole("region", {
+      name: "Speech for meetings",
+    });
+
+    const options = within(meetings).getAllByRole("radio");
+    const labels = options.map((option) => option.textContent ?? "");
+    expect(labels.some((label) => label.includes("base.en"))).toBe(false);
+    expect(labels.some((label) => label.includes("Apple Speech"))).toBe(false);
+    expect(labels.some((label) => label.includes("Parakeet TDT 0.6B v3"))).toBe(
+      true,
+    );
+  });
+
+  it("keeps an engine whose permission was denied visible but unpickable", async () => {
+    getAsrProviderInventoryMock.mockResolvedValue(
+      inventoryFixture({
+        macos_apple_speech: {
+          isAvailable: false,
+          platformReadiness: {
+            status: "authorization_denied",
+            ready: false,
+            platformSupported: true,
+            helperPresent: true,
+            authorization: "denied",
+            locale: "en_US",
+            localeSupported: true,
+            onDeviceAvailable: true,
+            recognizerAvailable: true,
+            message: "Speech Recognition permission is denied.",
+            setupAction: "Open Speech Settings.",
+          },
+        } as Partial<AsrProviderInventory>,
+      }),
+    );
+
+    render(<Harness />);
+    const dictation = await screen.findByRole("region", {
+      name: "Speech for dictation",
+    });
+
+    // Apple Speech is not a promoted route, so it lives in the drawer.
+    fireEvent.click(screen.getByRole("button", { name: /Show \d+ more models/ }));
+    const drawer = screen.getByRole("region", { name: "More models" });
+    const appleRow = within(drawer)
+      .getByText("Apple Speech · on-device dictation")
+      .closest("div") as HTMLElement;
+    const useForDictation = within(
+      appleRow.parentElement as HTMLElement,
+    ).getByRole("button", { name: "Use for dictation" });
+    expect(useForDictation).toBeDisabled();
+    expect(within(dictation).queryByText("Permission denied")).toBeNull();
+    expect(within(drawer).getByText("Permission denied")).toBeInTheDocument();
+  });
+
+  it("keeps the rest of the catalogue collapsed until asked", async () => {
+    render(<Harness />);
+    await screen.findByText("Speech for dictation");
+
+    expect(screen.queryByText("tiny (fastest)")).not.toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", { name: /Show \d+ more models/ }));
+    const drawer = screen.getByRole("region", { name: "More models" });
+
+    for (const label of [
+      "tiny (fastest)",
+      "tiny.en (fastest, English)",
+      "base (balanced)",
+      "small (better accuracy)",
+      "small.en (better accuracy, English)",
+      "medium (high accuracy)",
+      "medium.en (high accuracy, English)",
+      "large-v3 (best accuracy)",
+    ]) {
+      expect(within(drawer).getByText(label)).toBeInTheDocument();
+    }
+
+    // The promoted three stay in the main list rather than being repeated here.
+    expect(
+      within(drawer).queryByText("base.en (balanced, English)"),
+    ).not.toBeInTheDocument();
+    expect(
+      within(drawer).queryByText("large-v3-turbo (fast + accurate)"),
+    ).not.toBeInTheDocument();
+    expect(
+      within(drawer).queryByText("Parakeet TDT 0.6B v3"),
+    ).not.toBeInTheDocument();
+  });
+
+  it("says the engine list could not be read instead of inventing lanes", async () => {
+    getAsrProviderInventoryMock.mockResolvedValue([]);
+
+    render(<Harness />);
+
+    expect(
+      await screen.findByText(/Could not read the speech engines from the sidecar/),
+    ).toBeInTheDocument();
+    expect(
+      screen.queryByRole("region", { name: "Speech for dictation" }),
+    ).not.toBeInTheDocument();
+    // The AI lanes do not depend on the speech inventory, so they stay usable.
+    expect(screen.getByText("Who cleans up dictation")).toBeInTheDocument();
+  });
+
+  it("states size, languages and the downside for a promoted model", async () => {
+    render(<Harness />);
+    const dictation = await screen.findByRole("region", {
+      name: "Speech for dictation",
+    });
+
+    expect(
+      within(dictation).getByText(
+        /142 MiB, English only — speak Spanish or German into it/,
+      ),
+    ).toBeInTheDocument();
+    expect(
+      within(dictation).getByText(
+        /1\.6 GiB, ~100 languages — about eleven times the size of base\.en/,
+      ),
+    ).toBeInTheDocument();
+  });
+});

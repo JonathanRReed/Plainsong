@@ -1,5 +1,5 @@
 import { describe, expect, it, vi, beforeEach } from "vitest";
-import { fireEvent, render, screen, waitFor, within } from "@testing-library/react";
+import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { AsrProviderManager } from "@/components/asr-provider-manager";
 
@@ -292,7 +292,7 @@ describe("Platform optimization settings", () => {
     });
   });
 
-  it("keeps Apple Native in the main route flow and out of advanced native toggles", async () => {
+  it("keeps Apple Native setup here and out of advanced native toggles", async () => {
     const appleSettings = {
       transcription: {
         defaultProvider: "macos_apple_speech",
@@ -326,84 +326,11 @@ describe("Platform optimization settings", () => {
     render(<AsrProviderManager />);
 
     expect(await screen.findByText("Apple Speech setup")).toBeInTheDocument();
-    await waitFor(() => {
-      expect(
-        screen.getAllByText("Apple Speech · on-device dictation").length,
-      ).toBeGreaterThan(0);
-    });
 
     fireEvent.click(screen.getByRole("button", { name: "Show tools" }));
 
     expect(screen.queryByText("macOS Apple Speech engine")).not.toBeInTheDocument();
     expect(screen.queryByText("Windows SDK dictation engine")).not.toBeInTheDocument();
-  });
-
-  it("surfaces recommended solo local model lanes", async () => {
-    render(<AsrProviderManager />);
-
-    expect(await screen.findByText("Model Routes")).toBeInTheDocument();
-    fireEvent.click(screen.getByRole("button", { name: "Split dictation + meetings" }));
-    expect(await screen.findByText("Dictation")).toBeInTheDocument();
-    expect(screen.getByText("Recommended")).toBeInTheDocument();
-    expect(screen.getAllByText("Moonshine Base").length).toBeGreaterThan(0);
-    expect(screen.getByText("Current routing")).toBeInTheDocument();
-  });
-
-  it("treats Apple Native as dictation-only when persisting transcription route settings", async () => {
-    render(<AsrProviderManager />);
-
-    fireEvent.click(await screen.findByRole("button", { name: "Split dictation + meetings" }));
-    const dictationPanel = await screen.findByRole("tabpanel", { name: "Dictation" });
-    fireEvent.click(within(dictationPanel).getByRole("combobox"));
-    fireEvent.click(await screen.findByText("Apple Speech (On-Device)"));
-
-    await waitFor(() => {
-      expect(saveSettingsMock).toHaveBeenCalled();
-    });
-
-    const savedPayload =
-      saveSettingsMock.mock.calls[saveSettingsMock.mock.calls.length - 1]?.[0];
-    expect(savedPayload.transcription.defaultProvider).toBe("distil_whisper");
-    expect(savedPayload.transcription.dictationProvider).toBe("macos_apple_speech");
-    expect(savedPayload.transcription.useSharedAsrSelection).toBe(false);
-    expect(savedPayload.transcription.meetingProvider).toBe("distil_whisper");
-  });
-
-  it("renders unready Apple Speech as a disabled dictation option", async () => {
-    invokeMock.mockImplementation(async (cmd: string) => {
-      if (cmd === "get_asr_providers" || cmd === "get_asr_provider_inventory") {
-        return providerFixture.map((provider) =>
-          provider.providerType === "macos_apple_speech"
-            ? {
-                ...provider,
-                isAvailable: false,
-                runtimeStatus: "error",
-                platformReadiness: {
-                  ...(provider as any).platformReadiness,
-                  status: "authorization_denied",
-                  ready: false,
-                  authorization: "denied",
-                  message: "Speech Recognition permission is denied.",
-                  setupAction: "Open Speech Settings.",
-                },
-              }
-            : provider,
-        );
-      }
-      if (cmd === "get_default_asr_provider") return "distil_whisper";
-      if (cmd === "list_asr_benchmarks") return [];
-      return null;
-    });
-
-    render(<AsrProviderManager />);
-    fireEvent.click(await screen.findByRole("button", { name: "Split dictation + meetings" }));
-    const dictationPanel = await screen.findByRole("tabpanel", { name: "Dictation" });
-    fireEvent.click(within(dictationPanel).getByRole("combobox"));
-
-    const appleLabel = await screen.findByText("Apple Speech · on-device dictation");
-    const option = appleLabel.closest('[cmdk-item]');
-    expect(option).toHaveAttribute("aria-disabled", "true");
-    expect(screen.getByText("Permission denied")).toBeInTheDocument();
   });
 
   it("surfaces the latest clipboard-only insert fallback reason", async () => {
@@ -517,62 +444,6 @@ describe("Platform optimization settings", () => {
       screen.queryByText(/Shared route: Apple native speech permission has not been granted yet\./)
     ).not.toBeInTheDocument();
     expect(screen.getByText("Ready for transcription")).toBeInTheDocument();
-  });
-
-  it("keeps Whisper out of the meeting provider choices", async () => {
-    getSettingsMock.mockResolvedValue({
-      transcription: {
-        defaultProvider: "whisper",
-        selectedModelId: "base.en",
-        useSharedAsrSelection: false,
-        dictationProvider: "whisper",
-        dictationModelId: "base.en",
-        meetingProvider: "whisper",
-        meetingModelId: "small.en",
-        meetingRoutePolicy: "prefer_local",
-        platformOptimization: {
-          mode: "auto",
-          fallbackPolicy: "local_only",
-          macos: { appleNativeEnabled: false, mlxEnabled: true },
-          windows: { foundryEnabled: false, windowsSdkDictationEnabled: false },
-          manualEnginePriority: [],
-        },
-      },
-    });
-
-    render(<AsrProviderManager />);
-
-    expect(await screen.findByText("Current routing")).toBeInTheDocument();
-    expect(await screen.findByText("Split")).toBeInTheDocument();
-    expect(screen.getAllByText("Distil-Whisper").length).toBeGreaterThan(0);
-  });
-
-  it("keeps Whisper Candle out of shared meeting-compatible routes", async () => {
-    getSettingsMock.mockResolvedValue({
-      transcription: {
-        defaultProvider: "whisper_candle",
-        selectedModelId: "whisper-large-v3-turbo",
-        useSharedAsrSelection: true,
-        dictationProvider: "whisper_candle",
-        dictationModelId: "whisper-large-v3-turbo",
-        meetingProvider: "whisper_candle",
-        meetingModelId: "whisper-large-v3-turbo",
-        meetingRoutePolicy: "prefer_local",
-        platformOptimization: {
-          mode: "auto",
-          fallbackPolicy: "local_only",
-          macos: { appleNativeEnabled: false, mlxEnabled: true },
-          windows: { foundryEnabled: false, windowsSdkDictationEnabled: false },
-          manualEnginePriority: [],
-        },
-      },
-    });
-
-    render(<AsrProviderManager />);
-
-    expect(await screen.findByText("Current routing")).toBeInTheDocument();
-    expect(await screen.findByText("Split")).toBeInTheDocument();
-    expect(screen.getAllByText("Distil-Whisper").length).toBeGreaterThan(0);
   });
 
   it("persists meeting route policy changes", async () => {
