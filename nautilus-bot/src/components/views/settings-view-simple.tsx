@@ -1680,20 +1680,24 @@ export function SettingsView() {
       );
 
       if (refreshedModelId !== initialModelId) {
-        void updateSettings(
-          {
-            ...initialSettings,
-            privacy: {
-              ...initialSettings.privacy,
-              [lane]: { provider: providerName, modelId: refreshedModelId },
-            },
+        // Patch, do not rebuild from `initialSettings`. That snapshot predates
+        // the `await` above, and `queueSettingsSave` keeps a single pending
+        // slot that it REPLACES rather than merges — so a whole-object write
+        // from here would not merely lose a race with anything the user changed
+        // while the model list was loading, it would delete that queued save
+        // before it was ever attempted. Same defect the auto-pin effect had.
+        patchSettings((previous) => ({
+          ...previous,
+          privacy: {
+            ...previous.privacy,
+            [lane]: { ...previous.privacy[lane], modelId: refreshedModelId },
           },
-          { immediate: true },
-        );
+        }));
       }
     },
     [
       getCachedModelsForProvider,
+      patchSettings,
       refreshModelsForProvider,
       settings,
       updateSettings,
