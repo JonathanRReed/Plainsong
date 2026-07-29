@@ -7193,6 +7193,42 @@ mod tests {
     }
 
     #[test]
+    fn dictation_preview_floor_clears_the_whisper_pad_threshold() {
+        // `transcribe_blocking` pads anything under 1.1s up to 1.1s with
+        // silence, so a preview floor at or below that decodes mostly synthetic
+        // silence and still pays for a full beam search. This is the regression
+        // that made a real 2.7s dictation run three blank decodes.
+        const {
+            assert!(DICTATION_PARTIAL_MIN_SECONDS > 1.1);
+        }
+
+        // The old 0.5s floor would have.
+        let old_floor_samples = (16_000.0_f32 * 0.5) as usize;
+        let new_floor_samples = (16_000.0_f32 * DICTATION_PARTIAL_MIN_SECONDS) as usize;
+        assert!(partial_should_decode(
+            old_floor_samples,
+            0,
+            old_floor_samples
+        ));
+        assert!(!partial_should_decode(
+            old_floor_samples,
+            0,
+            new_floor_samples
+        ));
+    }
+
+    #[test]
+    fn dictation_preview_skips_snapshots_without_speech() {
+        let quiet = vec![0.0_f32; 16_000];
+        assert!(!partial_snapshot_has_speech(&quiet));
+        assert!(!partial_snapshot_has_speech(&[]));
+
+        // A tone well above the trim threshold is worth decoding.
+        let loud: Vec<f32> = (0..16_000).map(|i| (i as f32 * 0.05).sin() * 0.5).collect();
+        assert!(partial_snapshot_has_speech(&loud));
+    }
+
+    #[test]
     fn partial_should_decode_gates_correctly() {
         let min_samples = 8000; // 0.5 s at 16 kHz
 
@@ -11490,13 +11526,48 @@ async fn auto_name_meeting_recording(
     Ok(Some(new_title))
 }
 
+/// Shortest span the dictation live preview will hand to the decoder.
+///
+/// `WhisperProvider::transcribe` VAD-trims its input and then pads anything
+/// under 1.1s back up to 1.1s with silence, so a span below that floor is
+/// decoded as mostly synthetic silence and still pays for a full beam search.
+/// Measured on a real 2.7s packaged dictation with the previous 0.5s floor: the
+/// preview decoded three times, each trimming to ~330ms of speech, padding to
+/// 1100ms, and returning `[BLANK_AUDIO]` — 344ms of GPU for no output.
+///
+/// `streaming.rs` already learned this and set its own floor above the padding
+/// threshold (`MIN_CHUNK_SECONDS`); the dictation preview never got the same
+/// fix. It cannot borrow that 5s value — dictation previews have to feel live —
+/// so it sits just above the pad floor instead.
+const DICTATION_PARTIAL_MIN_SECONDS: f32 = 1.2;
+
+/// Speech energy the preview requires before decoding, in dBFS.
+///
+/// Matches the threshold `transcribe_blocking` trims against, so the preview
+/// stops asking the decoder questions whose answer is already known to be
+/// `[BLANK_AUDIO]`.
+const DICTATION_PARTIAL_MIN_SPEECH_DB: f32 = -40.0;
+
 /// Decide whether a streaming-partial tick should run a decode.
 ///
 /// UI-only: this gates the live preview decode, never the final transcription.
-/// Decode only when the accumulated audio is long enough to be worth decoding
-/// (`>= min_samples`) and has grown since the previous decode.
+/// A short *final* utterance must still be padded and decoded — dropping it
+/// would lose a real word — so this floor deliberately applies to the preview
+/// alone.
 fn partial_should_decode(snapshot_len: usize, last_len: usize, min_samples: usize) -> bool {
     snapshot_len >= min_samples && snapshot_len != last_len
+}
+
+/// Whether a preview snapshot carries enough speech to be worth decoding.
+///
+/// The length gate alone is not enough: 1.2s of near-silence trims back below
+/// the pad floor and lands in the same wasted decode. Checking energy first
+/// costs one pass over a buffer the tick already cloned.
+fn partial_snapshot_has_speech(samples: &[f32]) -> bool {
+    if samples.is_empty() {
+        return false;
+    }
+    crate::audio::vad::calculate_energy_db(samples) > DICTATION_PARTIAL_MIN_SPEECH_DB
 }
 
 fn mono_samples_to_wav_bytes(samples: &[f32], sample_rate: u32) -> Result<Vec<u8>, String> {
@@ -17767,7 +17838,7 @@ async fn start_dictation_for_sidecar(
         let model_id = dictation_model_id.clone();
         let handle = handle.clone();
         tokio::spawn(async move {
-            let min_samples = (sample_rate as f32 * 0.5) as usize;
+            let min_samples = (sample_rate as f32 * DICTATION_PARTIAL_MIN_SECONDS) as usize;
             let mut last_decoded_len: usize = 0;
             let mut last_emitted_text = String::new();
             while is_dictating.load(std::sync::atomic::Ordering::SeqCst) {
@@ -17790,6 +17861,14 @@ async fn start_dictation_for_sidecar(
                 };
 
                 if !partial_should_decode(snapshot.len(), last_decoded_len, min_samples) {
+                    continue;
+                }
+
+                // Long enough, but silence trims back below the pad floor and
+                // lands in the same wasted decode. Skip without advancing
+                // `last_decoded_len`, so the next tick reconsiders the same
+                // audio once speech has actually arrived.
+                if !partial_snapshot_has_speech(&snapshot) {
                     continue;
                 }
 
