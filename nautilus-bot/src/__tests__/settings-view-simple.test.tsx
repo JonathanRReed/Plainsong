@@ -253,7 +253,7 @@ describe("SettingsView performance behavior", () => {
     const backend = await import("@/lib/backend");
     render(<ToastProvider><SettingsView /></ToastProvider>);
 
-    await screen.findByText("Tune transcription, AI, privacy, storage, and app behavior");
+    await screen.findByText("How Plainsong listens, writes, and what it keeps.");
     expect(backend.getSettings).toHaveBeenCalledTimes(1);
     expect(backend.getBackupConfig).toHaveBeenCalledTimes(1);
     expect(backend.getPermissionDiagnostics).toHaveBeenCalledTimes(1);
@@ -275,7 +275,7 @@ describe("SettingsView performance behavior", () => {
     const backend = await import("@/lib/backend");
     render(<ToastProvider><SettingsView /></ToastProvider>);
 
-    await screen.findByText("Tune transcription, AI, privacy, storage, and app behavior");
+    await screen.findByText("How Plainsong listens, writes, and what it keeps.");
     fireEvent.click(screen.getByText("Privacy & Security"));
     await screen.findByText("Permission diagnostics");
     vi.clearAllMocks();
@@ -311,7 +311,7 @@ describe("SettingsView performance behavior", () => {
 
     expect(
       await screen.findByText(
-        "Tune transcription, AI, privacy, storage, and app behavior",
+        "How Plainsong listens, writes, and what it keeps.",
       ),
     ).toBeInTheDocument();
     fireEvent.click(screen.getByText("Storage"));
@@ -352,7 +352,7 @@ describe("SettingsView performance behavior", () => {
 
     render(<ToastProvider><SettingsView /></ToastProvider>);
 
-    await screen.findByText("Tune transcription, AI, privacy, storage, and app behavior");
+    await screen.findByText("How Plainsong listens, writes, and what it keeps.");
     await waitFor(() => {
       expect(backend.getPermissionDiagnostics).toHaveBeenCalled();
     });
@@ -365,7 +365,7 @@ describe("SettingsView performance behavior", () => {
   it("renders the Transcription tab without the removed audio-tuning placebo controls", async () => {
     render(<ToastProvider><SettingsView /></ToastProvider>);
 
-    await screen.findByText("Tune transcription, AI, privacy, storage, and app behavior");
+    await screen.findByText("How Plainsong listens, writes, and what it keeps.");
     fireEvent.click(screen.getByText("Transcription"));
     await screen.findByText(/Choose how Plainsong transcribes dictation and meetings/);
 
@@ -382,7 +382,7 @@ describe("SettingsView performance behavior", () => {
     const backend = await import("@/lib/backend");
     render(<ToastProvider><SettingsView /></ToastProvider>);
 
-    await screen.findByText("Tune transcription, AI, privacy, storage, and app behavior");
+    await screen.findByText("How Plainsong listens, writes, and what it keeps.");
     fireEvent.click(screen.getByText("Transcription"));
     expect(
       await screen.findByText(/has not verified macOS permission and non-silent callbacks/i),
@@ -423,7 +423,7 @@ describe("SettingsView performance behavior", () => {
 
     render(<ToastProvider><SettingsView /></ToastProvider>);
 
-    await screen.findByText("Tune transcription, AI, privacy, storage, and app behavior");
+    await screen.findByText("How Plainsong listens, writes, and what it keeps.");
     fireEvent.click(screen.getByText("Privacy & Security"));
 
     expect(await screen.findByText("4 of 6 encrypted")).toBeInTheDocument();
@@ -458,7 +458,7 @@ describe("SettingsView performance behavior", () => {
 
     render(<ToastProvider><SettingsView /></ToastProvider>);
 
-    await screen.findByText("Tune transcription, AI, privacy, storage, and app behavior");
+    await screen.findByText("How Plainsong listens, writes, and what it keeps.");
     fireEvent.click(screen.getByText("Privacy & Security"));
     await screen.findByText("6 of 6 encrypted");
 
@@ -485,7 +485,7 @@ describe("SettingsView performance behavior", () => {
     const backend = await import("@/lib/backend");
     render(<ToastProvider><SettingsView /></ToastProvider>);
 
-    await screen.findByText("Tune transcription, AI, privacy, storage, and app behavior");
+    await screen.findByText("How Plainsong listens, writes, and what it keeps.");
     vi.useFakeTimers();
     // Get a switch that actually triggers updateSettings, not the power-user toggle.
     const switches = screen.getAllByRole("switch");
@@ -505,7 +505,7 @@ describe("SettingsView performance behavior", () => {
     const backend = await import("@/lib/backend");
     render(<ToastProvider><SettingsView /></ToastProvider>);
 
-    await screen.findByText("Tune transcription, AI, privacy, storage, and app behavior");
+    await screen.findByText("How Plainsong listens, writes, and what it keeps.");
     fireEvent.click(screen.getByText("Storage"));
     await screen.findByText("Retention, backups, export paths, and cleanup tools");
 
@@ -528,7 +528,7 @@ describe("SettingsView performance behavior", () => {
 
     render(<ToastProvider><SettingsView /></ToastProvider>);
 
-    await screen.findByText("Tune transcription, AI, privacy, storage, and app behavior");
+    await screen.findByText("How Plainsong listens, writes, and what it keeps.");
     await waitFor(() => {
       expect(backend.getDictationShortcutCapabilityStatus).toHaveBeenCalled();
     });
@@ -569,7 +569,7 @@ describe("SettingsView performance behavior", () => {
 
     render(<ToastProvider><SettingsView /></ToastProvider>);
 
-    await screen.findByText("Tune transcription, AI, privacy, storage, and app behavior");
+    await screen.findByText("How Plainsong listens, writes, and what it keeps.");
     await waitFor(() => {
       expect(backend.getDictationShortcutCapabilityStatus).toHaveBeenCalled();
     });
@@ -607,7 +607,7 @@ describe("SettingsView performance behavior", () => {
 
     render(<ToastProvider><SettingsView /></ToastProvider>);
 
-    await screen.findByText("Tune transcription, AI, privacy, storage, and app behavior");
+    await screen.findByText("How Plainsong listens, writes, and what it keeps.");
     await waitFor(() => {
       expect(backend.getDictationShortcutCapabilityStatus).toHaveBeenCalled();
     });
@@ -640,7 +640,7 @@ describe("SettingsView performance behavior", () => {
 
     render(<ToastProvider><SettingsView /></ToastProvider>);
 
-    await screen.findByText("Tune transcription, AI, privacy, storage, and app behavior");
+    await screen.findByText("How Plainsong listens, writes, and what it keeps.");
     fireEvent.click(screen.getByText("Transcription"));
     await screen.findByText(/Choose how Plainsong transcribes dictation and meetings/);
 
@@ -681,7 +681,7 @@ describe("SettingsView performance behavior", () => {
 
     render(<ToastProvider><SettingsView /></ToastProvider>);
 
-    await screen.findByText("Tune transcription, AI, privacy, storage, and app behavior");
+    await screen.findByText("How Plainsong listens, writes, and what it keeps.");
     fireEvent.click(screen.getByText("Transcription"));
     await screen.findByText(/Choose how Plainsong transcribes dictation and meetings/);
 
@@ -693,7 +693,7 @@ describe("SettingsView performance behavior", () => {
     const backend = await import("@/lib/backend");
     render(<ToastProvider><SettingsView /></ToastProvider>);
 
-    await screen.findByText("Tune transcription, AI, privacy, storage, and app behavior");
+    await screen.findByText("How Plainsong listens, writes, and what it keeps.");
     fireEvent.click(screen.getByText("Storage"));
     await screen.findByText("Settings snapshots");
 
@@ -719,7 +719,7 @@ describe("SettingsView performance behavior", () => {
   it("states that backups and cloud uploads are manual without promising scheduling", async () => {
     render(<ToastProvider><SettingsView /></ToastProvider>);
 
-    await screen.findByText("Tune transcription, AI, privacy, storage, and app behavior");
+    await screen.findByText("How Plainsong listens, writes, and what it keeps.");
     fireEvent.click(screen.getByText("Storage"));
     await screen.findByText("Manual backups");
 
@@ -747,7 +747,7 @@ describe("SettingsView performance behavior", () => {
       </ToastProvider>
     );
 
-    await screen.findByText("Tune transcription, AI, privacy, storage, and app behavior");
+    await screen.findByText("How Plainsong listens, writes, and what it keeps.");
     expect(screen.queryByLabelText("Color scheme")).not.toBeInTheDocument();
     expect(screen.queryByRole("option", { name: "Rose Pine Night" })).not.toBeInTheDocument();
     expect(screen.queryByRole("option", { name: "Catppuccin Mocha" })).not.toBeInTheDocument();
@@ -762,7 +762,7 @@ describe("SettingsView performance behavior", () => {
       </ToastProvider>
     );
 
-    await screen.findByText("Tune transcription, AI, privacy, storage, and app behavior");
+    await screen.findByText("How Plainsong listens, writes, and what it keeps.");
     vi.useFakeTimers();
 
     const alwaysOnTopRow = screen.getByText("Always on top").closest(".flex.items-center.justify-between");
@@ -791,7 +791,7 @@ describe("SettingsView performance behavior", () => {
       </ToastProvider>
     );
 
-    await screen.findByText("Tune transcription, AI, privacy, storage, and app behavior");
+    await screen.findByText("How Plainsong listens, writes, and what it keeps.");
     vi.useFakeTimers();
 
     // Start an edit whose debounced save has not landed yet, so the ui
@@ -840,7 +840,7 @@ describe("SettingsView performance behavior", () => {
       </ToastProvider>
     );
 
-    await screen.findByText("Tune transcription, AI, privacy, storage, and app behavior");
+    await screen.findByText("How Plainsong listens, writes, and what it keeps.");
     vi.useFakeTimers();
     fireEvent.click(screen.getByText("AI & Keys"));
     await act(async () => {
@@ -903,7 +903,7 @@ describe("SettingsView performance behavior", () => {
       </ToastProvider>,
     );
 
-    await screen.findByText("Tune transcription, AI, privacy, storage, and app behavior");
+    await screen.findByText("How Plainsong listens, writes, and what it keeps.");
     fireEvent.click(screen.getByText("AI & Keys"));
 
     // On by default, so it has to name the destination rather than sit
@@ -943,7 +943,7 @@ describe("SettingsView performance behavior", () => {
       </ToastProvider>,
     );
 
-    await screen.findByText("Tune transcription, AI, privacy, storage, and app behavior");
+    await screen.findByText("How Plainsong listens, writes, and what it keeps.");
     fireEvent.click(screen.getByText("AI & Keys"));
 
     // Key Manager auto-seeds its provider to the current default analysis
@@ -988,7 +988,7 @@ describe("SettingsView performance behavior", () => {
       </ToastProvider>
     );
 
-    await screen.findByText("Tune transcription, AI, privacy, storage, and app behavior");
+    await screen.findByText("How Plainsong listens, writes, and what it keeps.");
     fireEvent.click(screen.getByText("Storage"));
     await screen.findByText("Guided setup");
 
@@ -1014,7 +1014,7 @@ describe("SettingsView performance behavior", () => {
       </ToastProvider>
     );
 
-    await screen.findByText("Tune transcription, AI, privacy, storage, and app behavior");
+    await screen.findByText("How Plainsong listens, writes, and what it keeps.");
     fireEvent.click(screen.getByText("AI & Keys"));
     await screen.findByText("Memory Search");
 
@@ -1049,7 +1049,7 @@ describe("SettingsView performance behavior", () => {
       </ToastProvider>,
     );
 
-    await screen.findByText("Tune transcription, AI, privacy, storage, and app behavior");
+    await screen.findByText("How Plainsong listens, writes, and what it keeps.");
     fireEvent.click(screen.getByText("AI & Keys"));
     await screen.findByText("Default analysis provider");
 
@@ -1085,7 +1085,7 @@ describe("SettingsView performance behavior", () => {
       </ToastProvider>
     );
 
-    await screen.findByText("Tune transcription, AI, privacy, storage, and app behavior");
+    await screen.findByText("How Plainsong listens, writes, and what it keeps.");
     fireEvent.click(screen.getByText("Transcription"));
     await screen.findByText("Dictation active language set");
 
@@ -1121,7 +1121,7 @@ describe("SettingsView performance behavior", () => {
       </ToastProvider>,
     );
 
-    await screen.findByText("Tune transcription, AI, privacy, storage, and app behavior");
+    await screen.findByText("How Plainsong listens, writes, and what it keeps.");
     await screen.findByText("Global keyboard shortcuts");
 
     expect(
@@ -1146,7 +1146,7 @@ describe("SettingsView performance behavior", () => {
       </ToastProvider>,
     );
 
-    await screen.findByText("Tune transcription, AI, privacy, storage, and app behavior");
+    await screen.findByText("How Plainsong listens, writes, and what it keeps.");
     await screen.findByText("Global keyboard shortcuts");
 
     expect(screen.queryByText(/This conflicts with/)).not.toBeInTheDocument();

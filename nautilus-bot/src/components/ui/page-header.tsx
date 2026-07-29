@@ -3,17 +3,16 @@ import type { ReactNode } from "react";
 
 interface PageHeaderProps {
   title: string;
+  /**
+   * The page's single rust rubric eyebrow. STYLE.md budgets exactly one per
+   * page and it lives here — sections inside the page use `.section-heading`
+   * (or nothing), never a second `.rubric`.
+   */
   eyebrow?: string;
   subtitle?: string;
   actions?: ReactNode;
-  breadcrumbs?: Array<{
-    label: string;
-    href?: string;
-    onClick?: () => void;
-  }>;
   className?: string;
   children?: ReactNode;
-  versal?: boolean;
 }
 
 export function PageHeader({
@@ -21,57 +20,17 @@ export function PageHeader({
   eyebrow,
   subtitle,
   actions,
-  breadcrumbs,
   className,
   children,
-  versal = false,
 }: PageHeaderProps) {
-  const showVersal = versal && title.length > 0;
-  const first = [...title][0] ?? "";
-  const rest = title.slice(first.length);
   return (
     <div className={cn("border-b border-border/70 bg-background/82 backdrop-blur-xl", className)}>
       <div className="mx-auto flex w-full max-w-7xl flex-col gap-4 px-6 py-5 lg:px-8">
-        {/* Breadcrumbs */}
-        {breadcrumbs && breadcrumbs.length > 0 && (
-          <nav className="rubric-muted flex flex-wrap items-center gap-2">
-            {breadcrumbs.map((crumb, index) => {
-              const isLast = index === breadcrumbs.length - 1;
-              return (
-                <div key={index} className="flex items-center gap-2">
-                  {index > 0 && (
-                    <span className="text-muted-foreground">/</span>
-                  )}
-                  {isLast ? (
-                    <span className="text-muted-foreground">{crumb.label}</span>
-                  ) : (
-                    <button
-                      type="button"
-                      onClick={crumb.onClick}
-                      className="text-muted-foreground hover:text-foreground transition-colors"
-                    >
-                      {crumb.label}
-                    </button>
-                  )}
-                </div>
-              );
-            })}
-          </nav>
-        )}
-
-        {/* Header Content */}
         <div className="flex flex-col gap-4 lg:flex-row lg:items-start lg:justify-between">
           <div className="min-w-0 flex-1">
             {eyebrow && <p className="rubric mb-1.5">{eyebrow}</p>}
             <h1 className="font-serif text-2xl font-semibold tracking-tight text-foreground">
-              {showVersal ? (
-                <>
-                  <span className="versal gilt-text">{first}</span>
-                  {rest}
-                </>
-              ) : (
-                title
-              )}
+              {title}
             </h1>
             {subtitle && (
               <p className="mt-1 max-w-3xl text-sm leading-6 text-muted-foreground">
@@ -86,7 +45,7 @@ export function PageHeader({
           )}
         </div>
 
-        {children && <div className="mt-4">{children}</div>}
+        {children}
       </div>
     </div>
   );

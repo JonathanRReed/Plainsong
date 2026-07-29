@@ -37,8 +37,6 @@ import {
   Search,
   Send,
   Users,
-  Building2,
-  Zap,
 } from "lucide-react";
 
 /** m:ss for a transcript offset, so a hit reads like a place in the meeting. */
@@ -275,7 +273,23 @@ export function DashboardView() {
               <CardContent className="grid gap-6 p-5 sm:p-6 lg:grid-cols-[minmax(0,1fr)_260px]">
                 <div className="min-w-0">
                   <div className="mb-5 flex flex-wrap items-center gap-2">
-                    <Badge variant={dictationReady && meetingReady ? "default" : "destructive"}>
+                    {/* The one full-gold mark on Home is the CTA in the page
+                        header, so readiness state is a hairline badge with a
+                        neume rather than a second gilded fill. */}
+                    <Badge
+                      variant="outline"
+                      className={
+                        dictationReady && meetingReady
+                          ? "border-gold/30 text-gold-text"
+                          : "border-rust/30 text-rust"
+                      }
+                    >
+                      <span
+                        className={
+                          dictationReady && meetingReady ? "neume neume-lit" : "neume neume-rust"
+                        }
+                        aria-hidden="true"
+                      />
                       {setupLoading
                         ? "Checking setup"
                         : dictationReady && meetingReady && fullCaptureReady
@@ -284,13 +298,13 @@ export function DashboardView() {
                             ? "Mic-only ready"
                             : "Needs attention"}
                     </Badge>
-                    <Badge variant="outline">Local memory</Badge>
                   </div>
-                  <p className="text-2xl font-semibold tracking-tight text-card-foreground sm:text-3xl">
+                  <p className="font-serif text-2xl font-semibold tracking-tight text-card-foreground sm:text-3xl">
                     {setupHeadline}
                   </p>
                   <p className="mt-3 max-w-2xl text-sm leading-6 text-muted-foreground">
-                    Capture voice, review the result, and move the next action forward without leaving the workspace.
+                    Dictate into whatever app you are in, record a meeting, then search back through
+                    everything that was said.
                   </p>
                   <div className="mt-6 flex flex-wrap gap-2">
                     <Button variant="outline" onClick={() => requestMainView("dictation")}>
@@ -331,7 +345,7 @@ export function DashboardView() {
                     >
                       <span className="min-w-0">
                         <span className="block text-sm font-medium text-card-foreground">{item.label}</span>
-                        <span className="mt-0.5 block text-xs text-muted-foreground">
+                        <span className="mt-0.5 block text-sm text-muted-foreground">
                           {item.ready ? "Open" : "Review"}
                         </span>
                       </span>
@@ -348,55 +362,37 @@ export function DashboardView() {
 
             <Card className="surface-panel-subtle xl:col-span-4">
               <CardContent className="flex h-full flex-col gap-4 p-5">
-                <div className="flex items-center justify-between gap-3">
+                <h2 className="section-heading">Stored on this Mac</h2>
+                <div className="grid grid-cols-3 gap-4">
                   <div>
-                    <p className="rubric-muted">Today</p>
-                    <p className="mt-1 font-serif text-lg font-semibold tracking-tight">Capture overview</p>
-                  </div>
-                  <div className="flex size-10 items-center justify-center rounded-xl bg-muted/30 text-muted-foreground">
-                    <Brain className="h-4 w-4" />
-                  </div>
-                </div>
-                <div className="grid grid-cols-3 gap-2">
-                  <div className="rounded-xl border border-border/60 bg-background/55 p-3">
                     <p className="text-xl font-semibold tabular-nums">{recordings.length}</p>
-                    <p className="mt-1 text-xs text-muted-foreground">Meetings</p>
+                    <p className="mt-1 text-sm text-muted-foreground">Recordings</p>
                   </div>
-                  <div className="rounded-xl border border-border/60 bg-background/55 p-3">
+                  <div>
                     <p className="text-xl font-semibold tabular-nums">{projects.length}</p>
-                    <p className="mt-1 text-xs text-muted-foreground">Projects</p>
+                    <p className="mt-1 text-sm text-muted-foreground">Projects</p>
                   </div>
-                  <div className="rounded-xl border border-border/60 bg-background/55 p-3">
+                  <div>
                     <p className="text-xl font-semibold tabular-nums">{Math.floor(totalDuration / 3600)}h</p>
-                    <p className="mt-1 text-xs text-muted-foreground">Audio</p>
+                    <p className="mt-1 text-sm text-muted-foreground">Audio</p>
                   </div>
-                </div>
-                <Separator />
-                <div className="flex items-start gap-3 rounded-xl bg-muted/35 p-3">
-                  <Zap className="mt-0.5 h-4 w-4 shrink-0 text-muted-foreground" />
-                  <p className="text-sm leading-6 text-muted-foreground">
-                    Dictation stays first. Meetings add memory, action items, and follow-through.
-                  </p>
                 </div>
               </CardContent>
             </Card>
           </section>
 
-          {/* Ask your meetings - Memory chat */}
-          <Card className="hover-lift">
+          <Card>
             <CardHeader>
-              <div className="flex items-center justify-between">
-                <CardTitle className="flex items-center gap-2 font-serif">
-                  <div className="flex h-8 w-8 items-center justify-center rounded-lg bg-muted/30">
-                    <Brain className="h-4 w-4 text-muted-foreground" />
-                  </div>
+              <div className="flex items-center justify-between gap-3">
+                <CardTitle className="flex items-center gap-2">
+                  <Brain className="h-4 w-4 shrink-0 text-muted-foreground" aria-hidden="true" />
                   Ask your meetings
                 </CardTitle>
                 {memoryMessages.length > 0 && (
                   <Button
                     variant="ghost"
                     size="sm"
-                    className="text-xs text-muted-foreground"
+                    className="text-muted-foreground"
                     onClick={() => {
                       setMemoryMessages([]);
                       setMemoryError(null);
@@ -407,7 +403,8 @@ export function DashboardView() {
                 )}
               </div>
               <p className="text-sm text-muted-foreground">
-                Ask anything across your meetings. Answers with citations from local transcripts.
+                A question in plain words. The answer comes back with the lines from your
+                transcripts it was based on.
               </p>
             </CardHeader>
             <CardContent className="space-y-4">
@@ -427,7 +424,7 @@ export function DashboardView() {
                 </Button>
               </div>
               {memoryError && (
-                <div className="p-3 rounded-md bg-destructive/10 text-destructive text-sm">
+                <div className="rounded-md border border-rust/30 bg-rust/10 p-3 text-sm text-rust">
                   {memoryError}
                 </div>
               )}
@@ -445,7 +442,7 @@ export function DashboardView() {
                       {message.citations && message.citations.length > 0 && (
                         <div className="mt-2 space-y-1">
                           {message.citations.map((citation, idx) => (
-                            <div key={idx} className="text-xs text-muted-foreground border-l-2 border-gold/30 pl-2">
+                            <div key={idx} className="border-l-2 border-gold/30 pl-2 text-sm text-muted-foreground">
                               {citation.text}
                             </div>
                           ))}
@@ -458,16 +455,14 @@ export function DashboardView() {
             </CardContent>
           </Card>
 
-          <Card className="hover-lift">
+          <Card>
             <CardHeader>
-              <CardTitle className="flex items-center gap-2 font-serif">
-                <div className="flex h-8 w-8 items-center justify-center rounded-lg bg-muted/30">
-                  <Users className="h-4 w-4 text-muted-foreground" />
-                </div>
+              <CardTitle className="flex items-center gap-2">
+                <Users className="h-4 w-4 shrink-0 text-muted-foreground" aria-hidden="true" />
                 Relationship Memory
               </CardTitle>
               <p className="text-sm text-muted-foreground">
-                Local memory built from speaker names, notes, and transcripts.
+                Who keeps coming up, gathered from speaker names and transcripts on this Mac.
               </p>
             </CardHeader>
             <CardContent className="space-y-4">
@@ -477,7 +472,7 @@ export function DashboardView() {
               {relationshipMemoryLoading ? (
                 <div className="flex items-center gap-2 py-4 text-sm text-muted-foreground">
                   <Loader2 className="h-4 w-4 animate-spin" />
-                  Building local relationship memory…
+                  Reading your transcripts…
                 </div>
               ) : null}
               {!relationshipMemoryLoading &&
@@ -486,27 +481,24 @@ export function DashboardView() {
               relationshipMemory.people.length === 0 &&
               relationshipMemory.companies.length === 0 ? (
                 <p className="text-sm text-muted-foreground">
-                  Record more meetings or name speakers to build people and company memory.
+                  Name the speakers in a meeting or two and the people you meet with will appear here.
                 </p>
               ) : null}
               {!relationshipMemoryLoading && relationshipMemory ? (
                 <div className="grid gap-4 lg:grid-cols-2">
                   <div className="space-y-3">
-                    <div className="flex items-center justify-between">
-                      <h3 className="flex items-center gap-1.5 text-xs font-semibold uppercase tracking-widest text-muted-foreground">
-                        <Users className="h-3 w-3" />
-                        People
-                      </h3>
-                      <Badge variant="secondary" className="text-[10px]">
+                    <div className="flex items-baseline justify-between gap-2 border-b border-border/60 pb-2">
+                      <h3 className="section-heading">People</h3>
+                      <span className="text-sm tabular-nums text-muted-foreground">
                         {relationshipMemory.people.length}
-                      </Badge>
+                      </span>
                     </div>
                     {relationshipMemory.people.slice(0, 4).map((person) => (
-                      <div key={person.id} className="rounded-lg border bg-muted/10 p-3 space-y-2 transition-colors hover:bg-muted/20">
+                      <div key={person.id} className="space-y-2 border-t border-border/40 pt-3 first:border-t-0 first:pt-0">
                         <div className="flex items-start justify-between gap-3">
                           <div className="min-w-0">
                             <p className="font-medium truncate">{person.name}</p>
-                            <p className="text-xs text-muted-foreground">
+                            <p className="text-sm text-muted-foreground">
                               {person.recordingCount} meetings · last seen{" "}
                               {new Date(person.lastSeenAt).toLocaleDateString()}
                             </p>
@@ -514,7 +506,7 @@ export function DashboardView() {
                           <Button
                             variant="outline"
                             size="sm"
-                            className="shrink-0 text-xs"
+                            className="shrink-0"
                             onClick={() => void runMemoryQuery(buildRelationshipPrompt(person, "person"))}
                             disabled={memoryLoading}
                           >
@@ -522,32 +514,29 @@ export function DashboardView() {
                           </Button>
                         </div>
                         {person.relatedCompanies.length > 0 ? (
-                          <p className="text-xs text-muted-foreground">
-                            Related: {person.relatedCompanies.join(", ")}
+                          <p className="text-sm text-muted-foreground">
+                            Also in meetings with {person.relatedCompanies.join(", ")}
                           </p>
                         ) : null}
                         {person.recentMeetings[0] ? (
-                          <p className="text-xs leading-relaxed text-muted-foreground line-clamp-2">{person.recentMeetings[0].snippet}</p>
+                          <p className="line-clamp-2 text-sm leading-relaxed text-muted-foreground">{person.recentMeetings[0].snippet}</p>
                         ) : null}
                       </div>
                     ))}
                   </div>
                   <div className="space-y-3">
-                    <div className="flex items-center justify-between">
-                      <h3 className="flex items-center gap-1.5 text-xs font-semibold uppercase tracking-widest text-muted-foreground">
-                        <Building2 className="h-3 w-3" />
-                        Companies
-                      </h3>
-                      <Badge variant="secondary" className="text-[10px]">
+                    <div className="flex items-baseline justify-between gap-2 border-b border-border/60 pb-2">
+                      <h3 className="section-heading">Companies</h3>
+                      <span className="text-sm tabular-nums text-muted-foreground">
                         {relationshipMemory.companies.length}
-                      </Badge>
+                      </span>
                     </div>
                     {relationshipMemory.companies.slice(0, 4).map((company) => (
-                      <div key={company.id} className="rounded-lg border bg-muted/10 p-3 space-y-2 transition-colors hover:bg-muted/20">
+                      <div key={company.id} className="space-y-2 border-t border-border/40 pt-3 first:border-t-0 first:pt-0">
                         <div className="flex items-start justify-between gap-3">
                           <div className="min-w-0">
                             <p className="font-medium truncate">{company.name}</p>
-                            <p className="text-xs text-muted-foreground">
+                            <p className="text-sm text-muted-foreground">
                               {company.recordingCount} meetings · last seen{" "}
                               {new Date(company.lastSeenAt).toLocaleDateString()}
                             </p>
@@ -555,7 +544,7 @@ export function DashboardView() {
                           <Button
                             variant="outline"
                             size="sm"
-                            className="shrink-0 text-xs"
+                            className="shrink-0"
                             onClick={() => void runMemoryQuery(buildRelationshipPrompt(company, "company"))}
                             disabled={memoryLoading}
                           >
@@ -563,12 +552,12 @@ export function DashboardView() {
                           </Button>
                         </div>
                         {company.relatedPeople.length > 0 ? (
-                          <p className="text-xs text-muted-foreground">
-                            Related: {company.relatedPeople.join(", ")}
+                          <p className="text-sm text-muted-foreground">
+                            Also in meetings with {company.relatedPeople.join(", ")}
                           </p>
                         ) : null}
                         {company.recentMeetings[0] ? (
-                          <p className="text-xs leading-relaxed text-muted-foreground line-clamp-2">{company.recentMeetings[0].snippet}</p>
+                          <p className="line-clamp-2 text-sm leading-relaxed text-muted-foreground">{company.recentMeetings[0].snippet}</p>
                         ) : null}
                       </div>
                     ))}
@@ -580,14 +569,13 @@ export function DashboardView() {
 
           <Card>
             <CardHeader>
-              <CardTitle className="flex items-center gap-2 font-serif">
-                <div className="flex h-8 w-8 items-center justify-center rounded-lg bg-muted/20">
-                  <Search className="h-4 w-4 text-muted-foreground" />
-                </div>
+              <CardTitle className="flex items-center gap-2">
+                <Search className="h-4 w-4 shrink-0 text-muted-foreground" aria-hidden="true" />
                 Search across meetings
               </CardTitle>
               <p className="text-sm text-muted-foreground">
-                Keyword search over every transcript, ranked by match.
+                Word-for-word search over every transcript. Open a result to jump to that moment,
+                or tick results and ask one question across all of them.
               </p>
             </CardHeader>
             <CardContent className="space-y-4">
@@ -693,13 +681,13 @@ export function DashboardView() {
                 </Button>
               </div>
               {selectedRecordingIds.length === 0 ? (
-                <p className="text-xs text-muted-foreground">
+                <p className="text-sm text-muted-foreground">
                   Search transcripts first, then select one or more matching meetings to analyze.
                 </p>
               ) : null}
 
               {analysisError && (
-                <p className="text-sm text-destructive">{analysisError}</p>
+                <p className="text-sm text-rust">{analysisError}</p>
               )}
 
               {multiAnalysisResult && (
@@ -708,8 +696,16 @@ export function DashboardView() {
                   {multiAnalysisCitations.length > 0 && (
                     <div className="mt-3 space-y-1 border-t border-border/50 pt-3">
                       {multiAnalysisCitations.map((citation, index) => (
-                        <p key={index} className="text-xs text-muted-foreground">
-                          [{citation.recordingId ?? "recording"}] {citation.startTime?.toFixed(1)}s–{citation.endTime?.toFixed(1)}s: {citation.text}
+                        <p key={index} className="text-sm text-muted-foreground">
+                          <span className="font-medium text-foreground">
+                            {recordings.find((recording) => recording.id === citation.recordingId)
+                              ?.title ?? "This meeting"}
+                          </span>{" "}
+                          <span className="time-spec">
+                            {formatHitTimestamp(citation.startTime ?? 0)}
+                          </span>
+                          {": "}
+                          {citation.text}
                         </p>
                       ))}
                     </div>
@@ -721,17 +717,17 @@ export function DashboardView() {
 
           <Tabs defaultValue="recent" className="space-y-4">
             <TabsList>
-              <TabsTrigger value="recent">Recent Sessions</TabsTrigger>
+              <TabsTrigger value="recent">Recent</TabsTrigger>
               <TabsTrigger value="projects">Projects</TabsTrigger>
-              <TabsTrigger value="timeline">Timeline</TabsTrigger>
+              <TabsTrigger value="timeline">By day</TabsTrigger>
             </TabsList>
 
             <TabsContent value="recent" className="space-y-4">
               {recentRecordings.length === 0 ? (
                 <div className="flex flex-col items-center justify-center gap-2 py-16 text-center">
                   <span className="neume neume-hollow" />
-                  <p className="font-serif text-base font-medium">No meetings yet</p>
-                  <p className="text-sm text-muted-foreground">Start recording to see them here.</p>
+                  <p className="font-serif text-base font-medium">Nothing recorded yet</p>
+                  <p className="text-sm text-muted-foreground">Recordings show up here as you make them.</p>
                 </div>
               ) : (
                 <div className="space-y-1.5">
@@ -742,16 +738,14 @@ export function DashboardView() {
                       onClick={() => requestMainView("recordings")}
                       className="group flex w-full items-center gap-3 rounded-lg border bg-card px-4 py-3 text-left transition-colors hover:bg-accent/50 cursor-pointer"
                     >
-                      <div className="flex h-8 w-8 shrink-0 items-center justify-center rounded-lg bg-muted/50">
-                        <FileAudio className="h-4 w-4 text-muted-foreground" />
-                      </div>
+                      <FileAudio className="h-4 w-4 shrink-0 text-muted-foreground" aria-hidden="true" />
                       <div className="min-w-0 flex-1">
                         <p className="font-medium truncate">{recording.title}</p>
                         <p className="text-xs text-muted-foreground">
                           {new Date(recording.createdAt).toLocaleString()}
                         </p>
                       </div>
-                      <Badge variant="secondary" className="shrink-0 text-xs tabular-nums">
+                      <Badge variant="secondary" className="time-spec shrink-0">
                         {Math.floor(recording.duration / 60)}:{(recording.duration % 60).toString().padStart(2, '0')}
                       </Badge>
                       <ArrowRight className="h-4 w-4 text-muted-foreground opacity-0 transition-opacity group-hover:opacity-100" />
@@ -766,33 +760,34 @@ export function DashboardView() {
                 <div className="flex flex-col items-center justify-center gap-2 py-16 text-center">
                   <span className="neume neume-hollow" />
                   <p className="font-serif text-base font-medium">No projects yet</p>
-                  <p className="text-sm text-muted-foreground">Create your first project to organize meetings.</p>
+                  <p className="text-sm text-muted-foreground">Create one to file dictation somewhere of its own.</p>
                 </div>
               ) : (
-                <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-3">
+                <div className="grid grid-cols-1 gap-3 md:grid-cols-2 lg:grid-cols-3">
                   {projects.map((project) => (
-                    <Card
+                    <button
+                      type="button"
                       key={project.id}
                       onClick={() => requestMainView("projects")}
-                      className="group cursor-pointer transition-colors hover:border-primary/30"
+                      className="rounded-md text-left focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
                     >
-                      <CardHeader className="pb-2">
-                        <div className="flex items-center gap-2">
-                          <div className="flex h-7 w-7 items-center justify-center rounded-lg bg-muted/20">
-                            <Folder className="h-3.5 w-3.5 text-muted-foreground" />
+                      <Card variant="interactive" className="h-full">
+                        <CardHeader className="pb-2">
+                          <div className="flex items-center gap-2">
+                            <Folder className="h-4 w-4 shrink-0 text-muted-foreground" aria-hidden="true" />
+                            <CardTitle className="truncate text-base">{project.name}</CardTitle>
                           </div>
-                          <CardTitle className="text-base truncate">{project.name}</CardTitle>
-                        </div>
-                      </CardHeader>
-                      <CardContent>
-                        <p className="text-sm text-muted-foreground line-clamp-2">
-                          {project.description || "No description"}
-                        </p>
-                        <p className="text-xs text-muted-foreground mt-2">
-                          Created {new Date(project.createdAt).toLocaleDateString()}
-                        </p>
-                      </CardContent>
-                    </Card>
+                        </CardHeader>
+                        <CardContent>
+                          <p className="line-clamp-2 text-sm text-muted-foreground">
+                            {project.description || "No description"}
+                          </p>
+                          <p className="mt-2 text-xs text-muted-foreground">
+                            Created {new Date(project.createdAt).toLocaleDateString()}
+                          </p>
+                        </CardContent>
+                      </Card>
+                    </button>
                   ))}
                 </div>
               )}
@@ -802,19 +797,19 @@ export function DashboardView() {
               {Object.keys(timelineGroups).length === 0 ? (
                 <div className="flex flex-col items-center justify-center gap-2 py-16 text-center">
                   <span className="neume neume-hollow" />
-                  <p className="font-serif text-base font-medium">No timeline yet</p>
-                  <p className="text-sm text-muted-foreground">Sessions will appear here as they are captured.</p>
+                  <p className="font-serif text-base font-medium">Nothing recorded yet</p>
+                  <p className="text-sm text-muted-foreground">Recordings group themselves by day once you have some.</p>
                 </div>
               ) : (
                 <div className="space-y-4">
                   {Object.entries(timelineGroups).map(([date, items]) => (
                     <div key={date}>
-                      <p className="mb-2 text-xs font-semibold uppercase tracking-widest text-muted-foreground">{date}</p>
+                      <p className="rubric-muted mb-2">{date}</p>
                       <div className="space-y-1">
                         {items.map((recording) => (
                           <div key={recording.id} className="flex items-center justify-between rounded-md border px-3 py-2 text-sm">
                             <span className="truncate font-medium">{recording.title}</span>
-                            <span className="shrink-0 text-xs tabular-nums text-muted-foreground">
+                            <span className="time-spec shrink-0 text-xs text-muted-foreground">
                               {new Date(recording.createdAt).toLocaleTimeString()}
                             </span>
                           </div>

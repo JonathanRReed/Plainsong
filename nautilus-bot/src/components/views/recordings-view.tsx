@@ -133,39 +133,39 @@ import type { AsrProviderType, LlmCitation, SearchHit } from "@/types";
 const MEETING_ASK_TEMPLATES: AnalysisTemplate[] = [
   {
     id: "summary",
-    name: "Refresh Summary",
+    name: "Rewrite summary",
     icon: "file-text",
     query: "Using the meeting transcript and saved meeting notes, write a crisp summary with outcomes, open questions, and next steps.",
-    description: "Rebuild the summary from notes and transcript",
+    description: "Outcomes, open questions, next steps",
   },
   {
     id: "actions",
-    name: "Action Items",
+    name: "Action items",
     icon: "check-square",
     query: "Using the meeting transcript and saved meeting notes, extract clear action items with owners when they are stated.",
-    description: "Find follow-ups and owners",
+    description: "Follow-ups, with owners where they were named",
   },
   {
     id: "decisions",
     name: "Decisions",
     icon: "lightbulb",
     query: "List the decisions, agreements, and commitments made in this meeting, using the saved meeting notes to clarify context.",
-    description: "Surface what was decided",
+    description: "What was agreed and committed to",
   },
   {
     id: "dates",
     name: "Deadlines",
     icon: "calendar",
     query: "Extract all deadlines, dates, and time-sensitive follow-ups from this meeting and the saved notes.",
-    description: "Highlight timing commitments",
+    description: "Dates and anything time-sensitive",
   },
   {
     id: "follow_up",
-    name: "Follow-up Draft",
+    name: "Follow-up draft",
     icon: "file-text",
     query:
       "Using the meeting transcript and saved meeting notes, draft a concise professional follow-up email or message. Keep decisions, owners, next steps, and deadlines clear. Return only the final follow-up draft.",
-    description: "Write the post-meeting follow-up",
+    description: "A message you can send after the meeting",
   },
 ];
 
@@ -232,7 +232,7 @@ function MeetingNotesSaveIndicator({
   if (status.state === "error") {
     return (
       <div
-        className="flex items-center gap-1 text-xs text-rust"
+        className="flex items-center gap-1 text-sm text-rust"
         role="status"
         aria-live="polite"
       >
@@ -249,7 +249,7 @@ function MeetingNotesSaveIndicator({
   }
 
   return (
-    <p className="text-xs text-muted-foreground" role="status" aria-live="polite">
+    <p className="text-sm text-muted-foreground" role="status" aria-live="polite">
       {status.state === "saving" ? "Saving…" : "Saved just now"}
     </p>
   );
@@ -276,17 +276,17 @@ const RECAP_AUTHORSHIP_TREATMENT: Record<RecapAuthorship, string> = {
 // The button under these captions is labelled "Regenerate". The only "Refresh"
 // on this page belongs to the transcript rail and does something else.
 const SUMMARY_AUTHORSHIP_CAPTION: Record<RecapAuthorship, string> = {
-  plainsong: "Written by Plainsong from transcript and notes.",
+  plainsong: "Written by Plainsong from the transcript and your notes.",
   user: "Your text. Regenerate to have Plainsong rewrite it from the transcript.",
   unrecorded:
-    "Authorship not recorded — nothing stored says whether you or Plainsong wrote this. Regenerate to have Plainsong rewrite it from the transcript.",
+    "Nothing stored says whether you or Plainsong wrote this. Regenerate to have Plainsong rewrite it from the transcript.",
 };
 
 const ACTION_ITEMS_AUTHORSHIP_CAPTION: Record<RecapAuthorship, string> = {
-  plainsong: "Extracted by Plainsong from transcript and notes.",
-  user: "Your text. Regenerate to have Plainsong extract them from the transcript.",
+  plainsong: "Found by Plainsong in the transcript and your notes.",
+  user: "Your text. Regenerate to have Plainsong pull them from the transcript.",
   unrecorded:
-    "Authorship not recorded — nothing stored says whether you or Plainsong wrote these. Regenerate to have Plainsong extract them from the transcript.",
+    "Nothing stored says whether you or Plainsong wrote these. Regenerate to have Plainsong pull them from the transcript.",
 };
 
 function formatCitationTimeRange(citation: LlmCitation): string | null {
@@ -497,11 +497,11 @@ function recordingStatusBand(
     case "completed":
       return { band: "border-l-gold-ambient", word: "Ready" };
     case "error":
-      return { band: "border-l-rust", word: "Attention" };
+      return { band: "border-l-rust", word: "Failed" };
     case "processing":
       return { band: "border-l-gold-ambient/60", word: "Processing" };
     case "recording":
-      return { band: "border-l-gold", word: "Capturing" };
+      return { band: "border-l-gold", word: "Recording" };
     default:
       return { band: "border-l-border", word: "Draft" };
   }
@@ -522,20 +522,20 @@ function describeMeetingAssetRetention(recording: Recording | null): {
     return {
       audioLabel: "Audio saved",
       detail:
-        "Audio is available for playback. Transcript, notes, summary, and action items remain attached to this meeting.",
+        "The audio file is still here and can be played. Transcript, notes, summary, and action items stay with this meeting.",
       deleteWarning:
-        "This permanently removes the meeting, transcript, notes, summary, action items, and saved audio file.",
+        "The transcript, your notes, the summary, the action items, and the saved audio file all go with it.",
       transcriptRecoveryNote:
         "The audio for this meeting is still saved, so “Re-transcribe from audio” in the meeting menu can produce the whole transcript again.",
     };
   }
 
   return {
-    audioLabel: "Transcript-only",
+    audioLabel: "No audio",
     detail:
-      "Audio is not saved or has already been removed by retention. Transcript, notes, summary, and action items remain available until this meeting is deleted.",
+      "The audio was never saved, or has already been deleted. Transcript, notes, summary, and action items stay here until this meeting is deleted.",
     deleteWarning:
-      "This permanently removes the meeting, transcript, notes, summary, and action items. No saved audio file is attached.",
+      "The transcript, your notes, the summary, and the action items all go with it. There is no audio file to lose.",
   };
 }
 
@@ -585,7 +585,7 @@ function qualityToneClasses(tone: "good" | "warn" | "muted"): string {
  */
 const MEETING_EXPORT_REDACTION_LEVEL = "basic" as const;
 const MEETING_EXPORT_REDACTION_NOTE =
-  "Exports from here use basic redaction: email addresses and phone numbers are replaced, nothing else. Use Exports to choose none or strict.";
+  "Files exported here have email addresses and phone numbers replaced, and nothing else. The Exports view is where you can turn that off or scrub more.";
 
 function formatDuration(seconds: number): string {
   const safeSeconds = Math.max(0, seconds);
@@ -777,48 +777,49 @@ function buildMeetingReadyState(args: {
       label: "Transcription failed",
       tone: "warn",
       detail:
-        "This meeting has no grounded transcript. Retry transcription from the meeting menu before relying on a recap.",
+        "This meeting has no transcript. Retry transcription from the meeting menu before you rely on a summary.",
     };
   }
   if (args.status === "processing") {
     return {
       label: "Transcribing",
       tone: "muted",
-      detail: "Transcript lines are still landing. Keep notes current in the meantime.",
+      detail: "Transcript lines are still arriving. Keep typing notes in the meantime.",
     };
   }
   if (args.summary.trim() && args.actionItems.length > 0) {
     return {
-      label: "Ready to send follow-up",
+      label: "Ready to send",
       tone: "good",
-      detail: "Summary and next steps are already in place.",
+      detail: "The summary and the next steps are both written.",
     };
   }
   if (args.notes.trim() && args.transcriptSegments > 0) {
     return {
-      label: "Ready for AI cleanup",
+      label: "Ready to summarize",
       tone: "warn",
-      detail: "You have enough notes and transcript context to generate a solid recap.",
+      detail:
+        "There are enough notes and transcript here for Plainsong to write the summary and action items.",
     };
   }
   if (args.transcriptSegments > 0) {
     return {
-      label: "Transcript captured",
+      label: "Transcript only",
       tone: "muted",
-      detail: "Start filling notes or run summary/action item refresh next.",
+      detail: "Add notes, or regenerate the summary and action items below.",
     };
   }
   if (args.isLive || args.status === "recording") {
     return {
-      label: "Capture in progress",
+      label: "Recording",
       tone: "muted",
-      detail: "Keep notes current while the meeting is still live.",
+      detail: "Keep typing notes while the meeting runs.",
     };
   }
   return {
-    label: "Nothing captured yet",
+    label: "Empty",
     tone: "muted",
-    detail: "This meeting has no transcript, notes, or recap attached to it.",
+    detail: "This meeting has no transcript, notes, or summary yet.",
   };
 }
 
@@ -1396,12 +1397,12 @@ export function RecordingsView() {
         refreshTranscriptDetails(selectedRecording.id),
         refreshSpeakerNames(selectedRecording.id),
       ]);
-      toast("Transcript panel refreshed.", "success");
+      toast("Transcript refreshed.", "success");
     } catch (error) {
       const message =
         error instanceof Error
           ? error.message
-          : "Transcript refresh failed. Try again after processing advances.";
+          : "Couldn't refresh the transcript. Try again once processing has moved on.";
       toast(message, "error");
     } finally {
       setIsRefreshingTranscriptPanel(false);
@@ -1882,7 +1883,7 @@ export function RecordingsView() {
       if (status === "error") {
         setAutoNameIssue({
           recordingId: updatedId,
-          message: message ?? "Meeting auto-name failed.",
+          message: message ?? "Plainsong could not name this meeting.",
         });
       }
     }).then((fn) => {
@@ -2088,7 +2089,7 @@ export function RecordingsView() {
       setSpeakerNames((prev) => ({ ...prev, [speakerId]: newName }));
     } catch (error) {
       const message =
-        error instanceof Error ? error.message : "Failed to rename this speaker.";
+        error instanceof Error ? error.message : "Couldn't rename this speaker.";
       toast(message, "error");
       throw error;
     }
@@ -2122,7 +2123,7 @@ export function RecordingsView() {
       const message =
         error instanceof Error
           ? error.message
-          : "Failed to remove transcript text from this meeting.";
+          : "Couldn't remove that transcript text.";
       toast(message, "error");
     }
   };
@@ -2158,13 +2159,13 @@ export function RecordingsView() {
             }
           : current
       );
-      toast("Summary refreshed from this meeting.", "success");
+      toast("Summary rewritten from this meeting.", "success");
     } catch (error) {
       if (!meetingSummaryRequestGuard.isCurrent(requestToken)) {
         return;
       }
       const message =
-        error instanceof Error ? error.message : "Failed to refresh the summary.";
+        error instanceof Error ? error.message : "Couldn't rewrite the summary.";
       toast(message, "error");
     } finally {
       if (meetingSummaryRequestGuard.isCurrent(requestToken)) {
@@ -2207,13 +2208,13 @@ export function RecordingsView() {
             }
           : current
       );
-      toast("Action items refreshed from this meeting.", "success");
+      toast("Action items pulled from this meeting.", "success");
     } catch (error) {
       if (!meetingActionItemsRequestGuard.isCurrent(requestToken)) {
         return;
       }
       const message =
-        error instanceof Error ? error.message : "Failed to refresh action items.";
+        error instanceof Error ? error.message : "Couldn't pull the action items.";
       toast(message, "error");
     } finally {
       if (meetingActionItemsRequestGuard.isCurrent(requestToken)) {
@@ -2389,18 +2390,18 @@ export function RecordingsView() {
       if (!summaryResult || !actionItemsResult) {
         const failedPart = summaryResult ? "action items" : "summary";
         toast(
-          `Enhanced notes are ready with the saved ${failedPart} kept unchanged because that analysis failed.`,
+          `Draft ready — but Plainsong could not redo the ${failedPart}, so what was already saved was kept.`,
           "info"
         );
       } else {
-        toast("Enhanced notes draft ready.", "success");
+        toast("Draft ready.", "success");
       }
     } catch (error) {
       if (!meetingEnhanceRequestGuard.isCurrent(requestToken)) {
         return;
       }
       const message =
-        error instanceof Error ? error.message : "Failed to build enhanced notes.";
+        error instanceof Error ? error.message : "Couldn't build the draft.";
       toast(message, "error");
     } finally {
       if (meetingEnhanceRequestGuard.isCurrent(requestToken)) {
@@ -2412,16 +2413,16 @@ export function RecordingsView() {
   const handleCopyEnhancedMeetingNotes = async () => {
     const draft = enhancedMeetingNotesDraft?.text.trim();
     if (!draft) {
-      toast("Nothing to copy for enhanced notes.", "error");
+      toast("There is no draft to copy yet.", "error");
       return;
     }
 
     try {
       await navigator.clipboard.writeText(draft);
-      toast("Enhanced notes copied.", "success");
+      toast("Draft copied.", "success");
     } catch (error) {
       const message =
-        error instanceof Error ? error.message : "Failed to copy enhanced notes.";
+        error instanceof Error ? error.message : "Couldn't copy the draft.";
       toast(message, "error");
     }
   };
@@ -2451,10 +2452,10 @@ export function RecordingsView() {
           : current
       );
       setEnhancedMeetingNotesDraft(null);
-      toast("Enhanced notes applied to this meeting.", "success");
+      toast("Draft saved into your notes.", "success");
     } catch (error) {
       const message =
-        error instanceof Error ? error.message : "Failed to apply enhanced notes.";
+        error instanceof Error ? error.message : "Couldn't save the draft into your notes.";
       toast(message, "error");
     }
   };
@@ -2525,9 +2526,9 @@ export function RecordingsView() {
   const handleCopyMeetingRecall = async (text: string) => {
     await handleCopyMeetingText({
       text,
-      emptyMessage: "Nothing to copy from cross-meeting recall.",
-      successMessage: "Cross-meeting recall copied.",
-      failureMessage: "Failed to copy cross-meeting recall.",
+      emptyMessage: "There is no answer to copy yet.",
+      successMessage: "Answer copied.",
+      failureMessage: "Couldn't copy the answer.",
     });
   };
 
@@ -2561,7 +2562,9 @@ export function RecordingsView() {
       }
     } catch (error) {
       setMeetingRecallError(
-        error instanceof Error ? error.message : "Cross-meeting recall could not be generated."
+        error instanceof Error
+          ? error.message
+          : "Couldn't answer from your earlier meetings."
       );
       setMeetingRecallResponse(null);
       setMeetingRecallCitations([]);
@@ -2596,7 +2599,7 @@ export function RecordingsView() {
       );
     } catch (error) {
       const message =
-        error instanceof Error ? error.message : "Failed to export the meeting artifact.";
+        error instanceof Error ? error.message : "Couldn't export this meeting.";
       toast(message, "error");
     } finally {
       setIsExportingMeeting(false);
@@ -2612,7 +2615,7 @@ export function RecordingsView() {
       await openExportPath(lastMeetingExportPath);
     } catch (error) {
       const message =
-        error instanceof Error ? error.message : "Failed to open the exported file.";
+        error instanceof Error ? error.message : "Couldn't open the exported file.";
       toast(message, "error");
     }
   };
@@ -2630,7 +2633,7 @@ export function RecordingsView() {
       const available = await isDiarizationModelAvailable();
       if (!available) {
         setDiarizationError(
-          "Speaker diarization is not yet available as a local model. Use the Ask tab for AI-powered meeting summaries, action items, and speaker attribution."
+          "Plainsong has no on-device model for separating speakers yet, so who said what can't be labelled here. Ask can still answer questions about what was said."
         );
         setIsRunningDiarization(false);
         return;
@@ -2639,7 +2642,7 @@ export function RecordingsView() {
       const result = await runDiarization(selectedRecording.id);
       await loadRecordingDetail(selectedRecording);
       setDiarizationMessage(
-        `Speaker identification complete (${result.speakers.length} speakers found).`
+        `Found ${result.speakers.length} speaker${result.speakers.length === 1 ? "" : "s"}.`
       );
     } catch (error) {
       const msg =
@@ -2647,7 +2650,7 @@ export function RecordingsView() {
           ? error.message
           : typeof error === "string"
             ? error
-            : "Speaker identification failed. Use the Ask tab for AI-powered features.";
+            : "Couldn't identify speakers. Ask can still answer questions about this meeting.";
       setDiarizationError(msg);
     } finally {
       setIsRunningDiarization(false);
@@ -2890,7 +2893,7 @@ export function RecordingsView() {
           setMeetingSearchError(
             error instanceof Error
               ? error.message
-              : "Transcript search is unavailable. Titles, notes, and recaps are still searched."
+              : "Transcript search is unavailable. Titles, notes, summaries, and action items are still searched."
           );
         })
         .finally(() => {
@@ -3307,9 +3310,9 @@ export function RecordingsView() {
         ...current,
         [recordingIdToRetry]: "processing",
       }));
-      toast("Re-transcribing meeting.", "success");
+      toast("Re-transcribing from the saved audio.", "success");
     } catch (error) {
-      const message = error instanceof Error ? error.message : "Failed to re-transcribe meeting.";
+      const message = error instanceof Error ? error.message : "Couldn't start re-transcription.";
       toast(message, "error");
     }
   };
@@ -3331,9 +3334,9 @@ export function RecordingsView() {
     try {
       await setRecordingSourceType(recordingIdToUpdate, "dictation");
       await refetch();
-      toast("Moved recording to Dictation.", "success");
+      toast("Moved to Dictation.", "success");
     } catch (error) {
-      const message = error instanceof Error ? error.message : "Failed to move recording to Dictation.";
+      const message = error instanceof Error ? error.message : "Couldn't move this to Dictation.";
       toast(message, "error");
     }
   };
@@ -3349,9 +3352,14 @@ export function RecordingsView() {
         filteredMeetings.map((recording) => setRecordingSourceType(recording.id, "dictation"))
       );
       await refetch();
-      toast(`Moved ${filteredMeetings.length} item(s) to Dictation.`, "success");
+      toast(
+        `Moved ${filteredMeetings.length} meeting${
+          filteredMeetings.length === 1 ? "" : "s"
+        } to Dictation.`,
+        "success"
+      );
     } catch (error) {
-      const message = error instanceof Error ? error.message : "Failed to move all filtered recordings.";
+      const message = error instanceof Error ? error.message : "Couldn't move every listed meeting.";
       toast(message, "error");
     } finally {
       setIsBulkReclassifying(false);
@@ -3486,7 +3494,7 @@ export function RecordingsView() {
                       onClick={() => void handleExportMeetingArtifact("markdown")}
                     >
                       <FileText className="mr-2 h-4 w-4" />
-                      Export Markdown (basic redaction)
+                      Export as Markdown (emails and phone numbers replaced)
                     </DropdownMenuItem>
                     {canRetranscribeRecording(selectedRecording) && !isLiveSelectedMeeting && (
                       <DropdownMenuItem
@@ -3498,7 +3506,7 @@ export function RecordingsView() {
                       >
                         <RefreshCw className="mr-2 h-4 w-4" />
                         {selectedRecording?.status === "error"
-                          ? "Retry Transcription"
+                          ? "Retry transcription"
                           : "Re-transcribe from audio"}
                       </DropdownMenuItem>
                     )}
@@ -3511,7 +3519,7 @@ export function RecordingsView() {
                       }}
                     >
                       <Mic2 className="mr-2 h-4 w-4" />
-                      Mark as Dictation
+                      Move to Dictation
                     </DropdownMenuItem>
                     <DropdownMenuSeparator />
                     <DropdownMenuItem
@@ -3636,7 +3644,7 @@ export function RecordingsView() {
                   </TabsTrigger>
                   <TabsTrigger value="assets" className="flex items-center gap-2">
                     <FileAudio className="h-4 w-4" />
-                    Assets
+                    Audio
                   </TabsTrigger>
                 </TabsList>
 
@@ -3645,7 +3653,7 @@ export function RecordingsView() {
                     <div className="space-y-6 px-6 py-5">
                       {isLoadingDetail ? (
                         <WorkspaceSkeleton
-                          label="Opening this meeting. Summary, action items, and notes are still loading."
+                          label="Loading the summary, action items, and notes for this meeting."
                           lines={6}
                         />
                       ) : (
@@ -3656,15 +3664,15 @@ export function RecordingsView() {
                                 The record
                               </h2>
                               <p className="mt-1 max-w-prose text-sm text-muted-foreground">
-                                What was decided, and what happens next. Edit either part by hand,
-                                or have Plainsong write it again from the transcript and your
-                                notes. The playbook shapes the summary Plainsong writes; action
-                                items are extracted the same way under any playbook.
+                                What was decided, and what happens next. Type over either part, or
+                                have Plainsong write it again from the transcript and your notes.
+                                The playbook changes how the summary is written; action items are
+                                pulled out the same way under every playbook.
                               </p>
                             </div>
 
                             <DocumentField
-                              label="Meeting summary"
+                              label="Summary"
                               value={meetingSummary}
                               onChange={(next) => {
                                 setMeetingSummary(next);
@@ -3685,8 +3693,8 @@ export function RecordingsView() {
                               isEditing={isEditingSummary}
                               onEditingChange={setIsEditingSummary}
                               disabled={!selectedRecording}
-                              emptyMessage="No summary yet. Regenerate to have Plainsong write it from the transcript."
-                              editorPlaceholder="Write the recap in your own words, or regenerate it from the transcript."
+                              emptyMessage="Nothing written yet. Regenerate to have Plainsong write it from the transcript."
+                              editorPlaceholder="Write the summary in your own words, or regenerate it from the transcript."
                               // No caption when the field is empty: the body
                               // already says the same sentence, and printing it
                               // twice is the duplicate-pair bug STYLE.md §2
@@ -3771,14 +3779,14 @@ export function RecordingsView() {
                             ) : null}
                             {analysisFailureByTarget.summary ? (
                               <p role="alert" className="text-sm text-rust">
-                                Summary analysis failed. The previous saved summary was kept. {" "}
+                                Couldn't rewrite the summary, so the saved one was kept.{" "}
                                 {analysisFailureByTarget.summary.reason}
                               </p>
                             ) : null}
 
                             <div className="border-t pt-5">
                               <DocumentField
-                                label="Meeting action items"
+                                label="Action items"
                                 value={meetingActionItemsText}
                                 renderValue={actionItemsToMarkdownList(selectedMeetingActionItems)}
                                 onChange={(next) => {
@@ -3788,8 +3796,8 @@ export function RecordingsView() {
                                 isEditing={isEditingActionItems}
                                 onEditingChange={setIsEditingActionItems}
                                 disabled={!selectedRecording}
-                                emptyMessage="No action items yet. Regenerate to have Plainsong extract them from the transcript."
-                                editorPlaceholder="One follow-up per line. Owners and dates can stay inline."
+                                emptyMessage="Nothing here yet. Regenerate to have Plainsong pull them from the transcript."
+                                editorPlaceholder="One follow-up per line. Owners and dates can go on the same line."
                                 caption={
                                   !meetingActionItemsText.trim()
                                     ? undefined
@@ -3798,7 +3806,7 @@ export function RecordingsView() {
                                       ? // The two hands mix line by line here, so
                                         // the caption says so rather than handing
                                         // the whole list to either one.
-                                        `Extracted by Plainsong, plus ${unattributedActionItemCount} line${
+                                        `Found by Plainsong, plus ${unattributedActionItemCount} line${
                                           unattributedActionItemCount === 1 ? "" : "s"
                                         } Plainsong did not write.`
                                       : ACTION_ITEMS_AUTHORSHIP_CAPTION[actionItemsAuthorship]
@@ -3854,7 +3862,7 @@ export function RecordingsView() {
                               ) : null}
                               {analysisFailureByTarget.actionItems ? (
                                 <p role="alert" className="mt-2 text-sm text-rust">
-                                  Action-item analysis failed. The previous saved action items were kept. {" "}
+                                  Couldn't pull new action items, so the saved ones were kept.{" "}
                                   {analysisFailureByTarget.actionItems.reason}
                                 </p>
                               ) : null}
@@ -3868,21 +3876,17 @@ export function RecordingsView() {
                               names the transcript moment it came from, in a row big
                               enough to hit, or says plainly that it has none. */}
                           <div className="mt-4 border-t pt-4">
-                            <div className="flex flex-wrap items-start justify-between gap-3">
-                              <div className="min-w-0">
-                                <p className="section-heading">Where this recap came from</p>
-                                <p className="mt-1 max-w-prose text-sm text-muted-foreground">
-                                  Saved evidence for the lines Plainsong wrote. Text you type here is
-                                  your own and invalidates only the evidence for the field you changed.
-                                  Older records without saved provenance remain explicitly unattributed.
-                                </p>
-                              </div>
-                            </div>
+                            <h3 className="section-heading">Where this came from</h3>
+                            <p className="mt-1 max-w-prose text-sm text-muted-foreground">
+                              The transcript lines Plainsong quoted when it wrote the text above.
+                              Pick one to jump to that moment. Editing a field by hand drops the
+                              quotes for that field only.
+                            </p>
 
                             {!hasRecapProvenance ? (
                               <p className="mt-3 text-sm text-muted-foreground">
-                                This recap has no saved analysis provenance. Regenerate the summary or
-                                action items to attach transcript citations and provider metadata.
+                                Nothing quoted yet. Regenerate the summary or the action items and
+                                Plainsong will record which transcript lines it used.
                               </p>
                             ) : (
                               <div className="mt-3 space-y-4">
@@ -3890,9 +3894,9 @@ export function RecordingsView() {
                                   <div>
                                     <p className="rubric-muted">Summary</p>
                                     {selectedRecording?.summaryProvenance ? (
-                                      <p className="mt-1 text-xs text-muted-foreground">
+                                      <p className="mt-1 font-mono text-xs text-muted-foreground">
                                         {selectedRecording.summaryProvenance.actualProvider} ·{" "}
-                                        {selectedRecording.summaryProvenance.actualModel} · completed{" "}
+                                        {selectedRecording.summaryProvenance.actualModel} ·{" "}
                                         {new Date(
                                           selectedRecording.summaryProvenance.completedAt
                                         ).toLocaleString()}
@@ -3903,8 +3907,8 @@ export function RecordingsView() {
                                       <p className="mt-1.5 inline-flex items-center gap-1.5 text-sm text-rust">
                                         <span className="neume neume-hollow" aria-hidden="true" />
                                         {summaryProvenance.citations.length === 0
-                                          ? "Not grounded — the model returned no transcript citation for this summary."
-                                          : "Not fully grounded — one or more citations were invalid or did not support this summary."}
+                                          ? "No transcript line was quoted for this summary — read it against the transcript before you send it."
+                                          : "Some quoted lines could not be found in the transcript, or do not support this summary."}
                                       </p>
                                     ) : (
                                       <div className="mt-2 grid gap-1.5">
@@ -3912,6 +3916,12 @@ export function RecordingsView() {
                                           <button
                                             key={`summary-citation-${index}`}
                                             type="button"
+                                            // No aria-label here: the accessible
+                                            // name must come from the contents so
+                                            // the quote itself is read out. A
+                                            // button is a leaf to a screen reader,
+                                            // so a label would silence the
+                                            // evidence this section exists to show.
                                             className="rounded-md border border-border/70 bg-background/70 px-3 py-2.5 text-left transition-colors hover:bg-muted/40 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
                                             onClick={() => jumpToTranscriptMoment(citation.startTime)}
                                           >
@@ -3927,9 +3937,6 @@ export function RecordingsView() {
                                             <span className="manuscript mt-1 block text-sm">
                                               {citation.text}
                                             </span>
-                                            <span className="mt-1 block text-sm text-muted-foreground">
-                                              Jump to this moment in the transcript
-                                            </span>
                                           </button>
                                         ))}
                                       </div>
@@ -3941,9 +3948,9 @@ export function RecordingsView() {
                                   <div>
                                     <p className="rubric-muted">Action items</p>
                                     {selectedRecording?.actionItemsProvenance ? (
-                                      <p className="mt-1 text-xs text-muted-foreground">
+                                      <p className="mt-1 font-mono text-xs text-muted-foreground">
                                         {selectedRecording.actionItemsProvenance.actualProvider} ·{" "}
-                                        {selectedRecording.actionItemsProvenance.actualModel} · completed{" "}
+                                        {selectedRecording.actionItemsProvenance.actualModel} ·{" "}
                                         {new Date(
                                           selectedRecording.actionItemsProvenance.completedAt
                                         ).toLocaleString()}
@@ -3959,8 +3966,8 @@ export function RecordingsView() {
                                             <p className="mt-1 inline-flex items-center gap-1.5 text-sm text-rust">
                                               <span className="neume neume-hollow" aria-hidden="true" />
                                               {entry.citations.length === 0
-                                                ? "Not grounded — no transcript citation was returned for this follow-up."
-                                                : "Not fully grounded — one or more citations were invalid or did not support this follow-up."}
+                                                ? "No transcript line was quoted for this follow-up."
+                                                : "Some quoted lines could not be found in the transcript, or do not support this follow-up."}
                                             </p>
                                           ) : (
                                             <div className="mt-1.5 grid gap-1.5">
@@ -3968,6 +3975,8 @@ export function RecordingsView() {
                                                 <button
                                                   key={`action-citation-${entryIndex}-${citationIndex}`}
                                                   type="button"
+                                                  // Contents-derived name only —
+                                                  // see the summary citations above.
                                                   className="rounded-md border border-border/70 bg-background/70 px-3 py-2.5 text-left transition-colors hover:bg-muted/40 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
                                                   onClick={() =>
                                                     jumpToTranscriptMoment(citation.startTime)
@@ -3985,9 +3994,6 @@ export function RecordingsView() {
                                                   <span className="manuscript mt-1 block text-sm">
                                                     {citation.text}
                                                   </span>
-                                                  <span className="mt-1 block text-sm text-muted-foreground">
-                                                    Jump to this moment in the transcript
-                                                  </span>
                                                 </button>
                                               ))}
                                             </div>
@@ -4004,8 +4010,9 @@ export function RecordingsView() {
                           <section className="border-t pt-5">
                             <h2 className="section-heading">Your notes</h2>
                             <p className="mt-1 max-w-prose text-sm text-muted-foreground">
-                              Raw notes ground the summary, the action items, and Ask. Fix them
-                              here and regenerate above — neither direction throws the other away.
+                              Plainsong reads these notes alongside the transcript when it writes
+                              the summary, the action items, and its answers in Ask. Fix them here,
+                              then regenerate above — neither one overwrites the other.
                             </p>
                           <div className="mt-4 flex flex-wrap items-center gap-2">
                             <label className="text-sm font-medium" htmlFor="meeting-template">
@@ -4029,7 +4036,7 @@ export function RecordingsView() {
                               variant="outline"
                               onClick={handleApplyTemplateOutline}
                             >
-                              Apply Outline
+                              Add its headings to my notes
                             </Button>
                             {selectedMeetingConsent.needsManualNotice ? (
                               <Button
@@ -4046,33 +4053,32 @@ export function RecordingsView() {
                                 }}
                               >
                                 <Copy className="mr-2 h-4 w-4" />
-                                Copy Notice
+                                Copy consent notice
                               </Button>
                             ) : null}
                           </div>
                           <div className="mt-4 flex flex-wrap items-center justify-between gap-2">
-                            <div className="space-y-1">
-                              <p className="text-sm text-muted-foreground">
-                                Sections autosave to the same meeting note as you type.
-                              </p>
-                              <MeetingNotesSaveIndicator
-                                status={
-                                  meetingNotesSaveStatus?.surface === "review" &&
-                                  meetingNotesSaveStatus.recordingId === meetingNotesTargetId
-                                    ? meetingNotesSaveStatus
-                                    : null
-                                }
-                                onRetry={() => retryMeetingNotesSave("review")}
-                              />
-                            </div>
+                            {/* The live indicator already says "Saving…" and
+                                "Saved just now"; a static "autosaves" sentence
+                                beside it was the same fact twice. */}
+                            <MeetingNotesSaveIndicator
+                              status={
+                                meetingNotesSaveStatus?.surface === "review" &&
+                                meetingNotesSaveStatus.recordingId === meetingNotesTargetId
+                                  ? meetingNotesSaveStatus
+                                  : null
+                              }
+                              onRetry={() => retryMeetingNotesSave("review")}
+                            />
                             <Button
                               type="button"
                               size="sm"
                               variant="outline"
+                              className="ml-auto"
                               onClick={handleAddMeetingSection}
                             >
                               <Plus className="mr-2 h-4 w-4" />
-                              Add Section
+                              Add section
                             </Button>
                           </div>
                           <div aria-label="Meeting notes" role="group" className="mt-4 space-y-3">
@@ -4084,14 +4090,12 @@ export function RecordingsView() {
                                 <div className="flex flex-wrap items-start justify-between gap-3">
                                   <div className="min-w-0 flex-1">
                                     {section.isTemplateSection ? (
-                                      <div>
-                                        <div className="flex items-center gap-2">
-                                          <p className="text-sm font-medium">{section.title}</p>
-                                          <span className="rubric-muted">Template</span>
-                                        </div>
-                                        <p className="text-sm text-muted-foreground">
-                                          Keeps this meeting aligned to the selected playbook.
-                                        </p>
+                                      // The badge already says where the heading
+                                      // came from; a sentence under it restating
+                                      // that was the same fact twice.
+                                      <div className="flex items-center gap-2">
+                                        <p className="text-sm font-medium">{section.title}</p>
+                                        <span className="rubric-muted">From the playbook</span>
                                       </div>
                                     ) : (
                                       <div className="space-y-2">
@@ -4154,16 +4158,16 @@ export function RecordingsView() {
                             <div className="flex flex-wrap items-start justify-between gap-3">
                               <div className="min-w-0">
                                 <div className="flex flex-wrap items-center gap-2">
-                                  <p className="section-heading">Enhanced draft</p>
+                                  <h2 className="section-heading">Tidied draft of your notes</h2>
                                   {enhancedMeetingNotesIsStale ? (
                                     <Badge variant="outline" className="bg-rust/10 text-rust">
-                                      Raw notes changed
+                                      Your notes changed since this
                                     </Badge>
                                   ) : null}
                                 </div>
                                 <p className="mt-1 max-w-prose text-sm text-muted-foreground">
-                                  A separate draft built from the transcript and your current raw
-                                  notes. Read the citations before it replaces anything.
+                                  One rewrite of your notes, built from the transcript. It sits
+                                  here until you save it — read the quotes underneath first.
                                 </p>
                                 {enhancedMeetingNotesDraft ? (
                                   <p className="mt-2 text-sm text-muted-foreground">
@@ -4185,7 +4189,7 @@ export function RecordingsView() {
                                   ) : (
                                     <RefreshCw className="mr-2 h-4 w-4" />
                                   )}
-                                  {enhancedMeetingNotesDraft ? "Regenerate" : "Enhance Notes"}
+                                  {enhancedMeetingNotesDraft ? "Build it again" : "Build a draft"}
                                 </Button>
                                 <Button
                                   type="button"
@@ -4205,7 +4209,7 @@ export function RecordingsView() {
                                   disabled={!enhancedMeetingNotesDraft?.text.trim()}
                                 >
                                   <CheckCircle2 className="mr-2 h-4 w-4" />
-                                  Apply to Notes
+                                  Save over my notes
                                 </Button>
                               </div>
                             </div>
@@ -4223,12 +4227,11 @@ export function RecordingsView() {
                                 </div>
 
                                 <div className="space-y-3 border-t pt-4">
-                                  <div>
-                                    <p className="section-heading">Where this draft came from</p>
-                                    <p className="mt-1 max-w-prose text-sm text-muted-foreground">
-                                      The transcript lines that grounded it.
-                                    </p>
-                                  </div>
+                                  {/* The heading names the content; a line under
+                                      it saying the same thing was cut. */}
+                                  <h3 className="section-heading">
+                                    Transcript lines behind this draft
+                                  </h3>
 
                                   <div className="space-y-2">
                                     <p className="text-sm font-medium">Summary</p>
@@ -4239,15 +4242,14 @@ export function RecordingsView() {
                                           className="border-t border-border/60 pt-2"
                                         >
                                           <p className="manuscript text-sm">{citation.text}</p>
-                                          <p className="rubric-muted time-spec mt-1">
+                                          <p className="time-spec mt-1 font-mono text-xs text-muted-foreground">
                                             {formatCitationTimeRange(citation) ?? "No timestamp"}
-                                            {citation.recordingId ? ` · ${citation.recordingId}` : ""}
                                           </p>
                                         </div>
                                       ))
                                     ) : (
                                       <p className="text-sm text-muted-foreground">
-                                        No summary citations were returned for this draft.
+                                        Plainsong quoted no transcript line for this summary.
                                       </p>
                                     )}
                                   </div>
@@ -4271,17 +4273,14 @@ export function RecordingsView() {
                                                   className="border-l-2 border-border pl-3"
                                                 >
                                                   <p className="manuscript text-sm">{citation.text}</p>
-                                                  <p className="rubric-muted time-spec mt-1">
+                                                  <p className="time-spec mt-1 font-mono text-xs text-muted-foreground">
                                                     {formatCitationTimeRange(citation) ?? "No timestamp"}
-                                                    {citation.recordingId
-                                                      ? ` · ${citation.recordingId}`
-                                                      : ""}
                                                   </p>
                                                 </div>
                                               ))
                                             ) : (
                                               <p className="text-sm text-muted-foreground">
-                                                No citations were returned for this action item.
+                                                Nothing was quoted for this one.
                                               </p>
                                             )}
                                           </div>
@@ -4289,7 +4288,7 @@ export function RecordingsView() {
                                       ))
                                     ) : (
                                       <p className="text-sm text-muted-foreground">
-                                        No action-item citations were returned for this draft.
+                                        Plainsong quoted no transcript lines for these.
                                       </p>
                                     )}
                                   </div>
@@ -4297,29 +4296,24 @@ export function RecordingsView() {
                               </div>
                             ) : (
                               <p className="max-w-prose text-sm text-muted-foreground">
-                                Build an enhanced draft when you want a cleaner note written from
-                                the transcript and your saved raw notes. It never replaces your
-                                notes until you apply it.
+                                Nothing built yet. Your notes are not touched until you choose to
+                                save the draft over them.
                               </p>
                             )}
                         </section>
 
                         <section className="border-t pt-5">
-                          <div className="flex flex-wrap items-start justify-between gap-3">
-                            <div className="min-w-0">
-                              <p className="section-heading">Prep</p>
-                              <p className="mt-1 max-w-prose text-sm text-muted-foreground">
-                                The questions worth answering live, and who Plainsong already
-                                remembers from earlier meetings.
-                              </p>
-                            </div>
-                            <Badge variant="outline" className="bg-background/80">
-                              {selectedTemplateOption.label}
-                            </Badge>
-                          </div>
+                          {/* The playbook name is already on the header strip
+                              above and in the picker under "Your notes"; a
+                              third bare badge here said nothing new. */}
+                          <h2 className="section-heading">Before the next one</h2>
+                          <p className="mt-1 max-w-prose text-sm text-muted-foreground">
+                            Questions worth asking while the conversation is live, and the people
+                            and companies this meeting shares with earlier ones.
+                          </p>
                           <div className="mt-3 space-y-4">
                             <div>
-                              <p className="text-sm font-medium">Prep prompts</p>
+                              <p className="text-sm font-medium">Questions to ask</p>
                               <ul className="mt-2 list-disc space-y-1 pl-5 text-sm">
                                 {selectedMeetingPrepPrompts.map((prompt) => (
                                   <li key={prompt}>{prompt}</li>
@@ -4327,19 +4321,21 @@ export function RecordingsView() {
                               </ul>
                             </div>
                             <div className="border-t pt-4">
-                              <p className="text-sm font-medium">Relationship memory</p>
+                              <p className="text-sm font-medium">Seen in earlier meetings</p>
                                 {selectedMeetingRelationshipMatches.people.length === 0 &&
                                 selectedMeetingRelationshipMatches.companies.length === 0 ? (
                                   <p className="mt-2 text-sm text-muted-foreground">
-                                    No strong matches yet. Plainsong will start surfacing people and companies as meetings accumulate.
+                                    Nothing yet. People and companies show up here once they appear
+                                    in more than one meeting.
                                   </p>
                                 ) : (
                                   <div className="mt-2 space-y-2">
                                     {selectedMeetingRelationshipMatches.people.map((person) => (
                                       <div key={`person-${person.id}`} className="border-l-2 border-border pl-3">
                                         <p className="text-sm font-medium">{person.name}</p>
-                                        <p className="rubric-muted time-spec mt-1">
-                                          {person.recordingCount} meetings · last seen {new Date(person.lastSeenAt).toLocaleDateString()}
+                                        <p className="time-spec mt-1 text-sm text-muted-foreground">
+                                          {person.recordingCount} meetings · last seen{" "}
+                                          {new Date(person.lastSeenAt).toLocaleDateString()}
                                         </p>
                                         {person.recentMeetings[0] ? (
                                           <p className="mt-2 text-sm text-muted-foreground">
@@ -4351,8 +4347,9 @@ export function RecordingsView() {
                                     {selectedMeetingRelationshipMatches.companies.map((company) => (
                                       <div key={`company-${company.id}`} className="border-l-2 border-border pl-3">
                                         <p className="text-sm font-medium">{company.name}</p>
-                                        <p className="rubric-muted time-spec mt-1">
-                                          {company.recordingCount} meetings · last seen {new Date(company.lastSeenAt).toLocaleDateString()}
+                                        <p className="time-spec mt-1 text-sm text-muted-foreground">
+                                          {company.recordingCount} meetings · last seen{" "}
+                                          {new Date(company.lastSeenAt).toLocaleDateString()}
                                         </p>
                                         {company.recentMeetings[0] ? (
                                           <p className="mt-2 text-sm text-muted-foreground">
@@ -4368,10 +4365,10 @@ export function RecordingsView() {
                         </section>
 
                         <section className="border-t pt-5">
-                          <p className="section-heading">Follow-up drafts</p>
+                          <h2 className="section-heading">Follow-up drafts</h2>
                           <p className="mt-1 max-w-prose text-sm text-muted-foreground">
-                            Built from the summary and action items above, with no model call —
-                            copy one and send it while the meeting is still warm.
+                            Assembled from the summary and action items above — no model runs, so
+                            these are instant. Copy one and send it while the meeting is fresh.
                           </p>
                           <div className="mt-3 grid gap-2 sm:grid-cols-2">
                               <Button
@@ -4381,7 +4378,7 @@ export function RecordingsView() {
                                 onClick={() => void handleCopyMeetingFollowUp(deterministicMeetingFollowUp)}
                               >
                                 <Copy className="mr-2 h-4 w-4" />
-                                Copy Follow-up Email
+                                Copy follow-up email
                               </Button>
                               <Button
                                 type="button"
@@ -4396,7 +4393,7 @@ export function RecordingsView() {
                                 }
                               >
                                 <Copy className="mr-2 h-4 w-4" />
-                                Copy DM Recap
+                                Copy short recap for chat
                               </Button>
                               <Button
                                 type="button"
@@ -4405,7 +4402,7 @@ export function RecordingsView() {
                                 onClick={() => void handleCopyMeetingFollowUp(deterministicNextAgenda)}
                               >
                                 <Copy className="mr-2 h-4 w-4" />
-                                Copy Next Agenda
+                                Copy next agenda
                               </Button>
                               <Button
                                 type="button"
@@ -4420,7 +4417,7 @@ export function RecordingsView() {
                                 }
                               >
                                 <Copy className="mr-2 h-4 w-4" />
-                                Copy Task List
+                                Copy task list
                               </Button>
                             <Button
                               type="button"
@@ -4440,16 +4437,16 @@ export function RecordingsView() {
                               <Volume2 className="mr-2 h-4 w-4" />
                               {activeSpeechTarget === "meeting-follow-up"
                                 ? "Stop reading"
-                                : "Read Follow-up"}
+                                : "Read follow-up aloud"}
                             </Button>
                           </div>
                         </section>
 
                         <section className="border-t pt-5">
-                          <p className="section-heading">Cross-meeting recall</p>
+                          <h2 className="section-heading">Ask across your earlier meetings</h2>
                           <p className="mt-1 max-w-prose text-sm text-muted-foreground">
-                            Ask across prior meetings when an older promise, deadline, or repeated
-                            ask should change what you send next.
+                            For when an older promise, deadline, or repeated request should change
+                            what you send after this one.
                           </p>
                           <div className="mt-3 space-y-3">
                               <div className="flex flex-wrap gap-2">
@@ -4471,8 +4468,8 @@ export function RecordingsView() {
                                 <Input
                                   value={meetingRecallQuery}
                                   onChange={(event) => setMeetingRecallQuery(event.target.value)}
-                                  placeholder="Ask across prior meetings"
-                                  aria-label="Ask across meetings"
+                                  placeholder="What did we agree last time?"
+                                  aria-label="Ask across your earlier meetings"
                                 />
                                 <Button
                                   type="button"
@@ -4486,7 +4483,7 @@ export function RecordingsView() {
                                       Asking
                                     </>
                                   ) : (
-                                    "Ask across meetings"
+                                    "Ask"
                                   )}
                                 </Button>
                               </div>
@@ -4500,7 +4497,7 @@ export function RecordingsView() {
                                   <div className="flex items-start justify-between gap-3">
                                     <div className="min-w-0">
                                       <p className="text-sm font-medium text-muted-foreground">
-                                        {meetingRecallPromptLabel ?? "Cross-meeting answer"}
+                                        {meetingRecallPromptLabel ?? "The answer"}
                                       </p>
                                       <MarkdownText
                                         className="mt-2"
@@ -4520,39 +4517,52 @@ export function RecordingsView() {
                                   {meetingRecallCitations.length > 0 ? (
                                     <div className="space-y-2">
                                       <p className="text-sm font-medium text-muted-foreground">
-                                        Supporting meetings
+                                        Quoted from earlier meetings
                                       </p>
-                                      {meetingRecallCitations.slice(0, 3).map((citation, index) => (
-                                        <div
-                                          key={`meeting-recall-citation-${index}`}
-                                          className="border-t border-border/60 pt-2"
-                                        >
-                                          <p className="manuscript text-sm">{citation.text}</p>
-                                          <p className="rubric-muted time-spec mt-1">
-                                            {formatCitationTimeRange(citation) ?? "No timestamp"}
-                                            {citation.recordingId ? ` · ${citation.recordingId}` : ""}
-                                          </p>
-                                        </div>
-                                      ))}
+                                      {meetingRecallCitations.slice(0, 3).map((citation, index) => {
+                                        // These quotes come from other meetings, so
+                                        // a bare timestamp would read as a moment in
+                                        // the meeting on screen. Name the meeting the
+                                        // quote was taken from; fall back to its id
+                                        // if that meeting is not in the loaded list.
+                                        const sourceMeeting = citation.recordingId
+                                          ? (effectiveRecordings.find(
+                                              (recording) => recording.id === citation.recordingId
+                                            )?.title ?? citation.recordingId)
+                                          : null;
+                                        return (
+                                          <div
+                                            key={`meeting-recall-citation-${index}`}
+                                            className="border-t border-border/60 pt-2"
+                                          >
+                                            <p className="manuscript text-sm">{citation.text}</p>
+                                            <p className="mt-1 text-sm text-muted-foreground">
+                                              {sourceMeeting ? `${sourceMeeting} · ` : null}
+                                              <span className="time-spec font-mono">
+                                                {formatCitationTimeRange(citation) ?? "No timestamp"}
+                                              </span>
+                                            </p>
+                                          </div>
+                                        );
+                                      })}
                                     </div>
                                   ) : null}
                                 </div>
                               ) : (
                                 <p className="text-sm text-muted-foreground">
-                                  Start with a suggested prompt or ask your own question to pull forward
-                                  context from prior meetings.
+                                  Pick one of the suggestions above, or type your own question.
                                 </p>
                               )}
                           </div>
                         </section>
 
                         <section className="border-t pt-5">
-                          <p className="section-heading">Share &amp; export</p>
+                          <h2 className="section-heading">Share and export</h2>
                           <p className="mt-1 max-w-prose text-sm text-muted-foreground">
-                            The recap carries the summary, action items, and your notes as Markdown,
-                            so it survives a paste into a chat window or a notes app. The full
-                            record adds the verbatim transcript — only copy that where the whole
-                            meeting is allowed to go.
+                            The recap is the summary, the action items, and your notes as Markdown
+                            — safe to paste into a chat window or a notes app. The full record adds
+                            every word that was said, so only copy that where the whole meeting is
+                            allowed to go.
                           </p>
                           <div className="mt-3 flex flex-wrap gap-2">
                               <Button
@@ -4575,7 +4585,7 @@ export function RecordingsView() {
                                 }
                               >
                                 <Copy className="mr-2 h-4 w-4" />
-                                Copy full record (includes transcript)
+                                Copy full record, transcript and all
                               </Button>
                               <Button
                                 type="button"
@@ -4585,7 +4595,7 @@ export function RecordingsView() {
                                 disabled={!selectedRecording || isExportingMeeting}
                               >
                                 <FileText className="mr-2 h-4 w-4" />
-                                Export Markdown
+                                Export as Markdown
                               </Button>
                               <Button
                                 type="button"
@@ -4599,7 +4609,7 @@ export function RecordingsView() {
                                 ) : (
                                   <FileOutput className="mr-2 h-4 w-4" />
                                 )}
-                                Export Text
+                                Export as plain text
                               </Button>
                             </div>
                             {/* The level is fixed here; say so rather than let
@@ -4636,31 +4646,34 @@ export function RecordingsView() {
                 <TabsContent value="ask" forceMount className="mt-0 min-h-0 flex-1 overflow-hidden">
                   {isLoadingDetail ? (
                     <div className="px-6 py-5">
-                      <WorkspaceSkeleton label="Loading this meeting's transcript and notes so Ask has something to stand on." />
+                      <WorkspaceSkeleton label="Loading this meeting's transcript and notes." />
                     </div>
                   ) : selectedRecording ? (
                     <ScrollArea type="always" className="h-full min-h-0">
                       <div className="space-y-4 px-6 py-5">
                         <div>
-                          <p className="section-heading">Ask this meeting</p>
+                          <h2 className="section-heading">Ask about this meeting</h2>
                           <p className="mt-1 max-w-prose text-sm text-muted-foreground">
-                            Answers are grounded in this meeting's transcript and your saved notes —
-                            follow-ups, decisions, blockers, owners.
+                            Answers are drawn from this meeting's transcript and your saved notes
+                            — decisions, blockers, owners, follow-ups.
                           </p>
                         </div>
                         <AiAnalysisPanel
                           key={selectedRecording.id}
                           recordingId={selectedRecording.id}
-                          title="Meeting Chat"
-                          inputPlaceholder="Ask about decisions, blockers, follow-ups, or anything in this meeting..."
+                          // The section heading above already names this panel;
+                          // the result card gets a plain noun instead of a
+                          // second copy of the same title.
+                          title="Answer"
+                          inputPlaceholder="Ask about decisions, blockers, follow-ups, or anything that was said…"
                           templates={MEETING_ASK_TEMPLATES}
-                          emptyStateLabel="Reviewing meeting context..."
+                          emptyStateLabel="Reading this meeting…"
                           analysisMode="grounded"
                           chatMessages={meetingChatMessages}
                           onChatMessagesChange={setMeetingChatMessages}
                           responseActions={[
                             {
-                              label: "Replace Summary",
+                              label: "Use as the summary",
                               onAction: ({ response, citations, provenance }) => {
                                 if (!selectedRecording) return;
                                 void updateRecordingAnalysis(selectedRecording.id, {
@@ -4692,7 +4705,7 @@ export function RecordingsView() {
                                     toast(
                                       error instanceof Error
                                         ? error.message
-                                        : "Failed to save this analysis as the summary.",
+                                        : "Couldn't save that answer as the summary.",
                                       "error"
                                     );
                                   });
@@ -4700,23 +4713,23 @@ export function RecordingsView() {
                               isVisible: ({ templateId }) => templateId !== "follow_up",
                             },
                             {
-                              label: "Append to Notes",
+                              label: "Add to my notes",
                               onAction: ({ response, templateId }) =>
                                 appendMeetingNotesBlock(
                                   templateId === "summary"
-                                    ? "Summary refresh"
+                                    ? "Summary"
                                     : templateId === "decisions"
                                       ? "Decisions"
                                       : templateId === "dates"
                                         ? "Deadlines"
                                         : templateId === "follow_up"
                                           ? "Follow-up draft"
-                                        : "Meeting answer",
+                                        : "Answer",
                                   response
                                 ),
                             },
                             {
-                              label: "Copy Follow-up",
+                              label: "Copy follow-up",
                               onAction: ({ response }) => {
                                 void handleCopyMeetingFollowUp(response);
                               },
@@ -4725,14 +4738,14 @@ export function RecordingsView() {
                           ]}
                           actionItemActions={[
                             {
-                              label: "Replace Action Items",
+                              label: "Use as the action items",
                               onAction: ({ items }) =>
                                 setMeetingActionItemsText(
                                   actionItemsToText(items.map((item) => formatGroundedActionItem(item)))
                                 ),
                             },
                             {
-                              label: "Append to Notes",
+                              label: "Add to my notes",
                               onAction: ({ items }) =>
                                 appendMeetingNotesBlock(
                                   "Action items",
@@ -4753,28 +4766,28 @@ export function RecordingsView() {
                 <TabsContent value="assets" className="mt-0 min-h-0 flex-1 overflow-hidden">
                   {isLoadingDetail ? (
                     <div className="px-6 py-5">
-                      <WorkspaceSkeleton label="Loading this meeting's audio and waveform." lines={3} />
+                      <WorkspaceSkeleton label="Loading this meeting's audio." lines={3} />
                     </div>
                   ) : (
                     <ScrollArea type="always" className="h-full min-h-0">
                       <div className="space-y-5 px-6 py-5">
                         <div>
-                          <p className="section-heading">Waveform</p>
+                          <h2 className="section-heading">Waveform</h2>
                           <div className="mt-3">
                             <WaveformVisualizer data={waveformData} height={100} />
                           </div>
                         </div>
 
                         <div className="border-t pt-4">
-                          <p className="section-heading">Audio &amp; retention</p>
+                          <h2 className="section-heading">What is kept</h2>
                           <p className="mt-2 text-sm">
-                            <span className="text-muted-foreground">Duration:</span>{" "}
+                            <span className="text-muted-foreground">Length:</span>{" "}
                             <span className="time-spec font-medium">
                               {formatDuration(selectedRecording?.duration ?? 0)}
                             </span>
                           </p>
                           <p className="mt-1 text-sm">
-                            <span className="text-muted-foreground">Created:</span>{" "}
+                            <span className="text-muted-foreground">Recorded:</span>{" "}
                             <span className="time-spec font-medium">
                               {selectedRecording?.createdAt
                                 ? new Date(selectedRecording.createdAt).toLocaleString()
@@ -4782,7 +4795,7 @@ export function RecordingsView() {
                             </span>
                           </p>
                           <p className="mt-1 text-sm">
-                            <span className="text-muted-foreground">Audio:</span>{" "}
+                            <span className="text-muted-foreground">Audio file:</span>{" "}
                             <span className="font-medium">
                               {selectedMeetingAssetRetention.audioLabel}
                             </span>
@@ -4805,7 +4818,7 @@ export function RecordingsView() {
                   <p className="mt-0.5 text-sm text-muted-foreground">
                     {isLoadingDetail
                       ? "Loading the transcript."
-                      : `${selectedTranscript?.segments?.length ?? 0} segments · ${selectedMeetingCaptureMode}`}
+                      : `${selectedTranscript?.segments?.length ?? 0} lines · ${selectedMeetingCaptureMode}`}
                   </p>
                 </div>
                 <Button
@@ -4847,7 +4860,7 @@ export function RecordingsView() {
               {isLoadingDetail ? (
                 <div className="flex-1 flex items-center justify-center text-muted-foreground">
                   <Loader2 className="h-5 w-5 mr-2 animate-spin" />
-                  Loading transcript...
+                  Loading transcript…
                 </div>
               ) : selectedTranscript ? (
                 <div className="flex min-h-0 flex-1 flex-col">
@@ -4861,9 +4874,10 @@ export function RecordingsView() {
                     <div className="mb-3 border-b pb-3">
                       <div className="flex items-start justify-between gap-3">
                         <div className="text-sm">
-                          <p className="font-medium">No speaker labels detected</p>
+                          <p className="font-medium">Nobody is named in this transcript</p>
                           <p className="text-muted-foreground">
-                            Run speaker identification to label multiple speakers in this transcript.
+                            Every line is unattributed. Plainsong can try to tell the voices apart
+                            and label them.
                           </p>
                         </div>
                         <Button
@@ -4875,10 +4889,10 @@ export function RecordingsView() {
                           {isRunningDiarization ? (
                             <>
                               <Loader2 className="h-4 w-4 mr-2 animate-spin" />
-                              Identifying...
+                              Working…
                             </>
                           ) : (
-                            "Identify Speakers"
+                            "Label the speakers"
                           )}
                         </Button>
                       </div>
@@ -4890,9 +4904,9 @@ export function RecordingsView() {
                       )}
                     </div>
                   )}
-                  {/* One strip of facts instead of four boxes: what the
-                      transcript is worth, where it came from, and how to work
-                      it. */}
+                  {/* One strip of facts instead of four boxes. The capture mode
+                      is already in the pane heading above, so it is not
+                      repeated here. */}
                   <div className="mb-3 flex flex-wrap items-center gap-x-4 gap-y-1.5 text-sm text-muted-foreground">
                     <span
                       className={`inline-flex items-center rounded-md border px-2 py-0.5 text-sm ${qualityToneClasses(
@@ -4904,25 +4918,25 @@ export function RecordingsView() {
                         ? ` · ${Math.round(selectedTranscriptDetails.qualityScore * 100)}%`
                         : ""}
                     </span>
-                    <span>{formatSourceMode(selectedTranscriptDetails)}</span>
                     <span>
                       {selectedTranscriptDetails?.actualProvider ??
                         selectedTranscript?.actualProvider ??
-                        "Provider unknown"}
+                        "Transcriber unknown"}
                       {(selectedTranscriptDetails?.modelId ?? selectedTranscript?.modelId)
                         ? ` · ${selectedTranscriptDetails?.modelId ?? selectedTranscript?.modelId}`
                         : ""}
                     </span>
                     <span className="time-spec">
                       {selectedTranscriptDetails?.transcriptionLatencyMs != null
-                        ? `${(selectedTranscriptDetails.transcriptionLatencyMs / 1000).toFixed(1)}s`
-                        : "Latency unavailable"}
+                        ? `Took ${(
+                            selectedTranscriptDetails.transcriptionLatencyMs / 1000
+                          ).toFixed(1)}s`
+                        : "Transcription time unknown"}
                     </span>
                   </div>
                   <p className="mb-3 max-w-prose text-sm text-muted-foreground">
-                    Click a paragraph to set your place; the text stays selectable. Double-click
-                    it, or use the Edit button, to correct it. Up and down arrows walk the
-                    transcript.
+                    Click a line to mark your place; the text stays selectable. Double-click it, or
+                    use Edit, to correct it. Arrow keys move line by line.
                   </p>
                   <TranscriptSearch
                     query={searchQuery}
@@ -4970,7 +4984,7 @@ export function RecordingsView() {
                           const message =
                             error instanceof Error
                               ? error.message
-                              : "Failed to update the transcript.";
+                              : "Couldn't save that transcript edit.";
                           toast(message, "error");
                           // Rethrow so the editor stays open with the correction.
                           throw error;
@@ -4995,12 +5009,11 @@ export function RecordingsView() {
                     <div className="max-w-md text-sm text-muted-foreground">
                       <div className="flex items-center gap-2 text-foreground">
                         <Loader2 className="h-4 w-4 animate-spin" />
-                        <span className="font-medium">Processing transcript</span>
+                        <span className="font-medium">Transcribing</span>
                       </div>
                       <p className="mt-2 leading-relaxed">
-                        Transcript lines have not landed yet. Auto-refresh is still running in the
-                        background, and you can force a manual refresh if the detail panel looks
-                        stale.
+                        No lines have arrived yet. Plainsong keeps checking on its own; refresh if
+                        this pane looks stuck.
                       </p>
                       <div className="mt-3 flex flex-wrap items-center gap-2">
                         <Button
@@ -5019,7 +5032,7 @@ export function RecordingsView() {
                         </Button>
                         {selectedMeetingConsent.needsManualNotice ? (
                           <span className="text-sm text-rust">
-                            Share the notice before distributing this capture.
+                            Share the consent notice before you pass this meeting on.
                           </span>
                         ) : null}
                       </div>
@@ -5030,8 +5043,8 @@ export function RecordingsView() {
                         Transcription failed
                       </p>
                       <p className="mt-2 leading-relaxed">
-                        This meeting's transcript could not be produced. The audio is still on
-                        disk, so you can retry transcription from scratch.
+                        Plainsong could not produce a transcript for this meeting. The audio is
+                        still saved, so transcription can be run again from the start.
                       </p>
                       <div className="mt-3 flex flex-wrap items-center gap-2">
                         <Button
@@ -5050,11 +5063,12 @@ export function RecordingsView() {
                   ) : (
                     <div className="max-w-md text-sm text-muted-foreground">
                       <p className="font-medium text-foreground">
-                        Transcript is not available yet
+                        No transcript yet
                       </p>
                       <p className="mt-2 leading-relaxed">
-                        This meeting has no grounded transcript lines yet. Refresh if processing
-                        already finished; the record beside this pane is still yours to write.
+                        No transcript lines have been written for this meeting. Refresh if
+                        processing has already finished; the record beside this pane is still
+                        yours to write either way.
                       </p>
                       <div className="mt-3 flex flex-wrap items-center gap-2">
                         <Button
@@ -5069,7 +5083,7 @@ export function RecordingsView() {
                           ) : (
                             <RefreshCw className="mr-2 h-4 w-4" />
                           )}
-                          Refresh transcript
+                          Refresh
                         </Button>
                         {/* This is also where a reader lands after deleting the
                             last turn, so the way back is offered right here. */}
@@ -5115,12 +5129,12 @@ export function RecordingsView() {
           {isRecording ? (
             <Button variant="destructive" disabled={isStopping} onClick={async () => { setIsStopping(true); try { await stopMeeting(); } finally { setIsStopping(false); } }}>
               <Square className="h-4 w-4 mr-2 fill-current" />
-              {isStopping ? "Stopping..." : "Stop Meeting"}
+              {isStopping ? "Stopping…" : "Stop meeting"}
             </Button>
           ) : (
             <Button variant="active" onClick={() => setShowConsent(true)}>
               <Mic2 className="h-4 w-4 mr-2" />
-              New Meeting
+              New meeting
             </Button>
           )}
         </div>
@@ -5134,7 +5148,7 @@ export function RecordingsView() {
                 <div className="flex flex-wrap items-center justify-between gap-3">
                   <div>
                     <p className="text-sm font-medium text-rust">
-                      Meeting title generation failed
+                      Plainsong could not name this meeting
                     </p>
                     <p className="text-sm text-muted-foreground">{autoNameIssue.message}</p>
                   </div>
@@ -5150,7 +5164,7 @@ export function RecordingsView() {
                             message:
                               error instanceof Error
                                 ? error.message
-                                : "Meeting title retry failed.",
+                                : "Naming it failed again.",
                           });
                         });
                       }}
@@ -5195,66 +5209,49 @@ export function RecordingsView() {
             </div>
           ) : null}
 
-          <section className="surface-panel-subtle mb-4 rounded-2xl p-4">
-            <div className="grid gap-3 md:grid-cols-[1fr_auto] md:items-center">
-              <div>
-                <p className="rubric-muted">Meeting workspace</p>
-                <p className="mt-1.5 font-serif text-base font-medium text-card-foreground">
-                  Bot-free capture, transcript-first review, and practical follow-through.
+          {/* The panel that used to wrap these counts carried a second title
+              and tagline restating the page header two inches above it, and
+              boxed every count inside a box inside a panel. The counts are the
+              only thing here that was information. */}
+          <section
+            aria-label="Meeting totals"
+            className="mb-5 flex flex-wrap gap-x-10 gap-y-3 border-b border-border/60 pb-5"
+          >
+            {[
+              ["Meetings", recordingsHaveLoaded ? meetingStats.total : "—"],
+              ["Ready", recordingsHaveLoaded ? meetingStats.completed : "—"],
+              ["Hours", recordingsHaveLoaded ? `${meetingStats.totalHours.toFixed(1)}h` : "—"],
+              ["Failed", recordingsHaveLoaded ? meetingStats.errors : "—"],
+            ].map(([label, value]) => (
+              <div key={label}>
+                <p className="rubric-muted">{label}</p>
+                <p className="mt-1 font-serif text-xl font-semibold tabular-nums tracking-tight">
+                  {value}
                 </p>
               </div>
-              <div className="grid grid-cols-2 gap-2 sm:grid-cols-4">
-                {[
-                  ["Total", recordingsHaveLoaded ? meetingStats.total : "—"],
-                  ["Completed", recordingsHaveLoaded ? meetingStats.completed : "—"],
-                  ["Hours", recordingsHaveLoaded ? `${meetingStats.totalHours.toFixed(1)}h` : "—"],
-                  ["Errors", recordingsHaveLoaded ? meetingStats.errors : "—"],
-                ].map(([label, value]) => (
-                  <div
-                    key={label}
-                    className="min-w-24 rounded-xl border border-border/70 bg-background/55 px-3 py-2"
-                  >
-                    <p className="rubric-muted">{label}</p>
-                    <p className="mt-1 font-serif text-xl font-semibold tabular-nums tracking-tight">{value}</p>
-                  </div>
-                ))}
-              </div>
-            </div>
+            ))}
           </section>
 
-          <section className="surface-panel-subtle mb-4 rounded-2xl p-4">
+          {/* Flat toolbar, not a second panel: the search, the status filter,
+              and the one bulk action, with the filter buttons grouped so a
+              screen reader announces what the row of words does. */}
+          <section className="mb-5">
               <div className="flex flex-col gap-3 md:flex-row md:items-center md:justify-between">
                 <div className="relative w-full md:max-w-md">
                   <Search className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-muted-foreground" />
                   <Input
                     className="pl-9"
-                    placeholder="Search titles, notes, recaps, action items, and transcripts"
+                    placeholder="Search titles, notes, summaries, action items, and transcripts"
                     aria-label="Search meetings"
                     value={meetingSearch}
                     onChange={(event) => setMeetingSearch(event.target.value)}
                   />
                 </div>
-                <div className="flex items-center gap-2">
-                  <Button
-                    variant="outline"
-                    size="sm"
-                    disabled={filteredMeetings.length === 0 || isBulkReclassifying}
-                    onClick={() => {
-                      void handleBulkMarkFilteredAsDictation();
-                    }}
-                  >
-                    {isBulkReclassifying ? (
-                      <>
-                        <Loader2 className="mr-2 h-3.5 w-3.5 animate-spin" />
-                        Moving...
-                      </>
-                    ) : (
-                      "Mark Filtered as Dictation"
-                    )}
-                  </Button>
+                <div className="flex items-center gap-2" role="group" aria-label="Show only">
                   <Button
                     variant={statusFilter === "all" ? "active" : "outline"}
                     size="sm"
+                    aria-pressed={statusFilter === "all"}
                     onClick={() => setStatusFilter("all")}
                   >
                     All
@@ -5262,13 +5259,15 @@ export function RecordingsView() {
                   <Button
                     variant={statusFilter === "completed" ? "active" : "outline"}
                     size="sm"
+                    aria-pressed={statusFilter === "completed"}
                     onClick={() => setStatusFilter("completed")}
                   >
-                    Completed
+                    Ready
                   </Button>
                   <Button
                     variant={statusFilter === "recording" ? "active" : "outline"}
                     size="sm"
+                    aria-pressed={statusFilter === "recording"}
                     onClick={() => setStatusFilter("recording")}
                   >
                     Recording
@@ -5276,6 +5275,7 @@ export function RecordingsView() {
                   <Button
                     variant={statusFilter === "processing" ? "active" : "outline"}
                     size="sm"
+                    aria-pressed={statusFilter === "processing"}
                     onClick={() => setStatusFilter("processing")}
                   >
                     Processing
@@ -5283,22 +5283,43 @@ export function RecordingsView() {
                   <Button
                     variant={statusFilter === "error" ? "active" : "outline"}
                     size="sm"
+                    aria-pressed={statusFilter === "error"}
                     onClick={() => setStatusFilter("error")}
                   >
-                    Error
+                    Failed
                   </Button>
                 </div>
               </div>
-              <p className="mt-3 text-sm text-muted-foreground">
-                Seeing a dictation in this list? Use the row menu and choose Mark as Dictation to move it out of Meetings.
-              </p>
+              <div className="mt-3 flex flex-wrap items-center gap-x-3 gap-y-2">
+                <p className="text-sm text-muted-foreground">
+                  A dictation landed in this list? Move it out from its row menu, or move
+                  everything listed at once.
+                </p>
+                <Button
+                  variant="outline"
+                  size="sm"
+                  disabled={filteredMeetings.length === 0 || isBulkReclassifying}
+                  onClick={() => {
+                    void handleBulkMarkFilteredAsDictation();
+                  }}
+                >
+                  {isBulkReclassifying ? (
+                    <>
+                      <Loader2 className="mr-2 h-3.5 w-3.5 animate-spin" />
+                      Moving…
+                    </>
+                  ) : (
+                    "Move all listed to Dictation"
+                  )}
+                </Button>
+              </div>
 
               {/* Transcript hits are ranked by the backend's bm25 index and open
                   the meeting at the moment they were found. */}
               {meetingSearch.trim().length >= 2 && (
                 <div className="mt-4 border-t border-border/60 pt-4">
                   <div className="flex flex-wrap items-baseline justify-between gap-2">
-                    <p className="section-heading text-sm">Transcript matches</p>
+                    <h2 className="section-heading">Lines from transcripts</h2>
                     <span className="rubric-muted time-spec">
                       {isSearchingMeetingTranscripts
                         ? "Searching"
@@ -5311,7 +5332,7 @@ export function RecordingsView() {
                     <p className="mt-2 text-sm text-muted-foreground">
                       {isSearchingMeetingTranscripts
                         ? "Looking through every transcript…"
-                        : "No transcript lines matched. Meetings matching on title, notes, recap, or action items are still listed below."}
+                        : "Nothing spoken matched. Meetings whose title, notes, summary, or action items match are still listed below."}
                     </p>
                   ) : (
                     <div className="mt-2 grid gap-1.5">
@@ -5366,16 +5387,18 @@ export function RecordingsView() {
                 <div className="mb-4 flex flex-col gap-3 lg:flex-row lg:items-start lg:justify-between">
                   <div className="space-y-2">
                     <div>
-                      <p className="text-sm font-medium text-gold-text">Recording in progress</p>
+                      {/* The gold neume is the live mark. A separate "Live
+                          meeting" chip beside this line said it a second
+                          time. */}
+                      <p className="inline-flex items-center gap-1.5 text-sm font-medium text-gold-text">
+                        <span className="neume neume-lit" aria-hidden="true" />
+                        Recording
+                      </p>
                       <p className="text-sm text-muted-foreground">
-                        Keep notes current while Plainsong captures the meeting.
+                        Take notes while Plainsong captures the audio.
                       </p>
                     </div>
                     <div className="flex flex-wrap items-center gap-2">
-                      <Badge variant="outline" className="border-border bg-muted/30 text-foreground">
-                        <span className="neume neume-lit mr-1" />
-                        Live meeting
-                      </Badge>
                       <Badge variant="outline" className="bg-background/70">
                         <Users className="mr-1 h-3 w-3" />
                         {activeMeetingCaptureMode}
@@ -5426,7 +5449,7 @@ export function RecordingsView() {
                       }}
                     >
                       <Edit3 className="mr-2 h-4 w-4" />
-                      Open Workspace
+                      Open this meeting
                     </Button>
                     <div className="font-mono text-lg font-semibold">{formattedDuration}</div>
                   </div>
@@ -5450,47 +5473,42 @@ export function RecordingsView() {
                     </span>
                   </div>
                 ) : null}
-                <div className="mt-4 grid gap-4 lg:grid-cols-[minmax(0,1.35fr)_minmax(280px,1fr)]">
-                  <div className="rounded-lg border border-gold/20 bg-background/80 p-3">
+                {/* Two plain columns. These used to be bordered boxes inside a
+                    bordered card inside a bordered row — three surfaces deep for
+                    a text area and a scrolling list. */}
+                <div className="mt-5 grid gap-6 lg:grid-cols-[minmax(0,1.35fr)_minmax(280px,1fr)]">
+                  <div>
                     <div className="mb-2 flex items-center justify-between gap-3">
-                      <p className="text-sm font-medium">
-                        Meeting notes{" "}
-                        <span className="font-normal text-muted-foreground">
-                          (grounds summary, actions, and Ask)
-                        </span>
-                      </p>
-                      <div className="text-right">
-                        <p className="text-sm text-muted-foreground">Autosaves to this meeting</p>
-                        <MeetingNotesSaveIndicator
-                          status={
-                            meetingNotesSaveStatus?.surface === "live" &&
-                            meetingNotesSaveStatus.recordingId === recordingId
-                              ? meetingNotesSaveStatus
-                              : null
-                          }
-                          onRetry={() => retryMeetingNotesSave("live")}
-                        />
-                      </div>
+                      <p className="section-heading">Meeting notes</p>
+                      <MeetingNotesSaveIndicator
+                        status={
+                          meetingNotesSaveStatus?.surface === "live" &&
+                          meetingNotesSaveStatus.recordingId === recordingId
+                            ? meetingNotesSaveStatus
+                            : null
+                        }
+                        onRetry={() => retryMeetingNotesSave("live")}
+                      />
                     </div>
+                    <p className="mb-2 text-sm text-muted-foreground">
+                      Saved as you type, and read alongside the transcript when Plainsong writes
+                      the summary and the action items.
+                    </p>
                     <textarea
                       value={liveMeetingNotes}
                       onChange={(e) => setLiveMeetingNotes(e.target.value)}
                       aria-label="Live meeting notes"
-                      placeholder="Capture decisions, names, risks, and next steps as the conversation moves."
+                      placeholder="Decisions, names, risks, and next steps as the conversation moves."
                       rows={8}
                       className="w-full resize-none rounded-md border border-border bg-background px-3 py-2 text-sm placeholder:text-muted-foreground/50 focus:outline-none focus:ring-1 focus:ring-gold"
                     />
                   </div>
-                  <div className="rounded-lg border border-gold/20 bg-background/70 p-3">
-                    <div className="mb-2 flex items-center justify-between gap-2">
-                      <p className="section-heading text-gold-text">
-                        {previewDelay.label}
-                      </p>
-                      <p className="text-sm text-muted-foreground">
-                        Notes stay the point here
-                      </p>
-                    </div>
-                    <p className="mb-2 text-sm text-muted-foreground">
+                  <div>
+                    {/* The label and caption come from the stream itself, so
+                        they say how far behind the preview actually is. Nothing
+                        here may read as a live caption. */}
+                    <p className="section-heading text-gold-text">{previewDelay.label}</p>
+                    <p className="mb-2 mt-2 text-sm text-muted-foreground">
                       {previewDelay.caption}
                     </p>
                     {streamChunks.length > 0 ? (
@@ -5507,7 +5525,7 @@ export function RecordingsView() {
                       </div>
                     ) : (
                       <div className="flex h-full min-h-[140px] items-center justify-center rounded-md border border-dashed border-gold/20 bg-muted/20 px-4 text-center text-sm text-muted-foreground">
-                        Decoded lines appear here a few seconds after they are spoken.
+                        Lines appear here a few seconds after they are spoken.
                       </div>
                     )}
                   </div>
@@ -5527,17 +5545,17 @@ export function RecordingsView() {
                 aria-hidden="true"
               />
               <h3 className="font-serif text-lg font-medium tracking-tight">
-                {meetings.length === 0 ? "No meetings yet" : "No meetings match your filters"}
+                {meetings.length === 0 ? "No meetings yet" : "Nothing matches"}
               </h3>
               <p className="mx-auto mt-2 max-w-sm text-sm leading-6 text-muted-foreground">
                 {meetings.length === 0
-                  ? "Start a meeting to capture conversation, notes, transcript review, and follow-up drafts."
-                  : "Try a different search or status filter."}
+                  ? "Start one and Plainsong will keep the audio, the transcript, your notes, and a summary together in one place."
+                  : "Try a different search, or a different status."}
               </p>
               {meetings.length === 0 && (
                 <Button className="mt-4" variant="active" onClick={() => setShowConsent(true)}>
                   <Mic2 data-icon="inline-start" />
-                  Start Meeting
+                  Start a meeting
                 </Button>
               )}
             </div>
@@ -5586,8 +5604,8 @@ export function RecordingsView() {
                                 {statusBand.word}
                               </span>
                             )}
-                            <span aria-hidden="true" className="text-muted-foreground/40">·</span>
-                            <span>Meeting</span>
+                            {/* Every row in a list called Meetings used to end
+                                with the word "Meeting". */}
                           </div>
                         </div>
                       </div>
@@ -5598,7 +5616,7 @@ export function RecordingsView() {
                           variant="ghost"
                           size="icon"
                           className="h-8 w-8"
-                          aria-label="Play audio recording"
+                          aria-label="Play this meeting's audio"
                           disabled={!recording.audioPath}
                           onClick={(e) => {
                             e.stopPropagation();
@@ -5613,7 +5631,7 @@ export function RecordingsView() {
                               variant="ghost"
                               size="icon"
                               className="h-8 w-8"
-                              aria-label="Recording options"
+                              aria-label="Meeting options"
                               onClick={(e) => e.stopPropagation()}
                             >
                               <MoreHorizontal className="h-4 w-4" />
@@ -5637,7 +5655,7 @@ export function RecordingsView() {
                               }}
                             >
                               <FileOutput className="h-4 w-4 mr-2" />
-                              View Details
+                              Open
                             </DropdownMenuItem>
                             {canRetranscribeRecording(recording) && !isLiveRow && (
                               <DropdownMenuItem
@@ -5648,7 +5666,7 @@ export function RecordingsView() {
                               >
                                 <RefreshCw className="h-4 w-4 mr-2" />
                                 {recording.status === "error"
-                                  ? "Retry Transcription"
+                                  ? "Retry transcription"
                                   : "Re-transcribe from audio"}
                               </DropdownMenuItem>
                             )}
@@ -5660,7 +5678,7 @@ export function RecordingsView() {
                               }}
                             >
                               <Mic2 className="h-4 w-4 mr-2" />
-                              Mark as Dictation
+                              Move to Dictation
                             </DropdownMenuItem>
                             <DropdownMenuSeparator />
                             <DropdownMenuItem
@@ -5781,9 +5799,9 @@ export function RecordingsView() {
       >
         <DialogContent>
           <DialogHeader>
-            <DialogTitle>Delete Recording</DialogTitle>
+            <DialogTitle>Delete this meeting?</DialogTitle>
             <DialogDescription>
-              Are you sure you want to delete &ldquo;{showDeleteConfirm?.title}&rdquo;?{" "}
+              &ldquo;{showDeleteConfirm?.title}&rdquo; is gone for good.{" "}
               {deleteConfirmationRetention.deleteWarning}
             </DialogDescription>
           </DialogHeader>
@@ -5815,7 +5833,7 @@ export function RecordingsView() {
       >
         <DialogContent>
           <DialogHeader>
-            <DialogTitle>Rename Recording</DialogTitle>
+            <DialogTitle>Rename meeting</DialogTitle>
           </DialogHeader>
           <Input
             value={renameValue}

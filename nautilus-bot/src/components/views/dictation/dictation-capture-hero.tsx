@@ -76,7 +76,7 @@ export function DictationCaptureHero({
     >
       <CardContent className="space-y-6 p-6">
         <div className="min-w-0">
-          <h2 className="rubric-muted">Capture</h2>
+          <h2 className="section-heading">Capture</h2>
           <p className="mt-1 text-sm text-muted-foreground">
             {hotkeyInstruction}
           </p>

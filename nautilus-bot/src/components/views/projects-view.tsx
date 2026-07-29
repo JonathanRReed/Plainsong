@@ -47,29 +47,27 @@ export function ProjectsView() {
       <PageHeader
         eyebrow="LIBRARY"
         title="Projects"
-        subtitle="Organize recordings and personal libraries"
+        subtitle="Groups for your recordings"
         actions={
           <Button onClick={() => setShowNewProject(true)}>
-            <Plus className="h-4 w-4 mr-2" />
-            New Project
+            <Plus className="mr-2 h-4 w-4" />
+            New project
           </Button>
         }
       />
 
       <ScrollArea className="flex-1">
-        <div className="p-6">
+        <div className="mx-auto w-full max-w-7xl px-6 py-6 lg:px-8">
           {error ? (
-            <Card variant="default">
-              <CardContent className="py-6 text-sm text-destructive">
-                {error}
-              </CardContent>
-            </Card>
+            <div className="rounded-lg border border-rust/30 bg-rust/10 px-4 py-3 text-sm text-rust">
+              {error}
+            </div>
           ) : null}
 
           {isLoading ? (
             <div className="flex flex-col items-center justify-center gap-2 py-20 text-center">
               <span className="neume" />
-              <p className="font-serif text-sm text-muted-foreground">Loading projects...</p>
+              <p className="font-serif text-sm text-muted-foreground">Loading projects…</p>
             </div>
           ) : null}
 
@@ -77,9 +75,9 @@ export function ProjectsView() {
             <EmptyState
               icon={<Folder className="h-8 w-8 text-muted-foreground" />}
               title="No projects yet"
-              description="Create your first project to organize recordings and keep work separated."
+              description="Create a project, then pick it as the destination for dictation. Meeting recordings stay in the default project."
               action={{
-                label: "Create Project",
+                label: "Create project",
                 onClick: () => setShowNewProject(true),
               }}
             />
@@ -88,19 +86,14 @@ export function ProjectsView() {
           {!isLoading && !error && projects.length > 0 ? (
             <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
               {projects.map((project) => (
-                <Card
-                  key={project.id}
-                  className="group"
-                >
+                <Card key={project.id}>
                   <CardHeader className="pb-3">
-                    <div className="flex items-start justify-between">
+                    <div className="flex items-start justify-between gap-3">
                       <div className="flex items-center gap-3">
-                        <div className="h-10 w-10 rounded-lg bg-muted/20 flex items-center justify-center">
-                          <Folder className="h-5 w-5 text-muted-foreground" />
-                        </div>
-                        <div>
+                        <Folder className="h-5 w-5 shrink-0 text-muted-foreground" />
+                        <div className="min-w-0">
                           <CardTitle className="text-lg">{project.name}</CardTitle>
-                          <p className="text-xs text-muted-foreground">
+                          <p className="text-sm text-muted-foreground">
                             {recordingCountByProject[project.id] ?? 0} recordings
                           </p>
                         </div>
@@ -117,17 +110,9 @@ export function ProjectsView() {
                     </div>
                   </CardHeader>
                   <CardContent>
-                    <p className="text-sm text-muted-foreground line-clamp-2">
+                    <p className="line-clamp-2 text-sm text-muted-foreground">
                       {project.description?.trim() || "No description"}
                     </p>
-                    <div className="mt-4 flex items-center justify-between text-xs text-muted-foreground">
-                      <span className="font-mono uppercase tracking-widest text-[10px]">
-                        {project.encrypted ? "Encrypted" : "Standard"}
-                      </span>
-                      <span>
-                        Recordings are managed in Meetings
-                      </span>
-                    </div>
                   </CardContent>
                 </Card>
               ))}
@@ -139,18 +124,19 @@ export function ProjectsView() {
       <Dialog open={showNewProject} onOpenChange={setShowNewProject}>
         <DialogContent>
           <DialogHeader>
-            <DialogTitle>Create New Project</DialogTitle>
+            <DialogTitle>New project</DialogTitle>
             <DialogDescription>
-              Create a new project to organize your recordings.
+              Once it exists you can send dictation to it from the dictation screen. Meeting
+              recordings stay in the default project.
             </DialogDescription>
           </DialogHeader>
 
           <div className="space-y-4 py-4">
             <div className="space-y-2">
-              <Label htmlFor="project-name">Project Name</Label>
+              <Label htmlFor="project-name">Name</Label>
               <Input
                 id="project-name"
-                placeholder="Enter project name"
+                placeholder="Weekly team sync"
                 value={newProjectName}
                 onChange={(event: ChangeEvent<HTMLInputElement>) =>
                   setNewProjectName(event.target.value)
@@ -162,7 +148,7 @@ export function ProjectsView() {
               <Label htmlFor="project-description">Description (optional)</Label>
               <Input
                 id="project-description"
-                placeholder="Enter project description"
+                placeholder="Standing Monday call with the team"
                 value={newProjectDescription}
                 onChange={(event: ChangeEvent<HTMLInputElement>) =>
                   setNewProjectDescription(event.target.value)
@@ -176,7 +162,7 @@ export function ProjectsView() {
               Cancel
             </Button>
             <Button onClick={handleCreateProject} disabled={!newProjectName.trim()}>
-              Create Project
+              Create project
             </Button>
           </DialogFooter>
         </DialogContent>
