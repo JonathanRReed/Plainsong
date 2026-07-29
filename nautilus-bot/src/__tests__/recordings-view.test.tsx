@@ -1,5 +1,5 @@
 // @ts-nocheck - Vitest mock types don't align with TypeScript
-import { act, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { act, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { RecordingsView } from "@/components/views/recordings-view";
@@ -436,7 +436,10 @@ describe("RecordingsView", () => {
 
     expect(screen.getByRole("status")).toHaveTextContent("Loading your meetings");
     expect(screen.queryByText("No meetings yet")).not.toBeInTheDocument();
-    expect(screen.getByText("Total").parentElement).toHaveTextContent("—");
+    // The page h1 is also "Meetings", so the count is read out of the totals
+    // strip rather than off the first match in the document.
+    const totals = screen.getByRole("region", { name: "Meeting totals" });
+    expect(within(totals).getByText("Meetings").parentElement).toHaveTextContent("—");
   });
 
   it("shows an actionable load error and retries without claiming the library is empty", () => {
@@ -481,7 +484,7 @@ describe("RecordingsView", () => {
     render(<RecordingsView />);
 
     fireEvent.click(screen.getByRole("button", { name: "Processing" }));
-    expect(screen.getByText("No meetings match your filters")).toBeInTheDocument();
+    expect(screen.getByText("Nothing matches")).toBeInTheDocument();
 
     const handler = eventListeners.get("recording-status-changed");
     expect(handler).toBeTruthy();
@@ -673,10 +676,10 @@ describe("RecordingsView", () => {
 
     render(<RecordingsView />);
 
-    fireEvent.pointerDown(screen.getByRole("button", { name: "Recording options" }), {
+    fireEvent.pointerDown(screen.getByRole("button", { name: "Meeting options" }), {
       button: 0,
     });
-    fireEvent.click(await screen.findByRole("menuitem", { name: "Retry Transcription" }));
+    fireEvent.click(await screen.findByRole("menuitem", { name: "Retry transcription" }));
 
     await waitFor(() => {
       expect(backend.retranscribeRecording).toHaveBeenCalledWith("r1");
@@ -708,7 +711,7 @@ describe("RecordingsView", () => {
 
     render(<RecordingsView />);
 
-    fireEvent.pointerDown(screen.getByRole("button", { name: "Recording options" }), {
+    fireEvent.pointerDown(screen.getByRole("button", { name: "Meeting options" }), {
       button: 0,
     });
     fireEvent.click(await screen.findByRole("menuitem", { name: "Re-transcribe from audio" }));
@@ -730,7 +733,7 @@ describe("RecordingsView", () => {
   it("keeps the transcript when the re-transcribe confirmation is declined", async () => {
     render(<RecordingsView />);
 
-    fireEvent.pointerDown(screen.getByRole("button", { name: "Recording options" }), {
+    fireEvent.pointerDown(screen.getByRole("button", { name: "Meeting options" }), {
       button: 0,
     });
     fireEvent.click(await screen.findByRole("menuitem", { name: "Re-transcribe from audio" }));
@@ -747,14 +750,14 @@ describe("RecordingsView", () => {
 
     render(<RecordingsView />);
 
-    fireEvent.pointerDown(screen.getByRole("button", { name: "Recording options" }), {
+    fireEvent.pointerDown(screen.getByRole("button", { name: "Meeting options" }), {
       button: 0,
     });
     await screen.findByRole("menuitem", { name: "Rename" });
     expect(
       screen.queryByRole("menuitem", { name: "Re-transcribe from audio" })
     ).not.toBeInTheDocument();
-    expect(screen.queryByRole("menuitem", { name: "Retry Transcription" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("menuitem", { name: "Retry transcription" })).not.toBeInTheDocument();
   });
 
   it.each([
@@ -767,7 +770,7 @@ describe("RecordingsView", () => {
 
       render(<RecordingsView />);
 
-      fireEvent.pointerDown(screen.getByRole("button", { name: "Recording options" }), {
+      fireEvent.pointerDown(screen.getByRole("button", { name: "Meeting options" }), {
         button: 0,
       });
       const deleteItem = await screen.findByRole("menuitem", { name: label });
@@ -808,14 +811,14 @@ describe("RecordingsView", () => {
     render(<RecordingsView />);
 
     fireEvent.click(screen.getByText("Weekly sync"));
-    await screen.findByLabelText("Meeting summary");
+    await screen.findByLabelText("Summary");
 
-    fireEvent.click(screen.getByRole("button", { name: "Edit Meeting summary" }));
-    fireEvent.change(screen.getByLabelText("Meeting summary"), {
+    fireEvent.click(screen.getByRole("button", { name: "Edit Summary" }));
+    fireEvent.change(screen.getByLabelText("Summary"), {
       target: { value: "User-edited recap" },
     });
-    fireEvent.click(screen.getByRole("button", { name: "Edit Meeting action items" }));
-    fireEvent.change(screen.getByLabelText("Meeting action items"), {
+    fireEvent.click(screen.getByRole("button", { name: "Edit Action items" }));
+    fireEvent.change(screen.getByLabelText("Action items"), {
       target: { value: "Follow up with design\nShip release notes" },
     });
 
@@ -837,7 +840,7 @@ describe("RecordingsView", () => {
     render(<RecordingsView />);
 
     fireEvent.click(screen.getByText("Weekly sync"));
-    await screen.findByLabelText("Meeting summary");
+    await screen.findByLabelText("Summary");
 
     fireEvent.click(screen.getByRole("button", { name: "Regenerate summary" }));
 
@@ -869,7 +872,7 @@ describe("RecordingsView", () => {
     render(<RecordingsView />);
 
     fireEvent.click(screen.getByText("Weekly sync"));
-    await screen.findByLabelText("Meeting summary");
+    await screen.findByLabelText("Summary");
 
     // Plain regenerate never asks which playbook: it repeats the one already
     // chosen, so a retry costs one click.
@@ -899,10 +902,10 @@ describe("RecordingsView", () => {
     render(<RecordingsView />);
 
     fireEvent.click(screen.getByText("Weekly sync"));
-    await screen.findByLabelText("Meeting summary");
+    await screen.findByLabelText("Summary");
 
-    fireEvent.click(screen.getByRole("button", { name: "Edit Meeting summary" }));
-    fireEvent.change(screen.getByLabelText("Meeting summary"), {
+    fireEvent.click(screen.getByRole("button", { name: "Edit Summary" }));
+    fireEvent.change(screen.getByLabelText("Summary"), {
       target: { value: "My own recap, typed by hand." },
     });
 
@@ -971,7 +974,7 @@ describe("RecordingsView", () => {
       expect(backend.updateRecordingTemplate).toHaveBeenCalledWith("r1", "standup");
     });
 
-    fireEvent.click(screen.getByRole("button", { name: "Apply Outline" }));
+    fireEvent.click(screen.getByRole("button", { name: "Add its headings to my notes" }));
 
     await waitFor(() => {
       expect(backend.updateRecordingNotes).toHaveBeenCalledWith(
@@ -1001,14 +1004,14 @@ describe("RecordingsView", () => {
     expect(screen.getAllByRole("button", { name: "Regenerate summary" })).toHaveLength(1);
     expect(screen.getAllByRole("button", { name: "Regenerate action items" })).toHaveLength(1);
     expect(screen.getAllByRole("button", { name: /^Copy recap$/ })).toHaveLength(1);
-    expect(await screen.findByText("Prep")).toBeInTheDocument();
-    expect(screen.getByText("Cross-meeting recall")).toBeInTheDocument();
+    expect(await screen.findByText("Before the next one")).toBeInTheDocument();
+    expect(screen.getByText("Ask across your earlier meetings")).toBeInTheDocument();
     expect(screen.getByText("Follow-up drafts")).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: "Copy Follow-up Email" })).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: "Read Follow-up" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Copy follow-up email" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Read follow-up aloud" })).toBeInTheDocument();
 
     // Status is stated once, in the header, not restated per card.
-    expect(screen.getAllByText("Ready to send follow-up")).toHaveLength(1);
+    expect(screen.getAllByText("Ready to send")).toHaveLength(1);
   });
 
   it("can read the meeting summary aloud from the review surface", async () => {
@@ -1043,7 +1046,7 @@ describe("RecordingsView", () => {
     fireEvent.click(screen.getByText("Weekly sync"));
     await screen.findByText("Canonical meeting summary");
 
-    fireEvent.click(screen.getByRole("button", { name: "Read Follow-up" }));
+    fireEvent.click(screen.getByRole("button", { name: "Read follow-up aloud" }));
 
     await waitFor(() => {
       expect(speechSynthesisMock.cancel).toHaveBeenCalled();
@@ -1056,7 +1059,7 @@ describe("RecordingsView", () => {
 
     fireEvent.click(screen.getByText("Weekly sync"));
 
-    expect(await screen.findByText("Cross-meeting recall")).toBeInTheDocument();
+    expect(await screen.findByText("Ask across your earlier meetings")).toBeInTheDocument();
     // The component may show preset suggestions; if not, we can test the functionality differently
     // For now, let's test that askMemory can be called directly
     await backend.askMemory("What has Jon cared about across recent meetings?");
@@ -1237,9 +1240,9 @@ describe("RecordingsView", () => {
     render(<RecordingsView />);
 
     fireEvent.click(screen.getByText("Weekly sync"));
-    await screen.findByRole("button", { name: "Add Section" });
+    await screen.findByRole("button", { name: "Add section" });
 
-    fireEvent.click(screen.getByRole("button", { name: "Add Section" }));
+    fireEvent.click(screen.getByRole("button", { name: "Add section" }));
 
     const customTitleInput = screen.getByDisplayValue("Custom section");
     fireEvent.change(customTitleInput, {
@@ -1311,8 +1314,15 @@ describe("RecordingsView", () => {
     // has to say what the file will and will not have scrubbed.
     const note = await screen.findByText(/basic redaction/i);
     expect(note.textContent).toContain("email addresses and phone numbers");
+    expect(note.textContent).toContain("and nothing else");
+    // Names the other levels too, so the sentence and the Exports picker share
+    // one vocabulary instead of making the reader map a description onto it.
+    expect(note.textContent).toContain("None");
+    expect(note.textContent).toContain("Strict");
+    // …and where the other levels live, since there is no picker here.
+    expect(note.textContent).toContain("Exports");
 
-    fireEvent.click(await screen.findByRole("button", { name: /Export Text/ }));
+    fireEvent.click(await screen.findByRole("button", { name: /Export as plain text/ }));
 
     await waitFor(() => {
       expect(backend.exportRecordingV2).toHaveBeenCalledWith("r1", "text", {
@@ -1328,7 +1338,7 @@ describe("RecordingsView", () => {
     fireEvent.click(screen.getByText("Weekly sync"));
     await screen.findByText("The record");
     fireEvent.click(await screen.findByRole("tab", { name: "Ask" }));
-    fireEvent.click(await screen.findByRole("button", { name: "Copy Follow-up" }));
+    fireEvent.click(await screen.findByRole("button", { name: "Copy follow-up" }));
 
     await waitFor(() => {
       expect(navigator.clipboard.writeText).toHaveBeenCalledWith(
@@ -1344,7 +1354,7 @@ describe("RecordingsView", () => {
     fireEvent.click(screen.getByText("Weekly sync"));
     await screen.findByText("The record");
     fireEvent.click(await screen.findByRole("tab", { name: "Ask" }));
-    fireEvent.click(await screen.findByRole("button", { name: "Append to Notes" }));
+    fireEvent.click(await screen.findByRole("button", { name: "Add to my notes" }));
 
     await waitFor(() => {
       expect(backend.updateRecordingNotes).toHaveBeenCalledWith(
@@ -1399,7 +1409,7 @@ describe("RecordingsView", () => {
       target: { value: "Keep the launch blocked only on legal approval." },
     });
 
-    fireEvent.click(screen.getByRole("button", { name: "Enhance Notes" }));
+    fireEvent.click(screen.getByRole("button", { name: "Build a draft" }));
 
     await waitFor(() => {
       expect(backend.summarizeRecordingGrounded).toHaveBeenCalledWith("r1");
@@ -1415,7 +1425,7 @@ describe("RecordingsView", () => {
       "Goals\nKeep the launch blocked only on legal approval.";
 
     await waitFor(() => {
-      expect(screen.getByRole("button", { name: "Apply to Notes" })).not.toBeDisabled();
+      expect(screen.getByRole("button", { name: "Save over my notes" })).not.toBeDisabled();
     });
     // The draft is shown as the document it would become: markdown rendered,
     // not twelve rows of a read-only box.
@@ -1427,15 +1437,12 @@ describe("RecordingsView", () => {
     expect(draftRegion.querySelector("li")).not.toBeNull();
     expect(screen.queryByDisplayValue(expectedDraft)).not.toBeInTheDocument();
 
-    fireEvent.click(screen.getByRole("button", { name: "Apply to Notes" }));
+    fireEvent.click(screen.getByRole("button", { name: "Save over my notes" }));
 
     await waitFor(() => {
       expect(backend.updateRecordingNotes).toHaveBeenLastCalledWith("r1", expectedDraft);
     });
-    expect(toast).toHaveBeenCalledWith(
-      "Enhanced notes applied to this meeting.",
-      "success"
-    );
+    expect(toast).toHaveBeenCalledWith("Draft saved into your notes.", "success");
   });
 
   it("keeps prior action items when enhanced-note action analysis fails", async () => {
@@ -1464,18 +1471,20 @@ describe("RecordingsView", () => {
     render(<RecordingsView />);
     fireEvent.click(screen.getByText("Weekly sync"));
     await screen.findByText("The record");
-    fireEvent.click(screen.getByRole("button", { name: "Enhance Notes" }));
+    fireEvent.click(screen.getByRole("button", { name: "Build a draft" }));
 
     const draft = await screen.findByRole("region", {
       name: "Enhanced meeting notes draft",
     });
     expect(draft).toHaveTextContent("Fresh summary survived the partial failure.");
     expect(draft).toHaveTextContent("Ship launch checklist");
-    expect(screen.getByLabelText("Meeting action items")).toHaveTextContent(
+    expect(screen.getByLabelText("Action items")).toHaveTextContent(
       "Ship launch checklist"
     );
     expect(toast).toHaveBeenCalledWith(
-      expect.stringContaining("saved action items kept unchanged"),
+      expect.stringContaining(
+        "could not redo the action items, so what was already saved was kept"
+      ),
       "info"
     );
   });
@@ -1486,12 +1495,12 @@ describe("RecordingsView", () => {
     fireEvent.click(screen.getByText("Weekly sync"));
     await screen.findByText("The record");
 
-    fireEvent.click(screen.getByRole("button", { name: "Edit Meeting summary" }));
-    fireEvent.change(screen.getByLabelText("Meeting summary"), {
+    fireEvent.click(screen.getByRole("button", { name: "Edit Summary" }));
+    fireEvent.change(screen.getByLabelText("Summary"), {
       target: { value: "Tight weekly recap" },
     });
-    fireEvent.click(screen.getByRole("button", { name: "Edit Meeting action items" }));
-    fireEvent.change(screen.getByLabelText("Meeting action items"), {
+    fireEvent.click(screen.getByRole("button", { name: "Edit Action items" }));
+    fireEvent.change(screen.getByLabelText("Action items"), {
       target: { value: "Ship launch checklist" },
     });
 
@@ -1518,7 +1527,7 @@ describe("RecordingsView", () => {
 
     fireEvent.click(
       await screen.findByRole("button", {
-        name: "Copy full record (includes transcript)",
+        name: "Copy full record, transcript and all",
       })
     );
 
@@ -1571,7 +1580,7 @@ describe("RecordingsView", () => {
     fireEvent.click(screen.getByText("Weekly sync"));
     await screen.findByText("The record");
 
-    fireEvent.click(screen.getAllByRole("button", { name: "Export Markdown" })[0]);
+    fireEvent.click(screen.getAllByRole("button", { name: "Export as Markdown" })[0]);
 
     await waitFor(() => {
       expect(backend.exportRecordingV2).toHaveBeenCalledWith("r1", "markdown", {
@@ -1601,12 +1610,12 @@ describe("RecordingsView", () => {
     fireEvent.click(screen.getByText("Weekly sync"));
     await screen.findByText("The record");
 
-    expect(await screen.findByText("Transcript-only")).toBeInTheDocument();
+    expect(await screen.findByText("No audio")).toBeInTheDocument();
 
-    fireEvent.mouseDown(screen.getByRole("tab", { name: "Assets" }), { button: 0 });
+    fireEvent.mouseDown(screen.getByRole("tab", { name: "Audio" }), { button: 0 });
     expect(
       await screen.findByText(
-        "Audio is not saved or has already been removed by retention. Transcript, notes, summary, and action items remain available until this meeting is deleted."
+        "The audio was never saved, or has already been deleted. Transcript, notes, summary, and action items stay here until this meeting is deleted."
       )
     ).toBeInTheDocument();
   });
@@ -1711,10 +1720,10 @@ describe("RecordingsView", () => {
 
     render(<RecordingsView />);
 
-    expect(screen.getByText("Open Workspace")).toBeInTheDocument();
+    expect(screen.getByText("Open this meeting")).toBeInTheDocument();
     expect(screen.getByText("Me + Them")).toBeInTheDocument();
 
-    fireEvent.click(screen.getByRole("button", { name: "Open Workspace" }));
+    fireEvent.click(screen.getByRole("button", { name: "Open this meeting" }));
 
     await screen.findByText("The record");
     expect(screen.getAllByText("Me + Them").length).toBeGreaterThan(0);
@@ -1726,7 +1735,7 @@ describe("RecordingsView", () => {
 
     render(<RecordingsView />);
 
-    fireEvent.click(screen.getByRole("button", { name: "New Meeting" }));
+    fireEvent.click(screen.getByRole("button", { name: "New meeting" }));
     fireEvent.click(await screen.findByRole("button", { name: "Confirm meeting consent" }));
 
     await waitFor(() => {
@@ -1746,7 +1755,7 @@ describe("RecordingsView", () => {
     };
 
     render(<RecordingsView />);
-    fireEvent.click(screen.getByRole("button", { name: "Stop Meeting" }));
+    fireEvent.click(screen.getByRole("button", { name: "Stop meeting" }));
 
     await waitFor(() => {
       expect(stopMeeting).toHaveBeenCalledTimes(1);
@@ -1968,7 +1977,7 @@ describe("RecordingsView", () => {
     try {
       render(<RecordingsView />);
 
-      fireEvent.click(screen.getByRole("button", { name: "Play audio recording" }));
+      fireEvent.click(screen.getByRole("button", { name: "Play this meeting's audio" }));
 
       expect(
         await screen.findByText(
@@ -2055,7 +2064,10 @@ describe("RecordingsView", () => {
     fireEvent.click(screen.getByText("Weekly sync"));
 
     expect(await screen.findByText("Transcription failed")).toBeInTheDocument();
-    expect(screen.queryByText("Capture in progress")).not.toBeInTheDocument();
+    // The readiness state that used to read "Capture in progress" is now
+    // labelled "Recording"; this guard has to name the live string or it stops
+    // guarding anything.
+    expect(screen.queryByText("Recording")).not.toBeInTheDocument();
   });
 
   it("labels cross-meeting recall buttons instead of slicing the prompt apart", async () => {
@@ -2267,11 +2279,11 @@ describe("RecordingsView", () => {
     render(<RecordingsView />);
 
     fireEvent.click(screen.getByText("Weekly sync"));
-    await screen.findByLabelText("Meeting summary");
+    await screen.findByLabelText("Summary");
 
     // Before any generation, the recap makes no evidence claim at all.
     expect(
-      screen.getByText(/This recap has no saved analysis provenance/i)
+      screen.getByText(/Nothing quoted yet\. Regenerate the summary or the action items/i)
     ).toBeInTheDocument();
 
     fireEvent.click(screen.getByRole("button", { name: "Regenerate summary" }));
@@ -2306,16 +2318,18 @@ describe("RecordingsView", () => {
     render(<RecordingsView />);
 
     fireEvent.click(screen.getByText("Weekly sync"));
-    await screen.findByLabelText("Meeting summary");
+    await screen.findByLabelText("Summary");
     await waitFor(() => {
-      expect(screen.getByLabelText("Meeting summary")).toHaveTextContent("Test summary");
+      expect(screen.getByLabelText("Summary")).toHaveTextContent("Test summary");
     });
 
     // The stored recap could have been written by anyone — a model in an
     // earlier session, or the reader. Nothing recorded which, so neither claim
     // is made and the reader is not handed the model's words as their own.
-    expect(screen.getByLabelText("Meeting summary")).toHaveClass("text-foreground/70");
-    expect(screen.getAllByText(/Authorship not recorded/i).length).toBeGreaterThan(0);
+    expect(screen.getByLabelText("Summary")).toHaveClass("text-foreground/70");
+    expect(
+      screen.getAllByText(/Nothing stored says whether you or Plainsong wrote this/i).length
+    ).toBeGreaterThan(0);
     expect(screen.queryByText(/^Your text\./i)).not.toBeInTheDocument();
 
     fireEvent.click(screen.getByRole("button", { name: "Regenerate summary" }));
@@ -2323,20 +2337,20 @@ describe("RecordingsView", () => {
 
     await waitFor(() => {
       expect(
-        screen.getByText(/Written by Plainsong from transcript and notes\./i)
+        screen.getByText(/Written by Plainsong from the transcript and your notes\./i)
       ).toBeInTheDocument();
     });
-    expect(screen.getByLabelText("Meeting summary")).toHaveClass("text-muted-foreground");
+    expect(screen.getByLabelText("Summary")).toHaveClass("text-muted-foreground");
 
     // One keystroke and the words are the user's again — including the evidence
     // claim, which no longer describes what is on screen.
-    fireEvent.click(screen.getByRole("button", { name: "Edit Meeting summary" }));
-    fireEvent.change(screen.getByLabelText("Meeting summary"), {
+    fireEvent.click(screen.getByRole("button", { name: "Edit Summary" }));
+    fireEvent.change(screen.getByLabelText("Summary"), {
       target: { value: "Launch is on track pending legal sign-off, and pricing is settled." },
     });
 
     await waitFor(() => {
-      expect(screen.getByLabelText("Meeting summary")).toHaveClass("text-foreground");
+      expect(screen.getByLabelText("Summary")).toHaveClass("text-foreground");
     });
     expect(
       // "Regenerate", because that is what the button under this caption says.
@@ -2366,13 +2380,13 @@ describe("RecordingsView", () => {
     render(<RecordingsView />);
 
     fireEvent.click(screen.getByText("Weekly sync"));
-    await screen.findByLabelText("Meeting summary");
+    await screen.findByLabelText("Summary");
 
     fireEvent.click(screen.getByRole("button", { name: "Regenerate summary" }));
     fireEvent.click(await screen.findByRole("button", { name: "Replace and regenerate" }));
     await waitFor(() => {
       expect(
-        screen.getByText(/Written by Plainsong from transcript and notes\./i)
+        screen.getByText(/Written by Plainsong from the transcript and your notes\./i)
       ).toBeInTheDocument();
     });
 
@@ -2403,25 +2417,32 @@ describe("RecordingsView", () => {
     });
     fireEvent.click(screen.getByRole("button", { name: "All meetings" }));
     await waitFor(() => {
-      expect(screen.queryByLabelText("Meeting summary")).not.toBeInTheDocument();
+      expect(screen.queryByLabelText("Summary")).not.toBeInTheDocument();
     });
 
     fireEvent.click(screen.getByText("Weekly sync"));
-    await screen.findByLabelText("Meeting summary");
+    await screen.findByLabelText("Summary");
     await waitFor(() => {
-      expect(screen.getByLabelText("Meeting summary")).toHaveTextContent(
+      expect(screen.getByLabelText("Summary")).toHaveTextContent(
         "Launch is on track pending legal sign-off."
       );
     });
 
     expect(screen.queryByText(/^Your text\./i)).not.toBeInTheDocument();
     expect(
-      screen.getByText(/Written by Plainsong from transcript and notes\./i)
+      screen.getByText(/Written by Plainsong from the transcript and your notes\./i)
     ).toBeInTheDocument();
     expect(
       screen.getByText("We are on track for launch, pending legal approval.")
     ).toBeInTheDocument();
-    expect(screen.getByText(/ollama · llama3\.2 · completed/i)).toBeInTheDocument();
+    // Provider, model, and when the analysis finished. The timestamp is
+    // labelled: this page shows the meeting's own createdAt a few inches above
+    // and again in the header strip, so a bare date here is unreadable.
+    expect(
+      screen.getByText(
+        `ollama · llama3.2 · finished ${new Date("2026-07-25T12:00:00.000Z").toLocaleString()}`
+      )
+    ).toBeInTheDocument();
   });
 
   it("says plainly when a generated line has no transcript citation", async () => {
@@ -2435,14 +2456,14 @@ describe("RecordingsView", () => {
     render(<RecordingsView />);
 
     fireEvent.click(screen.getByText("Weekly sync"));
-    await screen.findByLabelText("Meeting summary");
+    await screen.findByLabelText("Summary");
 
     fireEvent.click(screen.getByRole("button", { name: "Regenerate summary" }));
     fireEvent.click(await screen.findByRole("button", { name: "Replace and regenerate" }));
 
     expect(
       await screen.findByText(
-        /Not grounded — the model returned no transcript citation for this summary\./i
+        /No transcript line was quoted for this summary — read it against the transcript before you send it\./i
       )
     ).toBeInTheDocument();
   });
@@ -2533,7 +2554,7 @@ describe("RecordingsView", () => {
     render(<RecordingsView />);
 
     fireEvent.click(screen.getByText("Weekly sync"));
-    await screen.findByLabelText("Meeting summary");
+    await screen.findByLabelText("Summary");
 
     // Plainsong extracts the list first, so every visible item carries a
     // citation and the field as a whole reads as the model's.
@@ -2546,8 +2567,8 @@ describe("RecordingsView", () => {
     await screen.findAllByText("Ship launch checklist (Owner: Jon · Due: Friday)");
 
     // Then the reader adds one follow-up of their own.
-    fireEvent.click(screen.getByRole("button", { name: "Edit Meeting action items" }));
-    fireEvent.change(screen.getByLabelText("Meeting action items"), {
+    fireEvent.click(screen.getByRole("button", { name: "Edit Action items" }));
+    fireEvent.change(screen.getByLabelText("Action items"), {
       target: {
         value:
           "Ship launch checklist (Owner: Jon · Due: Friday)\nCall the lawyer before Friday",
@@ -2560,7 +2581,7 @@ describe("RecordingsView", () => {
       await screen.findByText(/Regenerating the action items replaces 1 action item/i)
     ).toBeInTheDocument();
     expect(backend.extractActionItemsGrounded).toHaveBeenCalledTimes(1);
-    expect(screen.getByLabelText("Meeting action items")).toHaveValue(
+    expect(screen.getByLabelText("Action items")).toHaveValue(
       "Ship launch checklist (Owner: Jon · Due: Friday)\nCall the lawyer before Friday"
     );
   });
@@ -2579,10 +2600,10 @@ describe("RecordingsView", () => {
 
     // The caption under the label and the body both said this sentence.
     expect(
-      screen.getAllByText(/No summary yet\. Regenerate to have Plainsong write it/i)
+      screen.getAllByText(/Nothing written yet\. Regenerate to have Plainsong write it/i)
     ).toHaveLength(1);
     expect(
-      screen.getAllByText(/No action items yet\. Regenerate to have Plainsong extract them/i)
+      screen.getAllByText(/Nothing here yet\. Regenerate to have Plainsong pull them/i)
     ).toHaveLength(1);
   });
 
@@ -2609,7 +2630,9 @@ describe("RecordingsView", () => {
     // The buttons are labelled "Regenerate"; "Refresh" is the transcript rail's
     // button and does something else entirely.
     expect(
-      screen.getByText(/Authorship not recorded[\s\S]*Regenerate to have Plainsong rewrite it/i)
+      screen.getByText(
+        /Nothing stored says whether you or Plainsong wrote this[\s\S]*Regenerate to have Plainsong rewrite it/i
+      )
     ).toBeInTheDocument();
     expect(screen.queryByText(/Refresh to have Plainsong/i)).not.toBeInTheDocument();
     expect(screen.queryByText(/Refresh the summary or action items/i)).not.toBeInTheDocument();
@@ -2628,7 +2651,7 @@ describe("RecordingsView", () => {
     expect(
       await screen.findByRole("menuitem", { name: "Copy recap as Markdown" })
     ).toBeInTheDocument();
-    expect(screen.getByRole("menuitem", { name: "Mark as Dictation" })).toBeInTheDocument();
+    expect(screen.getByRole("menuitem", { name: "Move to Dictation" })).toBeInTheDocument();
     expect(screen.getByRole("menuitem", { name: "Delete" })).toBeInTheDocument();
   });
 
@@ -2643,26 +2666,26 @@ describe("RecordingsView", () => {
 
     fireEvent.click(screen.getByText("Weekly sync"));
 
-    const summary = await screen.findByRole("region", { name: "Meeting summary" });
+    const summary = await screen.findByRole("region", { name: "Summary" });
     // Markdown, in the manuscript serif — not raw asterisks in a text box.
     expect(summary.querySelectorAll("li")).toHaveLength(2);
     expect(summary.querySelector(".font-semibold")).not.toBeNull();
     expect(summary.textContent).not.toContain("**");
     expect(summary.querySelector(".manuscript")).not.toBeNull();
 
-    const actionItems = screen.getByRole("region", { name: "Meeting action items" });
+    const actionItems = screen.getByRole("region", { name: "Action items" });
     expect(actionItems.querySelectorAll("li")).toHaveLength(2);
 
     // The editor arrives on request, and grows with the text instead of
     // clamping to eight rows.
-    fireEvent.click(screen.getByRole("button", { name: "Edit Meeting summary" }));
-    const editor = screen.getByLabelText("Meeting summary");
+    fireEvent.click(screen.getByRole("button", { name: "Edit Summary" }));
+    const editor = screen.getByLabelText("Summary");
     expect(editor.tagName).toBe("TEXTAREA");
     expect(editor).toHaveAttribute("rows", "1");
     expect(editor).toHaveValue("**Launch** is on track.\n\n- Legal signed off\n- Pricing holds");
 
-    fireEvent.click(screen.getByRole("button", { name: "Done editing Meeting summary" }));
-    expect(screen.getByRole("region", { name: "Meeting summary" })).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "Done editing Summary" }));
+    expect(screen.getByRole("region", { name: "Summary" })).toBeInTheDocument();
   });
 
   it("shows a loading skeleton instead of claiming the meeting is empty", async () => {
@@ -2675,22 +2698,26 @@ describe("RecordingsView", () => {
 
     fireEvent.click(screen.getByText("Weekly sync"));
 
-    expect(await screen.findByText(/Opening this meeting/i)).toBeInTheDocument();
+    expect(
+      await screen.findByText(/Loading the summary, action items, and notes for this meeting/i)
+    ).toBeInTheDocument();
     // None of these were true yet; the panel used to assert them anyway.
     expect(screen.queryByText("The record")).not.toBeInTheDocument();
-    expect(screen.queryByText(/No summary yet/i)).not.toBeInTheDocument();
+    expect(screen.queryByText(/Nothing written yet/i)).not.toBeInTheDocument();
     expect(
-      screen.queryByText(/This recap has no saved analysis provenance/i)
+      screen.queryByText(/Nothing quoted yet\. Regenerate the summary or the action items/i)
     ).not.toBeInTheDocument();
     expect(
-      screen.getByText(/Loading this meeting's transcript and notes so Ask has something/i)
+      screen.getByText(/Loading this meeting's transcript and notes\./i)
     ).toBeInTheDocument();
 
     pendingRecording.resolve({ ...recordings[0] });
     pendingTranscript.resolve(null);
 
     expect(await screen.findByText("The record")).toBeInTheDocument();
-    expect(screen.queryByText(/Opening this meeting/i)).not.toBeInTheDocument();
+    expect(
+      screen.queryByText(/Loading the summary, action items, and notes for this meeting/i)
+    ).not.toBeInTheDocument();
   });
 
   it("explains unavailable speaker identification and can run diarization when available", async () => {
@@ -2712,11 +2739,13 @@ describe("RecordingsView", () => {
     render(<RecordingsView />);
 
     await user.click(screen.getByText("Weekly sync"));
-    await screen.findByText("No speaker labels detected");
-    await user.click(await screen.findByRole("button", { name: "Identify Speakers" }));
+    await screen.findByText("Nobody is named in this transcript");
+    await user.click(await screen.findByRole("button", { name: "Label the speakers" }));
 
     expect(
-      await screen.findByText(/Speaker diarization is not yet available as a local model/i)
+      await screen.findByText(
+        /Plainsong has no on-device model for separating speakers yet/i
+      )
     ).toBeInTheDocument();
 
     backend.isDiarizationModelAvailable.mockResolvedValueOnce(true);
@@ -2728,11 +2757,11 @@ describe("RecordingsView", () => {
       segmentsUpdated: 2,
     });
 
-    await user.click(screen.getByRole("button", { name: "Identify Speakers" }));
+    await user.click(screen.getByRole("button", { name: "Label the speakers" }));
 
     await waitFor(() => {
       expect(backend.runDiarization).toHaveBeenCalledWith("r1");
     });
-    expect(await screen.findByText("Speaker identification complete (2 speakers found).")).toBeInTheDocument();
+    expect(await screen.findByText("Found 2 speakers.")).toBeInTheDocument();
   });
 });

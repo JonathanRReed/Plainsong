@@ -277,9 +277,9 @@ describe("SettingsView performance behavior", () => {
 
     await screen.findByText("How Plainsong listens, writes, and what it keeps.");
     fireEvent.click(screen.getByText("Privacy & Security"));
-    await screen.findByText("Permission diagnostics");
+    await screen.findByText("macOS permissions");
     vi.clearAllMocks();
-    fireEvent.click(screen.getByRole("button", { name: "Refresh" }));
+    fireEvent.click(screen.getByRole("button", { name: "Check again" }));
 
     await waitFor(() => {
       expect(backend.refreshAsrRuntimeProbes).toHaveBeenCalledTimes(1);
@@ -315,7 +315,7 @@ describe("SettingsView performance behavior", () => {
       ),
     ).toBeInTheDocument();
     fireEvent.click(screen.getByText("Storage"));
-    expect(screen.getByText("Loading backup controls...")).toBeInTheDocument();
+    expect(screen.getByText("Loading backup controls…")).toBeInTheDocument();
 
     resolveBackupConfig({
       enabled: true,
@@ -367,7 +367,10 @@ describe("SettingsView performance behavior", () => {
 
     await screen.findByText("How Plainsong listens, writes, and what it keeps.");
     fireEvent.click(screen.getByText("Transcription"));
-    await screen.findByText(/Choose how Plainsong transcribes dictation and meetings/);
+    // The per-tab header that used to describe this tab was removed as a
+    // restatement of the tab tile above it; the tab's first section heading
+    // is now the marker that the Transcription tab has rendered.
+    await screen.findByText("Microphones");
 
     // AudioSettings.autoGainControl / manualGainDb (and the other audio-tuning
     // fields) were removed from the backend schema; the paired controls must
@@ -385,19 +388,23 @@ describe("SettingsView performance behavior", () => {
     await screen.findByText("How Plainsong listens, writes, and what it keeps.");
     fireEvent.click(screen.getByText("Transcription"));
     expect(
-      await screen.findByText(/has not verified macOS permission and non-silent callbacks/i),
+      await screen.findByText(
+        /has not yet confirmed macOS permission and real sound coming through/i,
+      ),
     ).toBeInTheDocument();
 
-    fireEvent.click(screen.getByRole("button", { name: /test system audio/i }));
+    fireEvent.click(screen.getByRole("button", { name: "Run the test" }));
 
     await waitFor(() => {
       expect(backend.testSystemAudioCapture).toHaveBeenCalledTimes(1);
     });
     expect(
-      await screen.findByText(/verified 997 hz system audio/i),
+      await screen.findByText(/Heard the 997 Hz test tone through/i),
     ).toBeInTheDocument();
+    // "Verified through macOS itself" is how the Core Audio process tap
+    // backend is now named in the UI.
     expect(
-      screen.getByText(/verified via Core Audio process tap/i),
+      screen.getByText(/Verified through macOS itself/i),
     ).toBeInTheDocument();
   });
 
@@ -432,9 +439,9 @@ describe("SettingsView performance behavior", () => {
     ).toBeInTheDocument();
     // The bare claim the bytes on disk contradict.
     expect(screen.queryByText("Encrypted")).not.toBeInTheDocument();
-    expect(screen.getByText("Apple Speech privacy boundary")).toBeInTheDocument();
+    expect(screen.getByText("Apple Speech")).toBeInTheDocument();
     expect(
-      screen.getByText(/disables apple's server fallback/i),
+      screen.getByText(/turns off its fall back to Apple's servers/i),
     ).toBeInTheDocument();
   });
 
@@ -467,7 +474,7 @@ describe("SettingsView performance behavior", () => {
     // "not encrypted" just because privacy.encryptRecordings no longer exists
     // on the saved Settings object.
     const remoteProcessingRow = screen
-      .getByText("Remote processing")
+      .getByText("Use cloud AI for summaries and answers")
       .closest(".flex.items-center.justify-between");
     const remoteProcessingSwitch = within(
       remoteProcessingRow as HTMLElement,
@@ -507,7 +514,7 @@ describe("SettingsView performance behavior", () => {
 
     await screen.findByText("How Plainsong listens, writes, and what it keeps.");
     fireEvent.click(screen.getByText("Storage"));
-    await screen.findByText("Retention, backups, export paths, and cleanup tools");
+    await screen.findByText("Only allow exports into this folder");
 
     const exportRootInput = screen.getByPlaceholderText("/Users/you/Documents/Plainsong");
     fireEvent.change(exportRootInput, {
@@ -534,18 +541,23 @@ describe("SettingsView performance behavior", () => {
     });
 
     fireEvent.click(screen.getByText("Transcription"));
-    await screen.findByText(/Choose how Plainsong transcribes dictation and meetings/);
+    // The per-tab header that used to describe this tab was removed as a
+    // restatement of the tab tile above it; the tab's first section heading
+    // is now the marker that the Transcription tab has rendered.
+    await screen.findByText("Microphones");
 
-    const hotkeySelect = await screen.findByLabelText("Hotkey behavior");
+    const hotkeySelect = await screen.findByLabelText(
+      "How the dictation shortcut works",
+    );
     expect(hotkeySelect.tagName).toBe("SELECT");
     expect(
       within(hotkeySelect as HTMLSelectElement).getByText(
-        "Hold-to-talk (hold to record, release to stop)",
+        "Hold to record, release to stop",
       ),
     ).toBeInTheDocument();
     expect(
       within(hotkeySelect as HTMLSelectElement).getByText(
-        "Hands-free (starts automatically when you speak, no shortcut needed)",
+        "Start on its own when you speak",
       ),
     ).toBeInTheDocument();
 
@@ -575,27 +587,32 @@ describe("SettingsView performance behavior", () => {
     });
 
     fireEvent.click(screen.getByText("Transcription"));
-    await screen.findByText(/Choose how Plainsong transcribes dictation and meetings/);
+    // The per-tab header that used to describe this tab was removed as a
+    // restatement of the tab tile above it; the tab's first section heading
+    // is now the marker that the Transcription tab has rendered.
+    await screen.findByText("Microphones");
 
-    const hotkeySelect = await screen.findByLabelText("Hotkey behavior");
+    const hotkeySelect = await screen.findByLabelText(
+      "How the dictation shortcut works",
+    );
     expect(hotkeySelect.tagName).toBe("SELECT");
     expect(
       within(hotkeySelect as HTMLSelectElement).queryByText(
-        "Hold-to-talk (hold to record, release to stop)",
+        "Hold to record, release to stop",
       ),
     ).not.toBeInTheDocument();
     expect(
       within(hotkeySelect as HTMLSelectElement).getByText(
-        "Toggle (press to start, press again to stop)",
+        "Press to start, press again to stop",
       ),
     ).toBeInTheDocument();
     expect(
       within(hotkeySelect as HTMLSelectElement).getByText(
-        "Hands-free (starts automatically when you speak, no shortcut needed)",
+        "Start on its own when you speak",
       ),
     ).toBeInTheDocument();
     expect(
-      screen.getAllByText(/press to start, press again to stop/).length,
+      screen.getAllByText(/Press to start, press again to stop/).length,
     ).toBeGreaterThan(0);
   });
 
@@ -613,9 +630,14 @@ describe("SettingsView performance behavior", () => {
     });
 
     fireEvent.click(screen.getByText("Transcription"));
-    await screen.findByText(/Choose how Plainsong transcribes dictation and meetings/);
+    // The per-tab header that used to describe this tab was removed as a
+    // restatement of the tab tile above it; the tab's first section heading
+    // is now the marker that the Transcription tab has rendered.
+    await screen.findByText("Microphones");
 
-    const hotkeySelect = await screen.findByLabelText("Hotkey behavior");
+    const hotkeySelect = await screen.findByLabelText(
+      "How the dictation shortcut works",
+    );
     fireEvent.change(hotkeySelect, { target: { value: "hands_free" } });
 
     await waitFor(() => {
@@ -642,7 +664,10 @@ describe("SettingsView performance behavior", () => {
 
     await screen.findByText("How Plainsong listens, writes, and what it keeps.");
     fireEvent.click(screen.getByText("Transcription"));
-    await screen.findByText(/Choose how Plainsong transcribes dictation and meetings/);
+    // The per-tab header that used to describe this tab was removed as a
+    // restatement of the tab tile above it; the tab's first section heading
+    // is now the marker that the Transcription tab has rendered.
+    await screen.findByText("Microphones");
 
     await waitFor(() => {
       expect(backend.isSileroVadModelDownloaded).toHaveBeenCalled();
@@ -652,7 +677,7 @@ describe("SettingsView performance behavior", () => {
     // affordance is shown (no silent/automatic download).
     expect(backend.downloadSileroVadModel).not.toHaveBeenCalled();
     const downloadButton = await screen.findByText(/Download Silero/);
-    expect(screen.queryByText("Silero (accurate)")).not.toBeInTheDocument();
+    expect(screen.queryByText("Silero")).not.toBeInTheDocument();
 
     fireEvent.click(downloadButton);
 
@@ -662,8 +687,8 @@ describe("SettingsView performance behavior", () => {
 
     // Once downloaded, the Silero option becomes available and selecting it
     // persists dictationVadBackend: "silero" via the normal save path.
-    await screen.findByText("Silero (accurate)");
-    fireEvent.click(screen.getByText("Silero (accurate)"));
+    await screen.findByText("Silero");
+    fireEvent.click(screen.getByText("Silero"));
 
     await waitFor(() => {
       expect(backend.saveSettings).toHaveBeenCalled();
@@ -683,9 +708,12 @@ describe("SettingsView performance behavior", () => {
 
     await screen.findByText("How Plainsong listens, writes, and what it keeps.");
     fireEvent.click(screen.getByText("Transcription"));
-    await screen.findByText(/Choose how Plainsong transcribes dictation and meetings/);
+    // The per-tab header that used to describe this tab was removed as a
+    // restatement of the tab tile above it; the tab's first section heading
+    // is now the marker that the Transcription tab has rendered.
+    await screen.findByText("Microphones");
 
-    const energyOption = await screen.findByText("Energy-threshold");
+    const energyOption = await screen.findByText("Loudness");
     expect(energyOption.className).toContain("border-rust/40");
   });
 
@@ -695,17 +723,22 @@ describe("SettingsView performance behavior", () => {
 
     await screen.findByText("How Plainsong listens, writes, and what it keeps.");
     fireEvent.click(screen.getByText("Storage"));
-    await screen.findByText("Settings snapshots");
+    // The "Settings snapshots" sub-heading was folded into the one "Backups"
+    // group; wait on that group, then assert the settings-only snapshot is
+    // still presented separately from the full backup.
+    await screen.findByText("Backups");
 
     expect(screen.getByText("Latest settings snapshot")).toBeInTheDocument();
     expect(
-      screen.getByText(/recordings and transcripts stay out of it/i),
+      screen.getByText(
+        /Settings and shortcuts only — no recordings or transcripts/i,
+      ),
     ).toBeInTheDocument();
     expect(screen.queryByText(/dictionary entries|snippets/i)).not.toBeInTheDocument();
-    expect(screen.getByRole("button", { name: "Create Settings Snapshot" })).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: "Sync Latest Settings Snapshot" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Snapshot settings" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Upload latest snapshot" })).toBeInTheDocument();
 
-    const restoreButton = screen.getByRole("button", { name: "Restore Latest Settings Snapshot" });
+    const restoreButton = screen.getByRole("button", { name: "Restore latest snapshot" });
     await waitFor(() => {
       expect(restoreButton).toBeEnabled();
     });
@@ -721,19 +754,21 @@ describe("SettingsView performance behavior", () => {
 
     await screen.findByText("How Plainsong listens, writes, and what it keeps.");
     fireEvent.click(screen.getByText("Storage"));
-    await screen.findByText("Manual backups");
+    await screen.findByText("Backups");
 
     expect(
-      screen.getByText(/created only when you press its create button/i),
+      screen.getByText(
+        /a copy is made only when you press one of the buttons below/i,
+      ),
     ).toBeInTheDocument();
     expect(screen.queryByText(/schedule|scheduled/i)).not.toBeInTheDocument();
-    expect(screen.getByText("Manual cloud sync")).toBeInTheDocument();
+    expect(screen.getByText("Allow uploading to cloud storage")).toBeInTheDocument();
     expect(
-      screen.getByText(/nothing uploads or downloads automatically/i),
+      screen.getByText(/Uploads still only happen when you press one/i),
     ).toBeInTheDocument();
     expect(screen.queryByText("Automatic backups")).not.toBeInTheDocument();
     expect(screen.queryByText("Backup interval (hours)")).not.toBeInTheDocument();
-    expect(screen.getByText("Manual backup retention")).toBeInTheDocument();
+    expect(screen.getByText("Backups to keep on this Mac")).toBeInTheDocument();
     expect(screen.queryByText(/dictation flows/i)).not.toBeInTheDocument();
   });
 
@@ -851,11 +886,11 @@ describe("SettingsView performance behavior", () => {
     });
 
     const defaultProviderSelect = screen
-      .getByText("Default analysis provider")
+      .getByText("Who writes summaries, answers, and actions")
       .closest("div")
       ?.querySelector("select") as HTMLSelectElement;
     const credentialProviderSelect = screen
-      .getByText("Credential provider")
+      .getByText("API keys")
       .closest("div")
       ?.querySelector("select") as HTMLSelectElement;
     expect(defaultProviderSelect.value).toBe("ollama");
@@ -949,17 +984,17 @@ describe("SettingsView performance behavior", () => {
     // Key Manager auto-seeds its provider to the current default analysis
     // provider (anthropic here), so the warning should already be visible
     // without any manual provider selection.
-    await screen.findByText(/has no stored key/);
+    await screen.findByText(/No key saved for/);
     const credentialProviderSelect = screen
-      .getByText("Credential provider")
+      .getByText("API keys")
       .closest("div")
       ?.querySelector("select") as HTMLSelectElement;
     expect(credentialProviderSelect.value).toBe("anthropic");
 
-    fireEvent.change(screen.getByPlaceholderText("Enter API key"), {
+    fireEvent.change(screen.getByPlaceholderText("Paste the key here"), {
       target: { value: "sk-test-123" },
     });
-    fireEvent.click(screen.getByRole("button", { name: "Save Key" }));
+    fireEvent.click(screen.getByRole("button", { name: "Save key" }));
 
     await waitFor(() => {
       expect(backend.setProviderSecret).toHaveBeenCalledWith(
@@ -971,7 +1006,7 @@ describe("SettingsView performance behavior", () => {
     // The stale-warning bug left this visible until the user changed the
     // default analysis provider away and back; it must clear immediately.
     await waitFor(() => {
-      expect(screen.queryByText(/has no stored key/)).not.toBeInTheDocument();
+      expect(screen.queryByText(/No key saved for/)).not.toBeInTheDocument();
     });
   });
 
@@ -990,7 +1025,7 @@ describe("SettingsView performance behavior", () => {
 
     await screen.findByText("How Plainsong listens, writes, and what it keeps.");
     fireEvent.click(screen.getByText("Storage"));
-    await screen.findByText("Guided setup");
+    await screen.findByText("Setup");
 
     fireEvent.click(screen.getByRole("button", { name: /rerun onboarding/i }));
     fireEvent.click(screen.getByRole("button", { name: /fix dictation setup/i }));
@@ -1016,13 +1051,15 @@ describe("SettingsView performance behavior", () => {
 
     await screen.findByText("How Plainsong listens, writes, and what it keeps.");
     fireEvent.click(screen.getByText("AI & Keys"));
-    await screen.findByText("Memory Search");
+    await screen.findByText("Searching your transcripts");
 
+    // "Open Relationship Memory" was removed as a duplicate: its handler was
+    // byte-identical to Open Memory's (both requestMainView("dashboard")), so
+    // it was a second label for one destination, not a second destination.
     fireEvent.click(screen.getByRole("button", { name: /open memory/i }));
-    fireEvent.click(screen.getByRole("button", { name: /open relationship memory/i }));
     fireEvent.click(screen.getByRole("button", { name: /open meetings/i }));
 
-    expect(events).toEqual(["dashboard", "dashboard", "recordings"]);
+    expect(events).toEqual(["dashboard", "recordings"]);
 
     window.removeEventListener(OPEN_MAIN_VIEW_EVENT, handler as EventListener);
   });
@@ -1051,10 +1088,10 @@ describe("SettingsView performance behavior", () => {
 
     await screen.findByText("How Plainsong listens, writes, and what it keeps.");
     fireEvent.click(screen.getByText("AI & Keys"));
-    await screen.findByText("Default analysis provider");
+    await screen.findByText("Who writes summaries, answers, and actions");
 
     const providerSection = screen
-      .getByText("Default analysis provider")
+      .getByText("Who writes summaries, answers, and actions")
       .closest("div");
     expect(providerSection).not.toBeNull();
     const providerSelect = within(providerSection as HTMLElement).getByRole(
@@ -1087,11 +1124,11 @@ describe("SettingsView performance behavior", () => {
 
     await screen.findByText("How Plainsong listens, writes, and what it keeps.");
     fireEvent.click(screen.getByText("Transcription"));
-    await screen.findByText("Dictation active language set");
+    await screen.findByText("Languages you dictate in");
 
     fireEvent.click(
       screen.getByRole("button", {
-        name: /toggle French in dictation active languages/i,
+        name: /Dictate in French/i,
       })
     );
 
@@ -1122,10 +1159,12 @@ describe("SettingsView performance behavior", () => {
     );
 
     await screen.findByText("How Plainsong listens, writes, and what it keeps.");
-    await screen.findByText("Global keyboard shortcuts");
+    await screen.findByText("Keyboard shortcuts");
 
     expect(
-      await screen.findByText(/This conflicts with Dictation — only one will work\./),
+      await screen.findByText(
+        /Same keys as Dictation — only one of them will work\./,
+      ),
     ).toBeInTheDocument();
   });
 
@@ -1147,8 +1186,8 @@ describe("SettingsView performance behavior", () => {
     );
 
     await screen.findByText("How Plainsong listens, writes, and what it keeps.");
-    await screen.findByText("Global keyboard shortcuts");
+    await screen.findByText("Keyboard shortcuts");
 
-    expect(screen.queryByText(/This conflicts with/)).not.toBeInTheDocument();
+    expect(screen.queryByText(/Same keys as/)).not.toBeInTheDocument();
   });
 });

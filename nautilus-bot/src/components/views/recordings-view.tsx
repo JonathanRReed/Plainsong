@@ -584,8 +584,12 @@ function qualityToneClasses(tone: "good" | "warn" | "muted"): string {
  * level is fixed and stated. Exports is where the other levels live.
  */
 const MEETING_EXPORT_REDACTION_LEVEL = "basic" as const;
+// Names the level, not just its effect. Exports offers None / Basic / Strict by
+// name, so describing the behaviour without saying "Basic" left the reader to
+// map a sentence onto a picker label. Say both: what it does, and which option
+// that is.
 const MEETING_EXPORT_REDACTION_NOTE =
-  "Files exported here have email addresses and phone numbers replaced, and nothing else. The Exports view is where you can turn that off or scrub more.";
+  "Files exported here use Basic redaction: email addresses and phone numbers are replaced, and nothing else. Choose None or Strict in the Exports view.";
 
 function formatDuration(seconds: number): string {
   const safeSeconds = Math.max(0, seconds);
@@ -3896,7 +3900,7 @@ export function RecordingsView() {
                                     {selectedRecording?.summaryProvenance ? (
                                       <p className="mt-1 font-mono text-xs text-muted-foreground">
                                         {selectedRecording.summaryProvenance.actualProvider} ·{" "}
-                                        {selectedRecording.summaryProvenance.actualModel} ·{" "}
+                                        {selectedRecording.summaryProvenance.actualModel} · finished{" "}
                                         {new Date(
                                           selectedRecording.summaryProvenance.completedAt
                                         ).toLocaleString()}
@@ -3950,7 +3954,7 @@ export function RecordingsView() {
                                     {selectedRecording?.actionItemsProvenance ? (
                                       <p className="mt-1 font-mono text-xs text-muted-foreground">
                                         {selectedRecording.actionItemsProvenance.actualProvider} ·{" "}
-                                        {selectedRecording.actionItemsProvenance.actualModel} ·{" "}
+                                        {selectedRecording.actionItemsProvenance.actualModel} · finished{" "}
                                         {new Date(
                                           selectedRecording.actionItemsProvenance.completedAt
                                         ).toLocaleString()}
