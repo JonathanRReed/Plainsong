@@ -18,6 +18,26 @@ audio and text. The code is open — you can verify all of it.
   uses, the text is processed locally unless you chose a cloud provider for AI
   cleanup, and it is never persisted.
 
+## What does connect to the network
+
+"No Plainsong servers" is literal, but it would be misleading to leave it there
+without naming the connections the app does make. There are two, both to third
+parties, both triggered by you:
+
+- **Downloading a speech model.** The first time you use local transcription,
+  Plainsong downloads the model you chose from Hugging Face — about 148 MB for
+  the default `base.en`. Hugging Face sees that request, and therefore your IP
+  address, the same as any other download. It happens once per model. Nothing
+  about your audio, transcripts, or usage is included.
+- **Checking for updates.** When you ask Plainsong to check for a new version, it
+  requests the release manifest from GitHub. There is no automatic check on
+  launch and nothing downloads without your say-so.
+
+Everything else — transcription, formatting, meeting analysis with a local model
+— runs on your machine with no network access at all. If you opt into a cloud
+provider for transcription or AI cleanup, that provider is named at the point you
+choose it, and that is the only case where your text or audio leaves the device.
+
 ## What local-first means here
 
 Privacy is a property of Plainsong's architecture, not a comparison claim:
