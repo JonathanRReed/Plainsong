@@ -8,6 +8,8 @@ pub mod mlx_audio;
 pub mod moonshine;
 pub mod openai_cloud;
 pub mod parakeet;
+#[cfg(feature = "asr-parakeet")]
+pub mod parakeet_tdt;
 pub mod platform;
 pub mod python_runtime;
 pub mod voxtral;

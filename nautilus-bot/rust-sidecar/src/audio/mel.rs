@@ -34,6 +34,21 @@ impl MelSpectrogram {
         mel
     }
 
+    /// Create with Parakeet TDT 0.6B **v3** defaults.
+    ///
+    /// Same frontend as [`Self::parakeet_defaults`] except the filterbank has
+    /// 128 bins rather than 80. That is not a tuning preference: the v3 encoder
+    /// declares `audio_signal [batch, 128, frames]` and carries `feat_dim: 128`
+    /// in its ONNX metadata, so an 80-bin frontend does not merely sound worse,
+    /// it fails to bind.
+    pub fn parakeet_v3_defaults() -> Self {
+        let sample_rate = 16000u32;
+        let high_freq = sample_rate as f32 / 2.0 - 400.0;
+        let mut mel = Self::new(512, 160, 400, 128, sample_rate).with_nemo_log();
+        mel.mel_filters = compute_mel_filters(128, 512, sample_rate, 20.0, high_freq);
+        mel
+    }
+
     /// Switch to natural-log mode (NeMo/Parakeet/Moonshine style).
     pub fn with_nemo_log(mut self) -> Self {
         self.log_base_e = true;

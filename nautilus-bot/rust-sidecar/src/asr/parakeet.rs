@@ -286,7 +286,16 @@ fn normalize_parakeet_model_id(model_id: &str) -> String {
 // Native ONNX inference (feature-gated)
 // ---------------------------------------------------------------------------
 #[cfg(feature = "asr-parakeet")]
-fn run_parakeet_onnx(onnx_path: &Path, vocab_path: &Path, audio_path: &Path) -> Result<String> {
+/// `feat_dim` is the encoder's declared mel-bin count. It is not a tuning knob:
+/// the v3 export declares `audio_signal [batch, 128, frames]` while the older
+/// CTC exports use 80, and handing an encoder the wrong width fails to bind
+/// rather than degrading quietly.
+fn run_parakeet_onnx(
+    onnx_path: &Path,
+    vocab_path: &Path,
+    audio_path: &Path,
+    feat_dim: usize,
+) -> Result<String> {
     use ndarray::{Array, IxDyn};
     use ort::value::Tensor;
 
@@ -353,7 +362,11 @@ fn run_parakeet_onnx(onnx_path: &Path, vocab_path: &Path, audio_path: &Path) -> 
             samples.to_vec()
         };
 
-        let mel = MelSpectrogram::parakeet_defaults();
+        let mel = if feat_dim >= 128 {
+            MelSpectrogram::parakeet_v3_defaults()
+        } else {
+            MelSpectrogram::parakeet_defaults()
+        };
         // Use per-feature normalization (sherpa-onnx/NeMo style)
         let spec = mel.compute_normalized(&normalized); // [80][T]
         if spec.is_empty() || spec[0].is_empty() {
@@ -594,7 +607,12 @@ fn load_vocab(vocab_path: &Path) -> Result<Vec<String>> {
 }
 
 #[cfg(not(feature = "asr-parakeet"))]
-fn run_parakeet_onnx(_onnx_path: &Path, _vocab_path: &Path, _audio_path: &Path) -> Result<String> {
+fn run_parakeet_onnx(
+    _onnx_path: &Path,
+    _vocab_path: &Path,
+    _audio_path: &Path,
+    _feat_dim: usize,
+) -> Result<String> {
     Err(anyhow::anyhow!(
         "Parakeet ONNX support is not compiled in. Rebuild with the `asr-parakeet` feature."
     ))
@@ -706,8 +724,11 @@ impl AsrProvider for ParakeetProvider {
                 audio_path_owned.display()
             );
 
+            // The legacy 110M CTC export is an 80-bin model. v3 declares 128 and
+            // runs through the TDT path in `super::parakeet_tdt`, not here.
+            let feat_dim = 80usize;
             tokio::task::spawn_blocking(move || {
-                run_parakeet_onnx(&onnx_path, &vocab_path, &audio_path_owned)
+                run_parakeet_onnx(&onnx_path, &vocab_path, &audio_path_owned, feat_dim)
             })
             .await
             .context("Parakeet legacy inference task panicked")??
