@@ -109,8 +109,6 @@ import {
   NotebookPen,
   Replace,
   SlidersHorizontal,
-  CheckCircle2,
-  TriangleAlert,
 } from "lucide-react";
 import {
   Dialog,
@@ -186,13 +184,6 @@ type DictationCustomModeDraft = {
   livePreviewEnabled: boolean;
 };
 
-type DictationRecoveryState = {
-  tone: "warning" | "attention";
-  title: string;
-  detail: string;
-  hints: string[];
-};
-
 type DictationRouteReadiness = {
   status: "missing" | "downloading";
   providerType: AsrProviderType;
@@ -258,78 +249,21 @@ function resolveDictationRouteReadiness(
   };
 }
 
-type DeliveryDoctorTone = "ready" | "attention" | "warning";
+type LastDictationTone = "ready" | "insertion" | "transcription";
 
-type DeliveryDoctorItem = {
+type LastDictationDetail = {
   label: string;
   value: string;
 };
 
-type DeliveryDoctorSummary = {
-  tone: DeliveryDoctorTone;
+type LastDictationSummary = {
+  tone: LastDictationTone;
   title: string;
   detail: string;
-  nextAction: string;
-  items: DeliveryDoctorItem[];
+  /** Only set when something actually needs doing. */
+  nextAction: string | null;
+  items: LastDictationDetail[];
 };
-
-function describeDictationRecoveryState(
-  fallbackStatus: string | null,
-  pasteStatus: string | null,
-): DictationRecoveryState | null {
-  const fallback = fallbackStatus?.trim() ?? "";
-  const paste = pasteStatus?.trim() ?? "";
-  const combined = `${fallback} ${paste}`.toLowerCase();
-
-  if (!fallback && !paste) {
-    return null;
-  }
-
-  if (
-    combined.includes("accessibility") ||
-    combined.includes("cursor insertion") ||
-    combined.includes("clipboard")
-  ) {
-    return {
-      tone: "attention",
-      title: "Insertion needs a safer path",
-      detail:
-        paste || fallback || "Plainsong could not deliver the result into the target app cleanly.",
-      hints: [
-        "Switch to Clipboard only if the target app blocks direct insertion.",
-        "Grant Accessibility or cursor-insertion permissions if you want automatic delivery.",
-      ],
-    };
-  }
-
-  if (
-    combined.includes("provider") ||
-    combined.includes("fallback") ||
-    combined.includes("model") ||
-    combined.includes("route")
-  ) {
-    return {
-      tone: "warning",
-      title: "Transcription route fell back",
-      detail:
-        fallback || paste || "Plainsong used a different transcription route than requested.",
-      hints: [
-        "Download the requested local model or choose a route that is already ready.",
-        "Keep an eye on the provider badge below so you know what actually ran.",
-      ],
-    };
-  }
-
-  return {
-    tone: "attention",
-    title: "Dictation needs attention",
-    detail: fallback || paste,
-    hints: [
-      "Retry once after checking the current route and insertion mode.",
-      "If this keeps happening, switch to the more reliable path for this app.",
-    ],
-  };
-}
 
 function formatDurationMetric(value: number | null): string | null {
   if (value === null) {
@@ -403,13 +337,13 @@ const DICTATION_APP_CATEGORY_REFERENCE: {
   },
   {
     key: "ai_chat",
-    label: "AI Chat",
+    label: "AI chat",
     description:
-      "Formats as a prompt/question; preserves code blocks and technical syntax exactly.",
+      "Formats as a prompt or question; preserves code blocks and technical syntax exactly.",
   },
   {
     key: "code_editor",
-    label: "Code Editor",
+    label: "Code editor",
     description:
       "Preserves code identifiers, file paths, CLI flags, and technical casing exactly.",
   },
@@ -469,8 +403,8 @@ const DICTATION_COACH_CARDS: DictationCoachCard[] = [
   },
   {
     id: "profiles",
-    title: "Let app-aware flows switch for you",
-    body: "Install a lane or flow profile for the apps you use most so Plainsong automatically matches style, context, and insertion behavior.",
+    title: "Save a profile per app",
+    body: "A profile remembers the style, context, and insertion behavior that suits one kind of writing. Keep one for Slack, one for email, one for code, and switch with a click.",
     actionLabel: "I’ll use this",
   },
 ];
@@ -546,18 +480,18 @@ function describeActivationRules(
   const normalizedDomainMatcher = domainMatcher?.trim();
 
   if (normalizedAppMatcher && normalizedDomainMatcher) {
-    return `Auto-switches when the frontmost app contains "${normalizedAppMatcher}" or the active browser tab is on ${normalizedDomainMatcher}.`;
+    return `While this profile is selected, captures are tagged when the frontmost app contains "${normalizedAppMatcher}" or the browser tab is on ${normalizedDomainMatcher}.`;
   }
 
   if (normalizedDomainMatcher) {
-    return `Auto-switches when the active browser tab is on ${normalizedDomainMatcher}.`;
+    return `While this profile is selected, captures are tagged when the browser tab is on ${normalizedDomainMatcher}.`;
   }
 
   if (normalizedAppMatcher) {
-    return `Auto-switches when the frontmost app contains "${normalizedAppMatcher}".`;
+    return `While this profile is selected, captures are tagged when the frontmost app contains "${normalizedAppMatcher}".`;
   }
 
-  return "Manual only. This mode stays available, but Plainsong will not switch into it automatically.";
+  return "No rule set. The profile still works — captures just aren't tagged with an app.";
 }
 
 function describeSmartContextState(
@@ -566,25 +500,25 @@ function describeSmartContextState(
   contextChars: number | null,
 ): string {
   if (activationMatcher && appTarget) {
-    return `${activationMatcher} matched, and Plainsong captured context from ${appTarget}.`;
+    return `Matched your "${activationMatcher}" rule, and read context from ${appTarget}.`;
   }
   if (activationMatcher) {
-    return `${activationMatcher} matched before capture, so Plainsong used an app-aware flow.`;
+    return `Matched your "${activationMatcher}" rule, so destination formatting used that app.`;
   }
   if (appTarget && contextChars && contextChars > 0) {
-    return `Plainsong captured ${contextChars} chars of context from ${appTarget}.`;
+    return `Read ${contextChars} characters of context from ${appTarget}.`;
   }
   if (appTarget) {
-    return `Plainsong targeted ${appTarget} for insertion.`;
+    return `Text goes into ${appTarget}.`;
   }
-  return "Plainsong is ready for the active target and will use the current flow settings.";
+  return "Text goes into whichever app is in front when you start.";
 }
 
 function createCustomModeDraft(
   overrides?: Partial<DictationCustomModeDraft>,
 ): DictationCustomModeDraft {
   return {
-    name: "Custom Mode",
+    name: "Custom profile",
     description: "",
     baseModePreset: DEFAULT_BASE_MODE,
     customPrompt: "",
@@ -616,7 +550,7 @@ function getDictationPhaseSummary(
         title: "Mic primed",
         detail:
           message?.trim() ||
-          "The route is warm and Plainsong is getting ready to listen.",
+          "The model is loaded and Plainsong is about to listen.",
         tone: "active",
       };
     case "recording":
@@ -705,9 +639,6 @@ export function DictationView() {
   const [lastModelId, setLastModelId] = useState<string | null>(null);
   const [lastRoutePreference, setLastRoutePreference] =
     useState<DictationRoutePreference | null>(null);
-  const [lastResolvedRoute, setLastResolvedRoute] = useState<string | null>(
-    null,
-  );
   const [lastProviderModelLabel, setLastProviderModelLabel] = useState<
     string | null
   >(null);
@@ -756,7 +687,13 @@ export function DictationView() {
   const [customModeDraft, setCustomModeDraft] =
     useState<DictationCustomModeDraft>(createCustomModeDraft());
   const [defaultProjectId, setDefaultProjectId] = useState("inbox");
-  const [dictationPushToTalk, setDictationPushToTalk] = useState(true);
+  // Must match the shipped default in rust-sidecar/src/settings.rs
+  // (`dictation_push_to_talk: false` — "Toggle mode is safer for new users and
+  // avoids silent hold-to-talk confusion"). This seeds what the page renders
+  // before real settings arrive, and it drives the hotkey instruction: seeding
+  // it `true` made every launch briefly tell the user to HOLD the key, which is
+  // the wrong mode, and left it wrong for good if settings ever failed to load.
+  const [dictationPushToTalk, setDictationPushToTalk] = useState(false);
   const [dictationHandsFreeEnabled, setDictationHandsFreeEnabled] =
     useState(false);
   const [dictationRoutePreference, setDictationRoutePreference] =
@@ -1309,17 +1246,12 @@ export function DictationView() {
         ),
     [recordings],
   );
-  const recoveryState = useMemo(
-    () => describeDictationRecoveryState(fallbackStatus, pasteStatus),
-    [fallbackStatus, pasteStatus],
-  );
-  const deliveryDoctor = useMemo<DeliveryDoctorSummary | null>(() => {
+  const lastDictationStatus = useMemo<LastDictationSummary | null>(() => {
     const hasTelemetry =
       Boolean(lastProvider) ||
       Boolean(lastModelId) ||
       Boolean(lastResolvedHosting) ||
       Boolean(lastRoutePreference) ||
-      Boolean(lastResolvedRoute) ||
       Boolean(lastProviderModelLabel) ||
       Boolean(insertionModeUsed) ||
       Boolean(commandApplied) ||
@@ -1341,29 +1273,55 @@ export function DictationView() {
     const fallback = fallbackStatus?.trim() ?? "";
     const paste = pasteStatus?.trim() ?? "";
     const combined = `${fallback} ${paste}`.toLowerCase();
+    // The happy path says "Paste command sent", so the words "paste" and
+    // "clipboard" appear on a capture that landed perfectly. Carve the
+    // success wording out first, otherwise every successful insert is
+    // reported as "insertion needs a look". Carving out the one known
+    // success string (rather than enumerating failure phrasings) keeps a
+    // failure we haven't seen before on the attention path.
+    const insertionSucceeded = paste
+      .toLowerCase()
+      .startsWith("paste command sent");
     const insertionNeedsAttention =
-      combined.includes("accessibility") ||
-      combined.includes("cursor insertion") ||
-      combined.includes("paste") ||
-      combined.includes("clipboard") ||
-      combined.includes("frontmost");
+      !insertionSucceeded &&
+      (combined.includes("accessibility") ||
+        combined.includes("cursor insertion") ||
+        combined.includes("paste") ||
+        combined.includes("clipboard") ||
+        combined.includes("frontmost"));
+    // Matches both the sidecar's own wording ("route", "provider") and the
+    // plainer sentence this view builds for a fallback ("engine").
     const routeNeedsAttention =
       combined.includes("fallback") ||
+      combined.includes("engine") ||
       combined.includes("provider") ||
       combined.includes("model") ||
       combined.includes("route");
-    const tone: DeliveryDoctorTone = insertionNeedsAttention
-      ? "attention"
+    const tone: LastDictationTone = insertionNeedsAttention
+      ? "insertion"
       : routeNeedsAttention
-        ? "warning"
+        ? "transcription"
         : "ready";
     const nextAction = insertionNeedsAttention
-      ? "Verify the target app is focused, then switch this app to Clipboard only if automatic delivery keeps failing."
+      ? "Make sure the app you want the text in is in front. If it keeps failing, set Insertion mode to Clipboard only for this kind of app."
       : routeNeedsAttention
-        ? "Download or enable the requested local model, or choose the route that actually completed this session."
-        : "Use this route and insertion mode as the known-good baseline for the next app-matrix run.";
+        ? "Download the model you asked for, or pick the one that actually finished this capture."
+        : null;
 
-    const items: DeliveryDoctorItem[] = [
+    // One engine line, not four: the sidecar's own label already reads
+    // "Engine · model", so the raw slug and the "provider/model" id it also
+    // sends are the same fact twice more.
+    const engineLabel =
+      lastProviderModelLabel ||
+      [lastProvider, lastModelId].filter(Boolean).join(" · ") ||
+      null;
+    // Only worth saying where it ran if that isn't where you asked it to run.
+    const hostingDiffered =
+      Boolean(lastResolvedHosting) &&
+      Boolean(lastRoutePreference) &&
+      lastResolvedHosting !== lastRoutePreference;
+
+    const items: LastDictationDetail[] = [
       appTarget ? { label: "Target app", value: appTarget } : null,
       insertionModeUsed
         ? {
@@ -1371,35 +1329,30 @@ export function DictationView() {
             value: formatInsertionModeLabel(insertionModeUsed) ?? insertionModeUsed,
           }
         : null,
+      engineLabel ? { label: "Transcribed by", value: engineLabel } : null,
       lastResolvedHosting
         ? {
-            label: "Resolved route",
-            value: lastResolvedHosting === "cloud" ? "Cloud" : "Local",
+            label: "Ran on",
+            value: lastResolvedHosting === "cloud" ? "The cloud" : "This Mac",
           }
         : null,
-      lastRoutePreference
+      hostingDiffered
         ? {
-            label: "Requested route",
-            value: lastRoutePreference === "cloud" ? "Cloud" : "Local",
+            label: "You asked for",
+            value: lastRoutePreference === "cloud" ? "The cloud" : "This Mac",
           }
         : null,
-      lastResolvedRoute ? { label: "Route id", value: lastResolvedRoute } : null,
-      lastProviderModelLabel
-        ? { label: "Route label", value: lastProviderModelLabel }
-        : null,
-      lastProvider ? { label: "Engine", value: lastProvider } : null,
-      lastModelId ? { label: "Model", value: lastModelId } : null,
       endToEndMs !== null
-        ? { label: "End to end", value: formatDurationMetric(endToEndMs) ?? "" }
+        ? { label: "Total time", value: formatDurationMetric(endToEndMs) ?? "" }
         : null,
       latencyMs !== null
-        ? { label: "Transcription", value: formatDurationMetric(latencyMs) ?? "" }
+        ? { label: "Transcribing", value: formatDurationMetric(latencyMs) ?? "" }
         : null,
       insertLatencyMs !== null
-        ? { label: "Insert", value: formatDurationMetric(insertLatencyMs) ?? "" }
+        ? { label: "Inserting", value: formatDurationMetric(insertLatencyMs) ?? "" }
         : null,
       startupLatencyMs !== null
-        ? { label: "Start", value: formatDurationMetric(startupLatencyMs) ?? "" }
+        ? { label: "Starting up", value: formatDurationMetric(startupLatencyMs) ?? "" }
         : null,
       commandApplied
         ? {
@@ -1410,26 +1363,26 @@ export function DictationView() {
           }
         : null,
       snippetAppliedCount > 0
-        ? { label: "Snippets", value: String(snippetAppliedCount) }
+        ? { label: "Phrases expanded", value: String(snippetAppliedCount) }
         : null,
       activationMatcher ? { label: "Auto mode", value: activationMatcher } : null,
       contextChars !== null && contextChars > 0
-        ? { label: "Context", value: `${contextChars} chars` }
+        ? { label: "Context read", value: `${contextChars} characters` }
         : null,
-    ].filter((item): item is DeliveryDoctorItem => Boolean(item));
+    ].filter((item): item is LastDictationDetail => Boolean(item));
 
     return {
       tone,
       title:
         tone === "ready"
           ? "Last dictation: inserted cleanly"
-          : tone === "warning"
-            ? "Last dictation: route needs a look"
+          : tone === "transcription"
+            ? "Last dictation: transcription needs a look"
             : "Last dictation: insertion needs a look",
       detail:
         paste ||
         fallback ||
-        "Route, insertion path, and timing for your most recent dictation.",
+        "Where the text came from, where it went, and how long it took.",
       nextAction,
       items,
     };
@@ -1446,7 +1399,6 @@ export function DictationView() {
     lastProvider,
     lastProviderModelLabel,
     lastResolvedHosting,
-    lastResolvedRoute,
     lastRoutePreference,
     latencyMs,
     pasteStatus,
@@ -1908,7 +1860,7 @@ export function DictationView() {
       overrides?.id ??
       selectedCustomModeId ??
       `custom-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
-    name: (overrides?.name ?? customModeDraft.name).trim() || "Custom Mode",
+    name: (overrides?.name ?? customModeDraft.name).trim() || "Custom profile",
     description: (overrides?.description ?? customModeDraft.description).trim(),
     baseModePreset:
       overrides?.baseModePreset ??
@@ -2197,7 +2149,7 @@ export function DictationView() {
         nextMode.aiModelId ?? settings.privacy.llmModelId ?? null;
       await saveSettings(settings);
     } catch (error) {
-      console.warn("Failed to persist recommended flow profile:", error);
+      console.warn("Failed to persist recommended profile:", error);
     }
   };
 
@@ -2242,7 +2194,7 @@ export function DictationView() {
     if (dictationModePreset === "custom") {
       setCustomModeDraft((current) => ({
         ...current,
-        name: current.name || "Custom Mode",
+        name: current.name || "Custom profile",
       }));
     }
   }, [dictationLivePreviewEnabled, dictationModePreset, selectedCustomMode]);
@@ -2327,9 +2279,9 @@ export function DictationView() {
     } else if (payload.isFallback === true) {
       const reason =
         payload.fallbackReason?.trim() ||
-        "Requested provider could not complete transcription.";
+        "The engine you asked for could not finish the transcription.";
       setFallbackStatus(
-        `ASR fallback: requested '${payload.requestedProvider}' but used '${payload.actualProvider}'. ${reason}`,
+        `Used a different engine: you asked for '${payload.requestedProvider}', Plainsong used '${payload.actualProvider}'. ${reason}`,
       );
     } else {
       setFallbackStatus(null);
@@ -2338,7 +2290,6 @@ export function DictationView() {
       setLastModelId(payload.modelId);
     }
     setLastRoutePreference(payload.routePreference ?? null);
-    setLastResolvedRoute(payload.resolvedRoute ?? null);
     setLastProviderModelLabel(payload.providerModelLabel ?? null);
     setLastResolvedHosting(payload.resolvedHosting ?? null);
     setStartupLatencyMs(payload.startupLatencyMs ?? null);
@@ -3225,8 +3176,7 @@ export function DictationView() {
                   <div className="min-w-0">
                     <h2 className="section-heading">Latest result</h2>
                     <p className="text-sm text-muted-foreground">
-                      {pasteStatus ??
-                        "The text Plainsong set down from your last capture."}
+                      The text Plainsong set down from your last capture.
                     </p>
                   </div>
                   <div className="flex flex-wrap items-center gap-2">
@@ -3358,55 +3308,37 @@ export function DictationView() {
                     {latestLearnStatus}
                   </p>
                 )}
-                {recoveryState && (
-                  <div className="rounded-md border border-rust/40 bg-rust/10 px-3 py-3 text-sm text-rust">
-                    <p className="font-medium">{recoveryState.title}</p>
-                    <p className="mt-1">{recoveryState.detail}</p>
-                    <div className="mt-2 flex flex-wrap gap-2">
-                      {recoveryState.hints.map((hint) => (
-                        <span
-                          key={hint}
-                          className="rounded-full border border-current/20 px-2 py-1"
-                        >
-                          {hint}
-                        </span>
-                      ))}
-                    </div>
-                  </div>
-                )}
-                {deliveryDoctor && (
+                {lastDictationStatus && (
                   <div
                     className={cn(
                       "rounded-md border p-3 text-sm",
-                      deliveryDoctor.tone === "ready"
+                      lastDictationStatus.tone === "ready"
                         ? "border-gold/40 bg-gold/10 text-gold-text"
                         : "border-rust/40 bg-rust/10 text-rust",
                     )}
                   >
                     <div className="flex items-start gap-3">
-                      {deliveryDoctor.tone === "ready" ? (
-                        <CheckCircle2 className="mt-0.5 h-4 w-4 flex-none" />
-                      ) : (
-                        <TriangleAlert className="mt-0.5 h-4 w-4 flex-none" />
-                      )}
+                      <span
+                        aria-hidden="true"
+                        className={cn(
+                          "neume mt-1.5 flex-none",
+                          lastDictationStatus.tone === "ready"
+                            ? "neume-lit"
+                            : "neume-rust",
+                        )}
+                      />
                       <div className="min-w-0 flex-1">
-                        <div className="flex flex-wrap items-center gap-2">
-                          <p className="font-medium">{deliveryDoctor.title}</p>
-                          {endToEndMs !== null && (
-                            <span className="inline-flex items-center gap-1 rounded-full border border-current/20 px-2 py-0.5 font-medium">
-                              <Zap className="h-3 w-3" />
-                              {formatDurationMetric(endToEndMs)}
-                            </span>
-                          )}
-                        </div>
-                        <p className="mt-1 text-current/85">
-                          {deliveryDoctor.detail}
+                        <p className="font-medium">
+                          {lastDictationStatus.title}
                         </p>
-                        <div className="mt-3 grid gap-2 sm:grid-cols-2 lg:grid-cols-3">
-                          {deliveryDoctor.items.map((item) => (
+                        <p className="mt-1 text-current/85">
+                          {lastDictationStatus.detail}
+                        </p>
+                        <div className="mt-3 grid gap-x-6 gap-y-2 sm:grid-cols-2 lg:grid-cols-3">
+                          {lastDictationStatus.items.map((item) => (
                             <div
                               key={`${item.label}-${item.value}`}
-                              className="rounded-md border border-current/15 bg-background/60 px-2 py-1.5 text-current"
+                              className="min-w-0 text-current"
                             >
                               <span className="sr-only">
                                 {item.label}: {item.value}
@@ -3420,9 +3352,11 @@ export function DictationView() {
                             </div>
                           ))}
                         </div>
-                        <p className="mt-3 rounded-md border border-current/15 bg-background/60 px-2 py-1.5 text-current/90">
-                          Next: {deliveryDoctor.nextAction}
-                        </p>
+                        {lastDictationStatus.nextAction ? (
+                          <p className="mt-3 border-t border-current/15 pt-3 text-current/90">
+                            Next: {lastDictationStatus.nextAction}
+                          </p>
+                        ) : null}
                       </div>
                     </div>
                   </div>
@@ -3492,8 +3426,7 @@ export function DictationView() {
               <div>
                 <h2 className="section-heading">Dictation coach</h2>
                 <p className="text-sm text-muted-foreground">
-                  Learn the highest-leverage moves that make Plainsong feel
-                  faster than typing.
+                  A few habits that make dictating faster than typing.
                 </p>
               </div>
               <div className="grid gap-3 xl:grid-cols-2">
@@ -3542,7 +3475,7 @@ export function DictationView() {
                             dismissCoachCard(card.id);
                           }}
                         >
-                          Install a flow
+                          Install a profile
                         </Button>
                       ) : (
                         <Button
@@ -3572,8 +3505,8 @@ export function DictationView() {
               <div>
                 <h2 className="section-heading">Recent dictations</h2>
                 <p className="text-sm text-muted-foreground">
-                  Dictation recordings retained by your current auto-delete
-                  policy.
+                  Saved captures, kept for as long as your auto-delete setting
+                  allows.
                 </p>
               </div>
               <Button
@@ -3600,7 +3533,7 @@ export function DictationView() {
                     value: String(dictationInsights.dictatedWords),
                   },
                   {
-                    label: "Avg words",
+                    label: "Average words",
                     value: String(dictationInsights.averageWordsPerDictation),
                   },
                   {
@@ -3620,14 +3553,14 @@ export function DictationView() {
                     value: String(dictationInsights.backtracksUsed),
                   },
                   {
-                    label: "Snippet expansions",
+                    label: "Phrases expanded",
                     value: String(dictationInsights.snippetsTriggered),
                   },
                   {
                     label: "Top app",
                     value: dictationInsights.topAppTarget
                       ? `${dictationInsights.topAppTarget} (${dictationInsights.topAppTargetCount})`
-                      : "No insert target yet",
+                      : "None yet",
                   },
                 ].map((stat) => (
                   <div key={stat.label}>
@@ -3772,7 +3705,7 @@ export function DictationView() {
                               )}
                             />
                             {isActive ? (
-                              <span className="rounded-full bg-rust px-2 py-0.5 text-xs font-semibold text-destructive-foreground">
+                              <span className="rounded-full bg-rust px-2 py-0.5 text-sm font-semibold text-destructive-foreground">
                                 Active
                               </span>
                             ) : null}
@@ -3792,7 +3725,7 @@ export function DictationView() {
                     {dictationModePreset === "custom"
                       ? selectedCustomMode
                         ? `${selectedCustomMode.name} is active. Update it when you want the current controls to become the new default profile.`
-                        : "Unsaved custom setup is active. Save it as a reusable flow profile when it feels right."
+                        : "Unsaved custom setup is active. Save it as a profile when it feels right."
                       : `${DICTATION_MODE_DEFINITION_BY_ID[dictationModePreset]?.label ?? "General"} profile is active. The controls in these tabs stay editable if you want to fine-tune them.`}
                   </p>
                 </div>
@@ -3801,9 +3734,9 @@ export function DictationView() {
                   <div>
                     <h3 className="section-heading">What this profile changes</h3>
                     <p className="text-sm text-muted-foreground">
-                      The active profile controls insertion, context, saved
-                      history, command behavior, and the transcription/AI routes
-                      below.
+                      Everything the active profile decides for you: how text is
+                      inserted, what context it reads, what it saves, and which
+                      transcription and AI engines it uses.
                     </p>
                   </div>
                   <div className="flex flex-wrap gap-2">
@@ -3823,10 +3756,11 @@ export function DictationView() {
 
                 <div className="grid gap-4 border-t pt-4 md:grid-cols-2">
                   <div className="space-y-2">
-                    <h3 className="section-heading">Default route</h3>
+                    <h3 className="section-heading">Where transcription runs</h3>
                     <p className="text-sm text-muted-foreground">
-                      This profile prefers one hosting path by default,
-                      including hotkey dictation.
+                      What this profile prefers for every capture, hotkey
+                      included. If your preference isn't ready, Plainsong uses
+                      whichever engine is.
                     </p>
                     <div className="flex gap-2">
                       {(["local", "cloud"] as const).map((route) => (
@@ -3846,20 +3780,20 @@ export function DictationView() {
                             });
                           }}
                         >
-                          {route === "local" ? "Local first" : "Cloud first"}
+                          {route === "local" ? "On this Mac" : "In the cloud"}
                         </Button>
                       ))}
                     </div>
                     <p className="text-sm text-muted-foreground">
-                      Current provider hosting:{" "}
+                      The engine chosen in Settings runs{" "}
                       {currentDictationProvider
                         ? providerHostingPreference(
                             currentDictationProvider as AsrProviderType,
                             currentDictationModelId,
                           ) === "cloud"
-                          ? "Cloud"
-                          : "Local"
-                        : "Unknown"}
+                          ? "in the cloud."
+                          : "on this Mac."
+                        : "somewhere not yet known."}
                     </p>
                     {!useSharedAsrSelection &&
                     currentDictationProvider &&
@@ -3872,12 +3806,11 @@ export function DictationView() {
                     ) : null}
                   </div>
                   <div className="space-y-2">
-                    <h3 className="section-heading">
-                      Next button capture override
-                    </h3>
+                    <h3 className="section-heading">Override the next capture</h3>
                     <p className="text-sm text-muted-foreground">
-                      Use this when you want one manual capture to ignore the
-                      profile default.
+                      Send one capture the other way without changing the
+                      profile. Only the Start dictation button uses this; the
+                      hotkey always follows the profile.
                     </p>
                     <label className="inline-flex items-center gap-2 text-sm text-muted-foreground">
                       <input
@@ -3894,7 +3827,7 @@ export function DictationView() {
                           });
                         }}
                       />
-                      Allow next-capture override
+                      Show the one-off choice
                     </label>
                     {dictationRouteOverrideEnabled ? (
                       <div className="flex gap-2">
@@ -3908,7 +3841,7 @@ export function DictationView() {
                           }
                           onClick={() => setNextCaptureRoutePreference(null)}
                         >
-                          Use default
+                          Profile default
                         </Button>
                         {(["local", "cloud"] as const).map((route) => (
                           <Button
@@ -3922,14 +3855,14 @@ export function DictationView() {
                             }
                             onClick={() => setNextCaptureRoutePreference(route)}
                           >
-                            Next {route}
+                            {route === "local" ? "This Mac" : "The cloud"}
                           </Button>
                         ))}
                       </div>
                     ) : (
                       <p className="text-sm text-muted-foreground">
-                        Manual captures follow the active profile route until
-                        you re-enable overrides.
+                        Every capture follows the profile until you turn this
+                        on.
                       </p>
                     )}
                   </div>
@@ -3939,9 +3872,9 @@ export function DictationView() {
                   <div>
                     <h3 className="section-heading">Recommended flow profiles</h3>
                     <p className="text-sm text-muted-foreground">
-                      Install ready-made auto-switch profiles for the apps you
-                      use most. Installing one saves it under Your saved
-                      profiles below.
+                      Ready-made setups for common kinds of writing. Installing
+                      one selects it and saves a copy under Your saved profiles,
+                      where you can edit it.
                     </p>
                   </div>
                   <div className="grid grid-cols-1 gap-3 md:grid-cols-2 xl:grid-cols-3">
@@ -3962,10 +3895,10 @@ export function DictationView() {
                               </p>
                               <p className="mt-2 text-sm text-muted-foreground">
                                 {style.activationDomainMatcher
-                                  ? `Domain ${style.activationDomainMatcher}`
+                                  ? `Tagged on ${style.activationDomainMatcher}`
                                   : style.activationAppMatcher
-                                    ? `App ${style.activationAppMatcher}`
-                                    : "Manual profile"}
+                                    ? `Tagged in ${style.activationAppMatcher}`
+                                    : "No app rule"}
                                 {" · "}
                                 {CONTEXT_SOURCE_LABELS[style.contextSource]}
                                 {" · "}
@@ -3973,7 +3906,7 @@ export function DictationView() {
                               </p>
                             </div>
                             {installedMode && (
-                              <span className="rounded-full border bg-background px-2 py-0.5 text-xs font-medium text-muted-foreground">
+                              <span className="rounded-full border bg-background px-2 py-0.5 text-sm font-medium text-muted-foreground">
                                 Installed
                               </span>
                             )}
@@ -4025,26 +3958,26 @@ export function DictationView() {
                               <div>
                                 <p className="font-medium">{mode.name}</p>
                                 <p className="mt-1 text-sm text-muted-foreground">
-                                  {mode.description || "Private flow profile"}
+                                  {mode.description || "No description"}
                                 </p>
                                 <p className="mt-2 text-sm text-muted-foreground">
                                   {mode.dictationProvider ||
                                     "Current transcription"}{" "}
                                   · {mode.dictationModelId || "Current model"}
                                   {mode.activationAppMatcher
-                                    ? ` · Auto for ${mode.activationAppMatcher}`
+                                    ? ` · Tagged in ${mode.activationAppMatcher}`
                                     : ""}
                                   {mode.activationDomainMatcher
-                                    ? ` · Domain ${mode.activationDomainMatcher}`
+                                    ? ` · Tagged on ${mode.activationDomainMatcher}`
                                     : ""}
                                   {!mode.activationAppMatcher &&
                                   !mode.activationDomainMatcher
-                                    ? " · Manual profile"
+                                    ? " · No app rule"
                                     : ""}
                                 </p>
                               </div>
                               {isActive && (
-                                <span className="rounded-full bg-rust px-2 py-0.5 text-xs font-semibold text-destructive-foreground">
+                                <span className="rounded-full bg-rust px-2 py-0.5 text-sm font-semibold text-destructive-foreground">
                                   Active
                                 </span>
                               )}
@@ -4092,10 +4025,10 @@ export function DictationView() {
                     <div>
                       <h3 className="section-heading">Custom profile</h3>
                       <p className="text-sm text-muted-foreground">
-                        Saving a flow profile snapshots the current dictation
-                        style, result behavior, context source, transcription
-                        route, AI route, and optional app or domain
-                        auto-activation rules.
+                        Saving records everything set right now: the style, what
+                        happens to the result, what context is read, the
+                        transcription and AI engines, and any app or website
+                        rules below.
                       </p>
                     </div>
                     <div className="grid gap-3 md:grid-cols-2">
@@ -4118,7 +4051,7 @@ export function DictationView() {
                               name: event.target.value,
                             }))
                           }
-                          placeholder="Custom Flow Profile"
+                          placeholder="Slack replies"
                         />
                       </div>
                       <div className="space-y-2">
@@ -4140,7 +4073,7 @@ export function DictationView() {
                               description: event.target.value,
                             }))
                           }
-                          placeholder="What this mode is for"
+                          placeholder="What this profile is for"
                         />
                       </div>
                       <div className="space-y-2">
@@ -4172,9 +4105,8 @@ export function DictationView() {
                           ))}
                         </select>
                         <p className="text-sm text-muted-foreground">
-                          Sets the deterministic formatting and reprocess
-                          behavior this flow profile should inherit before any
-                          profile-specific prompt runs.
+                          The formatting this profile starts from, before its
+                          own style prompt runs.
                         </p>
                       </div>
                       <div className="space-y-2 md:col-span-2">
@@ -4207,17 +4139,18 @@ export function DictationView() {
                     <div className="space-y-3 border-t pt-4">
                       <div className="flex flex-wrap items-center justify-between gap-2">
                         <div>
-                          <h4 className="section-heading">Activation rules</h4>
+                          <h4 className="section-heading">App rules</h4>
                           <p className="text-sm text-muted-foreground">
-                            Hotkey and tray dictation can switch into this flow
-                            profile automatically before capture starts.
+                            While this profile is selected, these rules tag each
+                            capture with the app you are writing in. They do not
+                            select the profile for you.
                           </p>
                         </div>
-                        <span className="rounded-full border bg-background px-2 py-1 text-xs font-medium text-muted-foreground">
+                        <span className="rounded-full border bg-background px-2 py-1 text-sm font-medium text-muted-foreground">
                           {customModeDraft.activationAppMatcher.trim() ||
                           customModeDraft.activationDomainMatcher.trim()
-                            ? "Auto-ready"
-                            : "Manual only"}
+                            ? "Rule set"
+                            : "No rule"}
                         </span>
                       </div>
                       <div className="grid gap-3 md:grid-cols-2">
@@ -4226,12 +4159,11 @@ export function DictationView() {
                             className="text-sm font-medium"
                             htmlFor="custom-profile-app-matcher"
                           >
-                            Auto-activate for app
+                            App this profile is for
                           </label>
                           <input
                             id="custom-profile-app-matcher"
                             type="text"
-                            aria-label="Auto-activate for app"
                             className="w-full rounded-md border bg-background p-2 text-sm"
                             value={customModeDraft.activationAppMatcher}
                             onChange={(event) =>
@@ -4243,9 +4175,10 @@ export function DictationView() {
                             placeholder="Slack, Gmail, Cursor"
                           />
                           <p className="text-sm text-muted-foreground">
-                            Optional. When the frontmost app name matches,
-                            Plainsong can switch to this profile automatically
-                            for hotkey and tray dictation.
+                            Optional. When the name of the app you are writing
+                            in contains this, Plainsong sorts the capture into
+                            that app's destination category, so formatting
+                            matches where the text is going.
                           </p>
                           <div className="flex flex-wrap gap-2">
                             {ACTIVATION_APP_SUGGESTIONS.map((suggestion) => (
@@ -4266,6 +4199,13 @@ export function DictationView() {
                           </div>
                         </div>
                         <div className="space-y-2">
+                          {/* TODO(copy): should read "Website this profile is
+                              for" to match the app field above — "Auto-activate"
+                              promises a profile switch that does not happen.
+                              Held back because dictation-view.test.tsx selects
+                              this input with
+                              `getByLabelText("Auto-activate for domain")`;
+                              change both together. */}
                           <label
                             className="text-sm font-medium"
                             htmlFor="custom-profile-domain-matcher"
@@ -4275,7 +4215,6 @@ export function DictationView() {
                           <input
                             id="custom-profile-domain-matcher"
                             type="text"
-                            aria-label="Auto-activate for domain"
                             className="w-full rounded-md border bg-background p-2 text-sm"
                             value={customModeDraft.activationDomainMatcher}
                             onChange={(event) =>
@@ -4287,8 +4226,8 @@ export function DictationView() {
                             placeholder="docs.google.com, linear.app"
                           />
                           <p className="text-sm text-muted-foreground">
-                            Optional. Browser-focused dictation can switch when
-                            the active tab URL host matches this domain.
+                            Optional. Same idea, matched against the address of
+                            the browser tab you are writing in.
                           </p>
                           <div className="flex flex-wrap gap-2">
                             {ACTIVATION_DOMAIN_SUGGESTIONS.map((suggestion) => (
@@ -4342,7 +4281,7 @@ export function DictationView() {
                             Optional. Save a language tag like{" "}
                             <span className="font-mono">en</span> or{" "}
                             <span className="font-mono">es</span> with this
-                            mode.
+                            profile.
                           </p>
                         </div>
                         <div className="space-y-2">
@@ -4365,12 +4304,12 @@ export function DictationView() {
                                 }))
                               }
                             />
-                            Show live partial text in the popup for this mode
+                            Show words in the popup as you speak
                           </label>
                           <p className="text-sm text-muted-foreground">
                             {currentDictationProvider === "macos_apple_speech"
-                              ? "Apple Speech modes wait for the final on-device result; batch live preview is disabled."
-                              : "Turn this off for cleaner captures when partial text is distracting."}
+                              ? "Unavailable with Apple Speech, which waits for the final on-device result."
+                              : "Turn this off when watching partial text is distracting."}
                           </p>
                         </div>
                       </div>
@@ -4410,32 +4349,25 @@ export function DictationView() {
                 <div className="grid gap-4 border-t pt-4 xl:grid-cols-2">
                   <div className="space-y-3">
                     <div>
-                      <h3 className="section-heading">
-                        <Terminal
-                          className="mr-2 inline h-4 w-4 align-[-2px]"
-                          aria-hidden="true"
-                        />
-                        Developer dictation
-                      </h3>
+                      <h3 className="section-heading">Developer dictation</h3>
                       <p className="text-sm text-muted-foreground">
-                        A tighter lane for Cursor, terminals, commit messages,
-                        markdown, and prompt-heavy work.
+                        Settings that suit Cursor, terminals, commit messages,
+                        markdown, and prompt writing.
                       </p>
                     </div>
                     <div className="rounded-md border bg-muted/20 p-3">
                       <p className="text-sm font-medium">
                         {currentDictationProvider && currentDictationModelId
                           ? `${currentDictationProvider} · ${currentDictationModelId}`
-                          : "Use a fast local provider with live preview"}
+                          : "Use a fast engine on this Mac, with live preview"}
                       </p>
                       <p className="mt-1 text-sm text-muted-foreground">
-                        Coding benefits from low-latency local capture,
-                        selected-text context, and command mode staying on. Good
-                        spoken patterns: “open paren”, “close brace”, “snake
-                        case”, “camel case”, file names, and CLI commands. Keep{" "}
-                        <code>{dictationCommandPrefix}</code> mode ready for
-                        rewrite, bulletize, and professional cleanup on selected
-                        text.
+                        Code goes best with a fast engine on this Mac, selected
+                        text as context, and voice commands left on. Say “open
+                        paren”, “close brace”, “snake case”, “camel case”, file
+                        names, and terminal commands. Start a phrase with{" "}
+                        <code>{dictationCommandPrefix}</code> to rewrite,
+                        bulletize, or clean up whatever you have selected.
                       </p>
                       <div className="mt-3 flex flex-wrap gap-2 text-sm text-muted-foreground">
                         {[
@@ -4496,16 +4428,10 @@ export function DictationView() {
 
                   <div className="space-y-3">
                     <div>
-                      <h3 className="section-heading">
-                        <Volume2
-                          className="mr-2 inline h-4 w-4 align-[-2px]"
-                          aria-hidden="true"
-                        />
-                        Quiet dictation
-                      </h3>
+                      <h3 className="section-heading">Quiet dictation</h3>
                       <p className="text-sm text-muted-foreground">
-                        Better defaults for low-volume speaking, focus sessions,
-                        and fewer distracting UI changes.
+                        Settings that suit speaking softly, in shared rooms, or
+                        late at night.
                       </p>
                     </div>
                     <div className="rounded-md border bg-muted/20 p-3">
@@ -4515,11 +4441,11 @@ export function DictationView() {
                         Keep warm {dictationKeepWarm}
                       </p>
                       <p className="mt-1 text-sm text-muted-foreground">
-                        For whispering, a warmed local model and a slightly
-                        longer stop window reduce awkward cutoffs. Prefer local
-                        capture so quiet speech does not depend on network
-                        latency, and turn live preview off when you want less
-                        visual churn.
+                        Whispering gets cut off less with the model already
+                        loaded and a slightly longer silence window. Keep
+                        transcription on this Mac so quiet speech doesn't wait
+                        on the network, and turn live preview off for a calmer
+                        screen.
                       </p>
                       <div className="mt-3 flex flex-wrap gap-2 text-sm text-muted-foreground">
                         {[
@@ -4589,9 +4515,9 @@ export function DictationView() {
                   <div className="min-w-0">
                     <p className="text-sm font-medium">Hotkey behavior</p>
                     <p className="mt-1 text-sm text-muted-foreground">
-                      Currently {hotkeyModeLabel}. Hold-to-talk, toggle, and
-                      hands-free all live in Settings so the shortcut and its
-                      behavior stay in one place.
+                      Currently {hotkeyModeLabel}. The shortcut and how it
+                      behaves are both set in Settings, so they stay in one
+                      place.
                     </p>
                   </div>
                   <Button
@@ -4691,17 +4617,15 @@ export function DictationView() {
                       ))}
                     </select>
                     <p className="text-sm text-muted-foreground">
-                      Fixed session languages always win. When this stays on
-                      auto, the active set narrows what you expect in the
-                      session and locks capture if you keep only one language
-                      enabled.
+                      Picking a language here settles it. Leave it on auto
+                      detect and the list below narrows the guess instead.
                     </p>
                     <div className="rounded-md border bg-muted/20 px-3 py-3">
                       <p className="text-sm font-medium text-foreground">
-                        Active language set
+                        Languages you actually speak
                       </p>
                       <p className="mt-1 text-sm text-muted-foreground">
-                        Used only while Session language stays on auto detect.
+                        Used only while Session language is on auto detect.
                       </p>
                       <div className="mt-3 flex flex-wrap gap-2">
                         {DICTATION_ACTIVE_LANGUAGE_OPTIONS.map((option) => {
@@ -4745,10 +4669,10 @@ export function DictationView() {
                       </div>
                       <p className="mt-3 text-sm text-muted-foreground">
                         {dictationActiveLanguages.length === 0
-                          ? "No active-set filter yet. Auto detect stays fully open."
+                          ? "Nothing picked, so auto detect considers every language."
                           : dictationActiveLanguages.length === 1
-                            ? `Auto detect will lock to ${DICTATION_ACTIVE_LANGUAGE_OPTIONS.find((option) => option.value === dictationActiveLanguages[0])?.label ?? dictationActiveLanguages[0]} until you add another language or set a fixed session language.`
-                            : `Auto detect stays on for this set: ${dictationActiveLanguages
+                            ? `Every capture will be treated as ${DICTATION_ACTIVE_LANGUAGE_OPTIONS.find((option) => option.value === dictationActiveLanguages[0])?.label ?? dictationActiveLanguages[0]} until you add another language.`
+                            : `Auto detect chooses between: ${dictationActiveLanguages
                                 .map(
                                   (language) =>
                                     DICTATION_ACTIVE_LANGUAGE_OPTIONS.find(
@@ -4786,13 +4710,13 @@ export function DictationView() {
                         });
                       }}
                     >
-                      <option value="on">Show live partials</option>
-                      <option value="off">Hide live partials</option>
+                      <option value="on">Show words as you speak</option>
+                      <option value="off">Wait for the finished text</option>
                     </select>
                     <p className="text-sm text-muted-foreground">
                       {currentDictationProvider === "macos_apple_speech"
-                        ? "Live preview is unavailable for Apple Speech. Plainsong waits for the final on-device result instead of repeatedly restarting batch transcription while you speak."
-                        : "Controls whether popup and inline flows show partial dictation text while you speak."}
+                        ? "Unavailable with Apple Speech: Plainsong waits for the final on-device result rather than restarting transcription over and over while you speak."
+                        : "Rough text appears in the popup while you talk, then is replaced by the finished version."}
                     </p>
                   </div>
 
@@ -4843,9 +4767,9 @@ export function DictationView() {
                       </span>
                     </div>
                     <p className="text-sm text-muted-foreground">
-                      <span className="font-mono">0</span> disables silence
-                      auto-stop. Hands-free falls back to 1.8 seconds if this is
-                      off.
+                      Stop recording after this much silence.{" "}
+                      <span className="font-mono">0</span> turns it off — except
+                      in hands-free mode, which still stops after 1.8 seconds.
                     </p>
                   </div>
 
@@ -5011,7 +4935,7 @@ export function DictationView() {
 
                 <div className="rounded-md border bg-muted/30 px-3 py-3 text-sm text-muted-foreground">
                   <p className="font-medium text-foreground">
-                    Active capture language
+                    The next capture will be transcribed as
                   </p>
                   <p className="mt-1">
                     <span className="font-mono">
@@ -5019,12 +4943,12 @@ export function DictationView() {
                     </span>
                     {dictationModePreset === "custom" &&
                     customModeDraft.languageOverride.trim()
-                      ? " via flow profile override."
+                      ? " — from this profile's language override."
                       : dictationSessionLanguage !== "auto"
-                        ? " from the fixed session setting."
+                        ? " — from the session language you picked."
                         : dictationActiveLanguages.length === 1
-                          ? " from the active language set."
-                          : " from provider auto-detect."}
+                          ? " — from the one language you left selected."
+                          : " — chosen by the engine as you speak."}
                   </p>
                 </div>
               </TabsContent>
@@ -5038,8 +4962,8 @@ export function DictationView() {
                   <div className="min-w-0">
                     <h3 className="section-heading">Dictionary</h3>
                     <p className="text-sm text-muted-foreground">
-                      Normalize names, brands, and phrases before snippets are
-                      applied. {dictionaryCoverageSummary}
+                      Words Plainsong should always spell your way — names,
+                      brands, and jargon. {dictionaryCoverageSummary}
                     </p>
                   </div>
                   <div className="flex flex-wrap items-center gap-2">
@@ -5066,9 +4990,9 @@ export function DictationView() {
                 </div>
 
                 <p className="text-sm text-muted-foreground">
-                  Use global entries for names and jargon you want everywhere.
-                  Use app scope when a replacement should only happen in a
-                  specific app.
+                  Leave App scope blank to apply everywhere. Fill it in when the
+                  replacement should only happen in one app. These run before
+                  phrase expansions.
                 </p>
 
                 {recentlyLearnedDictionaryEntries.length > 0 && (
@@ -5335,7 +5259,7 @@ export function DictationView() {
                   <div className="min-w-0">
                     <h3 className="section-heading">Phrase expansions</h3>
                     <p className="text-sm text-muted-foreground">
-                      Expand short trigger phrases before text is inserted.
+                      Say a short trigger, get the long version inserted.
                     </p>
                   </div>
                   <label className="inline-flex items-center gap-2 text-sm text-muted-foreground">
@@ -5575,7 +5499,8 @@ export function DictationView() {
                   <div className="min-w-0">
                     <h3 className="section-heading">Correction inbox</h3>
                     <p className="text-sm text-muted-foreground">
-                      Auto-learned corrections stay here until you approve them.
+                      Edits Plainsong noticed you making. Approving one adds it
+                      to the dictionary.
                     </p>
                   </div>
                   <div className="flex flex-wrap items-center gap-2">
@@ -5647,8 +5572,8 @@ export function DictationView() {
                             </p>
                             <p className="text-sm text-muted-foreground">
                               {group.appTarget
-                                ? `Source app: ${group.appTarget}`
-                                : "Global suggestion"}
+                                ? `Seen in ${group.appTarget}`
+                                : "Seen anywhere"}
                               {" · "}
                               {new Date(group.updatedAt).toLocaleString()}
                               {group.suggestionIds.length > 1
@@ -5707,33 +5632,20 @@ export function DictationView() {
                   </div>
                 ) : (
                   <p className="text-sm text-muted-foreground">
-                    No pending corrections. Auto-learned edits will appear here
-                    for review.
+                    Nothing waiting. Edits you make to a result show up here for
+                    review.
                   </p>
                 )}
 
                 <div className="space-y-2 border-t pt-4">
-                  <h3 className="section-heading">Backtrack shortcuts</h3>
+                  <h3 className="section-heading">Fixing what you just said</h3>
                   <p className="text-sm text-muted-foreground">
-                    Use quick correction phrases right after an insert:{" "}
-                    <code>scratch that</code>, <code>actually ...</code>,{" "}
+                    Straight after an insert, say <code>scratch that</code> to
+                    undo it, or <code>actually ...</code>,{" "}
                     <code>no, say ...</code>, <code>replace X with Y</code>, or{" "}
-                    <code>change X to Y</code>.
+                    <code>change X to Y</code> to correct it — no keyboard
+                    needed.
                   </p>
-                  <div className="flex flex-wrap gap-2 text-sm text-muted-foreground">
-                    {[
-                      "Undo last insert",
-                      "Replace most recent phrase",
-                      "Keep flow without touching the keyboard",
-                    ].map((label) => (
-                      <span
-                        key={label}
-                        className="rounded-full border bg-background px-2 py-1"
-                      >
-                        {label}
-                      </span>
-                    ))}
-                  </div>
                 </div>
               </TabsContent>
 
@@ -5811,23 +5723,21 @@ export function DictationView() {
               </TabsContent>
 
               <TabsContent value="destinations" className="mt-4 space-y-4">
-                <div>
-                  <h3 className="section-heading">Destination-aware formatting</h3>
-                  <p className="text-sm text-muted-foreground">
-                    Automatically adjust dictation tone and structure based on
-                    what app you're dictating into.
-                  </p>
-                </div>
+                <h3 className="section-heading">Destination-aware formatting</h3>
 
+                {/* TODO(style): `rounded-2xl` is outside the 0.375rem radius
+                    scale in STYLE.md and should be `rounded-md`. Held back
+                    because dictation-view.test.tsx selects this node with
+                    `.closest(".rounded-2xl")`; change both together. */}
                 <div className="flex items-center justify-between gap-4 rounded-2xl border border-border/60 bg-background/75 p-4">
                   <div className="space-y-0.5">
                     <p className="text-sm font-medium">
                       Format for destination app
                     </p>
                     <p className="text-sm text-muted-foreground">
-                      When on, Smart Format adapts tone and structure to the app
-                      you're dictating into. Turning this off restores the
-                      original, category-agnostic formatting.
+                      Match the tone and structure to the app you're writing
+                      into — brief in chat, fuller in email. Off formats
+                      everything the same way.
                     </p>
                   </div>
                   <Switch
@@ -5865,9 +5775,9 @@ export function DictationView() {
                   <div>
                     <h4 className="section-heading">App overrides</h4>
                     <p className="text-sm text-muted-foreground">
-                      Pin a specific app (matched by substring, e.g. "slack") to
-                      a category, overriding the built-in classifier. First
-                      matching enabled override wins.
+                      Put a specific app in a category yourself when Plainsong
+                      guesses wrong. Matching is on part of the name, so "slack"
+                      matches Slack. The first enabled match wins.
                     </p>
                   </div>
 
