@@ -14,7 +14,11 @@ const DialogOverlay = React.forwardRef<
   <DialogPrimitive.Overlay
     ref={ref}
     className={cn(
-      "fixed inset-0 z-50 bg-foreground/80 data-[state=open]:animate-in data-[state=closed]:animate-out data-[state=closed]:fade-out-0 data-[state=open]:fade-in-0",
+      // The scrim must read darker than the panel in front of it, in both
+      // themes. `--foreground` is dark ink on vellum but near-white on the
+      // folio, so dark mode washed the app white; and `--background` there is
+      // the panel's own fill, so it left no visible edge. Plain black instead.
+      "fixed inset-0 z-50 bg-foreground/80 dark:bg-black/70 data-[state=open]:animate-in data-[state=closed]:animate-out data-[state=closed]:fade-out-0 data-[state=open]:fade-in-0",
       className
     )}
     {...props}

@@ -65,7 +65,9 @@ export function DocumentField({
     <section className="space-y-3">
       <div className="flex flex-wrap items-start justify-between gap-3">
         <div className="min-w-0">
-          <p className="section-heading">{label}</p>
+          {/* A real heading, so "Summary" and "Action items" show up when a
+              screen reader walks the meeting page by heading. */}
+          <h3 className="section-heading">{label}</h3>
           {caption ? (
             <p className="mt-1 max-w-prose text-sm text-muted-foreground">{caption}</p>
           ) : null}

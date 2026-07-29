@@ -7,11 +7,11 @@ import {
   RefreshCcw,
   Settings2,
   ShieldCheck,
-  Sparkles,
   Wrench,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
+import { PageHeader } from "@/components/ui/page-header";
 import { Badge } from "@/components/ui/badge";
 import {
   downloadAsrModels,
@@ -42,14 +42,25 @@ import { requestOnboarding } from "@/lib/onboarding";
 import { useSetupStatus } from "@/hooks/use-setup-status";
 import type { AsrProviderInfo } from "@/types";
 
-function statusTone(ready: boolean) {
-  return ready
-    ? "border-gold/30 bg-gold/10 text-gold-text"
-    : "border-rust/30 bg-rust/10 text-rust";
+/**
+ * One flat label/value list per readiness card. Bordered detail tiles inside an
+ * already-bordered card were card-in-card; hairline rows say the same thing.
+ */
+function StatusRows({ rows }: { rows: Array<{ label: string; value: string }> }) {
+  return (
+    <div className="border-t border-border/60">
+      {rows.map((row) => (
+        <div
+          key={row.label}
+          className="flex items-baseline justify-between gap-4 border-b border-border/60 py-2 text-sm"
+        >
+          <span className="text-muted-foreground">{row.label}</span>
+          <span className="text-right font-medium">{row.value}</span>
+        </div>
+      ))}
+    </div>
+  );
 }
-
-const readinessDetailClass = "rounded-lg border border-border/60 bg-background/60 px-3 py-2";
-const readinessLabelClass = "rubric-muted text-current opacity-70";
 
 function permissionStatusLabel(
   loading: boolean,
@@ -119,7 +130,7 @@ function providerBadge(provider: AsrProviderInfo) {
         variant="outline"
         className="border-rust/30 text-rust"
       >
-        Runtime setup
+        Needs setup
       </Badge>
     );
   }
@@ -243,19 +254,12 @@ export function SetupView() {
 
   return (
     <div className="h-full flex flex-col">
-      <div className="border-b border-border/70 px-6 py-5">
-        <div className="flex flex-wrap items-start justify-between gap-4">
-          <div className="min-w-0 flex-1 space-y-1.5">
-            <p className="rubric inline-flex items-center gap-1.5">
-              <Sparkles className="h-3 w-3" aria-hidden="true" />
-              Guided setup and repairs
-            </p>
-            <h1 className="font-serif text-2xl font-semibold tracking-tight">Setup</h1>
-            <p className="max-w-2xl text-sm leading-6 text-muted-foreground">
-              Check dictation and meetings, rerun guided setup, and verify every route from one place.
-            </p>
-          </div>
-          <div className="flex flex-wrap gap-2">
+      <PageHeader
+        eyebrow="Guided setup and repairs"
+        title="Setup"
+        subtitle="Check that dictation and meetings work, and fix them here when they do not."
+        actions={
+          <>
             <Button variant="outline" onClick={() => requestOnboarding("full")}>
               Rerun onboarding
             </Button>
@@ -265,12 +269,12 @@ export function SetupView() {
             <Button variant="outline" onClick={() => requestOnboarding("meetings")}>
               Set up meetings
             </Button>
-          </div>
-        </div>
-      </div>
+          </>
+        }
+      />
 
-      <div className="flex-1 overflow-y-auto px-6 py-6">
-        <div className="space-y-6">
+      <div className="flex-1 overflow-y-auto">
+        <div className="mx-auto w-full max-w-7xl space-y-6 px-6 py-6 lg:px-8">
           {error ? (
             <div className="rounded-lg border border-rust/30 bg-rust/10 px-4 py-3 text-sm text-rust">
               {error}
@@ -280,76 +284,68 @@ export function SetupView() {
             <div
               role="status"
               aria-live="polite"
-              className="rounded-lg border border-rust/30 bg-rust/10 px-4 py-3 text-sm text-rust"
+              className="rounded-lg border border-border/70 bg-muted/25 px-4 py-3 text-sm"
             >
               {statusMessage}
             </div>
           ) : null}
 
           <div className="grid gap-4 lg:grid-cols-2">
-            <Card className={statusTone(dictationReady)}>
+            <Card className={dictationReady ? "border-gold/40" : "border-rust/40"}>
               <CardHeader>
-                <CardTitle className="flex items-center gap-2 font-serif text-base">
-                  <Mic className="h-4 w-4" aria-hidden="true" />
-                  Dictation readiness
+                <CardTitle className="flex items-center gap-2 text-base">
+                  <Mic className="h-4 w-4 shrink-0" aria-hidden="true" />
+                  Dictation
                 </CardTitle>
-                <CardDescription className="text-current opacity-80">
-                  Permissions, insert behavior, and the active dictation lane.
+                <CardDescription>
+                  Speaking into any app and having the words typed for you.
                 </CardDescription>
               </CardHeader>
-              <CardContent className="space-y-3 text-sm">
-                <div className={`flex items-center justify-between ${readinessDetailClass}`}>
-                  <span>Active route</span>
-                  <span className="font-medium">{dictationRoute.summary}</span>
-                </div>
-                <div className={`flex items-center justify-between ${readinessDetailClass}`}>
-                  <span>Route preference</span>
-                  <span className="font-medium">
-                    {dictationRoutePreference === "cloud" ? "Cloud preferred" : "Local preferred"}
+              <CardContent className="space-y-4">
+                <p className="flex items-start gap-2 text-sm">
+                  <span
+                    className={dictationReady ? "neume neume-lit mt-1.5" : "neume neume-rust mt-1.5"}
+                    aria-hidden="true"
+                  />
+                  <span>
+                    {dictationReady
+                      ? "Dictation is ready. If it stops working, run the checks below."
+                      : (dictationRoute.reason ??
+                        "Dictation is not ready yet. What is missing is listed below.")}
                   </span>
-                </div>
-                <div className="grid gap-2 sm:grid-cols-3">
-                  <div className={readinessDetailClass}>
-                    <div className={readinessLabelClass}>Microphone</div>
-                    <div className="mt-1 font-medium">
-                      {loading ? "Checking" : microphoneReady ? "Ready" : "Needs attention"}
-                    </div>
-                  </div>
-                  <div className={readinessDetailClass}>
-                    <div className={readinessLabelClass}>Speech</div>
-                    <div className="mt-1 font-medium">
-                      {permissionStatusLabel(loading, permissions, "speechRecognitionReady")}
-                    </div>
-                  </div>
-                  <div className={readinessDetailClass}>
-                    <div className={readinessLabelClass}>Cursor insert</div>
-                    <div className="mt-1 font-medium">{cursorInsertLabel}</div>
-                  </div>
-                </div>
-                <div className="grid gap-2 sm:grid-cols-2">
-                  <div className={readinessDetailClass}>
-                    <div className={readinessLabelClass}>Local dictation</div>
-                    <div className="mt-1 font-medium">
-                      {dictationLocalReady ? "Ready" : "No ready route"}
-                    </div>
-                  </div>
-                  <div className={readinessDetailClass}>
-                    <div className={readinessLabelClass}>Cloud dictation</div>
-                    <div className="mt-1 font-medium">
-                      {dictationCloudReady ? "Ready" : "No ready route"}
-                    </div>
-                  </div>
-                </div>
-                {dictationRoute.reason ? (
-                  <p className="text-sm text-current opacity-90">{dictationRoute.reason}</p>
-                ) : (
-                  <p className="text-sm text-current opacity-90">
-                    Dictation is ready. If something drifts, rerun guided setup or refresh permissions here.
-                  </p>
-                )}
+                </p>
+                <StatusRows
+                  rows={[
+                    { label: "Transcribed by", value: dictationRoute.summary },
+                    {
+                      label: "Preference",
+                      value:
+                        dictationRoutePreference === "cloud"
+                          ? "Prefers the cloud"
+                          : "Prefers this Mac",
+                    },
+                    {
+                      label: "Microphone",
+                      value: loading ? "Checking" : microphoneReady ? "Ready" : "Needs attention",
+                    },
+                    {
+                      label: "Speech",
+                      value: permissionStatusLabel(loading, permissions, "speechRecognitionReady"),
+                    },
+                    { label: "Cursor insert", value: cursorInsertLabel },
+                    {
+                      label: "On this Mac",
+                      value: dictationLocalReady ? "Ready" : "Not ready",
+                    },
+                    {
+                      label: "In the cloud",
+                      value: dictationCloudReady ? "Ready" : "Not ready",
+                    },
+                  ]}
+                />
                 {dictationBlockers.length > 0 ? (
-                  <div className="rounded-lg border border-rust/20 bg-rust/5 px-3 py-2 text-xs text-current opacity-90">
-                    <p className="mb-1 font-medium">Current blockers</p>
+                  <div className="rounded-lg border border-rust/20 bg-rust/5 px-3 py-2 text-sm">
+                    <p className="mb-1 font-medium">Still missing</p>
                     <ul className="space-y-1">
                       {dictationBlockers.map((blocker) => (
                         <li key={blocker}>• {blocker}</li>
@@ -357,9 +353,9 @@ export function SetupView() {
                     </ul>
                   </div>
                 ) : null}
-                <div className="rounded-lg border border-border/60 bg-muted/20 px-3 py-2 text-xs leading-5 text-muted-foreground">
+                <p className="text-sm leading-6 text-muted-foreground">
                   Permission and insert tests may open macOS settings, show system prompts, or send test text to the current app. Run them when you are at this Mac.
-                </div>
+                </p>
                 <div className="flex flex-wrap gap-2">
                   <Button
                     variant="outline"
@@ -437,7 +433,7 @@ export function SetupView() {
                     {busyAction === "repair-cursor-permissions" ? (
                       <Loader2 className="mr-2 h-4 w-4 animate-spin" />
                     ) : null}
-                    Repair cursor insert
+                    Reset Accessibility permission
                   </Button>
                   <Button variant="outline" onClick={() => void openPermissionSettings("microphone")}>
                     Open Microphone
@@ -449,86 +445,79 @@ export function SetupView() {
               </CardContent>
             </Card>
 
-            <Card className={statusTone(meetingReady)}>
+            <Card className={meetingReady ? "border-gold/40" : "border-rust/40"}>
               <CardHeader>
-                <CardTitle className="flex items-center gap-2 font-serif text-base">
-                  <MonitorUp className="h-4 w-4" aria-hidden="true" />
-                  Meeting readiness
+                <CardTitle className="flex items-center gap-2 text-base">
+                  <MonitorUp className="h-4 w-4 shrink-0" aria-hidden="true" />
+                  Meetings
                 </CardTitle>
-                <CardDescription className="text-current opacity-80">
-                  Mic-only meeting readiness plus separately verified Me + Them capture.
+                <CardDescription>
+                  Recording a call. Your microphone alone, or your microphone plus what the other
+                  people say.
                 </CardDescription>
               </CardHeader>
-              <CardContent className="space-y-3 text-sm">
-                <div className={`flex items-center justify-between ${readinessDetailClass}`}>
-                  <span>Active route</span>
-                  <span className="font-medium">{meetingRoute.summary}</span>
-                </div>
-                <div className={`flex items-center justify-between ${readinessDetailClass}`}>
-                  <span>Meeting policy</span>
-                  <span className="font-medium">
-                    {meetingRoutePolicy === "best_available" ? "Best available" : "Prefer local"}
-                  </span>
-                </div>
-                <div className="grid gap-2 sm:grid-cols-2">
-                  <div className={readinessDetailClass}>
-                    <div className={readinessLabelClass}>System audio</div>
-                    <div className="mt-1 font-medium">
-                      {systemAudioAvailable === null
-                        ? "Checking"
-                        : fullCaptureReady
-                          ? "Verified"
-                          : systemAudioAvailable
-                            ? "Route detected · unverified"
-                            : "Not detected"}
-                    </div>
-                  </div>
-                  <div className={readinessDetailClass}>
-                    <div className={readinessLabelClass}>Capture route</div>
-                    <div className="mt-1 font-medium">{loopbackDevice ?? "Not found"}</div>
-                  </div>
-                </div>
-                <div className={readinessDetailClass}>
-                  <div className={readinessLabelClass}>Meeting capture mode</div>
-                  <div className="mt-1 font-medium">
-                    {meetingCaptureMode === "me_and_them"
-                      ? "Me + Them verified"
-                      : meetingCaptureMode === "mic_only" && meetingReady
-                        ? "Mic only ready"
-                        : meetingCaptureMode === "mic_only"
-                          ? "Not ready"
-                          : "Checking"}
-                  </div>
-                  <p className="mt-1 text-xs text-current opacity-70">
-                    {meetingCaptureMode === "me_and_them"
-                      ? "Microphone, meeting ASR, and non-silent system-audio callbacks are verified."
-                      : meetingReady && systemAudioAvailable
-                        ? "Mic-only meetings are ready. A system-audio route is detected but unverified; run Test system audio before Me + Them."
+              <CardContent className="space-y-4">
+                <p className="flex items-start gap-2 text-sm">
+                  <span
+                    className={meetingReady ? "neume neume-lit mt-1.5" : "neume neume-rust mt-1.5"}
+                    aria-hidden="true"
+                  />
+                  <span>
+                    {meetingRoute.reason
+                      ? meetingRoute.reason
+                      : fullCaptureReady
+                        ? "Both sides of a call will be recorded and transcribed."
                         : meetingReady
-                          ? "Mic-only meetings are ready. Remote participants may be missed until system audio is configured and tested."
-                          : meetingCaptureMode === "unknown"
-                            ? "Checking microphone, meeting ASR, and system-audio readiness."
-                            : "Microphone input, permission, or the meeting ASR route still needs attention."}
-                  </p>
-                </div>
-                {meetingRoute.reason ? (
-                  <p className="text-sm text-current opacity-90">{meetingRoute.reason}</p>
-                ) : fullCaptureReady ? (
-                  <p className="text-sm text-current opacity-90">
-                    Meetings are ready for verified Me + Them capture.
-                  </p>
-                ) : meetingReady ? (
-                  <p className="text-sm text-current opacity-90">
-                    Mic-only meetings are ready. Me + Them remains optional until system audio passes its signal test.
-                  </p>
-                ) : (
-                  <p className="text-sm text-current opacity-90">
-                    Meeting capture still needs microphone input, permission, or a ready meeting ASR route.
-                  </p>
-                )}
+                          ? "Mic-only meetings are ready. Test system audio to also capture the other people on the call."
+                          : "Meetings still need microphone input, permission, or a transcription engine that can handle a call."}
+                  </span>
+                </p>
+                <StatusRows
+                  rows={[
+                    { label: "Transcribed by", value: meetingRoute.summary },
+                    {
+                      label: "Meeting policy",
+                      value: meetingRoutePolicy === "best_available" ? "Best available" : "Prefer local",
+                    },
+                    {
+                      label: "System audio",
+                      value:
+                        systemAudioAvailable === null
+                          ? "Checking"
+                          : fullCaptureReady
+                            ? "Verified"
+                            : systemAudioAvailable
+                              ? "Found, not yet tested"
+                              : "Not detected",
+                    },
+                    { label: "Audio device", value: loopbackDevice ?? "Not found" },
+                    {
+                      label: "Meeting capture mode",
+                      value:
+                        meetingCaptureMode === "me_and_them"
+                          ? "Me + Them verified"
+                          : meetingCaptureMode === "mic_only" && meetingReady
+                            ? "Mic only ready"
+                            : meetingCaptureMode === "mic_only"
+                              ? "Not ready"
+                              : "Checking",
+                    },
+                  ]}
+                />
+                <p className="text-sm text-muted-foreground">
+                  {meetingCaptureMode === "me_and_them"
+                    ? "Microphone, transcription, and sound from the other people were all tested and heard."
+                    : meetingReady && systemAudioAvailable
+                      ? "Mic-only meetings are ready. A way to capture the other people exists but has never been tested; run Test system audio first."
+                      : meetingReady
+                        ? "Mic-only meetings are ready. Only your side of the call is recorded until system audio is set up and tested."
+                        : meetingCaptureMode === "unknown"
+                          ? "Checking the microphone, transcription, and sound from other people."
+                          : "The microphone, its permission, or the transcription engine still needs attention."}
+                </p>
                 {meetingBlockers.length > 0 ? (
-                  <div className="rounded-lg border border-rust/20 bg-rust/5 px-3 py-2 text-xs text-current opacity-90">
-                    <p className="mb-1 font-medium">Meeting blockers</p>
+                  <div className="rounded-lg border border-rust/20 bg-rust/5 px-3 py-2 text-sm">
+                    <p className="mb-1 font-medium">Still missing</p>
                     <ul className="space-y-1">
                       {meetingBlockers.map((blocker) => (
                         <li key={blocker}>• {blocker}</li>
@@ -537,7 +526,7 @@ export function SetupView() {
                   </div>
                 ) : null}
                 {meetingReady && !fullCaptureReady && fullCaptureBlockers.length > 0 ? (
-                  <div className="rounded-lg border border-border/60 bg-muted/20 px-3 py-2 text-xs text-current opacity-90">
+                  <div className="rounded-lg border border-border/60 bg-muted/20 px-3 py-2 text-sm">
                     <p className="mb-1 font-medium">Me + Them not verified</p>
                     <ul className="space-y-1">
                       {fullCaptureBlockers.map((blocker) => (
@@ -559,7 +548,7 @@ export function SetupView() {
                     ) : (
                       <ShieldCheck className="mr-2 h-4 w-4" />
                     )}
-                    Test meeting route
+                    Test meetings
                   </Button>
                   <Button
                     variant="outline"
@@ -586,27 +575,8 @@ export function SetupView() {
                     )}
                     Test system audio
                   </Button>
-                  <Button variant="secondary" onClick={() => requestOnboarding("meetings")}>
-                    Guided meeting setup
-                  </Button>
                   <Button variant="outline" onClick={() => requestMainView("settings")}>
                     Open settings
-                  </Button>
-                  <Button
-                    variant="outline"
-                    onClick={() =>
-                      void runAction("refresh-setup", async () => {
-                        await refreshAsrRuntimeProbes();
-                      })
-                    }
-                    disabled={busyAction !== null}
-                  >
-                    {busyAction === "refresh-setup" ? (
-                      <Loader2 className="mr-2 h-4 w-4 animate-spin" />
-                    ) : (
-                      <RefreshCcw className="mr-2 h-4 w-4" />
-                    )}
-                    Re-check environment
                   </Button>
                 </div>
               </CardContent>
@@ -615,10 +585,10 @@ export function SetupView() {
 
           <Card>
             <CardHeader className="flex flex-row items-start justify-between gap-4">
-              <div>
-                <CardTitle className="flex items-center gap-2 font-serif">
-                  <Settings2 className="h-4 w-4" aria-hidden="true" />
-                  Providers and models
+              <div className="space-y-1.5">
+                <CardTitle className="flex items-center gap-2 text-base">
+                  <Settings2 className="h-4 w-4 shrink-0" aria-hidden="true" />
+                  Transcription engines
                 </CardTitle>
                 <CardDescription>
                   Every route's runtime state, missing files, and recovery action in one place.
@@ -660,11 +630,11 @@ export function SetupView() {
                 </Button>
               </div>
             </CardHeader>
-            <CardContent className="space-y-3">
+            <CardContent className="space-y-0">
               {loading ? (
-                <div className="flex items-center gap-2 rounded-lg border border-border/70 px-4 py-6 text-sm text-muted-foreground">
+                <div className="flex items-center gap-2 py-6 text-sm text-muted-foreground">
                   <Loader2 className="h-4 w-4 animate-spin" />
-                  Loading provider readiness…
+                  Checking which engines are ready…
                 </div>
               ) : (
                 sortedProviders.map((provider) => {
@@ -673,15 +643,18 @@ export function SetupView() {
                     provider.runtimeStatus === "missing_model" &&
                     isDownloadableProvider(provider.providerType);
                   const actionVariant = providerActionVariant(provider);
+                  const modelLabel =
+                    provider.modelOptions.find((option) => option.id === provider.selectedModelId)
+                      ?.label ?? provider.selectedModelId;
 
                   return (
                     <div
                       key={provider.providerType}
-                      className="rounded-xl border border-border/70 bg-card/50 px-4 py-4"
+                      className="border-t border-border/60 py-4 first:border-t-0 first:pt-0"
                     >
                       <div className="flex flex-wrap items-start justify-between gap-3">
                         <div className="space-y-1">
-                          <div className="flex items-center gap-2">
+                          <div className="flex flex-wrap items-center gap-2">
                             <p className="font-medium">{provider.name}</p>
                             {providerBadge(provider)}
                             <Badge variant="secondary">
@@ -694,11 +667,8 @@ export function SetupView() {
                               )}
                             </Badge>
                           </div>
+                          <p className="text-sm text-muted-foreground">{modelLabel}</p>
                           <p className="text-sm text-muted-foreground">
-                            {provider.modelOptions.find((option) => option.id === provider.selectedModelId)?.label ??
-                              provider.selectedModelId}
-                          </p>
-                          <p className="text-xs text-muted-foreground">
                             {providerRecommendation(provider)}
                           </p>
                         </div>
@@ -794,18 +764,17 @@ export function SetupView() {
                             `${provider.name} is not ready yet.`}
                         </p>
                         {provider.providerType === "macos_apple_speech" ? (
-                          <p className="text-xs text-muted-foreground">
-                            Dictation-only. Recognition stays on-device and Apple
-                            server fallback is disabled.
+                          <p className="text-sm text-muted-foreground">
+                            Recognition stays on this Mac; Apple's server fallback is disabled.
                           </p>
                         ) : null}
                         {isCloudProvider(provider.providerType) && provider.runtimeStatus !== "ready" ? (
-                          <p className="text-xs text-muted-foreground">
-                            Cloud routes usually need an API key or account setup in Settings before they become usable.
+                          <p className="text-sm text-muted-foreground">
+                            Cloud engines usually need an API key added in Settings before they work.
                           </p>
                         ) : null}
                         {provider.runtimeDetails.missingFiles?.length ? (
-                          <p className="text-xs text-rust">
+                          <p className="text-sm text-rust">
                             Missing:{" "}
                             <span className="font-mono">
                               {provider.runtimeDetails.missingFiles.join(", ")}
@@ -813,7 +782,7 @@ export function SetupView() {
                           </p>
                         ) : null}
                         {provider.runtimeDetails.setupAction ? (
-                          <p className="text-xs text-muted-foreground">
+                          <p className="text-sm text-muted-foreground">
                             Fix: {provider.runtimeDetails.setupAction}
                           </p>
                         ) : null}
@@ -822,68 +791,6 @@ export function SetupView() {
                   );
                 })
               )}
-            </CardContent>
-          </Card>
-
-          <Card>
-            <CardHeader>
-              <CardTitle className="flex items-center gap-2 font-serif">
-                <ShieldCheck className="h-4 w-4" aria-hidden="true" />
-                Quick recovery
-              </CardTitle>
-                <CardDescription>
-                  Fast paths for the most common launch blockers.
-                </CardDescription>
-            </CardHeader>
-            <CardContent className="grid gap-3 md:grid-cols-3">
-              <div className="rounded-xl border border-border/70 p-4">
-                <div className="mb-2 flex items-center gap-2.5">
-                  <span
-                    className={dictationReady ? "neume neume-lit" : "neume neume-rust"}
-                    aria-hidden="true"
-                  />
-                  <p className="font-medium">{dictationReady ? "Dictation ready" : "Dictation not ready"}</p>
-                </div>
-                <p className="text-sm text-muted-foreground">
-                  Re-run the dictation-focused guide and re-check permissions, hotkey behavior, and cursor insert.
-                </p>
-                <Button className="mt-3 w-full" variant="outline" onClick={() => requestOnboarding("dictation")}>
-                  Fix dictation setup
-                </Button>
-              </div>
-              <div className="rounded-xl border border-border/70 p-4">
-                <div className="mb-2 flex items-center gap-2.5">
-                  <span
-                    className={meetingReady ? "neume neume-lit" : "neume neume-rust"}
-                    aria-hidden="true"
-                  />
-                  <p className="font-medium">
-                    {fullCaptureReady
-                      ? "Meetings ready · Me + Them verified"
-                      : meetingReady
-                        ? "Mic-only meetings ready"
-                        : "Meetings not ready"}
-                  </p>
-                </div>
-                <p className="text-sm text-muted-foreground">
-                  Re-run guided meeting setup to validate microphone access and a meeting-grade ASR route, then test system audio if you want Me + Them capture.
-                </p>
-                <Button className="mt-3 w-full" variant="outline" onClick={() => requestOnboarding("meetings")}>
-                  Set up meetings
-                </Button>
-              </div>
-              <div className="rounded-xl border border-border/70 p-4">
-                <div className="mb-2 flex items-center gap-2.5">
-                  <Settings2 className="h-4 w-4 text-muted-foreground" aria-hidden="true" />
-                  <p className="font-medium">Power-user controls</p>
-                </div>
-                <p className="text-sm text-muted-foreground">
-                  Use the provider and privacy screens when you need fine-grained control over models, keys, or storage.
-                </p>
-                <Button className="mt-3 w-full" variant="outline" onClick={() => requestMainView("settings")}>
-                  Open settings
-                </Button>
-              </div>
             </CardContent>
           </Card>
         </div>

@@ -1,22 +1,21 @@
 import * as React from "react";
 import { cn } from "@/lib/utils";
 
+/**
+ * A leaf surface. `interactive` is for choice tiles and clickable list rows;
+ * everything else is `default` — a quiet bordered leaf that does not react to
+ * the pointer, because it isn't clickable.
+ */
 const Card = React.forwardRef<
   HTMLDivElement,
-  React.HTMLAttributes<HTMLDivElement> & { variant?: "default" | "glass" | "interactive" | "elevated" | "borderless" }
+  React.HTMLAttributes<HTMLDivElement> & { variant?: "default" | "interactive" }
 >(({ className, variant = "default", ...props }, ref) => (
   <div
     ref={ref}
     className={cn(
-      "rounded-md bg-card text-card-foreground transition-smooth",
-      variant === "default" &&
-        "border border-border/60 shadow-[0_1px_0_hsl(var(--foreground)/0.03)_inset] hover:border-border",
-      variant === "glass" &&
-        "glass border border-border/60 shadow-[0_1px_0_hsl(var(--foreground)/0.03)_inset] hover:shadow-[0_14px_38px_hsl(34_26%_4%/0.1)]",
+      "rounded-md border border-border/60 bg-card text-card-foreground transition-smooth",
       variant === "interactive" &&
-        "border border-border/60 cursor-pointer shadow-[0_1px_0_hsl(var(--foreground)/0.03)_inset] hover:-translate-y-0.5 hover:border-border hover:shadow-[0_14px_38px_hsl(34_26%_4%/0.12)] active:translate-y-0",
-      variant === "elevated" && "border-0 shadow-[0_20px_60px_hsl(34_26%_4%/0.16)] hover:shadow-[0_24px_70px_hsl(34_26%_4%/0.2)]",
-      variant === "borderless" && "border-0 shadow-none hover:shadow-sm",
+        "cursor-pointer hover:-translate-y-0.5 hover:border-border hover:shadow-[0_14px_38px_hsl(34_26%_4%/0.12)] active:translate-y-0",
       className
     )}
     {...props}
@@ -43,7 +42,7 @@ const CardTitle = React.forwardRef<
   <h3
     ref={ref}
     className={cn(
-      "font-serif text-2xl font-semibold leading-none tracking-tight",
+      "font-serif text-lg font-semibold leading-tight tracking-tight",
       className
     )}
     {...props}

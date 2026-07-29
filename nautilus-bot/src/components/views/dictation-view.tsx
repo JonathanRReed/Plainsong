@@ -604,10 +604,12 @@ function getDictationPhaseSummary(
     case "idle":
     default:
       return {
-        title: "Ready to launch",
-        detail:
-          message?.trim() ||
-          "Start from the hotkey or the button below and Plainsong will take it from there.",
+        // "Ready to launch" borrowed a rocket metaphor from nothing in this
+        // app, and the detail line under it ("Plainsong will take it from
+        // there") spent a sentence saying nothing the button and the hotkey
+        // line above had not already said twice.
+        title: "Ready",
+        detail: message?.trim() || "Speak when you are.",
         tone: "idle",
       };
   }
@@ -3063,8 +3065,12 @@ export function DictationView() {
 
   return (
     <div className="h-full flex flex-col">
+      {/* The eyebrow names the area, never the page: WORKSPACE over Home,
+          LIBRARY over Projects, SHARE over Exports. DICTATION over Dictation
+          was the same word twice in two registers, spending the page's one
+          rust rubric to repeat its own title. */}
       <PageHeader
-        eyebrow="DICTATION"
+        eyebrow="CAPTURE"
         title="Dictation"
         subtitle="Fast voice capture that inserts text where you work"
         actions={

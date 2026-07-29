@@ -16,9 +16,9 @@ const badgeVariants = cva(
           "bg-rust/10 text-rust focus-visible:ring-rust/20 dark:bg-rust/20 dark:focus-visible:ring-rust/40 [a]:hover:bg-rust/20",
         outline:
           "border-border text-foreground [a]:hover:bg-muted [a]:hover:text-muted-foreground",
-        ghost:
-          "hover:bg-muted hover:text-muted-foreground dark:hover:bg-muted/50",
-        link: "text-primary underline-offset-4 hover:underline",
+        // Retired semantic names, mapped centrally onto gold/rust/neutral so no
+        // call site invents its own hue. Don't add new uses — reach for the
+        // explicit variant, or a neume, instead.
         success:
           "bg-gold/12 text-gold-text border-gold/25 focus-visible:ring-gold/20 [a]:hover:bg-gold/20",
         warning:
@@ -26,15 +26,9 @@ const badgeVariants = cva(
         info:
           "bg-muted/30 text-muted-foreground [a]:hover:bg-muted/40",
       },
-      size: {
-        default: "h-5 px-2 py-0.5 text-[0.6875rem]",
-        sm: "h-4 px-1.5 py-0.5 text-[0.625rem] tracking-[0.03em]",
-        lg: "h-6 px-2.5 py-1 text-xs",
-      },
     },
     defaultVariants: {
       variant: "default",
-      size: "default",
     },
   }
 )
@@ -42,7 +36,6 @@ const badgeVariants = cva(
 function Badge({
   className,
   variant = "default",
-  size,
   render,
   ...props
 }: useRender.ComponentProps<"span"> & VariantProps<typeof badgeVariants>) {
@@ -50,7 +43,7 @@ function Badge({
     defaultTagName: "span",
     props: mergeProps<"span">(
       {
-        className: cn(badgeVariants({ variant, size }), className),
+        className: cn(badgeVariants({ variant }), className),
       },
       props
     ),
@@ -58,7 +51,6 @@ function Badge({
     state: {
       slot: "badge",
       variant,
-      size,
     },
   })
 }

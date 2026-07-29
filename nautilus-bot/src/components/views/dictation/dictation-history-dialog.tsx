@@ -132,15 +132,14 @@ export function DictationHistoryDialog({
               <div>
                 <h3 className="section-heading">Capture details</h3>
                 <p className="text-sm text-muted-foreground">
-                  Inspect the original route, model, and transcript quality
-                  before reprocessing.
+                  The engine, model, and quality of the original capture.
                 </p>
               </div>
               <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
                 <div className="rounded-md border bg-muted/30 px-3 py-2">
                   <p className="rubric-muted">Requested engine</p>
                   <p className="mt-1 text-sm font-medium">
-                    {transcript.requestedProvider || "Default route"}
+                    {transcript.requestedProvider || "The default"}
                   </p>
                 </div>
                 <div className="rounded-md border bg-muted/30 px-3 py-2">
@@ -178,7 +177,7 @@ export function DictationHistoryDialog({
                   </p>
                 </div>
                 <div className="rounded-md border bg-muted/30 px-3 py-2">
-                  <p className="rubric-muted">Start</p>
+                  <p className="rubric-muted">Time to start</p>
                   <p className="mt-1 text-sm font-medium">
                     {formatStartupLatency(historyDetails?.startupLatencyMs)}
                   </p>
@@ -190,8 +189,7 @@ export function DictationHistoryDialog({
               <div>
                 <h3 className="section-heading">Prompt and context</h3>
                 <p className="text-sm text-muted-foreground">
-                  Inspect the app context and prompt strategy Plainsong used for
-                  this dictation.
+                  What Plainsong knew about the app, and which prompt it used.
                 </p>
               </div>
               {historyDetails ? (
@@ -220,22 +218,22 @@ export function DictationHistoryDialog({
                       </p>
                     </div>
                     <div className="rounded-md border bg-muted/30 px-3 py-2">
-                      <p className="rubric-muted">Requested route</p>
+                      <p className="rubric-muted">Asked to run</p>
                       <p className="mt-1 text-sm font-medium">
                         {historyDetails.routePreference
                           ? historyDetails.routePreference === "cloud"
-                            ? "Cloud"
-                            : "Local"
+                            ? "In the cloud"
+                            : "On this Mac"
                           : "Unavailable"}
                       </p>
                     </div>
                     <div className="rounded-md border bg-muted/30 px-3 py-2">
-                      <p className="rubric-muted">Resolved hosting</p>
+                      <p className="rubric-muted">Actually ran</p>
                       <p className="mt-1 text-sm font-medium">
                         {historyDetails.resolvedHosting
                           ? historyDetails.resolvedHosting === "cloud"
-                            ? "Cloud"
-                            : "Local"
+                            ? "In the cloud"
+                            : "On this Mac"
                           : "Unavailable"}
                       </p>
                     </div>
@@ -259,11 +257,11 @@ export function DictationHistoryDialog({
                         <span>Context app: {historyDetails.contextAppName}</span>
                       )}
                       {historyDetails.appTarget && (
-                        <span>Insert target: {historyDetails.appTarget}</span>
+                        <span>Inserted into: {historyDetails.appTarget}</span>
                       )}
                       {historyDetails.activationMatcher && (
                         <span>
-                          Auto rule:{" "}
+                          App rule:{" "}
                           {historyDetails.customModeName
                             ? `${historyDetails.customModeName} via ${historyDetails.activationMatcher}`
                             : historyDetails.activationMatcher}
@@ -281,10 +279,10 @@ export function DictationHistoryDialog({
                     historyDetails.recentInsertReused != null) && (
                     <div className="space-y-3 border-t pt-4">
                       <div>
-                        <h3 className="section-heading">Pipeline trace</h3>
+                        <h3 className="section-heading">What changed the text</h3>
                         <p className="text-sm text-muted-foreground">
-                          Shows which deterministic stages changed the text
-                          before delivery.
+                          The steps that edited this transcript before it was
+                          inserted.
                         </p>
                       </div>
                       {historyDetails.pipelineStageKeys.length > 0 && (
@@ -344,8 +342,8 @@ export function DictationHistoryDialog({
                 </div>
               ) : (
                 <p className="text-sm text-muted-foreground">
-                  Processing details are available for newer dictations saved
-                  after this update.
+                  This dictation was saved before Plainsong started recording
+                  these details.
                 </p>
               )}
             </div>
@@ -357,7 +355,7 @@ export function DictationHistoryDialog({
                     className="text-sm font-medium"
                     htmlFor="dictation-reprocess-mode"
                   >
-                    Reprocess with mode
+                    Try another style
                   </label>
                   <select
                     id="dictation-reprocess-mode"
@@ -394,8 +392,8 @@ export function DictationHistoryDialog({
                 </div>
               </div>
               <p className="text-sm text-muted-foreground">
-                Compare the saved transcript with a mode-tuned result before you
-                copy or reuse it.
+                Re-runs the saved words through another style so you can compare
+                before copying.
               </p>
               {reprocessError && (
                 <div className="rounded-md border border-rust/30 bg-rust/10 px-3 py-2 text-sm text-rust">
@@ -465,8 +463,7 @@ export function DictationHistoryDialog({
                   <div>
                     <p className="text-sm font-medium">Ready to use</p>
                     <p className="text-sm text-muted-foreground">
-                      A mode-shaped result for paste, clipboard, or follow-up
-                      writing.
+                      The same words in the style you picked above.
                     </p>
                   </div>
                   {reprocessedResult?.outputText && (
@@ -490,8 +487,7 @@ export function DictationHistoryDialog({
                     </p>
                   ) : (
                     <p className="text-sm text-muted-foreground">
-                      Pick a mode and run Reprocess to preview an alternate
-                      result.
+                      Pick a style above and press Reprocess to see it here.
                     </p>
                   )}
                 </div>
@@ -507,17 +503,17 @@ export function DictationHistoryDialog({
               {reprocessedResult && (
                 <>
                   {" "}
-                  · Final mode:{" "}
+                  · Reprocessed as:{" "}
                   {modeLabelFor(
                     reprocessedResult.modePreset,
                     reprocessedResult.modePreset,
                   )}{" "}
                   · {reprocessedResult.usedAi ? "AI tuned" : "Rule based"}
                   {reprocessedResult.provider
-                    ? ` · Final engine: ${reprocessedResult.provider}`
+                    ? ` · Engine: ${reprocessedResult.provider}`
                     : ""}
                   {reprocessedResult.modelId
-                    ? ` · Final model: ${reprocessedResult.modelId}`
+                    ? ` · Model: ${reprocessedResult.modelId}`
                     : ""}
                 </>
               )}
