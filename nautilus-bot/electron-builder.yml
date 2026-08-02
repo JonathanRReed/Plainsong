@@ -32,15 +32,19 @@ files:
   - node_modules/**
 
 extraResources:
+  # Keep the project's MIT license and generated dependency attributions beside
+  # the packaged application so binary distributions carry their legal notices.
+  - from: ../LICENSE
+    to: LICENSE
+  - from: THIRD-PARTY-NOTICES.txt
+    to: THIRD-PARTY-NOTICES.txt
+  - from: node_modules/electron/dist/LICENSES.chromium.html
+    to: LICENSES.chromium.html
   - from: rust-sidecar/target/release/
     to: sidecar
     filter:
       - plainsong-sidecar
       - plainsong-sidecar.exe
-  - from: rust-sidecar/python/
-    to: python
-    filter:
-      - asr/runner.py
 
 mac:
   # arm64 only for v1: the Rust sidecar is compiled for the host arch by
