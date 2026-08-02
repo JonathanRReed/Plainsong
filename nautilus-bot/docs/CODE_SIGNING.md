@@ -6,35 +6,45 @@ Plainsong v1 is an Apple Silicon macOS application packaged with
 `electron-builder`. The package includes the Electron application, Rust
 sidecar, native macOS shortcut helper, and Apple Speech helper.
 
-## Current candidate
+## Current local status
 
-The fresh v1.0.0 candidate built on July 27, 2026 includes:
+The exact July 30, 2026 v1.0.0 validation candidate is under
+`release-plainsong-launch-candidate-20260730/`:
 
-- `release/Plainsong-1.0.0-arm64.dmg`
-- `release/Plainsong-1.0.0-arm64-mac.zip`
-- `release/Plainsong-1.0.0-arm64-mac.zip.blockmap`
-- `release/latest-mac.yml`
-- `release/mac-arm64/Plainsong.app`
+- `release-plainsong-launch-candidate-20260730/Plainsong-1.0.0-arm64.dmg`
+- `release-plainsong-launch-candidate-20260730/Plainsong-1.0.0-arm64-mac.zip`
+- `release-plainsong-launch-candidate-20260730/Plainsong-1.0.0-arm64-mac.zip.blockmap`
+- `release-plainsong-launch-candidate-20260730/latest-mac.yml`
+- `release-plainsong-launch-candidate-20260730/mac-arm64/Plainsong.app`
 
 Developer ID signing, hardened runtime, secure timestamps, embedded executable
-signatures, arm64 architecture, update metadata, TCC usage strings, and the
+signatures, arm64 architecture, update metadata, TCC usage strings, Electron
+fuses, DMG integrity, mounted-app signature identity, ZIP extraction, and the
 package size gate all pass. The app, sidecar, shortcut helper, and Apple Speech
 helper are signed by
-`Developer ID Application: Jonathan Reed (AJ9VWBRNZN)`.
+`Developer ID Application: Jonathan Reed (AJ9VWBRNZN)`. The app CDHash is
+`557a50446a500d8cb995203f24e029102b8ed3a5`. The mounted DMG and
+ZIP-contained app have the same identity. The updater manifest matches the
+140,353,736-byte ZIP exactly.
 
-This candidate is intentionally not notarized. A supported local Keychain
-profile is available, but notarization was explicitly deferred before any
-Plainsong submission was made. The candidate was rebuilt with notarization
-inputs removed, so it has no stapled ticket. The trust report correctly
-records:
+The candidate is not notarized. The required local `plainsong-notary`
+Keychain profile has not been confirmed, and no Plainsong submission has been
+made. Electron-builder could not generate notarization options without those
+credentials and skipped notarization, so the build has no stapled ticket.
+Every local trust check passes except the eight checks that specifically
+require notarization, stapling, or Gatekeeper acceptance. The trust report
+correctly records:
 
 ```text
 Plainsong.app does not have a ticket stapled to it.
 source=Unnotarized Developer ID
 ```
 
-Do not distribute this candidate. Rebuild it through the official release
-workflow after the required credentials are configured.
+Do not distribute this candidate. Create `plainsong-notary` as documented in
+`APPLE_DEVELOPER_SETUP.md`, then rebuild through the official release workflow.
+The app-specific password belongs only in the login Keychain. Never write it
+to a repository file, build log, shell history, or release artifact, and never
+reuse another product's notarization profile.
 
 ## Release inputs
 
@@ -80,9 +90,12 @@ It writes:
 - `artifacts/release-credential-preflight.json`
 - `artifacts/release-credential-preflight.md`
 
-Those reports contain only boolean presence checks and signing identity counts.
-The command exits nonzero when the complete signing and notarization credential
-set is unavailable.
+Those reports contain only boolean presence checks, signing identity counts,
+a boolean result for the selected Developer ID identity, and a boolean result
+from authenticating the selected Keychain profile. Identity names, profile
+names, and secrets are never written to the reports. The command exits nonzero
+when the selected identity cannot sign, the complete notarization credential
+set is unavailable, or a named Keychain profile cannot authenticate.
 
 ## Build without publishing
 
@@ -107,10 +120,12 @@ bun run gate:size
 
 The trust gate verifies:
 
-- the app, sidecar, and shortcut helper are present and executable
-- all three signatures are valid Developer ID signatures
+- the app, sidecar, shortcut helper, and Apple Speech helper are present and executable
+- all four signatures are valid Developer ID signatures
 - hardened runtime and secure timestamps are present
 - all embedded executables use the expected Apple team
+- the sidecar and shortcut helper do not inherit unnecessary entitlements
+- only the Apple Speech helper receives the Speech Recognition entitlement
 - all shipped executables are arm64
 - a notarization ticket is stapled
 - Gatekeeper accepts the app as `Notarized Developer ID`

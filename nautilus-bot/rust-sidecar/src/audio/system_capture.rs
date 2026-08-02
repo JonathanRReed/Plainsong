@@ -7,8 +7,10 @@ use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use crossbeam::channel::TrySendError;
 use rubato::audioadapter_buffers::direct::InterleavedSlice;
 use rubato::{Fft, FixedSync, Indexing, Resampler, WindowFunction};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, VecDeque};
+#[cfg(target_os = "macos")]
+use std::process::{Command, Stdio};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::thread::JoinHandle;
@@ -597,7 +599,7 @@ const SYSTEM_AUDIO_TEST_NON_SILENT_THRESHOLD: f32 = 1.0e-5;
 const SYSTEM_ROUTE_STARTUP_GRACE: Duration = Duration::from_secs(5);
 const SYSTEM_ROUTE_RETRY_INTERVAL: Duration = Duration::from_secs(2);
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum SystemAudioBackend {
     CoreAudioProcessTap,
@@ -605,7 +607,7 @@ pub enum SystemAudioBackend {
     None,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum SystemAudioReadiness {
     Ready,
@@ -613,7 +615,7 @@ pub enum SystemAudioReadiness {
     Unavailable,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum SystemAudioFailureKind {
     UnsupportedOs,
@@ -625,7 +627,7 @@ pub enum SystemAudioFailureKind {
     StreamRuntime,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SystemAudioCapability {
     pub backend: SystemAudioBackend,
@@ -641,14 +643,14 @@ pub struct SystemAudioCapability {
     pub actionable_reason: Option<String>,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum SystemAudioVerificationMethod {
     KnownTone,
     ExternalAudio,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SystemAudioTestResult {
     pub capability: SystemAudioCapability,
@@ -1897,6 +1899,170 @@ impl SystemAudioCapture {
             verification_method: None,
         })
     }
+
+    /// Run the macOS tap verifier outside the long-lived sidecar process.
+    ///
+    /// Core Audio can block inside `AudioUnitSetProperty` while its first-use
+    /// permission request is unresolved. CPAL's stream timeout and our callback
+    /// timeout both begin after that call, so neither can recover the backend.
+    /// A disposable copy of the signed sidecar gives this boundary real
+    /// cancellation semantics: on timeout the operating system tears down the
+    /// helper's tap and aggregate device with the process, while the main
+    /// sidecar remains responsive and releases its test guard normally.
+    pub fn test_system_audio_bounded(&self, worker_timeout: Duration) -> SystemAudioTestResult {
+        #[cfg(target_os = "macos")]
+        {
+            let result = std::env::current_exe()
+                .map_err(|error| {
+                    format!(
+                        "Could not locate Plainsong's system-audio helper: {error}. Open Privacy & Security → Screen & System Audio Recording, then try again."
+                    )
+                })
+                .and_then(|executable| {
+                    run_system_audio_test_process(&executable, worker_timeout)
+                });
+
+            match result {
+                Ok(result) => {
+                    reconcile_system_audio_test_result(&result);
+                    result
+                }
+                Err(actionable) => self.failed_test_result(actionable),
+            }
+        }
+
+        #[cfg(not(target_os = "macos"))]
+        {
+            let _ = worker_timeout;
+            self.test_system_audio(Duration::from_secs(45))
+        }
+    }
+
+    fn failed_test_result(&self, actionable: String) -> SystemAudioTestResult {
+        let capability = self.capability();
+        if capability.backend != SystemAudioBackend::None {
+            if let Some(route_key) = capability.route_id.as_deref() {
+                clear_system_audio_route_verification(route_key);
+                record_system_audio_route_failure(
+                    route_key,
+                    SystemAudioFailureKind::StreamConstruction,
+                    &actionable,
+                );
+            }
+        }
+        failed_system_audio_test_result(capability, actionable)
+    }
+}
+
+fn failed_system_audio_test_result(
+    mut capability: SystemAudioCapability,
+    actionable: String,
+) -> SystemAudioTestResult {
+    if capability.backend != SystemAudioBackend::None {
+        capability.readiness = SystemAudioReadiness::Unverified;
+        capability.ready = false;
+        capability.reason = Some(SystemAudioFailureKind::StreamConstruction);
+        capability.actionable_reason = Some(actionable);
+    }
+    SystemAudioTestResult {
+        capability,
+        callbacks: 0,
+        captured_frames: 0,
+        non_silent_frames: 0,
+        peak: 0.0,
+        expected_tone_hz: SYSTEM_AUDIO_TEST_TONE_HZ,
+        detected_tone_amplitude: 0.0,
+        verification_method: None,
+    }
+}
+
+pub(crate) fn run_system_audio_test_worker(
+    first_callback_timeout: Duration,
+) -> SystemAudioTestResult {
+    SystemAudioCapture::new().test_system_audio(first_callback_timeout)
+}
+
+fn reconcile_system_audio_test_result(result: &SystemAudioTestResult) {
+    let Some(route_key) = result.capability.route_id.as_deref() else {
+        return;
+    };
+    if result.capability.ready {
+        mark_system_audio_route_verified(route_key);
+        return;
+    }
+
+    clear_system_audio_route_verification(route_key);
+    if let (Some(kind), Some(actionable)) = (
+        result.capability.reason,
+        result.capability.actionable_reason.as_deref(),
+    ) {
+        record_system_audio_route_failure(route_key, kind, actionable);
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn run_system_audio_test_process(
+    executable: &std::path::Path,
+    timeout: Duration,
+) -> std::result::Result<SystemAudioTestResult, String> {
+    let mut child = Command::new(executable)
+        .arg(crate::SYSTEM_AUDIO_TEST_WORKER_ARGUMENT)
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .map_err(|error| {
+            format!(
+                "Plainsong could not start its system-audio check: {error}. Open Privacy & Security → Screen & System Audio Recording, then try again."
+            )
+        })?;
+    let started = Instant::now();
+
+    loop {
+        match child.try_wait() {
+            Ok(Some(_)) => {
+                let output = child.wait_with_output().map_err(|error| {
+                    format!(
+                        "Plainsong could not read the system-audio check result: {error}. Open Privacy & Security → Screen & System Audio Recording, then try again."
+                    )
+                })?;
+                if output.status.code() == Some(crate::SYSTEM_AUDIO_TEST_WORKER_TIMEOUT_EXIT_CODE) {
+                    return Err(
+                        "macOS did not finish system-audio setup in time. Open Privacy & Security → Screen & System Audio Recording, allow Plainsong if it is listed, then run the test again."
+                            .to_string(),
+                    );
+                }
+                if !output.status.success() {
+                    return Err(
+                        "The system-audio check stopped unexpectedly. Open Privacy & Security → Screen & System Audio Recording, make sure Plainsong is allowed, then try again."
+                            .to_string(),
+                    );
+                }
+                return serde_json::from_slice(&output.stdout).map_err(|_| {
+                    "The system-audio check returned an invalid result. Reopen Plainsong and try again."
+                        .to_string()
+                });
+            }
+            Ok(None) => {}
+            Err(error) => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return Err(format!(
+                    "Plainsong could not monitor the system-audio check: {error}. Reopen Plainsong and try again."
+                ));
+            }
+        }
+
+        if started.elapsed() >= timeout {
+            let _ = child.kill();
+            let _ = child.wait();
+            return Err(
+                "macOS did not finish system-audio setup in time. Open Privacy & Security → Screen & System Audio Recording, allow Plainsong if it is listed, then run the test again."
+                    .to_string(),
+            );
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    }
 }
 
 impl MixedAudioCapture {
@@ -2673,6 +2839,84 @@ fn emit_source_silence_warning(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn bounded_test_failure_stays_recoverable_and_never_claims_audio() {
+        let capability = SystemAudioCapability {
+            backend: SystemAudioBackend::CoreAudioProcessTap,
+            native_os_supported: true,
+            native_os_enabled: true,
+            route_device: Some("Built-in Output".to_string()),
+            route_id: Some("test-route".to_string()),
+            native_sample_rate: Some(48_000),
+            native_channels: Some(2),
+            readiness: SystemAudioReadiness::Ready,
+            ready: true,
+            reason: None,
+            actionable_reason: None,
+        };
+
+        let result = failed_system_audio_test_result(
+            capability,
+            "Open Privacy Settings and try again.".to_string(),
+        );
+
+        assert!(!result.capability.ready);
+        assert_eq!(
+            result.capability.readiness,
+            SystemAudioReadiness::Unverified
+        );
+        assert_eq!(
+            result.capability.reason,
+            Some(SystemAudioFailureKind::StreamConstruction)
+        );
+        assert_eq!(
+            result.capability.actionable_reason.as_deref(),
+            Some("Open Privacy Settings and try again.")
+        );
+        assert_eq!(result.callbacks, 0);
+        assert_eq!(result.captured_frames, 0);
+        assert_eq!(result.non_silent_frames, 0);
+        assert!(result.verification_method.is_none());
+    }
+
+    #[test]
+    fn isolated_test_result_survives_worker_json_round_trip() {
+        let result = failed_system_audio_test_result(
+            SystemAudioCapability {
+                backend: SystemAudioBackend::VirtualLoopback,
+                native_os_supported: true,
+                native_os_enabled: true,
+                route_device: Some("BlackHole 2ch".to_string()),
+                route_id: Some("blackhole-2ch".to_string()),
+                native_sample_rate: Some(48_000),
+                native_channels: Some(2),
+                readiness: SystemAudioReadiness::Unverified,
+                ready: false,
+                reason: None,
+                actionable_reason: None,
+            },
+            "Play audio and try again.".to_string(),
+        );
+
+        let payload = serde_json::to_vec(&result).expect("serialize worker result");
+        let restored: SystemAudioTestResult =
+            serde_json::from_slice(&payload).expect("deserialize worker result");
+
+        assert_eq!(
+            restored.capability.backend,
+            SystemAudioBackend::VirtualLoopback
+        );
+        assert_eq!(
+            restored.capability.route_id.as_deref(),
+            Some("blackhole-2ch")
+        );
+        assert_eq!(
+            restored.capability.actionable_reason.as_deref(),
+            Some("Play audio and try again.")
+        );
+        assert_eq!(restored.expected_tone_hz, SYSTEM_AUDIO_TEST_TONE_HZ);
+    }
 
     #[test]
     #[ignore = "requires live CoreAudio device enumeration; covered by the packaged macOS smoke gate"]

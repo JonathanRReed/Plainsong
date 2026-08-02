@@ -320,7 +320,7 @@ fn format_time_range(start: f64, end: f64) -> String {
 
 /// Get default export path
 pub fn get_default_export_path(recording: &Recording, format: ExportFormat) -> PathBuf {
-    let exports_dir = dirs::data_dir()
+    let exports_dir = crate::paths::data_dir()
         .unwrap_or_else(|| PathBuf::from("."))
         .join("Plainsong")
         .join("exports");

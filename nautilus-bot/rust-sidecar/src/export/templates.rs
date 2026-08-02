@@ -93,21 +93,28 @@ impl TemplateManager {
             .get_template(template_id)
             .ok_or_else(|| anyhow::anyhow!("Template not found: {}", template_id))?;
 
-        let mut output = template.template.clone();
+        let values = [
+            ("{{title}}", data.title.clone()),
+            ("{{date}}", data.date.clone()),
+            ("{{duration}}", format_duration(data.duration_seconds)),
+            ("{{transcript}}", data.transcript.clone()),
+            ("{{speakers}}", format_speakers(&data.speakers)),
+            ("{{action_items}}", format_action_items(&data.action_items)),
+            (
+                "{{summary}}",
+                data.summary.as_deref().unwrap_or_default().to_string(),
+            ),
+        ];
+        let values = values.map(|(placeholder, value)| {
+            let value = if template.format == ExportFormat::Html {
+                escape_html(&value)
+            } else {
+                value
+            };
+            (placeholder, value)
+        });
 
-        // Replace placeholders
-        output = output.replace("{{title}}", &data.title);
-        output = output.replace("{{date}}", &data.date);
-        output = output.replace("{{duration}}", &format_duration(data.duration_seconds));
-        output = output.replace("{{transcript}}", &data.transcript);
-        output = output.replace("{{speakers}}", &format_speakers(&data.speakers));
-        output = output.replace("{{action_items}}", &format_action_items(&data.action_items));
-        output = output.replace(
-            "{{summary}}",
-            data.summary.as_ref().unwrap_or(&String::new()),
-        );
-
-        Ok(output)
+        Ok(render_placeholders(&template.template, &values))
     }
 
     /// Register built-in templates
@@ -408,4 +415,91 @@ fn format_action_items(items: &[String]) -> String {
         .map(|(i, item)| format!("{}. {}", i + 1, item))
         .collect::<Vec<_>>()
         .join("\n")
+}
+
+fn escape_html(value: &str) -> String {
+    let mut escaped = String::with_capacity(value.len());
+    for character in value.chars() {
+        match character {
+            '&' => escaped.push_str("&amp;"),
+            '<' => escaped.push_str("&lt;"),
+            '>' => escaped.push_str("&gt;"),
+            '"' => escaped.push_str("&quot;"),
+            '\'' => escaped.push_str("&#39;"),
+            _ => escaped.push(character),
+        }
+    }
+    escaped
+}
+
+fn render_placeholders(template: &str, values: &[(&str, String)]) -> String {
+    let mut output = String::with_capacity(template.len());
+    let mut remaining = template;
+
+    while let Some(start) = remaining.find("{{") {
+        output.push_str(&remaining[..start]);
+        let placeholder_start = &remaining[start..];
+        let Some(relative_end) = placeholder_start.find("}}") else {
+            output.push_str(placeholder_start);
+            return output;
+        };
+        let end = start + relative_end + 2;
+        let placeholder = &remaining[start..end];
+        if let Some((_, value)) = values.iter().find(|(key, _)| *key == placeholder) {
+            output.push_str(value);
+        } else {
+            output.push_str(placeholder);
+        }
+        remaining = &remaining[end..];
+    }
+
+    output.push_str(remaining);
+    output
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn hostile_render_data() -> RenderData {
+        RenderData {
+            title: "<script>alert(\"title\")</script>".to_string(),
+            date: "2026-07-30 & later".to_string(),
+            duration_seconds: 42,
+            transcript: "<img src=x onerror='alert(1)'> {{title}}".to_string(),
+            speakers: vec![SpeakerInfo {
+                id: "speaker-1".to_string(),
+                name: "<svg onload=alert(1)>".to_string(),
+                segments: Vec::new(),
+            }],
+            action_items: vec!["<iframe src=javascript:alert(1)>".to_string()],
+            summary: Some("<style>body{display:none}</style>".to_string()),
+        }
+    }
+
+    #[test]
+    fn html_exports_escape_all_rendered_user_content() {
+        let output = TemplateManager::new()
+            .render("podcast", &hostile_render_data())
+            .expect("podcast template should render");
+
+        assert!(output.contains("&lt;script&gt;alert(&quot;title&quot;)&lt;/script&gt;"));
+        assert!(output.contains("&lt;img src=x onerror=&#39;alert(1)&#39;&gt; {{title}}"));
+        assert!(output.contains("2026-07-30 &amp; later"));
+        assert!(!output.contains("<script>"));
+        assert!(!output.contains("<img src=x"));
+    }
+
+    #[test]
+    fn non_html_exports_preserve_plain_text_and_markdown_content() {
+        let output = TemplateManager::new()
+            .render("meeting", &hostile_render_data())
+            .expect("meeting template should render");
+
+        assert!(output.contains("<script>alert(\"title\")</script>"));
+        assert!(output.contains("<img src=x onerror='alert(1)'> {{title}}"));
+        assert!(output.contains("<svg onload=alert(1)>"));
+        assert!(output.contains("<iframe src=javascript:alert(1)>"));
+        assert!(output.contains("<style>body{display:none}</style>"));
+    }
 }

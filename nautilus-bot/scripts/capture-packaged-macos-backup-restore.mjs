@@ -37,7 +37,10 @@ const sidecarPath = path.join(
   "sidecar",
   "plainsong-sidecar"
 );
-const configDir = path.join(os.homedir(), "Library", "Application Support", "Plainsong");
+const configRoot = process.env.PLAINSONG_CONFIG_DIR
+  ? path.resolve(process.env.PLAINSONG_CONFIG_DIR)
+  : path.join(os.homedir(), "Library", "Application Support");
+const configDir = path.join(configRoot, "Plainsong");
 const settingsPath = path.join(configDir, "settings.json");
 const backupConfigPath = path.join(configDir, "backup-config.json");
 const originalSettingsBytes = fs.existsSync(settingsPath)
@@ -292,6 +295,8 @@ async function run() {
   try {
     const originalSettings = await sendCommand("get_settings", {});
     const originalConfig = await sendCommand("get_backup_config", {});
+    await sendCommand("save_settings", { settings: originalSettings });
+    artifact.checks.settingsPersistedForBackup = fs.existsSync(settingsPath);
     const qaConfig = {
       ...originalConfig,
       enabled: true,
@@ -428,8 +433,9 @@ async function run() {
       !didTimeOut &&
         artifact.rawSettingsRestored &&
         artifact.rawBackupConfigRestored &&
-        artifact.workDirCleaned &&
-        artifact.checks.configSaved &&
+      artifact.workDirCleaned &&
+      artifact.checks.settingsPersistedForBackup &&
+      artifact.checks.configSaved &&
         artifact.checks.backupCreated &&
         artifact.checks.settingsMutatedBeforeRestore &&
         artifact.checks.restoreMatchedBackup &&

@@ -1,0 +1,13 @@
+flowchart LR
+  Builder["Electron Builder signing"] --> Inherited["Inherited Electron child policy"]
+  Inherited --> ElectronHelpers["Electron helper processes"]
+  Callback["optionsForSignedFile"] --> SidecarPolicy["Sidecar minimal policy"]
+  Callback --> ShortcutPolicy["Shortcut empty policy"]
+  Callback --> SpeechPolicy["Speech-only policy"]
+  SidecarPolicy --> Sidecar["Rust sidecar"]
+  ShortcutPolicy --> Shortcut["Shortcut helper"]
+  SpeechPolicy --> Speech["Speech helper"]
+  Trust["Release trust gate"] --> Sidecar
+  Trust --> Shortcut
+  Trust --> Speech
+

@@ -160,7 +160,7 @@ const browserHostedRows = {
 };
 
 const recommendedVerifyModes = {
-  "Apple Notes": "clipboard-sentinel",
+  "Apple Notes": "native-accessibility",
   "Google Docs (Chrome)": "clipboard-sentinel",
   Slack: "clipboard-sentinel",
   Notion: "clipboard-sentinel",
@@ -178,9 +178,16 @@ const recommendedVerifyModes = {
  * mutation of the operator's own data caused by this harness, so it is snapshotted before the
  * sidecar starts and restored on every exit path.
  */
-const configDir = path.join(os.homedir(), "Library", "Application Support", "Plainsong");
+const dataRoot = process.env.PLAINSONG_DATA_DIR
+  ? path.resolve(process.env.PLAINSONG_DATA_DIR)
+  : path.join(os.homedir(), "Library", "Application Support");
+const configRoot = process.env.PLAINSONG_CONFIG_DIR
+  ? path.resolve(process.env.PLAINSONG_CONFIG_DIR)
+  : path.join(os.homedir(), "Library", "Application Support");
+const dataDir = path.join(dataRoot, "Plainsong");
+const configDir = path.join(configRoot, "Plainsong");
 const settingsPath = path.join(configDir, "settings.json");
-const dbPath = path.join(configDir, "plainsong.db");
+const dbPath = path.join(dataDir, "plainsong.db");
 const dbSidecarPaths = [dbPath, `${dbPath}-wal`, `${dbPath}-shm`];
 const dbBackups = new Map();
 let originalSettingsBytes = null;
@@ -446,7 +453,8 @@ function blockedReport(reason, extra = {}) {
       `--verify-mode ${recommendedMode} --scratch-target "$${scratchTargetEnv}"`,
     interactiveNote:
       "clipboard-sentinel needs a human-prepared, EMPTY, focused field in the target app before the " +
-      "prepare delay ends. local-http-probe and file-on-disk stage their own surface.",
+      "prepare delay ends. native-accessibility reads the focused native field directly. " +
+      "local-http-probe and file-on-disk stage their own surface.",
     verifyModes: VERIFY_MODES,
     recommendedVerifyMode: recommendedMode,
     targetOptions: matrixTargets,
@@ -840,6 +848,12 @@ async function run() {
         "run cannot close this row."
     );
   }
+  if (verifyMode === "native-accessibility") {
+    scopeCaveats.push(
+      "Pre-insert emptiness and post-insert content are read directly from the focused native " +
+        "accessibility text field. The field identifier must remain stable across both reads."
+    );
+  }
 
   const artifact = {
     generatedAt,
@@ -900,10 +914,13 @@ async function run() {
       settingsPath,
       dbPaths: dbSidecarPaths,
       note:
-        "The packaged sidecar opens the operator's real data directory and its startup path " +
-        "reconciles interrupted recordings and runs retention maintenance immediately, both of " +
-        "which delete rows and audio. settings.json, plainsong.db and its -wal/-shm are therefore " +
-        "snapshotted before the sidecar starts and restored on every exit path.",
+        process.env.PLAINSONG_DATA_DIR || process.env.PLAINSONG_CONFIG_DIR
+          ? "The harness is using explicit isolated data and configuration roots. settings.json, " +
+            "plainsong.db and its -wal/-shm are still snapshotted and restored on every exit path."
+          : "The packaged sidecar opens the operator's real data directory and its startup path " +
+            "reconciles interrupted recordings and runs retention maintenance immediately, both " +
+            "of which delete rows and audio. settings.json, plainsong.db and its -wal/-shm are " +
+            "therefore snapshotted before the sidecar starts and restored on every exit path.",
     },
     userStateSnapshotTaken: false,
     originalDbHashes: null,
@@ -972,6 +989,8 @@ async function run() {
         verifyMode === "file-on-disk" && !editorAppArg ? bundleIds[targetApp]?.[0] ?? null : null,
       expectedBundleIds: bundleIds[targetApp] ?? [],
       verifySurfaceIdentity: makeSurfaceIdentityVerifier(targetApp),
+      accessibilityApp: activationNames[targetApp] || "",
+      acceptedPreInsertBlankValues: targetApp === "Google Docs (Chrome)" ? [" "] : [],
       readyTimeoutMs,
       readBackTimeoutMs,
       closeTab: !keepProbeTab,

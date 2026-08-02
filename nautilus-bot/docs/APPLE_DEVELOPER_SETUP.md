@@ -5,28 +5,29 @@ the first Plainsong macOS release.
 
 ## Confirmed local state
 
-As of July 27, 2026:
+As of July 30, 2026:
 
 - a Developer ID Application identity for team `AJ9VWBRNZN` is installed
-- the v1.0.0 app, sidecar, native shortcut helper, and Apple Speech helper are
+- the exact
+  `release-plainsong-launch-candidate-20260730/mac-arm64/Plainsong.app`
+  candidate, sidecar, native shortcut helper, and Apple Speech helper are
   Developer ID signed
 - hardened runtime and secure timestamps are present
 - the packaged arm64 DMG, ZIP, blockmap, and updater manifest were built
-- **no** `notarytool` Keychain profile is stored on this machine. Re-checked on
-  July 28, 2026: the login Keychain holds no generic-password item under
-  `com.apple.gs.appleid.auth`, `notarytool`, `Xcode`, or `altool`, and
-  `xcrun notarytool history --keychain-profile <name>` reports
-  "No Keychain password item found" for every plausible profile name. An
-  earlier revision of this file claimed a profile was available; that was
-  wrong. Creating one is step 4 below and needs the account holder, because it
-  takes an Apple ID and an app-specific password
+- **no authenticated** `plainsong-notary` Keychain profile has been confirmed
+  on this machine. Before the current credential-creation attempt, a July 30
+  check with
+  `xcrun notarytool history --keychain-profile plainsong-notary` reports
+  "No Keychain password item found." Creating the profile needs the account
+  holder because it requires an Apple ID and an app-specific password
 - notarization was explicitly deferred before a Plainsong submission was made
-- the current candidate was rebuilt without notarization inputs
+- the current clean candidate was rebuilt without notarization inputs
 - stapler reports that no ticket is attached
 - Gatekeeper reports `source=Unnotarized Developer ID`
 
-When notarization is resumed, the next candidate must run through the
-credentialed official release workflow. Do not publish the current local
+When notarization is resumed, use only `plainsong-notary`. The final candidate
+must run through the credentialed release workflow and pass stapler and
+Gatekeeper verification before publication. Do not publish the current local
 candidate.
 
 ## 1. Confirm Apple team access
@@ -129,11 +130,11 @@ password:
 
 ```bash
 CSC_NAME="Jonathan Reed (AJ9VWBRNZN)" \
-APPLE_KEYCHAIN_PROFILE="<notarytool-profile>" \
+APPLE_KEYCHAIN_PROFILE="plainsong-notary" \
 bun run gate:release-credentials:preflight
 
 CSC_NAME="Jonathan Reed (AJ9VWBRNZN)" \
-APPLE_KEYCHAIN_PROFILE="<notarytool-profile>" \
+APPLE_KEYCHAIN_PROFILE="plainsong-notary" \
 bun run release:mac
 ```
 

@@ -24,36 +24,80 @@ const envPresence = Object.fromEntries(
   ENV_VARS.map((name) => [name, Boolean(process.env[name]?.length)])
 );
 
-function countCodesigningIdentities() {
+function inspectCodesigningIdentities() {
   if (process.platform !== "darwin") {
-    return null;
+    return { count: null, names: [] };
   }
   const result = spawnSync("security", ["find-identity", "-v", "-p", "codesigning"], {
     encoding: "utf8",
   });
   if (result.error || result.status !== 0) {
-    return 0;
+    return { count: 0, names: [] };
   }
   const match = result.stdout.match(/(\d+)\s+valid identities found/);
-  return match ? Number(match[1]) : 0;
+  const names = [...result.stdout.matchAll(/^\s*\d+\)\s+\S+\s+"([^"]+)"$/gm)].map(
+    (identityMatch) => identityMatch[1],
+  );
+  return {
+    count: match ? Number(match[1]) : 0,
+    names,
+  };
 }
 
-const codesigningIdentityCount = countCodesigningIdentities();
+const codesigningIdentities = inspectCodesigningIdentities();
+const codesigningIdentityCount = codesigningIdentities.count;
+
+function validateKeychainProfile(profileName) {
+  if (!profileName) {
+    return false;
+  }
+  const result = spawnSync(
+    "xcrun",
+    ["notarytool", "history", "--keychain-profile", profileName],
+    {
+      stdio: "ignore",
+      timeout: 30_000,
+    },
+  );
+  return !result.error && result.status === 0;
+}
 
 // electron-builder signs from either a certificate file (CSC_LINK, usually with
 // CSC_KEY_PASSWORD) or a keychain identity name (CSC_NAME).
+const selectedIdentityName = process.env.CSC_NAME?.trim() ?? "";
+const selectedIdentityHasRejectedPrefix = selectedIdentityName.startsWith(
+  "Developer ID Application:",
+);
+const selectedIdentityValid = envPresence.CSC_NAME
+  ? !selectedIdentityHasRejectedPrefix &&
+    codesigningIdentities.names.some(
+      (identityName) =>
+        identityName.startsWith("Developer ID Application:") &&
+        identityName.includes(selectedIdentityName),
+    )
+  : null;
 const hasCertificateInput =
-  (envPresence.CSC_LINK && envPresence.CSC_KEY_PASSWORD) || envPresence.CSC_NAME;
+  (envPresence.CSC_LINK && envPresence.CSC_KEY_PASSWORD) ||
+  selectedIdentityValid === true;
+const hasExplicitAppleCredentials =
+  envPresence.APPLE_ID &&
+  envPresence.APPLE_APP_SPECIFIC_PASSWORD &&
+  envPresence.APPLE_TEAM_ID;
+const keychainProfileValid = envPresence.APPLE_KEYCHAIN_PROFILE
+  ? validateKeychainProfile(process.env.APPLE_KEYCHAIN_PROFILE)
+  : null;
 const hasNotarizationInputs =
-  envPresence.APPLE_KEYCHAIN_PROFILE ||
-  (envPresence.APPLE_ID && envPresence.APPLE_APP_SPECIFIC_PASSWORD && envPresence.APPLE_TEAM_ID);
+  keychainProfileValid === true || hasExplicitAppleCredentials;
 
 const artifact = {
   generatedAt: new Date().toISOString(),
   platform: process.platform,
   envPresence,
   codesigningIdentityCount,
+  selectedIdentityValid,
   hasCertificateInput,
+  hasExplicitAppleCredentials,
+  keychainProfileValid,
   hasNotarizationInputs,
   ready: Boolean(hasCertificateInput && hasNotarizationInputs),
 };
@@ -74,7 +118,10 @@ ${ENV_VARS.map((name) => `- ${name}: ${envPresence[name] ? "set" : "missing"}`).
 ## Result
 
 - Developer ID codesigning identities in keychain: ${codesigningIdentityCount ?? "n/a (not macOS)"}
+- Selected CSC_NAME resolves to a Developer ID Application identity: ${selectedIdentityValid === null ? "NOT SELECTED" : selectedIdentityValid ? "PASS" : "FAIL"}
 - Certificate input (CSC_LINK + CSC_KEY_PASSWORD, or CSC_NAME): ${hasCertificateInput ? "PASS" : "FAIL"}
+- Keychain notarization profile authentication: ${keychainProfileValid === null ? "NOT SELECTED" : keychainProfileValid ? "PASS" : "FAIL"}
+- Explicit Apple notarization credentials: ${hasExplicitAppleCredentials ? "PASS" : "NOT SELECTED"}
 - Notarization inputs (APPLE_KEYCHAIN_PROFILE, or APPLE_ID + APPLE_APP_SPECIFIC_PASSWORD + APPLE_TEAM_ID): ${hasNotarizationInputs ? "PASS" : "FAIL"}
 `;
 

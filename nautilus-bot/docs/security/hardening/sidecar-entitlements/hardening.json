@@ -1,0 +1,307 @@
+{
+  "documentType": "codex-security.hardening-analysis",
+  "schemaVersion": "1.0",
+  "analysisId": "hardening_20260729_plainsong_sidecar_entitlements",
+  "sourceEvidence": {
+    "kind": "source_review",
+    "label": "Plainsong sidecar signing and release-trust boundary",
+    "collectionSha256": "feb26e7f5fd383dd9027d917c5ffc23b35095b3b2d8ef89926f130afeb76c782",
+    "artifactCount": 4,
+    "sourceDrift": "present",
+    "targetRevision": "18cd7389f29ea9221174ad88b799a65292864bc3"
+  },
+  "assessment": {
+    "outcome": "opportunities_identified",
+    "summary": "The Rust sidecar inherits Electron-only execution privileges. A per-binary entitlement policy is the proportionate launch fix, with service isolation deferred unless new evidence justifies it."
+  },
+  "constraints": {
+    "profile": "balanced",
+    "changeHorizons": [
+      "incremental",
+      "foundational"
+    ],
+    "nonNegotiables": [
+      "Preserve packaged dictation and meeting capture.",
+      "Reject privilege drift in the exact app and ZIP.",
+      "Do not add a process hop to the dictation hot path without measured evidence."
+    ],
+    "assumptions": [
+      "The native Rust sidecar does not require Electron JIT, unsigned executable memory, disabled library validation, or Apple Events.",
+      "Whether the sidecar requires a microphone entitlement must be settled by packaged capture testing."
+    ]
+  },
+  "opportunities": [
+    {
+      "opportunityId": "sidecar-least-privilege",
+      "title": "Give the Rust sidecar a dedicated least-privilege signing policy",
+      "summary": "Route the sidecar through a specialized entitlement file and make the release trust gate reject forbidden privileges.",
+      "diagnosis": "The signing callback specializes two native helpers but lets the Rust sidecar inherit the Electron child policy.",
+      "evidence": [
+        {
+          "claimType": "observed",
+          "sourceKind": "source",
+          "evidenceId": "E001",
+          "path": "build-resources/entitlements.mac.inherit.plist",
+          "claim": "The inherited policy grants JIT, unsigned executable memory, disabled library validation, microphone, and Apple Events."
+        },
+        {
+          "claimType": "observed",
+          "sourceKind": "source",
+          "evidenceId": "E002",
+          "path": "scripts/verify-macos-release-trust.mjs",
+          "claim": "The baseline release gate did not reject broad sidecar privileges."
+        },
+        {
+          "claimType": "observed",
+          "sourceKind": "experiment",
+          "evidenceId": "E003",
+          "path": "artifacts/release/macos-trust.json",
+          "claim": "The packaged sidecar carries the inherited broad entitlement set."
+        },
+        {
+          "claimType": "inferred",
+          "sourceKind": "source",
+          "evidenceId": "E004",
+          "path": "scripts/sign-macos.mjs",
+          "claim": "The existing per-helper signing callback can own a dedicated sidecar policy without changing runtime IPC."
+        }
+      ],
+      "desiredInvariants": [
+        "The Rust sidecar never carries Electron JIT or library-validation bypass privileges.",
+        "The Rust sidecar never carries Apple Events authority.",
+        "The sidecar carries microphone authority only when exact-package capture proves it is required.",
+        "The release gate rejects forbidden sidecar privileges in both the release app and the app extracted from the ZIP."
+      ],
+      "proposalPath": "proposals/sidecar-least-privilege.md",
+      "options": [
+        {
+          "optionId": "per-binary-entitlements",
+          "title": "Per-binary entitlement override",
+          "kind": "incremental",
+          "summary": "Give the sidecar its own entitlement file and enforce it in the release trust gate.",
+          "diagramPaths": {
+            "before": "diagrams/sidecar-least-privilege-before.mmd",
+            "after": "diagrams/sidecar-least-privilege-per-binary-entitlements-after.mmd"
+          },
+          "evidenceCoverage": [
+            {
+              "evidenceId": "E001",
+              "effect": "addresses",
+              "tacticalFixRequired": true,
+              "rationale": "The sidecar no longer consumes the inherited policy."
+            },
+            {
+              "evidenceId": "E002",
+              "effect": "addresses",
+              "tacticalFixRequired": true,
+              "rationale": "The trust gate receives a sidecar-specific forbidden set."
+            },
+            {
+              "evidenceId": "E003",
+              "effect": "addresses",
+              "tacticalFixRequired": true,
+              "rationale": "A newly signed package must demonstrate an empty or explicitly minimal sidecar entitlement set."
+            },
+            {
+              "evidenceId": "E004",
+              "effect": "mitigates",
+              "tacticalFixRequired": false,
+              "rationale": "The existing signing boundary is extended rather than replaced."
+            }
+          ],
+          "tradeoffs": [
+            {
+              "dimension": "security",
+              "direction": "improves",
+              "confidence": "high",
+              "basis": "source-derived",
+              "assessment": "The sidecar loses ambient execution and Apple Events authority, and future drift fails the release gate.",
+              "validationPlan": "Inspect exact-package entitlements and run every forbidden-entitlement regression."
+            },
+            {
+              "dimension": "performance",
+              "direction": "neutral",
+              "confidence": "high",
+              "basis": "source-derived",
+              "assessment": "Signing policy changes do not add a runtime hop or allocation.",
+              "validationPlan": "Compare packaged dictation latency and first-sample timing with the existing baseline."
+            },
+            {
+              "dimension": "memory",
+              "direction": "neutral",
+              "confidence": "high",
+              "basis": "source-derived",
+              "assessment": "No process or retained runtime state is added.",
+              "validationPlan": "Run the existing idle memory gate on the new package."
+            },
+            {
+              "dimension": "reliability",
+              "direction": "unknown",
+              "confidence": "medium",
+              "basis": "source-derived",
+              "assessment": "Runtime behavior should be unchanged, but microphone or system-audio capture could depend on a privilege currently inherited accidentally.",
+              "validationPlan": "Run packaged microphone, system-audio, shortcut, and Speech QA before acceptance."
+            },
+            {
+              "dimension": "operability",
+              "direction": "improves",
+              "confidence": "high",
+              "basis": "source-derived",
+              "assessment": "The trust report names forbidden sidecar privileges directly.",
+              "validationPlan": "Review JSON and Markdown output for one passing and each failing fixture."
+            },
+            {
+              "dimension": "migration",
+              "direction": "improves",
+              "confidence": "high",
+              "basis": "source-derived",
+              "assessment": "The change is isolated to signing and verification and can be reverted without data migration.",
+              "validationPlan": "Build once with the dedicated policy and confirm no application data changes."
+            }
+          ],
+          "residualRisks": [
+            "Exact-package capture may prove that a narrowly scoped audio entitlement is required.",
+            "The Electron main process retains broad privileges that must remain justified separately."
+          ],
+          "implementationReadiness": {
+            "affectedComponents": [
+              "build-resources/entitlements.mac.sidecar.plist",
+              "scripts/sign-macos.mjs",
+              "scripts/verify-macos-release-trust.mjs",
+              "src/__tests__/macos-apple-speech-helper.test.ts",
+              "src/__tests__/macos-release-trust-script.test.ts"
+            ],
+            "workPackages": [
+              "Add the dedicated entitlement file and signing route.",
+              "Add sidecar-specific release-trust checks.",
+              "Build and exercise the exact package."
+            ],
+            "acceptanceCriteria": [
+              "The sidecar has no forbidden entitlement in the app or ZIP.",
+              "Packaged dictation, meeting audio, shortcuts, and Speech remain functional."
+            ],
+            "migrationNotes": [],
+            "rollback": "Remove the sidecar override and its trust check only if packaged evidence proves a required privilege, then replace the empty policy with the narrowest demonstrated entitlement rather than restoring the inherited set."
+          }
+        },
+        {
+          "optionId": "isolated-capability-services",
+          "title": "Isolated capability services",
+          "kind": "isolation",
+          "summary": "Split capture, secrets, and privileged actions into independently sandboxed services with narrow protocols.",
+          "diagramPaths": {
+            "before": "diagrams/sidecar-least-privilege-before.mmd",
+            "after": "diagrams/sidecar-least-privilege-isolated-capability-services-after.mmd"
+          },
+          "evidenceCoverage": [
+            {
+              "evidenceId": "E001",
+              "effect": "mitigates",
+              "tacticalFixRequired": true,
+              "rationale": "Isolation narrows authority, but current packaged binaries still require direct entitlement repair during migration."
+            },
+            {
+              "evidenceId": "E002",
+              "effect": "mitigates",
+              "tacticalFixRequired": true,
+              "rationale": "The release gate still needs per-service privilege enforcement."
+            },
+            {
+              "evidenceId": "E003",
+              "effect": "mitigates",
+              "tacticalFixRequired": true,
+              "rationale": "The current sidecar remains overprivileged until the migration is complete."
+            },
+            {
+              "evidenceId": "E004",
+              "effect": "unaffected",
+              "tacticalFixRequired": false,
+              "rationale": "A new service boundary replaces rather than extends the current callback structure."
+            }
+          ],
+          "tradeoffs": [
+            {
+              "dimension": "security",
+              "direction": "improves",
+              "confidence": "medium",
+              "basis": "hypothetical",
+              "assessment": "Compromise containment could be stronger if each service receives a capability-limited protocol and entitlement set.",
+              "validationPlan": "Threat-model the proposed protocols and validate each service against concrete attack paths."
+            },
+            {
+              "dimension": "performance",
+              "direction": "regresses",
+              "confidence": "medium",
+              "basis": "analogous",
+              "assessment": "Additional process hops and serialization would enter latency-sensitive capture or transcription paths.",
+              "validationPlan": "Prototype the hot path and compare first-sample, p50, and p95 dictation latency."
+            },
+            {
+              "dimension": "memory",
+              "direction": "regresses",
+              "confidence": "high",
+              "basis": "source-derived",
+              "assessment": "Multiple services require additional processes, runtimes, and buffers.",
+              "validationPlan": "Compare idle and active resident memory with the current sidecar."
+            },
+            {
+              "dimension": "reliability",
+              "direction": "unknown",
+              "confidence": "medium",
+              "basis": "hypothetical",
+              "assessment": "Failure isolation improves, but lifecycle coordination and partial service failure become new risks.",
+              "validationPlan": "Exercise service crashes, restart, backpressure, and in-flight recovery."
+            },
+            {
+              "dimension": "operability",
+              "direction": "regresses",
+              "confidence": "high",
+              "basis": "source-derived",
+              "assessment": "Packaging, signing, logging, crash diagnosis, and release verification expand for every service.",
+              "validationPlan": "Build a release checklist and measure added artifact and diagnostic surface."
+            },
+            {
+              "dimension": "migration",
+              "direction": "regresses",
+              "confidence": "high",
+              "basis": "source-derived",
+              "assessment": "The current JSON-RPC state owner would need staged extraction and compatibility support.",
+              "validationPlan": "Design a dual-path migration and prove rollback while old and new services coexist."
+            }
+          ],
+          "residualRisks": [
+            "A privileged broker remains trusted.",
+            "Protocol validation defects can replace ambient-authority defects.",
+            "The current package remains vulnerable until migration finishes."
+          ],
+          "implementationReadiness": {
+            "affectedComponents": [
+              "electron",
+              "rust-sidecar",
+              "packaging",
+              "release verification"
+            ],
+            "workPackages": [
+              "Define capability protocols.",
+              "Extract services incrementally.",
+              "Migrate and remove the monolithic sidecar authority."
+            ],
+            "acceptanceCriteria": [
+              "Each service has a documented authority set and failure boundary.",
+              "Latency and memory remain within product budgets."
+            ],
+            "migrationNotes": [
+              "Keep the per-binary entitlement fix throughout migration."
+            ],
+            "rollback": "Retain the existing sidecar path behind a versioned protocol until service parity and package evidence are complete."
+          }
+        }
+      ],
+      "recommendedOptionId": "per-binary-entitlements",
+      "recommendation": "Use the per-binary entitlement override for launch. Reconsider service isolation only if later findings show that native sidecar compromise remains a high-impact recurring boundary."
+    }
+  ],
+  "openQuestions": [
+    "Does exact-package microphone or system-audio capture require one narrowly scoped sidecar entitlement?"
+  ]
+}

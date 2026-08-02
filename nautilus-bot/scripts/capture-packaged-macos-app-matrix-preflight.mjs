@@ -2,6 +2,7 @@
 import fs from "node:fs";
 import path from "node:path";
 import { spawnSync } from "node:child_process";
+import { evaluateCandidateEvidenceProvenance } from "./lib/macos-component-equivalence.mjs";
 
 const repoRoot = path.resolve(import.meta.dirname, "..");
 const args = process.argv.slice(2);
@@ -32,6 +33,19 @@ const markdownPath = path.resolve(
   repoRoot,
   valueFor("--markdown", "artifacts/qa/macos/app-matrix-preflight.md")
 );
+const requestedCandidateApp = valueFor("--candidate-app", null);
+const candidateAppPath = requestedCandidateApp
+  ? fs.realpathSync(path.resolve(repoRoot, requestedCandidateApp))
+  : null;
+const requestedEquivalence = valueFor("--equivalence", null);
+const equivalencePath = requestedEquivalence
+  ? path.resolve(repoRoot, requestedEquivalence)
+  : null;
+const insertionVerifierPath = path.join(
+  repoRoot,
+  "scripts",
+  "verify-packaged-macos-app-matrix-insertion.mjs"
+);
 
 const appCandidates = {
   "Apple Notes": [
@@ -42,7 +56,6 @@ const appCandidates = {
   Slack: ["/Applications/Slack.app"],
   Notion: ["/Applications/Notion.app"],
   "VS Code": ["/Applications/Visual Studio Code.app"],
-  Cursor: ["/Applications/Cursor.app"],
   Messages: [
     "/System/Applications/Messages.app",
     "/Applications/Messages.app",
@@ -74,6 +87,17 @@ function readJson(filePath) {
     return null;
   }
   return JSON.parse(fs.readFileSync(filePath, "utf8"));
+}
+
+const componentEquivalence = equivalencePath ? readJson(equivalencePath) : null;
+
+function canonicalExistingPath(value) {
+  if (!value) return null;
+  try {
+    return fs.realpathSync(path.resolve(repoRoot, value));
+  } catch {
+    return null;
+  }
 }
 
 function writeText(filePath, body) {
@@ -108,12 +132,14 @@ function parseAppMatrix(filePath) {
     const cells = line.split("|").slice(1, -1).map((cell) => cell.trim());
     if (cells.length < 4 || cells[0] === "App" || cells[0] === "---") continue;
     if (platform !== "macOS") continue;
+    const hasLaunchGate = cells.length >= 5;
     rows.push({
       platform,
       app: cells[0],
       status: cells[1],
       modeUsed: cells[2],
-      notes: cells[3],
+      launchGate: hasLaunchGate ? cells[3] : "REQUIRED",
+      notes: hasLaunchGate ? cells[4] : cells[3],
     });
   }
   return rows;
@@ -173,6 +199,126 @@ function spotlightPathsFor(app) {
     .filter(Boolean);
 }
 
+function evidenceMarkdownPathFromNotes(notes) {
+  const match = /Packaged insertion verified in `([^`]+\.md)`/i.exec(String(notes ?? ""));
+  if (!match) return null;
+  const resolved = path.resolve(repoRoot, match[1]);
+  const relative = path.relative(repoRoot, resolved);
+  if (relative.startsWith(`..${path.sep}`) || path.isAbsolute(relative)) {
+    return null;
+  }
+  return resolved;
+}
+
+function verifyLinkedInsertionEvidence(row) {
+  if (row.launchGate === "DEFERRED" || row.status === "DEFERRED") {
+    return {
+      required: false,
+      valid: false,
+      markdownPath: null,
+      jsonPath: null,
+      verifyMode: null,
+      summary: "This optional compatibility row is deferred and does not require v1 evidence.",
+    };
+  }
+  const statusEligible = row.status === "SUPPORTED" || row.status === "PARTIAL";
+  if (!statusEligible) {
+    return {
+      required: false,
+      valid: false,
+      markdownPath: null,
+      jsonPath: null,
+      verifyMode: null,
+      summary: "The row is still pending real packaged insertion evidence.",
+    };
+  }
+
+  const evidenceMarkdownPath = evidenceMarkdownPathFromNotes(row.notes);
+  if (!evidenceMarkdownPath) {
+    return {
+      required: true,
+      valid: false,
+      markdownPath: null,
+      jsonPath: null,
+      verifyMode: null,
+      summary:
+        "The row status requires a repository-relative `Packaged insertion verified in` Markdown link.",
+    };
+  }
+  const evidenceJsonPath = evidenceMarkdownPath.replace(/\.md$/i, ".json");
+  if (!fs.existsSync(evidenceMarkdownPath) || !fs.existsSync(evidenceJsonPath)) {
+    return {
+      required: true,
+      valid: false,
+      markdownPath: path.relative(repoRoot, evidenceMarkdownPath),
+      jsonPath: path.relative(repoRoot, evidenceJsonPath),
+      verifyMode: null,
+      summary: "The linked Markdown and JSON evidence pair does not exist.",
+    };
+  }
+
+  let artifact;
+  try {
+    artifact = readJson(evidenceJsonPath);
+  } catch (error) {
+    return {
+      required: true,
+      valid: false,
+      markdownPath: path.relative(repoRoot, evidenceMarkdownPath),
+      jsonPath: path.relative(repoRoot, evidenceJsonPath),
+      verifyMode: null,
+      summary: `The linked JSON evidence is unreadable: ${
+        error instanceof Error ? error.message : String(error)
+      }`,
+    };
+  }
+
+  const verifyMode = String(artifact?.verifyMode ?? "");
+  const result = spawnSync(
+    process.execPath,
+    [
+      insertionVerifierPath,
+      "--target-app",
+      row.app,
+      "--verify-mode",
+      verifyMode,
+      "--file",
+      evidenceJsonPath,
+      "--markdown",
+      evidenceMarkdownPath,
+    ],
+    {
+      cwd: repoRoot,
+      encoding: "utf8",
+    }
+  );
+  const artifactAppPath = canonicalExistingPath(artifact?.appPath);
+  const artifactSidecarPath = canonicalExistingPath(artifact?.sidecarPath);
+  const candidateProvenance = evaluateCandidateEvidenceProvenance({
+    artifactAppPath,
+    artifactSidecarPath,
+    candidateAppPath,
+    equivalence: componentEquivalence,
+  });
+  const canonicalVerifierPassed = result.status === 0;
+  const valid = canonicalVerifierPassed && candidateProvenance.valid;
+  return {
+    required: true,
+    valid,
+    markdownPath: path.relative(repoRoot, evidenceMarkdownPath),
+    jsonPath: path.relative(repoRoot, evidenceJsonPath),
+    verifyMode: verifyMode || null,
+    candidateProvenance,
+    summary: valid
+      ? `${(result.stdout ?? "").trim()} ${candidateProvenance.summary}`.trim()
+      : !candidateProvenance.valid
+        ? candidateProvenance.summary
+        : (result.stderr ?? "").trim() ||
+        (result.stdout ?? "").trim() ||
+        `Insertion verifier exited ${result.status}.`,
+  };
+}
+
 const generatedAt = new Date().toISOString();
 const matrixRows = parseAppMatrix(matrixPath);
 const blockedEntries = parseBlockedRegister(blockedRegisterPath);
@@ -180,8 +326,9 @@ const packagedBenchmark = readJson(packagedBenchmarkPath);
 const packagedScenarios = packagedScenariosByApp(packagedBenchmark);
 
 const rows = matrixRows.map((row) => {
-  const directInstalledPaths = installedPathsFor(row.app);
-  const spotlightPaths = spotlightPathsFor(row.app);
+  const requiredForLaunch = row.launchGate === "REQUIRED";
+  const directInstalledPaths = requiredForLaunch ? installedPathsFor(row.app) : [];
+  const spotlightPaths = requiredForLaunch ? spotlightPathsFor(row.app) : [];
   const installedPaths = [...new Set([...directInstalledPaths, ...spotlightPaths])].sort();
   const openBlockedEntries = blockedEntries
     .filter(
@@ -196,13 +343,31 @@ const rows = matrixRows.map((row) => {
     packagedScenarios.get(normalizeAppName(row.app.replace(/\s+\(Chrome\)$/i, ""))) ??
     [];
   const canAttemptManualCapture =
+    requiredForLaunch &&
     row.status === "PENDING" &&
     installedPaths.length > 0 &&
     openBlockedEntries.length === 0;
   const captureCommand = canAttemptManualCapture ? captureCommandFor(row.app) : null;
+  const insertionEvidence = verifyLinkedInsertionEvidence(row);
+  const launchReady =
+    insertionEvidence.valid === true && openBlockedEntries.length === 0;
+  const launchGateSatisfied = !requiredForLaunch || launchReady;
+  const launchReadyReason = !requiredForLaunch
+    ? "This optional compatibility row is explicitly deferred and does not block the v1 release gate."
+    : launchReady
+      ? insertionEvidence.candidateProvenance?.mode ===
+        "verified-unsigned-component-equivalence"
+        ? "The matrix status is supported or partial, the linked insertion artifact passes the canonical verifier, a trusted component-equivalence receipt binds its sidecar code to the exact candidate, and no blocked-app entry remains open."
+        : "The matrix status is supported or partial, the linked exact-candidate insertion artifact passes the canonical verifier, and no blocked-app entry remains open."
+      : insertionEvidence.required && !insertionEvidence.valid
+        ? `The matrix status claims support, but the linked evidence is invalid: ${insertionEvidence.summary}`
+        : openBlockedEntries.length > 0
+          ? `Blocked-app entries remain open: ${openBlockedEntries.join(", ")}.`
+          : "Real packaged insertion evidence has not been captured and verified yet.";
 
   return {
     ...row,
+    requiredForLaunch,
     appInstalled: installedPaths.length > 0,
     installedPaths,
     packagedBenchmarkCovered: packagedScenarioIds.length > 0,
@@ -211,28 +376,40 @@ const rows = matrixRows.map((row) => {
     canAttemptManualCapture,
     scratchTargetEnv: canAttemptManualCapture ? envNameForScratchTarget(row.app) : null,
     captureCommand,
-    launchReady: false,
-    launchReadyReason:
-      "Preflight only. Real packaged insertion evidence must be captured before status can change.",
+    insertionEvidence,
+    launchReady,
+    launchGateSatisfied,
+    launchReadyReason,
   };
 });
 
+const requiredRows = rows.filter((row) => row.requiredForLaunch);
 const summary = {
   total: rows.length,
+  required: requiredRows.length,
+  deferred: rows.length - requiredRows.length,
   installed: rows.filter((row) => row.appInstalled).length,
   packagedBenchmarkCovered: rows.filter((row) => row.packagedBenchmarkCovered).length,
   openBlockedEntries: new Set(rows.flatMap((row) => row.openBlockedEntries)).size,
+  openRequiredBlockedEntries: new Set(
+    requiredRows.flatMap((row) => row.openBlockedEntries)
+  ).size,
   manualCaptureCandidates: rows.filter((row) => row.canAttemptManualCapture).length,
-  launchReady: 0,
+  launchReady: rows.filter((row) => row.launchReady).length,
+  requiredLaunchReady: requiredRows.filter((row) => row.launchReady).length,
+  launchGateSatisfied: rows.filter((row) => row.launchGateSatisfied).length,
 };
+const pass = summary.requiredLaunchReady === summary.required;
 
 const report = {
   generatedAt,
-  pass: false,
-  status: "BLOCKED",
+  pass,
+  status: pass ? "PASS" : "BLOCKED",
   matrixPath,
   blockedRegisterPath,
   packagedBenchmarkPath,
+  candidateAppPath,
+  equivalencePath,
   summary,
   rows,
 };
@@ -248,12 +425,24 @@ const markdownRows = rows
       : "none";
     const scratchTargetEnv = row.scratchTargetEnv ? `\`${row.scratchTargetEnv}\`` : "not ready";
     const captureCommand = row.captureCommand ? `\`${row.captureCommand}\`` : "not ready";
-    const next = row.canAttemptManualCapture
-      ? "capture real packaged insertion"
-      : row.appInstalled
-        ? "resolve blocked entry or scenario gap"
-        : "install target app before capture";
-    return `| ${row.app} | ${row.modeUsed} | ${installed} | ${packaged} | ${blocked} | ${scratchTargetEnv} | ${captureCommand} | ${next} |`;
+    const evidence = row.insertionEvidence.valid
+      ? `verified (${row.insertionEvidence.verifyMode})`
+      : row.insertionEvidence.required
+        ? "invalid linked evidence"
+        : "missing";
+    const next = !row.requiredForLaunch
+      ? "deferred from v1"
+      : row.launchReady
+      ? "none"
+      : row.insertionEvidence.required && !row.insertionEvidence.valid
+        ? "repair linked evidence"
+        : row.canAttemptManualCapture
+          ? "capture real packaged insertion"
+          : row.appInstalled
+            ? "resolve blocked entry or scenario gap"
+            : "install target app before capture";
+    const gateSatisfied = row.launchGateSatisfied ? "yes" : "no";
+    return `| ${row.app} | ${row.modeUsed} | ${row.launchGate} | ${gateSatisfied} | ${installed} | ${evidence} | ${packaged} | ${blocked} | ${scratchTargetEnv} | ${captureCommand} | ${next} |`;
   })
   .join("\n");
 
@@ -262,32 +451,36 @@ writeText(
   markdownPath,
   `# macOS Dictation App Matrix Preflight
 
-Status: BLOCKED
+Status: ${report.status}
 Generated: ${generatedAt}
 
-This is a packaged-evidence preflight only. It does not certify app support and must not be used to move any app out of \`PENDING\`.
+This preflight certifies a \`REQUIRED\` \`SUPPORTED\` or \`PARTIAL\` row only when its linked JSON and Markdown pair passes the canonical packaged insertion verifier. When \`--candidate-app\` is supplied, the capture must either name that exact bundle or be covered by a verifier-clean packaged component-equivalence receipt. It never promotes a \`PENDING\` row. \`DEFERRED\` rows are reported as compatibility backlog and do not block v1.
 
 ## Summary
 
 - Matrix rows: ${summary.total}
+- Required launch rows: ${summary.required}
+- Deferred compatibility rows: ${summary.deferred}
 - Installed target apps found: ${summary.installed}
 - Rows covered by packaged benchmark fixtures: ${summary.packagedBenchmarkCovered}
 - Open blocked-app entries: ${summary.openBlockedEntries}
+- Open blocked-app entries on required rows: ${summary.openRequiredBlockedEntries}
 - Manual capture candidates: ${summary.manualCaptureCandidates}
-- Launch-ready rows certified by this artifact: ${summary.launchReady}
+- Required launch-ready rows certified by this artifact: ${summary.requiredLaunchReady}
 
 ## Rows
 
-| App | Mode | Installed | Packaged benchmark scenarios | Open blocked entries | Scratch target env | Capture command | Next action |
-| --- | --- | --- | --- | --- | --- | --- | --- |
+| App | Mode | Launch gate | Gate satisfied | Installed | Linked insertion evidence | Packaged benchmark scenarios | Open blocked entries | Scratch target env | Capture command | Next action |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
 ${markdownRows}
 
 ## Required Follow-Up
 
-- Capture real packaged insertion behavior in each target editor.
-- Use the per-row capture command for every manual capture candidate.
+- Capture real packaged insertion behavior only for a missing \`REQUIRED\` row.
+- Use the per-row capture command only for a required manual capture candidate.
 - Update \`docs/dictation-app-compatibility-matrix.md\` only after real insertion evidence exists.
-- Close blocked-app register entries only after their required evidence is attached.
+- Keep every required \`SUPPORTED\` or \`PARTIAL\` row linked to a verifier-clean JSON and Markdown pair.
+- Deferred rows may remain open as compatibility backlog without blocking v1.
 `
 );
 

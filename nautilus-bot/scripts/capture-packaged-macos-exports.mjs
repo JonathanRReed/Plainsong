@@ -19,7 +19,10 @@ const appPath = path.resolve(repoRoot, valueFor("--app", "release/mac-arm64/Plai
 const outPath = path.resolve(repoRoot, valueFor("--out", "artifacts/qa/macos/exports.json"));
 const timeoutMs = Number(valueFor("--timeout-ms", "300000"));
 const sidecarPath = path.join(appPath, "Contents", "Resources", "sidecar", "plainsong-sidecar");
-const dataDir = path.join(os.homedir(), "Library", "Application Support", "Plainsong");
+const dataRoot = process.env.PLAINSONG_DATA_DIR
+  ? path.resolve(process.env.PLAINSONG_DATA_DIR)
+  : path.join(os.homedir(), "Library", "Application Support");
+const dataDir = path.join(dataRoot, "Plainsong");
 const dbPath = path.join(dataDir, "plainsong.db");
 const dbSidecarPaths = [dbPath, `${dbPath}-wal`, `${dbPath}-shm`];
 const dbBackups = new Map();
@@ -27,9 +30,9 @@ const recordingId = `qa-exports-${Date.now()}`;
 const transcriptId = `${recordingId}-transcript`;
 const now = new Date().toISOString();
 const exportDir = path.join(
-  os.homedir(),
-  "Documents",
-  "Plainsong",
+  process.env.PLAINSONG_DATA_DIR
+    ? path.join(dataDir, "qa-exports")
+    : path.join(os.homedir(), "Documents", "Plainsong"),
   `qa-packaged-exports-${Date.now()}`
 );
 const transcriptText =
@@ -81,6 +84,15 @@ if (!fs.existsSync(dbPath)) {
 function hashBytes(bytes) {
   if (!bytes) return null;
   return crypto.createHash("sha256").update(bytes).digest("hex");
+}
+
+function pathsReferToSameFile(left, right) {
+  if (!left || !right) return false;
+  try {
+    return fs.realpathSync(left) === fs.realpathSync(right);
+  } catch {
+    return false;
+  }
 }
 
 function snapshotDbFiles() {
@@ -352,7 +364,7 @@ try {
     const file = fs.existsSync(target) ? readFileSummary(target) : null;
     const ok =
       Boolean(response?.exportPath) &&
-      response.exportPath === target &&
+      pathsReferToSameFile(response.exportPath, target) &&
       file !== null &&
       file.sizeBytes > 0 &&
       file.containsTranscript;
@@ -372,7 +384,7 @@ try {
       templateId: template.id,
       format: template.format,
       ok:
-        response?.exportPath === target &&
+        pathsReferToSameFile(response?.exportPath, target) &&
         file !== null &&
         file.sizeBytes > 0 &&
         file.containsTranscript,

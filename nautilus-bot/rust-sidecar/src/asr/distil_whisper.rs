@@ -11,14 +11,35 @@ use std::path::{Path, PathBuf};
 // ---------------------------------------------------------------------------
 const DISTIL_MODEL_ID: &str = "distil-large-v3.5";
 const DISTIL_HF_REPO: &str = "distil-whisper/distil-large-v3.5";
+const DISTIL_HF_REVISION: &str = "728a7691f3ff1d3d971528d3203a6e9559165d41";
 
 /// Only the files needed for Candle inference (safetensors + tokenizer).
-const DISTIL_REQUIRED_FILES: [&str; 4] = [
-    "model.safetensors",
-    "config.json",
-    "tokenizer.json",
-    "preprocessor_config.json",
+const DISTIL_REQUIRED_FILES: [(&str, &str); 4] = [
+    (
+        "model.safetensors",
+        "76ec9f754fc4b4810845dc36b71d1897c1342e702810c179e1569690084cfb0c",
+    ),
+    (
+        "config.json",
+        "515a10a9979258d3fc71cf79b2cd055c189f07d78879a15bd9bc282673308b85",
+    ),
+    (
+        "tokenizer.json",
+        "b3c8202bbf06d8ee4232c5984baa563784ac4737e2e7fdc42fa180200d3cfcdb",
+    ),
+    (
+        "preprocessor_config.json",
+        "7ccc62c6f2765af1f3b46c00c9b5894426835a05021c8b9c01eecb6dfb542711",
+    ),
 ];
+
+pub(crate) fn model_integrity_artifacts(models_root: &Path) -> Vec<(PathBuf, String)> {
+    let model_dir = models_root.join("distil_whisper");
+    DISTIL_REQUIRED_FILES
+        .iter()
+        .map(|(file_name, sha256)| (model_dir.join(file_name), (*sha256).to_string()))
+        .collect()
+}
 
 pub struct DistilWhisperProvider {
     model_dir: PathBuf,
@@ -26,7 +47,7 @@ pub struct DistilWhisperProvider {
 
 impl DistilWhisperProvider {
     pub fn new(_selected_model_id: Option<&str>) -> Self {
-        let model_dir = dirs::data_dir()
+        let model_dir = crate::paths::data_dir()
             .unwrap_or_else(|| PathBuf::from("."))
             .join("Plainsong")
             .join("models")
@@ -37,7 +58,13 @@ impl DistilWhisperProvider {
     fn has_required_files(&self) -> bool {
         DISTIL_REQUIRED_FILES
             .iter()
-            .all(|f| self.model_dir.join(f).exists())
+            .all(|(file_name, _)| self.model_dir.join(file_name).exists())
+    }
+
+    fn has_trusted_required_files(&self) -> bool {
+        DISTIL_REQUIRED_FILES.iter().all(|(file_name, sha256)| {
+            crate::download::is_model_artifact_trusted(&self.model_dir.join(file_name), sha256)
+        })
     }
 
     fn wav_duration_seconds(path: &Path) -> f64 {
@@ -63,7 +90,7 @@ impl Default for DistilWhisperProvider {
 
 #[cfg(feature = "asr-canary")]
 pub(crate) fn clear_cached_runtime() {
-    let model_dir = dirs::data_dir()
+    let model_dir = crate::paths::data_dir()
         .unwrap_or_else(|| PathBuf::from("."))
         .join("Plainsong")
         .join("models")
@@ -127,6 +154,11 @@ impl AsrProvider for DistilWhisperProvider {
         if !self.has_required_files() {
             return Err(anyhow::anyhow!(
                 "Distil-Whisper model not downloaded. Use the model manager to download it."
+            ));
+        }
+        if !self.has_trusted_required_files() {
+            return Err(anyhow::anyhow!(
+                "Distil-Whisper model files have not passed Plainsong integrity verification. Re-download the model from Settings."
             ));
         }
 
@@ -233,18 +265,15 @@ impl AsrProvider for DistilWhisperProvider {
         let progress_cb = std::sync::Arc::new(progress_cb);
         let n_files = DISTIL_REQUIRED_FILES.len() as f32;
 
-        for (i, file_name) in DISTIL_REQUIRED_FILES.iter().enumerate() {
+        for (i, (file_name, sha256)) in DISTIL_REQUIRED_FILES.iter().enumerate() {
             let destination = self.model_dir.join(file_name);
-            if destination.exists() {
-                continue;
-            }
             let url = format!(
-                "https://huggingface.co/{}/resolve/main/{}",
-                DISTIL_HF_REPO, file_name
+                "https://huggingface.co/{}/resolve/{}/{}",
+                DISTIL_HF_REPO, DISTIL_HF_REVISION, file_name
             );
             let cb = progress_cb.clone();
             manager
-                .download_file_unverified(&url, &destination, move |p| {
+                .download_verified_model_asset(&url, &destination, sha256, move |p| {
                     cb((i as f32 / n_files + p.percentage as f32 / 100.0 / n_files) * 100.0);
                     tracing::info!(
                         "Distil-Whisper {} download: {:.1}%",
@@ -256,5 +285,22 @@ impl AsrProvider for DistilWhisperProvider {
         }
         tracing::info!("Distil-Whisper model downloaded successfully");
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod integrity_tests {
+    use super::*;
+
+    #[test]
+    fn runtime_assets_are_revision_and_digest_pinned() {
+        assert_eq!(DISTIL_HF_REVISION.len(), 40);
+        for (file_name, sha256) in DISTIL_REQUIRED_FILES {
+            assert!(!file_name.is_empty());
+            assert_eq!(sha256.len(), 64);
+            assert!(sha256
+                .chars()
+                .all(|character| character.is_ascii_hexdigit()));
+        }
     }
 }

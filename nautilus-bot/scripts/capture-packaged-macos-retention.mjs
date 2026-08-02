@@ -23,12 +23,19 @@ const outPath = path.resolve(
   repoRoot,
   valueFor("--out", "artifacts/qa/macos/retention-policies.json")
 );
-const configDir = path.join(os.homedir(), "Library", "Application Support", "Plainsong");
+const dataRoot = process.env.PLAINSONG_DATA_DIR
+  ? path.resolve(process.env.PLAINSONG_DATA_DIR)
+  : path.join(os.homedir(), "Library", "Application Support");
+const configRoot = process.env.PLAINSONG_CONFIG_DIR
+  ? path.resolve(process.env.PLAINSONG_CONFIG_DIR)
+  : path.join(os.homedir(), "Library", "Application Support");
+const dataDir = path.join(dataRoot, "Plainsong");
+const configDir = path.join(configRoot, "Plainsong");
 const workDir = path.resolve(
   repoRoot,
   valueFor(
     "--work-dir",
-    path.join(configDir, "recordings", `.qa-retention-${process.pid}`)
+    path.join(dataDir, "recordings", `.qa-retention-${process.pid}`)
   )
 );
 const timeoutMs = Number(valueFor("--timeout-ms", "90000"));
@@ -40,7 +47,7 @@ const sidecarPath = path.join(
   "plainsong-sidecar"
 );
 const settingsPath = path.join(configDir, "settings.json");
-const dbPath = path.join(configDir, "plainsong.db");
+const dbPath = path.join(dataDir, "plainsong.db");
 const dbSidecarPaths = [dbPath, `${dbPath}-wal`, `${dbPath}-shm`];
 const dbBackups = new Map();
 const originalSettingsBytes = fs.existsSync(settingsPath)

@@ -13,6 +13,7 @@ import { listen } from "@/lib/electron";
 import { Sidebar } from "@/components/sidebar";
 import { RecordingProvider } from "@/hooks/use-recording";
 import { DataCacheProvider } from "@/hooks/data-cache-context";
+import { ProductReadinessProvider } from "@/features/readiness/product-readiness-context";
 import { TooltipProvider } from "@/components/ui/tooltip";
 import { ThemeProvider } from "@/components/theme-provider";
 import { FirstRunWizard } from "@/components/first-run-wizard";
@@ -88,15 +89,17 @@ export class ErrorBoundary extends Component<ErrorBoundaryProps, ErrorBoundarySt
         <div className="flex-1 flex items-center justify-center p-8">
           <div className="surface-panel max-w-md rounded-xl border border-border/60 px-8 py-10 text-center">
             <span className="neume neume-rust mx-auto mb-5 block" aria-hidden="true" />
-            <h2 className="font-serif text-xl font-semibold text-destructive">
+            <div role="alert" aria-live="assertive">
+              <h2 className="font-serif text-xl font-semibold text-destructive">
               Something went wrong
-            </h2>
-            <p className="mt-2 text-sm leading-6 text-muted-foreground">
-              {this.state.error?.message ?? "An unexpected error occurred."}
-            </p>
+              </h2>
+              <p className="mt-2 text-sm leading-6 text-muted-foreground">
+                {this.state.error?.message ?? "An unexpected error occurred."}
+              </p>
+            </div>
             <button
               type="button"
-              className="transition-smooth mt-6 rounded-md border border-border/70 px-4 py-2 text-sm text-muted-foreground hover:bg-muted hover:text-foreground"
+              className="transition-smooth mt-6 rounded-md border border-border/70 px-4 py-2 text-sm text-muted-foreground hover:bg-muted hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2"
               onClick={() => this.setState({ hasError: false, error: null })}
             >
               Try Again
@@ -117,6 +120,16 @@ const VIEW_COMPONENTS: Record<ViewId, ComponentType> = {
   exports: ExportsView,
   settings: SettingsView,
   setup: SetupView,
+};
+
+const VIEW_LABELS: Record<ViewId, string> = {
+  dashboard: "Home",
+  projects: "Projects",
+  recordings: "Meetings",
+  dictation: "Dictation",
+  exports: "Exports",
+  settings: "Settings",
+  setup: "Setup",
 };
 
 interface MainViewRequestEvent {
@@ -183,6 +196,8 @@ function App() {
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
   const [commandPaletteOpen, setCommandPaletteOpen] = useState(false);
   const firstViewMarked = useRef(false);
+  const mainRef = useRef<HTMLElement>(null);
+  const navigationFocusReadyRef = useRef(false);
 
   // UI overlays
   const [wizardMode, setWizardMode] = useState<OnboardingMode | null>(null);
@@ -202,6 +217,14 @@ function App() {
     }
     performance.mark(`view-change:${activeView}`);
     console.debug(`[perf] view-change:${activeView}`);
+  }, [activeView]);
+
+  useEffect(() => {
+    if (!navigationFocusReadyRef.current) {
+      navigationFocusReadyRef.current = true;
+      return;
+    }
+    mainRef.current?.focus({ preventScroll: true });
   }, [activeView]);
 
   useEffect(() => {
@@ -338,6 +361,7 @@ function App() {
   };
 
   const ActiveView = VIEW_COMPONENTS[activeView] ?? VIEW_COMPONENTS.dashboard;
+  const activeViewLabel = VIEW_LABELS[activeView] ?? VIEW_LABELS.dashboard;
 
   return (
     <ThemeProvider>
@@ -348,32 +372,59 @@ function App() {
           <ErrorBoundary>
             <RecordingProvider>
               <DataCacheProvider>
-                <div className="app-shell flex h-screen bg-background text-foreground">
-                  <Sidebar
-                    activeView={activeView}
-                    onViewChange={(v) => setActiveView(v as ViewId)}
-                    isCollapsed={sidebarCollapsed}
-                    onToggleCollapse={() => setSidebarCollapsed((c) => !c)}
-                  />
-
-                  <main className="app-main-surface min-w-0 flex-1 overflow-hidden">
-                    <Suspense
-                      fallback={
-                        <div className="flex h-full flex-col items-center justify-center gap-3 text-center">
-                          <span className="neume" aria-hidden="true" />
-                          <p className="font-serif text-sm text-muted-foreground">
-                            Loading workspace...
-                          </p>
-                        </div>
-                      }
+                <ProductReadinessProvider>
+                  <div className="app-shell flex h-screen bg-background text-foreground">
+                    <a
+                      href="#main-content"
+                      className="sr-only z-[100] rounded-md bg-background px-3 py-2 text-sm font-medium text-foreground shadow-lg focus:not-sr-only focus:fixed focus:left-4 focus:top-4 focus:outline-none focus:ring-2 focus:ring-ring focus:ring-offset-2"
                     >
-                      <ActiveView />
-                    </Suspense>
-                  </main>
-                </div>
+                      Skip to workspace
+                    </a>
+                    <Sidebar
+                      activeView={activeView}
+                      onViewChange={(v) => setActiveView(v as ViewId)}
+                      isCollapsed={sidebarCollapsed}
+                      onToggleCollapse={() => setSidebarCollapsed((c) => !c)}
+                    />
 
-                {/* First-run wizard (shown once on first launch) */}
-                {wizardMode && <FirstRunWizard mode={wizardMode} onComplete={handleWizardComplete} />}
+                    <main
+                      id="main-content"
+                      ref={mainRef}
+                      tabIndex={-1}
+                      aria-label={`${activeViewLabel} workspace`}
+                      className="app-main-surface min-w-0 flex-1 overflow-hidden focus-visible:outline-2 focus-visible:outline-offset-[-2px] focus-visible:outline-ring"
+                    >
+                      <Suspense
+                        fallback={
+                          <div className="flex h-full flex-col items-center justify-center gap-3 text-center">
+                            <span className="neume" aria-hidden="true" />
+                            <p className="font-serif text-sm text-muted-foreground">
+                              Loading workspace...
+                            </p>
+                          </div>
+                        }
+                      >
+                        <ActiveView />
+                      </Suspense>
+                    </main>
+                    <span
+                      className="sr-only"
+                      role="status"
+                      aria-live="polite"
+                      aria-label="Current workspace"
+                    >
+                      {activeViewLabel} workspace
+                    </span>
+                  </div>
+
+                  {/* First-run wizard (shown once on first launch) */}
+                  {wizardMode && (
+                    <FirstRunWizard
+                      mode={wizardMode}
+                      onComplete={handleWizardComplete}
+                    />
+                  )}
+                </ProductReadinessProvider>
               </DataCacheProvider>
             </RecordingProvider>
           </ErrorBoundary>

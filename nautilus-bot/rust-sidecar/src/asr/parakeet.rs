@@ -38,6 +38,7 @@ const PARAKEET_LEGACY_MODEL_ID: &str = "parakeet-tdt-ctc-110m";
 // artifact or an HTML error page" floor.
 // ---------------------------------------------------------------------------
 const PARAKEET_V3_REPO: &str = "csukuangfj/sherpa-onnx-nemo-parakeet-tdt-0.6b-v3-int8";
+const PARAKEET_V3_REVISION: &str = "2bda32ec70b097a55adaa07d9a7173915b43cc78";
 const PARAKEET_V3_ENCODER_FILE: &str = "encoder.int8.onnx";
 const PARAKEET_V3_DECODER_FILE: &str = "decoder.int8.onnx";
 const PARAKEET_V3_JOINER_FILE: &str = "joiner.int8.onnx";
@@ -71,6 +72,24 @@ fn v3_min_bytes(file_name: &str) -> u64 {
         .unwrap_or(4096)
 }
 
+fn v3_sha256(file_name: &str) -> Option<&'static str> {
+    match file_name {
+        PARAKEET_V3_ENCODER_FILE => {
+            Some("acfc2b4456377e15d04f0243af540b7fe7c992f8d898d751cf134c3a55fd2247")
+        }
+        PARAKEET_V3_DECODER_FILE => {
+            Some("179e50c43d1a9de79c8a24149a2f9bac6eb5981823f2a2ed88d655b24248db4e")
+        }
+        PARAKEET_V3_JOINER_FILE => {
+            Some("3164c13fc2821009440d20fcb5fdc78bff28b4db2f8d0f0b329101719c0948b3")
+        }
+        PARAKEET_VOCAB_FILE => {
+            Some("d58544679ea4bc6ac563d1f545eb7d474bd6cfa467f0a6e2c1dc1c7d37e3c35d")
+        }
+        _ => None,
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Legacy 110M CTC artifacts
 //
@@ -85,12 +104,46 @@ const PARAKEET_LEGACY_ONNX_ALIASES: [&str; 2] = ["encoder.onnx", "model.onnx"];
 const PARAKEET_VOCAB_FILE: &str = "tokens.txt";
 
 const PARAKEET_LEGACY_REPO: &str = "csukuangfj/sherpa-onnx-nemo-parakeet_tdt_ctc_110m-en-36000";
-const PARAKEET_LEGACY_ONNX_SOURCES: [&str; 1] = [
-    "https://huggingface.co/csukuangfj/sherpa-onnx-nemo-parakeet_tdt_ctc_110m-en-36000/resolve/main/model.onnx",
+const PARAKEET_LEGACY_ONNX_SOURCES: [(&str, &str); 1] = [
+    (
+        "https://huggingface.co/csukuangfj/sherpa-onnx-nemo-parakeet_tdt_ctc_110m-en-36000/resolve/3af92f152d32c836acabf38f4c993bc96b80eb2d/model.onnx",
+        "936806cf3dd0db5aba53f8c7410bb5632d7a8ad6b2c51009f5e4fc0890ec76bf",
+    ),
 ];
-const PARAKEET_LEGACY_TOKENS_SOURCES: [&str; 1] = [
-    "https://huggingface.co/csukuangfj/sherpa-onnx-nemo-parakeet_tdt_ctc_110m-en-36000/resolve/main/tokens.txt",
+const PARAKEET_LEGACY_TOKENS_SOURCES: [(&str, &str); 1] = [
+    (
+        "https://huggingface.co/csukuangfj/sherpa-onnx-nemo-parakeet_tdt_ctc_110m-en-36000/resolve/3af92f152d32c836acabf38f4c993bc96b80eb2d/tokens.txt",
+        "450e56bd2f036fe5b6aa821865838cc5aa9d8b0106134ce9a9ba0664abe6cd10",
+    ),
 ];
+
+pub(crate) fn model_integrity_artifacts(models_root: &Path) -> Vec<(PathBuf, String)> {
+    let legacy_dir = models_root.join("parakeet");
+    let mut artifacts = PARAKEET_LEGACY_ONNX_ALIASES
+        .iter()
+        .map(|file_name| {
+            (
+                legacy_dir.join(file_name),
+                PARAKEET_LEGACY_ONNX_SOURCES[0].1.to_string(),
+            )
+        })
+        .collect::<Vec<_>>();
+    artifacts.push((
+        legacy_dir.join(PARAKEET_VOCAB_FILE),
+        PARAKEET_LEGACY_TOKENS_SOURCES[0].1.to_string(),
+    ));
+
+    let v3_dir = legacy_dir.join(PARAKEET_V3_MODEL_ID);
+    artifacts.extend(PARAKEET_V3_ARTIFACTS.iter().map(|(file_name, _, _)| {
+        (
+            v3_dir.join(file_name),
+            v3_sha256(file_name)
+                .expect("every v3 artifact has a pinned digest")
+                .to_string(),
+        )
+    }));
+    artifacts
+}
 
 // ---------------------------------------------------------------------------
 // Artifact validation
@@ -350,7 +403,7 @@ pub struct ParakeetProvider {
 
 impl ParakeetProvider {
     pub fn new(selected_model_id: Option<&str>) -> Self {
-        let models_root = dirs::data_dir()
+        let models_root = crate::paths::data_dir()
             .unwrap_or_else(|| PathBuf::from("."))
             .join("Plainsong")
             .join("models");
@@ -417,6 +470,26 @@ impl ParakeetProvider {
 
     fn has_required_files(&self) -> bool {
         self.missing_or_invalid_reason().is_none()
+    }
+
+    fn has_trusted_required_files(&self) -> bool {
+        if self.is_legacy_model() {
+            let onnx_sha256 = PARAKEET_LEGACY_ONNX_SOURCES[0].1;
+            let tokens_sha256 = PARAKEET_LEGACY_TOKENS_SOURCES[0].1;
+            return crate::download::is_model_artifact_trusted(
+                &self.legacy_onnx_path(),
+                onnx_sha256,
+            ) && crate::download::is_model_artifact_trusted(
+                &self.vocab_path(),
+                tokens_sha256,
+            );
+        }
+
+        PARAKEET_V3_ARTIFACTS.iter().all(|(file_name, _, _)| {
+            v3_sha256(file_name).is_some_and(|sha256| {
+                crate::download::is_model_artifact_trusted(&self.model_dir.join(file_name), sha256)
+            })
+        })
     }
 
     fn missing_or_invalid_reason(&self) -> Option<String> {
@@ -928,6 +1001,11 @@ impl AsrProvider for ParakeetProvider {
         if let Some(reason) = self.missing_or_invalid_reason() {
             return Err(anyhow::anyhow!(reason));
         }
+        if !self.has_trusted_required_files() {
+            return Err(anyhow::anyhow!(
+                "Parakeet model files have not passed Plainsong integrity verification. Re-download the model from Settings."
+            ));
+        }
         let start = std::time::Instant::now();
         let audio_path_owned = audio_path.to_path_buf();
         let audio_path_for_dur = audio_path_owned.clone();
@@ -1023,30 +1101,23 @@ async fn download_v3(
 
     for (file_name, expected_bytes, _) in PARAKEET_V3_ARTIFACTS {
         let destination = model_dir.join(file_name);
-        let already_valid = if file_name == PARAKEET_VOCAB_FILE {
-            is_valid_tokens_file(&destination)
-        } else {
-            is_valid_onnx_file(&destination, v3_min_bytes(file_name))
-        };
-        if already_valid {
+        let sha256 = v3_sha256(file_name).expect("every v3 artifact has a pinned digest");
+        if crate::download::is_model_artifact_trusted(&destination, sha256) {
             completed_bytes += expected_bytes;
             progress_cb((completed_bytes as f32 / total_bytes as f32) * 100.0);
             continue;
         }
-        if destination.exists() {
-            std::fs::remove_file(&destination).ok();
-        }
 
         let url = format!(
-            "https://huggingface.co/{}/resolve/main/{}",
-            PARAKEET_V3_REPO, file_name
+            "https://huggingface.co/{}/resolve/{}/{}",
+            PARAKEET_V3_REPO, PARAKEET_V3_REVISION, file_name
         );
         let cb = progress_cb.clone();
         let base = completed_bytes as f32;
         let total = total_bytes as f32;
         let share = expected_bytes as f32;
         manager
-            .download_file_unverified(&url, &destination, move |p| {
+            .download_verified_model_asset(&url, &destination, sha256, move |p| {
                 let done = base + share * (p.percentage as f32 / 100.0);
                 cb((done / total) * 100.0);
             })
@@ -1093,12 +1164,12 @@ async fn download_legacy(
         std::fs::remove_file(&vocab_dest).ok();
     }
 
-    if !is_valid_onnx_file(&onnx_dest, 4096) {
+    if !crate::download::is_model_artifact_trusted(&onnx_dest, PARAKEET_LEGACY_ONNX_SOURCES[0].1) {
         let mut last_error = None;
-        for source in PARAKEET_LEGACY_ONNX_SOURCES {
+        for (source, sha256) in PARAKEET_LEGACY_ONNX_SOURCES {
             let cb = progress_cb.clone();
             match manager
-                .download_file_unverified(source, &onnx_dest, move |p| {
+                .download_verified_model_asset(source, &onnx_dest, sha256, move |p| {
                     cb(p.percentage as f32 * 0.95);
                 })
                 .await
@@ -1127,12 +1198,13 @@ async fn download_legacy(
         }
     }
 
-    if !is_valid_tokens_file(&vocab_dest) {
+    if !crate::download::is_model_artifact_trusted(&vocab_dest, PARAKEET_LEGACY_TOKENS_SOURCES[0].1)
+    {
         let mut last_error = None;
-        for source in PARAKEET_LEGACY_TOKENS_SOURCES {
+        for (source, sha256) in PARAKEET_LEGACY_TOKENS_SOURCES {
             let cb = progress_cb.clone();
             match manager
-                .download_file_unverified(source, &vocab_dest, move |p| {
+                .download_verified_model_asset(source, &vocab_dest, sha256, move |p| {
                     cb(95.0 + p.percentage as f32 * 0.05);
                 })
                 .await
@@ -1458,5 +1530,12 @@ mod tests {
             );
         }
         assert_eq!(v3_min_bytes("unknown.onnx"), 4096);
+        assert_eq!(PARAKEET_V3_REVISION.len(), 40);
+        assert!(PARAKEET_LEGACY_ONNX_SOURCES[0]
+            .0
+            .contains("/resolve/3af92f152d32c836acabf38f4c993bc96b80eb2d/"));
+        for (name, _, _) in PARAKEET_V3_ARTIFACTS {
+            assert_eq!(v3_sha256(name).expect("pinned v3 digest").len(), 64);
+        }
     }
 }

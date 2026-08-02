@@ -7,8 +7,9 @@ import path from "node:path";
 const repoRoot = path.resolve(import.meta.dirname, "..");
 const args = process.argv.slice(2);
 
-// --pack-only: verify a `--dir` (electron:pack) build, which has app-update.yml
-// but no latest-mac.yml / zip / blockmap artifacts. Used by the CI package gate.
+// --pack-only: verify app-update.yml without requiring the ZIP manifest or
+// blockmap. Electron Builder does not emit app-update.yml for a macOS `--dir`
+// target, so CI and release validation use the full ZIP-backed mode.
 const packOnly = args.includes("--pack-only");
 
 function valueFor(name, fallback = null) {

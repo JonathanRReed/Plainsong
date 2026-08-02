@@ -25,6 +25,8 @@ const outPath = path.resolve(
 );
 const recordMs = Number(valueFor("--record-ms", "3500"));
 const timeoutMs = Number(valueFor("--timeout-ms", "90000"));
+const inputDeviceId = valueFor("--input-device-id", "")?.trim() ?? "";
+const inputDeviceName = valueFor("--input-device-name", "")?.trim() ?? "";
 const includeSystemAudio = args.includes("--system-audio");
 const expectedCaptureMode = includeSystemAudio ? "me_and_them" : "mic_only";
 const sidecarPath = path.join(
@@ -34,9 +36,16 @@ const sidecarPath = path.join(
   "sidecar",
   "plainsong-sidecar"
 );
-const configDir = path.join(os.homedir(), "Library", "Application Support", "Plainsong");
+const dataRoot = process.env.PLAINSONG_DATA_DIR
+  ? path.resolve(process.env.PLAINSONG_DATA_DIR)
+  : path.join(os.homedir(), "Library", "Application Support");
+const configRoot = process.env.PLAINSONG_CONFIG_DIR
+  ? path.resolve(process.env.PLAINSONG_CONFIG_DIR)
+  : path.join(os.homedir(), "Library", "Application Support");
+const dataDir = path.join(dataRoot, "Plainsong");
+const configDir = path.join(configRoot, "Plainsong");
 const settingsPath = path.join(configDir, "settings.json");
-const dbPath = path.join(configDir, "plainsong.db");
+const dbPath = path.join(dataDir, "plainsong.db");
 const dbSidecarPaths = [dbPath, `${dbPath}-wal`, `${dbPath}-shm`];
 const dbBackups = new Map();
 const originalSettingsBytes = fs.existsSync(settingsPath)
@@ -139,6 +148,13 @@ function qaSettings(base) {
     ...next.audio,
     captureMicrophone: true,
     captureSystemAudio: includeSystemAudio,
+    meetingInputOverrideEnabled: Boolean(inputDeviceId),
+    meetingInputDevice: inputDeviceId
+      ? {
+          deviceId: inputDeviceId,
+          deviceName: inputDeviceName || inputDeviceId,
+        }
+      : next.audio?.meetingInputDevice ?? null,
   };
   return next;
 }
@@ -282,6 +298,8 @@ async function run() {
     dbPath,
     settingsPath,
     recordMs,
+    inputDeviceId: inputDeviceId || null,
+    inputDeviceName: inputDeviceName || null,
     includeSystemAudio,
     expectedCaptureMode,
     pass: false,

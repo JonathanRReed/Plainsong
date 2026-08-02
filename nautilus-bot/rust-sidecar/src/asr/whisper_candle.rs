@@ -12,13 +12,34 @@ use std::{cell::RefCell, thread_local};
 // ---------------------------------------------------------------------------
 const WHISPER_CANDLE_MODEL_ID: &str = "whisper-large-v3-turbo";
 const WHISPER_CANDLE_HF_REPO: &str = "openai/whisper-large-v3-turbo";
+const WHISPER_CANDLE_HF_REVISION: &str = "41f01f3fe87f28c78e2fbf8b568835947dd65ed9";
 
-const WHISPER_CANDLE_REQUIRED_FILES: [&str; 4] = [
-    "model.safetensors",
-    "config.json",
-    "tokenizer.json",
-    "preprocessor_config.json",
+const WHISPER_CANDLE_REQUIRED_FILES: [(&str, &str); 4] = [
+    (
+        "model.safetensors",
+        "542566a422ae4f3fd23f1ba11add198fca01bbf82e66e6a2857b3f608b1eb9d1",
+    ),
+    (
+        "config.json",
+        "c5b526b3e3cd64cd8940dabb45e8ba726629e22d8ed389c29b552f9140daf04a",
+    ),
+    (
+        "tokenizer.json",
+        "297b13372ac43916285644fb9687add3cc62ee2a1adb60da3dc25cc94c1871fd",
+    ),
+    (
+        "preprocessor_config.json",
+        "7ccc62c6f2765af1f3b46c00c9b5894426835a05021c8b9c01eecb6dfb542711",
+    ),
 ];
+
+pub(crate) fn model_integrity_artifacts(models_root: &Path) -> Vec<(PathBuf, String)> {
+    let model_dir = models_root.join("canary");
+    WHISPER_CANDLE_REQUIRED_FILES
+        .iter()
+        .map(|(file_name, sha256)| (model_dir.join(file_name), (*sha256).to_string()))
+        .collect()
+}
 
 #[cfg(feature = "asr-canary")]
 struct WhisperCandleRuntime {
@@ -95,7 +116,7 @@ pub struct WhisperCandleProvider {
 
 impl WhisperCandleProvider {
     pub fn new(_selected_model_id: Option<&str>) -> Self {
-        let model_dir = dirs::data_dir()
+        let model_dir = crate::paths::data_dir()
             .unwrap_or_else(|| PathBuf::from("."))
             .join("Plainsong")
             .join("models")
@@ -106,7 +127,15 @@ impl WhisperCandleProvider {
     fn has_required_files(&self) -> bool {
         WHISPER_CANDLE_REQUIRED_FILES
             .iter()
-            .all(|f| self.model_dir.join(f).exists())
+            .all(|(file_name, _)| self.model_dir.join(file_name).exists())
+    }
+
+    fn has_trusted_required_files(&self) -> bool {
+        WHISPER_CANDLE_REQUIRED_FILES
+            .iter()
+            .all(|(file_name, sha256)| {
+                crate::download::is_model_artifact_trusted(&self.model_dir.join(file_name), sha256)
+            })
     }
 
     fn wav_duration_seconds(path: &Path) -> f64 {
@@ -301,6 +330,11 @@ impl AsrProvider for WhisperCandleProvider {
                 "Whisper Candle model is not downloaded. Use the model manager to download it."
             ));
         }
+        if !self.has_trusted_required_files() {
+            return Err(anyhow::anyhow!(
+                "Whisper Candle model files have not passed Plainsong integrity verification. Re-download the model from Settings."
+            ));
+        }
 
         let start = std::time::Instant::now();
         let model_dir = self.model_dir.clone();
@@ -421,19 +455,16 @@ impl AsrProvider for WhisperCandleProvider {
         let manager = DownloadManager::new()?;
         let progress_cb = std::sync::Arc::new(progress_cb);
 
-        for (i, file_name) in WHISPER_CANDLE_REQUIRED_FILES.iter().enumerate() {
+        for (i, (file_name, sha256)) in WHISPER_CANDLE_REQUIRED_FILES.iter().enumerate() {
             let destination = self.model_dir.join(file_name);
-            if destination.exists() {
-                continue;
-            }
             let url = format!(
-                "https://huggingface.co/{}/resolve/main/{}",
-                WHISPER_CANDLE_HF_REPO, file_name
+                "https://huggingface.co/{}/resolve/{}/{}",
+                WHISPER_CANDLE_HF_REPO, WHISPER_CANDLE_HF_REVISION, file_name
             );
             let cb = progress_cb.clone();
             let n_files = WHISPER_CANDLE_REQUIRED_FILES.len() as f32;
             manager
-                .download_file_unverified(&url, &destination, move |p| {
+                .download_verified_model_asset(&url, &destination, sha256, move |p| {
                     cb((i as f32 / n_files + p.percentage as f32 / 100.0 / n_files) * 100.0);
                     tracing::info!(
                         "Whisper Candle {} download: {:.1}%",
@@ -446,5 +477,22 @@ impl AsrProvider for WhisperCandleProvider {
 
         tracing::info!("Whisper Candle model downloaded successfully");
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod integrity_tests {
+    use super::*;
+
+    #[test]
+    fn runtime_assets_are_revision_and_digest_pinned() {
+        assert_eq!(WHISPER_CANDLE_HF_REVISION.len(), 40);
+        for (file_name, sha256) in WHISPER_CANDLE_REQUIRED_FILES {
+            assert!(!file_name.is_empty());
+            assert_eq!(sha256.len(), 64);
+            assert!(sha256
+                .chars()
+                .all(|character| character.is_ascii_hexdigit()));
+        }
     }
 }

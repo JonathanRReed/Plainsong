@@ -29,6 +29,7 @@ use std::path::PathBuf;
 #[cfg(feature = "diarization")]
 pub struct SpeakerEmbeddingExtractor {
     model_path: PathBuf,
+    model_id: String,
     sample_rate: u32,
 }
 
@@ -41,7 +42,7 @@ impl SpeakerEmbeddingExtractor {
 
     /// Create an embedding extractor with a specific model
     pub fn with_model(model_id: &str) -> Result<Self> {
-        let models_dir = dirs::data_dir()
+        let models_dir = crate::paths::data_dir()
             .unwrap_or_else(|| PathBuf::from("."))
             .join("Plainsong")
             .join("models")
@@ -61,13 +62,17 @@ impl SpeakerEmbeddingExtractor {
 
         Ok(Self {
             model_path,
+            model_id: model_id.to_string(),
             sample_rate: 16000,
         })
     }
 
     /// Check if the embedding model is available
     pub fn is_model_available(&self) -> bool {
-        let exists = self.model_path.exists();
+        let exists = crate::download::is_diarization_model_artifact_trusted(
+            &self.model_id,
+            &self.model_path,
+        );
         tracing::info!(
             "is_model_available: path={:?}, exists={}",
             self.model_path,
@@ -84,6 +89,12 @@ impl SpeakerEmbeddingExtractor {
         audio_path: &Path,
         segments: &[(f64, f64)], // (start_sec, end_sec) chunks
     ) -> Result<Vec<(f64, f64, Array1<f32>)>> {
+        if !self.is_model_available() {
+            return Err(anyhow!(
+                "Diarization model '{}' has not passed Plainsong integrity verification. Re-download it from Settings.",
+                self.model_id
+            ));
+        }
         let audio_path = audio_path.to_path_buf();
         let model_path = self.model_path.clone();
         let segments = segments.to_vec();

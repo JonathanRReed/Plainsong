@@ -14,7 +14,7 @@
 //! # Model contract (verified against the actual upstream ONNX file)
 //!
 //! Confirmed by downloading and byte-inspecting
-//! `https://raw.githubusercontent.com/snakers4/silero-vad/master/src/silero_vad/data/silero_vad.onnx`
+//! `snakers4/silero-vad` at the immutable revision pinned by `crate::download`
 //! (the file shipped in the `snakers4/silero-vad` GitHub repo) and cross-checking
 //! against the upstream Python wrapper
 //! (`src/silero_vad/utils_vad.py::OnnxWrapper`) as of the version current at

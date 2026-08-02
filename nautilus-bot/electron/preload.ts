@@ -3,35 +3,32 @@ import { contextBridge, ipcRenderer } from "electron";
 type EventHandler = (payload: unknown) => void;
 type IpcEventHandler = (_event: Electron.IpcRendererEvent, payload: unknown) => void;
 
-const listenerRegistry = new Map<string, WeakMap<EventHandler, IpcEventHandler>>();
-
-function getWrappedHandler(event: string, handler: EventHandler): IpcEventHandler {
-  let eventHandlers = listenerRegistry.get(event);
-  if (!eventHandlers) {
-    eventHandlers = new WeakMap<EventHandler, IpcEventHandler>();
-    listenerRegistry.set(event, eventHandlers);
-  }
-
-  const existing = eventHandlers.get(handler);
-  if (existing) {
-    return existing;
-  }
-
-  const wrapped: IpcEventHandler = (_event, payload) => handler(payload);
-  eventHandlers.set(handler, wrapped);
-  return wrapped;
-}
+let nextSubscriptionId = 0;
+const listenerRegistry = new Map<
+  number,
+  { channel: string; wrapped: IpcEventHandler }
+>();
 
 contextBridge.exposeInMainWorld("electronAPI", {
   invoke: (command: string, args?: unknown): Promise<unknown> =>
     ipcRenderer.invoke("sidecar:invoke", command, args),
 
-  on: (event: string, handler: EventHandler): void => {
-    ipcRenderer.on(`sidecar:event:${event}`, getWrappedHandler(event, handler));
+  on: (event: string, handler: EventHandler): number => {
+    const subscriptionId = ++nextSubscriptionId;
+    const channel = `sidecar:event:${event}`;
+    const wrapped: IpcEventHandler = (_event, payload) => handler(payload);
+    listenerRegistry.set(subscriptionId, { channel, wrapped });
+    ipcRenderer.on(channel, wrapped);
+    return subscriptionId;
   },
 
-  off: (event: string, handler: EventHandler): void => {
-    ipcRenderer.removeListener(`sidecar:event:${event}`, getWrappedHandler(event, handler));
+  off: (_event: string, subscriptionId: number): void => {
+    const subscription = listenerRegistry.get(subscriptionId);
+    if (!subscription) {
+      return;
+    }
+    listenerRegistry.delete(subscriptionId);
+    ipcRenderer.removeListener(subscription.channel, subscription.wrapped);
   },
 
   getWindowLabel: (): Promise<string | null> =>

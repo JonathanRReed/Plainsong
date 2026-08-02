@@ -31,10 +31,11 @@ const sidecarPath = path.join(
   "sidecar",
   "plainsong-sidecar"
 );
+const configRoot = process.env.PLAINSONG_CONFIG_DIR
+  ? path.resolve(process.env.PLAINSONG_CONFIG_DIR)
+  : path.join(os.homedir(), "Library", "Application Support");
 const settingsPath = path.join(
-  os.homedir(),
-  "Library",
-  "Application Support",
+  configRoot,
   "Plainsong",
   "settings.json"
 );

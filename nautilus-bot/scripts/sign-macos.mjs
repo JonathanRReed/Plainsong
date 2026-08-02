@@ -19,11 +19,24 @@ const shortcutHelperEntitlements = path.resolve(
   "build-resources",
   "entitlements.mac.shortcut-helper.plist",
 );
+const sidecarName = "plainsong-sidecar";
+const sidecarEntitlements = path.resolve(
+  import.meta.dirname,
+  "..",
+  "build-resources",
+  "entitlements.mac.sidecar.plist",
+);
 
 export function optionsForSignedFile(filePath, inheritedOptionsForFile, signContext) {
   // 2.x passes a context object as the second argument. Forward it so an
   // inherited callback that reads it sees the same thing osx-sign would.
   const inherited = inheritedOptionsForFile?.(filePath, signContext) ?? {};
+  if (path.basename(filePath) === sidecarName) {
+    return {
+      ...inherited,
+      entitlements: sidecarEntitlements,
+    };
+  }
   if (path.basename(filePath) === shortcutHelperName) {
     return {
       ...inherited,

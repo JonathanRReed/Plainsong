@@ -131,6 +131,32 @@ fn abort_active_requests(
 fn main() -> ExitCode {
     tracing_subscriber::fmt().with_writer(io::stderr).init();
 
+    if std::env::args_os()
+        .skip(1)
+        .any(|argument| argument == plainsong_lib::SYSTEM_AUDIO_TEST_WORKER_ARGUMENT)
+    {
+        // The parent sidecar normally kills and reaps this helper after 75s.
+        // Keep a second deadline inside the helper so quitting or crashing the
+        // parent during a blocked Core Audio permission request cannot leave an
+        // orphan process behind for the audio server's multi-minute timeout.
+        std::thread::spawn(|| {
+            std::thread::sleep(Duration::from_secs(70));
+            eprintln!("[sidecar] System-audio worker reached its safety deadline");
+            std::process::exit(plainsong_lib::SYSTEM_AUDIO_TEST_WORKER_TIMEOUT_EXIT_CODE);
+        });
+        let result = plainsong_lib::audio_system_test_worker();
+        return match serde_json::to_string(&result) {
+            Ok(payload) => {
+                println!("{payload}");
+                ExitCode::SUCCESS
+            }
+            Err(error) => {
+                eprintln!("[sidecar] Failed to serialize system-audio test result: {error}");
+                ExitCode::FAILURE
+            }
+        };
+    }
+
     let runtime = match tokio::runtime::Runtime::new() {
         Ok(runtime) => runtime,
         Err(error) => {

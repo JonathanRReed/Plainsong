@@ -4,7 +4,7 @@ use std::path::PathBuf;
 
 #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
 pub fn probe() -> EngineProbe {
-    let sidecar = dirs::data_dir()
+    let sidecar = crate::paths::data_dir()
         .unwrap_or_else(|| PathBuf::from("."))
         .join("Plainsong")
         .join("models")

@@ -20,6 +20,9 @@ const MOONSHINE_TINY_MODEL_ID: &str = "moonshine-tiny";
 const MOONSHINE_ONNX_HF_REPO: &str = "UsefulSensors/moonshine";
 const MOONSHINE_TINY_HF_REPO: &str = "UsefulSensors/moonshine-tiny";
 const MOONSHINE_BASE_HF_REPO: &str = "UsefulSensors/moonshine-base";
+const MOONSHINE_ONNX_HF_REVISION: &str = "48b4e427b587bcf67797a5be706d6ddc4a298149";
+const MOONSHINE_TINY_HF_REVISION: &str = "390624ed33d594443aa4aa221f5b9f283b545b5a";
+const MOONSHINE_BASE_HF_REVISION: &str = "7a73d8d55ac0ba2ef3ae761593f6784b51f96dcf";
 
 /// ONNX files and tokenizer shipped in the UsefulSensors/moonshine HF repo.
 const MOONSHINE_LOCAL_ENCODER: &str = "encoder_model.onnx";
@@ -110,7 +113,7 @@ impl MoonshineProvider {
     pub fn new(selected_model_id: Option<&str>) -> Self {
         let model_id =
             normalize_moonshine_model_id(selected_model_id.unwrap_or(MOONSHINE_BASE_MODEL_ID));
-        let root_dir = dirs::data_dir()
+        let root_dir = crate::paths::data_dir()
             .unwrap_or_else(|| PathBuf::from("."))
             .join("Plainsong")
             .join("models");
@@ -129,6 +132,14 @@ impl MoonshineProvider {
         is_valid_onnx_file(&self.model_dir.join(MOONSHINE_LOCAL_ENCODER))
             && is_valid_onnx_file(&self.model_dir.join(MOONSHINE_LOCAL_DECODER))
             && is_valid_tokenizer_file(&self.model_dir.join(MOONSHINE_LOCAL_TOKENIZER))
+    }
+
+    fn has_trusted_required_files(&self) -> bool {
+        moonshine_repo_files(self.model_id.as_str())
+            .iter()
+            .all(|(_, _, _, local_name, sha256)| {
+                crate::download::is_model_artifact_trusted(&self.model_dir.join(local_name), sha256)
+            })
     }
 
     fn wav_duration_seconds(path: &Path) -> f64 {
@@ -191,43 +202,79 @@ fn normalize_moonshine_model_id(model_id: &str) -> String {
     }
 }
 
-fn moonshine_repo_files(model_id: &str) -> [(&'static str, &'static str, &'static str); 3] {
+fn moonshine_repo_files(
+    model_id: &str,
+) -> [(
+    &'static str,
+    &'static str,
+    &'static str,
+    &'static str,
+    &'static str,
+); 3] {
     match model_id {
         MOONSHINE_TINY_MODEL_ID => [
             (
                 MOONSHINE_ONNX_HF_REPO,
+                MOONSHINE_ONNX_HF_REVISION,
                 "onnx/merged/tiny/float/encoder_model.onnx",
                 MOONSHINE_LOCAL_ENCODER,
+                "cbbf580f703b2af2137e0f6d14cd87f31cc67bd858bfd8715403a9489982d1a5",
             ),
             (
                 MOONSHINE_ONNX_HF_REPO,
+                MOONSHINE_ONNX_HF_REVISION,
                 "onnx/merged/tiny/float/decoder_model_merged.onnx",
                 MOONSHINE_LOCAL_DECODER,
+                "4131cef00b62942e9cdef691101f2cc7dbbcd828d71eee8c6c46c28fd051d6cb",
             ),
             (
                 MOONSHINE_TINY_HF_REPO,
+                MOONSHINE_TINY_HF_REVISION,
                 "tokenizer.json",
                 MOONSHINE_LOCAL_TOKENIZER,
+                "6579793438bc4fbafffacf699169ff53e3769c5a0a0f5e71cdee8853e8130deb",
             ),
         ],
         _ => [
             (
                 MOONSHINE_ONNX_HF_REPO,
+                MOONSHINE_ONNX_HF_REVISION,
                 "onnx/merged/base/float/encoder_model.onnx",
                 MOONSHINE_LOCAL_ENCODER,
+                "153e128e7abd64a74ee47f2c3f585c3171c4d46cbb368b032827934c4e01e779",
             ),
             (
                 MOONSHINE_ONNX_HF_REPO,
+                MOONSHINE_ONNX_HF_REVISION,
                 "onnx/merged/base/float/decoder_model_merged.onnx",
                 MOONSHINE_LOCAL_DECODER,
+                "58778763ca8438963190244d6b26572bdca2cedec56a4b91e828f3f2d69ef3c5",
             ),
             (
                 MOONSHINE_BASE_HF_REPO,
+                MOONSHINE_BASE_HF_REVISION,
                 "tokenizer.json",
                 MOONSHINE_LOCAL_TOKENIZER,
+                "6579793438bc4fbafffacf699169ff53e3769c5a0a0f5e71cdee8853e8130deb",
             ),
         ],
     }
+}
+
+pub(crate) fn model_integrity_artifacts(models_root: &Path) -> Vec<(PathBuf, String)> {
+    [
+        (MOONSHINE_BASE_MODEL_ID, models_root.join("moonshine")),
+        (MOONSHINE_TINY_MODEL_ID, models_root.join("moonshine_tiny")),
+    ]
+    .into_iter()
+    .flat_map(|(model_id, model_dir)| {
+        moonshine_repo_files(model_id)
+            .into_iter()
+            .map(move |(_, _, _, local_name, sha256)| {
+                (model_dir.join(local_name), sha256.to_string())
+            })
+    })
+    .collect()
 }
 
 // ---------------------------------------------------------------------------
@@ -549,6 +596,11 @@ impl AsrProvider for MoonshineProvider {
                 "Moonshine model not downloaded. Use the model manager to download it."
             ));
         }
+        if !self.has_trusted_required_files() {
+            return Err(anyhow::anyhow!(
+                "Moonshine model files have not passed Plainsong integrity verification. Re-download the model from Settings."
+            ));
+        }
 
         let start = std::time::Instant::now();
         let model_dir = self.model_dir.clone();
@@ -665,26 +717,15 @@ impl AsrProvider for MoonshineProvider {
         let files = moonshine_repo_files(self.model_id.as_str());
         let n_files = files.len() as f32;
 
-        for (i, (repo_id, hf_path, local_name)) in files.into_iter().enumerate() {
+        for (i, (repo_id, revision, hf_path, local_name, sha256)) in files.into_iter().enumerate() {
             let destination = self.model_dir.join(local_name);
-            let is_valid = if local_name.ends_with(".onnx") {
-                is_valid_onnx_file(&destination)
-            } else {
-                is_valid_tokenizer_file(&destination)
-            };
-            if is_valid {
-                continue;
-            }
-            if destination.exists() {
-                std::fs::remove_file(&destination).ok();
-            }
             let url = format!(
-                "https://huggingface.co/{}/resolve/main/{}",
-                repo_id, hf_path
+                "https://huggingface.co/{}/resolve/{}/{}",
+                repo_id, revision, hf_path
             );
             let cb = progress_cb.clone();
             manager
-                .download_file_unverified(&url, &destination, move |p| {
+                .download_verified_model_asset(&url, &destination, sha256, move |p| {
                     cb((i as f32 / n_files + p.percentage as f32 / 100.0 / n_files) * 100.0);
                     tracing::info!("Moonshine {} download: {:.1}%", local_name, p.percentage);
                 })
@@ -713,8 +754,9 @@ mod tests {
         assert_eq!(files[0].0, MOONSHINE_ONNX_HF_REPO);
         assert_eq!(files[1].0, MOONSHINE_ONNX_HF_REPO);
         assert_eq!(files[2].0, MOONSHINE_TINY_HF_REPO);
-        assert_eq!(files[2].1, "tokenizer.json");
-        assert_eq!(files[2].2, MOONSHINE_LOCAL_TOKENIZER);
+        assert_eq!(files[2].2, "tokenizer.json");
+        assert_eq!(files[2].3, MOONSHINE_LOCAL_TOKENIZER);
+        assert_eq!(files[2].4.len(), 64);
     }
 
     #[test]
@@ -723,8 +765,9 @@ mod tests {
         assert_eq!(files[0].0, MOONSHINE_ONNX_HF_REPO);
         assert_eq!(files[1].0, MOONSHINE_ONNX_HF_REPO);
         assert_eq!(files[2].0, MOONSHINE_BASE_HF_REPO);
-        assert_eq!(files[2].1, "tokenizer.json");
-        assert_eq!(files[2].2, MOONSHINE_LOCAL_TOKENIZER);
+        assert_eq!(files[2].2, "tokenizer.json");
+        assert_eq!(files[2].3, MOONSHINE_LOCAL_TOKENIZER);
+        assert_eq!(files[2].4.len(), 64);
     }
 
     #[test]
@@ -740,5 +783,20 @@ mod tests {
             base.source_url,
             format!("https://huggingface.co/{}", MOONSHINE_BASE_HF_REPO)
         );
+    }
+
+    #[test]
+    fn runtime_assets_are_revision_and_digest_pinned() {
+        for model_id in ["moonshine-tiny", "moonshine-base"] {
+            for (_, revision, remote_path, local_name, sha256) in moonshine_repo_files(model_id) {
+                assert_eq!(revision.len(), 40);
+                assert!(!remote_path.is_empty());
+                assert!(!local_name.is_empty());
+                assert_eq!(sha256.len(), 64);
+                assert!(sha256
+                    .chars()
+                    .all(|character| character.is_ascii_hexdigit()));
+            }
+        }
     }
 }

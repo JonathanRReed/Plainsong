@@ -20,7 +20,10 @@ const outPath = path.resolve(
   repoRoot,
   valueFor("--out", "artifacts/qa/macos/capture-system-audio-test.json"),
 );
-const timeoutMs = Number(valueFor("--timeout-ms", "75000"));
+// The sidecar owns a 75s worker deadline so it can kill and reap a Core Audio
+// setup that macOS leaves blocked. Give that cleanup and the JSON-RPC response
+// enough room to arrive before the outer QA harness declares its own timeout.
+const timeoutMs = Number(valueFor("--timeout-ms", "90000"));
 const sidecarPath = path.join(
   appPath,
   "Contents",
@@ -49,7 +52,10 @@ const stderr = [];
 child.stderr.on("data", (chunk) => stderr.push(String(chunk)));
 const rl = createInterface({ input: child.stdout });
 const requestId = "system-audio-test";
+const healthRequestId = "system-audio-post-test-health";
 let settled = false;
+let pendingSystemAudioResult = null;
+let pendingSystemAudioChecks = null;
 
 function finish(artifact, exitCode) {
   if (settled) return;
@@ -88,6 +94,35 @@ rl.on("line", (line) => {
   } catch {
     return;
   }
+  if (String(message.id) === healthRequestId) {
+    const sidecarResponsive =
+      !message.error &&
+      message.result !== null &&
+      typeof message.result === "object";
+    const checks = {
+      ...pendingSystemAudioChecks,
+      sidecarResponsiveAfterTest: sidecarResponsive,
+    };
+    const pass = Object.values(checks).every(Boolean);
+    finish(
+      {
+        pass,
+        generatedAt: new Date().toISOString(),
+        appPath,
+        sidecarPath,
+        checks,
+        recovery: {
+          sidecarResponsive,
+          healthMethod: "get_settings",
+          healthError: message.error ?? null,
+        },
+        result: pendingSystemAudioResult,
+        stderr: stderr.join("").slice(-12000),
+      },
+      pass ? 0 : 1,
+    );
+    return;
+  }
   if (String(message.id) !== requestId) return;
   if (message.error) {
     finish(
@@ -115,18 +150,15 @@ rl.on("line", (line) => {
     knownToneMethod: result.verificationMethod === "known_tone",
     nativeFormat: Number(capability.nativeSampleRate) > 0 && Number(capability.nativeChannels) > 0,
   };
-  const pass = Object.values(checks).every(Boolean);
-  finish(
-    {
-      pass,
-      generatedAt: new Date().toISOString(),
-      appPath,
-      sidecarPath,
-      checks,
-      result,
-      stderr: stderr.join("").slice(-12000),
-    },
-    pass ? 0 : 1,
+  pendingSystemAudioResult = result;
+  pendingSystemAudioChecks = checks;
+  child.stdin.write(
+    `${JSON.stringify({
+      jsonrpc: "2.0",
+      id: healthRequestId,
+      method: "get_settings",
+      params: {},
+    })}\n`,
   );
 });
 

@@ -1,18 +1,27 @@
 use crate::models::{CreateDictationDictionaryEntryRequest, DictationDictionaryEntry};
 
+const FORMULA_GUARD_COLUMN: &str = "plainsong_formula_guard_v1";
+
 pub fn export_dictionary_entries_csv(entries: &[DictationDictionaryEntry]) -> String {
-    let mut lines =
-        vec!["spoken_form,replacement,app_scope,case_sensitive,enabled,category_scope".to_string()];
+    let mut lines = vec![format!(
+        "spoken_form,replacement,app_scope,case_sensitive,enabled,category_scope,{}",
+        FORMULA_GUARD_COLUMN
+    )];
 
     for entry in entries {
         lines.push(
             [
-                csv_escape(entry.spoken_form.as_str()),
-                csv_escape(entry.replacement.as_str()),
-                csv_escape(entry.app_scope.as_deref().unwrap_or("")),
+                csv_escape(&guard_spreadsheet_formula(entry.spoken_form.as_str())),
+                csv_escape(&guard_spreadsheet_formula(entry.replacement.as_str())),
+                csv_escape(&guard_spreadsheet_formula(
+                    entry.app_scope.as_deref().unwrap_or(""),
+                )),
                 entry.case_sensitive.to_string(),
                 entry.enabled.to_string(),
-                csv_escape(entry.category_scope.as_deref().unwrap_or("")),
+                csv_escape(&guard_spreadsheet_formula(
+                    entry.category_scope.as_deref().unwrap_or(""),
+                )),
+                "true".to_string(),
             ]
             .join(","),
         );
@@ -69,6 +78,7 @@ pub fn parse_dictionary_entries_csv(
     let mut rows = Vec::new();
     let mut errors = Vec::new();
     let mut first_non_empty_line = true;
+    let mut formula_guard_enabled = false;
 
     for (line_number, record) in split_csv_records(input) {
         let line = record.trim();
@@ -78,11 +88,12 @@ pub fn parse_dictionary_entries_csv(
 
         if first_non_empty_line && looks_like_header(line) {
             first_non_empty_line = false;
+            formula_guard_enabled = header_uses_formula_guard(line);
             continue;
         }
         first_non_empty_line = false;
 
-        match parse_dictionary_line(line) {
+        match parse_dictionary_line(line, formula_guard_enabled) {
             Ok(Some(row)) => rows.push(row),
             Ok(None) => {}
             Err(error) => errors.push(format!("Line {}: {}", line_number, error)),
@@ -98,8 +109,16 @@ pub fn parse_dictionary_entries_csv(
 
 fn parse_dictionary_line(
     line: &str,
+    formula_guard_enabled: bool,
 ) -> Result<Option<CreateDictationDictionaryEntryRequest>, String> {
-    let columns = parse_csv_line(line)?;
+    let mut columns = parse_csv_line(line)?;
+    if formula_guard_enabled {
+        for index in [0usize, 1, 2, 5] {
+            if let Some(value) = columns.get_mut(index) {
+                remove_spreadsheet_formula_guard(value);
+            }
+        }
+    }
     if columns.iter().all(|value| value.trim().is_empty()) {
         return Ok(None);
     }
@@ -159,6 +178,11 @@ fn parse_dictionary_line(
 fn looks_like_header(line: &str) -> bool {
     let lowercase = line.to_lowercase();
     lowercase.contains("spoken_form") || lowercase.contains("spoken form")
+}
+
+fn header_uses_formula_guard(line: &str) -> bool {
+    parse_csv_line(line)
+        .is_ok_and(|columns| columns.iter().any(|value| value == FORMULA_GUARD_COLUMN))
 }
 
 fn parse_bool(value: &str) -> Result<bool, String> {
@@ -233,6 +257,34 @@ fn csv_escape(value: &str) -> String {
     } else {
         value.to_string()
     }
+}
+
+fn guard_spreadsheet_formula(value: &str) -> String {
+    if has_spreadsheet_formula_prefix(value) {
+        format!("'{}", value)
+    } else {
+        value.to_string()
+    }
+}
+
+fn remove_spreadsheet_formula_guard(value: &mut String) {
+    let Some(remainder) = value.strip_prefix('\'') else {
+        return;
+    };
+    if has_spreadsheet_formula_prefix(remainder) {
+        value.remove(0);
+    }
+}
+
+fn has_spreadsheet_formula_prefix(value: &str) -> bool {
+    value
+        .chars()
+        .find(|character| {
+            !(character.is_whitespace() || character.is_control() || *character == '\'')
+        })
+        .is_some_and(|character| {
+            matches!(character, '=' | '+' | '-' | '@' | '＝' | '＋' | '－' | '＠')
+        })
 }
 
 #[cfg(test)]
@@ -414,5 +466,60 @@ mod tests {
         assert_eq!(rows[0].category_scope.as_deref(), Some("messaging"));
         assert_eq!(rows[1].spoken_form, "open ai");
         assert!(rows[1].category_scope.is_none());
+    }
+
+    #[test]
+    fn export_dictionary_csv_guards_spreadsheet_formulas() {
+        let csv = export_dictionary_entries_csv(&[DictationDictionaryEntry {
+            id: "entry".to_string(),
+            spoken_form: "=HYPERLINK(\"https://example.invalid\")".to_string(),
+            replacement: "\t+cmd|' /C calc'!A0".to_string(),
+            app_scope: Some("＠SUM(A1:A2)".to_string()),
+            case_sensitive: false,
+            enabled: true,
+            category_scope: None,
+            created_at: Utc::now(),
+            updated_at: Utc::now(),
+        }]);
+        let records = split_csv_records(&csv);
+        let columns = parse_csv_line(&records[1].1).expect("exported row should parse");
+
+        assert_eq!(columns[0], "'=HYPERLINK(\"https://example.invalid\")");
+        assert_eq!(columns[1], "'\t+cmd|' /C calc'!A0");
+        assert_eq!(columns[2], "'＠SUM(A1:A2)");
+        assert_eq!(columns[6], "true");
+    }
+
+    #[test]
+    fn guarded_dictionary_csv_round_trips_formula_like_values() {
+        let entries = vec![DictationDictionaryEntry {
+            id: "entry".to_string(),
+            spoken_form: "'=literal formula".to_string(),
+            replacement: "  ＝SUM(A1:A2)".to_string(),
+            app_scope: Some("-dangerous".to_string()),
+            case_sensitive: false,
+            enabled: true,
+            category_scope: None,
+            created_at: Utc::now(),
+            updated_at: Utc::now(),
+        }];
+
+        let csv = export_dictionary_entries_csv(&entries);
+        let rows = parse_dictionary_entries_csv(&csv).expect("guarded export should re-parse");
+
+        assert_eq!(rows[0].spoken_form, entries[0].spoken_form);
+        assert_eq!(rows[0].replacement, entries[0].replacement);
+        assert_eq!(rows[0].app_scope, entries[0].app_scope);
+    }
+
+    #[test]
+    fn legacy_dictionary_csv_preserves_leading_apostrophes() {
+        let rows = parse_dictionary_entries_csv(
+            "spoken_form,replacement,app_scope,case_sensitive,enabled\n'=literal,'+literal,,false,true",
+        )
+        .expect("legacy csv should parse");
+
+        assert_eq!(rows[0].spoken_form, "'=literal");
+        assert_eq!(rows[0].replacement, "'+literal");
     }
 }

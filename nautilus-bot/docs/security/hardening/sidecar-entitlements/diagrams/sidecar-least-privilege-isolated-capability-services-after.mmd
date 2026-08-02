@@ -1,0 +1,11 @@
+flowchart LR
+  Electron["Electron main"] --> Broker["Capability broker"]
+  Broker --> Capture["Capture service: audio only"]
+  Broker --> Transcription["Transcription service: model files only"]
+  Broker --> Secrets["Secret service: Keychain only"]
+  Broker --> Insertion["Insertion service: accessibility only"]
+  Trust["Per-service release trust gate"] --> Capture
+  Trust --> Transcription
+  Trust --> Secrets
+  Trust --> Insertion
+

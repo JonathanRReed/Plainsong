@@ -1,0 +1,8 @@
+flowchart LR
+  Builder["Electron Builder signing"] --> Inherited["Inherited child policy"]
+  Inherited --> ElectronHelpers["Electron helper processes"]
+  Inherited --> Sidecar["Rust sidecar"]
+  Callback["optionsForSignedFile"] --> Shortcut["Shortcut helper: empty policy"]
+  Callback --> Speech["Speech helper: Speech only"]
+  Sidecar --> Capabilities["JIT, unsigned memory, library bypass, audio, Apple Events"]
+

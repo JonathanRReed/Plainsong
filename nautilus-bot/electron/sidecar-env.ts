@@ -17,6 +17,7 @@ const SIDECAR_ENV_ALLOWLIST = new Set([
   "RUST_LOG",
   "RUST_BACKTRACE",
   "PLAINSONG_LOG",
+  "PLAINSONG_CONFIG_DIR",
   "PLAINSONG_DATA_DIR",
   "PLAINSONG_MODELS_DIR",
   "PLAINSONG_QA_MODE",
@@ -35,12 +36,22 @@ const SIDECAR_ENV_ALLOWLIST = new Set([
   "OLLAMA_CLOUD_API_KEY",
 ]);
 
+const QA_ONLY_PATH_OVERRIDES = new Set([
+  "PLAINSONG_CONFIG_DIR",
+  "PLAINSONG_DATA_DIR",
+]);
+
 type SidecarProcessEnv = Record<string, string | undefined>;
 
 export function buildSidecarEnv(source: SidecarProcessEnv): SidecarProcessEnv {
   const env: SidecarProcessEnv = {};
+  const qaModeEnabled = source.PLAINSONG_QA_MODE === "1";
   for (const [key, value] of Object.entries(source)) {
-    if (value !== undefined && SIDECAR_ENV_ALLOWLIST.has(key)) {
+    if (
+      value !== undefined &&
+      SIDECAR_ENV_ALLOWLIST.has(key) &&
+      (qaModeEnabled || !QA_ONLY_PATH_OVERRIDES.has(key))
+    ) {
       env[key] = value;
     }
   }

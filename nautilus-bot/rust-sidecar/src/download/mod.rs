@@ -5,11 +5,14 @@
 
 use anyhow::{Context, Result};
 use futures_util::StreamExt;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use tokio::fs::File;
-use tokio::io::AsyncWriteExt;
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+const WHISPER_MODEL_REVISION: &str = "5359861c739e955e79d9a303bcbc70fb988958b1";
+const MODEL_INTEGRITY_RECEIPT_VERSION: &str = "plainsong-model-integrity-v1";
 
 /// Download manager for ASR models
 pub struct DownloadManager {
@@ -23,12 +26,213 @@ pub struct DownloadManager {
 /// error page), current size ~2.2MB.
 /// See `crate::audio::silero_vad` for the model's input/output contract.
 const SILERO_VAD_ONNX_URL: &str =
-    "https://raw.githubusercontent.com/snakers4/silero-vad/master/src/silero_vad/data/silero_vad.onnx";
+    "https://raw.githubusercontent.com/snakers4/silero-vad/76e3dc408eb2a5c655c34e230d2d5459b4439daa/src/silero_vad/data/silero_vad.onnx";
+const SILERO_VAD_ONNX_SHA256: &str =
+    "1a153a22f4509e292a94e67d6f9b85e8deb25b4988682b7e174c65279d8788e3";
 const SILERO_VAD_ONNX_FILE: &str = "silero_vad.onnx";
 /// The real file is ~2.2MB; tolerate upstream size drift but reject tiny
 /// HTML/error-page payloads (same defensive pattern as
 /// `min_expected_model_bytes` for Whisper models).
 const SILERO_VAD_MIN_EXPECTED_BYTES: u64 = 512 * 1024;
+
+#[derive(Clone, Copy)]
+struct DiarizationModelInfo {
+    url: &'static str,
+    file_name: &'static str,
+    sha256: &'static str,
+}
+
+fn diarization_model_info(model_id: &str) -> Option<DiarizationModelInfo> {
+    match model_id {
+        "ecapa_tdnn_speaker" => Some(DiarizationModelInfo {
+            url: "https://huggingface.co/Wespeaker/wespeaker-ecapa-tdnn512-LM/resolve/a2f3dcb1c8702caccc7a55ceb57f5e8d1842112b/voxceleb_ECAPA512_LM.onnx",
+            file_name: "ecapa_tdnn_speaker.onnx",
+            sha256: "d71b85d9b48058ef68004f04f1b78acebefb9dfcf542e19b976a12a5ad1f10b0",
+        }),
+        "resnet34_speaker" => Some(DiarizationModelInfo {
+            url: "https://huggingface.co/Wespeaker/wespeaker-resnet34-LM/resolve/f0c48c298fd835726c27956a5d617bad7115627e/voxceleb_resnet34_LM.onnx",
+            file_name: "resnet34_speaker.onnx",
+            sha256: "7bb2f06e9df17cdf1ef14ee8a15ab08ed28e8d0ef5054ee135741560df2ec068",
+        }),
+        "campplus_speaker" => Some(DiarizationModelInfo {
+            url: "https://huggingface.co/Wespeaker/wespeaker-voxceleb-campplus-LM/resolve/c5e01c6fcffcce160861e7e79782828320192b5c/voxceleb_CAM%2B%2B_LM.onnx",
+            file_name: "campplus_speaker.onnx",
+            sha256: "1068e4ac3a76bb9c769e6816ef30bf89363f6e966f1d938210cb8ed4038f8e93",
+        }),
+        _ => None,
+    }
+}
+
+fn path_with_suffix(path: &Path, suffix: &str) -> PathBuf {
+    let mut value = path.as_os_str().to_os_string();
+    value.push(suffix);
+    PathBuf::from(value)
+}
+
+fn model_integrity_receipt_path(path: &Path) -> PathBuf {
+    path_with_suffix(path, ".plainsong-integrity")
+}
+
+fn is_internal_model_metadata_file(path: &Path) -> bool {
+    path.file_name()
+        .and_then(|name| name.to_str())
+        .is_some_and(|name| {
+            name.ends_with(".plainsong-integrity") || name.contains(".plainsong-integrity.tmp")
+        })
+}
+
+fn model_integrity_receipt_contents(path: &Path, expected_sha256: &str) -> Result<String> {
+    let metadata = std::fs::metadata(path)?;
+    let modified_nanos = metadata
+        .modified()?
+        .duration_since(std::time::UNIX_EPOCH)
+        .context("Model modification time predates the Unix epoch")?
+        .as_nanos();
+    Ok(format!(
+        "{}\nsha256={}\nsize={}\nmodified_nanos={}\n",
+        MODEL_INTEGRITY_RECEIPT_VERSION,
+        expected_sha256,
+        metadata.len(),
+        modified_nanos
+    ))
+}
+
+pub(crate) fn is_model_artifact_trusted(path: &Path, expected_sha256: &str) -> bool {
+    if !path.is_file() {
+        return false;
+    }
+    let Ok(expected_receipt) = model_integrity_receipt_contents(path, expected_sha256) else {
+        return false;
+    };
+    std::fs::read_to_string(model_integrity_receipt_path(path))
+        .is_ok_and(|receipt| receipt == expected_receipt)
+}
+
+pub(crate) fn whisper_model_expected_sha256(model_id: &str) -> Option<String> {
+    get_whisper_model_info(model_id).map(|model| model.sha256)
+}
+
+pub(crate) fn is_whisper_model_artifact_trusted(model_id: &str, path: &Path) -> bool {
+    whisper_model_expected_sha256(model_id)
+        .is_some_and(|sha256| is_model_artifact_trusted(path, &sha256))
+}
+
+pub(crate) fn is_diarization_model_artifact_trusted(model_id: &str, path: &Path) -> bool {
+    diarization_model_info(model_id)
+        .is_some_and(|model| is_model_artifact_trusted(path, model.sha256))
+}
+
+async fn write_model_integrity_receipt(path: &Path, expected_sha256: &str) -> Result<()> {
+    let receipt_path = model_integrity_receipt_path(path);
+    let temp_receipt_path = path_with_suffix(&receipt_path, ".tmp");
+    let contents = model_integrity_receipt_contents(path, expected_sha256)?;
+    tokio::fs::write(&temp_receipt_path, contents).await?;
+    tokio::fs::rename(&temp_receipt_path, &receipt_path).await?;
+    Ok(())
+}
+
+async fn verify_or_record_model_integrity(path: &PathBuf, expected_sha256: &str) -> Result<bool> {
+    if is_model_artifact_trusted(path, expected_sha256) {
+        return Ok(true);
+    }
+
+    let actual_sha256 = calculate_sha256(path).await?;
+    if actual_sha256 != expected_sha256 {
+        return Ok(false);
+    }
+    write_model_integrity_receipt(path, expected_sha256).await?;
+    Ok(true)
+}
+
+#[derive(Debug, Default)]
+pub(crate) struct ModelIntegrityMigrationReport {
+    pub migrated_count: usize,
+    pub rejected_paths: Vec<PathBuf>,
+    pub errors: Vec<(PathBuf, String)>,
+}
+
+/// Upgrade model caches created before integrity receipts were introduced.
+///
+/// Each existing artifact is hashed once against an application-pinned
+/// digest. Exact matches receive a metadata-bound receipt, so all later
+/// readiness checks stay fast. Mismatches remain installed but untrusted,
+/// preserving the fail-closed security boundary without deleting user data
+/// during startup.
+pub(crate) async fn migrate_legacy_model_integrity_receipts(
+    artifacts: &[(PathBuf, String)],
+) -> ModelIntegrityMigrationReport {
+    let mut report = ModelIntegrityMigrationReport::default();
+
+    for (path, expected_sha256) in artifacts {
+        if !path.is_file() || is_model_artifact_trusted(path, expected_sha256) {
+            continue;
+        }
+
+        match verify_or_record_model_integrity(path, expected_sha256).await {
+            Ok(true) => report.migrated_count += 1,
+            Ok(false) => {
+                tokio::fs::remove_file(model_integrity_receipt_path(path))
+                    .await
+                    .ok();
+                report.rejected_paths.push(path.clone());
+            }
+            Err(error) => {
+                tokio::fs::remove_file(model_integrity_receipt_path(path))
+                    .await
+                    .ok();
+                report.errors.push((path.clone(), error.to_string()));
+            }
+        }
+    }
+
+    report
+}
+
+pub(crate) fn managed_model_integrity_artifacts(models_root: &Path) -> Vec<(PathBuf, String)> {
+    let mut artifacts = Vec::new();
+
+    for model_id in [
+        "tiny",
+        "tiny.en",
+        "base",
+        "base.en",
+        "small",
+        "small.en",
+        "medium",
+        "medium.en",
+        "large-v3",
+        "large-v3-turbo",
+    ] {
+        if let Some(model) = get_whisper_model_info(model_id) {
+            artifacts.push((
+                models_root.join("whisper").join(model.file_name),
+                model.sha256,
+            ));
+        }
+    }
+
+    for model_id in ["ecapa_tdnn_speaker", "resnet34_speaker", "campplus_speaker"] {
+        if let Some(model) = diarization_model_info(model_id) {
+            artifacts.push((
+                models_root.join("diarization").join(model.file_name),
+                model.sha256.to_string(),
+            ));
+        }
+    }
+
+    artifacts.push((
+        models_root.join("vad").join(SILERO_VAD_ONNX_FILE),
+        SILERO_VAD_ONNX_SHA256.to_string(),
+    ));
+    artifacts
+}
+
+async fn remove_model_artifact(path: &Path) {
+    tokio::fs::remove_file(path).await.ok();
+    tokio::fs::remove_file(model_integrity_receipt_path(path))
+        .await
+        .ok();
+}
 
 /// HTTP client for model downloads. Deliberately no total-request timeout:
 /// model files run to ~1.5 GB, and a total timeout kills any healthy
@@ -60,7 +264,7 @@ pub struct DownloadProgress {
 impl DownloadManager {
     /// Create a new download manager
     pub fn new() -> Result<Self> {
-        let models_dir = dirs::data_dir()
+        let models_dir = crate::paths::data_dir()
             .context("Could not find data directory")?
             .join("Plainsong")
             .join("models");
@@ -238,9 +442,13 @@ impl DownloadManager {
         let destination = self.models_dir.join("whisper").join(&model_info.file_name);
         let min_expected_bytes = min_expected_model_bytes(model_info.size_mb);
 
-        // Check if already downloaded and valid enough for use.
+        // Upgrade legacy caches in place by hashing them once and recording a
+        // receipt. Future launches can validate the small receipt plus file
+        // metadata instead of re-reading multi-gigabyte models.
         if destination.exists() {
-            if validate_whisper_artifact(&destination, min_expected_bytes).await {
+            if validate_whisper_artifact(&destination, min_expected_bytes).await
+                && verify_or_record_model_integrity(&destination, &model_info.sha256).await?
+            {
                 tracing::info!("Model {} already exists at {:?}", model_name, destination);
                 return Ok(destination);
             }
@@ -249,7 +457,7 @@ impl DownloadManager {
                 model_name,
                 destination
             );
-            tokio::fs::remove_file(&destination).await.ok();
+            remove_model_artifact(&destination).await;
         }
 
         tracing::info!(
@@ -258,10 +466,13 @@ impl DownloadManager {
             model_info.url
         );
 
-        // Whisper model assets are large LFS blobs; HF response etag/checksum metadata can be
-        // inconsistent across redirect hops. Use unverified transport then validate artifact bytes.
-        self.download_file_unverified(&model_info.url, &destination, progress_callback)
-            .await?;
+        self.download_file_verified(
+            &model_info.url,
+            &destination,
+            &model_info.sha256,
+            progress_callback,
+        )
+        .await?;
 
         if !validate_whisper_artifact(&destination, min_expected_bytes).await {
             tokio::fs::remove_file(&destination).await.ok();
@@ -271,33 +482,38 @@ impl DownloadManager {
             ));
         }
 
-        // Verify checksum if available
-        if let Some(expected_checksum) = &model_info.sha256 {
-            let actual_checksum = calculate_sha256(&destination).await?;
-            if actual_checksum != *expected_checksum {
-                // Delete corrupted file
-                tokio::fs::remove_file(&destination).await.ok();
-                return Err(anyhow::anyhow!(
-                    "Checksum mismatch for {}. Expected: {}, Got: {}",
-                    model_name,
-                    expected_checksum,
-                    actual_checksum
-                ));
-            }
-            tracing::info!("Checksum verified for {}", model_name);
-        }
-
         Ok(destination)
     }
 
-    /// Download diarization/speaker embedding model
-    /// Download a file without checksum verification (useful for LFS files where ETag != content hash)
-    pub async fn download_file_unverified(
+    /// Download a model to a temporary file and install it only after its
+    /// app-pinned SHA-256 digest has been verified.
+    async fn download_file_verified(
         &self,
         url: &str,
         destination: &PathBuf,
+        expected_sha256: &str,
         progress_callback: impl Fn(DownloadProgress) + Send + Sync + 'static,
     ) -> Result<()> {
+        self.download_verified_model_asset(url, destination, expected_sha256, progress_callback)
+            .await
+    }
+
+    /// Download or migrate a model asset under an immutable URL and
+    /// application-pinned SHA-256 digest.
+    pub(crate) async fn download_verified_model_asset(
+        &self,
+        url: &str,
+        destination: &PathBuf,
+        expected_sha256: &str,
+        progress_callback: impl Fn(DownloadProgress) + Send + Sync + 'static,
+    ) -> Result<()> {
+        if destination.exists() {
+            if verify_or_record_model_integrity(destination, expected_sha256).await? {
+                return Ok(());
+            }
+            remove_model_artifact(destination).await;
+        }
+
         // Create parent directory if needed
         if let Some(parent) = destination.parent() {
             tokio::fs::create_dir_all(parent).await?;
@@ -456,7 +672,24 @@ impl DownloadManager {
             }
         }
 
-        tokio::fs::rename(temp_path, destination).await?;
+        let actual_sha256 = calculate_sha256(&temp_path).await?;
+        if actual_sha256 != expected_sha256 {
+            tokio::fs::remove_file(&temp_path).await.ok();
+            return Err(anyhow::anyhow!(
+                "Integrity verification failed for {}. Expected sha256 {}, got {}",
+                destination.display(),
+                expected_sha256,
+                actual_sha256
+            ));
+        }
+
+        tokio::fs::rename(&temp_path, destination).await?;
+        write_model_integrity_receipt(destination, expected_sha256).await?;
+        tracing::info!(
+            "Integrity verified for {} with app-pinned sha256 {}",
+            destination.display(),
+            expected_sha256
+        );
         Ok(())
     }
 
@@ -469,43 +702,38 @@ impl DownloadManager {
         let diarization_dir = self.models_dir.join("diarization");
         tokio::fs::create_dir_all(&diarization_dir).await?;
 
-        let (url, filename) = match model_id {
-            "ecapa_tdnn_speaker" => (
-                "https://huggingface.co/Wespeaker/wespeaker-ecapa-tdnn512-LM/resolve/main/voxceleb_ECAPA512_LM.onnx",
-                "ecapa_tdnn_speaker.onnx",
-            ),
-            "resnet34_speaker" => (
-                "https://huggingface.co/Wespeaker/wespeaker-resnet34-LM/resolve/main/voxceleb_resnet34_LM.onnx",
-                "resnet34_speaker.onnx",
-            ),
-            "campplus_speaker" => (
-                "https://huggingface.co/Wespeaker/wespeaker-voxceleb-campplus-LM/resolve/main/voxceleb_CAM%2B%2B_LM.onnx",
-                "campplus_speaker.onnx",
-            ),
-            _ => {
-                return Err(anyhow::anyhow!(
-                    "Unknown diarization model: {}. Supported: ecapa_tdnn_speaker, resnet34_speaker, campplus_speaker",
-                    model_id
-                ));
-            }
-        };
+        let model = diarization_model_info(model_id).ok_or_else(|| {
+            anyhow::anyhow!(
+                "Unknown diarization model: {}. Supported: ecapa_tdnn_speaker, resnet34_speaker, campplus_speaker",
+                model_id
+            )
+        })?;
 
-        let destination = diarization_dir.join(filename);
+        let destination = diarization_dir.join(model.file_name);
 
         if destination.exists() {
-            tracing::info!(
-                "Diarization model {} already exists at {:?}",
-                model_id,
-                destination
+            if verify_or_record_model_integrity(&destination, model.sha256).await? {
+                tracing::info!(
+                    "Diarization model {} already exists at {:?}",
+                    model_id,
+                    destination
+                );
+                return Ok(destination);
+            }
+            tracing::warn!(
+                "Existing diarization model {} failed integrity verification. Re-downloading.",
+                model_id
             );
-            return Ok(destination);
+            remove_model_artifact(&destination).await;
         }
 
-        tracing::info!("Downloading diarization model {} from {}", model_id, url);
-        tracing::info!("Starting unverified download of diarization model (HF ETag bypassed)");
+        tracing::info!(
+            "Downloading diarization model {} from {}",
+            model_id,
+            model.url
+        );
 
-        // Use unverified download because HF S3 ETag often matches LFS pointer, not content
-        self.download_file_unverified(url, &destination, _progress_callback)
+        self.download_file_verified(model.url, &destination, model.sha256, _progress_callback)
             .await?;
 
         // Verify file size (should be > 5MB)
@@ -533,10 +761,11 @@ impl DownloadManager {
         reason = "diarization settings can query this capability independently from downloads"
     )]
     pub fn is_diarization_model_downloaded(&self) -> bool {
-        self.models_dir
+        let path = self
+            .models_dir
             .join("diarization")
-            .join("ecapa_tdnn_speaker.onnx")
-            .exists()
+            .join("ecapa_tdnn_speaker.onnx");
+        is_diarization_model_artifact_trusted("ecapa_tdnn_speaker", &path)
     }
 
     /// Path Silero VAD's ONNX model is stored at once downloaded.
@@ -546,14 +775,14 @@ impl DownloadManager {
 
     /// Whether the Silero VAD ONNX model has already been downloaded.
     pub fn is_silero_vad_model_downloaded(&self) -> bool {
-        self.silero_vad_model_path().exists()
+        is_model_artifact_trusted(&self.silero_vad_model_path(), SILERO_VAD_ONNX_SHA256)
     }
 
     /// Download the Silero VAD ONNX model (MIT-licensed, ~2.2MB), the small
     /// voice-activity-detection model from `snakers4/silero-vad` used as an
     /// accuracy-focused v2 backend alongside `StreamingVadGate`'s energy
-    /// heuristic. Fetched directly from the upstream GitHub repo (a single,
-    /// unversioned raw file, no HF LFS/auth quirks to work around).
+    /// heuristic. Fetched from an immutable upstream Git commit and verified
+    /// against an app-pinned digest.
     ///
     /// Wired to the `download_silero_vad_model` sidecar IPC command (see
     /// `lib.rs`), invoked from the Settings UI's VAD backend selector.
@@ -564,22 +793,25 @@ impl DownloadManager {
         let destination = self.silero_vad_model_path();
 
         if destination.exists() {
-            let metadata = tokio::fs::metadata(&destination).await?;
-            if metadata.len() >= SILERO_VAD_MIN_EXPECTED_BYTES {
+            if verify_or_record_model_integrity(&destination, SILERO_VAD_ONNX_SHA256).await? {
                 tracing::info!("Silero VAD model already exists at {:?}", destination);
                 return Ok(destination);
             }
             tracing::warn!(
-                "Existing Silero VAD model at {:?} looks too small ({} bytes); re-downloading",
-                destination,
-                metadata.len()
+                "Existing Silero VAD model at {:?} failed integrity verification; re-downloading",
+                destination
             );
-            tokio::fs::remove_file(&destination).await.ok();
+            remove_model_artifact(&destination).await;
         }
 
         tracing::info!("Downloading Silero VAD model from {}", SILERO_VAD_ONNX_URL);
-        self.download_file_unverified(SILERO_VAD_ONNX_URL, &destination, progress_callback)
-            .await?;
+        self.download_file_verified(
+            SILERO_VAD_ONNX_URL,
+            &destination,
+            SILERO_VAD_ONNX_SHA256,
+            progress_callback,
+        )
+        .await?;
 
         let metadata = tokio::fs::metadata(&destination).await?;
         if metadata.len() < SILERO_VAD_MIN_EXPECTED_BYTES {
@@ -614,6 +846,9 @@ impl DownloadManager {
         if whisper_dir.exists() {
             let mut entries = tokio::fs::read_dir(&whisper_dir).await?;
             while let Some(entry) = entries.next_entry().await? {
+                if is_internal_model_metadata_file(&entry.path()) {
+                    continue;
+                }
                 let metadata = entry.metadata().await?;
                 if metadata.is_file() {
                     let name = entry.file_name().to_string_lossy().to_string();
@@ -642,6 +877,9 @@ impl DownloadManager {
                 .into_iter()
                 .filter_map(Result::ok)
             {
+                if is_internal_model_metadata_file(entry.path()) {
+                    continue;
+                }
                 let metadata = match entry.metadata() {
                     Ok(metadata) if metadata.is_file() => metadata,
                     _ => continue,
@@ -672,6 +910,9 @@ impl DownloadManager {
         if whisper_candle_dir.exists() {
             let mut entries = tokio::fs::read_dir(&whisper_candle_dir).await?;
             while let Some(entry) = entries.next_entry().await? {
+                if is_internal_model_metadata_file(&entry.path()) {
+                    continue;
+                }
                 let metadata = entry.metadata().await?;
                 if metadata.is_file() {
                     let name = entry.file_name().to_string_lossy().to_string();
@@ -691,6 +932,9 @@ impl DownloadManager {
         if distil_dir.exists() {
             let mut entries = tokio::fs::read_dir(&distil_dir).await?;
             while let Some(entry) = entries.next_entry().await? {
+                if is_internal_model_metadata_file(&entry.path()) {
+                    continue;
+                }
                 let metadata = entry.metadata().await?;
                 if metadata.is_file() {
                     let name = entry.file_name().to_string_lossy().to_string();
@@ -717,6 +961,9 @@ impl DownloadManager {
 
             let mut entries = tokio::fs::read_dir(&model_dir).await?;
             while let Some(entry) = entries.next_entry().await? {
+                if is_internal_model_metadata_file(&entry.path()) {
+                    continue;
+                }
                 let metadata = entry.metadata().await?;
                 if metadata.is_file() {
                     let name = entry.file_name().to_string_lossy().to_string();
@@ -736,6 +983,9 @@ impl DownloadManager {
         if vad_dir.exists() {
             let mut entries = tokio::fs::read_dir(&vad_dir).await?;
             while let Some(entry) = entries.next_entry().await? {
+                if is_internal_model_metadata_file(&entry.path()) {
+                    continue;
+                }
                 let metadata = entry.metadata().await?;
                 if metadata.is_file() {
                     let name = entry.file_name().to_string_lossy().to_string();
@@ -755,6 +1005,9 @@ impl DownloadManager {
         if mlx_dir.exists() {
             let mut entries = tokio::fs::read_dir(&mlx_dir).await?;
             while let Some(entry) = entries.next_entry().await? {
+                if is_internal_model_metadata_file(&entry.path()) {
+                    continue;
+                }
                 let metadata = entry.metadata().await?;
                 if metadata.is_file() {
                     let name = entry.file_name().to_string_lossy().to_string();
@@ -774,6 +1027,9 @@ impl DownloadManager {
         if foundry_dir.exists() {
             let mut entries = tokio::fs::read_dir(&foundry_dir).await?;
             while let Some(entry) = entries.next_entry().await? {
+                if is_internal_model_metadata_file(&entry.path()) {
+                    continue;
+                }
                 let metadata = entry.metadata().await?;
                 if metadata.is_file() {
                     let name = entry.file_name().to_string_lossy().to_string();
@@ -846,6 +1102,17 @@ impl DownloadManager {
         }
 
         tokio::fs::remove_file(&canonical).await?;
+        let receipt_path = model_integrity_receipt_path(&canonical);
+        if let Err(error) = tokio::fs::remove_file(&receipt_path).await {
+            if error.kind() != std::io::ErrorKind::NotFound {
+                return Err(error).with_context(|| {
+                    format!(
+                        "Deleted model but failed to remove its integrity receipt: {:?}",
+                        receipt_path
+                    )
+                });
+            }
+        }
         tracing::info!("Deleted model at {:?}", canonical);
         Ok(())
     }
@@ -925,92 +1192,87 @@ pub struct WhisperModelInfo {
     pub file_name: String,
     pub size_mb: f64,
     pub url: String,
-    pub sha256: Option<String>,
+    pub sha256: String,
 }
 
 /// Get information about a Whisper model
 fn get_whisper_model_info(model_name: &str) -> Option<WhisperModelInfo> {
+    let whisper_url = |file_name: &str| {
+        format!(
+            "https://huggingface.co/ggerganov/whisper.cpp/resolve/{}/{}",
+            WHISPER_MODEL_REVISION, file_name
+        )
+    };
     let models = vec![
         WhisperModelInfo {
             name: "tiny".to_string(),
             file_name: "ggml-tiny.bin".to_string(),
             size_mb: 75.0,
-            url: "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-tiny.bin"
-                .to_string(),
-            sha256: None,
+            url: whisper_url("ggml-tiny.bin"),
+            sha256: "be07e048e1e599ad46341c8d2a135645097a538221678b7acdd1b1919c6e1b21".to_string(),
         },
         WhisperModelInfo {
             name: "tiny.en".to_string(),
             file_name: "ggml-tiny.en.bin".to_string(),
             size_mb: 75.0,
-            url: "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-tiny.en.bin"
-                .to_string(),
-            sha256: None,
+            url: whisper_url("ggml-tiny.en.bin"),
+            sha256: "921e4cf8686fdd993dcd081a5da5b6c365bfde1162e72b08d75ac75289920b1f".to_string(),
         },
         WhisperModelInfo {
             name: "base".to_string(),
             file_name: "ggml-base.bin".to_string(),
             size_mb: 142.0,
-            url: "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-base.bin"
-                .to_string(),
-            sha256: None,
+            url: whisper_url("ggml-base.bin"),
+            sha256: "60ed5bc3dd14eea856493d334349b405782ddcaf0028d4b5df4088345fba2efe".to_string(),
         },
         WhisperModelInfo {
             name: "base.en".to_string(),
             file_name: "ggml-base.en.bin".to_string(),
             size_mb: 142.0,
-            url: "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-base.en.bin"
-                .to_string(),
-            sha256: None,
+            url: whisper_url("ggml-base.en.bin"),
+            sha256: "a03779c86df3323075f5e796cb2ce5029f00ec8869eee3fdfb897afe36c6d002".to_string(),
         },
         WhisperModelInfo {
             name: "small".to_string(),
             file_name: "ggml-small.bin".to_string(),
             size_mb: 466.0,
-            url: "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-small.bin"
-                .to_string(),
-            sha256: None,
+            url: whisper_url("ggml-small.bin"),
+            sha256: "1be3a9b2063867b937e64e2ec7483364a79917e157fa98c5d94b5c1fffea987b".to_string(),
         },
         WhisperModelInfo {
             name: "small.en".to_string(),
             file_name: "ggml-small.en.bin".to_string(),
             size_mb: 466.0,
-            url: "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-small.en.bin"
-                .to_string(),
-            sha256: None,
+            url: whisper_url("ggml-small.en.bin"),
+            sha256: "c6138d6d58ecc8322097e0f987c32f1be8bb0a18532a3f88f734d1bbf9c41e5d".to_string(),
         },
         WhisperModelInfo {
             name: "medium".to_string(),
             file_name: "ggml-medium.bin".to_string(),
             size_mb: 1500.0,
-            url: "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-medium.bin"
-                .to_string(),
-            sha256: None,
+            url: whisper_url("ggml-medium.bin"),
+            sha256: "6c14d5adee5f86394037b4e4e8b59f1673b6cee10e3cf0b11bbdbee79c156208".to_string(),
         },
         WhisperModelInfo {
             name: "medium.en".to_string(),
             file_name: "ggml-medium.en.bin".to_string(),
             size_mb: 1500.0,
-            url: "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-medium.en.bin"
-                .to_string(),
-            sha256: None,
+            url: whisper_url("ggml-medium.en.bin"),
+            sha256: "cc37e93478338ec7700281a7ac30a10128929eb8f427dda2e865faa8f6da4356".to_string(),
         },
         WhisperModelInfo {
             name: "large-v3".to_string(),
             file_name: "ggml-large-v3.bin".to_string(),
             size_mb: 2900.0,
-            url: "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-large-v3.bin"
-                .to_string(),
-            sha256: None,
+            url: whisper_url("ggml-large-v3.bin"),
+            sha256: "64d182b440b98d5203c4f9bd541544d84c605196c4f7b845dfa11fb23594d1e2".to_string(),
         },
         WhisperModelInfo {
             name: "large-v3-turbo".to_string(),
             file_name: "ggml-large-v3-turbo.bin".to_string(),
             size_mb: 1620.0,
-            url:
-                "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-large-v3-turbo.bin"
-                    .to_string(),
-            sha256: None,
+            url: whisper_url("ggml-large-v3-turbo.bin"),
+            sha256: "1fc70f774d38eb169993ac391eea357ef47c88757ef72ee5943879b7e8e2bc69".to_string(),
         },
     ];
 
@@ -1021,9 +1283,16 @@ fn get_whisper_model_info(model_name: &str) -> Option<WhisperModelInfo> {
 async fn calculate_sha256(path: &PathBuf) -> Result<String> {
     use sha2::{Digest, Sha256};
 
-    let data = tokio::fs::read(path).await?;
+    let mut file = File::open(path).await?;
     let mut hasher = Sha256::new();
-    hasher.update(&data);
+    let mut buffer = vec![0u8; 1024 * 1024];
+    loop {
+        let bytes_read = file.read(&mut buffer).await?;
+        if bytes_read == 0 {
+            break;
+        }
+        hasher.update(&buffer[..bytes_read]);
+    }
     let result = hasher.finalize();
 
     Ok(hex::encode(result))
@@ -1117,6 +1386,118 @@ mod tests {
         let info = info.unwrap();
         assert_eq!(info.file_name, "ggml-base.en.bin");
         assert_eq!(info.size_mb, 142.0);
+        assert_eq!(
+            info.sha256,
+            "a03779c86df3323075f5e796cb2ce5029f00ec8869eee3fdfb897afe36c6d002"
+        );
+    }
+
+    #[test]
+    fn runtime_model_sources_are_immutable_and_digest_pinned() {
+        for model_id in [
+            "tiny",
+            "tiny.en",
+            "base",
+            "base.en",
+            "small",
+            "small.en",
+            "medium",
+            "medium.en",
+            "large-v3",
+            "large-v3-turbo",
+        ] {
+            let model = get_whisper_model_info(model_id).expect("known Whisper model");
+            assert!(model.url.contains(WHISPER_MODEL_REVISION));
+            assert!(!model.url.contains("/resolve/main/"));
+            assert_eq!(model.sha256.len(), 64);
+            assert!(model
+                .sha256
+                .chars()
+                .all(|character| character.is_ascii_hexdigit()));
+        }
+
+        for model_id in ["ecapa_tdnn_speaker", "resnet34_speaker", "campplus_speaker"] {
+            let model = diarization_model_info(model_id).expect("known diarization model");
+            assert!(!model.url.contains("/resolve/main/"));
+            assert_eq!(model.sha256.len(), 64);
+            assert!(model
+                .sha256
+                .chars()
+                .all(|character| character.is_ascii_hexdigit()));
+        }
+
+        assert!(!SILERO_VAD_ONNX_URL.contains("/master/"));
+        assert_eq!(SILERO_VAD_ONNX_SHA256.len(), 64);
+        assert!(SILERO_VAD_ONNX_SHA256
+            .chars()
+            .all(|character| character.is_ascii_hexdigit()));
+    }
+
+    #[tokio::test]
+    async fn integrity_receipt_trusts_only_the_unchanged_verified_artifact() {
+        let test_dir = std::env::temp_dir()
+            .join("plainsong-model-integrity")
+            .join(uuid::Uuid::new_v4().to_string());
+        tokio::fs::create_dir_all(&test_dir)
+            .await
+            .expect("create integrity test directory");
+        let model_path = test_dir.join("model.onnx");
+        tokio::fs::write(&model_path, b"trusted model bytes")
+            .await
+            .expect("write model");
+        let digest = calculate_sha256(&model_path).await.expect("hash model");
+
+        assert!(verify_or_record_model_integrity(&model_path, &digest)
+            .await
+            .expect("verify model"));
+        assert!(is_model_artifact_trusted(&model_path, &digest));
+
+        tokio::fs::write(&model_path, b"tampered model bytes with a different size")
+            .await
+            .expect("tamper model");
+        assert!(!is_model_artifact_trusted(&model_path, &digest));
+        assert!(!verify_or_record_model_integrity(&model_path, &digest)
+            .await
+            .expect("reject tampered model"));
+
+        tokio::fs::remove_dir_all(&test_dir).await.ok();
+    }
+
+    #[tokio::test]
+    async fn startup_integrity_migration_upgrades_exact_legacy_artifacts_only() {
+        let test_dir = std::env::temp_dir()
+            .join("plainsong-model-integrity-migration")
+            .join(uuid::Uuid::new_v4().to_string());
+        tokio::fs::create_dir_all(&test_dir)
+            .await
+            .expect("create migration test directory");
+
+        let exact_path = test_dir.join("exact-model.bin");
+        let altered_path = test_dir.join("altered-model.bin");
+        tokio::fs::write(&exact_path, b"known pinned model bytes")
+            .await
+            .expect("write exact model");
+        tokio::fs::write(&altered_path, b"unexpected model bytes")
+            .await
+            .expect("write altered model");
+        let expected_digest = calculate_sha256(&exact_path)
+            .await
+            .expect("hash exact model");
+
+        let report = migrate_legacy_model_integrity_receipts(&[
+            (exact_path.clone(), expected_digest.clone()),
+            (altered_path.clone(), expected_digest.clone()),
+        ])
+        .await;
+
+        assert_eq!(report.migrated_count, 1);
+        assert_eq!(report.rejected_paths, vec![altered_path.clone()]);
+        assert!(report.errors.is_empty());
+        assert!(is_model_artifact_trusted(&exact_path, &expected_digest));
+        assert!(!is_model_artifact_trusted(&altered_path, &expected_digest));
+        assert!(!model_integrity_receipt_path(&altered_path).exists());
+
+        tokio::fs::remove_dir_all(&test_dir).await.ok();
     }
 
     #[cfg(unix)]
@@ -1175,6 +1556,74 @@ mod tests {
             listed.iter().all(|model| model.provider == "parakeet"),
             "both routes report the parakeet provider"
         );
+
+        std::fs::remove_dir_all(&models_dir).ok();
+    }
+
+    #[tokio::test]
+    async fn downloaded_model_listing_excludes_integrity_metadata() {
+        let models_dir = std::env::temp_dir()
+            .join("plainsong-download-integrity-listing")
+            .join(uuid::Uuid::new_v4().to_string());
+        let whisper_dir = models_dir.join("whisper");
+        let parakeet_dir = models_dir.join("parakeet").join("parakeet-tdt-0.6b-v3");
+        std::fs::create_dir_all(&whisper_dir).expect("create Whisper dir");
+        std::fs::create_dir_all(&parakeet_dir).expect("create Parakeet dir");
+
+        let whisper_model = whisper_dir.join("ggml-base.en.bin");
+        let parakeet_model = parakeet_dir.join("encoder.int8.onnx");
+        for path in [&whisper_model, &parakeet_model] {
+            std::fs::write(path, b"model").expect("write model");
+            std::fs::write(model_integrity_receipt_path(path), b"receipt").expect("write receipt");
+            std::fs::write(
+                path_with_suffix(&model_integrity_receipt_path(path), ".tmp-123"),
+                b"temporary receipt",
+            )
+            .expect("write temporary receipt");
+        }
+
+        let manager = DownloadManager {
+            client: build_download_client().expect("client"),
+            models_dir: models_dir.clone(),
+        };
+        let listed = manager
+            .list_downloaded_models()
+            .await
+            .expect("listing should succeed");
+
+        assert_eq!(listed.len(), 2, "only model payloads should be listed");
+        assert!(listed.iter().any(|model| model.path == whisper_model));
+        assert!(listed.iter().any(|model| model.path == parakeet_model));
+        assert!(listed
+            .iter()
+            .all(|model| !is_internal_model_metadata_file(&model.path)));
+
+        std::fs::remove_dir_all(&models_dir).ok();
+    }
+
+    #[tokio::test]
+    async fn deleting_a_model_removes_its_integrity_receipt() {
+        let models_dir = std::env::temp_dir()
+            .join("plainsong-download-delete")
+            .join(uuid::Uuid::new_v4().to_string());
+        let whisper_dir = models_dir.join("whisper");
+        std::fs::create_dir_all(&whisper_dir).expect("create Whisper dir");
+        let model_path = whisper_dir.join("ggml-base.en.bin");
+        let receipt_path = model_integrity_receipt_path(&model_path);
+        std::fs::write(&model_path, b"model").expect("write model");
+        std::fs::write(&receipt_path, b"receipt").expect("write receipt");
+
+        let manager = DownloadManager {
+            client: build_download_client().expect("client"),
+            models_dir: models_dir.clone(),
+        };
+        manager
+            .delete_model(&model_path)
+            .await
+            .expect("deletion should succeed");
+
+        assert!(!model_path.exists());
+        assert!(!receipt_path.exists());
 
         std::fs::remove_dir_all(&models_dir).ok();
     }

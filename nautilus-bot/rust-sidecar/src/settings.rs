@@ -18,7 +18,7 @@ use std::path::PathBuf;
 use crate::text::format::{self, DictationAppCategory};
 
 pub(crate) fn nautilus_config_dir() -> Result<PathBuf> {
-    let config_dir = dirs::config_dir()
+    let config_dir = crate::paths::config_dir()
         .context("Could not find config directory")?
         .join("Plainsong");
 

@@ -191,6 +191,14 @@ pub enum DictationProfile {
     PowerRewrite,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum DictationDeliveryMode {
+    #[default]
+    System,
+    Preview,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default, rename_all = "camelCase")]
 pub struct DictationStartOptions {
@@ -235,6 +243,11 @@ pub struct DictationStartOptions {
     pub activation_matcher: Option<String>,
     #[serde(default)]
     pub preferred_input_device_id: Option<String>,
+    /// Controls where the final text is delivered. Preview keeps the full
+    /// capture, transcription, and durable-history path, but deliberately
+    /// avoids clipboard and system-wide insertion side effects.
+    #[serde(default)]
+    pub delivery_mode: DictationDeliveryMode,
     /// True only when the hands-free idle monitor's own `hands_free_start`
     /// signal triggered this start. It is the one activation path allowed to be
     /// seeded from the monitor's pre-roll ring; a hotkey press means "start
@@ -269,6 +282,7 @@ impl Default for DictationStartOptions {
             resolved_mode_label: None,
             activation_matcher: None,
             preferred_input_device_id: None,
+            delivery_mode: DictationDeliveryMode::System,
             hands_free_trigger: false,
         }
     }

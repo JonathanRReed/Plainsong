@@ -4,7 +4,7 @@ use std::path::PathBuf;
 
 #[cfg(all(target_os = "windows", target_arch = "x86_64"))]
 pub fn probe() -> EngineProbe {
-    let marker = dirs::data_dir()
+    let marker = crate::paths::data_dir()
         .unwrap_or_else(|| PathBuf::from("."))
         .join("Plainsong")
         .join("models")

@@ -70,7 +70,7 @@ fn has_provider_secret_or_env(secret_name: &str, env_name: &str) -> bool {
 
 impl AsrManager {
     pub fn new() -> Self {
-        let models_dir = dirs::data_dir()
+        let models_dir = crate::paths::data_dir()
             .unwrap_or_else(|| PathBuf::from("."))
             .join("Plainsong")
             .join("models");
@@ -1310,7 +1310,7 @@ fn runtime_diagnostics_for_provider(
     last_error: Option<&str>,
     apple_speech_readiness: Option<&AppleSpeechReadiness>,
 ) -> RuntimeDiagnosticsInternal {
-    let models_root = dirs::data_dir()
+    let models_root = crate::paths::data_dir()
         .unwrap_or_else(|| PathBuf::from("."))
         .join("Plainsong")
         .join("models");

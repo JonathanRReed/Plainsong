@@ -12,8 +12,9 @@
  * always "match" even if nothing was inserted anywhere.
  *
  * Every strategy in this module reads the inserted text back out of something OUTSIDE the app
- * under test: an HTTP beacon from a page the app never sees, a file's bytes on disk, or the
- * system clipboard seeded with a sentinel the app did not write.
+ * under test: an HTTP beacon from a page the app never sees, a file's bytes on disk, the focused
+ * native accessibility value, or the system clipboard seeded with a sentinel the app did not
+ * write.
  *
  * Dependencies: node builtins plus the macOS `open`, `pbcopy`, `pbpaste` and `osascript`
  * binaries. No package.json dependency is added.
@@ -47,6 +48,7 @@ import { spawnSync } from "node:child_process";
 export const VERIFY_MODES = Object.freeze([
   "local-http-probe",
   "file-on-disk",
+  "native-accessibility",
   "clipboard-sentinel",
 ]);
 
@@ -274,6 +276,73 @@ function frontmostGate({ expectedBundleIds, appLabel, phase }) {
     };
   }
   return { frontmost, matched: true, blockedReason: null };
+}
+
+function readFocusedAccessibilityElement(appName) {
+  const encodedName = JSON.stringify(String(appName ?? ""));
+  const script = `
+const systemEvents = Application("System Events");
+const process = systemEvents.processes.byName(${encodedName});
+if (!process.exists()) {
+  throw new Error("Application process is not running");
+}
+const focused = process.attributes.byName("AXFocusedUIElement").value();
+const readAttribute = (name) => {
+  try {
+    const value = focused.attributes.byName(name).value();
+    return value === undefined || value === null ? null : String(value);
+  } catch (_) {
+    return null;
+  }
+};
+const readValue = () => {
+  try {
+    const value = focused.attributes.byName("AXValue").value();
+    return {
+      available: true,
+      value: value === undefined || value === null ? "" : String(value),
+    };
+  } catch (_) {
+    return { available: false, value: null };
+  }
+};
+const focusedValue = readValue();
+JSON.stringify({
+  role: readAttribute("AXRole"),
+  subrole: readAttribute("AXSubrole"),
+  identifier: readAttribute("AXIdentifier"),
+  description: readAttribute("AXDescription"),
+  valueAvailable: focusedValue.available,
+  value: focusedValue.value,
+});
+`;
+  const result = runProcess("osascript", ["-l", "JavaScript", "-e", script]);
+  if (result.status !== 0) {
+    return {
+      ok: false,
+      element: null,
+      error: result.stderr || result.spawnError || `osascript exit ${result.status}`,
+    };
+  }
+  try {
+    const element = JSON.parse(result.stdout.trim());
+    return {
+      ok: element?.valueAvailable === true && typeof element?.value === "string",
+      element,
+      error:
+        element?.valueAvailable === true && typeof element?.value === "string"
+          ? null
+          : "The focused element exposed no string AXValue.",
+    };
+  } catch (error) {
+    return {
+      ok: false,
+      element: null,
+      error: `The accessibility read returned invalid JSON: ${
+        error instanceof Error ? error.message : String(error)
+      }`,
+    };
+  }
 }
 
 function openWithApp({ bundleId, appName, argument }) {
@@ -773,7 +842,232 @@ function readFileAfterInsert(options = {}) {
 }
 
 /* ------------------------------------------------------------------------------------------ */
-/* Strategy 3: clipboard sentinel                                                               */
+/* Strategy 3: native accessibility value                                                       */
+/* ------------------------------------------------------------------------------------------ */
+
+function nativeAccessibilityReadBack(options = {}) {
+  const {
+    accessibilityApp = "",
+    expectedBundleIds = [],
+    targetLabel = accessibilityApp || "the target application",
+    verifySurfaceIdentity = null,
+    expectedRoles = ["AXTextArea", "AXTextField"],
+  } = options;
+
+  let frontmostAtPrepare = null;
+  let preparedElement = null;
+  let surfaceIdentity = null;
+
+  function readOrBlocked(phase) {
+    const read = readFocusedAccessibilityElement(accessibilityApp);
+    if (!read.ok) {
+      return {
+        ok: false,
+        blockedReason:
+          `System Events could not read the focused accessibility value in ${targetLabel} ` +
+          `${phase}. The harness cannot prove what the target field contains. Grant the terminal ` +
+          "Accessibility and Automation permission, focus a writable text field, and re-run. " +
+          `Detail: ${read.error}`,
+        read,
+      };
+    }
+    if (!expectedRoles.includes(read.element.role)) {
+      return {
+        ok: false,
+        blockedReason:
+          `The focused element in ${targetLabel} ${phase} has role ` +
+          `${read.element.role ?? "unknown"}, not one of ${expectedRoles.join(", ")}. Nothing ` +
+          "will be inserted until a writable text field is focused.",
+        read,
+      };
+    }
+    return { ok: true, blockedReason: null, read };
+  }
+
+  return {
+    mode: "native-accessibility",
+    surface: `focused native accessibility text field in ${targetLabel}`,
+    surfaceDescription:
+      `The focused AXTextArea or AXTextField in ${targetLabel}, read directly through System ` +
+      "Events before and after insertion. The observed value never comes from Plainsong.",
+    surfaceIsRealTargetApplication: true,
+
+    async prepare() {
+      const gate = frontmostGate({
+        expectedBundleIds,
+        appLabel: targetLabel,
+        phase: "before the pre-insert accessibility read",
+      });
+      frontmostAtPrepare = gate.frontmost;
+      if (gate.blockedReason) {
+        return {
+          ok: false,
+          blockedReason: gate.blockedReason,
+          preInsertValue: null,
+          evidence: { frontmostAtPrepare, expectedBundleIds },
+        };
+      }
+
+      surfaceIdentity = { status: "not-required", detail: null };
+      if (typeof verifySurfaceIdentity === "function") {
+        surfaceIdentity = (await verifySurfaceIdentity({ frontmost: frontmostAtPrepare })) ?? {
+          status: "unavailable",
+          detail: "The surface identity verifier returned nothing.",
+        };
+        if (surfaceIdentity.status === "mismatch") {
+          return {
+            ok: false,
+            blockedReason:
+              surfaceIdentity.blockedReason ??
+              `The frontmost surface in ${targetLabel} is not the one this matrix row names.`,
+            preInsertValue: null,
+            evidence: { frontmostAtPrepare, expectedBundleIds, surfaceIdentity },
+          };
+        }
+      }
+
+      const focused = readOrBlocked("before insertion");
+      if (!focused.ok) {
+        return {
+          ok: false,
+          blockedReason: focused.blockedReason,
+          preInsertValue: null,
+          evidence: {
+            frontmostAtPrepare,
+            expectedBundleIds,
+            surfaceIdentity,
+            accessibilityRead: focused.read,
+          },
+        };
+      }
+      preparedElement = focused.read.element;
+      if (normalizeReadBackValue(preparedElement.value) !== "") {
+        return {
+          ok: false,
+          blockedReason:
+            `The focused field in ${targetLabel} already contains ` +
+            `${preparedElement.value.length} characters. The harness refuses to insert because ` +
+            "pre-existing text could masquerade as the sample or be overwritten. Empty the " +
+            "disposable target, focus it, and re-run.",
+          preInsertValue: null,
+          evidence: {
+            frontmostAtPrepare,
+            expectedBundleIds,
+            surfaceIdentity,
+            focusedRole: preparedElement.role,
+            focusedIdentifier: preparedElement.identifier,
+            preInsertLength: preparedElement.value.length,
+            preInsertSha256: sha256(preparedElement.value),
+          },
+        };
+      }
+
+      return {
+        ok: true,
+        blockedReason: null,
+        surfaceIdentityEstablished:
+          surfaceIdentity.status === "matched" || surfaceIdentity.status === "not-required",
+        surfaceIdentity,
+        preInsertValue: "",
+        preInsertValueRaw: "",
+        evidence: {
+          frontmostAtPrepare,
+          expectedBundleIds,
+          surfaceIdentity,
+          focusedRole: preparedElement.role,
+          focusedIdentifier: preparedElement.identifier,
+          preInsertLength: 0,
+          preInsertSha256: sha256(""),
+          note:
+            "System Events read an empty string directly from the focused native text field. " +
+            "No keystroke or clipboard inference was used.",
+        },
+      };
+    },
+
+    async readBack() {
+      const gate = frontmostGate({
+        expectedBundleIds,
+        appLabel: targetLabel,
+        phase: "at the post-insert accessibility read",
+      });
+      if (gate.blockedReason) {
+        return {
+          ok: false,
+          blockedReason: gate.blockedReason,
+          observedValue: null,
+          evidence: { frontmostAtPrepare, frontmostAtReadBack: gate.frontmost },
+        };
+      }
+
+      const focused = readOrBlocked("after insertion");
+      if (!focused.ok) {
+        return {
+          ok: false,
+          blockedReason: focused.blockedReason,
+          observedValue: null,
+          evidence: {
+            frontmostAtPrepare,
+            frontmostAtReadBack: gate.frontmost,
+            accessibilityRead: focused.read,
+          },
+        };
+      }
+      const observedElement = focused.read.element;
+      if (
+        preparedElement?.identifier &&
+        observedElement.identifier &&
+        preparedElement.identifier !== observedElement.identifier
+      ) {
+        return {
+          ok: false,
+          blockedReason:
+            `The focused field changed between the pre-insert and post-insert reads in ` +
+            `${targetLabel}. Expected ${preparedElement.identifier}, observed ` +
+            `${observedElement.identifier}. The result cannot prove insertion into the staged ` +
+            "surface.",
+          observedValue: null,
+          evidence: {
+            frontmostAtPrepare,
+            frontmostAtReadBack: gate.frontmost,
+            preparedIdentifier: preparedElement.identifier,
+            observedIdentifier: observedElement.identifier,
+          },
+        };
+      }
+
+      return {
+        ok: true,
+        blockedReason: null,
+        observedValue: normalizeReadBackValue(observedElement.value),
+        observedValueRaw: observedElement.value,
+        evidence: {
+          frontmostAtPrepare,
+          frontmostAtReadBack: gate.frontmost,
+          focusedRole: observedElement.role,
+          focusedIdentifier: observedElement.identifier,
+          observedLength: observedElement.value.length,
+          observedSha256: sha256(observedElement.value),
+          note:
+            "System Events read the post-insert AXValue directly from the same focused native " +
+            "text field used for the pre-insert read.",
+        },
+      };
+    },
+
+    async cleanup() {
+      return {
+        mutatedByReadBack: false,
+        note:
+          "The native accessibility strategy is read-only. It did not type a probe token or " +
+          "modify the clipboard.",
+      };
+    },
+  };
+}
+
+/* ------------------------------------------------------------------------------------------ */
+/* Strategy 4: clipboard sentinel                                                               */
 /* ------------------------------------------------------------------------------------------ */
 
 /**
@@ -813,7 +1107,11 @@ function clipboardSentinelReadBack(options = {}) {
     copyTimeoutMs = 3000,
     typeSettleMs = 400,
     restoreClipboard = true,
+    acceptedPreInsertBlankValues = [],
   } = options;
+  const acceptedBlankValues = new Set(
+    acceptedPreInsertBlankValues.map((value) => String(value))
+  );
 
   const sentinelPre = `PLAINSONG-READBACK-PRE-${nonce}`;
   const sentinelProbe = `PLAINSONG-READBACK-PROBE-${nonce}`;
@@ -1004,7 +1302,9 @@ function clipboardSentinelReadBack(options = {}) {
         };
       }
 
-      if (!first.clipboardUnchanged) {
+      const acceptedCanonicalBlank =
+        !first.clipboardUnchanged && acceptedBlankValues.has(first.rawValue);
+      if (!first.clipboardUnchanged && !acceptedCanonicalBlank) {
         // Never insert here. The pending Cmd+V would replace exactly this selection, and
         // pre-existing text can masquerade as an inserted sample.
         const collapse = collapseSelection();
@@ -1029,21 +1329,49 @@ function clipboardSentinelReadBack(options = {}) {
         };
       }
 
-      // (4) The clipboard still holds the sentinel. That is AMBIGUOUS - an empty field and a
-      // silently ignored Cmd+C are indistinguishable here - so prove emptiness positively.
-      const collapse = collapseSelection();
-      const collapseBlocked = keystrokeBlockedReason("Right Arrow (collapse selection)", {
-        status: collapse.status,
-        stderr: collapse.stderr,
-        spawnError: null,
-      });
-      if (collapseBlocked) {
-        return {
-          ok: false,
-          blockedReason: collapseBlocked,
-          preInsertValue: null,
-          evidence: { ...baseEvidence(), ...first.evidence },
+      // (4) Some surfaces copy a target-specific placeholder from a visually empty editor.
+      // Consume only an explicitly accepted placeholder. Otherwise the clipboard still holds the
+      // sentinel, which is ambiguous because an empty field and a silently ignored Cmd+C look the
+      // same. In both cases, prove emptiness positively with the probe token below.
+      let canonicalBlankClear = null;
+      if (acceptedCanonicalBlank) {
+        const clear = pressKeyCode(KEY_CODE_DELETE);
+        canonicalBlankClear = {
+          valueLength: first.rawValue.length,
+          valueSha256: sha256(first.rawValue),
+          deleteStatus: clear.status,
+          deleteStderr: clear.stderr || null,
+          note:
+            "The selected value matched an explicit target-specific empty-editor placeholder and " +
+            "was consumed before the positive probe-token round trip.",
         };
+        const clearBlocked = keystrokeBlockedReason(
+          "Delete (clear the target-specific empty-editor placeholder)",
+          clear
+        );
+        if (clearBlocked) {
+          return {
+            ok: false,
+            blockedReason: clearBlocked,
+            preInsertValue: null,
+            evidence: { ...baseEvidence(), ...first.evidence, canonicalBlankClear },
+          };
+        }
+      } else {
+        const collapse = collapseSelection();
+        const collapseBlocked = keystrokeBlockedReason("Right Arrow (collapse selection)", {
+          status: collapse.status,
+          stderr: collapse.stderr,
+          spawnError: null,
+        });
+        if (collapseBlocked) {
+          return {
+            ok: false,
+            blockedReason: collapseBlocked,
+            preInsertValue: null,
+            evidence: { ...baseEvidence(), ...first.evidence },
+          };
+        }
       }
       await sleep(typeSettleMs);
 
@@ -1157,11 +1485,15 @@ function clipboardSentinelReadBack(options = {}) {
           ...baseEvidence(),
           preInsertRound: first.evidence,
           probeRound: second.evidence,
+          canonicalBlankClear,
           probeMatchedExactly,
           probeReadBackLength: probeReadBack.length,
           preInsertInterpretation:
-            "Emptiness was established positively, not inferred from silence: the selection was " +
-            `collapsed, the token ${probeToken} was typed, and select-all/copy returned that token ` +
+            "Emptiness was established positively, not inferred from silence: " +
+            (canonicalBlankClear
+              ? "the target-specific empty-editor placeholder was consumed, "
+              : "the empty selection was collapsed, ") +
+            `the token ${probeToken} was typed, and select-all/copy returned that token ` +
             (probeMatchedExactly
               ? "verbatim"
               : "differing only in letter case, which is the surface's own autocapitalisation") +
@@ -1294,6 +1626,8 @@ export async function createReadBackSession(mode, options = {}) {
       return await startLocalProbeServer(options);
     case "file-on-disk":
       return readFileAfterInsert(options);
+    case "native-accessibility":
+      return nativeAccessibilityReadBack(options);
     case "clipboard-sentinel":
       return clipboardSentinelReadBack(options);
     default:

@@ -26,6 +26,13 @@ const markdownPath = path.resolve(
   valueFor("--markdown", "artifacts/release/macos-trust.md"),
 );
 const expectedTeam = valueFor("--expected-team", process.env.APPLE_TEAM_ID ?? null);
+const requestedReleaseDir = path.resolve(
+  repoRoot,
+  valueFor("--release-dir", "release"),
+);
+const releaseDir = fs.existsSync(requestedReleaseDir)
+  ? fs.realpathSync(requestedReleaseDir)
+  : requestedReleaseDir;
 
 function appBundlePaths(bundlePath) {
   return {
@@ -109,6 +116,7 @@ function signingDetails(targetPath) {
 const SPEECH_RECOGNITION_ENTITLEMENT =
   "com.apple.security.personal-information.speech-recognition";
 const FORBIDDEN_INHERITED_ENTITLEMENTS = [
+  "com.apple.security.inherit",
   "com.apple.security.device.audio-input",
   "com.apple.security.device.microphone",
   "com.apple.security.automation.apple-events",
@@ -116,6 +124,10 @@ const FORBIDDEN_INHERITED_ENTITLEMENTS = [
   "com.apple.security.cs.allow-jit",
   "com.apple.security.cs.allow-unsigned-executable-memory",
   "com.apple.security.cs.disable-library-validation",
+];
+const FORBIDDEN_SIDECAR_ENTITLEMENTS = [
+  ...FORBIDDEN_INHERITED_ENTITLEMENTS,
+  SPEECH_RECOGNITION_ENTITLEMENT,
 ];
 const FORBIDDEN_SHORTCUT_HELPER_ENTITLEMENTS = [
   ...FORBIDDEN_INHERITED_ENTITLEMENTS,
@@ -136,11 +148,15 @@ function entitlementDetails(targetPath) {
     FORBIDDEN_SHORTCUT_HELPER_ENTITLEMENTS.filter((entitlement) =>
       result.output.includes(entitlement),
     );
+  const forbiddenSidecarEntitlements = FORBIDDEN_SIDECAR_ENTITLEMENTS.filter(
+    (entitlement) => result.output.includes(entitlement),
+  );
   return {
     ...result,
     hasSpeechRecognition:
       result.ok && result.output.includes(SPEECH_RECOGNITION_ENTITLEMENT),
     forbiddenInheritedEntitlements,
+    forbiddenSidecarEntitlements,
     forbiddenShortcutHelperEntitlements,
   };
 }
@@ -182,6 +198,7 @@ function entitlementDiagnostic(result) {
     ...commandDiagnostic(result),
     hasSpeechRecognition: result.hasSpeechRecognition,
     forbiddenInheritedEntitlements: result.forbiddenInheritedEntitlements,
+    forbiddenSidecarEntitlements: result.forbiddenSidecarEntitlements,
     forbiddenShortcutHelperEntitlements:
       result.forbiddenShortcutHelperEntitlements,
   };
@@ -196,7 +213,6 @@ function architectureDiagnostic(result) {
 }
 
 function resolveReleaseArtifact(pattern) {
-  const releaseDir = path.resolve(repoRoot, "release");
   if (!fs.existsSync(releaseDir)) return null;
   const match = fs
     .readdirSync(releaseDir)
@@ -382,6 +398,9 @@ function checksForAppBundle(inspection) {
       entitlements.app.ok && !entitlements.app.hasSpeechRecognition,
     sidecarHasNoSpeechEntitlement:
       entitlements.sidecar.ok && !entitlements.sidecar.hasSpeechRecognition,
+    sidecarHasNoForbiddenPrivileges:
+      entitlements.sidecar.ok &&
+      entitlements.sidecar.forbiddenSidecarEntitlements.length === 0,
     shortcutHelperHasNoSpeechEntitlement:
       entitlements.shortcutHelper.ok &&
       !entitlements.shortcutHelper.hasSpeechRecognition,
@@ -619,6 +638,7 @@ const artifact = {
   pass: Object.values(checks).every(Boolean),
   paths: {
     ...releaseApp.paths,
+    releaseDir,
     dmg: dmgPath,
     zip: zipPath,
     zipApp: zipVerification.appPath,
@@ -694,6 +714,7 @@ Generated: ${artifact.generatedAt}
 
 ## Artifacts
 
+- Release directory: ${releaseDir}
 - Release app: ${appPath}
 - DMG: ${dmgPath ?? "missing"}
 - ZIP: ${zipPath ?? "missing"}
