@@ -17,7 +17,16 @@ pub mod windows_sdk_dictation_provider;
 use anyhow::Result;
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
-use std::path::Path;
+use std::path::{Path, PathBuf};
+
+pub(crate) fn model_integrity_artifacts(models_root: &Path) -> Vec<(PathBuf, String)> {
+    let mut artifacts = Vec::new();
+    artifacts.extend(distil_whisper::model_integrity_artifacts(models_root));
+    artifacts.extend(moonshine::model_integrity_artifacts(models_root));
+    artifacts.extend(parakeet::model_integrity_artifacts(models_root));
+    artifacts.extend(whisper_candle::model_integrity_artifacts(models_root));
+    artifacts
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -160,6 +169,23 @@ impl AsrProviderType {
             AsrProviderType::OpenAiCloud => "whisper-1",
             AsrProviderType::Groq => "whisper-large-v3-turbo",
             AsrProviderType::CohereTranscribe => "cohere-transcribe-03-2026",
+        }
+    }
+
+    /// Canonical credential slot so reset coverage follows the exhaustive provider enum.
+    pub fn provider_secret_name(self) -> Option<&'static str> {
+        match self {
+            AsrProviderType::ElevenLabsScribe => Some("elevenlabs"),
+            AsrProviderType::OpenAiCloud => Some("openai"),
+            AsrProviderType::Groq => Some("groq"),
+            AsrProviderType::CohereTranscribe => Some("cohere"),
+            AsrProviderType::Whisper
+            | AsrProviderType::Parakeet
+            | AsrProviderType::WhisperCandle
+            | AsrProviderType::DistilWhisper
+            | AsrProviderType::MacosAppleSpeech
+            | AsrProviderType::Moonshine
+            | AsrProviderType::WindowsSdkDictation => None,
         }
     }
 

@@ -12,6 +12,7 @@ mod events;
 mod export;
 mod llm;
 mod models;
+mod paths;
 mod recording_audio;
 mod secrets;
 pub mod settings;
@@ -186,6 +187,8 @@ const LAST_EXTERNAL_TARGET_MAX_AGE_MS: i64 = 120_000;
 const MEETING_CONSENT_TARGET_MAX_AGE_MS: i64 = 12_000;
 const DICTATION_COMMAND_PREFIX_DEFAULT: &str = "command";
 const APP_BUNDLE_IDENTIFIER: &str = "com.plainsong.app";
+pub const SYSTEM_AUDIO_TEST_WORKER_ARGUMENT: &str = "--plainsong-system-audio-test-worker";
+pub const SYSTEM_AUDIO_TEST_WORKER_TIMEOUT_EXIT_CODE: i32 = 124;
 const STREAMING_PREVIEW_MAX_SECONDS: f64 = 90.0;
 /// Seconds at the end of an accumulated post-capture chunk searched, backwards,
 /// for a pause to cut at instead of cutting at the nominal frame count.
@@ -212,7 +215,10 @@ const VAULT_DB_KEY_SECRET: &str = "vault_db_key";
 const VAULT_UNLOCK_CHECK_SECRET: &str = "vault_unlock_check";
 const VAULT_RECORDING_KEY_SALT_LEN: usize = 16;
 const VAULT_UNLOCK_CHECK_PLAINTEXT: &[u8] = b"nautilus-vault-check";
-const RESETTABLE_PROVIDER_SECRETS: [&str; 8] = [
+/// Canonical registry for every provider credential accepted by the sidecar.
+/// Reset and provider-name validation share it so adding a credential cannot
+/// leave a second cleanup list stale.
+const PROVIDER_SECRET_NAMES: [&str; 9] = [
     "openai",
     "elevenlabs",
     "anthropic",
@@ -221,6 +227,7 @@ const RESETTABLE_PROVIDER_SECRETS: [&str; 8] = [
     "deepseek",
     "ollama-cloud",
     "mistral",
+    "cohere",
 ];
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -297,6 +304,12 @@ struct DictationSessionTracker {
     startup_latency_ms: Option<u64>,
     insertion_mode_at_start: Option<DictationInsertionMode>,
     copy_to_clipboard_at_start: Option<bool>,
+    /// Set by the one stop that owns finalization for this session. Manual,
+    /// VAD, popup, and hotkey stops are separate callers, so two of them could
+    /// otherwise read the same active id, both proceed into audio finalization,
+    /// and the loser would clear the tracker out from under the winner —
+    /// discarding a dictation the user had already spoken.
+    stopping_session_id: Option<u64>,
 }
 
 #[derive(Debug, Clone)]
@@ -1035,7 +1048,7 @@ struct DiarizationModelOption {
 }
 
 fn diarization_model_path(model_id: &str) -> Option<std::path::PathBuf> {
-    let models_dir = dirs::data_dir()
+    let models_dir = crate::paths::data_dir()
         .unwrap_or_else(|| std::path::PathBuf::from("."))
         .join("Plainsong")
         .join("models")
@@ -1055,7 +1068,7 @@ fn list_diarization_models() -> Vec<DiarizationModelOption> {
             label: "ECAPA-TDNN 512",
             description: "Fast and accurate, recommended for most use cases (~25 MB)",
             installed: diarization_model_path("ecapa_tdnn_speaker")
-                .map(|p| p.exists())
+                .map(|p| download::is_diarization_model_artifact_trusted("ecapa_tdnn_speaker", &p))
                 .unwrap_or(false),
         },
         DiarizationModelOption {
@@ -1063,7 +1076,7 @@ fn list_diarization_models() -> Vec<DiarizationModelOption> {
             label: "ResNet34",
             description: "Balanced performance, good accuracy with moderate speed (~30 MB)",
             installed: diarization_model_path("resnet34_speaker")
-                .map(|p| p.exists())
+                .map(|p| download::is_diarization_model_artifact_trusted("resnet34_speaker", &p))
                 .unwrap_or(false),
         },
         DiarizationModelOption {
@@ -1071,7 +1084,7 @@ fn list_diarization_models() -> Vec<DiarizationModelOption> {
             label: "CAM++",
             description: "Highest accuracy, best for challenging audio conditions (~35 MB)",
             installed: diarization_model_path("campplus_speaker")
-                .map(|p| p.exists())
+                .map(|p| download::is_diarization_model_artifact_trusted("campplus_speaker", &p))
                 .unwrap_or(false),
         },
     ]
@@ -1081,7 +1094,7 @@ fn list_diarization_models() -> Vec<DiarizationModelOption> {
 fn is_diarization_model_available(modelId: Option<String>) -> bool {
     let id = modelId.as_deref().unwrap_or("ecapa_tdnn_speaker");
     diarization_model_path(id)
-        .map(|p| p.exists())
+        .map(|p| download::is_diarization_model_artifact_trusted(id, &p))
         .unwrap_or(false)
 }
 
@@ -2619,11 +2632,13 @@ async fn persist_repaired_meeting_route(
 async fn resolve_ready_meeting_selection(
     state: &AppState,
     transcription: &settings::TranscriptionSettings,
+    remote_processing_enabled: bool,
 ) -> Result<(asr::AsrProviderType, String, Option<String>), String> {
     let requested_selection =
         resolve_transcription_provider_and_model(transcription, TranscriptionScope::Meeting);
 
     ensure_meeting_route_supported(requested_selection.0, &requested_selection.1)?;
+    enforce_remote_asr_provider_policy(requested_selection.0, remote_processing_enabled)?;
 
     match ensure_asr_route_ready(
         state,
@@ -2658,10 +2673,14 @@ async fn resolve_ready_meeting_selection(
                 dictation_provider,
                 meeting_provider,
             );
-            let repaired_candidate =
-                select_ready_meeting_candidate(&provider_infos, &preferred_candidates);
+            let repaired_candidate = select_ready_meeting_candidate(
+                &provider_infos,
+                &preferred_candidates,
+                meeting_policy,
+            );
 
             if let Some((provider_type, model_id)) = repaired_candidate {
+                enforce_remote_asr_provider_policy(provider_type, remote_processing_enabled)?;
                 if provider_type != requested_selection.0 || model_id != requested_selection.1 {
                     let persisted_model_id =
                         persist_repaired_meeting_route(state, provider_type, &model_id).await?;
@@ -2690,6 +2709,7 @@ async fn resolve_ready_dictation_selection(
     state: &AppState,
     transcription: &settings::TranscriptionSettings,
     route_override: Option<&str>,
+    remote_processing_enabled: bool,
 ) -> Result<
     (
         asr::AsrProviderType,
@@ -2714,6 +2734,7 @@ async fn resolve_ready_dictation_selection(
         requested_selection.0,
         &requested_selection.1,
     ) {
+        enforce_remote_asr_provider_policy(requested_selection.0, remote_processing_enabled)?;
         match ensure_asr_route_ready(
             state,
             requested_selection.0,
@@ -2784,6 +2805,7 @@ async fn resolve_ready_dictation_selection(
                     &preferred_candidates,
                     route_preference,
                 ) {
+                    enforce_remote_asr_provider_policy(provider_type, remote_processing_enabled)?;
                     let resolved_hosting = provider_hosting_environment(provider_type, &model_id);
                     let warning = format!(
                         "Dictation route '{}' / '{}' was not ready. Using '{}' / '{}' for this capture.",
@@ -2828,6 +2850,7 @@ async fn resolve_ready_dictation_selection(
     if let Some((provider_type, model_id)) =
         select_ready_dictation_candidate(&provider_infos, &preferred_candidates, route_preference)
     {
+        enforce_remote_asr_provider_policy(provider_type, remote_processing_enabled)?;
         let resolved_hosting = provider_hosting_environment(provider_type, &model_id);
         let warning = format!(
             "This dictation mode prefers {} routing. Using '{}' / '{}' instead of '{}' / '{}'.",
@@ -3357,22 +3380,43 @@ fn emit_recording_status_with_markers(
 
 pub(crate) fn normalize_provider_secret_name(provider: &str) -> Result<&'static str, String> {
     let normalized = provider.trim().to_ascii_lowercase();
-    match normalized.as_str() {
-        "openai" => Ok("openai"),
-        "elevenlabs" | "eleven_labs" => Ok("elevenlabs"),
-        "anthropic" => Ok("anthropic"),
-        "gemini" => Ok("gemini"),
-        "deepseek" => Ok("deepseek"),
-        "ollama-cloud" | "ollama_cloud" | "ollamacloud" => Ok("ollama-cloud"),
-        "mistral" => Ok("mistral"),
-        "groq" => Ok("groq"),
-        "cohere" => Ok("cohere"),
-        "ollama" => Err("Local Ollama does not require a stored API key".to_string()),
-        _ => Err(format!(
-            "Unsupported provider '{}'. Expected one of: openai, elevenlabs, anthropic, gemini, deepseek, ollama-cloud, mistral, groq, cohere",
-            provider
-        )),
+    let canonical = match normalized.as_str() {
+        "eleven_labs" => "elevenlabs",
+        "ollama_cloud" | "ollamacloud" => "ollama-cloud",
+        "ollama" => {
+            return Err("Local Ollama does not require a stored API key".to_string());
+        }
+        other => other,
+    };
+
+    PROVIDER_SECRET_NAMES
+        .iter()
+        .copied()
+        .find(|registered| *registered == canonical)
+        .ok_or_else(|| {
+            format!(
+                "Unsupported provider '{}'. Expected one of: {}",
+                provider,
+                PROVIDER_SECRET_NAMES.join(", ")
+            )
+        })
+}
+
+fn clear_registered_provider_secrets_with<E>(
+    mut clear: impl FnMut(&str) -> Result<(), E>,
+) -> (Vec<String>, Vec<String>)
+where
+    E: std::fmt::Display,
+{
+    let mut cleared = Vec::new();
+    let mut failed = Vec::new();
+    for provider in PROVIDER_SECRET_NAMES {
+        match clear(provider) {
+            Ok(()) => cleared.push(provider.to_string()),
+            Err(error) => failed.push(format!("{} ({})", provider, error)),
+        }
     }
+    (cleared, failed)
 }
 
 fn canonicalize_or_create_absolute_path(raw_path: &Path, label: &str) -> Result<PathBuf, String> {
@@ -3407,6 +3451,76 @@ fn canonicalize_or_create_absolute_path(raw_path: &Path, label: &str) -> Result<
     })
 }
 
+fn canonicalize_absolute_path_without_creation(
+    raw_path: &Path,
+    label: &str,
+) -> Result<PathBuf, String> {
+    if !raw_path.is_absolute() {
+        return Err(format!(
+            "{} must be an absolute path, got '{}'",
+            label,
+            raw_path.display()
+        ));
+    }
+
+    if raw_path.exists() {
+        return raw_path.canonicalize().map_err(|e| {
+            format!(
+                "Failed to resolve {} '{}': {}",
+                label,
+                raw_path.display(),
+                e
+            )
+        });
+    }
+
+    let existing_ancestor = raw_path
+        .ancestors()
+        .find(|ancestor| ancestor.exists())
+        .ok_or_else(|| {
+            format!(
+                "Failed to find an existing ancestor for {} '{}'",
+                label,
+                raw_path.display()
+            )
+        })?;
+    let suffix = raw_path.strip_prefix(existing_ancestor).map_err(|e| {
+        format!(
+            "Failed to resolve {} '{}': {}",
+            label,
+            raw_path.display(),
+            e
+        )
+    })?;
+    let mut resolved = existing_ancestor.canonicalize().map_err(|e| {
+        format!(
+            "Failed to resolve {} ancestor '{}': {}",
+            label,
+            existing_ancestor.display(),
+            e
+        )
+    })?;
+
+    for component in suffix.components() {
+        match component {
+            std::path::Component::CurDir => {}
+            std::path::Component::ParentDir => {
+                resolved.pop();
+            }
+            std::path::Component::Normal(part) => resolved.push(part),
+            std::path::Component::RootDir | std::path::Component::Prefix(_) => {
+                return Err(format!(
+                    "Failed to resolve {} '{}': unexpected absolute suffix",
+                    label,
+                    raw_path.display()
+                ));
+            }
+        }
+    }
+
+    Ok(resolved)
+}
+
 async fn validate_export_target_path(state: &AppState, raw_target: &str) -> Result<String, String> {
     let trimmed = raw_target.trim();
     if trimmed.is_empty() {
@@ -3427,33 +3541,26 @@ async fn validate_export_target_path(state: &AppState, raw_target: &str) -> Resu
     };
 
     let resolved_target = if candidate.exists() {
-        let canonical = canonicalize_existing_absolute_path(trimmed, "target")?;
-        if canonical.is_dir() {
+        let resolved = canonicalize_existing_absolute_path(trimmed, "target")?;
+        if resolved.is_dir() {
             return Err(format!(
                 "target must be a file path, got directory '{}'",
-                canonical.display()
+                resolved.display()
             ));
         }
-        canonical
+        resolved
     } else {
-        let Some(parent) = candidate.parent() else {
-            return Err(format!(
-                "target must include a parent directory, got '{}'",
-                candidate.display()
-            ));
-        };
-        let canonical_parent = canonicalize_or_create_absolute_path(parent, "target parent")?;
-        let Some(file_name) = candidate.file_name() else {
+        if candidate.file_name().is_none() {
             return Err(format!(
                 "target must include a file name, got '{}'",
                 candidate.display()
             ));
-        };
-        canonical_parent.join(file_name)
+        }
+        canonicalize_absolute_path_without_creation(&candidate, "target")?
     };
 
     if let Some(root) = export_root {
-        let canonical_root = canonicalize_or_create_absolute_path(&root, "exportRoot")?;
+        let canonical_root = canonicalize_absolute_path_without_creation(&root, "exportRoot")?;
         if !resolved_target.starts_with(&canonical_root) {
             return Err(format!(
                 "target '{}' is outside configured exportRoot '{}'",
@@ -3499,6 +3606,19 @@ fn enforce_remote_provider_policy(
         return Err(format!(
             "Remote provider '{}' is blocked by policy. Enable Settings > Security > Remote processing to continue.",
             provider.as_settings_value()
+        ));
+    }
+    Ok(())
+}
+
+fn enforce_remote_asr_provider_policy(
+    provider: asr::AsrProviderType,
+    remote_processing_enabled: bool,
+) -> Result<(), String> {
+    if provider.is_remote() && !remote_processing_enabled {
+        return Err(format!(
+            "Remote ASR provider '{}' is blocked by policy. Enable Settings > Security > Remote processing to continue.",
+            asr_provider_to_settings_value(provider)
         ));
     }
     Ok(())
@@ -5405,6 +5525,161 @@ async fn unlock_vault_runtime(state: &AppState, password: &str) -> Result<(), St
     Ok(())
 }
 
+#[cfg(any(feature = "sqlcipher", test))]
+fn persist_and_verify_vault_db_key<SetSecret, GetSecret, ClearSecret>(
+    db_key: &str,
+    mut set_secret: SetSecret,
+    mut get_secret: GetSecret,
+    mut clear_secret: ClearSecret,
+) -> Result<(), String>
+where
+    SetSecret: FnMut(&str) -> Result<(), String>,
+    GetSecret: FnMut() -> Result<Option<String>, String>,
+    ClearSecret: FnMut() -> Result<(), String>,
+{
+    set_secret(db_key)?;
+    match get_secret() {
+        Ok(Some(readback)) if readback == db_key => Ok(()),
+        Ok(_) => {
+            let cleanup = clear_secret();
+            let suffix = cleanup
+                .err()
+                .map(|error| format!("; orphaned secret cleanup also failed: {error}"))
+                .unwrap_or_default();
+            Err(format!(
+                "Secure database key did not verify after persistence{suffix}"
+            ))
+        }
+        Err(error) => {
+            let cleanup = clear_secret();
+            let suffix = cleanup
+                .err()
+                .map(|cleanup_error| {
+                    format!("; orphaned secret cleanup also failed: {cleanup_error}")
+                })
+                .unwrap_or_default();
+            Err(format!(
+                "Could not verify the persisted secure database key: {error}{suffix}"
+            ))
+        }
+    }
+}
+
+#[cfg(any(feature = "sqlcipher", test))]
+fn install_vault_database_key<SetSecret, GetSecret, ClearSecret, Rekey>(
+    db_key: &str,
+    set_secret: SetSecret,
+    get_secret: GetSecret,
+    mut clear_secret: ClearSecret,
+    mut rekey: Rekey,
+) -> Result<(), String>
+where
+    SetSecret: FnMut(&str) -> Result<(), String>,
+    GetSecret: FnMut() -> Result<Option<String>, String>,
+    ClearSecret: FnMut() -> Result<(), String>,
+    Rekey: FnMut() -> Result<(), String>,
+{
+    persist_and_verify_vault_db_key(db_key, set_secret, get_secret, &mut clear_secret)?;
+    if let Err(error) = rekey() {
+        let cleanup = clear_secret();
+        let suffix = cleanup
+            .err()
+            .map(|cleanup_error| format!("; orphaned secret cleanup also failed: {cleanup_error}"))
+            .unwrap_or_default();
+        return Err(format!(
+            "Failed to encrypt the database after durably storing its key: {error}{suffix}"
+        ));
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod vault_key_migration_tests {
+    use super::{install_vault_database_key, persist_and_verify_vault_db_key};
+    use std::cell::RefCell;
+    use std::rc::Rc;
+
+    #[test]
+    fn crash_after_verified_key_write_leaves_recoverable_key() {
+        let durable = Rc::new(RefCell::new(None::<String>));
+        let write_store = Rc::clone(&durable);
+        let read_store = Rc::clone(&durable);
+
+        // Stopping here models the old destructive window in reverse: no rekey
+        // has happened yet, but the exact key needed to finish it is durable.
+        persist_and_verify_vault_db_key(
+            "durable-key",
+            move |value| {
+                *write_store.borrow_mut() = Some(value.to_string());
+                Ok(())
+            },
+            move || Ok(read_store.borrow().clone()),
+            || Ok(()),
+        )
+        .expect("persist and verify key");
+
+        assert_eq!(durable.borrow().as_deref(), Some("durable-key"));
+    }
+
+    #[test]
+    fn rekey_runs_only_after_verified_secret_readback() {
+        let events = Rc::new(RefCell::new(Vec::<&'static str>::new()));
+        let durable = Rc::new(RefCell::new(None::<String>));
+        let set_events = Rc::clone(&events);
+        let get_events = Rc::clone(&events);
+        let rekey_events = Rc::clone(&events);
+        let write_store = Rc::clone(&durable);
+        let read_store = Rc::clone(&durable);
+
+        install_vault_database_key(
+            "durable-key",
+            move |value| {
+                set_events.borrow_mut().push("set");
+                *write_store.borrow_mut() = Some(value.to_string());
+                Ok(())
+            },
+            move || {
+                get_events.borrow_mut().push("get");
+                Ok(read_store.borrow().clone())
+            },
+            || Ok(()),
+            move || {
+                rekey_events.borrow_mut().push("rekey");
+                Ok(())
+            },
+        )
+        .expect("install key");
+
+        assert_eq!(&*events.borrow(), &["set", "get", "rekey"]);
+    }
+
+    #[test]
+    fn failed_rekey_removes_orphaned_secret() {
+        let durable = Rc::new(RefCell::new(None::<String>));
+        let write_store = Rc::clone(&durable);
+        let read_store = Rc::clone(&durable);
+        let clear_store = Rc::clone(&durable);
+
+        let error = install_vault_database_key(
+            "durable-key",
+            move |value| {
+                *write_store.borrow_mut() = Some(value.to_string());
+                Ok(())
+            },
+            move || Ok(read_store.borrow().clone()),
+            move || {
+                *clear_store.borrow_mut() = None;
+                Ok(())
+            },
+            || Err("simulated rekey failure".to_string()),
+        )
+        .expect_err("rekey failure must abort migration");
+
+        assert!(error.contains("simulated rekey failure"));
+        assert!(durable.borrow().is_none());
+    }
+}
+
 async fn migrate_storage_encryption(state: &AppState, password: &str) -> Result<(), String> {
     let password = password.trim();
     if password.len() < 8 {
@@ -5464,8 +5739,26 @@ async fn migrate_storage_encryption(state: &AppState, password: &str) -> Result<
 
         #[cfg(feature = "sqlcipher")]
         {
-            let db = state.db.lock().await;
-            db.change_key(&db_key).map_err(|e| e.to_string())?;
+            // The irreversible rekey happens only after Keychain persistence has
+            // been read back byte-for-byte. If rekey itself fails, remove the
+            // orphaned key so the next startup still opens the plaintext file.
+            let mut db = state.db.lock().await;
+            install_vault_database_key(
+                &db_key,
+                |value| {
+                    secrets::set_internal_secret(VAULT_DB_KEY_SECRET, value)
+                        .map_err(|error| error.to_string())
+                },
+                || {
+                    secrets::get_internal_secret(VAULT_DB_KEY_SECRET)
+                        .map_err(|error| error.to_string())
+                },
+                || {
+                    secrets::clear_internal_secret(VAULT_DB_KEY_SECRET)
+                        .map_err(|error| error.to_string())
+                },
+                || db.change_key(&db_key).map_err(|error| error.to_string()),
+            )?;
         }
         #[cfg(not(feature = "sqlcipher"))]
         {
@@ -5474,7 +5767,6 @@ async fn migrate_storage_encryption(state: &AppState, password: &str) -> Result<
                 "sqlcipher feature is disabled in this build; database encryption migration skipped"
             );
         }
-        secrets::set_internal_secret(VAULT_DB_KEY_SECRET, &db_key).map_err(|e| e.to_string())?;
     }
     if existing_verifier.is_none() {
         let verifier =
@@ -6857,6 +7149,10 @@ mod tests {
 
         let updates = recording_activation_failure_updates(&plan, "injected activation failure");
         assert_eq!(updates.len(), 2);
+        assert!(
+            recording_activation_failure_has_audio(&updates),
+            "nonempty owned audio must prevent rollback"
+        );
         assert_eq!(
             updates[0].1,
             recording_audio::RecordingAudioLifecycle::Failed
@@ -6866,6 +7162,43 @@ mod tests {
             recording_audio::RecordingAudioLifecycle::Missing
         );
         assert!(primary.exists(), "nonempty owned audio must be preserved");
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn activation_failure_without_audio_is_safe_to_rollback() {
+        let root = std::env::temp_dir().join(format!(
+            "plainsong-empty-activation-failure-test-{}",
+            uuid::Uuid::new_v4()
+        ));
+        std::fs::create_dir_all(&root).expect("create activation fixture root");
+        let primary = root.join("recording.wav");
+        let writer = hound::WavWriter::create(
+            &primary,
+            hound::WavSpec {
+                channels: 1,
+                sample_rate: 48_000,
+                bits_per_sample: 32,
+                sample_format: hound::SampleFormat::Float,
+            },
+        )
+        .expect("create empty wav");
+        writer.finalize().expect("finalize empty wav");
+        let plan = recording_audio::RecordingCapturePlan {
+            recording_id: "recording-empty".to_string(),
+            primary_path: primary,
+            mic_path: None,
+            system_path: None,
+        };
+
+        let updates = recording_activation_failure_updates(&plan, "injected activation failure");
+        assert_eq!(updates.len(), 1);
+        assert!(!recording_activation_failure_has_audio(&updates));
+        assert_eq!(
+            updates[0].1,
+            recording_audio::RecordingAudioLifecycle::Missing
+        );
 
         let _ = std::fs::remove_dir_all(&root);
     }
@@ -7255,6 +7588,21 @@ mod tests {
         assert!(partial_should_decode(20000, 8000, min_samples));
         // Exactly at the threshold counts as long enough.
         assert!(partial_should_decode(min_samples, 0, min_samples));
+    }
+
+    #[test]
+    fn dictation_recording_duration_uses_wav_frames_not_byte_length() {
+        let samples = vec![0.0_f32; 48_000 * 3];
+        let wav = mono_samples_to_wav_bytes(&samples, 48_000).expect("wav fixture");
+
+        assert!(
+            wav.len() > 100_000,
+            "fixture must expose the byte-count bug"
+        );
+        assert_eq!(
+            compute_wav_duration_seconds_from_bytes(&wav).expect("wav duration"),
+            3
+        );
     }
 
     #[test]
@@ -7732,6 +8080,14 @@ mod tests {
 
         let allowed = enforce_remote_provider_policy(AnalysisProvider::Ollama, false);
         assert!(allowed.is_ok());
+
+        let denied_asr =
+            enforce_remote_asr_provider_policy(asr::AsrProviderType::CohereTranscribe, false);
+        assert!(denied_asr.is_err());
+
+        let allowed_asr =
+            enforce_remote_asr_provider_policy(asr::AsrProviderType::DistilWhisper, false);
+        assert!(allowed_asr.is_ok());
     }
 
     #[test]
@@ -7743,6 +8099,38 @@ mod tests {
         );
         assert!(normalize_provider_secret_name("ollama").is_err());
         assert!(normalize_provider_secret_name("unknown-provider").is_err());
+    }
+
+    #[test]
+    fn reset_secret_registry_clears_every_remote_asr_provider_secret() {
+        let mut attempted = Vec::new();
+        let (cleared, failed) = clear_registered_provider_secrets_with(|provider| {
+            attempted.push(provider.to_string());
+            Ok::<(), String>(())
+        });
+        let registered = PROVIDER_SECRET_NAMES
+            .iter()
+            .map(|provider| provider.to_string())
+            .collect::<Vec<_>>();
+
+        assert_eq!(attempted, registered);
+        assert_eq!(cleared, registered);
+        assert!(failed.is_empty());
+
+        for provider in asr::AsrProviderType::all()
+            .into_iter()
+            .filter(|provider| provider.is_remote())
+        {
+            let secret_name = provider
+                .provider_secret_name()
+                .expect("every remote ASR provider must declare its credential slot");
+            assert!(
+                cleared.iter().any(|cleared| cleared == secret_name),
+                "reset did not clear the '{}' credential used by {:?}",
+                secret_name,
+                provider
+            );
+        }
     }
 
     #[test]
@@ -7781,6 +8169,88 @@ mod tests {
     fn canonicalize_or_create_requires_absolute_path() {
         let err = canonicalize_or_create_absolute_path(Path::new("relative/path"), "testPath");
         assert!(err.is_err());
+    }
+
+    #[test]
+    fn canonicalize_without_creation_resolves_missing_path_without_side_effects() {
+        let root = std::env::temp_dir().join(format!(
+            "plainsong-path-validation-{}",
+            uuid::Uuid::new_v4()
+        ));
+        std::fs::create_dir_all(&root).expect("create test root");
+        let missing = root.join("not-created").join("export.md");
+
+        let resolved = canonicalize_absolute_path_without_creation(&missing, "target")
+            .expect("missing target should resolve");
+
+        assert_eq!(
+            resolved,
+            root.canonicalize()
+                .expect("canonicalize test root")
+                .join("not-created")
+                .join("export.md")
+        );
+        assert!(!root.join("not-created").exists());
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn canonicalize_without_creation_requires_absolute_path() {
+        let err = canonicalize_absolute_path_without_creation(Path::new("relative/path"), "target");
+        assert!(err.is_err());
+    }
+
+    #[test]
+    fn a_session_can_only_be_claimed_for_stopping_once() {
+        // Manual, VAD, popup, and hotkey stops are separate callers. Two of
+        // them could read the same active id, both proceed into audio
+        // finalization, and the loser would reset the tracker out from under
+        // the winner — discarding a dictation the user had already spoken.
+        let mut tracker = DictationSessionTracker {
+            active_session_id: Some(7),
+            ..Default::default()
+        };
+
+        // First claim wins.
+        assert_eq!(tracker.stopping_session_id, None);
+        assert_eq!(tracker.active_session_id, Some(7));
+        tracker.stopping_session_id = Some(7);
+
+        // A second stop for the same session must be recognizable as duplicate.
+        assert_eq!(
+            tracker.stopping_session_id,
+            Some(7),
+            "the claim must survive for the losing caller to observe"
+        );
+
+        // A new session must not inherit the previous claim.
+        tracker.active_session_id = Some(8);
+        tracker.stopping_session_id = None;
+        assert_eq!(tracker.stopping_session_id, None);
+    }
+
+    #[test]
+    fn sweep_removes_orphaned_dictation_audio_only() {
+        // A SIGKILL skips TempWav's Drop, leaving real recorded speech in the
+        // OS temp directory. The sweep must clear ours and touch nothing else.
+        let temp_dir = std::env::temp_dir();
+        let unique = uuid::Uuid::new_v4();
+        let ours = temp_dir.join(format!("plainsong-dictation-sweep-{unique}.wav"));
+        let not_ours = temp_dir.join(format!("unrelated-{unique}.wav"));
+        let not_a_wav = temp_dir.join(format!("plainsong-dictation-{unique}.log"));
+
+        std::fs::write(&ours, b"RIFF").expect("write ours");
+        std::fs::write(&not_ours, b"RIFF").expect("write unrelated");
+        std::fs::write(&not_a_wav, b"log").expect("write log");
+
+        sweep_stale_dictation_temp_audio();
+
+        assert!(!ours.exists(), "orphaned dictation audio should be removed");
+        assert!(not_ours.exists(), "unrelated temp files must be left alone");
+        assert!(not_a_wav.exists(), "non-wav files must be left alone");
+
+        let _ = std::fs::remove_file(&not_ours);
+        let _ = std::fs::remove_file(&not_a_wav);
     }
 
     #[test]
@@ -8080,6 +8550,16 @@ mod tests {
             dictation_done_message("empty", true, &[]),
             "No speech detected."
         );
+        assert_eq!(
+            dictation_done_message("previewed", false, &[]),
+            "Ready in Plainsong."
+        );
+        assert!(should_deliver_dictation_text(
+            models::DictationDeliveryMode::System
+        ));
+        assert!(!should_deliver_dictation_text(
+            models::DictationDeliveryMode::Preview
+        ));
 
         // Every warning is kept, not just the first one.
         let both = dictation_done_message(
@@ -8154,6 +8634,25 @@ mod tests {
             body.matches("DICTATION_FORMAT_TIMEOUT,").count(),
             provider_calls,
             "every pre-insert LLM call must be wrapped in DICTATION_FORMAT_TIMEOUT"
+        );
+    }
+
+    #[test]
+    fn dictation_result_is_durable_before_delivery_begins() {
+        // A paste can cross process and accessibility boundaries. The only
+        // recoverable transcript must therefore be committed before the first
+        // delivery attempt, not after it returns.
+        let body = owned_stop_dictation_body();
+        let persistence = body
+            .find("create_recording_with_transcript")
+            .expect("dictation stop must persist the result transactionally");
+        let delivery = body
+            .find("paste_text_systemwide")
+            .expect("dictation stop must contain the delivery path");
+
+        assert!(
+            persistence < delivery,
+            "dictation recording and transcript must commit before cursor delivery starts"
         );
     }
 
@@ -9642,6 +10141,10 @@ mod tests {
             asr::AsrProviderType::OpenAiCloud,
             "whisper-1"
         ));
+        assert!(meeting_route_is_shared_compatible(
+            asr::AsrProviderType::CohereTranscribe,
+            "cohere-transcribe-03-2026"
+        ));
     }
 
     #[test]
@@ -9735,6 +10238,7 @@ mod tests {
                 asr::AsrProviderType::Parakeet,
                 asr::AsrProviderType::Whisper,
             ],
+            MeetingRoutePolicy::PreferLocal,
         )
         .expect("meeting candidate should be selected");
 
@@ -9986,45 +10490,84 @@ mod tests {
     }
 
     #[test]
-    fn meeting_policy_prefer_local_orders_local_routes_before_cloud_routes() {
-        let candidates = preferred_meeting_provider_candidates(
-            MeetingRoutePolicy::PreferLocal,
-            asr::AsrProviderType::DistilWhisper,
-            asr::AsrProviderType::Parakeet,
-            Some(asr::AsrProviderType::OpenAiCloud),
-        );
+    fn every_remote_asr_provider_is_cloud_and_never_matches_local_routing() {
+        let remote_providers = asr::AsrProviderType::all()
+            .into_iter()
+            .filter(|provider| provider.is_remote())
+            .collect::<Vec<_>>();
+        assert!(!remote_providers.is_empty());
 
-        let first_local_index = candidates
-            .iter()
-            .position(|provider| *provider == asr::AsrProviderType::DistilWhisper)
-            .expect("local provider should be present");
-        let first_cloud_index = candidates
-            .iter()
-            .position(|provider| *provider == asr::AsrProviderType::ElevenLabsScribe)
-            .expect("cloud provider should be present");
-
-        assert!(first_local_index < first_cloud_index);
+        for provider in remote_providers {
+            let model_id = provider.default_model_id();
+            assert!(
+                provider_hosting_environment(provider, model_id) == HostingEnvironment::Cloud,
+                "{:?} must resolve through the canonical remote classification",
+                provider
+            );
+            assert!(!route_matches_hosting(
+                DictationRoutePreference::Local,
+                provider,
+                model_id
+            ));
+        }
     }
 
     #[test]
-    fn meeting_policy_best_available_orders_cloud_routes_before_local_defaults() {
+    fn prefer_local_meeting_repair_never_yields_a_remote_provider() {
         let candidates = preferred_meeting_provider_candidates(
+            MeetingRoutePolicy::PreferLocal,
+            asr::AsrProviderType::OpenAiCloud,
+            asr::AsrProviderType::CohereTranscribe,
+            Some(asr::AsrProviderType::ElevenLabsScribe),
+        );
+        assert!(candidates.iter().all(|provider| !provider.is_remote()));
+
+        let remote_candidates = asr::AsrProviderType::all()
+            .into_iter()
+            .filter(|provider| provider.is_remote())
+            .collect::<Vec<_>>();
+        let remote_providers = remote_candidates
+            .iter()
+            .map(|provider| {
+                provider_info_for_test(
+                    *provider,
+                    provider.default_model_id(),
+                    asr::manager::RuntimeStatus::Ready,
+                    true,
+                )
+            })
+            .collect::<Vec<_>>();
+
+        assert_eq!(
+            select_ready_meeting_candidate(
+                &remote_providers,
+                &remote_candidates,
+                MeetingRoutePolicy::PreferLocal,
+            ),
+            None
+        );
+    }
+
+    #[test]
+    fn best_available_meeting_repair_uses_only_an_explicit_remote_selection() {
+        let explicit = preferred_meeting_provider_candidates(
+            MeetingRoutePolicy::BestAvailable,
+            asr::AsrProviderType::Whisper,
+            asr::AsrProviderType::Moonshine,
+            Some(asr::AsrProviderType::CohereTranscribe),
+        );
+        assert_eq!(
+            explicit.first(),
+            Some(&asr::AsrProviderType::CohereTranscribe)
+        );
+
+        let inferred = preferred_meeting_provider_candidates(
             MeetingRoutePolicy::BestAvailable,
             asr::AsrProviderType::Whisper,
             asr::AsrProviderType::Moonshine,
             None,
         );
-
-        let first_cloud_index = candidates
-            .iter()
-            .position(|provider| *provider == asr::AsrProviderType::ElevenLabsScribe)
-            .expect("cloud provider should be present");
-        let first_local_index = candidates
-            .iter()
-            .position(|provider| *provider == asr::AsrProviderType::DistilWhisper)
-            .expect("local provider should be present");
-
-        assert!(first_cloud_index < first_local_index);
+        assert!(inferred.iter().all(|provider| !provider.is_remote()));
     }
 
     #[test]
@@ -10213,6 +10756,7 @@ fn dictation_options_from_settings(settings: &settings::Settings) -> models::Dic
             .filter(|_| settings.audio.dictation_input_override_enabled)
             .or(settings.audio.preferred_input_device.as_ref())
             .map(|device| device.device_id.clone()),
+        delivery_mode: models::DictationDeliveryMode::System,
         // Never inferred from settings: this is a property of how a specific
         // start was triggered, and only the caller that received the
         // `hands_free_start` signal knows it.
@@ -12617,11 +13161,12 @@ fn provider_hosting_environment(
     provider: asr::AsrProviderType,
     _model_id: &str,
 ) -> HostingEnvironment {
-    match provider {
-        asr::AsrProviderType::OpenAiCloud
-        | asr::AsrProviderType::ElevenLabsScribe
-        | asr::AsrProviderType::Groq => HostingEnvironment::Cloud,
-        _ => HostingEnvironment::Local,
+    // New hosted providers must inherit the canonical privacy classification
+    // instead of falling through a hand-written match as local.
+    if provider.is_remote() {
+        HostingEnvironment::Cloud
+    } else {
+        HostingEnvironment::Local
     }
 }
 
@@ -12660,6 +13205,7 @@ fn meeting_provider_is_supported(provider: asr::AsrProviderType) -> bool {
             | asr::AsrProviderType::ElevenLabsScribe
             | asr::AsrProviderType::OpenAiCloud
             | asr::AsrProviderType::Groq
+            | asr::AsrProviderType::CohereTranscribe
     )
 }
 
@@ -12701,7 +13247,7 @@ fn ensure_meeting_route_supported(
     }
 
     Err(format!(
-        "Meetings require a meeting-grade ASR route. '{}' with model '{}' is dictation-only or unsupported for meetings. Choose Distil Whisper, Parakeet, ElevenLabs, OpenAI, or Groq in Settings -> ASR / Providers.",
+        "Meetings require a meeting-grade ASR route. '{}' with model '{}' is dictation-only or unsupported for meetings. Choose Distil Whisper, Parakeet, ElevenLabs, OpenAI, Groq, or Cohere in Settings -> ASR / Providers.",
         provider.display_name(),
         model_id
     ))
@@ -12723,27 +13269,24 @@ fn preferred_meeting_provider_candidates(
         Some(asr::AsrProviderType::DistilWhisper),
         Some(asr::AsrProviderType::Parakeet),
     ];
-    let cloud_defaults = [
-        Some(asr::AsrProviderType::ElevenLabsScribe),
-        Some(asr::AsrProviderType::OpenAiCloud),
-        Some(asr::AsrProviderType::Groq),
-    ];
 
     let mut ordered_candidates = Vec::new();
     ordered_candidates.extend(explicit_candidates);
-    match policy {
-        MeetingRoutePolicy::PreferLocal => {
-            ordered_candidates.extend(local_defaults);
-            ordered_candidates.extend(cloud_defaults);
-        }
-        MeetingRoutePolicy::BestAvailable => {
-            ordered_candidates.extend(cloud_defaults);
-            ordered_candidates.extend(local_defaults);
-        }
-    }
+    ordered_candidates.extend(local_defaults);
 
     for provider in ordered_candidates.into_iter().flatten() {
-        if meeting_provider_is_supported(provider) && !candidates.contains(&provider) {
+        // A stored API key proves capability, not consent to upload meeting audio.
+        // Remote repair is allowed only for the explicitly selected meeting slot.
+        let hosting_allowed = match policy {
+            MeetingRoutePolicy::PreferLocal => !provider.is_remote(),
+            MeetingRoutePolicy::BestAvailable => {
+                !provider.is_remote() || meeting_provider == Some(provider)
+            }
+        };
+        if hosting_allowed
+            && meeting_provider_is_supported(provider)
+            && !candidates.contains(&provider)
+        {
             candidates.push(provider);
         }
     }
@@ -12858,12 +13401,18 @@ fn preferred_same_provider_dictation_fallback_model(
 fn select_ready_meeting_candidate(
     provider_infos: &[asr::manager::ProviderInfo],
     preferred_candidates: &[asr::AsrProviderType],
+    policy: MeetingRoutePolicy,
 ) -> Option<(asr::AsrProviderType, String)> {
     preferred_candidates.iter().find_map(|candidate_provider| {
         provider_infos
             .iter()
             .find(|info| {
+                // Enforce the boundary again at selection time so candidate-list
+                // ordering cannot weaken PreferLocal into an upload permission.
+                let hosting_allowed = !matches!(policy, MeetingRoutePolicy::PreferLocal)
+                    || !info.provider_type.is_remote();
                 info.provider_type == *candidate_provider
+                    && hosting_allowed
                     && matches!(info.runtime_status, asr::manager::RuntimeStatus::Ready)
                     && info.is_available
                     && meeting_route_is_shared_compatible(
@@ -13043,7 +13592,14 @@ fn build_provider_fallback_message(
 fn dictation_done_message(outcome: &str, final_text_is_empty: bool, warnings: &[String]) -> String {
     let outcome_message = match outcome {
         "pasted" | "replaced" => "Inserted into the target app.",
+        // The paste keystroke was sent but nothing reported back that the app
+        // took it, so this says what actually happened and leaves the user a
+        // next step. The text stays on the clipboard for exactly this case.
+        "paste_dispatched" => {
+            "Sent to the target app. If nothing appeared, press Cmd+V to paste it."
+        }
         "copied" | "copied_replacement" => "Copied to the clipboard and ready to paste.",
+        "previewed" => "Ready in Plainsong.",
         "undone" => "Undo applied.",
         "error" => "Could not deliver the text. It is saved in your dictation history.",
         _ if final_text_is_empty => "No speech detected.",
@@ -13055,6 +13611,10 @@ fn dictation_done_message(outcome: &str, final_text_is_empty: bool, warnings: &[
     } else {
         format!("{} {}", outcome_message, warnings.join(" "))
     }
+}
+
+fn should_deliver_dictation_text(delivery_mode: models::DictationDeliveryMode) -> bool {
+    delivery_mode == models::DictationDeliveryMode::System
 }
 
 fn build_models_transcript_from_asr_result(
@@ -13962,6 +14522,18 @@ fn template_format_extension(format: &export::templates::ExportFormat) -> &'stat
     }
 }
 
+fn compute_wav_duration_seconds_from_bytes(bytes: &[u8]) -> Result<i64, String> {
+    let reader = hound::WavReader::new(std::io::Cursor::new(bytes))
+        .map_err(|error| format!("Captured audio is not a readable WAV: {}", error))?;
+    let sample_rate = reader.spec().sample_rate;
+    if sample_rate == 0 {
+        return Err("Captured audio has an invalid zero sample rate".to_string());
+    }
+    Ok((reader.duration() as f64 / sample_rate as f64)
+        .round()
+        .max(1.0) as i64)
+}
+
 fn compute_wav_duration_seconds(audio_path: &str) -> i64 {
     match hound::WavReader::open(audio_path) {
         Ok(reader) => {
@@ -14008,7 +14580,7 @@ pub(crate) fn canonicalize_existing_absolute_path(
 }
 
 pub(crate) fn nautilus_data_root() -> Result<PathBuf, String> {
-    let root = dirs::data_dir()
+    let root = crate::paths::data_dir()
         .ok_or("Could not find data directory")?
         .join("Plainsong");
     std::fs::create_dir_all(&root).map_err(|e| {
@@ -14026,7 +14598,7 @@ fn approved_path_roots() -> Result<Vec<PathBuf>, String> {
 
     roots.push(nautilus_data_root()?);
 
-    let config_root = dirs::config_dir()
+    let config_root = crate::paths::config_dir()
         .ok_or("Could not find config directory")?
         .join("Plainsong");
     if let Err(e) = std::fs::create_dir_all(&config_root) {
@@ -14122,6 +14694,14 @@ struct PasteOutcome {
     pasted: bool,
     copied: bool,
     direct_accessibility: bool,
+    /// Whether the target was actually observed to receive the text, as
+    /// opposed to the keystroke merely having been dispatched. Direct
+    /// Accessibility writes are confirmed: the API reports whether the value
+    /// was set. A native Cmd+V is NOT — `CGEvent::post` returns nothing, so a
+    /// target that ignored, blocked, or was too slow to accept the paste is
+    /// indistinguishable from one that took it. Reporting that case as a plain
+    /// success is what made the app claim it had inserted text it had not.
+    confirmed: bool,
     successful_strategy: Option<CursorInsertStrategy>,
     error: Option<String>,
 }
@@ -14932,6 +15512,7 @@ fn replace_focused_field_text_systemwide(
                     pasted: true,
                     copied,
                     direct_accessibility: true,
+                    confirmed: true,
                     successful_strategy: Some(CursorInsertStrategy::AccessibilityDirectText),
                     error: None,
                 }
@@ -14942,6 +15523,7 @@ fn replace_focused_field_text_systemwide(
                     pasted: false,
                     copied,
                     direct_accessibility: false,
+                    confirmed: false,
                     successful_strategy: None,
                     error: Some(format!(
                         "Result is ready, but Plainsong could not replace the focused field ({})",
@@ -14960,6 +15542,7 @@ fn replace_focused_field_text_systemwide(
             pasted: false,
             copied: copy_to_clipboard(text).is_ok(),
             direct_accessibility: false,
+            confirmed: false,
             successful_strategy: None,
             error: Some("Focused-field replacement is only implemented on macOS.".to_string()),
         }
@@ -15876,6 +16459,7 @@ fn paste_text_systemwide(
                     pasted: true,
                     copied,
                     direct_accessibility: true,
+                    confirmed: true,
                     successful_strategy: Some(CursorInsertStrategy::AccessibilityDirectText),
                     error: None,
                 };
@@ -15916,6 +16500,7 @@ fn paste_text_systemwide(
                     pasted: true,
                     copied,
                     direct_accessibility: false,
+                    confirmed: false,
                     successful_strategy: Some(strategy),
                     error: None,
                 }
@@ -15930,6 +16515,7 @@ fn paste_text_systemwide(
                         pasted: false,
                         copied: false,
                         direct_accessibility: false,
+                        confirmed: false,
                         successful_strategy: None,
                         error: Some(error),
                     };
@@ -15939,6 +16525,7 @@ fn paste_text_systemwide(
                     pasted: false,
                     copied: true,
                     direct_accessibility: false,
+                    confirmed: false,
                     successful_strategy: None,
                     error: Some(format!("Copied to clipboard. {}", insert_error)),
                 }
@@ -15965,6 +16552,7 @@ fn paste_text_systemwide(
                 pasted: false,
                 copied: false,
                 direct_accessibility: false,
+                confirmed: false,
                 successful_strategy: None,
                 error: Some(error),
             };
@@ -15997,6 +16585,7 @@ fn paste_text_systemwide(
                     pasted: true,
                     copied: left_on_clipboard,
                     direct_accessibility: false,
+                    confirmed: false,
                     successful_strategy: Some(strategy),
                     error: None,
                 }
@@ -16005,6 +16594,7 @@ fn paste_text_systemwide(
                 pasted: false,
                 copied: true,
                 direct_accessibility: false,
+                confirmed: false,
                 successful_strategy: None,
                 error: Some(format!("Copied to clipboard. {}", error)),
             },
@@ -16409,7 +16999,7 @@ fn cleanup_legacy_license_artifacts() {
         let _ = secrets::clear_internal_secret(key);
     }
     if let Some(state_file) =
-        dirs::data_dir().map(|d| d.join("Plainsong").join("nautilus_license.json"))
+        crate::paths::data_dir().map(|d| d.join("Plainsong").join("nautilus_license.json"))
     {
         let _ = std::fs::remove_file(state_file);
     }
@@ -16500,9 +17090,17 @@ async fn reload_settings_after_restore(
         restored_settings.privacy.remote_processing_enabled,
         Ordering::SeqCst,
     );
+    // Same reasoning as `save_settings`: a backup restore must not rewrite the
+    // snapshot an in-flight dictation is about to be finalized against.
     {
-        let mut dictation_options = state.dictation_start_options.lock().await;
-        *dictation_options = dictation_options_from_settings(&restored_settings);
+        if active_dictation_session_id(state).await.is_some() {
+            tracing::debug!(
+                "Deferring restored dictation start options: a session is still active"
+            );
+        } else {
+            let mut dictation_options = state.dictation_start_options.lock().await;
+            *dictation_options = dictation_options_from_settings(&restored_settings);
+        }
     }
 
     let meeting_custom_prompt_changed =
@@ -16537,17 +17135,113 @@ async fn reload_settings_after_restore(
     Ok(())
 }
 
+fn open_database_with_vault_key_recovery(
+    initial_db_key: Option<&str>,
+) -> Result<db::Database, String> {
+    match db::Database::new_with_key(initial_db_key) {
+        Ok(database) => Ok(database),
+        #[cfg(feature = "sqlcipher")]
+        Err(keyed_error) if initial_db_key.is_some() => {
+            // A process can stop after the key's verified Keychain write but
+            // before PRAGMA rekey. The persisted key makes that window
+            // recoverable: prove the file is still plaintext, then finish the
+            // rekey using the already-durable key. A wrong key for an encrypted
+            // file cannot pass the plaintext open and is never overwritten.
+            let mut plaintext = db::Database::new_with_key(None).map_err(|plaintext_error| {
+                format!(
+                    "Failed to initialize encrypted database ({keyed_error}); plaintext recovery also failed ({plaintext_error})"
+                )
+            })?;
+            plaintext
+                .change_key(initial_db_key.expect("guarded by is_some"))
+                .map_err(|error| {
+                    format!("Failed to finish interrupted database encryption: {error}")
+                })?;
+            Ok(plaintext)
+        }
+        Err(error) => Err(format!("Failed to initialize local database: {error}")),
+    }
+}
+
+/// Delete dictation scratch WAVs left behind by a previous run.
+///
+/// The `TempWav` guard unlinks on drop, which covers cancellation and normal
+/// errors. It cannot cover SIGKILL, a panic that aborts, or a power loss — and
+/// what is left behind is real recorded speech sitting in the OS temp
+/// directory. Sweeping at startup bounds how long that can persist.
+fn sweep_stale_dictation_temp_audio() {
+    const PREFIX: &str = "plainsong-dictation-";
+
+    let temp_dir = std::env::temp_dir();
+    let Ok(entries) = std::fs::read_dir(&temp_dir) else {
+        return;
+    };
+
+    let mut removed = 0usize;
+    for entry in entries.flatten() {
+        let name = entry.file_name();
+        let Some(name) = name.to_str() else {
+            continue;
+        };
+        if !name.starts_with(PREFIX) || !name.ends_with(".wav") {
+            continue;
+        }
+        // Only regular files, never a symlink pointing somewhere else.
+        let Ok(metadata) = entry.metadata() else {
+            continue;
+        };
+        if !metadata.is_file() {
+            continue;
+        }
+        if std::fs::remove_file(entry.path()).is_ok() {
+            removed += 1;
+        }
+    }
+
+    if removed > 0 {
+        tracing::info!("Removed {} orphaned dictation audio file(s)", removed);
+    }
+}
+
 pub async fn build_app_state() -> Result<AppState, String> {
     cleanup_legacy_license_artifacts();
+    sweep_stale_dictation_temp_audio();
 
     let initial_db_key = secrets::get_internal_secret(VAULT_DB_KEY_SECRET)
         .map_err(|e| format!("Could not read secure database key: {}", e))?;
 
-    let database = db::Database::new_with_key(initial_db_key.as_deref())
-        .map_err(|e| format!("Failed to initialize local database: {}", e))?;
+    let database = open_database_with_vault_key_recovery(initial_db_key.as_deref())?;
 
     let settings_manager = settings::SettingsManager::new()
         .map_err(|e| format!("Failed to initialize settings: {}", e))?;
+
+    let models_root = crate::paths::data_dir()
+        .ok_or("Could not find data directory")?
+        .join("Plainsong")
+        .join("models");
+    let mut model_integrity_artifacts = download::managed_model_integrity_artifacts(&models_root);
+    model_integrity_artifacts.extend(asr::model_integrity_artifacts(&models_root));
+    let integrity_migration =
+        download::migrate_legacy_model_integrity_receipts(&model_integrity_artifacts).await;
+    if integrity_migration.migrated_count > 0 {
+        tracing::info!(
+            "Recorded integrity receipts for {} existing local model artifact(s)",
+            integrity_migration.migrated_count
+        );
+    }
+    for path in integrity_migration.rejected_paths {
+        tracing::warn!(
+            "Existing local model failed application-pinned integrity verification: {}",
+            path.display()
+        );
+    }
+    for (path, error) in integrity_migration.errors {
+        tracing::warn!(
+            "Could not verify existing local model '{}': {}",
+            path.display(),
+            error
+        );
+    }
 
     let initial_dictation_options = dictation_options_from_settings(settings_manager.settings());
     let remote_processing_allowed = Arc::new(AtomicBool::new(
@@ -16798,9 +17492,20 @@ async fn save_settings_for_sidecar(
             .map_err(|error| error.to_string())?;
     }
 
+    // `dictation_start_options` doubles as the live session's snapshot: stop
+    // reads it to learn which route, model, target app and delivery mode the
+    // session actually began with. Overwriting it while a session is running
+    // replaced that history with the new defaults, so a save landing mid-
+    // dictation made the finished result claim the wrong provider and target.
+    // New defaults apply from the next session.
     {
-        let mut active_dictation_options = state.dictation_start_options.lock().await;
-        *active_dictation_options = dictation_options;
+        let session_active = active_dictation_session_id(state).await.is_some();
+        if session_active {
+            tracing::debug!("Deferring dictation start-option defaults: a session is still active");
+        } else {
+            let mut active_dictation_options = state.dictation_start_options.lock().await;
+            *active_dictation_options = dictation_options;
+        }
     }
 
     // Pick up any change to `dictation_hands_free_enabled` immediately: starts the
@@ -16836,7 +17541,7 @@ async fn reset_app_state_for_sidecar(
         ));
     }
 
-    let data_dir = dirs::data_dir().ok_or_else(|| {
+    let data_dir = crate::paths::data_dir().ok_or_else(|| {
         "Could not determine the application data directory for reset".to_string()
     })?;
     let deleted_runtime_audio_directory = remove_decrypted_runtime_audio_directory(&data_dir)?;
@@ -16957,14 +17662,8 @@ async fn reset_app_state_for_sidecar(
         *delivery = None;
     }
 
-    let mut cleared_provider_secrets = Vec::new();
-    let mut failed_provider_secret_clears = Vec::new();
-    for provider in RESETTABLE_PROVIDER_SECRETS {
-        match secrets::clear_provider_secret(provider) {
-            Ok(_) => cleared_provider_secrets.push(provider.to_string()),
-            Err(e) => failed_provider_secret_clears.push(format!("{} ({})", provider, e)),
-        }
-    }
+    let (cleared_provider_secrets, failed_provider_secret_clears) =
+        clear_registered_provider_secrets_with(secrets::clear_provider_secret);
 
     handle.emit_event(
         "dictation-state-changed",
@@ -17321,6 +18020,7 @@ async fn start_dictation_for_sidecar(
         state,
         &settings_snapshot.transcription,
         options.route_preference.as_deref(),
+        settings_snapshot.privacy.remote_processing_enabled,
     )
     .await?;
 
@@ -17377,6 +18077,8 @@ async fn start_dictation_for_sidecar(
         let mut tracker = state.dictation_session_tracker.lock().await;
         tracker.next_session_id += 1;
         tracker.active_session_id = Some(tracker.next_session_id);
+        // A new session never inherits the previous session's stop claim.
+        tracker.stopping_session_id = None;
         tracker.started_at = Some(std::time::Instant::now());
         tracker.started_at_epoch_ms = Some(session_started_at_ms);
         tracker.startup_latency_ms = None;
@@ -17425,6 +18127,7 @@ async fn start_dictation_for_sidecar(
             let mut tracker = state.dictation_session_tracker.lock().await;
             if tracker.active_session_id == Some(session_id) {
                 tracker.active_session_id = None;
+                tracker.stopping_session_id = None;
             }
         }
         handle.emit_event(
@@ -17616,6 +18319,7 @@ async fn start_dictation_for_sidecar(
                 let mut tracker = state.dictation_session_tracker.lock().await;
                 if tracker.active_session_id == Some(session_id) {
                     tracker.active_session_id = None;
+                    tracker.stopping_session_id = None;
                 }
                 if let Ok(mut overlay) = state.dictation_overlay_state.lock() {
                     *overlay = DictationOverlayState::default();
@@ -17778,6 +18482,7 @@ async fn reset_dictation_session_runtime(
     {
         let mut tracker = session_tracker.lock().await;
         tracker.active_session_id = None;
+        tracker.stopping_session_id = None;
         tracker.started_at = None;
         tracker.started_at_epoch_ms = None;
         tracker.startup_latency_ms = None;
@@ -17988,17 +18693,35 @@ async fn stop_dictation_for_sidecar(
     stop_reason: &str,
     expected_session_id: Option<u64>,
 ) -> Result<String, String> {
-    let session_id = active_dictation_session_id(state)
-        .await
-        .ok_or_else(|| "No active dictation session to stop".to_string())?;
-    if let Some(expected) = expected_session_id {
-        if expected != session_id {
+    // Claim the session atomically. Reading the active id and then re-taking
+    // the lock later leaves a window where a second stop passes the same
+    // checks; both would then run audio finalization and the loser would reset
+    // the tracker, throwing away audio the winner had already captured.
+    let session_id = {
+        let mut tracker = state.dictation_session_tracker.lock().await;
+        let active = tracker
+            .active_session_id
+            .ok_or_else(|| "No active dictation session to stop".to_string())?;
+
+        if let Some(expected) = expected_session_id {
+            if expected != active {
+                return Err(format!(
+                    "Stale stop request for dictation session {} ignored (active session is {})",
+                    expected, active
+                ));
+            }
+        }
+
+        if tracker.stopping_session_id == Some(active) {
             return Err(format!(
-                "Stale stop request for dictation session {} ignored (active session is {})",
-                expected, session_id
+                "Dictation session {} is already stopping; ignoring duplicate stop",
+                active
             ));
         }
-    }
+
+        tracker.stopping_session_id = Some(active);
+        active
+    };
     let dictation_options = state.dictation_start_options.lock().await.clone();
     let settings_snapshot = {
         let sm = state.settings_manager.lock().await;
@@ -18028,7 +18751,12 @@ async fn stop_dictation_for_sidecar(
         .or_else(|| requested_model_id.clone());
     let app_target = dictation_options.context_app_name.clone();
     let app_bundle_id = dictation_options.context_app_bundle_id.clone();
-    let requested_insertion_mode = tracker_insertion_mode(state).await;
+    let preview_only = !should_deliver_dictation_text(dictation_options.delivery_mode);
+    let requested_insertion_mode = if preview_only {
+        "preview".to_string()
+    } else {
+        tracker_insertion_mode(state).await
+    };
     // From here on the session is owned: every exit path must be either the
     // terminal "done" emit at the bottom or `fail_dictation_stop`.
     let failure_context = DictationStopFailureContext {
@@ -18090,6 +18818,19 @@ async fn stop_dictation_for_sidecar(
                 )
                 .await);
             }
+        }
+    };
+    let dictation_duration_seconds = match compute_wav_duration_seconds_from_bytes(&audio_bytes) {
+        Ok(duration_seconds) => duration_seconds,
+        Err(error) => {
+            return Err(fail_dictation_stop(
+                state,
+                handle,
+                &failure_context,
+                Some(error.clone()),
+                format!("Failed to read captured dictation duration: {}", error),
+            )
+            .await);
         }
     };
 
@@ -18467,110 +19208,6 @@ async fn stop_dictation_for_sidecar(
         tracker.startup_latency_ms
     };
     let transcription_latency_ms = transcription_result.processing_time_ms;
-    let mut insert_latency_ms: Option<u64> = None;
-    let mut pasted = false;
-    let mut copied = false;
-    let mut paste_error: Option<String> = None;
-    let mut actual_insertion_mode = requested_insertion_mode.clone();
-    let mut outcome = "ready".to_string();
-    let mut undo_performed = false;
-
-    if undo_previous_insert {
-        if recent_inserted_text.is_some() {
-            match send_native_undo_key() {
-                Ok(()) => {
-                    undo_performed = true;
-                    outcome = "undone".to_string();
-                }
-                Err(error) => {
-                    paste_error = Some(error);
-                }
-            }
-        } else if final_text.is_empty() {
-            paste_error = Some("No recent dictation insert was available to undo.".to_string());
-            actual_insertion_mode = "command_only".to_string();
-            outcome = "error".to_string();
-        }
-    }
-
-    if !final_text.is_empty() {
-        let insert_started_at = std::time::Instant::now();
-        let paste_outcome =
-            match DictationInsertionMode::from_settings_value(&requested_insertion_mode) {
-                DictationInsertionMode::ClipboardOnly => {
-                    match copy_to_clipboard(final_text.as_str()) {
-                        Ok(()) => PasteOutcome {
-                            pasted: false,
-                            copied: true,
-                            direct_accessibility: false,
-                            successful_strategy: None,
-                            error: None,
-                        },
-                        Err(error) => PasteOutcome {
-                            pasted: false,
-                            copied: false,
-                            direct_accessibility: false,
-                            successful_strategy: None,
-                            error: Some(error),
-                        },
-                    }
-                }
-                DictationInsertionMode::Auto => paste_text_systemwide(
-                    state,
-                    final_text.as_str(),
-                    tracker_copy_to_clipboard(state).await,
-                    app_target.as_deref(),
-                    app_bundle_id.as_deref(),
-                ),
-            };
-        insert_latency_ms = Some(
-            insert_started_at
-                .elapsed()
-                .as_millis()
-                .min(u128::from(u64::MAX)) as u64,
-        );
-        pasted = paste_outcome.pasted;
-        copied = paste_outcome.copied;
-        if paste_error.is_none() {
-            paste_error = paste_outcome.error;
-        }
-        outcome = if pasted {
-            if undo_performed {
-                "replaced".to_string()
-            } else {
-                "pasted".to_string()
-            }
-        } else if copied {
-            if undo_performed {
-                "copied_replacement".to_string()
-            } else {
-                "copied".to_string()
-            }
-        } else if paste_error.is_some() {
-            "error".to_string()
-        } else {
-            outcome
-        };
-    } else if undo_performed {
-        actual_insertion_mode = "command_only".to_string();
-    } else if paste_error.is_none() {
-        outcome = "empty".to_string();
-    }
-
-    let end_to_end_ms = {
-        let tracker = state.dictation_session_tracker.lock().await;
-        tracker
-            .started_at
-            .map(|started_at| started_at.elapsed().as_millis().min(u128::from(u64::MAX)) as u64)
-            .unwrap_or(transcription_latency_ms + insert_latency_ms.unwrap_or(0))
-    };
-    let fallback_message = build_provider_fallback_message(
-        transcription_result.requested_provider,
-        transcription_result.actual_provider,
-        transcription_result.fallback_reason.as_deref(),
-        transcription_result.optimization_applied,
-    );
-
     let recording_id = uuid::Uuid::new_v4().to_string();
     let stored_text = if final_text.trim().is_empty() {
         raw_transcribed_text.clone()
@@ -18619,40 +19256,190 @@ async fn stop_dictation_for_sidecar(
         ),
         created_at: now,
     };
+    let recording = models::Recording {
+        id: recording_id.clone(),
+        title: format!(
+            "Dictation - {}",
+            chrono::Local::now().format("%Y-%m-%d %H:%M")
+        ),
+        project_id: dictation_options
+            .project_id
+            .clone()
+            .unwrap_or_else(|| "inbox".to_string()),
+        duration: dictation_duration_seconds,
+        created_at: now,
+        updated_at: now,
+        source_type: "dictation".to_string(),
+        audio_path: String::new(),
+        status: "completed".to_string(),
+        summary: None,
+        action_items: None,
+        summary_provenance: None,
+        action_items_provenance: None,
+        meeting_notes: None,
+        meeting_template_id: None,
+        meeting_capture_mode: None,
+        notes_updated_at: None,
+        consent_prompt_shown: false,
+        consent_notice_mode: None,
+        consent_notice_surface: None,
+        consent_notice_message: None,
+        consent_notice_updated_at: None,
+    };
+
+    // Cursor delivery crosses native process and accessibility boundaries.
+    // Commit the only recoverable copy first, as one transaction, so a helper
+    // failure or app termination during insertion cannot erase the words.
+    {
+        let mut db = state.db.lock().await;
+        if let Err(error) = db.create_recording_with_transcript(&recording, &transcript) {
+            drop(db);
+            record_recent_dictation_result(
+                state,
+                &final_text,
+                app_target.as_deref(),
+                dictation_options.context_app_bundle_id.as_deref(),
+            );
+            if let Ok(mut overlay) = state.dictation_overlay_state.lock() {
+                overlay.preview = Some(final_text.clone());
+            }
+            return Err(fail_dictation_stop(
+                state,
+                handle,
+                &failure_context,
+                None,
+                format!(
+                    "Plainsong could not save this dictation, so no text was inserted. \
+                     Your words remain available in the dictation window: {}",
+                    error
+                ),
+            )
+            .await);
+        }
+    }
+
+    let mut insert_latency_ms: Option<u64> = None;
+    let mut pasted = false;
+    let mut copied = false;
+    let mut paste_error: Option<String> = None;
+    let mut actual_insertion_mode = requested_insertion_mode.clone();
+    let mut outcome = "ready".to_string();
+    let mut undo_performed = false;
+
+    if preview_only {
+        actual_insertion_mode = "preview".to_string();
+        outcome = if final_text.is_empty() {
+            "empty".to_string()
+        } else {
+            "previewed".to_string()
+        };
+    } else {
+        if undo_previous_insert {
+            if recent_inserted_text.is_some() {
+                match send_native_undo_key() {
+                    Ok(()) => {
+                        undo_performed = true;
+                        outcome = "undone".to_string();
+                    }
+                    Err(error) => {
+                        paste_error = Some(error);
+                    }
+                }
+            } else if final_text.is_empty() {
+                paste_error = Some("No recent dictation insert was available to undo.".to_string());
+                actual_insertion_mode = "command_only".to_string();
+                outcome = "error".to_string();
+            }
+        }
+
+        if !final_text.is_empty() {
+            let insert_started_at = std::time::Instant::now();
+            let paste_outcome =
+                match DictationInsertionMode::from_settings_value(&requested_insertion_mode) {
+                    DictationInsertionMode::ClipboardOnly => {
+                        match copy_to_clipboard(final_text.as_str()) {
+                            Ok(()) => PasteOutcome {
+                                pasted: false,
+                                copied: true,
+                                direct_accessibility: false,
+                                confirmed: false,
+                                successful_strategy: None,
+                                error: None,
+                            },
+                            Err(error) => PasteOutcome {
+                                pasted: false,
+                                copied: false,
+                                direct_accessibility: false,
+                                confirmed: false,
+                                successful_strategy: None,
+                                error: Some(error),
+                            },
+                        }
+                    }
+                    DictationInsertionMode::Auto => paste_text_systemwide(
+                        state,
+                        final_text.as_str(),
+                        tracker_copy_to_clipboard(state).await,
+                        app_target.as_deref(),
+                        app_bundle_id.as_deref(),
+                    ),
+                };
+            insert_latency_ms = Some(
+                insert_started_at
+                    .elapsed()
+                    .as_millis()
+                    .min(u128::from(u64::MAX)) as u64,
+            );
+            pasted = paste_outcome.pasted;
+            copied = paste_outcome.copied;
+            if paste_error.is_none() {
+                paste_error = paste_outcome.error;
+            }
+            outcome = if pasted {
+                if undo_performed {
+                    "replaced".to_string()
+                } else if paste_outcome.confirmed {
+                    "pasted".to_string()
+                } else {
+                    // Dispatched via Cmd+V with no read-back. Claiming a
+                    // confirmed insert here is what let the app tell users it
+                    // had typed text into an app that never took it.
+                    "paste_dispatched".to_string()
+                }
+            } else if copied {
+                if undo_performed {
+                    "copied_replacement".to_string()
+                } else {
+                    "copied".to_string()
+                }
+            } else if paste_error.is_some() {
+                "error".to_string()
+            } else {
+                outcome
+            };
+        } else if undo_performed {
+            actual_insertion_mode = "command_only".to_string();
+        } else if paste_error.is_none() {
+            outcome = "empty".to_string();
+        }
+    }
+
+    let end_to_end_ms = {
+        let tracker = state.dictation_session_tracker.lock().await;
+        tracker
+            .started_at
+            .map(|started_at| started_at.elapsed().as_millis().min(u128::from(u64::MAX)) as u64)
+            .unwrap_or(transcription_latency_ms + insert_latency_ms.unwrap_or(0))
+    };
+    let fallback_message = build_provider_fallback_message(
+        transcription_result.requested_provider,
+        transcription_result.actual_provider,
+        transcription_result.fallback_reason.as_deref(),
+        transcription_result.optimization_applied,
+    );
 
     {
         let mut db = state.db.lock().await;
-        let _ = db.create_recording(&models::Recording {
-            id: recording_id.clone(),
-            title: format!(
-                "Dictation - {}",
-                chrono::Local::now().format("%Y-%m-%d %H:%M")
-            ),
-            project_id: dictation_options
-                .project_id
-                .clone()
-                .unwrap_or_else(|| "inbox".to_string()),
-            duration: i64::try_from(audio_bytes.len()).unwrap_or(0),
-            created_at: now,
-            updated_at: now,
-            source_type: "dictation".to_string(),
-            audio_path: String::new(),
-            status: "completed".to_string(),
-            summary: None,
-            action_items: None,
-            summary_provenance: None,
-            action_items_provenance: None,
-            meeting_notes: None,
-            meeting_template_id: None,
-            meeting_capture_mode: None,
-            notes_updated_at: None,
-            consent_prompt_shown: false,
-            consent_notice_mode: None,
-            consent_notice_surface: None,
-            consent_notice_message: None,
-            consent_notice_updated_at: None,
-        });
-        let _ = db.save_transcript(&transcript);
         let _ = db.save_transcript_artifact(&TranscriptArtifactRecord {
             id: uuid::Uuid::new_v4().to_string(),
             recording_id: recording_id.clone(),
@@ -19008,12 +19795,68 @@ fn recording_activation_failure_updates(
         .collect()
 }
 
-async fn persist_recording_activation_failure(
+fn recording_activation_failure_has_audio(
+    updates: &[(
+        recording_audio::RecordingAudioRole,
+        recording_audio::RecordingAudioLifecycle,
+        Option<recording_audio::ValidatedRecordingAudio>,
+        Option<String>,
+    )],
+) -> bool {
+    updates
+        .iter()
+        .any(|(_, lifecycle, _, _)| *lifecycle != recording_audio::RecordingAudioLifecycle::Missing)
+}
+
+async fn persist_or_rollback_recording_activation_failure(
     state: &AppState,
     plan: &recording_audio::RecordingCapturePlan,
     activation_error: &str,
 ) {
     let updates = recording_activation_failure_updates(plan, activation_error);
+    if !recording_activation_failure_has_audio(&updates) {
+        let bundle = {
+            let db = state.db.lock().await;
+            db.load_recording_audio_bundle(&plan.recording_id)
+        };
+        if let Ok(bundle) = bundle {
+            let deletion = remove_owned_recording_audio(&bundle, "unstarted recording rollback");
+            if deletion.failures.is_empty() && deletion.cleared_roles.len() == updates.len() {
+                let mut db = state.db.lock().await;
+                let rollback_result = db
+                    .set_audio_asset_validation_states(&plan.recording_id, &updates, "error")
+                    .and_then(|_| db.delete_recording(&plan.recording_id));
+                match rollback_result {
+                    Ok(_) => {
+                        let _ = db.log_audit_event(
+                            "recording_start_rolled_back",
+                            Some(serde_json::json!({
+                                "recording_id": &plan.recording_id,
+                                "error": activation_error,
+                                "deleted_audio_files": deletion.deleted_files,
+                            })),
+                            "warning",
+                        );
+                        return;
+                    }
+                    Err(error) => {
+                        tracing::warn!(
+                            "Failed to roll back unstarted recording '{}': {}",
+                            plan.recording_id,
+                            error
+                        );
+                    }
+                }
+            } else {
+                tracing::warn!(
+                    "Kept unstarted recording '{}' because its owned audio could not be removed: {}",
+                    plan.recording_id,
+                    deletion.failures.join("; ")
+                );
+            }
+        }
+    }
+
     let mut db = state.db.lock().await;
     if let Err(error) = db.set_audio_asset_validation_states(&plan.recording_id, &updates, "error")
     {
@@ -19100,8 +19943,12 @@ async fn start_recording_for_sidecar(
     })?;
 
     let settings_snapshot = state.settings_manager.lock().await.settings().clone();
-    let meeting_selection =
-        resolve_ready_meeting_selection(state, &settings_snapshot.transcription).await?;
+    let meeting_selection = resolve_ready_meeting_selection(
+        state,
+        &settings_snapshot.transcription,
+        settings_snapshot.privacy.remote_processing_enabled,
+    )
+    .await?;
 
     #[cfg(target_os = "macos")]
     if options.mic {
@@ -19207,7 +20054,7 @@ async fn start_recording_for_sidecar(
     };
     if let Err(error) = preparation_result {
         let message = error.to_string();
-        persist_recording_activation_failure(state, &plan, &message).await;
+        persist_or_rollback_recording_activation_failure(state, &plan, &message).await;
         return Err(message);
     }
 
@@ -19220,7 +20067,7 @@ async fn start_recording_for_sidecar(
             let mut audio = state.audio_capture.lock().await;
             audio.abort_prepared_recording();
         }
-        persist_recording_activation_failure(state, &plan, &message).await;
+        persist_or_rollback_recording_activation_failure(state, &plan, &message).await;
         return Err(message);
     }
 
@@ -19230,7 +20077,7 @@ async fn start_recording_for_sidecar(
     };
     if let Err(error) = activation_result {
         let message = error.to_string();
-        persist_recording_activation_failure(state, &plan, &message).await;
+        persist_or_rollback_recording_activation_failure(state, &plan, &message).await;
         return Err(message);
     }
 
@@ -19414,6 +20261,32 @@ async fn stop_recording_for_sidecar(
             return Err(message);
         }
     };
+
+    // The input stream can die mid-meeting — an unplugged microphone, a
+    // switched audio device, a sample-rate invalidation. CoreAudio reports it
+    // to the error callback and then simply stops delivering samples, so the
+    // recording still "succeeds" with a file that is shorter than the elapsed
+    // session. Say so instead of presenting a silently truncated meeting as a
+    // complete one.
+    if let Some(reason) = stop_result.capture_failure.as_deref() {
+        let message = format!(
+            "The microphone stopped sending audio during this meeting, so the recording ends early. Audio captured before that point was saved. ({reason})"
+        );
+        tracing::error!(
+            "Recording {} lost capture mid-session: {}",
+            recording_id,
+            reason
+        );
+        handle.emit_event(
+            "recording-status-changed",
+            serde_json::json!({
+                "recordingId": &recording_id,
+                "status": "warning",
+                "message": &message,
+                "updatedAt": chrono::Utc::now().to_rfc3339(),
+            }),
+        );
+    }
 
     let audio_path = stop_result.audio_path.clone();
     let duration_seconds = stop_result
@@ -19609,7 +20482,12 @@ async fn run_meeting_transcription_pipeline(
 
     let meeting_selection = {
         let settings = state_clone.settings_manager.lock().await.settings().clone();
-        resolve_ready_meeting_selection(state_clone.as_ref(), &settings.transcription).await
+        resolve_ready_meeting_selection(
+            state_clone.as_ref(),
+            &settings.transcription,
+            settings.privacy.remote_processing_enabled,
+        )
+        .await
     };
     let (meeting_provider, meeting_model_id, meeting_route_warning) = match meeting_selection {
         Ok(selection) => selection,
@@ -20182,13 +21060,34 @@ pub async fn dispatch_command(
                     .unwrap_or(serde_json::Value::Object(Default::default())),
             )
             .unwrap_or_default();
-            let session_id = start_dictation_for_sidecar(state.as_ref(), handle, options).await?;
+            // The result is captured rather than `?`-propagated: a `?` here
+            // returned before the reconcile below, so a failed start left
+            // hands-free monitoring stopped and the user's next utterance was
+            // never heard. The comment claimed reconciliation always ran; now
+            // it actually does, on both the success and failure paths.
+            let start_result = start_dictation_for_sidecar(state.as_ref(), handle, options).await;
+
             // If starting failed, the runtime state falls back to `Idle` inside
             // `start_dictation_for_sidecar`'s own error handling, so it's always safe to
             // reconcile here regardless of success/failure — this is what resumes idle
             // listening if start_dictation errored out before ever recording.
             reconcile_hands_free_monitor(state.as_ref(), handle).await;
-            Ok(serde_json::json!({ "sessionId": session_id }))
+
+            match start_result {
+                Ok(session_id) => Ok(serde_json::json!({ "sessionId": session_id })),
+                Err(error) => {
+                    // Make the failure visible instead of leaving the HUD to
+                    // time out on its own: the renderer mirrors this phase.
+                    handle.emit_event(
+                        "dictation-state-changed",
+                        serde_json::json!({
+                            "phase": "idle",
+                            "error": error,
+                        }),
+                    );
+                    Err(error)
+                }
+            }
         }
         "stop_dictation" => {
             let stop_reason = params
@@ -20218,6 +21117,7 @@ pub async fn dispatch_command(
             drop(runtime_state);
             let mut tracker = state.dictation_session_tracker.lock().await;
             tracker.active_session_id = None;
+            tracker.stopping_session_id = None;
             tracker.started_at = None;
             drop(tracker);
             if let Ok(mut overlay) = state.dictation_overlay_state.lock() {
@@ -20262,7 +21162,7 @@ pub async fn dispatch_command(
             let result = tokio::task::spawn_blocking(move || {
                 let _test_guard = test_guard;
                 audio::system_capture::SystemAudioCapture::new()
-                    .test_system_audio(std::time::Duration::from_secs(45))
+                    .test_system_audio_bounded(std::time::Duration::from_secs(75))
             })
             .await
             .map_err(|error| format!("System-audio verification failed: {error}"))?;
@@ -21281,7 +22181,7 @@ pub async fn dispatch_command(
             Ok(serde_json::Value::Null)
         }
         "repair_local_model_cache" => {
-            let models_root = dirs::data_dir()
+            let models_root = crate::paths::data_dir()
                 .ok_or_else(|| "Could not find data directory".to_string())?
                 .join("Plainsong")
                 .join("models");
@@ -22223,68 +23123,28 @@ pub async fn dispatch_command(
             serde_json::to_value(result).map_err(|e| e.to_string())
         }
         "get_dictation_insights" => {
+            // Bounded aggregate query: this used to load every dictation and
+            // then issue two more queries per recording, so opening the
+            // Dictation view got slower for the rest of the user's life.
             let db = state.db.lock().await;
-            let recordings = db.get_recordings(None).map_err(|e| e.to_string())?;
-            let dictation_recordings: Vec<_> = recordings
-                .into_iter()
-                .filter(|r| r.source_type == "dictation")
-                .collect();
-            let mut insights = models::DictationInsights::default();
-            let mut active_days = std::collections::HashSet::new();
-            let mut app_target_counts: std::collections::HashMap<String, u64> =
-                std::collections::HashMap::new();
-            let last_seven_day_cutoff = chrono::Utc::now() - chrono::Duration::days(7);
-            for recording in &dictation_recordings {
-                insights.total_dictations += 1;
-                active_days.insert(recording.created_at.date_naive());
-                if recording.created_at >= last_seven_day_cutoff {
-                    insights.last_seven_days_dictations += 1;
-                }
-                if let Some(transcript) = db
-                    .get_transcript(&recording.id)
-                    .map_err(|e| e.to_string())?
-                {
-                    insights.dictated_words +=
-                        transcript.full_text.split_whitespace().count() as u64;
-                }
-                if let Some(action) = db
-                    .get_latest_insertion_action(&recording.id)
-                    .map_err(|e| e.to_string())?
-                {
-                    if action.command_applied.is_some() {
-                        insights.commands_used += 1;
-                    }
-                    if action
-                        .command_applied
-                        .as_deref()
-                        .map(|v| v.starts_with("backtrack_"))
-                        .unwrap_or(false)
-                    {
-                        insights.backtracks_used += 1;
-                    }
-                    if action.snippet_applied_count > 0 {
-                        insights.snippets_triggered += action.snippet_applied_count as u64;
-                    }
-                    if let Some(app_target) = action
-                        .app_target
-                        .as_deref()
-                        .map(str::trim)
-                        .filter(|v| !v.is_empty())
-                    {
-                        *app_target_counts.entry(app_target.to_string()).or_insert(0) += 1;
-                    }
-                }
-            }
-            insights.active_days = active_days.len() as u64;
-            insights.average_words_per_dictation = insights
-                .dictated_words
-                .checked_div(insights.total_dictations)
-                .unwrap_or(0);
-            if let Some((app_target, count)) = app_target_counts.into_iter().max_by_key(|(_, c)| *c)
-            {
-                insights.top_app_target = Some(app_target);
-                insights.top_app_target_count = count;
-            }
+            let totals = db
+                .get_dictation_insight_totals()
+                .map_err(|e| e.to_string())?;
+            let insights = models::DictationInsights {
+                total_dictations: totals.total_dictations,
+                dictated_words: totals.dictated_words,
+                average_words_per_dictation: totals
+                    .dictated_words
+                    .checked_div(totals.total_dictations)
+                    .unwrap_or(0),
+                active_days: totals.active_days,
+                last_seven_days_dictations: totals.last_seven_days_dictations,
+                commands_used: totals.commands_used,
+                backtracks_used: totals.backtracks_used,
+                snippets_triggered: totals.snippets_triggered,
+                top_app_target: totals.top_app_target,
+                top_app_target_count: totals.top_app_target_count,
+            };
             serde_json::to_value(insights).map_err(|e| e.to_string())
         }
         "verify_dictation_setup" => {
@@ -22314,6 +23174,7 @@ pub async fn dispatch_command(
                 state.as_ref(),
                 &settings.transcription,
                 Some(&settings.transcription.dictation_route_preference),
+                settings.privacy.remote_processing_enabled,
             )
             .await
             {
@@ -22437,6 +23298,7 @@ pub async fn dispatch_command(
             let result = match resolve_ready_meeting_selection(
                 state.as_ref(),
                 &settings.transcription,
+                settings.privacy.remote_processing_enabled,
             )
             .await
             {
@@ -23022,7 +23884,7 @@ pub async fn dispatch_command(
                         .to_string(),
                 );
             }
-            let data_dir = dirs::data_dir()
+            let data_dir = crate::paths::data_dir()
                 .ok_or("Could not find data directory")?
                 .join("Plainsong");
             let snapshot = snapshot_live_database(state.as_ref()).await?;
@@ -23041,7 +23903,7 @@ pub async fn dispatch_command(
             serde_json::to_value(info).map_err(|e| e.to_string())
         }
         "create_settings_backup_default" => {
-            let data_dir = dirs::data_dir()
+            let data_dir = crate::paths::data_dir()
                 .ok_or("Could not find data directory")?
                 .join("Plainsong");
             let bm = state.backup_manager.lock().await;
@@ -23054,7 +23916,7 @@ pub async fn dispatch_command(
         "restore_backup_default" => {
             let backup_id: String =
                 serde_json::from_value(params["backupId"].clone()).map_err(|e| e.to_string())?;
-            let data_dir = dirs::data_dir()
+            let data_dir = crate::paths::data_dir()
                 .ok_or("Could not find data directory")?
                 .join("Plainsong");
             let outcome = {
@@ -23136,4 +23998,8 @@ pub async fn dispatch_command(
 
         _ => Err(format!("Unknown command: {}", method)),
     }
+}
+
+pub fn audio_system_test_worker() -> audio::system_capture::SystemAudioTestResult {
+    audio::system_capture::run_system_audio_test_worker(std::time::Duration::from_secs(45))
 }
