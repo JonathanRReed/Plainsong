@@ -258,8 +258,14 @@ export function createDictationShortcutSignalRuntime(deps: {
   holdWatchdogMs?: number;
 }): DictationShortcutSignalRuntime {
   const holdWatchdogMs = deps.holdWatchdogMs ?? DICTATION_HOLD_WATCHDOG_MS;
-  let startInFlight = false;
-  let pendingHoldRelease = false;
+  // Start bookkeeping is per-attempt, not global. These used to be two shared
+  // booleans, so a second physical tap arriving while the first start was still
+  // in flight reset `pendingHoldRelease` and the first tap's release was lost —
+  // the user held the key and the session never stopped. Each start now owns a
+  // generation, and only that generation may consume or clear its own release.
+  let startGeneration = 0;
+  let activeStartGeneration: number | null = null;
+  let pendingHoldReleaseGeneration: number | null = null;
   let watchdogTimer: ReturnType<typeof setTimeout> | null = null;
 
   const clearWatchdog = (): void => {
@@ -287,11 +293,11 @@ export function createDictationShortcutSignalRuntime(deps: {
 
     if (decision.action === "ignore") {
       if (input.signal === "released" && holdToTalkWithRelease) {
-        if (startInFlight) {
+        if (activeStartGeneration !== null) {
           // Rapid tap: the release arrived while start_dictation was still in
-          // flight. Remember it so the session is stopped the moment the
-          // start resolves.
-          pendingHoldRelease = true;
+          // flight. Tag it with the generation that is starting so only that
+          // start consumes it.
+          pendingHoldReleaseGeneration = activeStartGeneration;
         } else if (watchdogTimer !== null) {
           // The start already resolved (watchdog armed) but the sidecar's
           // phase "recording" event has not been observed yet, so the cached
@@ -319,20 +325,33 @@ export function createDictationShortcutSignalRuntime(deps: {
         behavior: input.behavior,
         capability: input.capability,
       });
-      startInFlight = true;
-      pendingHoldRelease = false;
+      const generation = ++startGeneration;
+      activeStartGeneration = generation;
+      // Only clear a release that belongs to an older generation; a release
+      // already recorded for THIS generation (possible if the signal races the
+      // invoke) must survive.
+      if (
+        pendingHoldReleaseGeneration !== null &&
+        pendingHoldReleaseGeneration !== generation
+      ) {
+        pendingHoldReleaseGeneration = null;
+      }
       let started = false;
       try {
         await deps.invoke("start_dictation", {});
         started = true;
       } finally {
-        startInFlight = false;
-        if (!started) {
-          pendingHoldRelease = false;
+        // A newer start may have superseded this one while we awaited; in that
+        // case leave its bookkeeping alone.
+        if (activeStartGeneration === generation) {
+          activeStartGeneration = null;
+        }
+        if (!started && pendingHoldReleaseGeneration === generation) {
+          pendingHoldReleaseGeneration = null;
         }
       }
-      if (holdToTalkWithRelease && pendingHoldRelease) {
-        pendingHoldRelease = false;
+      if (holdToTalkWithRelease && pendingHoldReleaseGeneration === generation) {
+        pendingHoldReleaseGeneration = null;
         deps.log?.("dictation shortcut stop_dictation", {
           phase: deps.getPhase(),
           behavior: input.behavior,

@@ -200,6 +200,29 @@ describe("settings shortcut refresh wiring", () => {
       /eventName === "settings-changed"[\s\S]{0,700}applyElectronGlobalShortcuts\("settings-changed"\)/,
     );
   });
+
+  it("does not touch global shortcuts when a duplicate instance quits before ready", () => {
+    const mainSource = readFileSync(resolve(process.cwd(), "electron/main.ts"), "utf8");
+
+    expect(mainSource).toMatch(
+      // The window is generous because `before-quit` also has to finalize an
+      // active meeting before the normal teardown runs; the guard being
+      // asserted here is the `app.isReady()` check, not its distance from the
+      // handler's first line.
+      /app\.on\("before-quit"[\s\S]{0,1600}if \(app\.isReady\(\)\) \{\s*globalShortcut\.unregisterAll\(\)/,
+    );
+  });
+
+  it("forces a bounded process exit if Electron's graceful quit stalls", () => {
+    const mainSource = readFileSync(resolve(process.cwd(), "electron/main.ts"), "utf8");
+
+    expect(mainSource).toMatch(
+      /app\.on\("before-quit"[\s\S]{0,1400}setTimeout\(\(\) => \{[\s\S]{0,180}app\.exit\(0\)[\s\S]{0,180}FORCED_QUIT_TIMEOUT_MS/,
+    );
+    expect(mainSource).toMatch(
+      /app\.on\("quit"[\s\S]{0,180}clearTimeout\(forcedQuitTimer\)/,
+    );
+  });
 });
 
 describe("convertShortcutToAccelerator", () => {

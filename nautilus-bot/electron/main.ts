@@ -9,6 +9,7 @@ import {
   net,
   protocol,
   screen,
+  session,
   shell,
   Tray,
   type IpcMainInvokeEvent,
@@ -54,11 +55,47 @@ import {
   rendererUrl,
   resolveRendererAssetPath,
 } from "./renderer-protocol";
+import {
+  RENDERER_READY_LOG_MESSAGE,
+  shouldForwardRendererConsoleMessage,
+} from "./renderer-readiness";
 import { createDictationOverlayWindow, createRecordingOverlayWindow } from "./windows";
 
-const isDev = process.env.NODE_ENV === "development" || !app.isPackaged;
-const devServerUrl = process.env.PLAINSONG_DEV_SERVER_URL ?? "http://127.0.0.1:1420";
-const rendererMode = process.env.PLAINSONG_RENDERER_MODE ?? "file";
+// Packaging is the only thing that decides development mode. This used to also
+// honour `NODE_ENV=development`, which meant an ambient environment variable
+// could put a signed, packaged app into dev mode and, with the two renderer
+// overrides below, point every privileged BrowserWindow at an arbitrary URL.
+// A packaged build now ignores all three variables unconditionally.
+const isDev = !app.isPackaged;
+const devServerUrl = isDev
+  ? (process.env.PLAINSONG_DEV_SERVER_URL ?? "http://127.0.0.1:1420")
+  : "";
+const rendererMode = isDev ? (process.env.PLAINSONG_RENDERER_MODE ?? "file") : "file";
+
+// The dev server may only ever be a loopback origin, so an unpackaged run can't
+// be pointed at a remote host either.
+function isLoopbackDevServerUrl(rawUrl: string): boolean {
+  try {
+    const url = new URL(rawUrl);
+    if (url.protocol !== "http:" && url.protocol !== "https:") {
+      return false;
+    }
+    return (
+      url.hostname === "127.0.0.1" || url.hostname === "localhost" || url.hostname === "[::1]"
+    );
+  } catch {
+    return false;
+  }
+}
+
+const devServerUrlIsUsable = isDev && rendererMode === "server" && isLoopbackDevServerUrl(devServerUrl);
+
+if (isDev && rendererMode === "server" && !devServerUrlIsUsable) {
+  console.error(
+    "[dev] refusing non-loopback PLAINSONG_DEV_SERVER_URL; falling back to the bundled renderer",
+    { url: devServerUrl }
+  );
+}
 
 protocol.registerSchemesAsPrivileged([
   {
@@ -82,6 +119,10 @@ let dictationPhase = "idle";
 // Session id from the most recent `dictation-state-changed` event, used to
 // drop stale VAD `silence_stop` signals emitted for an earlier session.
 let dictationSessionId: number | null = null;
+// Mirrors the sidecar's active meeting so a sidecar death can be reported
+// against the right recording. Dictation already had this; meetings did not,
+// so a crash mid-meeting left the UI showing "recording" indefinitely.
+let activeMeetingRecordingId: string | null = null;
 let updaterConfigured = false;
 let updateReadyToInstall = false;
 let bootstrapComplete = false;
@@ -93,6 +134,8 @@ let alwaysOnTopEnabled = false;
 let showDictationOverlayEnabled = true;
 let showRecordingOverlayEnabled = true;
 let isQuitting = false;
+let forcedQuitTimer: ReturnType<typeof setTimeout> | null = null;
+const FORCED_QUIT_TIMEOUT_MS = 5_000;
 let nativeShortcutController: NativeShortcutController | null = null;
 let nativeShortcutAvailable = false;
 let appliedNativeShortcutConfig: string | null = null;
@@ -789,7 +832,7 @@ function createOverlayWindow(kind: OverlayKind): BrowserWindow {
   });
 
   const query = { overlay: kind };
-  if (isDev && rendererMode === "server") {
+  if (devServerUrlIsUsable) {
     void overlay.loadURL(`${devServerUrl}?overlay=${kind}`);
   } else {
     void overlay.loadURL(rendererUrl(query));
@@ -1288,7 +1331,7 @@ function isRendererAppUrl(rawUrl: string): boolean {
       return true;
     }
 
-    if (isDev && rendererMode === "server") {
+    if (devServerUrlIsUsable) {
       return url.origin === new URL(devServerUrl).origin;
     }
 
@@ -1305,6 +1348,45 @@ function isAllowedExternalUrl(rawUrl: string): boolean {
   } catch {
     return false;
   }
+}
+
+// Electron approves renderer permission requests by default. Plainsong's
+// renderer processes inherit the app's microphone entitlement, so an
+// unexpected origin loaded into a window would otherwise be able to open the
+// microphone under the grant the user gave Plainsong. Only the packaged
+// renderer origin (or the loopback dev server) may ask, and only for media.
+const RENDERER_ALLOWED_PERMISSIONS = new Set(["media", "clipboard-sanitized-write"]);
+
+function isTrustedRendererOrigin(rawUrl: string | undefined | null): boolean {
+  if (!rawUrl) {
+    return false;
+  }
+  return isRendererAppUrl(rawUrl);
+}
+
+function installRendererPermissionHandlers(): void {
+  const defaultSession = session.defaultSession;
+
+  defaultSession.setPermissionRequestHandler((webContents, permission, callback) => {
+    const requestUrl = webContents?.getURL();
+    const allowed =
+      RENDERER_ALLOWED_PERMISSIONS.has(permission) && isTrustedRendererOrigin(requestUrl);
+
+    if (!allowed) {
+      console.warn("[security] denied renderer permission request", {
+        permission,
+        url: requestUrl,
+      });
+    }
+
+    callback(allowed);
+  });
+
+  defaultSession.setPermissionCheckHandler((_webContents, permission, requestingOrigin) => {
+    return (
+      RENDERER_ALLOWED_PERMISSIONS.has(permission) && isTrustedRendererOrigin(requestingOrigin)
+    );
+  });
 }
 
 function configureWindowSecurity(win: BrowserWindow): void {
@@ -1367,6 +1449,25 @@ function createMainWindow(): BrowserWindow {
     }
   });
 
+  win.webContents.on(
+    "console-message",
+    ({ level, message, lineNumber, sourceId }) => {
+      if (!shouldForwardRendererConsoleMessage(message, isDev)) {
+        return;
+      }
+      if (isDev) {
+        console.log("[renderer:console]", {
+          level,
+          message,
+          lineNumber,
+          sourceId,
+        });
+        return;
+      }
+      console.log(RENDERER_READY_LOG_MESSAGE);
+    },
+  );
+
   if (isDev) {
     win.webContents.on("did-start-loading", () => {
       console.log("[renderer] did-start-loading", win.webContents.getURL());
@@ -1402,13 +1503,10 @@ function createMainWindow(): BrowserWindow {
         validatedUrl,
       });
     });
-    win.webContents.on("console-message", (_event, level, message, line, sourceId) => {
-      console.log("[renderer:console]", { level, message, line, sourceId });
-    });
     win.webContents.on("render-process-gone", (_event, details) => {
       console.error("[renderer] render-process-gone", details);
     });
-    if (rendererMode === "server") {
+    if (devServerUrlIsUsable) {
       void win.loadURL(devServerUrl);
     } else {
       void win.loadURL(rendererUrl());
@@ -1434,14 +1532,69 @@ process.on("unhandledRejection", (reason) => {
   console.error("[main] unhandled rejection", reason);
 });
 
-app.on("before-quit", () => {
+// Quitting with a meeting still running used to tear the sidecar down while the
+// capture and WAV-writer threads were live, so everything since the last
+// five-second header checkpoint was lost and the meeting was left marked
+// errored. Stop and finalize first, then continue the normal quit.
+async function finalizeActiveMeetingBeforeQuit(): Promise<void> {
+  if (!activeMeetingRecordingId || !ipcBridge) {
+    return;
+  }
+
+  const recordingId = activeMeetingRecordingId;
+  activeMeetingRecordingId = null;
+  console.log("[main] finalizing active meeting before quit", { recordingId });
+
+  try {
+    await ipcBridge.invoke("stop_recording", {});
+    console.log("[main] meeting finalized before quit", { recordingId });
+  } catch (error) {
+    console.error("[main] failed to finalize meeting before quit", { recordingId, error });
+  }
+}
+
+app.on("before-quit", (event) => {
+  // Take one pass to finalize the meeting, then re-issue the quit. The guard is
+  // `isQuitting`, which is already set below, so the second pass falls straight
+  // through instead of looping.
+  if (!isQuitting && activeMeetingRecordingId && ipcBridge) {
+    event.preventDefault();
+    isQuitting = true;
+    void finalizeActiveMeetingBeforeQuit().finally(() => {
+      app.quit();
+    });
+    return;
+  }
+
   isQuitting = true;
-  globalShortcut.unregisterAll();
+  // Electron's graceful quit can remain stuck after every window disappears.
+  // Keep the normal lifecycle first so renderers and the sidecar can clean up,
+  // then force only this process to exit if macOS never completes the quit.
+  if (!forcedQuitTimer) {
+    forcedQuitTimer = setTimeout(() => {
+      console.error("[main] graceful quit timed out; forcing process exit");
+      app.exit(0);
+    }, FORCED_QUIT_TIMEOUT_MS);
+    forcedQuitTimer.unref();
+  }
+  // A second instance can lose the single-instance lock and call app.quit()
+  // before Electron reaches ready. globalShortcut is unavailable that early,
+  // so only touch it after app.whenReady() has resolved.
+  if (app.isReady()) {
+    globalShortcut.unregisterAll();
+  }
   dictationShortcutSignalRuntime.dispose();
   disposeNativeShortcutController();
   ipcBridge?.shutdown();
   tray?.destroy();
   tray = null;
+});
+
+app.on("quit", () => {
+  if (forcedQuitTimer) {
+    clearTimeout(forcedQuitTimer);
+    forcedQuitTimer = null;
+  }
 });
 
 app.on("window-all-closed", () => {
@@ -1486,7 +1639,9 @@ async function bootstrap() {
 
   await app.whenReady();
 
-  if (!(isDev && rendererMode === "server")) {
+  installRendererPermissionHandlers();
+
+  if (!devServerUrlIsUsable) {
     await protocol.handle(RENDERER_SCHEME, (request) => {
       try {
         const rendererRoot = path.join(__dirname, "../dist");
@@ -1506,7 +1661,7 @@ async function bootstrap() {
     });
   }
 
-  if (isDev && rendererMode === "server") {
+  if (devServerUrlIsUsable) {
     const timeout = new Promise<never>((_, reject) => {
       setTimeout(() => reject(new Error("timed out")), 5000);
     });
@@ -1536,6 +1691,7 @@ async function bootstrap() {
   }
 
   ipcBridge = new IpcBridge(sidecarPath);
+  ipcBridge.onValidateSender(isTrustedRendererOrigin);
   ipcBridge.onLocalCommand(handleLocalCommand);
   configureAutoUpdater(autoUpdater);
 
@@ -1553,6 +1709,23 @@ async function bootstrap() {
       broadcastRendererEvent("dictation-state-changed", { phase: "idle" });
       refreshTray();
     }
+
+    // A meeting dies with the process too. Reporting it as "error" rather than
+    // "idle" is deliberate: idle would silently reset the UI as though the user
+    // had stopped, and the whole point is that they did not. Audio written
+    // before the crash survives — the WAV writer checkpoints its header every
+    // five seconds — so the message says recovery is possible.
+    if (activeMeetingRecordingId) {
+      const interruptedRecordingId = activeMeetingRecordingId;
+      activeMeetingRecordingId = null;
+      broadcastRendererEvent("meeting-recording-state-changed", {
+        phase: "error",
+        recordingId: interruptedRecordingId,
+        message:
+          "Recording stopped unexpectedly because the audio engine restarted. Audio captured before the interruption was saved.",
+      });
+      refreshTray();
+    }
   });
 
   ipcBridge.onEvent((eventName: string, payload: unknown) => {
@@ -1562,6 +1735,21 @@ async function bootstrap() {
       // Re-read its now-live settings before re-registering so restored global
       // and native hotkeys take effect without a restart or another save.
       void applyElectronGlobalShortcuts("settings-changed");
+    }
+
+    if (
+      eventName === "meeting-recording-state-changed" &&
+      payload &&
+      typeof payload === "object" &&
+      "phase" in payload
+    ) {
+      const meetingPhase = (payload as { phase?: unknown }).phase;
+      const meetingId = (payload as { recordingId?: unknown }).recordingId;
+      if (meetingPhase === "recording" && typeof meetingId === "string") {
+        activeMeetingRecordingId = meetingId;
+      } else if (meetingPhase === "idle" || meetingPhase === "error") {
+        activeMeetingRecordingId = null;
+      }
     }
 
     if (

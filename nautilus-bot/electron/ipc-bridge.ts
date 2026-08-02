@@ -1,9 +1,14 @@
 import { ipcMain, type IpcMainInvokeEvent } from "electron";
-import { spawn, ChildProcess } from "child_process";
-import { createInterface } from "readline";
-import { randomUUID } from "crypto";
+import { spawn, ChildProcess } from "node:child_process";
+import { randomUUID } from "node:crypto";
+import { createInterface } from "node:readline";
 import { getCommandTimeoutMs } from "./ipc-command-policy";
 import { buildSidecarEnv } from "./sidecar-env";
+import {
+  isExpectedSidecarStdinClose,
+  retryOnceAfterMicrophonePreparationTimeout,
+  SIDECAR_SHUTDOWN_MESSAGE,
+} from "./sidecar-recovery-policy";
 
 interface JsonRpcRequest {
   jsonrpc: "2.0";
@@ -33,6 +38,7 @@ type EventCallback = (eventName: string, payload: unknown) => void;
 type WindowCommandCallback = (command: string, payload: unknown) => void;
 type CommandResolvedCallback = (command: string, args: unknown, result: unknown) => void;
 type TerminatedCallback = (reason: string) => void;
+type SenderValidator = (senderUrl: string) => boolean;
 type LocalCommandResult = { handled: boolean; result?: unknown };
 type LocalCommandCallback = (
   event: IpcMainInvokeEvent,
@@ -218,6 +224,7 @@ const ALLOWED_RENDERER_COMMANDS = new Set<string>([
 
 export class IpcBridge {
   private sidecarPath: string;
+  private readonly spawnProcess: typeof spawn;
   private process: ChildProcess | null = null;
   private pending = new Map<string, PendingRequest>();
   private eventCallback: EventCallback | null = null;
@@ -225,12 +232,15 @@ export class IpcBridge {
   private commandResolvedCallback: CommandResolvedCallback | null = null;
   private localCommandCallback: LocalCommandCallback | null = null;
   private terminatedCallback: TerminatedCallback | null = null;
+  private senderValidator: SenderValidator | null = null;
   private shuttingDown = false;
   private restartAttempts = 0;
+  private restartTimer: ReturnType<typeof setTimeout> | null = null;
   private readonly maxRestarts = 5;
 
-  constructor(sidecarPath: string) {
+  constructor(sidecarPath: string, spawnProcess: typeof spawn = spawn) {
     this.sidecarPath = sidecarPath;
+    this.spawnProcess = spawnProcess;
   }
 
   onEvent(cb: EventCallback): void {
@@ -247,6 +257,36 @@ export class IpcBridge {
 
   onLocalCommand(cb: LocalCommandCallback): void {
     this.localCommandCallback = cb;
+  }
+
+  /**
+   * Decides whether an `invoke` may proceed based on the sender frame's URL.
+   * Main owns renderer-origin trust, so it supplies the predicate; when none is
+   * registered the bridge fails closed for frames that report a URL it cannot
+   * confirm (see `isTrustedSender`).
+   */
+  onValidateSender(cb: SenderValidator): void {
+    this.senderValidator = cb;
+  }
+
+  private isTrustedSender(event: IpcMainInvokeEvent): boolean {
+    if (!this.senderValidator) {
+      return true;
+    }
+
+    let frameUrl: string | undefined;
+    try {
+      frameUrl = event.senderFrame?.url;
+    } catch {
+      // senderFrame throws if the frame was disposed mid-call; treat as untrusted.
+      return false;
+    }
+
+    if (!frameUrl) {
+      return false;
+    }
+
+    return this.senderValidator(frameUrl);
   }
 
   /**
@@ -267,7 +307,7 @@ export class IpcBridge {
   private spawnSidecar(): void {
     console.log(`[sidecar] spawning: ${this.sidecarPath}`);
 
-    this.process = spawn(this.sidecarPath, [], {
+    this.process = this.spawnProcess(this.sidecarPath, [], {
       stdio: ["pipe", "pipe", "pipe"],
       env: buildSidecarEnv(process.env),
     });
@@ -288,6 +328,20 @@ export class IpcBridge {
       process.stderr.write(`[sidecar] ${chunk.toString()}`);
     });
 
+    this.process.stdin!.on("error", (error: NodeJS.ErrnoException) => {
+      // A sidecar that accepted the shutdown RPC can close its read end before
+      // Electron finishes dispatching the last renderer poll. Node emits that
+      // EPIPE on the stream, outside the write call's try/catch. Consume the
+      // expected close so a normal quit never reaches uncaughtException.
+      if (isExpectedSidecarStdinClose(error)) {
+        if (!this.shuttingDown) {
+          console.warn(`[sidecar] stdin closed unexpectedly: ${error.code}`);
+        }
+        return;
+      }
+      console.error("[sidecar] stdin error:", error);
+    });
+
     this.process.on("exit", (code, signal) => {
       console.warn(`[sidecar] exited: code=${code} signal=${signal}`);
       this.handleSidecarTermination(`Sidecar process exited (code=${code}, signal=${signal})`);
@@ -302,18 +356,36 @@ export class IpcBridge {
 
     this.process.on("spawn", () => {
       console.log("[sidecar] connected");
-      this.restartAttempts = 0;
+      // Deliberately NOT resetting restartAttempts here. 'spawn' only means the
+      // process was created, so a sidecar that starts and then immediately dies
+      // reset the counter on every cycle and restarted forever. The counter is
+      // cleared in handleSidecarMessage() on the first well-formed JSON-RPC
+      // reply, which is the earliest evidence the sidecar is actually usable.
     });
   }
 
   // Shared termination path for both 'exit' and 'error': schedule a backoff
   // restart and reject all pending requests with a clear message.
   private handleSidecarTermination(reason: string): void {
+    // A single dead process can emit both 'error' and 'exit'. Without this
+    // guard each one schedules its own restart, so the pool of live sidecars
+    // grows instead of being replaced.
+    if (this.restartTimer) {
+      clearTimeout(this.restartTimer);
+      this.restartTimer = null;
+    }
+
     if (!this.shuttingDown && this.restartAttempts < this.maxRestarts) {
       const delay = Math.min(1000 * 2 ** this.restartAttempts, 30000);
       this.restartAttempts++;
       console.log(`[sidecar] restarting in ${delay}ms (attempt ${this.restartAttempts}/${this.maxRestarts})`);
-      setTimeout(() => this.spawnSidecar(), delay);
+      this.restartTimer = setTimeout(() => {
+        this.restartTimer = null;
+        if (this.shuttingDown) {
+          return;
+        }
+        this.spawnSidecar();
+      }, delay);
     } else if (this.restartAttempts >= this.maxRestarts) {
       console.error("[sidecar] max restarts reached, giving up");
     }
@@ -331,6 +403,13 @@ export class IpcBridge {
   }
 
   private handleSidecarMessage(msg: JsonRpcResponse): void {
+    // First readable message from this generation: the sidecar is talking, so
+    // the backoff budget has been earned back. See the 'spawn' handler.
+    if (this.restartAttempts > 0) {
+      console.log("[sidecar] healthy, clearing restart budget");
+      this.restartAttempts = 0;
+    }
+
     if (msg.method === "event" && msg.params) {
       const { event, payload } = msg.params;
       if (event.startsWith("window:")) {
@@ -363,6 +442,9 @@ export class IpcBridge {
   }
 
   invokeSidecar(command: string, args?: unknown): Promise<unknown> {
+    if (this.shuttingDown) {
+      return Promise.reject(new Error(SIDECAR_SHUTDOWN_MESSAGE));
+    }
     return new Promise((resolve, reject) => {
       const id = randomUUID();
       const timeout = setTimeout(() => {
@@ -395,11 +477,71 @@ export class IpcBridge {
   }
 
   invoke(command: string, args?: unknown): Promise<unknown> {
-    return this.invokeSidecar(command, args);
+    return retryOnceAfterMicrophonePreparationTimeout(
+      command,
+      () => this.invokeSidecar(command, args),
+      () =>
+        this.recycleSidecarAfterFault(
+          "microphone stream preparation timed out",
+        ),
+    );
+  }
+
+  private waitForReplacementSidecar(
+    previousProcess: ChildProcess,
+    timeoutMs = 10_000,
+  ): Promise<void> {
+    const startedAt = Date.now();
+    return new Promise((resolve, reject) => {
+      const check = () => {
+        if (this.shuttingDown) {
+          reject(new Error(SIDECAR_SHUTDOWN_MESSAGE));
+          return;
+        }
+        if (
+          this.process &&
+          this.process !== previousProcess &&
+          this.process.stdin?.writable
+        ) {
+          resolve();
+          return;
+        }
+        if (Date.now() - startedAt >= timeoutMs) {
+          reject(new Error("Timed out waiting for the audio sidecar to restart"));
+          return;
+        }
+        setTimeout(check, 25);
+      };
+      check();
+    });
+  }
+
+  private async recycleSidecarAfterFault(reason: string): Promise<void> {
+    const sidecarProcess = this.process;
+    if (!sidecarProcess || sidecarProcess.killed) {
+      throw new Error("The audio sidecar is not available to restart");
+    }
+    console.warn(`[sidecar] recycling unhealthy process: ${reason}`);
+    const replacement = this.waitForReplacementSidecar(sidecarProcess);
+    if (!sidecarProcess.kill("SIGTERM")) {
+      throw new Error("Failed to stop the unhealthy audio sidecar");
+    }
+    await replacement;
   }
 
   private registerIpcHandler(): void {
     ipcMain.handle("sidecar:invoke", async (event, command: string, args?: unknown) => {
+      // The allowlist checks *what* is being asked for; this checks *who* is
+      // asking. Without it any frame that ends up in a window with our preload
+      // — including one loaded from an unexpected origin — reaches the sidecar.
+      if (!this.isTrustedSender(event)) {
+        console.warn("[security] rejected sidecar command from untrusted sender", {
+          command,
+          url: event.senderFrame?.url,
+        });
+        throw new Error("Renderer command rejected: untrusted sender");
+      }
+
       if (!ALLOWED_RENDERER_COMMANDS.has(command)) {
         throw new Error(`Renderer command is not allowed: ${command}`);
       }
@@ -411,12 +553,30 @@ export class IpcBridge {
         }
       }
 
-      return this.invokeSidecar(command, args);
+      return await this.invoke(command, args);
     });
   }
 
   shutdown(): void {
+    if (this.shuttingDown) {
+      return;
+    }
     this.shuttingDown = true;
+    if (this.restartTimer) {
+      clearTimeout(this.restartTimer);
+      this.restartTimer = null;
+    }
+    const pendingCount = this.pending.size;
+    for (const [, pending] of this.pending) {
+      clearTimeout(pending.timeout);
+      pending.reject(new Error(SIDECAR_SHUTDOWN_MESSAGE));
+    }
+    this.pending.clear();
+    if (pendingCount > 0) {
+      console.warn(
+        `[sidecar] rejected ${pendingCount} pending request(s): ${SIDECAR_SHUTDOWN_MESSAGE}`
+      );
+    }
     if (this.process && !this.process.killed) {
       try {
         this.sendToSidecar({ jsonrpc: "2.0", id: randomUUID(), method: "shutdown", params: {} });
