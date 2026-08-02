@@ -164,6 +164,24 @@ describe("asr-route-catalog", () => {
     ).toBe(true);
   });
 
+  it("does not repeat an unqualified language count in the Parakeet route label", () => {
+    const parakeet = {
+      ...providers[2],
+      modelOptions: [
+        {
+          id: "parakeet-tdt-0.6b-v3",
+          label: "Parakeet TDT 0.6B v3 (25 EU languages, recommended)",
+        },
+      ],
+    };
+    const route = buildAsrRouteCatalog([parakeet], "prefer_local")[0];
+
+    expect(route.label).toBe("Parakeet TDT 0.6B v3");
+    expect(route.capabilitySummary).toContain(
+      "25 European languages listed upstream",
+    );
+  });
+
   it("recommends the fastest local route for dictation when it is ready", () => {
     const routes = buildAsrRouteCatalog(providers, "prefer_local");
     const recommended = getRecommendedLaneRoute(routes, "dictation", "prefer_local");

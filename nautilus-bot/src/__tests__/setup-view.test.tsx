@@ -1,6 +1,7 @@
 import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { SetupView } from "@/components/views/setup-view";
+import type { ProductReadinessSnapshot } from "@/features/readiness/product-readiness";
 
 const setupStatusMock = vi.hoisted(() => ({
   loading: false,
@@ -65,6 +66,49 @@ const setupStatusMock = vi.hoisted(() => ({
   fullCaptureBlockers: [
     "Start in Mic only mode or configure a system-audio route.",
   ],
+  productReadiness: {
+    evidenceObservedAt: 1,
+    dictation: { domain: "dictation", state: "ready", cause: null },
+    meetings: {
+      domain: "meetings",
+      state: "blocked",
+      cause: {
+        id: "meeting_route",
+        message: "Meetings need a meeting-grade ASR route.",
+        action: {
+          id: "open_models",
+          label: "Review models",
+          destination: "models",
+        },
+      },
+    },
+    fullCapture: {
+      domain: "full_capture",
+      state: "blocked",
+      cause: {
+        id: "meeting_route",
+        message: "Meetings need a meeting-grade ASR route.",
+        action: {
+          id: "open_models",
+          label: "Review models",
+          destination: "models",
+        },
+      },
+    },
+    overall: {
+      domain: "overall",
+      state: "blocked",
+      cause: {
+        id: "meeting_route",
+        message: "Meetings need a meeting-grade ASR route.",
+        action: {
+          id: "open_models",
+          label: "Review models",
+          destination: "models",
+        },
+      },
+    },
+  } as ProductReadinessSnapshot,
   providers: [
     {
       providerType: "parakeet",
@@ -181,8 +225,8 @@ const navigationMocks = vi.hoisted(() => ({
   requestMainView: vi.fn(),
 }));
 
-vi.mock("@/hooks/use-setup-status", () => ({
-  useSetupStatus: () => setupStatusMock,
+vi.mock("@/features/readiness/product-readiness-context", () => ({
+  useProductReadinessStatus: () => setupStatusMock,
 }));
 
 vi.mock("@/lib/backend/asr", () => ({
@@ -268,6 +312,49 @@ describe("SetupView", () => {
     setupStatusMock.fullCaptureBlockers = [
       "Start in Mic only mode or configure a system-audio route.",
     ];
+    setupStatusMock.productReadiness = {
+      evidenceObservedAt: 1,
+      dictation: { domain: "dictation", state: "ready", cause: null },
+      meetings: {
+        domain: "meetings",
+        state: "blocked",
+        cause: {
+          id: "meeting_route",
+          message: "Meetings need a meeting-grade ASR route.",
+          action: {
+            id: "open_models",
+            label: "Review models",
+            destination: "models",
+          },
+        },
+      },
+      fullCapture: {
+        domain: "full_capture",
+        state: "blocked",
+        cause: {
+          id: "meeting_route",
+          message: "Meetings need a meeting-grade ASR route.",
+          action: {
+            id: "open_models",
+            label: "Review models",
+            destination: "models",
+          },
+        },
+      },
+      overall: {
+        domain: "overall",
+        state: "blocked",
+        cause: {
+          id: "meeting_route",
+          message: "Meetings need a meeting-grade ASR route.",
+          action: {
+            id: "open_models",
+            label: "Review models",
+            destination: "models",
+          },
+        },
+      },
+    };
   });
 
   it("surfaces guided setup actions in a permanent setup workspace", async () => {
@@ -279,6 +366,34 @@ describe("SetupView", () => {
     expect(screen.getAllByRole("button", { name: "Set up meetings" }).length).toBeGreaterThan(0);
     expect(screen.getByText(/every route's runtime state/i)).toBeInTheDocument();
     expect(screen.getByText(/Permission and insert tests may open macOS settings/i)).toBeInTheDocument();
+  });
+
+  it("uses the canonical snapshot when legacy readiness booleans disagree", () => {
+    setupStatusMock.dictationReady = true;
+    setupStatusMock.productReadiness.dictation = {
+      domain: "dictation",
+      state: "blocked",
+      cause: {
+        id: "dictation_route",
+        message: "Download the selected dictation model.",
+        action: {
+          id: "open_models",
+          label: "Review models",
+          destination: "models",
+        },
+      },
+    };
+
+    render(<SetupView />);
+
+    expect(
+      screen.getByText("Download the selected dictation model."),
+    ).toBeInTheDocument();
+    expect(
+      screen.queryByText(
+        "Dictation is ready. If it stops working, run the checks below.",
+      ),
+    ).not.toBeInTheDocument();
   });
 
   it("offers Apple Speech permission recovery without making the route look ready", async () => {
@@ -350,6 +465,29 @@ describe("SetupView", () => {
     };
     setupStatusMock.meetingReady = true;
     setupStatusMock.meetingBlockers = [];
+    setupStatusMock.productReadiness.meetings = {
+      domain: "meetings",
+      state: "ready",
+      cause: null,
+    };
+    setupStatusMock.productReadiness.fullCapture = {
+      domain: "full_capture",
+      state: "degraded",
+      cause: {
+        id: "system_audio_unavailable",
+        message: "Mic-only meetings are ready, but system audio is not configured.",
+        action: {
+          id: "configure_system_audio",
+          label: "Set up system audio",
+          destination: "transcription",
+        },
+      },
+    };
+    setupStatusMock.productReadiness.overall = {
+      domain: "overall",
+      state: "degraded",
+      cause: setupStatusMock.productReadiness.fullCapture.cause,
+    };
 
     render(<SetupView />);
 
@@ -386,6 +524,9 @@ describe("SetupView", () => {
     };
 
     render(<SetupView />);
+
+    fireEvent.click(screen.getByRole("button", { name: "Open privacy settings" }));
+    expect(backendMocks.openPermissionSettings).toHaveBeenCalledWith("system_audio");
 
     fireEvent.click(screen.getByRole("button", { name: "Test system audio" }));
 
@@ -464,7 +605,7 @@ describe("SetupView", () => {
 
     render(<SetupView />);
 
-    expect(screen.getByText("Speech")).toBeInTheDocument();
+    expect(screen.getByText("Apple Speech permission")).toBeInTheDocument();
     expect(screen.getAllByText("Checking").length).toBeGreaterThan(0);
   });
 });

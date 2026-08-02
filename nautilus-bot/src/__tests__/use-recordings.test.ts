@@ -3,6 +3,7 @@ import { act, renderHook, waitFor } from "@testing-library/react";
 import { createElement, type ReactNode } from "react";
 import { DataCacheProvider } from "@/hooks/data-cache-context";
 import { useRecordings } from "@/hooks/use-recordings";
+import { listen } from "@/lib/electron";
 
 const eventMocks = vi.hoisted(() => ({
   listeners: new Map<string, (event: { payload: any }) => void>(),
@@ -189,5 +190,27 @@ describe("useRecordings", () => {
     });
 
     expect(mockedGetRecordings).toHaveBeenCalledTimes(2);
+  });
+
+  it("removes listeners that finish registering after unmount", async () => {
+    const pendingUnlisten = deferred<() => void>();
+    const unlisten = vi.fn();
+    vi.mocked(listen).mockImplementation((eventName, handler) => {
+      eventMocks.listeners.set(
+        eventName,
+        handler as (event: { payload: any }) => void,
+      );
+      return pendingUnlisten.promise;
+    });
+
+    const { unmount } = renderHook(() => useRecordings(), { wrapper });
+    unmount();
+
+    await act(async () => {
+      pendingUnlisten.resolve(unlisten);
+      await pendingUnlisten.promise;
+    });
+
+    expect(unlisten).toHaveBeenCalledTimes(3);
   });
 });

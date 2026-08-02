@@ -36,9 +36,21 @@ export function useRecordings(projectId?: string) {
   }, [fetchRecordings]);
 
   useEffect(() => {
+    let disposed = false;
     let unlistenStatus: (() => void) | undefined;
     let unlistenAnalysis: (() => void) | undefined;
     let unlistenTitle: (() => void) | undefined;
+
+    const retainUnlistener = (
+      assign: (unlisten: () => void) => void,
+      unlisten: () => void,
+    ) => {
+      if (disposed) {
+        unlisten();
+        return;
+      }
+      assign(unlisten);
+    };
 
     const refresh = () => {
       cache.invalidateRecordings(projectId);
@@ -46,20 +58,30 @@ export function useRecordings(projectId?: string) {
     };
 
     const setup = async () => {
-      unlistenStatus = await listen("recording-status-changed", () => {
-        refresh();
-      });
-      unlistenAnalysis = await listen("recording-analysis-ready", () => {
-        refresh();
-      });
-      unlistenTitle = await listen("recording-title-updated", () => {
-        refresh();
-      });
+      retainUnlistener(
+        (unlisten) => {
+          unlistenStatus = unlisten;
+        },
+        await listen("recording-status-changed", refresh),
+      );
+      retainUnlistener(
+        (unlisten) => {
+          unlistenAnalysis = unlisten;
+        },
+        await listen("recording-analysis-ready", refresh),
+      );
+      retainUnlistener(
+        (unlisten) => {
+          unlistenTitle = unlisten;
+        },
+        await listen("recording-title-updated", refresh),
+      );
     };
 
     void setup();
 
     return () => {
+      disposed = true;
       unlistenStatus?.();
       unlistenAnalysis?.();
       unlistenTitle?.();

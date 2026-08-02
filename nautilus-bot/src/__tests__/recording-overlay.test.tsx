@@ -1,4 +1,5 @@
 import { act, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { useState } from "react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { ConsentDialog } from "@/components/recording-overlay";
 import type { SystemAudioCapability } from "@/lib/backend/recordings";
@@ -47,6 +48,112 @@ describe("ConsentDialog", () => {
       canAutomate: false,
       message: "Copy the notice into the meeting chat.",
       noticeText: "This meeting is being recorded and transcribed.",
+    });
+  });
+
+  it("keeps the start controls visible while the long setup body scrolls", async () => {
+    backendMocks.getSystemAudioCapability.mockResolvedValue(capability());
+
+    render(
+      <ConsentDialog open onOpenChange={vi.fn()} onStart={vi.fn()} />,
+    );
+
+    await waitFor(() => {
+      expect(backendMocks.getSystemAudioCapability).toHaveBeenCalledTimes(1);
+    });
+    expect(screen.getByRole("dialog")).toHaveClass(
+      "max-h-[calc(100vh-2rem)]",
+      "max-w-2xl",
+      "overflow-hidden",
+    );
+    expect(screen.getByTestId("meeting-start-dialog-body")).toHaveClass(
+      "min-h-0",
+      "overflow-y-auto",
+    );
+    expect(screen.getByRole("button", { name: "Start Meeting" })).toBeVisible();
+  });
+
+  it("announces selection state for capture modes and meeting templates", async () => {
+    backendMocks.getSystemAudioCapability.mockResolvedValue(capability());
+
+    render(<ConsentDialog open onOpenChange={vi.fn()} onStart={vi.fn()} />);
+
+    const micOnly = screen.getByRole("button", { name: /Mic only/ });
+    const meAndThem = screen.getByRole("button", { name: /Me \+ Them/ });
+    await waitFor(() => {
+      expect(meAndThem).toHaveAttribute("aria-pressed", "true");
+    });
+    expect(micOnly).toHaveAttribute("aria-pressed", "false");
+
+    fireEvent.click(micOnly);
+    expect(micOnly).toHaveAttribute("aria-pressed", "true");
+    expect(meAndThem).toHaveAttribute("aria-pressed", "false");
+
+    const autoTemplate = screen.getByRole("button", { name: "Auto" });
+    const standupTemplate = screen.getByRole("button", { name: "Standup" });
+    expect(autoTemplate).toHaveAttribute("aria-pressed", "true");
+    expect(standupTemplate).toHaveAttribute("aria-pressed", "false");
+
+    fireEvent.click(standupTemplate);
+    expect(autoTemplate).toHaveAttribute("aria-pressed", "false");
+    expect(standupTemplate).toHaveAttribute("aria-pressed", "true");
+  });
+
+  it("announces asynchronous system-audio capability changes", async () => {
+    const pendingCapability = deferred<SystemAudioCapability>();
+    backendMocks.getSystemAudioCapability.mockReturnValueOnce(
+      pendingCapability.promise,
+    );
+
+    render(<ConsentDialog open onOpenChange={vi.fn()} onStart={vi.fn()} />);
+
+    const status = screen.getByRole("status", {
+      name: "System audio capability",
+    });
+    expect(status).toHaveAttribute("aria-live", "polite");
+    expect(status).toHaveTextContent(
+      "Checking the current system-audio capability...",
+    );
+
+    await act(async () => {
+      pendingCapability.resolve(capability());
+      await pendingCapability.promise;
+    });
+
+    expect(status).toHaveTextContent("Verified via MacBook Pro Speakers.");
+  });
+
+  it("returns focus to the control that opened the dialog", async () => {
+    backendMocks.getSystemAudioCapability.mockResolvedValue(capability());
+
+    function Harness() {
+      const [open, setOpen] = useState(false);
+      return (
+        <>
+          <button type="button" onClick={() => setOpen(true)}>
+            Open meeting setup
+          </button>
+          <ConsentDialog
+            open={open}
+            onOpenChange={setOpen}
+            onStart={vi.fn()}
+          />
+        </>
+      );
+    }
+
+    render(<Harness />);
+    const trigger = screen.getByRole("button", {
+      name: "Open meeting setup",
+    });
+    trigger.focus();
+    fireEvent.click(trigger);
+    await screen.findByRole("dialog");
+
+    fireEvent.click(screen.getByRole("button", { name: "Cancel" }));
+
+    await waitFor(() => {
+      expect(trigger).toHaveFocus();
     });
   });
 

@@ -55,9 +55,12 @@ export async function listen<T = unknown>(
   const wrapped = (payload: T) => {
     handler({ event, payload, id });
   };
-  window.electronAPI.on(event, wrapped as (payload: unknown) => void);
+  const subscriptionId = window.electronAPI.on(
+    event,
+    wrapped as (payload: unknown) => void,
+  );
   return () => {
-    window.electronAPI!.off(event, wrapped as (payload: unknown) => void);
+    window.electronAPI!.off(event, subscriptionId);
   };
 }
 
@@ -142,8 +145,8 @@ declare global {
   interface Window {
     electronAPI?: {
       invoke(cmd: string, args?: Record<string, unknown>): Promise<unknown>;
-      on(event: string, handler: (payload: unknown) => void): void;
-      off(event: string, handler: (payload: unknown) => void): void;
+      on(event: string, handler: (payload: unknown) => void): number;
+      off(event: string, subscriptionId: number): void;
       getWindowLabel(): Promise<string | null>;
     };
   }

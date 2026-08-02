@@ -35,6 +35,9 @@ import {
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/components/ui/tooltip";
 import { ThemeToggle } from "@/components/theme-toggle";
 import { useRecording } from "@/hooks/use-recording";
+import { useProductReadinessStatus } from "@/features/readiness/product-readiness-context";
+import { selectReadinessForSurface } from "@/features/readiness/product-readiness";
+import { requestReadinessDestination } from "@/lib/navigation";
 
 interface SidebarProps {
   activeView: string;
@@ -160,6 +163,11 @@ export function Sidebar({
   isCollapsed = false,
   onToggleCollapse,
 }: SidebarProps) {
+  const { productReadiness } = useProductReadinessStatus();
+  const sidebarReadiness = selectReadinessForSurface(
+    productReadiness,
+    "sidebar",
+  );
   const { isRecording, formattedDuration, recordingMode } = useRecording();
   const [localModeStatus, setLocalModeStatus] = useState<LocalModeStatus>(DEFAULT_LOCAL_MODE_STATUS);
   const [dictationHotkey, setDictationHotkey] = useState<DictationHotkey>(DEFAULT_DICTATION_HOTKEY);
@@ -489,6 +497,36 @@ export function Sidebar({
           </div>
 
           <div className={cn("flex flex-col gap-2", isCollapsed && "items-center gap-2")}>
+            {sidebarReadiness.state !== "ready" &&
+            sidebarReadiness.cause ? (
+              <Tooltip delayDuration={0}>
+                <TooltipTrigger asChild>
+                  <button
+                    type="button"
+                    onClick={() =>
+                      requestReadinessDestination(
+                        sidebarReadiness.cause!.action.destination,
+                      )
+                    }
+                    aria-label={`Setup needed. ${sidebarReadiness.cause.message}`}
+                    className={cn(
+                      "flex h-9 items-center gap-2 rounded-xl border border-rust/30 bg-rust/10 px-2.5 text-xs text-rust transition-colors hover:bg-rust/15 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 focus-visible:ring-offset-background",
+                      isCollapsed && "h-10 w-10 justify-center p-0",
+                    )}
+                  >
+                    <span
+                      className="neume neume-rust"
+                      aria-hidden="true"
+                    />
+                    {!isCollapsed && <span>Setup needed</span>}
+                  </button>
+                </TooltipTrigger>
+                <TooltipContent side="right">
+                  {sidebarReadiness.cause.message}
+                </TooltipContent>
+              </Tooltip>
+            ) : null}
+
             <Tooltip delayDuration={0}>
               <TooltipTrigger asChild>
                 <button

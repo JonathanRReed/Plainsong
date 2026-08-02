@@ -1,6 +1,7 @@
 import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { DashboardView } from "@/components/views/dashboard-view";
+import type { ProductReadinessSnapshot } from "@/features/readiness/product-readiness";
 
 const {
   analyzeRecordings,
@@ -25,6 +26,13 @@ const {
       meetingReady: true as boolean,
       fullCaptureReady: true as boolean,
       loading: false as boolean,
+      productReadiness: {
+        evidenceObservedAt: 1,
+        dictation: { domain: "dictation", state: "ready", cause: null },
+        meetings: { domain: "meetings", state: "ready", cause: null },
+        fullCapture: { domain: "full_capture", state: "ready", cause: null },
+        overall: { domain: "overall", state: "ready", cause: null },
+      } as ProductReadinessSnapshot,
     },
     recordings: [
       {
@@ -72,8 +80,8 @@ vi.mock("@/hooks/use-recordings", () => ({
   }),
 }));
 
-vi.mock("@/hooks/use-setup-status", () => ({
-  useSetupStatus: () => dashboardState.setupStatus,
+vi.mock("@/features/readiness/product-readiness-context", () => ({
+  useProductReadinessStatus: () => dashboardState.setupStatus,
 }));
 
 vi.mock("@/lib/navigation", () => ({
@@ -100,6 +108,13 @@ describe("DashboardView memory chat", () => {
       meetingReady: true,
       fullCaptureReady: true,
       loading: false,
+      productReadiness: {
+        evidenceObservedAt: 1,
+        dictation: { domain: "dictation", state: "ready", cause: null },
+        meetings: { domain: "meetings", state: "ready", cause: null },
+        fullCapture: { domain: "full_capture", state: "ready", cause: null },
+        overall: { domain: "overall", state: "ready", cause: null },
+      },
     };
     dashboardState.recordings = [
       {
@@ -183,6 +198,37 @@ describe("DashboardView memory chat", () => {
       meetingReady: true,
       fullCaptureReady: false,
       loading: false,
+      productReadiness: {
+        evidenceObservedAt: 2,
+        dictation: { domain: "dictation", state: "ready", cause: null },
+        meetings: { domain: "meetings", state: "ready", cause: null },
+        fullCapture: {
+          domain: "full_capture",
+          state: "degraded",
+          cause: {
+            id: "system_audio_unavailable",
+            message: "Mic-only meetings are ready.",
+            action: {
+              id: "configure_system_audio",
+              label: "Set up system audio",
+              destination: "transcription",
+            },
+          },
+        },
+        overall: {
+          domain: "overall",
+          state: "degraded",
+          cause: {
+            id: "system_audio_unavailable",
+            message: "Mic-only meetings are ready.",
+            action: {
+              id: "configure_system_audio",
+              label: "Set up system audio",
+              destination: "transcription",
+            },
+          },
+        },
+      },
     };
 
     render(<DashboardView />);
@@ -204,6 +250,61 @@ describe("DashboardView memory chat", () => {
       meetingReady: false,
       fullCaptureReady: false,
       loading: false,
+      productReadiness: {
+        evidenceObservedAt: 3,
+        dictation: {
+          domain: "dictation",
+          state: "blocked",
+          cause: {
+            id: "dictation_route",
+            message: "Choose a dictation model.",
+            action: {
+              id: "open_models",
+              label: "Review models",
+              destination: "models",
+            },
+          },
+        },
+        meetings: {
+          domain: "meetings",
+          state: "blocked",
+          cause: {
+            id: "meeting_route",
+            message: "Choose a meeting model.",
+            action: {
+              id: "open_models",
+              label: "Review models",
+              destination: "models",
+            },
+          },
+        },
+        fullCapture: {
+          domain: "full_capture",
+          state: "blocked",
+          cause: {
+            id: "meeting_route",
+            message: "Choose a meeting model.",
+            action: {
+              id: "open_models",
+              label: "Review models",
+              destination: "models",
+            },
+          },
+        },
+        overall: {
+          domain: "overall",
+          state: "blocked",
+          cause: {
+            id: "dictation_route",
+            message: "Choose a dictation model.",
+            action: {
+              id: "open_models",
+              label: "Review models",
+              destination: "models",
+            },
+          },
+        },
+      },
     };
 
     render(<DashboardView />);
@@ -216,6 +317,75 @@ describe("DashboardView memory chat", () => {
 
     expect(requestOnboarding).toHaveBeenNthCalledWith(1, "dictation");
     expect(requestOnboarding).toHaveBeenNthCalledWith(2, "meetings");
+  });
+
+  it("uses the canonical snapshot when legacy readiness booleans disagree", async () => {
+    dashboardState.setupStatus = {
+      dictationReady: true,
+      meetingReady: true,
+      fullCaptureReady: true,
+      loading: false,
+      productReadiness: {
+        evidenceObservedAt: 4,
+        dictation: {
+          domain: "dictation",
+          state: "blocked",
+          cause: {
+            id: "dictation_route",
+            message: "Download the dictation model.",
+            action: {
+              id: "open_models",
+              label: "Review models",
+              destination: "models",
+            },
+          },
+        },
+        meetings: { domain: "meetings", state: "ready", cause: null },
+        fullCapture: {
+          domain: "full_capture",
+          state: "degraded",
+          cause: {
+            id: "system_audio_unavailable",
+            message: "Mic-only meetings are ready.",
+            action: {
+              id: "configure_system_audio",
+              label: "Set up system audio",
+              destination: "transcription",
+            },
+          },
+        },
+        overall: {
+          domain: "overall",
+          state: "blocked",
+          cause: {
+            id: "dictation_route",
+            message: "Download the dictation model.",
+            action: {
+              id: "open_models",
+              label: "Review models",
+              destination: "models",
+            },
+          },
+        },
+      },
+    };
+
+    render(<DashboardView />);
+
+    expect(
+      await screen.findByText(
+        "Mic-only meetings are ready. Dictation needs one more pass",
+      ),
+    ).toBeInTheDocument();
+    expect(
+      screen.queryByRole("button", { name: "Start Dictation" }),
+    ).not.toBeInTheDocument();
+    fireEvent.click(
+      screen.getByRole("button", { name: "Review dictation setup" }),
+    );
+    expect(requestMainView).toHaveBeenCalledWith("dictation");
+    fireEvent.click(screen.getByRole("button", { name: /Dictation\s*Review/ }));
+    expect(requestOnboarding).toHaveBeenCalledWith("dictation");
   });
 
   it("shows recent recordings and opens the meetings workspace from the timeline", async () => {

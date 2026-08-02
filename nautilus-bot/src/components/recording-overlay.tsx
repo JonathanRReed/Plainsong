@@ -35,6 +35,7 @@ export function ConsentDialog({ open, onOpenChange, onStart }: ConsentDialogProp
   const [startError, setStartError] = useState<string | null>(null);
   const isStartingRef = useRef(false);
   const captureModeTouchedRef = useRef(false);
+  const returnFocusRef = useRef<HTMLElement | null>(null);
   const selectedTemplate = getMeetingTemplateOption(template);
 
   useEffect(() => {
@@ -141,7 +142,25 @@ export function ConsentDialog({ open, onOpenChange, onStart }: ConsentDialogProp
         }
       }}
     >
-      <DialogContent onPointerDownOutside={(e) => e.preventDefault()} onCloseAutoFocus={(e) => e.preventDefault()}>
+      <DialogContent
+        className="max-h-[calc(100vh-2rem)] max-w-2xl overflow-hidden"
+        onPointerDownOutside={(e) => e.preventDefault()}
+        onOpenAutoFocus={() => {
+          const activeElement = document.activeElement;
+          returnFocusRef.current =
+            activeElement instanceof HTMLElement && activeElement !== document.body
+              ? activeElement
+              : null;
+        }}
+        onCloseAutoFocus={(event) => {
+          const returnTarget = returnFocusRef.current;
+          returnFocusRef.current = null;
+          if (returnTarget?.isConnected) {
+            event.preventDefault();
+            returnTarget.focus();
+          }
+        }}
+      >
         <DialogHeader>
           <DialogTitle>Start Meeting</DialogTitle>
           <DialogDescription>
@@ -150,23 +169,28 @@ export function ConsentDialog({ open, onOpenChange, onStart }: ConsentDialogProp
         </DialogHeader>
 
         <form
+          className="flex min-h-0 flex-col"
           onSubmit={(event) => {
             event.preventDefault();
             void submitMeeting();
           }}
         >
-          <div className="space-y-5 py-4">
+          <div
+            data-testid="meeting-start-dialog-body"
+            className="-mr-2 min-h-0 flex-1 space-y-5 overflow-y-auto py-4 pr-2"
+          >
           <div>
             <p className="rubric mb-2">Capture Mode</p>
             <div className="grid gap-2 md:grid-cols-2">
               <button
                 type="button"
+                aria-pressed={captureMode === "mic_only"}
                 onClick={() => {
                   captureModeTouchedRef.current = true;
                   setCaptureMode("mic_only");
                 }}
                 disabled={isStarting}
-                className={`rounded-lg border p-3 text-left transition-smooth ${
+                className={`rounded-lg border p-3 text-left transition-smooth focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 ${
                   captureMode === "mic_only"
                     ? "border-rust/40 bg-rust/8 text-rust"
                     : "border-border bg-background hover:bg-muted"
@@ -182,6 +206,7 @@ export function ConsentDialog({ open, onOpenChange, onStart }: ConsentDialogProp
               </button>
               <button
                 type="button"
+                aria-pressed={captureMode === "me_them"}
                 onClick={() => {
                   if (systemAudioReady) {
                     captureModeTouchedRef.current = true;
@@ -189,7 +214,7 @@ export function ConsentDialog({ open, onOpenChange, onStart }: ConsentDialogProp
                   }
                 }}
                 disabled={isStarting || !systemAudioReady}
-                className={`rounded-lg border p-3 text-left transition-smooth ${
+                className={`rounded-lg border p-3 text-left transition-smooth focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 ${
                   captureMode === "me_them"
                     ? "border-rust/40 bg-rust/8 text-rust"
                     : "border-border bg-background hover:bg-muted"
@@ -202,7 +227,12 @@ export function ConsentDialog({ open, onOpenChange, onStart }: ConsentDialogProp
                 <p className="mt-2 text-sm text-muted-foreground">
                   Capture your microphone and remote participants for meeting-grade notes and follow-up.
                 </p>
-                <p className="mt-2 text-xs text-muted-foreground">
+                <p
+                  className="mt-2 text-sm text-muted-foreground"
+                  role="status"
+                  aria-live="polite"
+                  aria-label="System audio capability"
+                >
                   <span
                     aria-hidden="true"
                     className={`neume mr-1.5 align-middle ${
@@ -232,9 +262,10 @@ export function ConsentDialog({ open, onOpenChange, onStart }: ConsentDialogProp
                 <button
                   key={t.value}
                   type="button"
+                  aria-pressed={template === t.value}
                   onClick={() => setTemplate(t.value)}
                   disabled={isStarting}
-                  className={`px-2 py-1.5 rounded text-xs text-left transition-smooth border ${
+                  className={`min-h-8 rounded border px-2 py-1.5 text-left text-sm transition-smooth focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 ${
                     template === t.value
                       ? "border-rust/40 bg-rust/8 text-rust"
                       : "bg-background border-border hover:bg-muted"
@@ -316,7 +347,13 @@ export function ConsentDialog({ open, onOpenChange, onStart }: ConsentDialogProp
                 Copy notice
               </Button>
               {copiedNotice ? (
-                <span className="text-xs text-muted-foreground">Copied.</span>
+                <span
+                  className="text-sm text-muted-foreground"
+                  role="status"
+                  aria-live="polite"
+                >
+                  Copied.
+                </span>
               ) : null}
             </div>
           </div>
@@ -327,7 +364,7 @@ export function ConsentDialog({ open, onOpenChange, onStart }: ConsentDialogProp
           ) : null}
         </div>
 
-        <DialogFooter>
+        <DialogFooter className="shrink-0 border-t border-border/60 pt-4">
           <Button
             type="button"
             variant="outline"

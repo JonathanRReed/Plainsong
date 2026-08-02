@@ -276,6 +276,21 @@ function isExperimentalRoute(providerType: AsrProviderType, modelId: string) {
   );
 }
 
+function routeDisplayLabel(
+  providerType: AsrProviderType,
+  modelId: string,
+  upstreamLabel: string,
+) {
+  if (
+    providerType === "parakeet" &&
+    modelId === "parakeet-tdt-0.6b-v3"
+  ) {
+    return "Parakeet TDT 0.6B v3";
+  }
+
+  return upstreamLabel;
+}
+
 function routeSummary(
   providerType: AsrProviderType,
   modelId: string,
@@ -433,7 +448,11 @@ export function buildAsrRouteCatalog(
         routeId: routeIdFor(provider.providerType, option.id),
         providerType: provider.providerType,
         modelId: option.id,
-        label: option.label,
+        label: routeDisplayLabel(
+          provider.providerType,
+          option.id,
+          option.label,
+        ),
         providerLabel: provider.name,
         providerDescription: provider.description,
         laneCompatibility: routeLaneCompatibility(provider.providerType, option.id),

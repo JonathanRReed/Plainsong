@@ -1,0 +1,149 @@
+import { act, renderHook, waitFor } from "@testing-library/react";
+import { beforeEach, describe, expect, it, vi } from "vitest";
+import { useSetupStatus } from "@/hooks/use-setup-status";
+import type { Settings } from "@/types/settings";
+
+const liveMocks = vi.hoisted(() => ({
+  listeners: new Map<string, (event: { payload: unknown }) => void>(),
+  getSettings: vi.fn(),
+  getAsrProviders: vi.fn(),
+  getPermissionDiagnostics: vi.fn(),
+  getSystemAudioCapability: vi.fn(),
+}));
+
+vi.mock("@/lib/electron", () => ({
+  listen: vi.fn(
+    async (
+      eventName: string,
+      handler: (event: { payload: unknown }) => void,
+    ) => {
+      liveMocks.listeners.set(eventName, handler);
+      return () => {
+        liveMocks.listeners.delete(eventName);
+      };
+    },
+  ),
+}));
+
+vi.mock("@/lib/backend/asr", () => ({
+  getAsrProviders: liveMocks.getAsrProviders,
+}));
+
+vi.mock("@/lib/backend/settings", () => ({
+  getSettings: liveMocks.getSettings,
+  getPermissionDiagnostics: liveMocks.getPermissionDiagnostics,
+}));
+
+vi.mock("@/lib/backend/recordings", () => ({
+  getSystemAudioCapability: liveMocks.getSystemAudioCapability,
+}));
+
+function settings(): Settings {
+  return {
+    transcription: {
+      useSharedAsrSelection: false,
+      defaultProvider: "moonshine",
+      dictationProvider: "moonshine",
+      dictationModelId: "moonshine-base",
+      meetingProvider: "parakeet",
+      meetingModelId: "parakeet-tdt-0.6b-v3",
+      selectedModelId: "moonshine-base",
+      dictationInsertionMode: "clipboard_only",
+    },
+  } as Settings;
+}
+
+describe("useSetupStatus live refresh", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    liveMocks.listeners.clear();
+    liveMocks.getSettings.mockResolvedValue(settings());
+    liveMocks.getAsrProviders.mockResolvedValue([]);
+    liveMocks.getPermissionDiagnostics.mockResolvedValue(null);
+    liveMocks.getSystemAudioCapability.mockResolvedValue(null);
+  });
+
+  it("refreshes after settings writes, completed model downloads, and app focus", async () => {
+    const { unmount } = renderHook(() => useSetupStatus());
+
+    await waitFor(() => {
+      expect(liveMocks.getSettings).toHaveBeenCalledTimes(1);
+      expect(liveMocks.listeners.has("settings-changed")).toBe(true);
+      expect(liveMocks.listeners.has("asr-download-progress")).toBe(true);
+    });
+
+    await act(async () => {
+      liveMocks.listeners.get("settings-changed")?.({ payload: settings() });
+    });
+    await waitFor(() => {
+      expect(liveMocks.getSettings).toHaveBeenCalledTimes(2);
+    });
+
+    await act(async () => {
+      liveMocks.listeners.get("asr-download-progress")?.({
+        payload: ["moonshine", 99],
+      });
+    });
+    expect(liveMocks.getSettings).toHaveBeenCalledTimes(2);
+
+    await act(async () => {
+      liveMocks.listeners.get("asr-download-progress")?.({
+        payload: ["moonshine", 100],
+      });
+    });
+    await waitFor(() => {
+      expect(liveMocks.getSettings).toHaveBeenCalledTimes(3);
+    });
+
+    await act(async () => {
+      window.dispatchEvent(new Event("focus"));
+    });
+    await waitFor(() => {
+      expect(liveMocks.getSettings).toHaveBeenCalledTimes(4);
+    });
+
+    unmount();
+    expect(liveMocks.listeners.size).toBe(0);
+
+    window.dispatchEvent(new Event("focus"));
+    expect(liveMocks.getSettings).toHaveBeenCalledTimes(4);
+  });
+
+  it("does not let a slower older refresh overwrite newer readiness data", async () => {
+    let resolveOlderSettings: ((value: Settings) => void) | undefined;
+    const olderSettings = new Promise<Settings>((resolve) => {
+      resolveOlderSettings = resolve;
+    });
+    const newerSettings = settings();
+    newerSettings.transcription.dictationModelId = "moonshine-tiny";
+
+    liveMocks.getSettings
+      .mockImplementationOnce(() => olderSettings)
+      .mockResolvedValue(newerSettings);
+
+    const { result } = renderHook(() => useSetupStatus());
+
+    await waitFor(() => {
+      expect(liveMocks.listeners.has("settings-changed")).toBe(true);
+      expect(liveMocks.getSettings).toHaveBeenCalledTimes(1);
+    });
+
+    await act(async () => {
+      liveMocks.listeners.get("settings-changed")?.({ payload: newerSettings });
+    });
+    await waitFor(() => {
+      expect(result.current.settings?.transcription.dictationModelId).toBe(
+        "moonshine-tiny",
+      );
+    });
+
+    await act(async () => {
+      resolveOlderSettings?.(settings());
+      await olderSettings;
+    });
+
+    expect(result.current.settings?.transcription.dictationModelId).toBe(
+      "moonshine-tiny",
+    );
+  });
+});

@@ -1,4 +1,5 @@
 import { act, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
+import userEvent from "@testing-library/user-event";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { DictationView } from "@/components/views/dictation-view";
 import {
@@ -6,6 +7,9 @@ import {
   SPOKEN_COMMAND_PREFIX_LABEL,
 } from "@/lib/selected-text-actions";
 import { DICTATION_PROFILE_TILES } from "@/lib/dictation-profiles";
+import type { ProductReadinessSnapshot } from "@/features/readiness/product-readiness";
+import type { Recording } from "@/types";
+import { OPEN_MAIN_VIEW_EVENT } from "@/lib/navigation";
 
 /** Radix tabs activate on mouse-down, not click. */
 async function openConfigTab(name: string) {
@@ -21,6 +25,16 @@ const speechSynthesisMock = {
 const clipboardWriteText = vi.fn(async () => {});
 
 const toast = vi.fn();
+const readinessContext = vi.hoisted(() => ({
+  refresh: vi.fn(async () => {}),
+  productReadiness: {
+    evidenceObservedAt: 1,
+    dictation: { domain: "dictation", state: "ready", cause: null },
+    meetings: { domain: "meetings", state: "ready", cause: null },
+    fullCapture: { domain: "full_capture", state: "ready", cause: null },
+    overall: { domain: "overall", state: "ready", cause: null },
+  } as ProductReadinessSnapshot,
+}));
 
 vi.mock("@/components/toast", () => ({
   useToast: () => ({
@@ -28,11 +42,17 @@ vi.mock("@/components/toast", () => ({
   }),
 }));
 
+vi.mock("@/features/readiness/product-readiness-context", () => ({
+  useProductReadinessStatus: () => readinessContext,
+}));
+
 const backendMocks = vi.hoisted(() => ({
   eventListeners: new Map<string, (event: { payload: any }) => void>(),
   transcriptionOverrides: {} as Record<string, unknown>,
   saveSettings: vi.fn(async () => {}),
   refetchDictationHistory: vi.fn(),
+  recordings: [] as Recording[],
+  deleteRecording: vi.fn(async () => {}),
   startDictation: vi.fn(async () => {}),
   stopDictation: vi.fn(async () => ""),
   invoke: vi.fn(async () => ({ pasted: true, copied: false })),
@@ -203,7 +223,7 @@ vi.mock("@/hooks/use-projects", () => ({
 
 vi.mock("@/hooks/use-recordings", () => ({
   useRecordings: () => ({
-    recordings: [],
+    recordings: backendMocks.recordings,
     isLoading: false,
     refetch: backendMocks.refetchDictationHistory,
   }),
@@ -216,6 +236,7 @@ vi.mock("@/lib/backend/settings", () => ({
 
 vi.mock("@/lib/backend/recordings", () => ({
   getTranscript: vi.fn(),
+  deleteRecording: backendMocks.deleteRecording,
 }));
 
 vi.mock("@/lib/backend/asr", () => ({
@@ -311,11 +332,34 @@ vi.mock("@/lib/backend/dictation", () => ({
   deleteDictationCommandPreset: vi.fn(),
 }));
 
+function createSavedDictation(overrides: Partial<Recording> = {}): Recording {
+  return {
+    id: "dictation-1",
+    title: "Project update",
+    projectId: "inbox",
+    duration: 12,
+    createdAt: "2026-08-01T12:00:00.000Z",
+    updatedAt: "2026-08-01T12:00:12.000Z",
+    sourceType: "dictation",
+    audioPath: "/tmp/dictation.wav",
+    status: "completed",
+    ...overrides,
+  };
+}
+
 describe("DictationView modes", () => {
   beforeEach(() => {
     vi.clearAllMocks();
     backendMocks.eventListeners.clear();
     backendMocks.asrProviders = backendMocks.buildAsrProviders();
+    backendMocks.recordings = [];
+    readinessContext.productReadiness = {
+      evidenceObservedAt: 1,
+      dictation: { domain: "dictation", state: "ready", cause: null },
+      meetings: { domain: "meetings", state: "ready", cause: null },
+      fullCapture: { domain: "full_capture", state: "ready", cause: null },
+      overall: { domain: "overall", state: "ready", cause: null },
+    };
     for (const key of Object.keys(backendMocks.transcriptionOverrides)) {
       delete backendMocks.transcriptionOverrides[key];
     }
@@ -406,6 +450,107 @@ describe("DictationView modes", () => {
     expect(
       startButton.compareDocumentPosition(firstTab) & Node.DOCUMENT_POSITION_FOLLOWING,
     ).toBeTruthy();
+  });
+
+  it("blocks capture and routes repair from the canonical dictation cause", async () => {
+    readinessContext.productReadiness = {
+      ...readinessContext.productReadiness,
+      dictation: {
+        domain: "dictation",
+        state: "needs_action",
+        cause: {
+          id: "cursor_insertion",
+          message: "Text insertion needs Accessibility access for the current mode.",
+          action: {
+            id: "repair_cursor_insertion",
+            label: "Repair text insertion",
+            destination: "setup",
+          },
+        },
+      },
+      overall: {
+        domain: "overall",
+        state: "needs_action",
+        cause: {
+          id: "cursor_insertion",
+          message: "Text insertion needs Accessibility access for the current mode.",
+          action: {
+            id: "repair_cursor_insertion",
+            label: "Repair text insertion",
+            destination: "setup",
+          },
+        },
+      },
+    };
+    const navigationListener = vi.fn();
+    window.addEventListener(OPEN_MAIN_VIEW_EVENT, navigationListener);
+
+    render(<DictationView />);
+
+    const notice = await screen.findByRole("alert", {
+      name: "Dictation needs attention",
+    });
+    expect(notice).toHaveTextContent(
+      "Text insertion needs Accessibility access for the current mode.",
+    );
+    expect(screen.queryByText("Ready")).not.toBeInTheDocument();
+    expect(screen.getByText("Setup needed")).toBeInTheDocument();
+    expect(
+      screen.getByRole("button", { name: "Complete setup to start" }),
+    ).toBeDisabled();
+
+    fireEvent.click(screen.getByRole("button", { name: "Repair text insertion" }));
+    expect(
+      (navigationListener.mock.calls[0]?.[0] as CustomEvent).detail,
+    ).toEqual({ view: "setup" });
+
+    fireEvent.click(
+      screen.getByRole("button", { name: "Complete setup to start" }),
+    );
+    expect(backendMocks.startDictation).not.toHaveBeenCalled();
+
+    window.removeEventListener(OPEN_MAIN_VIEW_EVENT, navigationListener);
+  });
+
+  it("does not describe a runtime failure as an absent model", async () => {
+    backendMocks.transcriptionOverrides.defaultProvider = "moonshine";
+    backendMocks.transcriptionOverrides.selectedModelId = "moonshine-base";
+    backendMocks.asrProviders = backendMocks.buildAsrProviders();
+    backendMocks.asrProviders[0].downloadStatus = "NotDownloaded";
+    backendMocks.asrProviders[0].runtimeStatus = "error";
+    backendMocks.asrProviders[0].runtimeMessage =
+      "Moonshine model exists but failed to initialize.";
+    readinessContext.productReadiness = {
+      ...readinessContext.productReadiness,
+      dictation: {
+        domain: "dictation",
+        state: "blocked",
+        cause: {
+          id: "dictation_route",
+          message: "Moonshine model exists but failed to initialize.",
+          action: {
+            id: "open_models",
+            label: "Review models",
+            destination: "models",
+          },
+        },
+      },
+    };
+
+    render(<DictationView />);
+
+    expect(
+      await screen.findAllByText(
+        "Moonshine model exists but failed to initialize.",
+      ),
+    ).not.toHaveLength(0);
+    expect(
+      screen.queryByText("Dictation has no model yet"),
+    ).not.toBeInTheDocument();
+    expect(screen.queryByText(/is not on this Mac/i)).not.toBeInTheDocument();
+    expect(
+      screen.getByRole("button", { name: "Complete setup to start" }),
+    ).toBeDisabled();
   });
 
   it("keeps a hands-free choice and states one hotkey behavior", async () => {
@@ -586,7 +731,7 @@ describe("DictationView modes", () => {
 
     const nameInput = await screen.findByLabelText("Profile name");
     fireEvent.change(nameInput, { target: { value: "Sales Follow-up" } });
-    fireEvent.change(screen.getByLabelText("Auto-activate for domain"), {
+    fireEvent.change(screen.getByLabelText("Website this profile is for"), {
       target: { value: "gmail.com" },
     });
     fireEvent.click(screen.getByRole("button", { name: /save current setup/i }));
@@ -651,6 +796,122 @@ describe("DictationView modes", () => {
 
     await waitFor(() => {
       expect(backendMocks.refetchDictationHistory).toHaveBeenCalled();
+    });
+  });
+
+  it("opens a saved dictation from a keyboard-accessible history control", async () => {
+    const user = userEvent.setup();
+    const recording = createSavedDictation();
+    backendMocks.recordings = [recording];
+
+    render(<DictationView />);
+
+    const openButton = await screen.findByRole("button", {
+      name: "Open saved dictation: Project update",
+    });
+    const copyButton = screen.getByRole("button", { name: "Copy Project update" });
+    const deleteButton = screen.getByRole("button", { name: "Delete Project update" });
+    expect(openButton.tagName).toBe("BUTTON");
+    expect(openButton).not.toContainElement(copyButton);
+    expect(openButton).not.toContainElement(deleteButton);
+
+    openButton.focus();
+    await user.keyboard("{Enter}");
+    expect(
+      await screen.findByRole("dialog", { name: "Project update" }),
+    ).toBeInTheDocument();
+
+    await user.keyboard("{Escape}");
+    await waitFor(() => {
+      expect(
+        screen.queryByRole("dialog", { name: "Project update" }),
+      ).not.toBeInTheDocument();
+    });
+
+    openButton.focus();
+    await user.keyboard(" ");
+    expect(
+      await screen.findByRole("dialog", { name: "Project update" }),
+    ).toBeInTheDocument();
+  });
+
+  it("requires confirmation before deleting a saved dictation", async () => {
+    backendMocks.recordings = [createSavedDictation()];
+
+    render(<DictationView />);
+
+    fireEvent.click(
+      await screen.findByRole("button", { name: "Delete Project update" }),
+    );
+    expect(backendMocks.deleteRecording).not.toHaveBeenCalled();
+
+    const confirmDialog = await screen.findByRole("dialog", {
+      name: "Delete this dictation?",
+    });
+    expect(confirmDialog).toHaveTextContent("Project update");
+    expect(confirmDialog).toHaveTextContent(/cannot be undone/i);
+
+    fireEvent.click(within(confirmDialog).getByRole("button", { name: "Cancel" }));
+    expect(backendMocks.deleteRecording).not.toHaveBeenCalled();
+
+    fireEvent.click(
+      screen.getByRole("button", { name: "Delete Project update" }),
+    );
+    fireEvent.click(
+      within(
+        await screen.findByRole("dialog", { name: "Delete this dictation?" }),
+      ).getByRole("button", { name: "Delete dictation" }),
+    );
+
+    await waitFor(() => {
+      expect(backendMocks.deleteRecording).toHaveBeenCalledWith("dictation-1");
+      expect(backendMocks.refetchDictationHistory).toHaveBeenCalled();
+    });
+  });
+
+  it("uses the same delete confirmation from the saved-dictation dialog", async () => {
+    backendMocks.recordings = [createSavedDictation()];
+
+    render(<DictationView />);
+
+    fireEvent.click(
+      await screen.findByRole("button", {
+        name: "Open saved dictation: Project update",
+      }),
+    );
+    const detailDialog = await screen.findByRole("dialog", {
+      name: "Project update",
+    });
+    fireEvent.click(
+      within(detailDialog).getByRole("button", { name: "Delete" }),
+    );
+    expect(backendMocks.deleteRecording).not.toHaveBeenCalled();
+
+    let confirmDialog = await screen.findByRole("dialog", {
+      name: "Delete this dictation?",
+    });
+    fireEvent.click(within(confirmDialog).getByRole("button", { name: "Cancel" }));
+    expect(
+      await screen.findByRole("dialog", { name: "Project update" }),
+    ).toBeInTheDocument();
+
+    fireEvent.click(
+      within(
+        screen.getByRole("dialog", { name: "Project update" }),
+      ).getByRole("button", { name: "Delete" }),
+    );
+    confirmDialog = await screen.findByRole("dialog", {
+      name: "Delete this dictation?",
+    });
+    fireEvent.click(
+      within(confirmDialog).getByRole("button", { name: "Delete dictation" }),
+    );
+
+    await waitFor(() => {
+      expect(backendMocks.deleteRecording).toHaveBeenCalledWith("dictation-1");
+      expect(
+        screen.queryByRole("dialog", { name: "Project update" }),
+      ).not.toBeInTheDocument();
     });
   });
 
@@ -862,6 +1123,7 @@ describe("DictationView modes", () => {
     backendMocks.transcriptionOverrides.selectedModelId = "moonshine-base";
     backendMocks.asrProviders = backendMocks.buildAsrProviders();
     backendMocks.asrProviders[0].downloadStatus = "NotDownloaded";
+    backendMocks.asrProviders[0].runtimeStatus = "missing_model";
 
     render(<DictationView />);
 
@@ -888,6 +1150,7 @@ describe("DictationView modes", () => {
     backendMocks.transcriptionOverrides.selectedModelId = "moonshine-base";
     backendMocks.asrProviders = backendMocks.buildAsrProviders();
     backendMocks.asrProviders[0].downloadStatus = "NotDownloaded";
+    backendMocks.asrProviders[0].runtimeStatus = "missing_model";
     backendMocks.downloadAsrModels.mockImplementationOnce(async () => {
       backendMocks.asrProviders = backendMocks.buildAsrProviders();
     });
@@ -1041,7 +1304,7 @@ describe("DictationView modes", () => {
 
     await openConfigTab("Destinations");
     const toggle = await screen.findByText("Format for destination app");
-    const card = toggle.closest(".rounded-2xl");
+    const card = toggle.closest(".rounded-md");
     expect(card).toBeTruthy();
     const switchControl = within(card as HTMLElement).getByRole("switch");
     expect(switchControl).toHaveAttribute("aria-checked", "true");

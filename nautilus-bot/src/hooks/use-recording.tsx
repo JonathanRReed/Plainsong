@@ -19,6 +19,7 @@ import {
   stopRecording,
 } from "@/lib/backend/recordings";
 import { logger } from "@/lib/logger";
+import { formatMeetingStartError } from "@/lib/meeting-start-error";
 import type { DictationStateChangedEvent as SharedDictationStateChangedEvent } from "@/features/dictation/runtime";
 
 interface RecordingState {
@@ -155,14 +156,7 @@ export function RecordingProvider({ children }: { children: ReactNode }) {
         return recordingId;
       } catch (error) {
         console.error("Failed to start meeting:", error);
-        const message = error instanceof Error ? error.message : String(error);
-        if (message.includes("audio") || message.includes("microphone")) {
-          throw new Error(`${message}. Please check your microphone permissions in System Settings.`);
-        }
-        if (message.includes("screen") || message.includes("system")) {
-          throw new Error(`${message}. Please check screen recording permissions in System Settings.`);
-        }
-        throw new Error(message);
+        throw new Error(formatMeetingStartError(error));
       }
     },
     [startTimer]

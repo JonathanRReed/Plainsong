@@ -4,10 +4,25 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import { ModelsScreen } from "@/components/models/models-screen";
 import type { AsrProviderInventory } from "@/types";
 import type { Settings } from "@/types/settings";
+import type { ProductReadinessSnapshot } from "@/features/readiness/product-readiness";
 
 const getAsrProviderInventoryMock = vi.fn();
 const listDownloadedModelsMock = vi.fn();
 const downloadAsrModelsMock = vi.fn();
+const readinessContext = vi.hoisted(() => ({
+  refresh: vi.fn(async () => {}),
+  productReadiness: {
+    evidenceObservedAt: 1,
+    dictation: { domain: "dictation", state: "ready", cause: null },
+    meetings: { domain: "meetings", state: "ready", cause: null },
+    fullCapture: { domain: "full_capture", state: "ready", cause: null },
+    overall: { domain: "overall", state: "ready", cause: null },
+  } as ProductReadinessSnapshot,
+}));
+
+vi.mock("@/features/readiness/product-readiness-context", () => ({
+  useProductReadinessStatus: () => readinessContext,
+}));
 
 vi.mock("@/lib/backend/asr", () => ({
   getAsrProviderInventory: () => getAsrProviderInventoryMock(),
@@ -170,7 +185,15 @@ function lastSaved(): Settings {
 describe("Models screen", () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    readinessContext.refresh.mockResolvedValue(undefined);
     savedSettings.length = 0;
+    readinessContext.productReadiness = {
+      evidenceObservedAt: 1,
+      dictation: { domain: "dictation", state: "ready", cause: null },
+      meetings: { domain: "meetings", state: "ready", cause: null },
+      fullCapture: { domain: "full_capture", state: "ready", cause: null },
+      overall: { domain: "overall", state: "ready", cause: null },
+    };
     getAsrProviderInventoryMock.mockResolvedValue(inventoryFixture());
     listDownloadedModelsMock.mockResolvedValue([
       {
@@ -196,6 +219,64 @@ describe("Models screen", () => {
     // 148,000,000 bytes measured off the one file on disk.
     expect(
       screen.getByText(/Speech models on this Mac: 141 MiB across 1 file\./),
+    ).toBeInTheDocument();
+  });
+
+  it("surfaces the canonical selected-route blocker above the model controls", async () => {
+    readinessContext.productReadiness = {
+      ...readinessContext.productReadiness,
+      dictation: {
+        domain: "dictation",
+        state: "blocked",
+        cause: {
+          id: "dictation_route",
+          message: "Whisper model exists but failed to initialize.",
+          action: {
+            id: "open_models",
+            label: "Review models",
+            destination: "models",
+          },
+        },
+      },
+      overall: {
+        domain: "overall",
+        state: "blocked",
+        cause: {
+          id: "dictation_route",
+          message: "Whisper model exists but failed to initialize.",
+          action: {
+            id: "open_models",
+            label: "Review models",
+            destination: "models",
+          },
+        },
+      },
+    };
+
+    const initial = settingsFixture();
+    initial.transcription = {
+      ...initial.transcription,
+      useSharedAsrSelection: false,
+      dictationProvider: "whisper",
+      dictationModelId: "base.en",
+    };
+
+    render(<Harness initial={initial} />);
+
+    expect(
+      await screen.findByRole("alert", {
+        name: "Selected speech route needs attention",
+      }),
+    ).toHaveTextContent("Whisper model exists but failed to initialize.");
+    const dictationLane = screen.getByRole("region", {
+      name: "Speech for dictation",
+    });
+    expect(within(dictationLane).getByText("Needs attention")).toBeInTheDocument();
+    expect(within(dictationLane).queryByText("Ready")).not.toBeInTheDocument();
+    expect(
+      within(dictationLane).getByRole("button", {
+        name: "Review diagnostics",
+      }),
     ).toBeInTheDocument();
   });
 
@@ -497,12 +578,17 @@ describe("Models screen", () => {
 
     expect(
       within(dictation).getByText(
-        /142 MiB, English only — speak Spanish or German into it/,
+        /142 MiB, English only; English verified in Plainsong; speak Spanish or German into it/,
       ),
     ).toBeInTheDocument();
     expect(
       within(dictation).getByText(
-        /1\.6 GiB, ~100 languages — about eleven times the size of base\.en/,
+        /1\.6 GiB, ~100 languages listed upstream; not yet qualified across the full set in Plainsong; about eleven times the size of base\.en/,
+      ),
+    ).toBeInTheDocument();
+    expect(
+      within(dictation).getByText(
+        /639 MiB, 25 European languages listed upstream; English verified in Plainsong/,
       ),
     ).toBeInTheDocument();
   });

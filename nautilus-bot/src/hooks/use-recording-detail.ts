@@ -347,82 +347,115 @@ export function useRecordingDetail({
       return;
     }
 
+    let disposed = false;
     let unlistenAnalysis: (() => void) | undefined;
     let unlistenTitle: (() => void) | undefined;
     let unlistenStatus: (() => void) | undefined;
     let unlistenTranscriptUpdated: (() => void) | undefined;
 
+    const retainUnlistener = (
+      assign: (unlisten: () => void) => void,
+      unlisten: () => void,
+    ) => {
+      if (disposed) {
+        unlisten();
+        return;
+      }
+      assign(unlisten);
+    };
+
     const setup = async () => {
-      unlistenAnalysis = await listen<{ recordingId: string }>(
-        "recording-analysis-ready",
-        (event) => {
-          if (event.payload?.recordingId === selectedRecordingId) {
-            void refreshSelectedRecording(selectedRecordingId);
-            void refreshTranscript(selectedRecordingId);
-            void refreshTranscriptDetails(selectedRecordingId);
-          }
-        }
+      retainUnlistener(
+        (unlisten) => {
+          unlistenAnalysis = unlisten;
+        },
+        await listen<{ recordingId: string }>(
+          "recording-analysis-ready",
+          (event) => {
+            if (event.payload?.recordingId === selectedRecordingId) {
+              void refreshSelectedRecording(selectedRecordingId);
+              void refreshTranscript(selectedRecordingId);
+              void refreshTranscriptDetails(selectedRecordingId);
+            }
+          },
+        ),
       );
 
-      unlistenTitle = await listen<{
-        recordingId: string;
-        status: "ok" | "error";
-      }>("recording-title-updated", (event) => {
-        if (
-          event.payload?.status === "ok" &&
-          event.payload.recordingId === selectedRecordingId
-        ) {
-          void refreshSelectedRecording(selectedRecordingId);
-          void refreshTranscriptDetails(selectedRecordingId);
-        }
-      });
-
-      unlistenTranscriptUpdated = await listen<TranscriptUpdatedEvent>(
-        "transcript-updated",
-        (event) => {
-          if (event.payload?.recordingId !== selectedRecordingId) {
-            return;
-          }
-
-          void refreshTranscript(selectedRecordingId);
-          void refreshTranscriptDetails(selectedRecordingId);
-          void refreshSpeakerNames(selectedRecordingId);
-        }
-      );
-
-      unlistenStatus = await listen<RecordingStatusChangedEvent>(
-        "recording-status-changed",
-        (event) => {
-          if (event.payload?.recordingId !== selectedRecordingId) {
-            return;
-          }
-
-          setSelectedRecording((current) =>
-            current ? { ...current, status: event.payload.status } : current
-          );
-
-          if (event.payload.status === "processing") {
-            setSelectedTranscript(null);
-            setSelectedTranscriptDetails(null);
-            void refreshSelectedRecording(selectedRecordingId);
-            void refreshTranscriptDetails(selectedRecordingId);
-            return;
-          }
-
+      retainUnlistener(
+        (unlisten) => {
+          unlistenTitle = unlisten;
+        },
+        await listen<{
+          recordingId: string;
+          status: "ok" | "error";
+        }>("recording-title-updated", (event) => {
           if (
-            event.payload.status === "completed" ||
-            event.payload.status === "error"
+            event.payload?.status === "ok" &&
+            event.payload.recordingId === selectedRecordingId
           ) {
             void refreshSelectedRecording(selectedRecordingId);
-            void refreshTranscript(selectedRecordingId);
             void refreshTranscriptDetails(selectedRecordingId);
           }
-        }
+        }),
+      );
+
+      retainUnlistener(
+        (unlisten) => {
+          unlistenTranscriptUpdated = unlisten;
+        },
+        await listen<TranscriptUpdatedEvent>(
+          "transcript-updated",
+          (event) => {
+            if (event.payload?.recordingId !== selectedRecordingId) {
+              return;
+            }
+
+            void refreshTranscript(selectedRecordingId);
+            void refreshTranscriptDetails(selectedRecordingId);
+            void refreshSpeakerNames(selectedRecordingId);
+          },
+        ),
+      );
+
+      retainUnlistener(
+        (unlisten) => {
+          unlistenStatus = unlisten;
+        },
+        await listen<RecordingStatusChangedEvent>(
+          "recording-status-changed",
+          (event) => {
+            if (event.payload?.recordingId !== selectedRecordingId) {
+              return;
+            }
+
+            setSelectedRecording((current) =>
+              current ? { ...current, status: event.payload.status } : current
+            );
+
+            if (event.payload.status === "processing") {
+              setSelectedTranscript(null);
+              setSelectedTranscriptDetails(null);
+              void refreshSelectedRecording(selectedRecordingId);
+              void refreshTranscriptDetails(selectedRecordingId);
+              return;
+            }
+
+            if (
+              event.payload.status === "completed" ||
+              event.payload.status === "error"
+            ) {
+              void refreshSelectedRecording(selectedRecordingId);
+              void refreshTranscript(selectedRecordingId);
+              void refreshTranscriptDetails(selectedRecordingId);
+            }
+          },
+        ),
       );
     };
 
     void setup();
     return () => {
+      disposed = true;
       unlistenAnalysis?.();
       unlistenTitle?.();
       unlistenStatus?.();

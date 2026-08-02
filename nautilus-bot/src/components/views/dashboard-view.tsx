@@ -21,7 +21,7 @@ import type {
   PersonMemoryProfile,
   RelationshipMemory,
 } from "@/lib/backend/ai";
-import { useSetupStatus } from "@/hooks/use-setup-status";
+import { useProductReadinessStatus } from "@/features/readiness/product-readiness-context";
 import { requestMainView, requestRecordingWorkspace } from "@/lib/navigation";
 import { requestOnboarding } from "@/lib/onboarding";
 import { cn } from "@/lib/utils";
@@ -36,6 +36,7 @@ import {
   ArrowRight,
   Search,
   Send,
+  TriangleAlert,
   Users,
 } from "lucide-react";
 
@@ -82,11 +83,12 @@ export function DashboardView() {
   const [relationshipMemoryLoading, setRelationshipMemoryLoading] = useState(true);
   const [relationshipMemoryError, setRelationshipMemoryError] = useState<string | null>(null);
   const {
-    dictationReady,
-    meetingReady,
-    fullCaptureReady,
+    productReadiness,
     loading: setupLoading,
-  } = useSetupStatus();
+  } = useProductReadinessStatus();
+  const dictationReady = productReadiness.dictation.state === "ready";
+  const meetingReady = productReadiness.meetings.state === "ready";
+  const fullCaptureReady = productReadiness.fullCapture.state === "ready";
 
   useEffect(() => {
     let cancelled = false;
@@ -259,9 +261,16 @@ export function DashboardView() {
         title="Home"
         subtitle="Dictation, meetings, and follow-through in one place"
         actions={
-          <Button onClick={() => requestMainView("dictation")}>
-            <Mic data-icon="inline-start" />
-            Start Dictation
+          <Button
+            variant={dictationReady ? "default" : "outline"}
+            onClick={() => requestMainView("dictation")}
+          >
+            {dictationReady ? (
+              <Mic data-icon="inline-start" />
+            ) : (
+              <TriangleAlert data-icon="inline-start" />
+            )}
+            {dictationReady ? "Start Dictation" : "Review dictation setup"}
           </Button>
         }
       />

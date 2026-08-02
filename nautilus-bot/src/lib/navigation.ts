@@ -9,6 +9,18 @@ export type MainViewId =
 
 export const OPEN_MAIN_VIEW_EVENT = "nautilus-open-main-view";
 export const OPEN_RECORDING_WORKSPACE_EVENT = "nautilus-open-recording-workspace";
+export const OPEN_SETTINGS_TAB_EVENT = "nautilus-open-settings-tab";
+
+export type SettingsTabId =
+  | "models"
+  | "asr"
+  | "general"
+  | "security"
+  | "storage"
+  | "ai"
+  | "updates";
+
+export type ReadinessDestination = "setup" | "models" | "transcription";
 
 interface OpenMainViewDetail {
   view: MainViewId;
@@ -32,6 +44,39 @@ export function requestMainView(view: MainViewId) {
       detail: { view },
     })
   );
+}
+
+let pendingSettingsTab: SettingsTabId | null = null;
+
+function requestSettingsTab(tab: SettingsTabId) {
+  if (typeof window === "undefined") {
+    return;
+  }
+
+  pendingSettingsTab = tab;
+  requestMainView("settings");
+  window.dispatchEvent(
+    new CustomEvent<{ tab: SettingsTabId }>(OPEN_SETTINGS_TAB_EVENT, {
+      detail: { tab },
+    }),
+  );
+}
+
+export function consumePendingSettingsTab(): SettingsTabId | null {
+  const pending = pendingSettingsTab;
+  pendingSettingsTab = null;
+  return pending;
+}
+
+export function requestReadinessDestination(
+  destination: ReadinessDestination,
+) {
+  if (destination === "setup") {
+    requestMainView("setup");
+    return;
+  }
+
+  requestSettingsTab(destination === "models" ? "models" : "asr");
 }
 
 // The meetings view is lazy-loaded, so a request made from another view lands

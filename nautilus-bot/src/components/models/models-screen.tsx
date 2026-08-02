@@ -20,7 +20,10 @@ import {
   isModelOnDisk,
   type DownloadedModelIndex,
 } from "@/components/models/downloaded-models";
-import { laneRouteReadiness } from "@/components/models/model-facts";
+import {
+  laneRouteReadiness,
+  type LaneReadiness,
+} from "@/components/models/model-facts";
 import { ModelFootprint } from "@/components/models/model-footprint";
 import {
   resolveActivePresetId,
@@ -35,6 +38,8 @@ import {
 import { MoreModelsDrawer } from "@/components/models/more-models-drawer";
 import { PresetPicker } from "@/components/models/preset-picker";
 import { SpeechLaneRow } from "@/components/models/speech-lane-row";
+import { useProductReadinessStatus } from "@/features/readiness/product-readiness-context";
+import { selectReadinessForSurface } from "@/features/readiness/product-readiness";
 
 interface ModelsScreenProps {
   settings: Settings;
@@ -76,6 +81,14 @@ export function ModelsScreen({
   onOpenKeySettings,
   onOpenDiagnostics,
 }: ModelsScreenProps) {
+  const {
+    productReadiness,
+    refresh: refreshProductReadiness,
+  } = useProductReadinessStatus();
+  const modelReadiness = selectReadinessForSurface(
+    productReadiness,
+    "models",
+  );
   const [inventory, setInventory] = useState<AsrProviderInventory[]>([]);
   const [inventoryLoaded, setInventoryLoaded] = useState(false);
   const [downloadIndex, setDownloadIndex] = useState<DownloadedModelIndex | null>(
@@ -207,6 +220,33 @@ export function ModelsScreen({
       isModelOnDisk(downloadIndex, route.providerType, route.modelId),
     [downloadIndex],
   );
+  const dictationLocalReadiness = activeDictationRoute
+    ? laneRouteReadiness(
+        activeDictationRoute,
+        onDiskFor(activeDictationRoute),
+      )
+    : null;
+  const meetingLocalReadiness = activeMeetingRoute
+    ? laneRouteReadiness(activeMeetingRoute, onDiskFor(activeMeetingRoute))
+    : null;
+  const canonicalRepairOverride: LaneReadiness = {
+    label: "Needs attention",
+    tone: "attention",
+    action: "fix_setup",
+    actionLabel: "Review diagnostics",
+  };
+  const dictationReadinessOverride =
+    productReadiness.dictation.state !== "ready" &&
+    productReadiness.dictation.cause?.id === "dictation_route" &&
+    dictationLocalReadiness?.label === "Ready"
+      ? canonicalRepairOverride
+      : null;
+  const meetingReadinessOverride =
+    productReadiness.meetings.state !== "ready" &&
+    productReadiness.meetings.cause?.id === "meeting_route" &&
+    meetingLocalReadiness?.label === "Ready"
+      ? canonicalRepairOverride
+      : null;
 
   const promotedTotalMib = useMemo(() => {
     const seen = new Set<string>();
@@ -316,7 +356,7 @@ export function ModelsScreen({
       setActionError(null);
       try {
         await downloadAsrModels(route.providerType);
-        await refresh();
+        await Promise.all([refresh(), refreshProductReadiness()]);
       } catch (error) {
         setActionError(
           error instanceof Error
@@ -329,7 +369,13 @@ export function ModelsScreen({
         }
       }
     },
-    [onDiskFor, onOpenDiagnostics, onOpenKeySettings, refresh],
+    [
+      onDiskFor,
+      onOpenDiagnostics,
+      onOpenKeySettings,
+      refresh,
+      refreshProductReadiness,
+    ],
   );
 
   if (!inventoryLoaded) {
@@ -342,6 +388,30 @@ export function ModelsScreen({
 
   return (
     <div className="space-y-5">
+      {modelReadiness.state !== "ready" &&
+      (modelReadiness.cause?.id === "dictation_route" ||
+        modelReadiness.cause?.id === "meeting_route") ? (
+        <div
+          role="alert"
+          aria-label="Selected speech route needs attention"
+          className="flex items-start gap-2.5 rounded-md border border-rust/35 bg-rust/10 px-4 py-3 text-sm text-rust"
+        >
+          <span
+            className="neume neume-rust mt-1 shrink-0"
+            aria-hidden="true"
+          />
+          <div>
+            <p className="font-medium">
+              The selected speech route needs attention
+            </p>
+            <p className="mt-1 leading-6">
+              {modelReadiness.cause.message} Review the selected speech lanes
+              below.
+            </p>
+          </div>
+        </div>
+      ) : null}
+
       <PresetPicker
         activePresetId={activePresetId}
         unavailableReasonFor={unavailableReasonFor}
@@ -379,6 +449,7 @@ export function ModelsScreen({
                 onSelect={(route) => handleSelectRoute("dictation", route)}
                 onAction={(route) => void handleRouteAction(route)}
                 actionBusy={busyRouteId === activeDictationRoute?.routeId}
+                readinessOverride={dictationReadinessOverride}
                 explainPauseBehavior
               />
             </div>
@@ -396,6 +467,7 @@ export function ModelsScreen({
                 onSelect={(route) => handleSelectRoute("meeting", route)}
                 onAction={(route) => void handleRouteAction(route)}
                 actionBusy={busyRouteId === activeMeetingRoute?.routeId}
+                readinessOverride={meetingReadinessOverride}
                 explainPauseBehavior={false}
               />
             </div>

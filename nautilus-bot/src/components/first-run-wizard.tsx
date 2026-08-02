@@ -7,12 +7,10 @@ import {
   KeyRound,
   Loader2,
   Mic,
-  Settings2,
   Shield,
   ShieldCheck,
   Users,
   XCircle,
-  Zap,
 } from "lucide-react";
 import {
   downloadAsrModels,
@@ -36,6 +34,10 @@ import {
   type SystemAudioCapability,
 } from "@/lib/backend/recordings";
 import {
+  startDictation,
+  stopDictation,
+} from "@/lib/backend/dictation";
+import {
   defaultDictationShortcut,
   dictationInstruction,
   formatShortcutForDisplay,
@@ -45,6 +47,7 @@ import {
   buildAsrRouteCatalog,
   getRecommendedLaneRoute,
 } from "@/lib/asr-route-catalog";
+import { normalizeDownloadStatus } from "@/lib/download-status";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Progress } from "@/components/ui/progress";
@@ -56,11 +59,26 @@ type Props = {
   onComplete(result?: { markOnboardingComplete?: boolean; meetingsCompleted?: boolean }): void;
 };
 
-type Step = "welcome" | "permissions" | "dictation-model" | "hotkey" | "meeting-setup";
+type Step =
+  | "try-dictation"
+  | "use-everywhere"
+  | "ready"
+  | "permissions"
+  | "dictation-model"
+  | "hotkey"
+  | "meeting-setup";
 
-// Ordered so the fast, shipped default (whisper.cpp base.en -- see
+type ScratchDictationState =
+  | "idle"
+  | "starting"
+  | "listening"
+  | "transcribing"
+  | "complete"
+  | "error";
+
+// Ordered so the fast local default (whisper.cpp base.en -- see
 // settings.rs's default_provider/default_model_id) is first and pre-selected.
-// The rest are clearly-labeled accuracy upgrades, not alternate defaults.
+// Model weights are downloaded on demand; none ship inside the app bundle.
 const POWER_MODEL_OPTIONS: Array<{
   id: string;
   providerType: AsrProviderType;
@@ -74,7 +92,7 @@ const POWER_MODEL_OPTIONS: Array<{
     providerType: "whisper",
     label: "Whisper base.en",
     size: "142 MB",
-    desc: "Fast default -- this is what Plainsong already ships with",
+    desc: "Fast local default — downloaded on demand",
     recommended: true,
   },
   {
@@ -165,7 +183,9 @@ const PERMISSION_GATE_ICONS: Record<string, ReactNode> = {
 };
 
 const STEP_LABELS: Record<Step, string> = {
-  welcome: "Choose your setup",
+  "try-dictation": "Try dictation here",
+  "use-everywhere": "Use it everywhere",
+  ready: "Ready",
   permissions: "Permissions",
   "dictation-model": "Dictation model",
   hotkey: "Hotkey",
@@ -253,12 +273,18 @@ function getRecommendedMeetingRoute(providers: AsrProviderInfo[]) {
 }
 
 export function FirstRunWizard({ mode = "full", onComplete }: Props) {
-  const [includeMeetings, setIncludeMeetings] = useState(false);
-  const [step, setStep] = useState<Step>(mode === "full" ? "welcome" : mode === "meetings" ? "meeting-setup" : "permissions");
+  const [step, setStep] = useState<Step>(
+    mode === "full"
+      ? "dictation-model"
+      : mode === "meetings"
+        ? "meeting-setup"
+        : "permissions"
+  );
 
   // This wizard is a real modal: give it dialog semantics and trap focus
   // inside it so keyboard users can't Tab into the obscured app behind it.
   const dialogRef = useRef<HTMLDivElement | null>(null);
+  const stepHeadingRef = useRef<HTMLHeadingElement | null>(null);
   const titleId = useId();
 
   // The model download can run for minutes, and the wizard unmounts the moment
@@ -324,9 +350,11 @@ export function FirstRunWizard({ mode = "full", onComplete }: Props) {
 
   const [modelState, setModelState] = useState<"idle" | "downloading" | "done" | "error">("idle");
   const [modelError, setModelError] = useState<string | null>(null);
+  const [modelSkipped, setModelSkipped] = useState(false);
   const [selectedModelId, setSelectedModelId] = useState("base.en");
   const [downloadPercent, setDownloadPercent] = useState<number | null>(null);
   const downloadingProviderTypeRef = useRef<AsrProviderType | null>(null);
+  const modelInteractionStartedRef = useRef(false);
   // Captures whatever dictation provider was already persisted at mount, so
   // ensureDefaultModelDownloading can tell "nothing configured yet" apart
   // from "user already has a different, working route" -- see its comment.
@@ -339,6 +367,10 @@ export function FirstRunWizard({ mode = "full", onComplete }: Props) {
   // mode to describe it accurately instead of assuming toggle.
   const [hotkeyMode, setHotkeyMode] = useState<"hold_to_talk" | "toggle" | "hands_free">("toggle");
   const [hotkeyDemoActive, setHotkeyDemoActive] = useState(false);
+  const [scratchState, setScratchState] =
+    useState<ScratchDictationState>("idle");
+  const [scratchText, setScratchText] = useState("");
+  const [scratchError, setScratchError] = useState<string | null>(null);
   const [saveBusy, setSaveBusy] = useState(false);
   const [saveError, setSaveError] = useState<string | null>(null);
   const [saveErrorContext, setSaveErrorContext] = useState<
@@ -370,19 +402,28 @@ export function FirstRunWizard({ mode = "full", onComplete }: Props) {
     if (mode === "dictation") {
       return ["permissions", "dictation-model", "hotkey"] as Step[];
     }
-    return includeMeetings
-      ? (["welcome", "permissions", "dictation-model", "hotkey", "meeting-setup"] as Step[])
-      : (["welcome", "permissions", "dictation-model", "hotkey"] as Step[]);
-  }, [includeMeetings, mode]);
+    return ["dictation-model", "try-dictation", "use-everywhere", "ready"] as Step[];
+  }, [mode]);
 
   const stepIndex = steps.indexOf(step);
   const progress = steps.length > 1 ? ((stepIndex + 1) / steps.length) * 100 : 100;
   const isLastStep = stepIndex === steps.length - 1;
+  const stepAnnouncement = `Step ${stepIndex + 1} of ${steps.length}: ${STEP_LABELS[step]}`;
+
+  useEffect(() => {
+    const frame = requestAnimationFrame(() => {
+      stepHeadingRef.current?.focus();
+    });
+    return () => cancelAnimationFrame(frame);
+  }, [step]);
 
   useEffect(() => {
     let mounted = true;
-    void getSettings()
-      .then((settings) => {
+    void Promise.all([
+      getSettings(),
+      getAsrProviders().catch(() => [] as AsrProviderInfo[]),
+    ])
+      .then(([settings, providers]) => {
         if (!mounted) {
           return;
         }
@@ -417,10 +458,36 @@ export function FirstRunWizard({ mode = "full", onComplete }: Props) {
         } else if (settings.transcription.dictationProvider === "distil_whisper") {
           setSelectedModelId("distil-large-v3.5");
         } else {
-          // whisper (the shipped default) and any unrecognized/legacy value
-          // fall back to the fast local default, which is the only whisper
-          // option this step offers.
+          // Whisper and any unrecognized or legacy value fall back to the fast
+          // local default, which is the only Whisper option this step offers.
           setSelectedModelId("base.en");
+        }
+        const configuredProvider = (
+          settings.transcription.dictationProvider ??
+          settings.transcription.defaultProvider
+        ) as AsrProviderType | undefined;
+        const configuredModelId =
+          settings.transcription.dictationModelId ??
+          settings.transcription.selectedModelId ??
+          null;
+        const isWizardModel = POWER_MODEL_OPTIONS.some(
+          (option) =>
+            option.providerType === configuredProvider &&
+            option.id === configuredModelId
+        );
+        const configuredProviderInfo = providers.find(
+          (provider) =>
+            provider.providerType === configuredProvider &&
+            provider.selectedModelId === configuredModelId
+        );
+        if (
+          !modelInteractionStartedRef.current &&
+          isWizardModel &&
+          configuredProviderInfo?.runtimeStatus === "ready" &&
+          normalizeDownloadStatus(configuredProviderInfo.downloadStatus).kind ===
+            "downloaded"
+        ) {
+          setModelState("done");
         }
         setHotkeyMode(
           settings.transcription.dictationHandsFreeEnabled
@@ -453,7 +520,11 @@ export function FirstRunWizard({ mode = "full", onComplete }: Props) {
   }, []);
 
   useEffect(() => {
-    if (step === "permissions") {
+    if (
+      step === "permissions" ||
+      step === "try-dictation" ||
+      step === "use-everywhere"
+    ) {
       void refreshPerms();
     }
   }, [refreshPerms, step]);
@@ -614,6 +685,50 @@ export function FirstRunWizard({ mode = "full", onComplete }: Props) {
     }
   }, []);
 
+  const startScratchDictation = useCallback(async () => {
+    setScratchState("starting");
+    setScratchText("");
+    setScratchError(null);
+    try {
+      await startDictation({
+        saveToInbox: true,
+        projectId: "inbox",
+        profile: "normal_speed",
+        contextSource: "none",
+        livePreviewEnabled: true,
+        deliveryMode: "preview",
+      });
+      if (mountedRef.current) {
+        setScratchState("listening");
+      }
+    } catch (error) {
+      if (!mountedRef.current) {
+        return;
+      }
+      setScratchState("error");
+      setScratchError(error instanceof Error ? error.message : String(error));
+    }
+  }, []);
+
+  const finishScratchDictation = useCallback(async () => {
+    setScratchState("transcribing");
+    setScratchError(null);
+    try {
+      const text = (await stopDictation()).trim();
+      if (!mountedRef.current) {
+        return;
+      }
+      setScratchText(text);
+      setScratchState("complete");
+    } catch (error) {
+      if (!mountedRef.current) {
+        return;
+      }
+      setScratchState("error");
+      setScratchError(error instanceof Error ? error.message : String(error));
+    }
+  }, []);
+
   // The sidecar reports real download progress as ["providerType", percent]
   // (see download_asr_models in rust-sidecar/src/lib.rs); wire it up instead
   // of showing only an indeterminate spinner for the whole download.
@@ -642,6 +757,8 @@ export function FirstRunWizard({ mode = "full", onComplete }: Props) {
   const startModelDownload = useCallback(async (modelId?: string) => {
     const option =
       POWER_MODEL_OPTIONS.find((candidate) => candidate.id === modelId) ?? POWER_MODEL_OPTIONS[0];
+    modelInteractionStartedRef.current = true;
+    setModelSkipped(false);
     setModelState("downloading");
     setModelError(null);
     setDownloadPercent(0);
@@ -649,7 +766,7 @@ export function FirstRunWizard({ mode = "full", onComplete }: Props) {
     try {
       await downloadAsrModels(option.providerType);
       if (!mountedRef.current) {
-        return;
+        return false;
       }
       // Read settings *after* the download, never before it. save_settings is
       // a whole-struct replace, so a snapshot taken before a multi-minute
@@ -660,7 +777,7 @@ export function FirstRunWizard({ mode = "full", onComplete }: Props) {
       // fresh copy.
       const settings = await getSettings();
       if (!mountedRef.current) {
-        return;
+        return false;
       }
       settings.transcription.useSharedAsrSelection = false;
       settings.transcription.defaultProvider = option.providerType;
@@ -669,35 +786,34 @@ export function FirstRunWizard({ mode = "full", onComplete }: Props) {
       settings.transcription.dictationModelId = option.id;
       await saveSettings(settings);
       if (!mountedRef.current) {
-        return;
+        return false;
       }
       setModelState("done");
+      return true;
     } catch (error) {
       if (!mountedRef.current) {
-        return;
+        return false;
       }
       setModelState("error");
       setModelError(error instanceof Error ? error.message : String(error));
+      return false;
     } finally {
       downloadingProviderTypeRef.current = null;
     }
   }, []);
 
-  // Leaving the model step un-downloaded -- by Continue, by "Skip for now", or
-  // by closing the wizard before ever reaching it -- would otherwise leave the
-  // persisted default route (whisper/base.en) permanently un-fetched, since
-  // nothing else in the app auto-downloads it. Kick off the fast default in the
-  // background so dictation has something ready. Called both when advancing
-  // past this step and from completeWizard on every exit that marks onboarding
-  // complete, so no exit path can close the door on an empty model cache.
+  // Advancing past the visible model surface starts the selected fast default
+  // in the background so the user can continue setting up the shortcut. The
+  // explicit Skip action never calls this function because skipping is not
+  // consent for a model download.
   //
   // But only do this when the user doesn't already have a different,
   // previously-configured dictation route (e.g. parakeet, distil_whisper,
   // macos_apple_speech). Someone who opens "Fix dictation setup" for an
   // unrelated reason (a hotkey conflict, say) and just clicks through this
   // step must not have their working provider silently downgraded/overwritten
-  // to whisper/base.en. If nothing but the shipped default was ever
-  // configured, downloading base.en in the background is a safe no-op for
+  // to whisper/base.en. If nothing but the default route was ever configured,
+  // downloading base.en in the background is a safe no-op for
   // provider selection and is the only way dictation ends up with a
   // downloaded model at all.
   const ensureDefaultModelDownloading = useCallback(() => {
@@ -788,31 +904,15 @@ export function FirstRunWizard({ mode = "full", onComplete }: Props) {
     meetingRetentionPreset,
   ]);
 
-  const handleWelcomeChoice = (nextIncludeMeetings: boolean) => {
-    setIncludeMeetings(nextIncludeMeetings);
-    setStep("permissions");
-  };
-
   const completeWizard = useCallback(
     (result?: { markOnboardingComplete?: boolean; meetingsCompleted?: boolean }) => {
       const markOnboardingComplete = result?.markOnboardingComplete ?? mode === "full";
-      // Marking onboarding complete permanently gates this wizard (App.tsx
-      // never reopens it once the flag is set), and the model step is the only
-      // place in the app that ever auto-downloads a dictation model. Leaving
-      // via "Skip for now" on the permissions step -- or "Close" on the
-      // welcome screen -- used to set the flag without ever passing the model
-      // step, so nothing was downloaded, dictation could never start, and the
-      // hotkey failed silently forever. Every exit that closes the door has to
-      // kick off the fast default first.
-      if (markOnboardingComplete) {
-        ensureDefaultModelDownloading();
-      }
       onComplete({
         markOnboardingComplete,
         meetingsCompleted: result?.meetingsCompleted ?? false,
       });
     },
-    [ensureDefaultModelDownloading, mode, onComplete]
+    [mode, onComplete]
   );
 
   const nextStep = async () => {
@@ -824,16 +924,34 @@ export function FirstRunWizard({ mode = "full", onComplete }: Props) {
     }
 
     if (step === "dictation-model") {
-      ensureDefaultModelDownloading();
+      if (mode === "full" && modelState !== "done") {
+        const downloaded = await startModelDownload(selectedModelId);
+        if (!downloaded) {
+          return;
+        }
+      } else if (mode !== "full") {
+        ensureDefaultModelDownloading();
+      }
+    }
+
+    if (step === "use-everywhere") {
+      const saved = await persistDictationStep();
+      if (!saved) {
+        return;
+      }
+    }
+
+    if (step === "ready") {
+      completeWizard({
+        markOnboardingComplete: true,
+        meetingsCompleted: false,
+      });
+      return;
     }
 
     if (step === "hotkey") {
       const saved = await persistDictationStep();
       if (!saved) {
-        return;
-      }
-      if (mode === "full" && !includeMeetings) {
-        completeWizard({ markOnboardingComplete: true, meetingsCompleted: false });
         return;
       }
     }
@@ -863,23 +981,42 @@ export function FirstRunWizard({ mode = "full", onComplete }: Props) {
     });
   };
 
+  const skipModelDownload = () => {
+    setModelSkipped(true);
+    const nextIndex = steps.indexOf(step) + 1;
+    if (nextIndex < steps.length) {
+      setStep(steps[nextIndex]);
+    }
+  };
+
   const subtitle =
-    step === "welcome"
-      ? "Set up Plainsong the way you actually plan to use it."
-      : step === "meeting-setup"
-        ? "Meetings can be configured now or revisited later from Setup."
-        : `Step ${stepIndex + 1} of ${steps.length}, ${STEP_LABELS[step]}`;
+    step === "meeting-setup"
+      ? "Meetings can be configured now or revisited later from Setup."
+      : `Step ${stepIndex + 1} of ${steps.length}`;
 
   const nextLabel =
-    step === "meeting-setup" && meetingRouteReady === false
-      ? "Fix meeting route"
-      : isLastStep
-        ? mode === "meetings" || step === "meeting-setup"
-          ? "Finish meeting setup"
-          : "Finish"
-        : "Continue";
+    step === "dictation-model" && mode === "full" && modelState !== "done"
+      ? modelState === "error"
+        ? "Retry download"
+        : modelState === "downloading"
+          ? "Downloading…"
+          : "Download and continue"
+      : step === "ready"
+        ? "Start using Plainsong"
+        : step === "meeting-setup" && meetingRouteReady === false
+          ? "Fix meeting route"
+          : isLastStep
+            ? mode === "meetings" || step === "meeting-setup"
+              ? "Finish meeting setup"
+              : "Finish"
+            : "Continue";
 
   const displayShortcut = formatShortcutForDisplay(shortcutValue);
+  const scratchBusy =
+    scratchState === "starting" ||
+    scratchState === "listening" ||
+    scratchState === "transcribing";
+  const wizardTitle = STEP_LABELS[step];
 
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-background/80 backdrop-blur-sm">
@@ -897,10 +1034,18 @@ export function FirstRunWizard({ mode = "full", onComplete }: Props) {
             <p className="rubric">
               {mode === "meetings" ? "MEETINGS" : mode === "dictation" ? "DICTATION" : "ONBOARDING"}
             </p>
-            <h2 id={titleId} className="font-serif text-xl font-semibold text-card-foreground">
-              {mode === "meetings" ? "Set Up Meetings" : mode === "dictation" ? "Fix Dictation Setup" : "Getting Started"}
+            <h2
+              ref={stepHeadingRef}
+              id={titleId}
+              tabIndex={-1}
+              className="font-serif text-xl font-semibold text-card-foreground outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2"
+            >
+              {wizardTitle}
             </h2>
             <p className="text-sm text-muted-foreground">{subtitle}</p>
+            <p className="sr-only" role="status" aria-live="polite" aria-atomic="true">
+              {stepAnnouncement}
+            </p>
           </div>
           {steps.length > 1 ? (
             <div className="flex gap-2">
@@ -918,8 +1063,65 @@ export function FirstRunWizard({ mode = "full", onComplete }: Props) {
 
         {steps.length > 1 ? <Progress value={progress} className="h-1" /> : null}
 
-        {step === "welcome" ? (
-          <WelcomeStep onChoose={handleWelcomeChoice} />
+        {step === "try-dictation" ? (
+          <TryDictationStep
+            perms={perms}
+            permsLoading={permsLoading}
+            onRefreshPermissions={() => void refreshPerms()}
+            onRequestPermissions={() => void requestPermissionsNow()}
+            onOpenMicrophoneSettings={() =>
+              void openPermissionSettingsFromWizard("microphone", "Microphone")
+            }
+            permissionRequestBusy={permissionRequestBusy}
+            permissionRequestError={permissionRequestError}
+            permissionRequestStatus={permissionRequestStatus}
+            modelState={modelState}
+            modelError={modelError}
+            modelPercent={downloadPercent}
+            onDownloadModel={() => void startModelDownload("base.en")}
+            scratchState={scratchState}
+            scratchText={scratchText}
+            scratchError={scratchError}
+            onStartScratch={() => void startScratchDictation()}
+            onFinishScratch={() => void finishScratchDictation()}
+          />
+        ) : null}
+
+        {step === "use-everywhere" ? (
+          <UseEverywhereStep
+            perms={perms}
+            permsLoading={permsLoading}
+            onRefreshPermissions={() => void refreshPerms()}
+            onOpenAccessibilitySettings={() =>
+              void openPermissionSettingsFromWizard(
+                "accessibility",
+                "Accessibility"
+              )
+            }
+            displayShortcut={displayShortcut}
+            onShortcutChange={setShortcutValue}
+            hotkeyMode={hotkeyMode}
+            saveError={saveError}
+          />
+        ) : null}
+
+        {step === "ready" ? (
+          <ReadyStep
+            displayShortcut={displayShortcut}
+            hotkeyMode={hotkeyMode}
+            modelState={modelState}
+            modelError={modelError}
+            modelSkipped={modelSkipped}
+            onRetryModel={() => void startModelDownload("base.en")}
+            microphoneReady={
+              perms?.microphonePermissionReady ?? perms?.microphoneReady
+            }
+            insertionReady={
+              Boolean(perms?.accessibilityReady) &&
+              Boolean(perms?.postEventReady)
+            }
+            scratchCompleted={scratchState === "complete"}
+          />
         ) : null}
 
         {step === "permissions" ? (
@@ -950,6 +1152,7 @@ export function FirstRunWizard({ mode = "full", onComplete }: Props) {
             error={modelError}
             percent={downloadPercent}
             selectedId={selectedModelId}
+            downloadFromFooter={mode === "full"}
             onSelect={setSelectedModelId}
             onDownload={() => void startModelDownload(selectedModelId)}
           />
@@ -962,7 +1165,7 @@ export function FirstRunWizard({ mode = "full", onComplete }: Props) {
             displayShortcut={displayShortcut}
             onShortcutChange={setShortcutValue}
             hotkeyMode={hotkeyMode}
-            includeMeetings={mode === "full" && includeMeetings}
+            includeMeetings={false}
             saveError={saveError}
           />
         ) : null}
@@ -1006,16 +1209,28 @@ export function FirstRunWizard({ mode = "full", onComplete }: Props) {
 
         <div className="flex justify-between">
           <div className="flex gap-2">
-            {mode === "full" && step !== "welcome" ? (
-              <Button
-                variant="ghost"
-                onClick={() =>
-                  completeWizard({ markOnboardingComplete: true, meetingsCompleted: false })
-                }
-                className="text-muted-foreground"
-              >
-                Skip for now
-              </Button>
+            {mode === "full" ? (
+              step === "dictation-model" && modelState !== "done" ? (
+                <Button
+                  variant="ghost"
+                  onClick={skipModelDownload}
+                  className="text-muted-foreground"
+                  disabled={modelState === "downloading"}
+                >
+                  Skip model download
+                </Button>
+              ) : (
+                <Button
+                  variant="ghost"
+                  onClick={() =>
+                    completeWizard({ markOnboardingComplete: true, meetingsCompleted: false })
+                  }
+                  className="text-muted-foreground"
+                  disabled={scratchBusy}
+                >
+                  Skip setup for now
+                </Button>
+              )
             ) : (
               <Button variant="ghost" onClick={() => completeWizard()} className="text-muted-foreground">
                 Close
@@ -1030,104 +1245,479 @@ export function FirstRunWizard({ mode = "full", onComplete }: Props) {
               </Button>
             ) : null}
           </div>
-          {step !== "welcome" || mode !== "full" ? (
-            <Button
-              onClick={() => void nextStep()}
-              disabled={
-                saveBusy ||
-                permissionRequestBusy ||
-                // Only block Continue for a download in progress while the
-                // user is still on the model step itself (the visible,
-                // foreground download). Once ensureDefaultModelDownloading
-                // kicks off the background base.en fetch on advancing past
-                // this step, later steps (hotkey, meeting-setup) must stay
-                // usable -- this copy promises "you can keep moving without
-                // downloading here", and dictation-repair mode has no "Skip
-                // for now" escape hatch to fall back on.
-                (modelState === "downloading" && step === "dictation-model") ||
-                meetingSetupLoading
-              }
-            >
-              {saveBusy || meetingSetupLoading ? <Loader2 className="mr-2 h-4 w-4 animate-spin" /> : null}
-              {nextLabel}
-              <ChevronRight className="ml-1 h-4 w-4" />
-            </Button>
-          ) : null}
+          <Button
+            onClick={() => void nextStep()}
+            disabled={
+              saveBusy ||
+              permissionRequestBusy ||
+              scratchBusy ||
+              // Only block Continue for a download in progress while the
+              // user is still on a visible, foreground model surface.
+              (modelState === "downloading" &&
+                (step === "dictation-model" ||
+                  step === "try-dictation" ||
+                  step === "ready")) ||
+              ((modelState === "idle" || modelState === "error") &&
+                step === "ready" &&
+                !modelSkipped &&
+                scratchState !== "complete") ||
+              meetingSetupLoading
+            }
+          >
+            {saveBusy || meetingSetupLoading ? <Loader2 className="mr-2 h-4 w-4 animate-spin" /> : null}
+            {nextLabel}
+            <ChevronRight className="ml-1 h-4 w-4" />
+          </Button>
         </div>
       </div>
     </div>
   );
 }
 
-function WelcomeStep({ onChoose }: { onChoose(includeMeetings: boolean): void }) {
+function TryDictationStep({
+  perms,
+  permsLoading,
+  onRefreshPermissions,
+  onRequestPermissions,
+  onOpenMicrophoneSettings,
+  permissionRequestBusy,
+  permissionRequestError,
+  permissionRequestStatus,
+  modelState,
+  modelError,
+  modelPercent,
+  onDownloadModel,
+  scratchState,
+  scratchText,
+  scratchError,
+  onStartScratch,
+  onFinishScratch,
+}: {
+  perms: PermissionDiagnostics | null;
+  permsLoading: boolean;
+  onRefreshPermissions(): void;
+  onRequestPermissions(): void;
+  onOpenMicrophoneSettings(): void;
+  permissionRequestBusy: boolean;
+  permissionRequestError: string | null;
+  permissionRequestStatus: string | null;
+  modelState: "idle" | "downloading" | "done" | "error";
+  modelError: string | null;
+  modelPercent: number | null;
+  onDownloadModel(): void;
+  scratchState: ScratchDictationState;
+  scratchText: string;
+  scratchError: string | null;
+  onStartScratch(): void;
+  onFinishScratch(): void;
+}) {
+  const microphoneReady =
+    perms?.microphonePermissionReady ?? perms?.microphoneReady;
+  const scratchInFlight =
+    scratchState === "starting" || scratchState === "transcribing";
+
   return (
-    <div className="space-y-4">
-      <p className="text-sm text-muted-foreground">
-        Start with fast dictation readiness, then decide whether to configure meetings now or later.
+    <div className="space-y-5">
+      <p className="max-w-xl text-sm text-muted-foreground">
+        Get a real transcript before setting up system-wide insertion. This test
+        uses Plainsong&apos;s normal local capture and history path, but keeps
+        the result inside Plainsong.
       </p>
-      <div className="grid gap-3 md:grid-cols-2">
-        <ChoiceCard
-          icon={<Zap className="h-6 w-6 text-gold" />}
-          title="Get dictation ready"
-          description="Best first-run path. Fix permissions, set the hotkey, and start dictating quickly."
-          actionLabel="Start with dictation"
-          recommended
-          onClick={() => onChoose(false)}
-        />
-        <ChoiceCard
-          icon={<Settings2 className="h-6 w-6 text-muted-foreground" />}
-          title="Full setup"
-          description="Do dictation first, then continue into meeting capture and system-audio setup."
-          actionLabel="Set up both"
-          onClick={() => onChoose(true)}
-        />
+
+      <div className="divide-y divide-border rounded-xl border border-border">
+        <div className="flex items-start justify-between gap-4 p-4">
+          <div className="flex min-w-0 gap-3">
+            <span className="mt-0.5 text-muted-foreground">
+              <Mic className="h-4 w-4" />
+            </span>
+            <div>
+              <p className="text-sm font-medium">Dictation permissions</p>
+              <p className="text-sm text-muted-foreground">
+                {microphoneReady
+                  ? "The microphone is ready for this test."
+                  : "macOS may ask for Microphone so Plainsong can hear you, then Accessibility so it can insert text in other apps."}
+              </p>
+            </div>
+          </div>
+          {permsLoading || permissionRequestBusy ? (
+            <Loader2 className="h-4 w-4 animate-spin text-muted-foreground" />
+          ) : microphoneReady ? (
+            <span className="neume neume-lit mt-1" aria-label="Microphone ready" />
+          ) : (
+            <div className="flex shrink-0 gap-2">
+              <Button size="sm" variant="outline" onClick={onRequestPermissions}>
+                Request dictation permissions
+              </Button>
+              <Button
+                size="sm"
+                variant="ghost"
+                onClick={onOpenMicrophoneSettings}
+              >
+                Open Settings
+              </Button>
+            </div>
+          )}
+        </div>
+
+        <div className="flex items-start justify-between gap-4 p-4">
+          <div className="flex min-w-0 gap-3">
+            <span className="mt-0.5 text-muted-foreground">
+              <Download className="h-4 w-4" />
+            </span>
+            <div>
+              <p className="text-sm font-medium">Fast local model</p>
+              <p className="text-sm text-muted-foreground">
+                Whisper base.en is a 142 MB download. You can choose a larger model later.
+              </p>
+            </div>
+          </div>
+          {modelState === "done" ? (
+            <span className="neume neume-lit mt-1" aria-label="Model ready" />
+          ) : modelState === "downloading" ? (
+            <span className="shrink-0 text-xs text-muted-foreground">
+              {modelPercent === null ? "Downloading" : `${Math.round(modelPercent)}%`}
+            </span>
+          ) : (
+            <Button size="sm" variant="outline" onClick={onDownloadModel}>
+              {modelState === "error" ? "Retry download" : "Download"}
+            </Button>
+          )}
+        </div>
       </div>
-      <div className="rounded-lg border border-border bg-muted/30 p-3 text-xs text-muted-foreground">
-        You can always reopen guided setup later from Setup if you only want to configure meetings after the app is already working for dictation.
+
+      {modelState === "downloading" ? (
+        <Progress value={modelPercent} className="h-1.5" />
+      ) : null}
+      {modelError ? (
+        <p className="text-xs text-destructive" role="alert">
+          Model download failed: {modelError}
+        </p>
+      ) : null}
+
+      <div className="rounded-xl border border-primary/30 bg-primary/5 p-5">
+        <div className="flex flex-col items-center text-center">
+          <div
+            className={`mb-4 flex h-16 w-16 items-center justify-center rounded-full border ${
+              scratchState === "listening"
+                ? "border-primary bg-primary text-primary-foreground"
+                : "border-border bg-background text-muted-foreground"
+            }`}
+          >
+            {scratchInFlight ? (
+              <Loader2 className="h-6 w-6 animate-spin" />
+            ) : (
+              <Mic className="h-6 w-6" />
+            )}
+          </div>
+          <p className="font-serif text-lg font-semibold">
+            {scratchState === "listening"
+              ? "Listening"
+              : scratchState === "transcribing"
+                ? "Turning speech into text"
+                : scratchState === "complete"
+                  ? "That worked"
+                  : "Say one sentence"}
+          </p>
+          <p className="mt-1 max-w-md text-sm text-muted-foreground">
+            {scratchState === "listening"
+              ? "Speak naturally, then finish when you are done."
+              : "This result is saved locally. It will not touch the clipboard or another app."}
+          </p>
+
+          <div className="mt-4">
+            {scratchState === "listening" ? (
+              <Button onClick={onFinishScratch}>Finish and transcribe</Button>
+            ) : (
+              <Button
+                onClick={onStartScratch}
+                disabled={scratchInFlight || modelState !== "done"}
+              >
+                {scratchState === "complete" || scratchState === "error"
+                  ? "Try again"
+                  : scratchState === "starting"
+                    ? "Getting ready"
+                    : "Start a test"}
+              </Button>
+            )}
+          </div>
+        </div>
+
+        {scratchState === "complete" ? (
+          <div
+            className="mt-5 rounded-lg border border-border bg-background/70 p-4 text-left"
+            role="status"
+            aria-live="polite"
+          >
+            {scratchText ? (
+              <p className="text-sm leading-relaxed text-foreground">
+                {scratchText}
+              </p>
+            ) : (
+              <p className="text-sm text-muted-foreground">
+                No speech was detected. Try again and speak a little closer to
+                the microphone.
+              </p>
+            )}
+          </div>
+        ) : null}
+
+        {scratchError ? (
+          <p className="mt-4 text-sm text-destructive" role="alert">
+            {scratchError}
+          </p>
+        ) : null}
+      </div>
+
+      <div className="flex flex-wrap items-center gap-x-3 gap-y-2 text-xs text-muted-foreground">
+        <Button
+          size="sm"
+          variant="ghost"
+          onClick={onRefreshPermissions}
+          disabled={permsLoading}
+        >
+          Re-check microphone
+        </Button>
+        {permissionRequestStatus ? <span>{permissionRequestStatus}</span> : null}
+        {permissionRequestError ? (
+          <span className="text-destructive" role="alert">
+            {permissionRequestError}
+          </span>
+        ) : null}
       </div>
     </div>
   );
 }
 
-function ChoiceCard({
-  icon,
-  title,
-  description,
-  actionLabel,
-  recommended = false,
-  onClick,
+function UseEverywhereStep({
+  perms,
+  permsLoading,
+  onRefreshPermissions,
+  onOpenAccessibilitySettings,
+  displayShortcut,
+  onShortcutChange,
+  hotkeyMode,
+  saveError,
 }: {
-  icon: ReactNode;
-  title: string;
-  description: string;
-  actionLabel: string;
-  recommended?: boolean;
-  onClick(): void;
+  perms: PermissionDiagnostics | null;
+  permsLoading: boolean;
+  onRefreshPermissions(): void;
+  onOpenAccessibilitySettings(): void;
+  displayShortcut: string;
+  onShortcutChange(value: string): void;
+  hotkeyMode: "hold_to_talk" | "toggle" | "hands_free";
+  saveError: string | null;
 }) {
   return (
-    <button
-      type="button"
-      onClick={onClick}
-      className="transition-smooth flex flex-col items-start gap-3 rounded-xl border border-border p-5 text-left hover:border-primary/60 hover:bg-primary/5"
-    >
-      <div
-        className={
-          recommended
-            ? "flex h-12 w-12 items-center justify-center rounded-full bg-muted/20"
-            : "flex h-12 w-12 items-center justify-center rounded-full bg-muted/40"
-        }
+    <div className="space-y-5">
+      <p className="max-w-xl text-sm text-muted-foreground">
+        The first test stayed in Plainsong. To dictate at the cursor in any app,
+        macOS needs one cursor-control grant and a shortcut you can remember.
+      </p>
+
+      <div className="space-y-3">
+        <PermRow
+          order={1}
+          label="Accessibility"
+          purpose="Lets Plainsong insert finished words at your cursor."
+          icon={<ShieldCheck className="h-4 w-4" />}
+          ready={perms?.accessibilityReady}
+          loading={permsLoading}
+          onFix={onOpenAccessibilitySettings}
+          registerRef={() => {}}
+        />
+        <PermRow
+          order={2}
+          label="Keyboard fallback"
+          purpose="Lets Plainsong type when direct insertion is unavailable."
+          icon={<Shield className="h-4 w-4" />}
+          ready={perms?.postEventReady}
+          loading={permsLoading}
+          onFix={onOpenAccessibilitySettings}
+          registerRef={() => {}}
+        />
+      </div>
+
+      <Button
+        size="sm"
+        variant="ghost"
+        onClick={onRefreshPermissions}
+        disabled={permsLoading}
       >
-        {icon}
+        Re-check cursor access
+      </Button>
+
+      <div className="space-y-3 border-t border-border pt-5">
+        <div className="flex items-baseline justify-between gap-4">
+          <div>
+            <p className="text-sm font-medium">Your dictation shortcut</p>
+            <p className="text-xs text-muted-foreground">
+              {dictationInstruction(displayShortcut, hotkeyMode)}
+            </p>
+          </div>
+          <span className="rubric-muted text-[0.65rem]">
+            {HOTKEY_MODE_LABELS[hotkeyMode].name}
+          </span>
+        </div>
+        <Input
+          aria-label="Dictation shortcut"
+          value={displayShortcut}
+          readOnly
+          onKeyDown={(event) => {
+            if (event.key === "Tab") return;
+            event.preventDefault();
+            event.stopPropagation();
+            if (event.key === "Escape") return;
+            const parsed = formatShortcutFromKeyboardEvent(event);
+            if (parsed) {
+              onShortcutChange(parsed);
+            }
+          }}
+          className="font-mono text-center"
+        />
+        <p className="text-xs text-muted-foreground">
+          Click the field, then press the key combination you want. After setup,
+          place the cursor in any text field and use this shortcut.
+        </p>
       </div>
-      <div>
-        <p className="font-serif font-semibold">{title}</p>
-        <p className="mt-1 text-sm text-muted-foreground">{description}</p>
+
+      {saveError ? (
+        <p className="text-xs text-destructive" role="alert">
+          Failed to save shortcut: {saveError}
+        </p>
+      ) : null}
+    </div>
+  );
+}
+
+function ReadyStep({
+  displayShortcut,
+  hotkeyMode,
+  modelState,
+  modelError,
+  modelSkipped,
+  onRetryModel,
+  microphoneReady,
+  insertionReady,
+  scratchCompleted,
+}: {
+  displayShortcut: string;
+  hotkeyMode: "hold_to_talk" | "toggle" | "hands_free";
+  modelState: "idle" | "downloading" | "done" | "error";
+  modelError: string | null;
+  modelSkipped: boolean;
+  onRetryModel(): void;
+  microphoneReady: boolean | undefined;
+  insertionReady: boolean;
+  scratchCompleted: boolean;
+}) {
+  const localDictation =
+    scratchCompleted
+      ? {
+          detail: "First transcript completed inside Plainsong.",
+          tone: "ready" as const,
+        }
+      : modelState === "downloading"
+        ? {
+            detail: "Downloading Whisper base.en in the background.",
+            tone: "progress" as const,
+          }
+        : modelState === "error"
+          ? {
+              detail: modelSkipped
+                ? "The download was skipped after it failed. Download the model here or from Dictation before using the shortcut."
+                : modelError
+                  ? `Model download failed: ${modelError}`
+                  : "The local model download needs another try.",
+              tone: "attention" as const,
+            }
+          : modelState === "done"
+            ? {
+                detail: "Whisper base.en is ready for your first dictation.",
+                tone: "ready" as const,
+              }
+            : {
+                detail: modelSkipped
+                  ? "The model download was skipped. Download it here or from Dictation before using the shortcut."
+                  : "The local model has not been downloaded yet.",
+                tone: "attention" as const,
+              };
+  const rows = [
+    {
+      label: "Local dictation",
+      ...localDictation,
+    },
+    {
+      label: "Microphone",
+      detail: microphoneReady
+        ? "Permission is ready."
+        : "macOS permission still needs attention.",
+      tone: microphoneReady ? ("ready" as const) : ("attention" as const),
+    },
+    {
+      label: displayShortcut,
+      detail: `${HOTKEY_MODE_LABELS[hotkeyMode].name}: ${HOTKEY_MODE_LABELS[hotkeyMode].hint}.`,
+      tone: "ready" as const,
+    },
+    {
+      label: "System-wide insertion",
+      detail: insertionReady
+        ? "Cursor control is ready."
+        : "Finish the Accessibility grant before relying on insertion.",
+      tone: insertionReady ? ("ready" as const) : ("attention" as const),
+    },
+  ];
+
+  return (
+    <div className="space-y-5">
+      <p className="max-w-xl text-sm text-muted-foreground">
+        Plainsong saves every finished dictation before it attempts delivery.
+        If another app rejects insertion, your words remain in dictation
+        history.
+      </p>
+
+      <div className="divide-y divide-border rounded-xl border border-border">
+        {rows.map((row) => (
+          <div
+            key={row.label}
+            className="flex items-start justify-between gap-4 p-4"
+          >
+            <div>
+              <p className="text-sm font-medium">{row.label}</p>
+              <p className="text-xs text-muted-foreground">{row.detail}</p>
+            </div>
+            <span
+              className={
+                row.tone === "ready"
+                  ? "neume neume-lit mt-1"
+                  : row.tone === "attention"
+                    ? "neume neume-rust mt-1"
+                    : "neume neume-hollow mt-1"
+              }
+              aria-hidden="true"
+            />
+          </div>
+        ))}
       </div>
-      <span className={recommended ? "inline-flex items-center gap-1.5 text-xs font-medium text-foreground" : "text-xs font-medium text-muted-foreground"}>
-        {recommended ? <span className="neume neume-lit" aria-hidden="true" /> : null}
-        {actionLabel}
-      </span>
-    </button>
+
+      {modelState === "idle" || modelState === "error" ? (
+        <Button size="sm" variant="outline" onClick={onRetryModel}>
+          {modelState === "error"
+            ? "Retry local model download"
+            : "Download local model"}
+        </Button>
+      ) : null}
+
+      <div className="flex items-start gap-3 border-t border-border pt-5">
+        <Users className="mt-0.5 h-4 w-4 shrink-0 text-muted-foreground" />
+        <div>
+          <p className="text-sm font-medium">Meetings are optional</p>
+          <p className="text-xs text-muted-foreground">
+            Configure meeting capture, retention, and system audio later from
+            Setup. Dictation does not wait on it.
+          </p>
+        </div>
+      </div>
+    </div>
   );
 }
 
@@ -1336,6 +1926,7 @@ function DictationModelStep({
   error,
   percent,
   selectedId,
+  downloadFromFooter,
   onSelect,
   onDownload,
 }: {
@@ -1343,6 +1934,7 @@ function DictationModelStep({
   error: string | null;
   percent: number | null;
   selectedId: string;
+  downloadFromFooter: boolean;
   onSelect(id: string): void;
   onDownload(): void;
 }) {
@@ -1350,8 +1942,8 @@ function DictationModelStep({
   return (
     <div className="space-y-4">
       <p className="text-sm text-muted-foreground">
-        Set up the local dictation route Plainsong will use for solo work. Whisper base.en is the
-        fast default already shipped with the app; the others below are accuracy upgrades.
+        Choose the local model Plainsong will use for dictation. Whisper base.en is the fast
+        default and downloads on demand; the larger choices trade space and time for accuracy.
       </p>
 
       <div className="space-y-2">
@@ -1387,7 +1979,7 @@ function DictationModelStep({
         ))}
       </div>
 
-      {state === "idle" ? (
+      {state === "idle" && !downloadFromFooter ? (
         <Button id="download-model-btn" onClick={onDownload} className="gap-2">
           <Download className="h-4 w-4" />
           Download {selectedOption?.label}
@@ -1418,16 +2010,18 @@ function DictationModelStep({
             <XCircle className="h-4 w-4" />
             Download failed: {error}
           </div>
-          <Button variant="outline" size="sm" onClick={onDownload}>
-            Retry download
-          </Button>
+          {!downloadFromFooter ? (
+            <Button variant="outline" size="sm" onClick={onDownload}>
+              Retry download
+            </Button>
+          ) : null}
         </div>
       ) : null}
 
-      <p className="text-xs text-muted-foreground">
-        You can keep moving without downloading here -- Plainsong will fetch the fast default
-        (Whisper base.en) in the background so dictation still works. Change models later in
-        Setup or Settings → ASR / Providers.
+      <p className="text-sm text-muted-foreground">
+        {downloadFromFooter
+          ? "Download the selected model to continue, or choose Skip model download. Dictation will keep showing a download reminder until a model is ready."
+          : "Start the download here, or keep your existing dictation model. You can change models later in Settings."}
       </p>
     </div>
   );
@@ -1695,7 +2289,7 @@ function MeetingSetupStep({
             </p>
           ) : null}
           <p className="mt-2 text-xs text-muted-foreground">
-            The native macOS permission prompt can take about 45 seconds, and fallback routes may take longer. Plainsong plays a brief low-volume tone only for the native Core Audio process tap. Virtual loopback routes must carry external audio during the test. A route is only marked ready after callbacks contain the expected non-silent verification signal.
+            macOS may ask for system-audio permission the first time. Plainsong stops waiting if macOS does not finish setup, so you can open Privacy Settings and try again. Plainsong plays a brief low-volume tone only for the native Core Audio process tap. Virtual loopback routes must carry external audio during the test. A route is only marked ready after callbacks contain the expected non-silent verification signal.
           </p>
           <div className="mt-3 flex flex-wrap items-center gap-2">
             <Button
@@ -1710,7 +2304,8 @@ function MeetingSetupStep({
               ) : null}
               Test system audio
             </Button>
-            {systemAudioCapability?.reason === "permission_denied" ? (
+            {systemAudioCapability?.backend === "core_audio_process_tap" &&
+            !systemAudioCapability.ready ? (
               <Button
                 type="button"
                 size="sm"

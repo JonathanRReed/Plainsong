@@ -18,6 +18,7 @@ import {
 import { invoke, listen } from "@/lib/electron";
 import { Button } from "@/components/ui/button";
 import { Switch } from "@/components/ui/switch";
+import { SettingsSwitch } from "@/components/ui/settings-control";
 import { Input } from "@/components/ui/input";
 import { Textarea } from "@/components/ui/textarea";
 import { Label } from "@/components/ui/label";
@@ -105,7 +106,12 @@ import {
   SHORTCUT_FIELD_PRECEDENCE,
 } from "../../../electron/shortcut-registration";
 import { ONBOARDING_STORAGE_KEY, requestOnboarding } from "@/lib/onboarding";
-import { requestMainView } from "@/lib/navigation";
+import {
+  consumePendingSettingsTab,
+  OPEN_SETTINGS_TAB_EVENT,
+  requestMainView,
+  type SettingsTabId,
+} from "@/lib/navigation";
 import {
   AlertCircle,
   Cloud,
@@ -124,15 +130,10 @@ import {
 } from "lucide-react";
 import { UpdateStatusWidget, BetaChannelToggle } from "@/components/update";
 import { useToast } from "@/components/toast";
+import { useProductReadinessStatus } from "@/features/readiness/product-readiness-context";
+import type { ReadinessAssessment } from "@/features/readiness/product-readiness";
 
-type TabId =
-  | "models"
-  | "asr"
-  | "general"
-  | "security"
-  | "storage"
-  | "ai"
-  | "updates";
+type TabId = SettingsTabId;
 type QueuedSettingsSave = {
   version: number;
   settings: Settings;
@@ -443,11 +444,17 @@ function describeRecordingEncryption(
 }
 
 function resolveDictationReadinessChip(
-  settings: Settings | null,
-  permissionDiagnostics: PermissionDiagnostics | null,
-  providers: AsrProviderInfo[] = [],
+  readiness: ReadinessAssessment,
 ): ReadinessChipState {
-  if (!permissionDiagnostics) {
+  if (readiness.state === "ready") {
+    return {
+      label: "Dictation",
+      status: "Ready",
+      tone: true,
+    };
+  }
+
+  if (readiness.state === "unknown") {
     return {
       label: "Dictation",
       status: "Checking",
@@ -455,80 +462,26 @@ function resolveDictationReadinessChip(
     };
   }
 
-  const microphoneReady =
-    permissionDiagnostics.microphonePermissionReady ??
-    permissionDiagnostics.microphoneReady ??
-    false;
-  const useSharedSelection =
-    settings?.transcription.useSharedAsrSelection ?? true;
-  const dictationProvider = useSharedSelection
-    ? settings?.transcription.defaultProvider
-    : settings?.transcription.dictationProvider ??
-      settings?.transcription.defaultProvider;
-  const usesAppleSpeech = dictationProvider === "macos_apple_speech";
-  const appleSpeechReadiness = providers.find(
-    (provider) => provider.providerType === "macos_apple_speech",
-  )?.platformReadiness;
-  const insertionMode = settings?.transcription.dictationInsertionMode ?? "auto";
-  const cursorInsertionReady =
-    insertionMode === "clipboard_only"
-      ? true
-      : permissionDiagnostics.cursorInsertionReady ??
-        permissionDiagnostics.accessibilityReady ??
-        true;
-
-  if (!microphoneReady) {
-    return {
-      label: "Microphone",
-      status: "Needs setup",
-      tone: false,
-    };
-  }
-
-  if (usesAppleSpeech && appleSpeechReadiness && !appleSpeechReadiness.ready) {
-    return {
-      label: "Apple Speech",
-      status:
-        appleSpeechReadiness.status === "authorization_denied"
-          ? "Permission denied"
-          : appleSpeechReadiness.status === "authorization_not_determined"
-            ? "Permission required"
-            : appleSpeechReadiness.status === "unsupported_locale"
-              ? "Locale unsupported"
-              : appleSpeechReadiness.status === "helper_missing"
-                ? "Helper missing"
-                : appleSpeechReadiness.status === "on_device_unavailable"
-                  ? "On-device unavailable"
-                  : "Needs setup",
-      tone: false,
-    };
-  }
-
-  if (usesAppleSpeech && !permissionDiagnostics.speechRecognitionReady) {
-    return {
-      label: "Speech recognition",
-      status: "Needs setup",
-      tone: false,
-    };
-  }
-
-  if (!cursorInsertionReady) {
-    return {
-      label: "Text insertion",
-      status: "Needs setup",
-      tone: false,
-    };
-  }
+  const label =
+    readiness.cause?.id === "microphone_permission" ||
+    readiness.cause?.id === "microphone_device"
+      ? "Microphone"
+      : readiness.cause?.id === "cursor_insertion"
+        ? "Text insertion"
+        : readiness.cause?.id === "dictation_route"
+          ? "Dictation engine"
+          : "Dictation";
 
   return {
-    label: "Dictation",
-    status: "Ready",
-    tone: true,
+    label,
+    status: readiness.state === "degraded" ? "Limited" : "Needs setup",
+    tone: false,
   };
 }
 
 export function SettingsView() {
   const { theme, setTheme } = useTheme();
+  const { productReadiness } = useProductReadinessStatus();
   const [activeTab, setActiveTab] = useState<TabId>("general");
   const [draftSettings, setDraftSettings] = useState<Settings | null>(null);
   const [persistedSettings, setPersistedSettings] = useState<Settings | null>(
@@ -536,6 +489,7 @@ export function SettingsView() {
   );
   const [isSaving, setIsSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [initialLoadFailed, setInitialLoadFailed] = useState(false);
   const [provider, setProvider] = useState("openai");
   const [apiKey, setApiKey] = useState("");
   const [hasApiKey, setHasApiKey] = useState(false);
@@ -554,7 +508,7 @@ export function SettingsView() {
     useState<CloudSetupReport | null>(null);
   const [permissionDiagnostics, setPermissionDiagnostics] =
     useState<PermissionDiagnostics | null>(null);
-  const [asrProviders, setAsrProviders] = useState<AsrProviderInfo[]>([]);
+  const [, setAsrProviders] = useState<AsrProviderInfo[]>([]);
   const [nativeShortcutAvailable, setNativeShortcutAvailable] =
     useState(false);
   const [shortcutConflicts, setShortcutConflicts] = useState<
@@ -644,8 +598,8 @@ export function SettingsView() {
     permissionDiagnostics?.microphoneReady ??
     false;
   const dictationReadinessChip = useMemo(
-    () => resolveDictationReadinessChip(settings, permissionDiagnostics, asrProviders),
-    [asrProviders, settings, permissionDiagnostics],
+    () => resolveDictationReadinessChip(productReadiness.dictation),
+    [productReadiness.dictation],
   );
   const recordingEncryptionSummary = useMemo(
     () => describeRecordingEncryption(securityStatus),
@@ -881,31 +835,33 @@ export function SettingsView() {
     ],
   );
 
+  const loadInitialSettings = useCallback(async () => {
+    setInitialLoadFailed(false);
+    markSettingsPerf("settings-initial-load-start");
+    try {
+      const loaded = await getSettings();
+      if (mountedRef.current) {
+        setDraftSettings(loaded);
+        setPersistedSettings(loaded);
+        setError(null);
+        markSettingsPerf("settings-initial-load-complete");
+      }
+    } catch (loadError) {
+      console.warn("Failed to load settings:", loadError);
+      if (mountedRef.current) {
+        setInitialLoadFailed(true);
+      }
+    }
+  }, []);
+
   useEffect(() => {
     mountedRef.current = true;
-    markSettingsPerf("settings-initial-load-start");
-
-    const load = async () => {
-      try {
-        const loaded = await getSettings();
-        if (mountedRef.current) {
-          setDraftSettings(loaded);
-          setPersistedSettings(loaded);
-          markSettingsPerf("settings-initial-load-complete");
-        }
-      } catch (e) {
-        if (mountedRef.current) {
-          setError(e instanceof Error ? e.message : "Failed to load settings");
-        }
-      }
-    };
-
-    void load();
+    void loadInitialSettings();
     return () => {
       mountedRef.current = false;
       void flushPendingSettingsSave(true);
     };
-  }, [flushPendingSettingsSave]);
+  }, [flushPendingSettingsSave, loadInitialSettings]);
 
   useEffect(() => {
     persistedSettingsRef.current = persistedSettings;
@@ -1024,6 +980,10 @@ export function SettingsView() {
   useEffect(() => {
     let mounted = true;
     if (!settings) return;
+    if (!isRemoteAnalysisProvider(settings.privacy.meetingsAi.provider)) {
+      setHasApiKey(false);
+      return;
+    }
       withSettingsSectionTimeout(
         "Provider secret status",
         hasProviderSecret(settings.privacy.meetingsAi.provider),
@@ -1045,6 +1005,10 @@ export function SettingsView() {
 
   useEffect(() => {
     let mounted = true;
+    if (!isRemoteAnalysisProvider(provider)) {
+      setKeyManagerHasApiKey(false);
+      return;
+    }
     withSettingsSectionTimeout(
       "Key Manager provider secret status",
       hasProviderSecret(provider),
@@ -1061,6 +1025,36 @@ export function SettingsView() {
       mounted = false;
     };
   }, [provider]);
+
+  useEffect(() => {
+    const pendingTab = consumePendingSettingsTab();
+    if (pendingTab) {
+      setActiveTab(pendingTab);
+    }
+
+    const handleOpenSettingsTab = (event: Event) => {
+      const requestedTab = (
+        event as CustomEvent<{ tab?: SettingsTabId }>
+      ).detail?.tab;
+      if (
+        requestedTab &&
+        SETTINGS_TABS.some((tab) => tab.id === requestedTab)
+      ) {
+        setActiveTab(requestedTab);
+      }
+    };
+
+    window.addEventListener(
+      OPEN_SETTINGS_TAB_EVENT,
+      handleOpenSettingsTab as EventListener,
+    );
+    return () => {
+      window.removeEventListener(
+        OPEN_SETTINGS_TAB_EVENT,
+        handleOpenSettingsTab as EventListener,
+      );
+    };
+  }, []);
 
   useEffect(() => {
     markSettingsPerf(`settings-tab-open:${activeTab}`);
@@ -1255,6 +1249,10 @@ export function SettingsView() {
           return models;
         }
         case "ollama-cloud": {
+          if (!(await hasProviderSecret("ollama-cloud"))) {
+            setOllamaCloudModels([]);
+            return [];
+          }
           const models = normalizeProviderModelList(
             await listOllamaCloudModels(),
           );
@@ -1338,10 +1336,14 @@ export function SettingsView() {
             console.error("Ollama error:", e);
             return [];
           }),
-          listOllamaCloudModels().catch((e) => {
-            console.error("Ollama Cloud error:", e);
-            return [];
-          }),
+          hasProviderSecret("ollama-cloud")
+            .then((hasSecret) =>
+              hasSecret ? listOllamaCloudModels() : Promise.resolve([]),
+            )
+            .catch((e) => {
+              console.error("Ollama Cloud error:", e);
+              return [];
+            }),
           listOpenAiModels().catch((e) => {
             console.error("OpenAI error:", e);
             return [];
@@ -1887,21 +1889,28 @@ export function SettingsView() {
   }, [localShortcutConflictsByField, shortcutConflicts]);
 
   if (!settings) {
-    if (error) {
+    if (initialLoadFailed) {
       return (
         <div className="flex h-full items-center justify-center px-6">
-          <div className="max-w-md rounded-2xl border border-destructive/25 bg-destructive/10 p-5 text-sm text-destructive">
+          <div
+            role="alert"
+            className="max-w-md rounded-2xl border border-destructive/25 bg-destructive/10 p-5 text-sm text-destructive"
+          >
             <div className="flex items-start gap-3">
               <AlertCircle className="mt-0.5 h-4 w-4 shrink-0" />
               <div>
                 <p className="font-medium">Settings could not load</p>
                 <p className="mt-1 leading-6 text-destructive/85">
-                  {error}
+                  Plainsong could not open your settings right now. Try again.
                 </p>
-                <p className="mt-3 text-sm leading-5 text-muted-foreground">
-                  Most settings need the Plainsong desktop app — open that
-                  rather than a browser window.
-                </p>
+                <Button
+                  variant="outline"
+                  size="sm"
+                  className="mt-4"
+                  onClick={() => void loadInitialSettings()}
+                >
+                  Try again
+                </Button>
               </div>
             </div>
           </div>
@@ -1944,6 +1953,7 @@ export function SettingsView() {
                   <Input
                     value={isCapturing ? "Listening..." : currentVal}
                     readOnly
+                    aria-label={`${label} shortcut`}
                     aria-invalid={conflict ? true : undefined}
                     className={`h-9 w-36 text-center font-mono text-xs ${isCapturing ? "border-primary ring-1 ring-primary" : conflict ? "border-destructive/60" : ""}`}
                     onFocus={() => setCapturingShortcut(key)}
@@ -1958,6 +1968,7 @@ export function SettingsView() {
                     variant="ghost"
                     size="sm"
                     className="h-9 px-3"
+                    aria-label={`Clear ${label} shortcut`}
                     onClick={() => {
                       const next: Settings = {
                         ...settings,
@@ -2053,52 +2064,39 @@ export function SettingsView() {
 
         {includeCoreControls && (
           <>
-            <div className="flex items-center justify-between gap-4">
-              <div className="space-y-0.5">
-                <Label>Smart Format</Label>
-                <p className="text-sm text-muted-foreground">
-                  Tidy up punctuation, grammar, and layout before the text is
-                  pasted, using the AI service set in AI &amp; Keys.
-                </p>
-              </div>
-              <Switch
-                checked={settings.transcription.dictationAiFormatting}
-                onCheckedChange={(checked) =>
-                  void updateSettings({
-                    ...settings,
-                    transcription: {
-                      ...settings.transcription,
-                      dictationAiFormatting: checked,
-                    },
-                  })
-                }
-              />
-            </div>
+            <SettingsSwitch
+              className="py-0"
+              label="Smart Format"
+              description="Tidy up punctuation, grammar, and layout before the text is pasted, using the AI service set in AI & Keys."
+              checked={settings.transcription.dictationAiFormatting}
+              onCheckedChange={(checked) =>
+                void updateSettings({
+                  ...settings,
+                  transcription: {
+                    ...settings.transcription,
+                    dictationAiFormatting: checked,
+                  },
+                })
+              }
+            />
 
-            <div className="flex items-center justify-between gap-4">
-              <div className="space-y-0.5">
-                <Label>Spoken commands</Label>
-                <p className="text-sm text-muted-foreground">
-                  Say things like &quot;command undo that&quot; or &quot;command
-                  uppercase selection&quot; and Plainsong acts on them instead
-                  of typing them.
-                </p>
-              </div>
-              <Switch
-                checked={
-                  settings.transcription.dictationCommandModeEnabled ?? true
-                }
-                onCheckedChange={(checked) =>
-                  void updateSettings({
-                    ...settings,
-                    transcription: {
-                      ...settings.transcription,
-                      dictationCommandModeEnabled: checked,
-                    },
-                  })
-                }
-              />
-            </div>
+            <SettingsSwitch
+              className="py-0"
+              label="Spoken commands"
+              description={'Say things like "command undo that" or "command uppercase selection" and Plainsong acts on them instead of typing them.'}
+              checked={
+                settings.transcription.dictationCommandModeEnabled ?? true
+              }
+              onCheckedChange={(checked) =>
+                void updateSettings({
+                  ...settings,
+                  transcription: {
+                    ...settings.transcription,
+                    dictationCommandModeEnabled: checked,
+                  },
+                })
+              }
+            />
 
             <div className="space-y-2">
               <Label>The word that starts a spoken command</Label>
@@ -2118,53 +2116,41 @@ export function SettingsView() {
               />
             </div>
 
-            <div className="flex items-center justify-between gap-4">
-              <div className="space-y-0.5">
-                <Label>Snippets</Label>
-                <p className="text-sm text-muted-foreground">
-                  Replace saved abbreviations with the full text you set for
-                  them.
-                </p>
-              </div>
-              <Switch
-                checked={
-                  settings.transcription.dictationSnippetsEnabled ?? true
-                }
-                onCheckedChange={(checked) =>
-                  void updateSettings({
-                    ...settings,
-                    transcription: {
-                      ...settings.transcription,
-                      dictationSnippetsEnabled: checked,
-                    },
-                  })
-                }
-              />
-            </div>
+            <SettingsSwitch
+              className="py-0"
+              label="Snippets"
+              description="Replace saved abbreviations with the full text you set for them."
+              checked={
+                settings.transcription.dictationSnippetsEnabled ?? true
+              }
+              onCheckedChange={(checked) =>
+                void updateSettings({
+                  ...settings,
+                  transcription: {
+                    ...settings.transcription,
+                    dictationSnippetsEnabled: checked,
+                  },
+                })
+              }
+            />
 
-            <div className="flex items-center justify-between gap-4">
-              <div className="space-y-0.5">
-                <Label>Learn from your corrections</Label>
-                <p className="text-sm text-muted-foreground">
-                  When you fix a word or short phrase after dictating, remember
-                  it for next time.
-                </p>
-              </div>
-              <Switch
-                checked={
-                  settings.transcription.dictationAutoLearnCorrections ?? true
-                }
-                onCheckedChange={(checked) =>
-                  void updateSettings({
-                    ...settings,
-                    transcription: {
-                      ...settings.transcription,
-                      dictationAutoLearnCorrections: checked,
-                    },
-                  })
-                }
-              />
-            </div>
+            <SettingsSwitch
+              className="py-0"
+              label="Learn from your corrections"
+              description="When you fix a word or short phrase after dictating, remember it for next time."
+              checked={
+                settings.transcription.dictationAutoLearnCorrections ?? true
+              }
+              onCheckedChange={(checked) =>
+                void updateSettings({
+                  ...settings,
+                  transcription: {
+                    ...settings.transcription,
+                    dictationAutoLearnCorrections: checked,
+                  },
+                })
+              }
+            />
 
             <div className="flex flex-col gap-4 lg:flex-row lg:items-center lg:justify-between">
               <p className="text-sm text-muted-foreground">
@@ -2224,28 +2210,23 @@ export function SettingsView() {
 
             {includeMeetingAutoName && (
               <>
-                <div className="flex items-center justify-between gap-4">
-                  <div className="space-y-0.5">
-                    <Label>Name meetings for me</Label>
-                    <p className="text-sm text-muted-foreground">
-                      Give each meeting a title once its transcript is done.
-                    </p>
-                  </div>
-                  <Switch
-                    checked={
-                      settings.transcription.meetingAutoNameEnabled ?? true
-                    }
-                    onCheckedChange={(checked) =>
-                      void updateSettings({
-                        ...settings,
-                        transcription: {
-                          ...settings.transcription,
-                          meetingAutoNameEnabled: checked,
-                        },
-                      })
-                    }
-                  />
-                </div>
+                <SettingsSwitch
+                  className="py-0"
+                  label="Name meetings for me"
+                  description="Give each meeting a title once its transcript is done."
+                  checked={
+                    settings.transcription.meetingAutoNameEnabled ?? true
+                  }
+                  onCheckedChange={(checked) =>
+                    void updateSettings({
+                      ...settings,
+                      transcription: {
+                        ...settings.transcription,
+                        meetingAutoNameEnabled: checked,
+                      },
+                    })
+                  }
+                />
                 <div className="space-y-2">
                   <Label>Model used for those titles</Label>
                   <Input
@@ -2269,53 +2250,43 @@ export function SettingsView() {
               </>
             )}
 
-            <div className="flex items-center justify-between gap-4">
-              <div className="space-y-0.5">
-                <Label>Also copy dictated text to the clipboard</Label>
-                <p className="text-sm text-muted-foreground">
-                  So you can paste it again yourself.
-                </p>
-              </div>
-              <Switch
-                checked={
-                  settings.transcription.dictationCopyToClipboard ?? false
-                }
-                onCheckedChange={(checked) =>
-                  void updateSettings({
-                    ...settings,
-                    transcription: {
-                      ...settings.transcription,
-                      dictationCopyToClipboard: checked,
-                    },
-                  })
-                }
-              />
-            </div>
+            <SettingsSwitch
+              className="py-0"
+              label="Also copy dictated text to the clipboard"
+              description="So you can paste it again yourself."
+              checked={
+                settings.transcription.dictationCopyToClipboard ?? false
+              }
+              onCheckedChange={(checked) =>
+                void updateSettings({
+                  ...settings,
+                  transcription: {
+                    ...settings.transcription,
+                    dictationCopyToClipboard: checked,
+                  },
+                })
+              }
+            />
           </>
         )}
 
         {includeAudioTuning && (
           <>
-            <div className="flex items-center justify-between gap-4">
-              <div className="space-y-0.5">
-                <Label>Skip silence</Label>
-                <p className="text-sm text-muted-foreground">
-                  Leave the quiet stretches out of what gets transcribed.
-                </p>
-              </div>
-              <Switch
-                checked={settings.transcription.silenceSkipEnabled}
-                onCheckedChange={(checked) =>
-                  void updateSettings({
-                    ...settings,
-                    transcription: {
-                      ...settings.transcription,
-                      silenceSkipEnabled: checked,
-                    },
-                  })
-                }
-              />
-            </div>
+            <SettingsSwitch
+              className="py-0"
+              label="Skip silence"
+              description="Leave the quiet stretches out of what gets transcribed."
+              checked={settings.transcription.silenceSkipEnabled}
+              onCheckedChange={(checked) =>
+                void updateSettings({
+                  ...settings,
+                  transcription: {
+                    ...settings.transcription,
+                    silenceSkipEnabled: checked,
+                  },
+                })
+              }
+            />
 
             {/* The VAD backend drives dictation auto-stop-on-silence and
                 hands-free auto-start (not the recording silence-timeout
@@ -2500,29 +2471,23 @@ export function SettingsView() {
 
         {includePermissions && (
           <>
-            <div className="flex items-center justify-between gap-4">
-              <div className="space-y-0.5">
-                <Label>Ask macOS for permission when needed</Label>
-                <p className="text-sm text-muted-foreground">
-                  Requests microphone access before dictation starts, and
-                  speech recognition only if you have chosen Apple Speech.
-                </p>
-              </div>
-              <Switch
-                checked={
-                  settings.transcription.dictationAutoRequestPermissions ?? true
-                }
-                onCheckedChange={(checked) =>
-                  void updateSettings({
-                    ...settings,
-                    transcription: {
-                      ...settings.transcription,
-                      dictationAutoRequestPermissions: checked,
-                    },
-                  })
-                }
-              />
-            </div>
+            <SettingsSwitch
+              className="py-0"
+              label="Ask macOS for permission when needed"
+              description="Requests microphone access before dictation starts, and speech recognition only if you have chosen Apple Speech."
+              checked={
+                settings.transcription.dictationAutoRequestPermissions ?? true
+              }
+              onCheckedChange={(checked) =>
+                void updateSettings({
+                  ...settings,
+                  transcription: {
+                    ...settings.transcription,
+                    dictationAutoRequestPermissions: checked,
+                  },
+                })
+              }
+            />
 
             <div className="space-y-3 border-t pt-4">
               <div className="flex flex-col gap-3 lg:flex-row lg:items-center lg:justify-between">
@@ -2657,6 +2622,7 @@ export function SettingsView() {
               </p>
               <div className="flex items-center gap-2">
                 <select
+                  aria-label="API key service"
                   value={provider}
                   onChange={(e: ChangeEvent<HTMLSelectElement>) => {
                     // This only chooses which provider's credential is being
@@ -2842,13 +2808,19 @@ export function SettingsView() {
                         "Cloud AI for summaries and answers is off.",
                       );
                     }
-                    const keyPresent = await hasProviderSecret(
-                      settings.privacy.meetingsAi.provider,
-                    );
-                    if (!keyPresent) {
-                      checks.push(
-                        `No key saved for ${describeAnalysisDestination(settings.privacy.meetingsAi.provider)}.`,
+                    if (
+                      isRemoteAnalysisProvider(
+                        settings.privacy.meetingsAi.provider,
+                      )
+                    ) {
+                      const keyPresent = await hasProviderSecret(
+                        settings.privacy.meetingsAi.provider,
                       );
+                      if (!keyPresent) {
+                        checks.push(
+                          `No key saved for ${describeAnalysisDestination(settings.privacy.meetingsAi.provider)}.`,
+                        );
+                      }
                     }
                     if (checks.length === 0) {
                       setCloudReadinessMessage("Everything is in place.");
@@ -2925,8 +2897,9 @@ export function SettingsView() {
             </div>
 
             <div className="space-y-2">
-              <Label>Method</Label>
+              <Label htmlFor="memory-search-method">Method</Label>
               <select
+                id="memory-search-method"
                 value={settings.transcription.memorySearchMode}
                 onChange={(e: ChangeEvent<HTMLSelectElement>) =>
                   void updateSettings({
@@ -3205,6 +3178,7 @@ export function SettingsView() {
                               </p>
                             </div>
                             <Switch
+                              aria-label="Use a different microphone for dictation"
                               checked={
                                 settings.audio
                                   .dictationInputOverrideEnabled ?? false
@@ -3277,6 +3251,7 @@ export function SettingsView() {
                               </p>
                             </div>
                             <Switch
+                              aria-label="Use a different microphone for meetings"
                               checked={
                                 settings.audio
                                   .meetingInputOverrideEnabled ?? false
@@ -3440,7 +3415,8 @@ export function SettingsView() {
                             ) : null}
                             Run the test
                           </Button>
-                          {systemAudioCapability?.reason === "permission_denied" ? (
+                          {systemAudioCapability?.backend === "core_audio_process_tap" &&
+                          !systemAudioCapability.ready ? (
                             <Button
                               variant="ghost"
                               size="sm"
@@ -3465,7 +3441,7 @@ export function SettingsView() {
 
                     <div className="flex items-center justify-between">
                       <div className="space-y-0.5">
-                        <Label>Separate speakers</Label>
+                        <Label id="separate-speakers-label">Separate speakers</Label>
                         <p className="text-sm text-muted-foreground">
                           Once a recording is transcribed, split the text up by
                           who was talking.
@@ -3473,6 +3449,7 @@ export function SettingsView() {
                       </div>
                       {diarizationAvailable ? (
                         <Switch
+                          aria-labelledby="separate-speakers-label"
                           checked={settings.transcription.enableDiarization}
                           onCheckedChange={(checked) =>
                             void updateSettings({
@@ -3526,8 +3503,9 @@ export function SettingsView() {
                     </div>
 
                     <div className="space-y-2">
-                      <Label>Transcription language</Label>
+                      <Label htmlFor="transcription-language">Transcription language</Label>
                       <select
+                        id="transcription-language"
                         className="w-full rounded-md border bg-background px-3 py-2 text-sm"
                         value={settings.transcription.language ?? ""}
                         onChange={(e: ChangeEvent<HTMLSelectElement>) =>
@@ -3670,45 +3648,34 @@ export function SettingsView() {
                       </div>
                     </div>
 
-                    <div className="flex items-center justify-between">
-                      <div className="space-y-0.5">
-                        <Label>Keep running after close</Label>
-                        <p className="text-sm text-muted-foreground">
-                          Closing the window leaves Plainsong running in the
-                          menu bar, so shortcuts and recording keep working.
-                        </p>
-                      </div>
-                      <Switch
-                        checked={settings.ui.minimizeToTray}
-                        onCheckedChange={(checked) => {
-                          void updateSettings({
-                            ...settings,
-                            ui: { ...settings.ui, minimizeToTray: checked },
-                          });
-                          void invoke("app:set_minimize_to_tray", {
-                            enabled: checked,
-                          }).catch(() => {});
-                        }}
-                      />
-                    </div>
+                    <SettingsSwitch
+                      className="py-0"
+                      label="Keep running after close"
+                      description="Closing the window leaves Plainsong running in the menu bar, so shortcuts and recording keep working."
+                      checked={settings.ui.minimizeToTray}
+                      onCheckedChange={(checked) => {
+                        void updateSettings({
+                          ...settings,
+                          ui: { ...settings.ui, minimizeToTray: checked },
+                        });
+                        void invoke("app:set_minimize_to_tray", {
+                          enabled: checked,
+                        }).catch(() => {});
+                      }}
+                    />
 
-                    <div className="flex items-center justify-between">
-                      <div className="space-y-0.5">
-                        <Label>Always on top</Label>
-                        <p className="text-sm text-muted-foreground">
-                          Keep the window above other applications
-                        </p>
-                      </div>
-                      <Switch
-                        checked={settings.ui.alwaysOnTop}
-                        onCheckedChange={(checked) =>
-                          void updateSettings({
-                            ...settings,
-                            ui: { ...settings.ui, alwaysOnTop: checked },
-                          })
-                        }
-                      />
-                    </div>
+                    <SettingsSwitch
+                      className="py-0"
+                      label="Always on top"
+                      description="Keep the window above other applications."
+                      checked={settings.ui.alwaysOnTop}
+                      onCheckedChange={(checked) =>
+                        void updateSettings({
+                          ...settings,
+                          ui: { ...settings.ui, alwaysOnTop: checked },
+                        })
+                      }
+                    />
 
                     <div className="pt-4 border-t space-y-4">
                       <div className="space-y-1">
@@ -3719,37 +3686,35 @@ export function SettingsView() {
                         </p>
                       </div>
 
-                      <div className="flex items-center justify-between">
-                        <Label>While dictating</Label>
-                        <Switch
-                          checked={settings.ui.showDictationPopup}
-                          onCheckedChange={(checked) =>
-                            void updateSettings({
-                              ...settings,
-                              ui: {
-                                ...settings.ui,
-                                showDictationPopup: checked,
-                              },
-                            })
-                          }
-                        />
-                      </div>
+                      <SettingsSwitch
+                        className="py-0"
+                        label="While dictating"
+                        checked={settings.ui.showDictationPopup}
+                        onCheckedChange={(checked) =>
+                          void updateSettings({
+                            ...settings,
+                            ui: {
+                              ...settings.ui,
+                              showDictationPopup: checked,
+                            },
+                          })
+                        }
+                      />
 
-                      <div className="flex items-center justify-between">
-                        <Label>While recording a meeting</Label>
-                        <Switch
-                          checked={settings.ui.showRecordingPopup}
-                          onCheckedChange={(checked) =>
-                            void updateSettings({
-                              ...settings,
-                              ui: {
-                                ...settings.ui,
-                                showRecordingPopup: checked,
-                              },
-                            })
-                          }
-                        />
-                      </div>
+                      <SettingsSwitch
+                        className="py-0"
+                        label="While recording a meeting"
+                        checked={settings.ui.showRecordingPopup}
+                        onCheckedChange={(checked) =>
+                          void updateSettings({
+                            ...settings,
+                            ui: {
+                              ...settings.ui,
+                              showRecordingPopup: checked,
+                            },
+                          })
+                        }
+                      />
                     </div>
 
                     <div className="pt-4 border-t space-y-5">
@@ -3824,6 +3789,7 @@ export function SettingsView() {
                         </p>
                       </div>
                       <Switch
+                        aria-label="Use cloud AI for summaries and answers"
                         checked={settings.privacy.remoteProcessingEnabled}
                         onCheckedChange={(checked) =>
                           void updateSettings({
@@ -4000,8 +3966,9 @@ export function SettingsView() {
                     <div className="h-px bg-border" />
 
                     <div className="space-y-2">
-                      <Label>Auto-delete dictation recordings</Label>
+                      <Label htmlFor="dictation-retention">Auto-delete dictation recordings</Label>
                       <select
+                        id="dictation-retention"
                         className="w-full rounded-md border bg-background px-3 py-2 text-sm"
                         value={
                           settings.transcription.dictationRetentionPreset ??
@@ -4057,8 +4024,9 @@ export function SettingsView() {
                     </div>
 
                     <div className="space-y-2">
-                      <Label>Meeting audio</Label>
+                      <Label htmlFor="meeting-audio-storage">Meeting audio</Label>
                       <select
+                        id="meeting-audio-storage"
                         className="w-full rounded-md border bg-background px-3 py-2 text-sm"
                         value={
                           settings.transcription.meetingAudioStorageMode ??
@@ -4082,8 +4050,9 @@ export function SettingsView() {
                     </div>
 
                     <div className="space-y-2">
-                      <Label>Auto-delete meeting data</Label>
+                      <Label htmlFor="meeting-retention">Auto-delete meeting data</Label>
                       <select
+                        id="meeting-retention"
                         className="w-full rounded-md border bg-background px-3 py-2 text-sm"
                         value={
                           settings.transcription.meetingRetentionPreset ??
@@ -4139,8 +4108,9 @@ export function SettingsView() {
                     </div>
 
                     <div className="space-y-2">
-                      <Label>When a meeting is auto-deleted, remove</Label>
+                      <Label htmlFor="meeting-retention-delete-mode">When a meeting is auto-deleted, remove</Label>
                       <select
+                        id="meeting-retention-delete-mode"
                         className="w-full rounded-md border bg-background px-3 py-2 text-sm"
                         value={
                           settings.transcription
@@ -4331,30 +4301,24 @@ export function SettingsView() {
                           </p>
                         </div>
 
-                        <div className="flex items-center justify-between gap-4">
-                          <div className="space-y-0.5">
-                            <Label>Allow uploading to cloud storage</Label>
-                            <p className="text-sm text-muted-foreground">
-                              Turns on the Sync buttons below. Uploads still
-                              only happen when you press one.
-                            </p>
-                          </div>
-                          <Switch
-                            aria-label="Enable manual cloud sync"
-                            checked={backupConfig.cloudSync}
-                            onCheckedChange={(checked) =>
-                              setBackupConfig({
-                                ...backupConfig,
-                                cloudSync: checked,
-                              })
-                            }
-                          />
-                        </div>
+                        <SettingsSwitch
+                          className="py-0"
+                          label="Allow uploading to cloud storage"
+                          description="Turns on the Sync buttons below. Uploads still only happen when you press one."
+                          checked={backupConfig.cloudSync}
+                          onCheckedChange={(checked) =>
+                            setBackupConfig({
+                              ...backupConfig,
+                              cloudSync: checked,
+                            })
+                          }
+                        />
 
                         <div className="grid grid-cols-2 gap-4">
                           <div className="space-y-2">
-                            <Label>Cloud storage service</Label>
+                            <Label htmlFor="cloud-storage-service">Cloud storage service</Label>
                             <select
+                              id="cloud-storage-service"
                               value={backupConfig.cloudProvider ?? ""}
                               onChange={(e: ChangeEvent<HTMLSelectElement>) =>
                                 setBackupConfig({
@@ -4783,32 +4747,29 @@ export function SettingsView() {
                         the settings schema: every finished meeting was
                         handed to the analysis provider with nothing in the
                         UI saying so. */}
-                    <div className="flex items-start justify-between gap-3">
-                      <div className="space-y-0.5">
-                        <Label>Summarize every meeting automatically</Label>
-                        <p className="text-sm text-muted-foreground">
-                          {!settings.transcription.enableAutoAnalysis
-                            ? "Meetings are summarized only when you ask for it from the meeting itself."
-                            : isRemoteAnalysisProvider(
-                                  settings.privacy.meetingsAi.provider,
-                                ) && !settings.privacy.remoteProcessingEnabled
-                              ? `Every finished meeting would go to ${describeAnalysisDestination(settings.privacy.meetingsAi.provider)}, but cloud AI is turned off — so no summary is written.`
-                              : `Every finished meeting transcript goes to ${describeAnalysisDestination(settings.privacy.meetingsAi.provider)} for a summary and action items, without asking first.`}
-                        </p>
-                      </div>
-                      <Switch
-                        checked={settings.transcription.enableAutoAnalysis}
-                        onCheckedChange={(checked) =>
-                          void updateSettings({
-                            ...settings,
-                            transcription: {
-                              ...settings.transcription,
-                              enableAutoAnalysis: checked,
-                            },
-                          })
-                        }
-                      />
-                    </div>
+                    <SettingsSwitch
+                      className="items-start py-0"
+                      label="Summarize every meeting automatically"
+                      description={
+                        !settings.transcription.enableAutoAnalysis
+                          ? "Meetings are summarized only when you ask for it from the meeting itself."
+                          : isRemoteAnalysisProvider(
+                                settings.privacy.meetingsAi.provider,
+                              ) && !settings.privacy.remoteProcessingEnabled
+                            ? `Every finished meeting would go to ${describeAnalysisDestination(settings.privacy.meetingsAi.provider)}, but cloud AI is turned off — so no summary is written.`
+                            : `Every finished meeting transcript goes to ${describeAnalysisDestination(settings.privacy.meetingsAi.provider)} for a summary and action items, without asking first.`
+                      }
+                      checked={settings.transcription.enableAutoAnalysis}
+                      onCheckedChange={(checked) =>
+                        void updateSettings({
+                          ...settings,
+                          transcription: {
+                            ...settings.transcription,
+                            enableAutoAnalysis: checked,
+                          },
+                        })
+                      }
+                    />
 
                     {/* Which model writes them is chosen in Models, with the
                         speech engines and the presets that set all four lanes
@@ -4835,6 +4796,7 @@ export function SettingsView() {
                         </p>
                       </div>
                       <Switch
+                        aria-label="Use cloud AI for summaries and answers"
                         checked={settings.privacy.remoteProcessingEnabled}
                         onCheckedChange={(checked) =>
                           void updateSettings({

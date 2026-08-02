@@ -46,6 +46,18 @@ function normalizePath(path: string): string {
   return path.replace(/\\/g, "/");
 }
 
+/** Suffixes the download manager uses while a file is still being written. */
+const PARTIAL_DOWNLOAD_SUFFIXES = [".part", ".partial", ".tmp", ".download", ".crdownload"];
+
+function isPartialDownloadArtifact(path: string): boolean {
+  const normalized = normalizePath(path).toLowerCase();
+  const fileName = normalized.slice(normalized.lastIndexOf("/") + 1);
+  return (
+    PARTIAL_DOWNLOAD_SUFFIXES.some((suffix) => fileName.endsWith(suffix)) ||
+    fileName.startsWith(".")
+  );
+}
+
 function modelIdForFile(
   providerType: AsrProviderType,
   file: DownloadedModelFile,
@@ -79,6 +91,13 @@ export function buildDownloadedModelIndex(
   const presentRouteIds = new Set<string>();
 
   for (const file of files) {
+    if (isPartialDownloadArtifact(file.path)) {
+      // A download still in flight writes to a temporary sibling. Counting it
+      // made an interrupted download read as an installed model, so the route
+      // looked ready and then failed at transcription time.
+      continue;
+    }
+
     const providerType = PROVIDER_BY_LIST_VALUE[file.provider];
     if (!providerType) {
       // Silero VAD, diarization embeddings and platform assets are all

@@ -66,6 +66,28 @@ describe("ASR model capability metadata", () => {
     );
   });
 
+  it("separates upstream language coverage from languages qualified in Plainsong", () => {
+    expect(
+      getAsrModelCapability("whisper", "base.en")?.languageEvidence,
+    ).toEqual({
+      basis: "plainsong_verified",
+      verifiedLanguages: ["English"],
+    });
+    expect(
+      getAsrModelCapability("whisper", "large-v3-turbo")?.languageEvidence,
+    ).toEqual({
+      basis: "upstream_listed",
+      verifiedLanguages: [],
+    });
+    expect(
+      getAsrModelCapability("parakeet", "parakeet-tdt-0.6b-v3")
+        ?.languageEvidence,
+    ).toEqual({
+      basis: "upstream_listed",
+      verifiedLanguages: ["English"],
+    });
+  });
+
   it("carries the real download sizes rather than placeholders", () => {
     // All MiB, matching the (misnamed) `size_mb` fields on the Rust side.
     expect(getAsrModelCapability("whisper", "base.en")?.sizeMib).toBe(142);
@@ -132,11 +154,18 @@ describe("ASR model capability metadata", () => {
     const baseEn = describeAsrModel("whisper", "base.en");
     expect(baseEn).toContain("142 MiB");
     expect(baseEn).toContain("English only");
+    expect(baseEn).toContain("English verified in Plainsong");
     expect(baseEn).toContain("Spanish");
 
     const turbo = describeAsrModel("whisper", "large-v3-turbo");
     expect(turbo).toContain("1.6 GiB");
+    expect(turbo).toContain("listed upstream");
+    expect(turbo).toContain("not yet qualified");
     expect(turbo).toContain("slower");
+
+    const parakeet = describeAsrModel("parakeet", "parakeet-tdt-0.6b-v3");
+    expect(parakeet).toContain("25 European languages listed upstream");
+    expect(parakeet).toContain("English verified in Plainsong");
   });
 
   it("returns null rather than inventing metadata for routes it has none for", () => {

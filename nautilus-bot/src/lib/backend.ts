@@ -25,6 +25,7 @@ export interface DictationStartOptions {
   routePreference?: "local" | "cloud";
   languageOverride?: string | null;
   livePreviewEnabled?: boolean;
+  deliveryMode?: "system" | "preview";
 }
 
 export interface DictationHistoryDetails {

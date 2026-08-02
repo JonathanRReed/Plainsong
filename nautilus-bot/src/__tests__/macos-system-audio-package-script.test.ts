@@ -50,6 +50,9 @@ describe("macOS system-audio packaging gates", () => {
     expect(qaScript).toContain("Number(result.nonSilentFrames) > 0");
     expect(qaScript).toContain("Number(result.detectedToneAmplitude) >= 0.005");
     expect(qaScript).toContain('result.verificationMethod === "known_tone"');
+    expect(qaScript).toContain('valueFor("--timeout-ms", "90000")');
+    expect(qaScript).toContain('method: "get_settings"');
+    expect(qaScript).toContain("sidecarResponsiveAfterTest");
   });
 
   it("verifies the known tone before combined meeting capture in the same sidecar", () => {
@@ -73,5 +76,28 @@ describe("macOS system-audio packaging gates", () => {
         'artifact.systemAudioVerification?.verificationMethod === "known_tone"',
       );
     }
+  });
+
+  it("proves a virtual microphone timeout is bounded and leaves the sidecar usable", () => {
+    const qaScript = fs.readFileSync(
+      path.join(repoRoot, "scripts", "capture-packaged-macos-meeting-soak.mjs"),
+      "utf8",
+    );
+
+    expect(qaScript).toContain('args.includes("--expect-start-failure")');
+    expect(qaScript).toContain(
+      'valueFor("--max-start-failure-ms", "5000")',
+    );
+    expect(qaScript).toContain(
+      'await sidecar.sendCommand("get_settings", {})',
+    );
+    expect(qaScript).toContain(
+      "artifact.startFailureRecovery.sidecarResponsive = true",
+    );
+    expect(qaScript).toContain("expectedStartFailureObserved");
+    expect(qaScript).toContain("startFailureWithinLimit");
+    expect(qaScript).toContain("sidecarResponsiveAfterStartFailure");
+    expect(qaScript).toContain("virtualFixtureOutputRestored");
+    expect(qaScript).toContain("sidecarExitedCleanly");
   });
 });

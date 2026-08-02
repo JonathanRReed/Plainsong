@@ -195,6 +195,11 @@ describe("buildSnapshot", () => {
     expect(snapshot.meetingCaptureMode).toBe("mic_only");
     expect(snapshot.meetingBlockers).toEqual([]);
     expect(snapshot.fullCaptureBlockers).toContain("Run Test system audio.");
+    expect(snapshot.productReadiness.meetings.state).toBe("ready");
+    expect(snapshot.productReadiness.fullCapture.state).toBe("degraded");
+    expect(snapshot.productReadiness.fullCapture.cause?.id).toBe(
+      "system_audio_unverified",
+    );
   });
 
   it("requires microphone permission even when an input device is present", () => {
@@ -218,6 +223,26 @@ describe("buildSnapshot", () => {
     expect(snapshot.meetingBlockers).toContain(
       "Microphone permission is still required."
     );
+    expect(snapshot.productReadiness.dictation.state).toBe("needs_action");
+    expect(snapshot.productReadiness.dictation.cause?.id).toBe(
+      "microphone_permission",
+    );
+  });
+
+  it("keeps missing permission diagnostics unknown in the canonical snapshot", () => {
+    const snapshot = buildSnapshot(
+      createSettings("auto"),
+      createProviders(),
+      null,
+      null,
+      null,
+    );
+
+    expect(snapshot.productReadiness.dictation.state).toBe("unknown");
+    expect(snapshot.productReadiness.dictation.cause?.id).toBe(
+      "source_unavailable",
+    );
+    expect(snapshot.productReadiness.meetings.state).toBe("unknown");
   });
 
   it("reserves Me + Them readiness for a verified system-audio route", () => {

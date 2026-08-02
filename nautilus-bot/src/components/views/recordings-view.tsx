@@ -98,6 +98,7 @@ import {
   consumePendingRecordingWorkspace,
   OPEN_RECORDING_WORKSPACE_EVENT,
   requestMainView,
+  requestReadinessDestination,
   type OpenRecordingWorkspaceDetail,
 } from "@/lib/navigation";
 import { actionItemsToMarkdownList } from "@/lib/markdown";
@@ -107,6 +108,8 @@ import { EditableTitle } from "@/components/views/meetings/editable-title";
 import { MarkdownText } from "@/components/views/meetings/markdown-text";
 import { WorkspaceSkeleton } from "@/components/views/meetings/workspace-skeleton";
 import { listen } from "@/lib/electron";
+import { useProductReadinessStatus } from "@/features/readiness/product-readiness-context";
+import { selectReadinessForSurface } from "@/features/readiness/product-readiness";
 import {
   AlertCircle,
   ArrowLeft,
@@ -910,6 +913,12 @@ function buildRelationshipRecallPrompts(args: {
 }
 
 export function RecordingsView() {
+  const { productReadiness } = useProductReadinessStatus();
+  const meetingsReadiness = selectReadinessForSurface(
+    productReadiness,
+    "meetings",
+  );
+  const fullCaptureReadiness = productReadiness.fullCapture;
   const {
     recordings,
     isLoading: recordingsLoading,
@@ -1141,6 +1150,7 @@ export function RecordingsView() {
       return;
     }
 
+    let disposed = false;
     let unlistenProgress: (() => void) | undefined;
     let unlistenFailure: (() => void) | undefined;
     const recordingId = selectedRecording.id;
@@ -1166,7 +1176,11 @@ export function RecordingsView() {
           });
         }
       ).then((unlisten) => {
-        unlistenProgress = unlisten;
+        if (disposed) {
+          unlisten();
+        } else {
+          unlistenProgress = unlisten;
+        }
       }),
       listen<RecordingAnalysisFailedEvent>(
         "recording-analysis-failed",
@@ -1184,11 +1198,16 @@ export function RecordingsView() {
           });
         }
       ).then((unlisten) => {
-        unlistenFailure = unlisten;
+        if (disposed) {
+          unlisten();
+        } else {
+          unlistenFailure = unlisten;
+        }
       }),
     ]);
 
     return () => {
+      disposed = true;
       unlistenProgress?.();
       unlistenFailure?.();
     };
@@ -1797,6 +1816,7 @@ export function RecordingsView() {
     if (!isRecording || !recordingId) {
       return;
     }
+    let disposed = false;
     let unlisten: (() => void) | undefined;
     let scrollTimeout: ReturnType<typeof setTimeout> | undefined;
     listen<RecordingTranscriptionStreamEvent>(
@@ -1822,9 +1842,14 @@ export function RecordingsView() {
         }, 50);
       }
     ).then((fn) => {
-      unlisten = fn;
+      if (disposed) {
+        fn();
+      } else {
+        unlisten = fn;
+      }
     });
     return () => {
+      disposed = true;
       if (scrollTimeout) {
         clearTimeout(scrollTimeout);
       }
@@ -1838,6 +1863,7 @@ export function RecordingsView() {
     if (!isRecording || !recordingId) {
       return;
     }
+    let disposed = false;
     let unlisten: (() => void) | undefined;
     listen<MeetingAudioSourceWarningEvent>(
       MEETING_AUDIO_SOURCE_WARNING_EVENT,
@@ -1846,14 +1872,20 @@ export function RecordingsView() {
         setAudioSourceWarning(describeAudioSourceWarning(event.payload));
       }
     ).then((fn) => {
-      unlisten = fn;
+      if (disposed) {
+        fn();
+      } else {
+        unlisten = fn;
+      }
     });
     return () => {
+      disposed = true;
       unlisten?.();
     };
   }, [isRecording, recordingId]);
 
   useEffect(() => {
+    let disposed = false;
     let unlisten: (() => void) | undefined;
     listen<{
       recordingId: string;
@@ -1877,15 +1909,21 @@ export function RecordingsView() {
         });
       }
     }).then((fn) => {
-      unlisten = fn;
+      if (disposed) {
+        fn();
+      } else {
+        unlisten = fn;
+      }
     });
 
     return () => {
+      disposed = true;
       unlisten?.();
     };
   }, [refetch]);
 
   useEffect(() => {
+    let disposed = false;
     let unlisten: (() => void) | undefined;
     listen<RecordingStatusChangedEvent>("recording-status-changed", (event) => {
       const payload = event.payload;
@@ -1911,10 +1949,15 @@ export function RecordingsView() {
         );
       }
     }).then((fn) => {
-      unlisten = fn;
+      if (disposed) {
+        fn();
+      } else {
+        unlisten = fn;
+      }
     });
 
     return () => {
+      disposed = true;
       unlisten?.();
     };
   }, [refetch]);
@@ -1998,7 +2041,39 @@ export function RecordingsView() {
       });
   };
 
+  const openMeetingCapture = () => {
+    if (meetingsReadiness.state !== "ready") {
+      const cause = meetingsReadiness.cause;
+      toast(
+        cause?.message ?? "Plainsong could not confirm that meetings are ready.",
+        "error",
+      );
+      if (cause) {
+        requestReadinessDestination(cause.action.destination);
+      }
+      return;
+    }
+    setShowConsent(true);
+  };
+
   const handleStartRecording = async (options: { mic: boolean; systemAudio: boolean; template?: string }) => {
+    const requestedReadiness = options.systemAudio
+      ? fullCaptureReadiness
+      : meetingsReadiness;
+    if (requestedReadiness.state !== "ready") {
+      const cause = requestedReadiness.cause;
+      toast(
+        cause?.message ??
+          "Plainsong could not confirm that the selected meeting capture is ready.",
+        "error",
+      );
+      if (cause) {
+        requestReadinessDestination(cause.action.destination);
+      }
+      setShowConsent(false);
+      return;
+    }
+
     try {
       const selectedTemplateId = options.template ?? "auto";
       const shouldSeedTemplateOutline =
@@ -5116,7 +5191,7 @@ export function RecordingsView() {
               {isStopping ? "Stopping…" : "Stop meeting"}
             </Button>
           ) : (
-            <Button variant="active" onClick={() => setShowConsent(true)}>
+            <Button variant="active" onClick={openMeetingCapture}>
               <Mic2 className="h-4 w-4 mr-2" />
               New meeting
             </Button>
@@ -5126,6 +5201,44 @@ export function RecordingsView() {
 
       <ScrollArea className="flex-1">
         <div className="p-6">
+          {meetingsReadiness.state !== "ready" ? (
+            <div
+              role={
+                meetingsReadiness.state === "unknown" ? "status" : "alert"
+              }
+              aria-label="Meetings need attention"
+              className="mb-4 flex flex-wrap items-start justify-between gap-3 rounded-md border border-rust/35 bg-rust/10 px-4 py-3"
+            >
+              <div className="flex min-w-0 items-start gap-2.5 text-sm text-rust">
+                <span
+                  className="neume neume-rust mt-1 shrink-0"
+                  aria-hidden="true"
+                />
+                <div>
+                  <p className="font-medium">Meetings need attention</p>
+                  <p className="mt-1 leading-6">
+                    {meetingsReadiness.cause?.message ??
+                      "Plainsong could not confirm that meetings are ready."}
+                  </p>
+                </div>
+              </div>
+              {meetingsReadiness.cause ? (
+                <Button
+                  type="button"
+                  size="sm"
+                  variant="outline"
+                  onClick={() =>
+                    requestReadinessDestination(
+                      meetingsReadiness.cause!.action.destination,
+                    )
+                  }
+                >
+                  {meetingsReadiness.cause.action.label}
+                </Button>
+              ) : null}
+            </div>
+          ) : null}
+
           {autoNameIssue && (
             <Card className="mb-4 border-rust/40 bg-rust/5">
               <CardContent className="p-4">
@@ -5537,7 +5650,7 @@ export function RecordingsView() {
                   : "Try a different search, or a different status."}
               </p>
               {meetings.length === 0 && (
-                <Button className="mt-4" variant="active" onClick={() => setShowConsent(true)}>
+                <Button className="mt-4" variant="active" onClick={openMeetingCapture}>
                   <Mic2 data-icon="inline-start" />
                   Start a meeting
                 </Button>

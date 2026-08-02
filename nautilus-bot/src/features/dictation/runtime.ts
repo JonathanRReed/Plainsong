@@ -138,29 +138,55 @@ export function useDictationRuntime() {
   const [textReadyEvent, setTextReadyEvent] = useState<DictationTextReadyEvent | null>(null);
 
   useEffect(() => {
+    let disposed = false;
     let unlistenState: (() => void) | undefined;
     let unlistenTextReady: (() => void) | undefined;
 
     const setup = async () => {
       try {
         const initialState = await invoke<DictationStateChangedEvent>("get_dictation_overlay_state");
-        setStateEvent((previous) => mergeStateEvent(previous, initialState));
+        if (!disposed) {
+          setStateEvent((previous) => mergeStateEvent(previous, initialState));
+        }
       } catch {
         // Ignore initial hydration failures.
       }
 
-      unlistenState = await listen<DictationStateChangedEvent>("dictation-state-changed", (event) => {
-        setStateEvent((previous) => mergeStateEvent(previous, event.payload));
-      });
+      const nextUnlistenState = await listen<DictationStateChangedEvent>(
+        "dictation-state-changed",
+        (event) => {
+          if (!disposed) {
+            setStateEvent((previous) =>
+              mergeStateEvent(previous, event.payload),
+            );
+          }
+        },
+      );
+      if (disposed) {
+        nextUnlistenState();
+        return;
+      }
+      unlistenState = nextUnlistenState;
 
-      unlistenTextReady = await listen<DictationTextReadyEvent>("dictation-text-ready", (event) => {
-        setTextReadyEvent({ ...event.payload });
-      });
+      const nextUnlistenTextReady = await listen<DictationTextReadyEvent>(
+        "dictation-text-ready",
+        (event) => {
+          if (!disposed) {
+            setTextReadyEvent({ ...event.payload });
+          }
+        },
+      );
+      if (disposed) {
+        nextUnlistenTextReady();
+        return;
+      }
+      unlistenTextReady = nextUnlistenTextReady;
     };
 
     void setup();
 
     return () => {
+      disposed = true;
       unlistenState?.();
       unlistenTextReady?.();
     };

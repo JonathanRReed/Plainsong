@@ -61,7 +61,10 @@ function writeFakeElectronFramework(appPath: string, wire: string) {
 
 function createFakeMacosApp(
   tempRoot: string,
-  { fuseWire = HARDENED_FUSE_WIRE }: { fuseWire?: string } = {},
+  {
+    archiveDirectoryName = "release",
+    fuseWire = HARDENED_FUSE_WIRE,
+  }: { archiveDirectoryName?: string; fuseWire?: string } = {},
 ) {
   const appPath = path.join(tempRoot, "release", "mac-arm64", "Plainsong.app");
   const contentsDir = path.join(appPath, "Contents");
@@ -81,7 +84,8 @@ function createFakeMacosApp(
 
   // The gate also inspects the disk image and archive the user downloads, not
   // just the bundle inside them.
-  const releaseDir = path.join(tempRoot, "release");
+  const releaseDir = path.join(tempRoot, archiveDirectoryName);
+  mkdirSync(releaseDir, { recursive: true });
   const dmgPath = path.join(releaseDir, "Plainsong-1.0.0-arm64.dmg");
   const zipPath = path.join(releaseDir, "Plainsong-1.0.0-arm64-mac.zip");
   writeFileSync(dmgPath, "dmg", "utf8");
@@ -237,6 +241,7 @@ childProcess.spawnSync = function mockedSpawnSync(command, args = []) {
       const isSpeechHelper =
         basename === "nautilus-macos-speech-helper-aarch64-apple-darwin";
       const isShortcutHelper = basename === "plainsong-native-shortcut-helper";
+      const isSidecar = basename === "plainsong-sidecar";
       const speechEntitlement = isSpeechHelper
         ? "<key>com.apple.security.personal-information.speech-recognition</key><true/>"
         : "";
@@ -248,6 +253,10 @@ childProcess.spawnSync = function mockedSpawnSync(command, args = []) {
         isShortcutHelper && process.env.SHORTCUT_HELPER_ENTITLEMENT
           ? "<key>" + process.env.SHORTCUT_HELPER_ENTITLEMENT + "</key><true/>"
           : "";
+      const sidecarPrivilege =
+        isSidecar && process.env.SIDECAR_ENTITLEMENT
+          ? "<key>" + process.env.SIDECAR_ENTITLEMENT + "</key><true/>"
+          : "";
       return commandResult(
         0,
         [
@@ -256,6 +265,7 @@ childProcess.spawnSync = function mockedSpawnSync(command, args = []) {
           speechEntitlement,
           unrelatedSpeechPrivilege,
           shortcutPrivilege,
+          sidecarPrivilege,
           "</dict></plist>",
           "",
         ].join("\n"),
@@ -321,6 +331,8 @@ function runTrustScript(
   harness: "mock-apple-tools" | "spoofed-path-only" = "mock-apple-tools",
   speechHelperEntitlements: "minimal" | "overbroad" = "minimal",
   shortcutHelperEntitlement = "",
+  sidecarEntitlement = "",
+  releaseDir: string | null = null,
 ) {
   const outPath = path.join(tempRoot, "artifacts", "qa", "macos", `${mode}-trust.json`);
   const markdownPath = path.join(tempRoot, "artifacts", "qa", "macos", `${mode}-trust.md`);
@@ -338,6 +350,7 @@ function runTrustScript(
     MOCK_APPLE_TOOLS_TRACE_LOG: mockedTools?.tracePath ?? "",
     MOCK_ZIP_APP_PATH: appPath,
     SHORTCUT_HELPER_ENTITLEMENT: shortcutHelperEntitlement,
+    SIDECAR_ENTITLEMENT: sidecarEntitlement,
     SPOOFED_PATH_TRACE_LOG: spoofedPathTracePath,
     SPEECH_HELPER_ENTITLEMENTS: speechHelperEntitlements,
     TRUST_SPCTL_RESULT: mode,
@@ -364,6 +377,9 @@ function runTrustScript(
     "--markdown",
     markdownPath,
   );
+  if (releaseDir) {
+    nodeArgs.push("--release-dir", releaseDir);
+  }
 
   const result = spawnSync(
     process.execPath,
@@ -385,6 +401,38 @@ function runTrustScript(
 }
 
 describe("verify-macos-release-trust.mjs", () => {
+  it("resolves DMG and ZIP artifacts only from the requested release directory", () => {
+    const { tempRoot, tempScript } = createTempRepo(
+      "verify-macos-release-trust.mjs",
+    );
+    try {
+      const { appPath, dmgPath, zipPath } = createFakeMacosApp(tempRoot, {
+        archiveDirectoryName: "candidate-release",
+      });
+      const { outPath, result } = runTrustScript(
+        tempScript,
+        tempRoot,
+        appPath,
+        "accept",
+        "AJ9VWBRNZN",
+        "mock-apple-tools",
+        "minimal",
+        "",
+        "",
+        path.join(tempRoot, "candidate-release"),
+      );
+
+      expect(result.status).toBe(0);
+      const artifact = JSON.parse(readFileSync(outPath, "utf8")) as {
+        paths: Record<string, string>;
+      };
+      expect(realpathSync(artifact.paths.dmg)).toBe(realpathSync(dmgPath));
+      expect(realpathSync(artifact.paths.zip)).toBe(realpathSync(zipPath));
+    } finally {
+      rmSync(tempRoot, { recursive: true, force: true });
+    }
+  });
+
   it("writes secret-safe PASS artifacts for a trusted fake app bundle", () => {
     const { tempRoot, tempScript } = createTempRepo("verify-macos-release-trust.mjs");
     try {
@@ -474,6 +522,7 @@ describe("verify-macos-release-trust.mjs", () => {
       expect(artifact.checks.speechHelperUsesHardenedRuntime).toBe(true);
       expect(artifact.checks.appHasNoSpeechEntitlement).toBe(true);
       expect(artifact.checks.sidecarHasNoSpeechEntitlement).toBe(true);
+      expect(artifact.checks.sidecarHasNoForbiddenPrivileges).toBe(true);
       expect(artifact.checks.shortcutHelperHasNoSpeechEntitlement).toBe(true);
       expect(artifact.checks.shortcutHelperHasNoInheritedPrivileges).toBe(true);
       expect(artifact.checks.speechHelperHasSpeechEntitlement).toBe(true);
@@ -526,6 +575,7 @@ describe("verify-macos-release-trust.mjs", () => {
       expect(artifact.checks.zipSpeechHelperUsesHardenedRuntime).toBe(true);
       expect(artifact.checks.zipAppHasSecureTimestamp).toBe(true);
       expect(artifact.checks.zipSidecarHasSecureTimestamp).toBe(true);
+      expect(artifact.checks.zipSidecarHasNoForbiddenPrivileges).toBe(true);
       expect(artifact.checks.zipShortcutHelperHasSecureTimestamp).toBe(true);
       expect(artifact.checks.zipSpeechHelperHasSecureTimestamp).toBe(true);
       expect(artifact.checks.zipShortcutHelperHasNoInheritedPrivileges).toBe(true);
@@ -653,6 +703,7 @@ describe("verify-macos-release-trust.mjs", () => {
   });
 
   it.each([
+    "com.apple.security.inherit",
     "com.apple.security.device.audio-input",
     "com.apple.security.device.microphone",
     "com.apple.security.automation.apple-events",
@@ -706,6 +757,62 @@ describe("verify-macos-release-trust.mjs", () => {
       rmSync(tempRoot, { recursive: true, force: true });
     }
   });
+
+  it.each([
+    "com.apple.security.inherit",
+    "com.apple.security.device.audio-input",
+    "com.apple.security.device.microphone",
+    "com.apple.security.automation.apple-events",
+    "com.apple.security.temporary-exception.apple-events",
+    "com.apple.security.cs.allow-jit",
+    "com.apple.security.cs.allow-unsigned-executable-memory",
+    "com.apple.security.cs.disable-library-validation",
+    "com.apple.security.personal-information.speech-recognition",
+  ])("fails closed when the sidecar receives %s", (forbiddenEntitlement) => {
+    const { tempRoot, tempScript } = createTempRepo("verify-macos-release-trust.mjs");
+    try {
+      const { appPath } = createFakeMacosApp(tempRoot);
+      const { outPath, result } = runTrustScript(
+        tempScript,
+        tempRoot,
+        appPath,
+        "accept",
+        "AJ9VWBRNZN",
+        "mock-apple-tools",
+        "minimal",
+        "",
+        forbiddenEntitlement,
+      );
+
+      expect(result.status).not.toBe(0);
+      const artifact = JSON.parse(readFileSync(outPath, "utf8")) as {
+        checks: Record<string, boolean>;
+        diagnostics: {
+          sidecarEntitlements: {
+            forbiddenSidecarEntitlements: string[];
+          };
+          zipApp: {
+            sidecarEntitlements: {
+              forbiddenSidecarEntitlements: string[];
+            };
+          };
+        };
+        pass: boolean;
+      };
+      expect(artifact.pass).toBe(false);
+      expect(artifact.checks.sidecarHasNoForbiddenPrivileges).toBe(false);
+      expect(artifact.checks.zipSidecarHasNoForbiddenPrivileges).toBe(false);
+      expect(
+        artifact.diagnostics.sidecarEntitlements.forbiddenSidecarEntitlements,
+      ).toContain(forbiddenEntitlement);
+      expect(
+        artifact.diagnostics.zipApp.sidecarEntitlements
+          .forbiddenSidecarEntitlements,
+      ).toContain(forbiddenEntitlement);
+    } finally {
+      rmSync(tempRoot, { recursive: true, force: true });
+    }
+  }, 15_000);
 
   it("fails closed when Gatekeeper rejects the app bundle", () => {
     const { tempRoot, tempScript } = createTempRepo("verify-macos-release-trust.mjs");

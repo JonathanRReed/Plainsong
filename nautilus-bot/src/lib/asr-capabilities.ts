@@ -218,10 +218,26 @@ export interface AsrModelLanguageSupport {
   label: string;
 }
 
+export type AsrLanguageEvidenceBasis =
+  | "plainsong_verified"
+  | "upstream_listed";
+
+export interface AsrModelLanguageEvidence {
+  /**
+   * `plainsong_verified` means the complete language claim was exercised in
+   * this product. `upstream_listed` keeps a vendor capability distinct from a
+   * Plainsong release qualification.
+   */
+  basis: AsrLanguageEvidenceBasis;
+  /** Languages exercised successfully in Plainsong's packaged runtime. */
+  verifiedLanguages: readonly string[];
+}
+
 export interface AsrModelCapability {
   providerType: AsrProviderType;
   modelId: string;
   languages: AsrModelLanguageSupport;
+  languageEvidence: AsrModelLanguageEvidence;
   /**
    * Download size in **MiB** (2^20 bytes), not MB (10^6). The unit is not
    * cosmetic: `ggml-base.en.bin` is 147,964,211 bytes, which is 141.1 MiB but
@@ -260,7 +276,10 @@ const PARAKEET_V3_LANGUAGES: AsrModelLanguageSupport = {
   label: "25 European languages",
 };
 
-const ASR_MODEL_CAPABILITIES: readonly AsrModelCapability[] = [
+const ASR_MODEL_CAPABILITIES_WITHOUT_LANGUAGE_EVIDENCE: readonly Omit<
+  AsrModelCapability,
+  "languageEvidence"
+>[] = [
   {
     providerType: "whisper",
     modelId: "tiny",
@@ -424,6 +443,38 @@ const ASR_MODEL_CAPABILITIES: readonly AsrModelCapability[] = [
   },
 ];
 
+const LANGUAGE_EVIDENCE_BY_ROUTE = new Map<
+  string,
+  AsrModelLanguageEvidence
+>([
+  [
+    "whisper:base.en",
+    {
+      basis: "plainsong_verified",
+      verifiedLanguages: ["English"],
+    },
+  ],
+  [
+    "parakeet:parakeet-tdt-0.6b-v3",
+    {
+      basis: "upstream_listed",
+      verifiedLanguages: ["English"],
+    },
+  ],
+]);
+
+const ASR_MODEL_CAPABILITIES: readonly AsrModelCapability[] =
+  ASR_MODEL_CAPABILITIES_WITHOUT_LANGUAGE_EVIDENCE.map((entry) => ({
+    ...entry,
+    languageEvidence:
+      LANGUAGE_EVIDENCE_BY_ROUTE.get(
+        `${entry.providerType}:${entry.modelId}`,
+      ) ?? {
+        basis: "upstream_listed",
+        verifiedLanguages: [],
+      },
+  }));
+
 const CAPABILITY_BY_ROUTE = new Map<string, AsrModelCapability>(
   ASR_MODEL_CAPABILITIES.map((entry) => [
     `${entry.providerType}:${entry.modelId}`,
@@ -484,5 +535,17 @@ export function describeAsrModel(
     return null;
   }
 
-  return `${formatModelSize(capability.sizeMib)}, ${capability.languages.label} — ${capability.tradeoff}`;
+  const verifiedLanguages = capability.languageEvidence.verifiedLanguages;
+  const languageEvidence =
+    capability.languageEvidence.basis === "plainsong_verified"
+      ? `${capability.languages.label}; ${verifiedLanguages.join(
+          " and ",
+        )} verified in Plainsong`
+      : verifiedLanguages.length > 0
+        ? `${capability.languages.label} listed upstream; ${verifiedLanguages.join(
+            " and ",
+          )} verified in Plainsong`
+        : `${capability.languages.label} listed upstream; not yet qualified across the full set in Plainsong`;
+
+  return `${formatModelSize(capability.sizeMib)}, ${languageEvidence}; ${capability.tradeoff}`;
 }

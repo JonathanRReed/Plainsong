@@ -6,6 +6,7 @@ import {
   laneRouteReadiness,
   routeDownloadLabel,
   routeFactSentence,
+  type LaneReadiness,
 } from "@/components/models/model-facts";
 import type { AsrRouteCatalogEntry } from "@/lib/asr-route-catalog";
 
@@ -21,6 +22,7 @@ interface SpeechLaneRowProps {
   onSelect: (route: AsrRouteCatalogEntry) => void;
   onAction: (route: AsrRouteCatalogEntry) => void;
   actionBusy: boolean;
+  readinessOverride?: LaneReadiness | null;
   /** Whether the pause-behaviour sentence earns its place in this lane. */
   explainPauseBehavior: boolean;
 }
@@ -35,12 +37,14 @@ export function SpeechLaneRow({
   onSelect,
   onAction,
   actionBusy,
+  readinessOverride = null,
   explainPauseBehavior,
 }: SpeechLaneRowProps) {
   // The header answers for the model this lane points at, measured off disk --
   // not for the provider that lists it. See `laneRouteReadiness`.
   const headerReadiness = activeRoute
-    ? laneRouteReadiness(activeRoute, onDiskFor(activeRoute))
+    ? readinessOverride ??
+      laneRouteReadiness(activeRoute, onDiskFor(activeRoute))
     : null;
 
   return (

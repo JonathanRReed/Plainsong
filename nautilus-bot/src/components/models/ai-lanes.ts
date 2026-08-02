@@ -64,6 +64,30 @@ export function describeAnalysisDestination(provider: string | undefined): strin
 // endpoint also returns embedding, audio and moderation models, and Google's
 // returns non-Gemini endpoints; none of them can write a summary, so they
 // never belong in this picker.
+// Families that share a completion-model prefix but cannot answer a chat
+// completion. An allowlist on "gpt" alone still offered gpt-4o-transcribe and
+// gpt-4o-audio-preview, which fail at request time with a provider error the
+// user cannot act on.
+const NON_COMPLETION_MODEL_MARKERS = [
+  "audio",
+  "realtime",
+  "transcribe",
+  "tts",
+  "whisper",
+  "embedding",
+  "embed",
+  "moderation",
+  "image",
+  "dall-e",
+  "search",
+  "computer-use",
+];
+
+function canWriteCompletions(model: string): boolean {
+  const normalized = model.toLowerCase();
+  return !NON_COMPLETION_MODEL_MARKERS.some((marker) => normalized.includes(marker));
+}
+
 export function analysisModelChoices(
   providerName: string,
   models: string[],
@@ -78,10 +102,11 @@ export function analysisModelChoices(
             model.includes("o3") ||
             model.includes("o4"),
         )
+        .filter(canWriteCompletions)
         .sort();
     case "gemini":
-      return models.filter((model) => model.includes("gemini"));
+      return models.filter((model) => model.includes("gemini")).filter(canWriteCompletions);
     default:
-      return models;
+      return models.filter(canWriteCompletions);
   }
 }

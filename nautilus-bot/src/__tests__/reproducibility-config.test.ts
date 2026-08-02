@@ -43,6 +43,15 @@ describe("reproducible package and release configuration", () => {
     );
   });
 
+  it("keeps the full test suite stable and includes its config in source identity", () => {
+    const vitestConfig = readRepoFile("vitest.config.ts");
+    const sourceGate = readRepoFile("scripts/capture-source-gates.mjs");
+
+    expect(vitestConfig).toContain('pool: "threads"');
+    expect(vitestConfig).toContain("maxWorkers: 4");
+    expect(sourceGate).toContain("vite(?:st)?\\.config");
+  });
+
   it("keeps contributor and release Cargo commands locked", () => {
     const packageJson = JSON.parse(readRepoFile("package.json")) as {
       scripts: Record<string, string>;
@@ -53,6 +62,10 @@ describe("reproducible package and release configuration", () => {
       "cargo clippy --locked",
     );
     expect(packageJson.scripts["test:rust"]).toContain("cargo test --locked");
+    expect(packageJson.scripts["test:rust"]).toContain("--bins");
+    expect(packageJson.scripts["benchmark:latency"]).toContain(
+      "cargo run --release --locked",
+    );
     expect(sidecarBuild).toMatch(/"build",\s*"--locked",\s*"--release"/);
   });
 
@@ -108,6 +121,7 @@ describe("reproducible package and release configuration", () => {
     expect(builder).toMatch(
       /dmg:\s*[\s\S]*?sign:\s*true[\s\S]*?writeUpdateInfo:\s*false/,
     );
+    expect(builder).not.toContain("rust-sidecar/python");
     expectInOrder(trustSteps, [
       "bun run gate:size",
       "      - name: Notarize and staple signed DMG",

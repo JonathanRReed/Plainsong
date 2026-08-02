@@ -20,6 +20,9 @@ interface DictationCaptureHeroProps {
   phaseTone: DictationPhaseTone;
   isCaptureLive: boolean;
   isBusy: boolean;
+  isAvailable: boolean;
+  unavailableTitle: string;
+  unavailableDetail: string;
   formattedDuration: string;
   hotkeyInstruction: string;
   hotkeyPressed: boolean;
@@ -45,6 +48,9 @@ export function DictationCaptureHero({
   phaseTone,
   isCaptureLive,
   isBusy,
+  isAvailable,
+  unavailableTitle,
+  unavailableDetail,
   formattedDuration,
   hotkeyInstruction,
   hotkeyPressed,
@@ -57,8 +63,11 @@ export function DictationCaptureHero({
   onStop,
   onReadSelectedText,
 }: DictationCaptureHeroProps) {
+  const isUnavailable = !isAvailable && !isCaptureLive && !isBusy;
   const ringToneClass = isCaptureLive
     ? "border-gold/20 bg-gold/5"
+    : isUnavailable
+      ? "border-rust/30 bg-rust/10"
     : phase === "done"
       ? "border-gold/20 bg-gold/5"
       : phase === "error"
@@ -71,7 +80,11 @@ export function DictationCaptureHero({
     <Card
       className={cn(
         "border transition-colors duration-200",
-        isBusy ? "border-gold/40" : "border-border/60",
+        isBusy
+          ? "border-gold/40"
+          : isUnavailable
+            ? "border-rust/30"
+            : "border-border/60",
       )}
     >
       <CardContent className="space-y-6 p-6">
@@ -105,6 +118,8 @@ export function DictationCaptureHero({
               </>
             ) : isBusy ? (
               <RefreshCw className="h-10 w-10 animate-spin text-foreground" />
+            ) : isUnavailable ? (
+              <TriangleAlert className="h-10 w-10 text-rust" />
             ) : phase === "done" ? (
               <CheckCircle2 className="h-10 w-10 text-gold-text" />
             ) : phase === "error" ? (
@@ -145,7 +160,7 @@ export function DictationCaptureHero({
                 aria-hidden="true"
                 className={cn(
                   "mr-2 align-middle neume",
-                  phaseTone === "error"
+                  isUnavailable || phaseTone === "error"
                     ? "neume-rust"
                     : phaseTone === "idle"
                       ? "neume-hollow"
@@ -153,14 +168,16 @@ export function DictationCaptureHero({
                   isCaptureLive && "neume-live",
                 )}
               />
-              {phaseTitle}
+              {isUnavailable ? unavailableTitle : phaseTitle}
             </p>
             {isCaptureLive ? (
               <p className="time-spec mt-2 font-mono text-3xl font-semibold text-foreground">
                 {phase === "recording" ? formattedDuration : "--:--"}
               </p>
             ) : (
-              <p className="mt-1 text-sm text-muted-foreground">{phaseDetail}</p>
+              <p className="mt-1 text-sm text-muted-foreground">
+                {isUnavailable ? unavailableDetail : phaseDetail}
+              </p>
             )}
           </div>
 
@@ -173,6 +190,16 @@ export function DictationCaptureHero({
             <Button variant="outline" size="lg" disabled>
               <RefreshCw className="mr-2 h-4 w-4 animate-spin" />
               {phase === "delivering" ? "Inserting..." : "Working..."}
+            </Button>
+          ) : isUnavailable ? (
+            <Button
+              variant="outline"
+              size="lg"
+              disabled
+              aria-label="Complete setup to start"
+            >
+              <TriangleAlert className="mr-2 h-4 w-4" />
+              Complete setup to start
             </Button>
           ) : (
             <Button variant="default" size="lg" onClick={onStart}>

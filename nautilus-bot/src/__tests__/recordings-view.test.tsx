@@ -5,6 +5,8 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import { RecordingsView } from "@/components/views/recordings-view";
 import type { Recording } from "@/types";
 import * as backend from "@/lib/backend";
+import type { ProductReadinessSnapshot } from "@/features/readiness/product-readiness";
+import { OPEN_SETTINGS_TAB_EVENT } from "@/lib/navigation";
 
 const speechSynthesisMock = {
   speak: vi.fn(),
@@ -15,12 +17,27 @@ const eventListeners = new Map<string, (event: { payload: any }) => void>();
 const toast = vi.fn();
 const startMeeting = vi.fn();
 const stopMeeting = vi.fn();
+const readinessContext = vi.hoisted(() => ({
+  productReadiness: {
+    evidenceObservedAt: 1,
+    dictation: { domain: "dictation", state: "ready", cause: null },
+    meetings: { domain: "meetings", state: "ready", cause: null },
+    fullCapture: { domain: "full_capture", state: "ready", cause: null },
+    overall: { domain: "overall", state: "ready", cause: null },
+  } as ProductReadinessSnapshot,
+}));
+
+vi.mock("@/features/readiness/product-readiness-context", () => ({
+  useProductReadinessStatus: () => readinessContext,
+}));
 
 vi.mock("@/lib/electron", () => ({
   listen: vi.fn(async (eventName: string, handler: (event: { payload: any }) => void) => {
     eventListeners.set(eventName, handler);
     return () => {
-      eventListeners.delete(eventName);
+      if (eventListeners.get(eventName) === handler) {
+        eventListeners.delete(eventName);
+      }
     };
   }),
   invoke: vi.fn(),
@@ -296,6 +313,13 @@ describe("RecordingsView", () => {
     recordingsLoading = false;
     recordingsHaveLoaded = true;
     recordingsError = null;
+    readinessContext.productReadiness = {
+      evidenceObservedAt: 1,
+      dictation: { domain: "dictation", state: "ready", cause: null },
+      meetings: { domain: "meetings", state: "ready", cause: null },
+      fullCapture: { domain: "full_capture", state: "ready", cause: null },
+      overall: { domain: "overall", state: "ready", cause: null },
+    };
     recordings = [
       {
         id: "r1",
@@ -457,6 +481,69 @@ describe("RecordingsView", () => {
 
     fireEvent.click(screen.getByRole("button", { name: "Retry" }));
     expect(refetchRecordings).toHaveBeenCalledTimes(1);
+  });
+
+  it("blocks meeting capture and opens the canonical model repair destination", async () => {
+    readinessContext.productReadiness = {
+      ...readinessContext.productReadiness,
+      meetings: {
+        domain: "meetings",
+        state: "blocked",
+        cause: {
+          id: "meeting_route",
+          message: "Choose a meeting-ready speech model.",
+          action: {
+            id: "open_models",
+            label: "Review models",
+            destination: "models",
+          },
+        },
+      },
+      fullCapture: {
+        domain: "full_capture",
+        state: "blocked",
+        cause: {
+          id: "meeting_route",
+          message: "Choose a meeting-ready speech model.",
+          action: {
+            id: "open_models",
+            label: "Review models",
+            destination: "models",
+          },
+        },
+      },
+      overall: {
+        domain: "overall",
+        state: "blocked",
+        cause: {
+          id: "meeting_route",
+          message: "Choose a meeting-ready speech model.",
+          action: {
+            id: "open_models",
+            label: "Review models",
+            destination: "models",
+          },
+        },
+      },
+    };
+    const settingsTabListener = vi.fn();
+    window.addEventListener(OPEN_SETTINGS_TAB_EVENT, settingsTabListener);
+
+    render(<RecordingsView />);
+
+    expect(
+      screen.getByRole("alert", { name: "Meetings need attention" }),
+    ).toHaveTextContent("Choose a meeting-ready speech model.");
+    fireEvent.click(screen.getByRole("button", { name: "Review models" }));
+    expect(
+      (settingsTabListener.mock.calls[0]?.[0] as CustomEvent).detail,
+    ).toEqual({ tab: "models" });
+
+    fireEvent.click(screen.getByRole("button", { name: "New meeting" }));
+    expect(screen.queryByRole("dialog", { name: "Meeting consent" })).toBeNull();
+    expect(startMeeting).not.toHaveBeenCalled();
+
+    window.removeEventListener(OPEN_SETTINGS_TAB_EVENT, settingsTabListener);
   });
 
   it("keeps cached meetings visible during a background refresh", () => {

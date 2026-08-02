@@ -1,6 +1,10 @@
 import fs from "node:fs";
 import path from "node:path";
 import { describe, expect, it } from "vitest";
+import {
+  evaluateCandidateEvidenceProvenance,
+  evaluateComponentEquivalence,
+} from "../../scripts/lib/macos-component-equivalence.mjs";
 
 const repoRoot = path.resolve(import.meta.dirname, "../..");
 
@@ -10,6 +14,18 @@ const captureScript = fs.readFileSync(
 );
 const verifierScript = fs.readFileSync(
   path.join(repoRoot, "scripts", "verify-packaged-macos-app-matrix-insertion.mjs"),
+  "utf8",
+);
+const preflightScript = fs.readFileSync(
+  path.join(repoRoot, "scripts", "capture-packaged-macos-app-matrix-preflight.mjs"),
+  "utf8",
+);
+const releaseAuditScript = fs.readFileSync(
+  path.join(repoRoot, "scripts", "capture-packaged-macos-release-audit.mjs"),
+  "utf8",
+);
+const compatibilityMatrix = fs.readFileSync(
+  path.join(repoRoot, "docs", "dictation-app-compatibility-matrix.md"),
   "utf8",
 );
 
@@ -53,5 +69,107 @@ describe("macOS app matrix insertion scripts", () => {
     // product the harness never opened.
     expect(verifierScript).toContain("PASS_OUT_OF_SCOPE");
     expect(captureScript).toContain("closesMatrixRow");
+  });
+
+  it("gates launch on required rows while retaining optional hosts as deferred backlog", () => {
+    expect(preflightScript).toContain('row.launchGate === "REQUIRED"');
+    expect(preflightScript).toContain(
+      "summary.requiredLaunchReady === summary.required",
+    );
+    expect(releaseAuditScript).toContain("artifact?.pass === true");
+    expect(releaseAuditScript).toContain(
+      "artifact?.summary?.requiredLaunchReady === artifact?.summary?.required",
+    );
+    expect(compatibilityMatrix).toMatch(
+      /\| Cursor \| DEFERRED \| clipboard_only \| DEFERRED \|/,
+    );
+    expect(compatibilityMatrix).not.toMatch(
+      /\| Cursor \| [^|\n]+ \| [^|\n]+ \| REQUIRED \|/,
+    );
+  });
+
+  it("accepts historical direct-sidecar evidence only through exact unsigned component equivalence", () => {
+    const components = Object.fromEntries(
+      ["sidecar", "shortcutHelper", "speechHelper"].map((name) => [
+        name,
+        {
+          referenceUnsignedSha256: `${name}-hash`,
+          candidateUnsignedSha256: `${name}-hash`,
+          unsignedCodeIdentical: true,
+        },
+      ]),
+    );
+    const evaluation = evaluateComponentEquivalence({
+      referenceApp: "/reference/Plainsong.app",
+      candidateApp: "/candidate/Plainsong.app",
+      referenceTrustPass: true,
+      candidateTrustPass: true,
+      sameSigningTeam: true,
+      sameBundleIdentifier: true,
+      components,
+    });
+    expect(evaluation.pass).toBe(true);
+
+    const provenance = evaluateCandidateEvidenceProvenance({
+      artifactAppPath: "/reference/Plainsong.app",
+      artifactSidecarPath:
+        "/reference/Plainsong.app/Contents/Resources/sidecar/plainsong-sidecar",
+      candidateAppPath: "/candidate/Plainsong.app",
+      equivalence: {
+        pass: evaluation.pass,
+        identity: {
+          referenceApp: "/reference/Plainsong.app",
+          candidateApp: "/candidate/Plainsong.app",
+        },
+        checks: evaluation.checks,
+        components,
+      },
+    });
+
+    expect(provenance).toMatchObject({
+      valid: true,
+      mode: "verified-unsigned-component-equivalence",
+    });
+  });
+
+  it("rejects an evidence transfer when the exact candidate sidecar differs", () => {
+    const components = Object.fromEntries(
+      ["sidecar", "shortcutHelper", "speechHelper"].map((name) => [
+        name,
+        {
+          referenceUnsignedSha256: `${name}-reference`,
+          candidateUnsignedSha256:
+            name === "sidecar" ? `${name}-candidate` : `${name}-reference`,
+          unsignedCodeIdentical: name !== "sidecar",
+        },
+      ]),
+    );
+    const evaluation = evaluateComponentEquivalence({
+      referenceApp: "/reference/Plainsong.app",
+      candidateApp: "/candidate/Plainsong.app",
+      referenceTrustPass: true,
+      candidateTrustPass: true,
+      sameSigningTeam: true,
+      sameBundleIdentifier: true,
+      components,
+    });
+    expect(evaluation.pass).toBe(false);
+
+    const provenance = evaluateCandidateEvidenceProvenance({
+      artifactAppPath: "/reference/Plainsong.app",
+      artifactSidecarPath:
+        "/reference/Plainsong.app/Contents/Resources/sidecar/plainsong-sidecar",
+      candidateAppPath: "/candidate/Plainsong.app",
+      equivalence: {
+        pass: evaluation.pass,
+        identity: {
+          referenceApp: "/reference/Plainsong.app",
+          candidateApp: "/candidate/Plainsong.app",
+        },
+        checks: evaluation.checks,
+        components,
+      },
+    });
+    expect(provenance.valid).toBe(false);
   });
 });

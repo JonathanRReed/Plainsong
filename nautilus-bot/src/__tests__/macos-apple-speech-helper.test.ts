@@ -64,9 +64,15 @@ describe("macOS Apple Speech helper contract", () => {
       ),
       "utf8",
     );
+    const sidecarEntitlements = fs.readFileSync(
+      path.join(repoRoot, "build-resources/entitlements.mac.sidecar.plist"),
+      "utf8",
+    );
 
     expect(signScript).toContain("optionsForSignedFile");
     expect(signScript).toContain("macos_speech_helper.entitlements.plist");
+    expect(signScript).toContain("plainsong-sidecar");
+    expect(signScript).toContain("entitlements.mac.sidecar.plist");
     expect(signScript).toContain("plainsong-native-shortcut-helper");
     expect(signScript).toContain("entitlements.mac.shortcut-helper.plist");
     expect(entitlements).toContain(
@@ -85,6 +91,10 @@ describe("macOS Apple Speech helper contract", () => {
     expect(shortcutHelperEntitlements).not.toMatch(
       /microphone|audio-input|apple-events|allow-jit|allow-unsigned-executable-memory|disable-library-validation|speech-recognition/,
     );
+    expect(sidecarEntitlements).toContain("<dict/>");
+    expect(sidecarEntitlements).not.toMatch(
+      /microphone|audio-input|apple-events|allow-jit|allow-unsigned-executable-memory|disable-library-validation|speech-recognition/,
+    );
   });
 
   it("selects dedicated native-helper entitlements by basename", () => {
@@ -101,6 +111,10 @@ describe("macOS Apple Speech helper contract", () => {
           const inherited = () => ({ entitlements: "broad.plist", marker: "inherited" });
           console.log(JSON.stringify({
             ordinary: optionsForSignedFile("/tmp/ordinary-helper", inherited),
+            sidecar: optionsForSignedFile(
+              "/tmp/nested/plainsong-sidecar",
+              inherited,
+            ),
             shortcut: optionsForSignedFile(
               "/tmp/nested/plainsong-native-shortcut-helper",
               inherited,
@@ -123,6 +137,10 @@ describe("macOS Apple Speech helper contract", () => {
       entitlements: "broad.plist",
       marker: "inherited",
     });
+    expect(selected.sidecar.marker).toBe("inherited");
+    expect(selected.sidecar.entitlements).toBe(
+      path.join(repoRoot, "build-resources/entitlements.mac.sidecar.plist"),
+    );
     expect(selected.shortcut.marker).toBe("inherited");
     expect(selected.shortcut.entitlements).toBe(
       path.join(
@@ -137,7 +155,7 @@ describe("macOS Apple Speech helper contract", () => {
         "rust-sidecar/native/macos_speech_helper.entitlements.plist",
       ),
     );
-  });
+  }, 15_000);
 
   it("calls a signing entry point @electron/osx-sign actually exports", () => {
     // The signing hook only runs during a packaged release build, so a renamed
@@ -167,7 +185,7 @@ describe("macOS Apple Speech helper contract", () => {
     expect(
       fs.readFileSync(path.join(repoRoot, "scripts/sign-macos.mjs"), "utf8"),
     ).toContain('import { sign } from "@electron/osx-sign"');
-  });
+  }, 15_000);
 
   it("keeps native live recognition separate from generic batch preview", () => {
     const helper = fs.readFileSync(

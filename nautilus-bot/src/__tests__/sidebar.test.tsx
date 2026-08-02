@@ -1,6 +1,22 @@
 import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { Sidebar } from "@/components/sidebar";
+import type { ProductReadinessSnapshot } from "@/features/readiness/product-readiness";
+import { OPEN_SETTINGS_TAB_EVENT } from "@/lib/navigation";
+
+const readinessContext = vi.hoisted(() => ({
+  productReadiness: {
+    evidenceObservedAt: 1,
+    dictation: { domain: "dictation", state: "ready", cause: null },
+    meetings: { domain: "meetings", state: "ready", cause: null },
+    fullCapture: { domain: "full_capture", state: "ready", cause: null },
+    overall: { domain: "overall", state: "ready", cause: null },
+  } as ProductReadinessSnapshot,
+}));
+
+vi.mock("@/features/readiness/product-readiness-context", () => ({
+  useProductReadinessStatus: () => readinessContext,
+}));
 
 vi.mock("@/hooks/use-recording", () => ({
   useRecording: () => ({
@@ -27,6 +43,13 @@ vi.mock("@/components/theme-toggle", () => ({
 describe("Sidebar collapsed layout", () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    readinessContext.productReadiness = {
+      evidenceObservedAt: 1,
+      dictation: { domain: "dictation", state: "ready", cause: null },
+      meetings: { domain: "meetings", state: "ready", cause: null },
+      fullCapture: { domain: "full_capture", state: "ready", cause: null },
+      overall: { domain: "overall", state: "ready", cause: null },
+    };
   });
 
   it("routes every primary, secondary, and more navigation item", async () => {
@@ -200,5 +223,58 @@ describe("Sidebar collapsed layout", () => {
     fireEvent.click(localStatus);
 
     expect(onViewChange).toHaveBeenCalledWith("settings");
+  });
+
+  it("surfaces the canonical blocker without cluttering a ready sidebar", () => {
+    readinessContext.productReadiness = {
+      ...readinessContext.productReadiness,
+      dictation: {
+        domain: "dictation",
+        state: "blocked",
+        cause: {
+          id: "dictation_route",
+          message: "Download the selected dictation model.",
+          action: {
+            id: "open_models",
+            label: "Review models",
+            destination: "models",
+          },
+        },
+      },
+      overall: {
+        domain: "overall",
+        state: "blocked",
+        cause: {
+          id: "dictation_route",
+          message: "Download the selected dictation model.",
+          action: {
+            id: "open_models",
+            label: "Review models",
+            destination: "models",
+          },
+        },
+      },
+    };
+    const settingsTabListener = vi.fn();
+    window.addEventListener(OPEN_SETTINGS_TAB_EVENT, settingsTabListener);
+
+    render(
+      <Sidebar
+        activeView="dashboard"
+        onToggleCollapse={vi.fn()}
+        onViewChange={vi.fn()}
+      />,
+    );
+
+    fireEvent.click(
+      screen.getByRole("button", {
+        name: "Setup needed. Download the selected dictation model.",
+      }),
+    );
+    expect(
+      (settingsTabListener.mock.calls[0]?.[0] as CustomEvent).detail,
+    ).toEqual({ tab: "models" });
+
+    window.removeEventListener(OPEN_SETTINGS_TAB_EVENT, settingsTabListener);
   });
 });

@@ -66,7 +66,10 @@ describe("release-credentials-preflight.mjs", () => {
       const artifact = JSON.parse(readFileSync(jsonPath, "utf8")) as {
         codesigningIdentityCount: number | null;
         envPresence: Record<string, boolean>;
+        selectedIdentityValid: boolean | null;
         hasCertificateInput: boolean;
+        hasExplicitAppleCredentials: boolean;
+        keychainProfileValid: boolean | null;
         hasNotarizationInputs: boolean;
         ready: boolean;
       };
@@ -84,7 +87,10 @@ describe("release-credentials-preflight.mjs", () => {
           APPLE_TEAM_ID: true,
           APPLE_KEYCHAIN_PROFILE: false,
         },
+        selectedIdentityValid: null,
         hasCertificateInput: true,
+        hasExplicitAppleCredentials: true,
+        keychainProfileValid: null,
         hasNotarizationInputs: true,
         ready: true,
       });
@@ -116,16 +122,24 @@ describe("release-credentials-preflight.mjs", () => {
       const securityScript = path.join(tempBinDir, "security");
       writeFileSync(
         securityScript,
-        "#!/bin/sh\nprintf '%s\\n' '1 valid identities found'\n",
+        "#!/bin/sh\nprintf '%s\\n' '  1) ABCDEF0123456789 \"Developer ID Application: Example (EXAMPLETEAM)\"' '     1 valid identities found'\n",
         "utf8",
       );
       chmodSync(securityScript, 0o755);
+
+      const xcrunScript = path.join(tempBinDir, "xcrun");
+      writeFileSync(
+        xcrunScript,
+        "#!/bin/sh\n[ \"$1\" = 'notarytool' ] && [ \"$2\" = 'history' ] && exit 0\nexit 1\n",
+        "utf8",
+      );
+      chmodSync(xcrunScript, 0o755);
 
       const result = spawnSync("node", [tempScript], {
         encoding: "utf8",
         env: {
           PATH: `${tempBinDir}${path.delimiter}${process.env.PATH ?? ""}`,
-          CSC_NAME: "Developer ID Application: Example (EXAMPLETEAM)",
+          CSC_NAME: "Example (EXAMPLETEAM)",
           APPLE_KEYCHAIN_PROFILE: "example-notary-profile",
         },
       });
@@ -140,7 +154,10 @@ describe("release-credentials-preflight.mjs", () => {
         ),
       ) as {
         envPresence: Record<string, boolean>;
+        selectedIdentityValid: boolean | null;
         hasCertificateInput: boolean;
+        hasExplicitAppleCredentials: boolean;
+        keychainProfileValid: boolean | null;
         hasNotarizationInputs: boolean;
         ready: boolean;
       };
@@ -153,7 +170,10 @@ describe("release-credentials-preflight.mjs", () => {
           APPLE_TEAM_ID: false,
           APPLE_KEYCHAIN_PROFILE: true,
         },
+        selectedIdentityValid: true,
         hasCertificateInput: true,
+        hasExplicitAppleCredentials: false,
+        keychainProfileValid: true,
         hasNotarizationInputs: true,
         ready: true,
       });
@@ -163,6 +183,128 @@ describe("release-credentials-preflight.mjs", () => {
         "utf8",
       );
       expect(markdown).not.toContain("example-notary-profile");
+    } finally {
+      rmSync(tempRoot, { recursive: true, force: true });
+    }
+  }, 30_000);
+
+  it("rejects a named Keychain profile that cannot authenticate", () => {
+    const { tempRoot, tempScript } = createTempRepo("release-credentials-preflight.mjs");
+    try {
+      const tempBinDir = path.join(tempRoot, "bin");
+      mkdirSync(tempBinDir, { recursive: true });
+
+      const securityScript = path.join(tempBinDir, "security");
+      writeFileSync(
+        securityScript,
+        "#!/bin/sh\nprintf '%s\\n' '  1) ABCDEF0123456789 \"Developer ID Application: Example (EXAMPLETEAM)\"' '     1 valid identities found'\n",
+        "utf8",
+      );
+      chmodSync(securityScript, 0o755);
+
+      const xcrunScript = path.join(tempBinDir, "xcrun");
+      writeFileSync(xcrunScript, "#!/bin/sh\nexit 1\n", "utf8");
+      chmodSync(xcrunScript, 0o755);
+
+      const result = spawnSync("node", [tempScript], {
+        encoding: "utf8",
+        env: {
+          PATH: `${tempBinDir}${path.delimiter}${process.env.PATH ?? ""}`,
+          CSC_NAME: "Example (EXAMPLETEAM)",
+          APPLE_KEYCHAIN_PROFILE: "missing-notary-profile",
+        },
+      });
+
+      expect(result.error).toBeUndefined();
+      expect(result.status).toBe(1);
+
+      const artifact = JSON.parse(
+        readFileSync(
+          path.join(tempRoot, "artifacts", "release-credential-preflight.json"),
+          "utf8",
+        ),
+      ) as {
+        keychainProfileValid: boolean;
+        selectedIdentityValid: boolean;
+        hasNotarizationInputs: boolean;
+        ready: boolean;
+      };
+
+      expect(artifact).toMatchObject({
+        keychainProfileValid: false,
+        selectedIdentityValid: true,
+        hasNotarizationInputs: false,
+        ready: false,
+      });
+
+      const markdown = readFileSync(
+        path.join(tempRoot, "artifacts", "release-credential-preflight.md"),
+        "utf8",
+      );
+      expect(markdown).toContain(
+        "Keychain notarization profile authentication: FAIL",
+      );
+      expect(markdown).not.toContain("missing-notary-profile");
+    } finally {
+      rmSync(tempRoot, { recursive: true, force: true });
+    }
+  }, 30_000);
+
+  it("rejects the certificate prefix that electron-builder does not accept in CSC_NAME", () => {
+    const { tempRoot, tempScript } = createTempRepo("release-credentials-preflight.mjs");
+    try {
+      const tempBinDir = path.join(tempRoot, "bin");
+      mkdirSync(tempBinDir, { recursive: true });
+
+      const securityScript = path.join(tempBinDir, "security");
+      writeFileSync(
+        securityScript,
+        "#!/bin/sh\nprintf '%s\\n' '  1) ABCDEF0123456789 \"Developer ID Application: Example (EXAMPLETEAM)\"' '     1 valid identities found'\n",
+        "utf8",
+      );
+      chmodSync(securityScript, 0o755);
+
+      const result = spawnSync("node", [tempScript], {
+        encoding: "utf8",
+        env: {
+          PATH: `${tempBinDir}${path.delimiter}${process.env.PATH ?? ""}`,
+          CSC_NAME: "Developer ID Application: Example (EXAMPLETEAM)",
+          APPLE_ID: "dummy@example.com",
+          APPLE_APP_SPECIFIC_PASSWORD: "dummy-app-specific-password",
+          APPLE_TEAM_ID: "DUMMYTEAMID",
+        },
+      });
+
+      expect(result.error).toBeUndefined();
+      expect(result.status).toBe(1);
+
+      const artifact = JSON.parse(
+        readFileSync(
+          path.join(tempRoot, "artifacts", "release-credential-preflight.json"),
+          "utf8",
+        ),
+      ) as {
+        selectedIdentityValid: boolean;
+        hasCertificateInput: boolean;
+        ready: boolean;
+      };
+
+      expect(artifact).toMatchObject({
+        selectedIdentityValid: false,
+        hasCertificateInput: false,
+        ready: false,
+      });
+
+      const markdown = readFileSync(
+        path.join(tempRoot, "artifacts", "release-credential-preflight.md"),
+        "utf8",
+      );
+      expect(markdown).toContain(
+        "Selected CSC_NAME resolves to a Developer ID Application identity: FAIL",
+      );
+      expect(markdown).not.toContain(
+        "Developer ID Application: Example (EXAMPLETEAM)",
+      );
     } finally {
       rmSync(tempRoot, { recursive: true, force: true });
     }

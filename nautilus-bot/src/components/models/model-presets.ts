@@ -50,7 +50,7 @@ export const MODEL_PRESETS: readonly ModelPreset[] = [
     // they are in the drawer. This is the smallest of the promoted three.
     buys: "The smallest of the promoted models for dictation, with the smallest local engine that is wired for long recordings handling meetings.",
     costs:
-      "Dictation is English only: speak Spanish into base.en and it returns English-sounding nonsense rather than admitting it cannot.",
+      "Dictation is English only. The meeting model vendor lists 25 European languages, but Plainsong has only qualified English so far.",
   },
   {
     id: "balanced",
@@ -65,7 +65,7 @@ export const MODEL_PRESETS: readonly ModelPreset[] = [
     },
     buys: "One engine for both jobs, and a transducer that emits silence during silence — so stopping mid-sentence to think does not become invented words.",
     costs:
-      "25 European languages, not 100: Mandarin, Hindi and Arabic are not covered at all.",
+      "The model vendor lists 25 European languages, but Plainsong has only qualified English so far.",
   },
   {
     id: "widest_languages",
@@ -75,9 +75,9 @@ export const MODEL_PRESETS: readonly ModelPreset[] = [
       providerType: "parakeet",
       modelId: "parakeet-tdt-0.6b-v3",
     },
-    buys: "Dictation covers roughly 100 languages — the widest coverage of anything you can download here.",
+    buys: "The dictation model's upstream documentation lists roughly 100 languages, the broadest listed coverage of anything downloadable here.",
     costs:
-      "large-v3-turbo is slower per utterance and fills long pauses with invented text, and meetings still cover 25 languages rather than 100.",
+      "large-v3-turbo is slower per utterance and fills long pauses with invented text. The meeting model vendor lists 25 European languages, but Plainsong has only qualified English so far.",
   },
   {
     id: "largest_models",

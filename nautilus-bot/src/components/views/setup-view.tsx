@@ -39,7 +39,7 @@ import {
 } from "@/lib/asr-capabilities";
 import { requestMainView } from "@/lib/navigation";
 import { requestOnboarding } from "@/lib/onboarding";
-import { useSetupStatus } from "@/hooks/use-setup-status";
+import { useProductReadinessStatus } from "@/features/readiness/product-readiness-context";
 import type { AsrProviderInfo } from "@/types";
 
 /**
@@ -185,13 +185,14 @@ export function SetupView() {
     meetingRoutePolicy,
     dictationRoute,
     meetingRoute,
-    dictationReady,
-    meetingReady,
-    fullCaptureReady,
     dictationBlockers,
     meetingBlockers,
     fullCaptureBlockers,
-  } = useSetupStatus();
+    productReadiness,
+  } = useProductReadinessStatus();
+  const dictationReady = productReadiness.dictation.state === "ready";
+  const meetingReady = productReadiness.meetings.state === "ready";
+  const fullCaptureReady = productReadiness.fullCapture.state === "ready";
   const [busyAction, setBusyAction] = useState<string | null>(null);
   const [statusMessage, setStatusMessage] = useState<string | null>(null);
   const dictationInsertionMode = settings?.transcription.dictationInsertionMode ?? "auto";
@@ -310,7 +311,8 @@ export function SetupView() {
                   <span>
                     {dictationReady
                       ? "Dictation is ready. If it stops working, run the checks below."
-                      : (dictationRoute.reason ??
+                      : (productReadiness.dictation.cause?.message ??
+                        dictationRoute.reason ??
                         "Dictation is not ready yet. What is missing is listed below.")}
                   </span>
                 </p>
@@ -329,16 +331,16 @@ export function SetupView() {
                       value: loading ? "Checking" : microphoneReady ? "Ready" : "Needs attention",
                     },
                     {
-                      label: "Speech",
+                      label: "Apple Speech permission",
                       value: permissionStatusLabel(loading, permissions, "speechRecognitionReady"),
                     },
                     { label: "Cursor insert", value: cursorInsertLabel },
                     {
-                      label: "On this Mac",
+                      label: "Any local engine",
                       value: dictationLocalReady ? "Ready" : "Not ready",
                     },
                     {
-                      label: "In the cloud",
+                      label: "Any cloud engine",
                       value: dictationCloudReady ? "Ready" : "Not ready",
                     },
                   ]}
@@ -463,8 +465,8 @@ export function SetupView() {
                     aria-hidden="true"
                   />
                   <span>
-                    {meetingRoute.reason
-                      ? meetingRoute.reason
+                    {productReadiness.meetings.cause?.message
+                      ? productReadiness.meetings.cause.message
                       : fullCaptureReady
                         ? "Both sides of a call will be recorded and transcribed."
                         : meetingReady
@@ -575,6 +577,16 @@ export function SetupView() {
                     )}
                     Test system audio
                   </Button>
+                  {systemAudioCapability?.backend === "core_audio_process_tap" &&
+                  !systemAudioCapability.ready ? (
+                    <Button
+                      variant="ghost"
+                      onClick={() => void openPermissionSettings("system_audio")}
+                      disabled={busyAction !== null}
+                    >
+                      Open privacy settings
+                    </Button>
+                  ) : null}
                   <Button variant="outline" onClick={() => requestMainView("settings")}>
                     Open settings
                   </Button>

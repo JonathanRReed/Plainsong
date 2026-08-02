@@ -77,7 +77,10 @@ import {
   DICTATION_HOTKEY_MODE_CHIP_LABELS,
   resolveDictationHotkeyMode,
 } from "@/lib/dictation-hotkey-mode";
-import { requestMainView } from "@/lib/navigation";
+import {
+  requestMainView,
+  requestReadinessDestination,
+} from "@/lib/navigation";
 import { sanitizeUserFacingDictationMessage } from "@/lib/dictation-ui-message";
 import { speakTextAloud, stopSpeakingText } from "@/lib/text-to-speech";
 import { useToast } from "@/components/toast";
@@ -109,15 +112,20 @@ import {
   NotebookPen,
   Replace,
   SlidersHorizontal,
+  Trash2,
 } from "lucide-react";
 import {
   Dialog,
   DialogContent,
+  DialogDescription,
+  DialogFooter,
   DialogHeader,
   DialogTitle,
 } from "@/components/ui/dialog";
 import { DictationCaptureHero } from "@/components/views/dictation/dictation-capture-hero";
 import { DictationHistoryDialog } from "@/components/views/dictation/dictation-history-dialog";
+import { useProductReadinessStatus } from "@/features/readiness/product-readiness-context";
+import { selectReadinessForSurface } from "@/features/readiness/product-readiness";
 import { DictationTextActionsEditor } from "@/components/views/dictation/dictation-text-actions-editor";
 import {
   DICTATION_TEXT_ACTIONS,
@@ -228,7 +236,11 @@ function resolveDictationRouteReadiness(
   }
 
   const downloadKind = normalizeDownloadStatus(provider.downloadStatus).kind;
-  if (downloadKind === "downloaded" || downloadKind === "unknown") {
+  if (
+    provider.runtimeStatus === "ready" ||
+    provider.runtimeStatus === "error" ||
+    provider.runtimeStatus === "missing_runtime"
+  ) {
     return null;
   }
 
@@ -617,6 +629,14 @@ function getDictationPhaseSummary(
 
 export function DictationView() {
   const {
+    productReadiness,
+    refresh: refreshProductReadiness,
+  } = useProductReadinessStatus();
+  const dictationReadiness = selectReadinessForSurface(
+    productReadiness,
+    "dictation",
+  );
+  const {
     stateEvent: dictationStateEvent,
     textReadyEvent: dictationTextReadyEvent,
   } = useDictationRuntime();
@@ -790,6 +810,8 @@ export function DictationView() {
   const [selectedRecording, setSelectedRecording] = useState<Recording | null>(
     null,
   );
+  const [pendingHistoryDelete, setPendingHistoryDelete] =
+    useState<Recording | null>(null);
   const [selectedTranscript, setSelectedTranscript] =
     useState<Transcript | null>(null);
   const [selectedHistoryDetails, setSelectedHistoryDetails] =
@@ -1442,7 +1464,10 @@ export function DictationView() {
     setRouteDownloadError(null);
     try {
       await downloadAsrModels(dictationRouteReadiness.providerType);
-      await refreshDictationRouteReadiness();
+      await Promise.all([
+        refreshDictationRouteReadiness(),
+        refreshProductReadiness(),
+      ]);
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
       setRouteDownloadError(message);
@@ -2371,6 +2396,17 @@ export function DictationView() {
   };
 
   const launchDictation = async () => {
+    if (dictationReadiness.state !== "ready") {
+      const message =
+        dictationReadiness.cause?.message ??
+        "Plainsong could not confirm that dictation is ready.";
+      setDictationPhase("error");
+      setDictationPhaseMessage(message);
+      setDictationPhasePreview(null);
+      setDictationError(message);
+      return;
+    }
+
     const routePreference =
       dictationRouteOverrideEnabled && nextCaptureRoutePreference
         ? nextCaptureRoutePreference
@@ -3021,9 +3057,14 @@ export function DictationView() {
     }
   };
 
-  const handleDeleteHistoryItem = async (recordingId: string) => {
+  const handleDeleteHistoryItem = async () => {
+    if (!pendingHistoryDelete) {
+      return;
+    }
+    const recordingId = pendingHistoryDelete.id;
     try {
       await deleteRecording(recordingId);
+      setPendingHistoryDelete(null);
       if (selectedRecording?.id === recordingId) {
         setIsDialogOpen(false);
         setSelectedRecording(null);
@@ -3072,6 +3113,20 @@ export function DictationView() {
       : activeProfile.title;
   const hotkeyModeLabel = DICTATION_HOTKEY_MODE_CHIP_LABELS[hotkeyMode];
   const hotkeyInstruction = dictationInstruction(hotkeyShortcut, hotkeyMode);
+  const dictationAvailable =
+    dictationReadiness.state === "ready" && !dictationRouteReadiness;
+  const dictationUnavailableTitle =
+    dictationReadiness.state === "unknown"
+      ? "Checking setup"
+      : dictationRouteReadiness?.status === "downloading"
+        ? "Model downloading"
+        : "Setup needed";
+  const dictationUnavailableDetail = dictationRouteReadiness
+    ? dictationRouteReadiness.status === "downloading"
+      ? `${dictationRouteReadiness.routeLabel} is still downloading. Re-check it above when the transfer finishes.`
+      : `${dictationRouteReadiness.routeLabel} must be downloaded before capture can start.`
+    : dictationReadiness.cause?.message ??
+      "Plainsong could not confirm that dictation is ready.";
 
   return (
     <div className="h-full flex flex-col">
@@ -3103,6 +3158,48 @@ export function DictationView() {
 
       <ScrollArea className="flex-1">
         <div className="p-6 max-w-4xl mx-auto space-y-6">
+          {dictationReadiness.state !== "ready" &&
+          !dictationRouteReadiness ? (
+            <div
+              role={
+                dictationReadiness.state === "unknown" ? "status" : "alert"
+              }
+              aria-label="Dictation needs attention"
+              className="rounded-md border border-rust/40 bg-rust/10 px-4 py-3"
+            >
+              <div className="flex flex-wrap items-start justify-between gap-3">
+                <div className="flex min-w-0 items-start gap-2.5">
+                  <span
+                    className="neume neume-rust mt-1 shrink-0"
+                    aria-hidden="true"
+                  />
+                  <div className="min-w-0">
+                    <p className="text-sm font-medium text-rust">
+                      Dictation needs attention
+                    </p>
+                    <p className="mt-1 text-sm leading-6 text-rust">
+                      {dictationReadiness.cause?.message ??
+                        "Plainsong could not confirm that dictation is ready."}
+                    </p>
+                  </div>
+                </div>
+                {dictationReadiness.cause ? (
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    onClick={() =>
+                      requestReadinessDestination(
+                        dictationReadiness.cause!.action.destination,
+                      )
+                    }
+                  >
+                    {dictationReadiness.cause.action.label}
+                  </Button>
+                ) : null}
+              </div>
+            </div>
+          ) : null}
+
           {dictationRouteReadiness && (
             <div
               role="alert"
@@ -3172,6 +3269,9 @@ export function DictationView() {
             phaseTone={dictationPhaseSummary.tone}
             isCaptureLive={isDictationCaptureLive}
             isBusy={isDictationBusy}
+            isAvailable={dictationAvailable}
+            unavailableTitle={dictationUnavailableTitle}
+            unavailableDetail={dictationUnavailableDetail}
             formattedDuration={formattedDuration}
             hotkeyInstruction={hotkeyInstruction}
             hotkeyPressed={hotkeyPressed}
@@ -3605,40 +3705,40 @@ export function DictationView() {
                 {dictationHistory.slice(0, 25).map((recording) => (
                   <div
                     key={recording.id}
-                    className="flex cursor-pointer items-center justify-between rounded-md border p-3 transition-colors hover:bg-muted/50"
-                    onClick={() => {
-                      setSelectedRecording(recording);
-                      setIsDialogOpen(true);
-                    }}
+                    className="flex items-center justify-between gap-3 rounded-md border p-3 transition-colors hover:bg-muted/50"
                   >
-                    <div>
+                    <button
+                      type="button"
+                      aria-label={`Open saved dictation: ${recording.title}`}
+                      className="min-w-0 flex-1 rounded-sm text-left outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2"
+                      onClick={() => {
+                        setSelectedRecording(recording);
+                        setIsDialogOpen(true);
+                      }}
+                    >
                       <p className="font-medium">{recording.title}</p>
                       <p className="text-sm text-muted-foreground">
                         {new Date(recording.createdAt).toLocaleString()} ·{" "}
                         {recording.status}
                       </p>
-                    </div>
-                    <div className="flex items-center gap-2">
+                    </button>
+                    <div className="flex shrink-0 items-center gap-2">
                       <p className="time-spec text-sm text-muted-foreground">
                         {formatRecordingDuration(recording.duration)}
                       </p>
                       <Button
                         variant="ghost"
                         size="sm"
-                        onClick={(event) => {
-                          event.stopPropagation();
-                          void handleCopyHistoryTranscript(recording.id);
-                        }}
+                        aria-label={`Copy ${recording.title}`}
+                        onClick={() => void handleCopyHistoryTranscript(recording.id)}
                       >
                         Copy
                       </Button>
                       <Button
                         variant="ghost"
                         size="sm"
-                        onClick={(event) => {
-                          event.stopPropagation();
-                          void handleDeleteHistoryItem(recording.id);
-                        }}
+                        aria-label={`Delete ${recording.title}`}
+                        onClick={() => setPendingHistoryDelete(recording)}
                       >
                         Delete
                       </Button>
@@ -4214,18 +4314,11 @@ export function DictationView() {
                           </div>
                         </div>
                         <div className="space-y-2">
-                          {/* TODO(copy): should read "Website this profile is
-                              for" to match the app field above — "Auto-activate"
-                              promises a profile switch that does not happen.
-                              Held back because dictation-view.test.tsx selects
-                              this input with
-                              `getByLabelText("Auto-activate for domain")`;
-                              change both together. */}
                           <label
                             className="text-sm font-medium"
                             htmlFor="custom-profile-domain-matcher"
                           >
-                            Auto-activate for domain
+                            Website this profile is for
                           </label>
                           <input
                             id="custom-profile-domain-matcher"
@@ -5740,11 +5833,7 @@ export function DictationView() {
               <TabsContent value="destinations" className="mt-4 space-y-4">
                 <h3 className="section-heading">Destination-aware formatting</h3>
 
-                {/* TODO(style): `rounded-2xl` is outside the 0.375rem radius
-                    scale in STYLE.md and should be `rounded-md`. Held back
-                    because dictation-view.test.tsx selects this node with
-                    `.closest(".rounded-2xl")`; change both together. */}
-                <div className="flex items-center justify-between gap-4 rounded-2xl border border-border/60 bg-background/75 p-4">
+                <div className="flex items-center justify-between gap-4 rounded-md border border-border/60 bg-background/75 p-4">
                   <div className="space-y-0.5">
                     <p className="text-sm font-medium">
                       Format for destination app
@@ -6004,9 +6093,43 @@ export function DictationView() {
           if (!selectedRecording) {
             return;
           }
-          void handleDeleteHistoryItem(selectedRecording.id);
+          setPendingHistoryDelete(selectedRecording);
         }}
       />
+
+      <Dialog
+        open={pendingHistoryDelete !== null}
+        onOpenChange={(open) => {
+          if (!open) {
+            setPendingHistoryDelete(null);
+          }
+        }}
+      >
+        <DialogContent>
+          <DialogHeader>
+            <DialogTitle>Delete this dictation?</DialogTitle>
+            <DialogDescription>
+              &ldquo;{pendingHistoryDelete?.title}&rdquo; and its saved transcript are gone for good.
+              This cannot be undone.
+            </DialogDescription>
+          </DialogHeader>
+          <DialogFooter>
+            <Button
+              variant="outline"
+              onClick={() => setPendingHistoryDelete(null)}
+            >
+              Cancel
+            </Button>
+            <Button
+              variant="destructive"
+              onClick={() => void handleDeleteHistoryItem()}
+            >
+              <Trash2 className="mr-2 h-4 w-4" />
+              Delete dictation
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
 
       <Dialog
         open={dictionaryCsvDialogOpen}

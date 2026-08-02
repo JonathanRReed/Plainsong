@@ -1,5 +1,5 @@
 import { act, fireEvent, render, screen, waitFor } from "@testing-library/react";
-import { useState } from "react";
+import { useState, type ReactNode } from "react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import App, { ErrorBoundary } from "@/App";
 import { ONBOARDING_STORAGE_KEY } from "@/lib/onboarding";
@@ -41,6 +41,19 @@ vi.mock("@/components/views/settings-view-simple", () => ({
 }));
 vi.mock("@/components/views/setup-view", () => ({
   SetupView: () => <div>Mock setup workspace</div>,
+}));
+
+vi.mock("@/features/readiness/product-readiness-context", () => ({
+  ProductReadinessProvider: ({ children }: { children: ReactNode }) => children,
+  useProductReadinessStatus: () => ({
+    productReadiness: {
+      evidenceObservedAt: 1,
+      dictation: { domain: "dictation", state: "ready", cause: null },
+      meetings: { domain: "meetings", state: "ready", cause: null },
+      fullCapture: { domain: "full_capture", state: "ready", cause: null },
+      overall: { domain: "overall", state: "ready", cause: null },
+    },
+  }),
 }));
 
 vi.mock("@/components/first-run-wizard", () => ({
@@ -151,6 +164,32 @@ describe("App shell", () => {
     expect(await screen.findByText("Mock settings workspace")).toBeInTheDocument();
   });
 
+  it("names the active workspace and moves keyboard focus after navigation", async () => {
+    localStorage.setItem(ONBOARDING_STORAGE_KEY, "true");
+
+    render(<App />);
+
+    const skipLink = screen.getByRole("link", { name: "Skip to workspace" });
+    expect(skipLink).toHaveAttribute("href", "#main-content");
+
+    const initialMain = await screen.findByRole("main", {
+      name: "Dictation workspace",
+    });
+    expect(initialMain).toHaveAttribute("tabindex", "-1");
+
+    fireEvent.keyDown(window, { key: "h", ctrlKey: true, shiftKey: true });
+
+    const homeMain = await screen.findByRole("main", {
+      name: "Home workspace",
+    });
+    await waitFor(() => {
+      expect(homeMain).toHaveFocus();
+      expect(screen.getByRole("status", { name: "Current workspace" })).toHaveTextContent(
+        "Home workspace",
+      );
+    });
+  });
+
   it("shows first-run onboarding until setup completes", async () => {
     render(<App />);
 
@@ -208,6 +247,9 @@ describe("App shell", () => {
 
     expect(await screen.findByText("Something went wrong")).toBeInTheDocument();
     expect(screen.getByText("Dictation view failed")).toBeInTheDocument();
+    expect(screen.getByRole("alert")).toHaveTextContent(
+      "Something went wrong",
+    );
 
     fireEvent.click(screen.getByRole("button", { name: "Try Again" }));
 

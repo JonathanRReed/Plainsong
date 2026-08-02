@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { getAsrProviders } from "@/lib/backend/asr";
 import {
   getPermissionDiagnostics,
@@ -14,6 +14,11 @@ import {
   isMeetingEligibleModel,
   providerHostingPreference,
 } from "@/lib/asr-capabilities";
+import {
+  buildProductReadinessSnapshot,
+  type ProductReadinessSnapshot,
+} from "@/features/readiness/product-readiness";
+import { listen } from "@/lib/electron";
 import type { AsrProviderInfo, AsrProviderType } from "@/types";
 import type { Settings } from "@/types/settings";
 
@@ -47,6 +52,15 @@ interface SetupStatusSnapshot {
   dictationBlockers: string[];
   meetingBlockers: string[];
   fullCaptureBlockers: string[];
+  productReadiness: ProductReadinessSnapshot;
+}
+
+interface SetupStatusSourceState {
+  observedAt?: number;
+  loading?: boolean;
+  error?: string | null;
+  settingsLoaded?: boolean;
+  providersLoaded?: boolean;
 }
 
 function resolveSharedSelection(settings: Settings | null, kind: "dictation" | "meeting") {
@@ -173,7 +187,8 @@ export function buildSnapshot(
   permissions: PermissionDiagnostics | null,
   systemAudioAvailable: boolean | null,
   loopbackDevice: string | null,
-  systemAudioCapability: SystemAudioCapability | null = null
+  systemAudioCapability: SystemAudioCapability | null = null,
+  sourceState: SetupStatusSourceState = {},
 ): SetupStatusSnapshot {
   const dictationRoute = buildRouteStatus("dictation", settings, providers, permissions);
   const meetingRoute = buildRouteStatus("meeting", settings, providers, permissions);
@@ -191,7 +206,7 @@ export function buildSnapshot(
   const cursorInsertionRequired = dictationInsertionMode !== "clipboard_only";
   const cursorInsertionReady =
     !cursorInsertionRequired ||
-    (permissions?.cursorInsertionReady ?? permissions?.accessibilityReady ?? true);
+    (permissions?.cursorInsertionReady ?? permissions?.accessibilityReady ?? false);
   const dictationRoutePreference =
     settings?.transcription.dictationRoutePreference === "cloud" ? "cloud" : "local";
   const meetingRoutePolicy =
@@ -262,6 +277,44 @@ export function buildSnapshot(
       : fullCaptureReady
         ? "me_and_them"
         : "mic_only";
+  const productReadiness = buildProductReadinessSnapshot({
+    observedAt: sourceState.observedAt ?? Date.now(),
+    loading: sourceState.loading ?? false,
+    error: sourceState.error ?? null,
+    settingsLoaded: sourceState.settingsLoaded ?? settings !== null,
+    providersLoaded:
+      sourceState.providersLoaded ?? providers.length > 0,
+    microphonePermissionReady: permissions
+      ? (permissions.microphonePermissionReady ??
+        permissions.microphoneReady ??
+        null)
+      : null,
+    microphoneDeviceReady: permissions?.microphoneReady ?? null,
+    dictationRouteReady:
+      settings && providers.length > 0 ? dictationRoute.ready : null,
+    dictationRouteReason: dictationRoute.reason,
+    cursorInsertionRequired,
+    cursorInsertionReady: permissions
+      ? (permissions.cursorInsertionReady ??
+        permissions.accessibilityReady ??
+        null)
+      : null,
+    meetingRouteReady:
+      settings && providers.length > 0 ? meetingRoute.ready : null,
+    meetingRouteReason: meetingRoute.reason,
+    systemAudioState: systemAudioCapability
+      ? systemAudioCapability.ready &&
+        systemAudioCapability.readiness === "ready"
+        ? "ready"
+        : systemAudioCapability.readiness === "unverified"
+          ? "unverified"
+          : "unavailable"
+      : effectiveSystemAudioAvailable === true
+        ? "unverified"
+        : effectiveSystemAudioAvailable === false
+          ? "unavailable"
+          : "unknown",
+  });
 
   return {
     settings,
@@ -284,6 +337,7 @@ export function buildSnapshot(
     dictationBlockers,
     meetingBlockers,
     fullCaptureBlockers,
+    productReadiness,
   };
 }
 
@@ -295,8 +349,11 @@ export function useSetupStatus() {
     useState<SystemAudioCapability | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  const [observedAt, setObservedAt] = useState(() => Date.now());
+  const refreshSequenceRef = useRef(0);
 
   const refresh = useCallback(async () => {
+    const refreshSequence = ++refreshSequenceRef.current;
     setLoading(true);
     setError(null);
 
@@ -313,19 +370,88 @@ export function useSetupStatus() {
         getSystemAudioCapability().catch(() => null),
       ]);
 
+      if (refreshSequence !== refreshSequenceRef.current) {
+        return;
+      }
       setSettings(nextSettings);
       setProviders(nextProviders);
       setPermissions(nextPermissions);
       setSystemAudioCapability(nextSystemAudioCapability);
     } catch (nextError) {
+      if (refreshSequence !== refreshSequenceRef.current) {
+        return;
+      }
       setError(nextError instanceof Error ? nextError.message : String(nextError));
     } finally {
-      setLoading(false);
+      if (refreshSequence === refreshSequenceRef.current) {
+        setObservedAt(Date.now());
+        setLoading(false);
+      }
     }
   }, []);
 
   useEffect(() => {
     void refresh();
+    return () => {
+      refreshSequenceRef.current += 1;
+    };
+  }, [refresh]);
+
+  useEffect(() => {
+    let disposed = false;
+    const unlisteners: Array<() => void> = [];
+    const retainUnlistener = (unlisten: () => void) => {
+      if (disposed) {
+        unlisten();
+        return;
+      }
+      unlisteners.push(unlisten);
+    };
+
+    void listen("settings-changed", () => {
+      if (!disposed) {
+        void refresh();
+      }
+    })
+      .then(retainUnlistener)
+      .catch((nextError) => {
+        console.warn(
+          "Failed to subscribe to readiness settings changes:",
+          nextError,
+        );
+      });
+
+    void listen<[AsrProviderType, number]>(
+      "asr-download-progress",
+      (event) => {
+        const [, percent] = event.payload;
+        if (!disposed && Number.isFinite(percent) && percent >= 100) {
+          void refresh();
+        }
+      },
+    )
+      .then(retainUnlistener)
+      .catch((nextError) => {
+        console.warn(
+          "Failed to subscribe to readiness model downloads:",
+          nextError,
+        );
+      });
+
+    const handleWindowFocus = () => {
+      if (!disposed) {
+        void refresh();
+      }
+    };
+    window.addEventListener("focus", handleWindowFocus);
+
+    return () => {
+      disposed = true;
+      window.removeEventListener("focus", handleWindowFocus);
+      for (const unlisten of unlisteners) {
+        unlisten();
+      }
+    };
   }, [refresh]);
 
   const snapshot = useMemo(
@@ -338,9 +464,24 @@ export function useSetupStatus() {
           ? systemAudioCapability.backend !== "none"
           : null,
         systemAudioCapability?.routeDevice ?? null,
-        systemAudioCapability
+        systemAudioCapability,
+        {
+          observedAt,
+          loading,
+          error,
+          settingsLoaded: settings !== null,
+          providersLoaded: !loading && error === null,
+        },
       ),
-    [permissions, providers, settings, systemAudioCapability]
+    [
+      error,
+      loading,
+      observedAt,
+      permissions,
+      providers,
+      settings,
+      systemAudioCapability,
+    ]
   );
 
   return {

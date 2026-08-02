@@ -14,6 +14,7 @@ import {
   buildDownloadedModelIndex,
   isModelOnDisk,
 } from "@/components/models/downloaded-models";
+import { analysisModelChoices } from "@/components/models/ai-lanes";
 import { laneRouteReadiness } from "@/components/models/model-facts";
 import { buildAsrRouteCatalog } from "@/lib/asr-route-catalog";
 import type { AsrProviderInventory } from "@/types";
@@ -112,6 +113,20 @@ describe("model presets", () => {
       expect(entry.buys).not.toMatch(/\bbest\b/i);
       expect(entry.name).not.toMatch(/\bbest\b/i);
     }
+  });
+
+  it("does not present upstream language counts as Plainsong-qualified coverage", () => {
+    const balanced = preset("balanced");
+    const widest = preset("widest_languages");
+
+    expect(balanced.costs).toContain(
+      "vendor lists 25 European languages",
+    );
+    expect(balanced.costs).toContain(
+      "Plainsong has only qualified English",
+    );
+    expect(widest.buys).toContain("upstream documentation lists roughly 100");
+    expect(widest.costs).toContain("Plainsong has only qualified English");
   });
 
   it("applies both speech lanes in one write", () => {
@@ -353,5 +368,79 @@ describe("lane readiness", () => {
     // not fix an engine that will not load.
     expect(laneRouteReadiness(turbo!, false).label).toBe("Fix setup");
     expect(laneRouteReadiness(turbo!, false).action).toBe("fix_setup");
+  });
+});
+
+describe("analysisModelChoices", () => {
+  it("drops OpenAI models that cannot answer a completion", () => {
+    // Every one of these contains "gpt", so a substring allowlist offered them
+    // and the request failed later with a provider error the user could not act
+    // on.
+    const offered = analysisModelChoices("openai", [
+      "gpt-4o",
+      "gpt-4o-mini",
+      "gpt-4o-transcribe",
+      "gpt-4o-audio-preview",
+      "gpt-4o-realtime-preview",
+      "gpt-image-1",
+      "text-embedding-3-large",
+      "omni-moderation-latest",
+      "tts-1",
+      "whisper-1",
+    ]);
+
+    expect(offered).toEqual(["gpt-4o", "gpt-4o-mini"]);
+  });
+
+  it("keeps reasoning families that do not use a gpt prefix", () => {
+    expect(analysisModelChoices("openai", ["o3-mini", "o4-mini", "gpt-4o"])).toEqual([
+      "gpt-4o",
+      "o3-mini",
+      "o4-mini",
+    ]);
+  });
+
+  it("drops Gemini embedding and TTS entries", () => {
+    const offered = analysisModelChoices("gemini", [
+      "gemini-2.5-pro",
+      "gemini-2.5-flash",
+      "gemini-embedding-001",
+      "gemini-2.5-flash-preview-tts",
+    ]);
+
+    expect(offered).toEqual(["gemini-2.5-pro", "gemini-2.5-flash"]);
+  });
+
+  it("still filters unknown providers to completion-capable models", () => {
+    expect(analysisModelChoices("ollama", ["llama3.1", "nomic-embed-text"])).toEqual([
+      "llama3.1",
+    ]);
+  });
+});
+
+describe("buildDownloadedModelIndex partial downloads", () => {
+  it("does not count an in-flight download as an installed model", () => {
+    // An interrupted download left a .part sibling behind, which made the
+    // route read as ready and then fail when the user actually dictated.
+    const index = buildDownloadedModelIndex([
+      {
+        provider: "whisper",
+        path: "/models/whisper/ggml-base.en.bin.part",
+        sizeBytes: 12_000_000,
+      },
+    ] as never);
+
+    expect(isModelOnDisk(index, "whisper", "base.en")).toBe(false);
+    expect(index.fileCount).toBe(0);
+    expect(index.totalBytes).toBe(0);
+  });
+
+  it("still counts the completed file", () => {
+    const index = buildDownloadedModelIndex([
+      { provider: "whisper", path: "/models/whisper/ggml-base.en.bin", sizeBytes: 142_000_000 },
+    ] as never);
+
+    expect(isModelOnDisk(index, "whisper", "base.en")).toBe(true);
+    expect(index.fileCount).toBe(1);
   });
 });

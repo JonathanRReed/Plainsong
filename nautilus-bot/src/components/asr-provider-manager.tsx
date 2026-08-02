@@ -257,11 +257,26 @@ export function AsrProviderManager({ className }: AsrProviderManagerProps) {
   ]);
 
   useEffect(() => {
+    let disposed = false;
+    let unlistenDownloadProgress: (() => void) | undefined;
+
     const bootstrap = async () => {
       const loadedInventory = await loadInventory();
+      if (disposed) {
+        return;
+      }
       await loadSelectionSettings(loadedInventory);
+      if (disposed) {
+        return;
+      }
       await loadBenchmarkHistory();
+      if (disposed) {
+        return;
+      }
       await loadPlatformSettings();
+      if (disposed) {
+        return;
+      }
       await refreshPermissionDiagnostics();
     };
 
@@ -272,14 +287,21 @@ export function AsrProviderManager({ className }: AsrProviderManagerProps) {
       const [providerType, progress] = event.payload;
       setDownloadProgress((prev) => ({ ...prev, [providerType]: progress }));
     })
-      .then(() => {
-        // Cleanup if component unmounts - simpler to just let it leak in this top-level component
-        // or store unlisten function in a ref if strictly needed.
-        // For now, this is acceptable for a main view component.
+      .then((unlisten) => {
+        if (disposed) {
+          unlisten();
+        } else {
+          unlistenDownloadProgress = unlisten;
+        }
       })
       .catch((error) => {
         console.warn("Failed to subscribe to ASR download progress:", error);
       });
+
+    return () => {
+      disposed = true;
+      unlistenDownloadProgress?.();
+    };
   }, []);
 
   useEffect(() => {

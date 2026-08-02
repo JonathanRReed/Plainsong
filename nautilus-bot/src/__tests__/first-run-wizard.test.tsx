@@ -156,6 +156,11 @@ vi.mock("@/lib/backend/asr", () => ({
   getAsrProviders: vi.fn(async () => providers),
 }));
 
+vi.mock("@/lib/backend/dictation", () => ({
+  startDictation: vi.fn(async () => {}),
+  stopDictation: vi.fn(async () => "This is my first Plainsong dictation."),
+}));
+
 vi.mock("@/lib/backend/recordings", () => ({
   getSystemAudioCapability: vi.fn(async () => ({
     backend: "core_audio_process_tap",
@@ -247,12 +252,148 @@ describe("FirstRunWizard", () => {
     vi.clearAllMocks();
   });
 
-  it("still fetches the fast default when the user skips at the permissions step", async () => {
-    // Marking onboarding complete permanently gates the wizard (App.tsx only
-    // opens it while the flag is unset), and the model step is the only place
-    // in the app that auto-downloads a dictation model. Skipping at
-    // permissions never reaches that step, so without this the user is left
-    // with no model, no wizard, and a hotkey that silently does nothing.
+  it("opens full onboarding with an explicit model download step", async () => {
+    render(<FirstRunWizard onComplete={vi.fn()} />);
+
+    expect(
+      await screen.findByRole("heading", { name: /dictation model/i })
+    ).toBeInTheDocument();
+    expect(screen.getByText(/^step 1 of 4$/i)).toBeInTheDocument();
+    expect(
+      screen.getByRole("button", { name: /download and continue/i })
+    ).toBeInTheDocument();
+    expect(screen.getByText(/downloaded on demand/i)).toBeInTheDocument();
+    expect(screen.queryByText(/already ships with/i)).not.toBeInTheDocument();
+  });
+
+  it("announces each step and moves focus to the new heading", async () => {
+    render(<FirstRunWizard onComplete={vi.fn()} />);
+
+    const modelHeading = await screen.findByRole("heading", {
+      name: /dictation model/i,
+    });
+    await waitFor(() => expect(modelHeading).toHaveFocus());
+    expect(screen.getByRole("status")).toHaveTextContent(
+      "Step 1 of 4: Dictation model",
+    );
+
+    await clickPrimary(/skip model download/i);
+
+    const tryHeading = await screen.findByRole("heading", {
+      name: /try dictation here/i,
+    });
+    await waitFor(() => expect(tryHeading).toHaveFocus());
+    expect(screen.getByRole("status")).toHaveTextContent(
+      "Step 2 of 4: Try dictation here",
+    );
+  });
+
+  it("explains that the microphone action requests all dictation permissions", async () => {
+    const backend = await import("@/lib/backend/settings");
+    vi.mocked(backend.getPermissionDiagnostics).mockResolvedValueOnce({
+      microphoneReady: false,
+      microphonePermissionReady: false,
+      speechRecognitionReady: false,
+      accessibilityReady: false,
+      automationReady: false,
+      postEventReady: false,
+      notes: [],
+      runningFromDiskImage: false,
+    });
+
+    render(<FirstRunWizard onComplete={vi.fn()} />);
+    await clickPrimary(/skip model download/i);
+
+    expect(
+      await screen.findByText(/macOS may ask for Microphone.*then Accessibility/i),
+    ).toBeInTheDocument();
+    fireEvent.click(
+      screen.getByRole("button", { name: /request dictation permissions/i }),
+    );
+
+    await waitFor(() => {
+      expect(backend.requestDictationPermissions).toHaveBeenCalledTimes(1);
+    });
+  });
+
+  it("runs the first dictation inside Plainsong without system delivery", async () => {
+    const dictationBackend = await import("@/lib/backend/dictation");
+    const startDictation = vi.mocked(dictationBackend.startDictation);
+    const stopDictation = vi.mocked(dictationBackend.stopDictation);
+
+    render(<FirstRunWizard onComplete={vi.fn()} />);
+
+    await clickPrimary(/download and continue/i);
+    await screen.findByRole("heading", { name: /try dictation here/i });
+    fireEvent.click(
+      screen.getByRole("button", { name: /start a test/i })
+    );
+    await waitFor(() => {
+      expect(startDictation).toHaveBeenCalledWith(
+        expect.objectContaining({
+          deliveryMode: "preview",
+          saveToInbox: true,
+          projectId: "inbox",
+        })
+      );
+    });
+
+    fireEvent.click(
+      screen.getByRole("button", { name: /finish and transcribe/i })
+    );
+
+    await waitFor(() => {
+      expect(stopDictation).toHaveBeenCalledTimes(1);
+    });
+    expect(
+      await screen.findByText("This is my first Plainsong dictation.")
+    ).toBeInTheDocument();
+  });
+
+  it("hydrates an already-downloaded local model instead of offering it again", async () => {
+    const asrBackend = await import("@/lib/backend/asr");
+    vi.mocked(asrBackend.getAsrProviders).mockResolvedValueOnce([
+      ...providers,
+      {
+        providerType: "whisper",
+        name: "OpenAI Whisper",
+        description: "Local Whisper",
+        isAvailable: true,
+        inferenceEnabled: true,
+        modelInfo: {
+          name: "Whisper base.en",
+          version: "1",
+          sizeMb: 142,
+          parameters: "base.en",
+          languages: ["en"],
+          license: "MIT",
+          sourceUrl: "https://huggingface.co",
+        },
+        selectedModelId: "base.en",
+        modelOptions: [{ id: "base.en", label: "Whisper base.en" }],
+        downloadStatus: "Downloaded",
+        runtimeStatus: "ready",
+        runtimeDetails: {},
+      },
+    ]);
+    currentSettings.transcription.useSharedAsrSelection = false;
+    currentSettings.transcription.dictationProvider = "whisper";
+    currentSettings.transcription.dictationModelId = "base.en";
+
+    render(<FirstRunWizard onComplete={vi.fn()} />);
+
+    expect(
+      await screen.findByText(/local dictation route downloaded and selected/i)
+    ).toBeInTheDocument();
+    expect(
+      screen.getByRole("button", { name: /^continue$/i })
+    ).toBeInTheDocument();
+    expect(
+      screen.queryByRole("button", { name: /download and continue/i })
+    ).not.toBeInTheDocument();
+  });
+
+  it("keeps an honest recovery action after the user skips the model download", async () => {
     const onComplete = vi.fn();
     const asrBackend = await import("@/lib/backend/asr");
     const downloadAsrModels = vi.mocked(asrBackend.downloadAsrModels);
@@ -262,59 +403,70 @@ describe("FirstRunWizard", () => {
 
     render(<FirstRunWizard onComplete={onComplete} />);
 
-    await clickPrimary(/start with dictation/i); // welcome -> permissions
-    await screen.findByText("Microphone");
-    await clickPrimary(/skip for now/i);
+    await clickPrimary(/skip model download/i);
+    expect(onComplete).not.toHaveBeenCalled();
+    expect(downloadAsrModels).not.toHaveBeenCalled();
 
+    await clickPrimary(/^continue$/i);
+    await clickPrimary(/^continue$/i);
+
+    expect(
+      await screen.findByText(/the model download was skipped/i)
+    ).toBeInTheDocument();
+    expect(
+      screen.getByRole("button", { name: /download local model/i })
+    ).toBeInTheDocument();
+
+    await clickPrimary(/start using plainsong/i);
     expect(onComplete).toHaveBeenCalledWith({
       markOnboardingComplete: true,
       meetingsCompleted: false,
     });
-    await waitFor(() => {
-      expect(downloadAsrModels).toHaveBeenCalledWith("whisper");
-    });
+    expect(downloadAsrModels).not.toHaveBeenCalled();
   });
 
-  it("still fetches the fast default when the user closes the welcome screen", async () => {
-    // The same permanent dead end is reachable one step earlier: "Close" on
-    // the welcome screen resolves markOnboardingComplete to true in full mode.
-    const onComplete = vi.fn();
+  it("downloads the selected model before the primary action advances", async () => {
     const asrBackend = await import("@/lib/backend/asr");
     const downloadAsrModels = vi.mocked(asrBackend.downloadAsrModels);
+    const download = deferred<void>();
+    downloadAsrModels.mockImplementationOnce(() => download.promise);
 
     currentSettings.transcription.dictationProvider = "whisper";
     currentSettings.transcription.dictationModelId = "base.en";
 
-    render(<FirstRunWizard onComplete={onComplete} />);
+    render(<FirstRunWizard onComplete={vi.fn()} />);
 
-    await screen.findByRole("button", { name: /start with dictation/i });
-    await clickPrimary(/^close$/i);
+    fireEvent.click(
+      await screen.findByRole("button", { name: /download and continue/i })
+    );
+    expect(downloadAsrModels).toHaveBeenCalledWith("whisper");
+    expect(
+      screen.getByRole("heading", { name: /dictation model/i })
+    ).toBeInTheDocument();
+    expect(
+      screen.getByRole("button", { name: /downloading/i })
+    ).toBeDisabled();
 
-    expect(onComplete).toHaveBeenCalledWith({
-      markOnboardingComplete: true,
-      meetingsCompleted: false,
+    await act(async () => {
+      download.resolve();
     });
-    await waitFor(() => {
-      expect(downloadAsrModels).toHaveBeenCalledWith("whisper");
-    });
+
+    expect(
+      await screen.findByRole("heading", { name: /try dictation here/i })
+    ).toBeInTheDocument();
   });
 
-  it("does not downgrade an already-working route when skipping at the permissions step", async () => {
-    // The skip path must not become a new way to silently overwrite a route
-    // the user already configured -- the fixture ships macos_apple_speech.
-    const onComplete = vi.fn();
+  it("does not downgrade an already-working route when the model download is skipped", async () => {
     const asrBackend = await import("@/lib/backend/asr");
     const downloadAsrModels = vi.mocked(asrBackend.downloadAsrModels);
 
-    render(<FirstRunWizard onComplete={onComplete} />);
+    render(<FirstRunWizard onComplete={vi.fn()} />);
 
-    await clickPrimary(/start with dictation/i);
-    await screen.findByText("Microphone");
-    await clickPrimary(/skip for now/i);
+    await clickPrimary(/skip model download/i);
 
-    expect(onComplete).toHaveBeenCalled();
     expect(downloadAsrModels).not.toHaveBeenCalled();
     expect(currentSettings.transcription.dictationProvider).toBe("macos_apple_speech");
+    expect(currentSettings.transcription.dictationModelId).toBe("apple-default");
   });
 
   it("keeps settings saved during a slow model download instead of reverting them", async () => {
@@ -356,20 +508,20 @@ describe("FirstRunWizard", () => {
     expect(currentSettings.shortcuts.toggleDictation).toBe("Cmd+Shift+J");
   });
 
-  it("completes the full onboarding in dictation-only mode, downloading the fast default when nothing was configured", async () => {
+  it("completes full onboarding only after the explicit model download", async () => {
     const onComplete = vi.fn();
+    const asrBackend = await import("@/lib/backend/asr");
+    const downloadAsrModels = vi.mocked(asrBackend.downloadAsrModels);
 
-    // Start from an unconfigured dictation route (the shipped default) so
-    // the background base.en fetch is expected to actually run.
     currentSettings.transcription.dictationProvider = "whisper";
     currentSettings.transcription.dictationModelId = "base.en";
 
     render(<FirstRunWizard onComplete={onComplete} />);
 
-    await clickPrimary(/start with dictation/i);
-    await clickPrimary(/continue/i);
-    await clickPrimary(/continue/i);
-    await clickPrimary(/finish/i);
+    await clickPrimary(/download and continue/i);
+    await clickPrimary(/^continue$/i);
+    await clickPrimary(/^continue$/i);
+    await clickPrimary(/start using plainsong/i);
 
     await waitFor(() => {
       expect(onComplete).toHaveBeenCalledWith({
@@ -379,18 +531,52 @@ describe("FirstRunWizard", () => {
     });
 
     expect(currentSettings.shortcuts.toggleDictation).toBe("Cmd+Shift+Space");
-    // Continuing past the model step without clicking "Download" still fetches
-    // the fast shipped default (whisper/base.en) in the background, so the
-    // persisted dictation route isn't left permanently un-downloaded.
-    await waitFor(() => {
-      expect(currentSettings.transcription.dictationProvider).toBe("whisper");
-    });
+    expect(downloadAsrModels).toHaveBeenCalledWith("whisper");
+    expect(currentSettings.transcription.dictationProvider).toBe("whisper");
     expect(currentSettings.transcription.dictationModelId).toBe("base.en");
     // The wizard's hotkey step only manages the shortcut key, not the
     // interaction mode -- any existing hold-to-talk/hands-free preference
     // (set from Settings) is left untouched, not silently reset to toggle.
     expect(currentSettings.transcription.dictationPushToTalk).toBe(true);
     expect(currentSettings.transcription.dictationHandsFreeEnabled).toBe(false);
+  });
+
+  it("keeps a failed local model download on the model step until retry succeeds", async () => {
+    const asrBackend = await import("@/lib/backend/asr");
+    const downloadAsrModels = vi.mocked(asrBackend.downloadAsrModels);
+    const retryDownload = deferred<void>();
+    downloadAsrModels
+      .mockRejectedValueOnce(new Error("Network unavailable"))
+      .mockImplementationOnce(() => retryDownload.promise);
+
+    currentSettings.transcription.dictationProvider = "whisper";
+    currentSettings.transcription.dictationModelId = "base.en";
+
+    render(<FirstRunWizard onComplete={vi.fn()} />);
+
+    await clickPrimary(/download and continue/i);
+
+    expect(
+      await screen.findByText(/download failed: network unavailable/i)
+    ).toBeInTheDocument();
+    expect(
+      screen.getByRole("heading", { name: /dictation model/i })
+    ).toBeInTheDocument();
+
+    fireEvent.click(
+      screen.getByRole("button", { name: /retry download/i })
+    );
+    expect(
+      screen.getByRole("button", { name: /downloading/i })
+    ).toBeDisabled();
+
+    await act(async () => {
+      retryDownload.resolve();
+    });
+
+    expect(
+      await screen.findByRole("heading", { name: /try dictation here/i })
+    ).toBeInTheDocument();
   });
 
   it("does not overwrite an already-configured, different dictation provider when just passing through the model step", async () => {
@@ -535,6 +721,9 @@ describe("FirstRunWizard", () => {
 
     expect(
       await screen.findByText(/permission and non-silent audio are not verified yet/i),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByRole("button", { name: /open system-audio privacy settings/i }),
     ).toBeInTheDocument();
     fireEvent.click(screen.getByRole("button", { name: /test system audio/i }));
 

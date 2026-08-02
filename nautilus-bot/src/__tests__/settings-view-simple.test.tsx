@@ -4,6 +4,33 @@ import { SettingsView } from "@/components/views/settings-view-simple";
 import { ToastProvider } from "@/components/toast";
 import { OPEN_ONBOARDING_EVENT } from "@/lib/onboarding";
 import { OPEN_MAIN_VIEW_EVENT } from "@/lib/navigation";
+import type { ProductReadinessSnapshot } from "@/features/readiness/product-readiness";
+
+const readinessContext = vi.hoisted(() => ({
+  productReadiness: {
+    evidenceObservedAt: 1,
+    dictation: {
+      domain: "dictation",
+      state: "ready",
+      cause: null,
+    },
+    meetings: {
+      domain: "meetings",
+      state: "ready",
+      cause: null,
+    },
+    fullCapture: {
+      domain: "full_capture",
+      state: "ready",
+      cause: null,
+    },
+    overall: {
+      domain: "overall",
+      state: "ready",
+      cause: null,
+    },
+  } as ProductReadinessSnapshot,
+}));
 
 const baseSettings = {
   audio: {
@@ -62,6 +89,10 @@ vi.mock("@/components/theme-provider", () => ({
     theme: "system",
     setTheme: vi.fn(),
   }),
+}));
+
+vi.mock("@/features/readiness/product-readiness-context", () => ({
+  useProductReadinessStatus: () => readinessContext,
 }));
 
 // Captures the "settings-changed" listener the view registers, so tests can
@@ -246,6 +277,11 @@ describe("SettingsView performance behavior", () => {
   beforeEach(() => {
     vi.clearAllMocks();
     electronEventListeners.clear();
+    readinessContext.productReadiness.dictation = {
+      domain: "dictation",
+      state: "ready",
+      cause: null,
+    };
   });
 
   afterEach(() => {
@@ -274,6 +310,122 @@ describe("SettingsView performance behavior", () => {
     });
   });
 
+  it("shows a plain retry path when the initial settings load fails", async () => {
+    const backend = await import("@/lib/backend");
+    const getSettings = vi.mocked(backend.getSettings);
+    getSettings
+      .mockReset()
+      .mockRejectedValueOnce(
+        new Error("get_settings JSON-RPC failed at /Users/test/settings.json"),
+      )
+      .mockResolvedValue({ ...baseSettings } as unknown as Awaited<
+        ReturnType<typeof backend.getSettings>
+      >);
+
+    render(<ToastProvider><SettingsView /></ToastProvider>);
+
+    const alert = await screen.findByRole("alert");
+    expect(alert).toHaveTextContent("Settings could not load");
+    expect(alert).toHaveTextContent(/could not open your settings right now/i);
+    expect(alert).not.toHaveTextContent(/get_settings|JSON-RPC|\/Users\/test/i);
+
+    fireEvent.click(screen.getByRole("button", { name: /try again/i }));
+
+    expect(
+      await screen.findByText("How Plainsong listens, writes, and what it keeps."),
+    ).toBeInTheDocument();
+    expect(getSettings).toHaveBeenCalledTimes(2);
+  });
+
+  it("gives visible settings controls accessible names", async () => {
+    render(<ToastProvider><SettingsView /></ToastProvider>);
+
+    await screen.findByText("How Plainsong listens, writes, and what it keeps.");
+    for (const name of [
+      "Keep running after close",
+      "Always on top",
+      "While dictating",
+      "While recording a meeting",
+    ]) {
+      expect(screen.getByRole("switch", { name })).toBeInTheDocument();
+    }
+    for (const name of [
+      "Dictation shortcut",
+      "Paste last result shortcut",
+      "Copy last result shortcut",
+      "Open window shortcut",
+    ]) {
+      expect(screen.getByRole("textbox", { name })).toBeInTheDocument();
+    }
+
+    fireEvent.click(screen.getByText("Transcription"));
+    await screen.findByText("Microphones");
+    for (const name of [
+      "Use a different microphone for dictation",
+      "Use a different microphone for meetings",
+      "Separate speakers",
+      "Smart Format",
+      "Spoken commands",
+      "Snippets",
+      "Learn from your corrections",
+      "Name meetings for me",
+      "Also copy dictated text to the clipboard",
+      "Skip silence",
+    ]) {
+      expect(await screen.findByRole("switch", { name })).toBeInTheDocument();
+    }
+    for (const name of [
+      "App-wide microphone",
+      "Dictation microphone override",
+      "Meeting microphone override",
+      "Transcription language",
+      "How the dictation shortcut works",
+    ]) {
+      expect(screen.getByRole("combobox", { name })).toBeInTheDocument();
+    }
+
+    fireEvent.click(screen.getByText("Privacy & Security"));
+    expect(
+      await screen.findByRole("switch", {
+        name: "Use cloud AI for summaries and answers",
+      }),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByRole("switch", {
+        name: "Ask macOS for permission when needed",
+      }),
+    ).toBeInTheDocument();
+
+    fireEvent.click(screen.getByText("Storage"));
+    for (const name of [
+      "Auto-delete dictation recordings",
+      "Meeting audio",
+      "Auto-delete meeting data",
+      "When a meeting is auto-deleted, remove",
+    ]) {
+      expect(await screen.findByRole("combobox", { name })).toBeInTheDocument();
+    }
+    expect(
+      await screen.findByRole("switch", {
+        name: "Allow uploading to cloud storage",
+      }),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByRole("combobox", { name: "Cloud storage service" }),
+    ).toBeInTheDocument();
+
+    fireEvent.click(screen.getByText("AI & Keys"));
+    expect(
+      await screen.findByRole("switch", {
+        name: "Summarize every meeting automatically",
+      }),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByRole("combobox", { name: "API key service" }),
+    ).toBeInTheDocument();
+    expect(screen.getByRole("combobox", { name: "Method" })).toBeInTheDocument();
+  });
+
   it("invalidates ASR runtime probes before refreshing permission diagnostics", async () => {
     const backend = await import("@/lib/backend");
     render(<ToastProvider><SettingsView /></ToastProvider>);
@@ -292,6 +444,26 @@ describe("SettingsView performance behavior", () => {
     expect(
       vi.mocked(backend.refreshAsrRuntimeProbes).mock.invocationCallOrder[0],
     ).toBeLessThan(vi.mocked(backend.getAsrProviders).mock.invocationCallOrder[0]);
+  });
+
+  it("does not probe local Ollama for a key or query Ollama Cloud without one", async () => {
+    const backend = await import("@/lib/backend");
+
+    render(
+      <ToastProvider>
+        <SettingsView />
+      </ToastProvider>,
+    );
+
+    await screen.findByText("How Plainsong listens, writes, and what it keeps.");
+    expect(backend.hasProviderSecret).not.toHaveBeenCalledWith("ollama");
+
+    fireEvent.click(screen.getByText("AI & Keys"));
+    await screen.findByText("API keys");
+    await waitFor(() => {
+      expect(backend.hasProviderSecret).toHaveBeenCalledWith("ollama-cloud");
+    });
+    expect(backend.listOllamaCloudModels).not.toHaveBeenCalled();
   });
 
   it("renders settings before backup config finishes loading", async () => {
@@ -365,6 +537,28 @@ describe("SettingsView performance behavior", () => {
     expect(screen.queryByText(/^Mic$/)).not.toBeInTheDocument();
   });
 
+  it("uses canonical text-insertion readiness even when the local probes look ready", async () => {
+    readinessContext.productReadiness.dictation = {
+      domain: "dictation",
+      state: "needs_action",
+      cause: {
+        id: "cursor_insertion",
+        message: "Text insertion needs Accessibility access for the current mode.",
+        action: {
+          id: "repair_cursor_insertion",
+          label: "Repair text insertion",
+          destination: "setup",
+        },
+      },
+    };
+
+    render(<ToastProvider><SettingsView /></ToastProvider>);
+
+    await screen.findByText("How Plainsong listens, writes, and what it keeps.");
+    const chip = screen.getByText("Text insertion").parentElement;
+    expect(chip).toHaveTextContent("Text insertion·Needs setup");
+  });
+
   it("renders the Transcription tab without the removed audio-tuning placebo controls", async () => {
     render(<ToastProvider><SettingsView /></ToastProvider>);
 
@@ -394,6 +588,9 @@ describe("SettingsView performance behavior", () => {
       await screen.findByText(
         /has not yet confirmed macOS permission and real sound coming through/i,
       ),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByRole("button", { name: "Open privacy settings" }),
     ).toBeInTheDocument();
 
     fireEvent.click(screen.getByRole("button", { name: "Run the test" }));
