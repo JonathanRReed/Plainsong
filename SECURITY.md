@@ -4,11 +4,9 @@
 
 Please report security issues privately rather than opening a public issue.
 
-Email **`security-contact@example.invalid`**. **This is a pre-publication
-placeholder, not a working inbox; the maintainer must replace it with an
-explicitly monitored address before the repository becomes public.** Once
-GitHub private vulnerability reporting is enabled, you may instead use
-**"Report a vulnerability"** under Security → Advisories.
+Email **Contact@JonathanRReed.com**. Once GitHub private vulnerability
+reporting is enabled on this repository, you may instead use **"Report a
+vulnerability"** under Security → Advisories.
 
 Maintainer pre-publication requirement: enable private vulnerability reporting
 at the public-repository cutover and verify that the reporting form is available
