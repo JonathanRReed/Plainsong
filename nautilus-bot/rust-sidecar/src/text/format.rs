@@ -545,6 +545,53 @@ fn normalize_spoken_punctuation(text: &str) -> String {
         })
 }
 
+/// Collapses `word..` into `word.` while leaving ellipses and relative paths
+/// alone. Dictation genuinely does produce a doubled period (the speaker says
+/// "period" after a sentence that already ended in one), so the rule is worth
+/// keeping — it just has to be narrower than a global `replace("..", ".")`.
+fn collapse_duplicated_sentence_period(text: &str) -> String {
+    let chars: Vec<char> = text.chars().collect();
+    let mut output = String::with_capacity(text.len());
+    let mut index = 0;
+
+    while index < chars.len() {
+        let current = chars[index];
+        if current != '.' {
+            output.push(current);
+            index += 1;
+            continue;
+        }
+
+        // Measure the whole run of dots so `...` is never partially rewritten.
+        let mut run_end = index;
+        while run_end < chars.len() && chars[run_end] == '.' {
+            run_end += 1;
+        }
+        let run_len = run_end - index;
+
+        let previous = output.chars().next_back();
+        let next = chars.get(run_end).copied();
+
+        // Exactly two dots, directly after a word character, and not the start
+        // of a path segment (`../`, `..\`) or a range (`1..5`).
+        let is_doubled_sentence_period = run_len == 2
+            && previous.is_some_and(|c| c.is_alphanumeric())
+            && !matches!(next, Some('/') | Some('\\'))
+            && !next.is_some_and(|c| c.is_alphanumeric());
+
+        if is_doubled_sentence_period {
+            output.push('.');
+        } else {
+            for _ in 0..run_len {
+                output.push('.');
+            }
+        }
+        index = run_end;
+    }
+
+    output
+}
+
 fn normalize_spacing_around_punctuation(text: &str) -> String {
     let mut output = text.replace("\r\n", "\n");
     let replacements = [
@@ -555,13 +602,20 @@ fn normalize_spacing_around_punctuation(text: &str) -> String {
         (" :", ":"),
         (" ;", ";"),
         (",,", ","),
-        ("..", "."),
         ("!!", "!"),
         ("??", "?"),
     ];
     for (needle, replacement) in replacements {
         output = output.replace(needle, replacement);
     }
+
+    // `..` is deliberately NOT in the table above. A blanket collapse turned
+    // `cd ../src` into `cd ./src` and ate the middle dot of an ellipsis, and it
+    // runs before the CodeEditor passthrough so no destination was safe from
+    // it. Only collapse a duplicated sentence period: one that follows a word
+    // character and is not part of a longer run (`...`) or a relative path
+    // (`../`, `./`).
+    output = collapse_duplicated_sentence_period(&output);
 
     let Ok(space_re) = RegexBuilder::new(r"[ \t]{2,}").build() else {
         return output;
@@ -1433,5 +1487,67 @@ mod tests {
 
         let code_editor_category = resolve_dictation_app_category(Some("Cursor"), None);
         assert_eq!(code_editor_category, DictationAppCategory::CodeEditor);
+    }
+
+    #[test]
+    fn relative_paths_survive_punctuation_normalization() {
+        // `cd ../src` used to come out as `cd ./src`: the blanket ".." -> "."
+        // rewrite ran before the CodeEditor passthrough, so a terminal command
+        // was corrupted no matter which app the user dictated into.
+        assert_eq!(
+            collapse_duplicated_sentence_period("cd ../src"),
+            "cd ../src"
+        );
+        assert_eq!(
+            collapse_duplicated_sentence_period("cp ../a/b ../../c"),
+            "cp ../a/b ../../c"
+        );
+        assert_eq!(
+            collapse_duplicated_sentence_period("import x from '../lib'"),
+            "import x from '../lib'"
+        );
+        assert_eq!(
+            collapse_duplicated_sentence_period("cd ..\\src"),
+            "cd ..\\src"
+        );
+    }
+
+    #[test]
+    fn ellipses_and_ranges_survive_punctuation_normalization() {
+        assert_eq!(
+            collapse_duplicated_sentence_period("wait for it..."),
+            "wait for it..."
+        );
+        assert_eq!(
+            collapse_duplicated_sentence_period("range 1..5"),
+            "range 1..5"
+        );
+    }
+
+    #[test]
+    fn a_doubled_sentence_period_is_still_collapsed() {
+        // The rule this narrowing preserves: a speaker who says "period" after
+        // a sentence that already ended in one should not get two.
+        assert_eq!(
+            collapse_duplicated_sentence_period("That is done.."),
+            "That is done."
+        );
+        assert_eq!(
+            collapse_duplicated_sentence_period("One.. Two.."),
+            "One. Two."
+        );
+    }
+
+    #[test]
+    fn code_editor_dictation_preserves_technical_text() {
+        let formatted = smart_format_dictation_text_with_category(
+            "cd ../src",
+            "voice",
+            DictationAppCategory::CodeEditor,
+        );
+        assert!(
+            formatted.contains("../src"),
+            "code editor formatting corrupted a relative path: {formatted}"
+        );
     }
 }

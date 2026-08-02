@@ -26,7 +26,7 @@ use crate::sidecar_handle::SidecarHandle;
 use anyhow::{Context, Result};
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use cpal::{FromSample, Sample};
-use crossbeam::channel::{bounded, Receiver, TrySendError};
+use crossbeam::channel::{bounded, Receiver, RecvTimeoutError, TrySendError};
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -179,6 +179,10 @@ pub struct AudioCapture {
     recordings_dir: PathBuf,
     host: cpal::Host,
     active_recording: Option<ActiveRecordingSession>,
+    /// A timed-out Core Audio construction call cannot be cancelled safely.
+    /// Keep the long-lived sidecar from leaking another blocked worker on every
+    /// retry; Electron recycles the sidecar after surfacing the first error.
+    microphone_preparation_stalled: bool,
     /// Audio preprocessor for noise suppression
     preprocessor: Option<AudioPreprocessor>,
     /// Enable noise suppression
@@ -297,6 +301,12 @@ struct ActiveRecordingSession {
     /// Dropped chunk counters captured during recording.
     dropped_stream_chunks: Arc<AtomicU64>,
     dropped_writer_chunks: Arc<AtomicU64>,
+    /// Set when the OS reports the capture stream has failed — a device
+    /// disconnect, a sample-rate invalidation, or any other CoreAudio error.
+    /// This used to be logged and nothing else, so an unplugged microphone left
+    /// the timer running and the badge lit while nothing reached the WAV. The
+    /// stop path reads this so the recording can be reported honestly.
+    capture_failure: Arc<std::sync::Mutex<Option<String>>>,
 }
 
 #[expect(
@@ -314,6 +324,10 @@ pub struct RecordingStopResult {
     pub dropped_mic_samples: u64,
     pub dropped_system_samples: u64,
     pub dropped_mixed_chunks: u64,
+    /// The OS-reported capture failure, if the input stream died mid-recording.
+    /// `Some` means audio stopped arriving before the user pressed stop, so the
+    /// saved file is shorter than the elapsed session.
+    pub capture_failure: Option<String>,
 }
 
 /// Feed this callback's mono samples through the active dictation auto-stop VAD
@@ -467,7 +481,7 @@ fn resolve_device_preference<'a>(
 
 impl AudioCapture {
     pub fn new() -> Self {
-        let recordings_dir = dirs::data_dir()
+        let recordings_dir = crate::paths::data_dir()
             .unwrap_or_else(|| PathBuf::from("."))
             .join("Plainsong")
             .join("recordings");
@@ -487,6 +501,7 @@ impl AudioCapture {
             recordings_dir,
             host,
             active_recording: None,
+            microphone_preparation_stalled: false,
             preprocessor: Some(preprocessor),
             noise_suppression_enabled: true,
             dictation_audio_level: Arc::new(std::sync::atomic::AtomicU32::new(0)),
@@ -507,6 +522,18 @@ impl AudioCapture {
 
     pub fn plan_recording(&self, options: &RecordingOptions) -> Result<RecordingCapturePlan> {
         RecordingCapturePlan::new(&self.recordings_dir, options.mic, options.system_audio)
+    }
+
+    fn ensure_microphone_preparation_retry_is_safe(
+        &self,
+        microphone_requested: bool,
+    ) -> Result<()> {
+        if microphone_requested && self.microphone_preparation_stalled {
+            anyhow::bail!(
+                "Microphone capture is recovering from a stalled setup attempt. Wait for Plainsong to restart audio capture, then retry."
+            );
+        }
+        Ok(())
     }
 
     /// Check if system audio capture is available
@@ -958,32 +985,48 @@ impl AudioCapture {
         });
         self.dictation_thread = Some(capture_handle);
 
-        // Wait for the audio stream to actually start (up to 500ms)
+        // Wait for the audio stream to actually start. Core Audio stream
+        // construction can stall inside the platform call, so every failure
+        // path must retire the worker with a bounded join. An unbounded join
+        // here would prevent the command from ever returning its timeout to
+        // Electron, leaving the UI stuck on "Getting ready".
         match startup_rx.recv_timeout(Duration::from_millis(1500)) {
             Ok(Ok(())) => {
                 tracing::info!("Dictation started (stream confirmed live)");
             }
             Ok(Err(error)) => {
-                self.is_dictating.store(false, Ordering::SeqCst);
-                self.signal_capture_stop();
-                if let Some(handle) = self.dictation_thread.take() {
-                    let _ = handle.join();
-                }
+                self.retire_dictation_preparation_thread();
                 return Err(anyhow::anyhow!(error));
             }
-            Err(_) => {
-                self.is_dictating.store(false, Ordering::SeqCst);
-                self.signal_capture_stop();
-                if let Some(handle) = self.dictation_thread.take() {
-                    let _ = handle.join();
-                }
+            Err(RecvTimeoutError::Timeout) => {
+                self.retire_dictation_preparation_thread();
                 return Err(anyhow::anyhow!(
-                    "Timed out waiting for dictation microphone stream to start"
+                    "Timed out waiting for dictation microphone stream to start. Plainsong is restarting audio capture automatically; retry in a moment."
+                ));
+            }
+            Err(RecvTimeoutError::Disconnected) => {
+                self.retire_dictation_preparation_thread();
+                return Err(anyhow::anyhow!(
+                    "Dictation microphone stream preparation stopped unexpectedly"
                 ));
             }
         }
 
         Ok(resolved_device)
+    }
+
+    fn retire_dictation_preparation_thread(&mut self) {
+        self.is_dictating.store(false, Ordering::SeqCst);
+        self.signal_capture_stop();
+        if let Some(handle) = self.dictation_thread.take() {
+            if let Err(error) = join_thread_with_timeout(
+                handle,
+                Duration::from_millis(250),
+                "dictation microphone preparation thread",
+            ) {
+                tracing::warn!("{}", error);
+            }
+        }
     }
 
     /// Tell the current capture session's thread and callbacks to stop, and
@@ -1239,6 +1282,7 @@ impl AudioCapture {
         options: RecordingOptions,
         event_handle: Option<SidecarHandle>,
     ) -> Result<String> {
+        self.ensure_microphone_preparation_retry_is_safe(options.mic)?;
         if self.active_recording.is_some() {
             return Err(anyhow::anyhow!("A recording session is already active"));
         }
@@ -1332,6 +1376,7 @@ impl AudioCapture {
                 sample_rate,
                 dropped_stream_chunks: Arc::new(AtomicU64::new(0)),
                 dropped_writer_chunks: Arc::new(AtomicU64::new(0)),
+                capture_failure: Arc::new(std::sync::Mutex::new(None)),
             });
         } else {
             let device = preferred_mic_device
@@ -1358,6 +1403,10 @@ impl AudioCapture {
             let dropped_writer_chunks = Arc::new(AtomicU64::new(0));
             let dropped_stream_chunks_for_session = Arc::clone(&dropped_stream_chunks);
             let dropped_writer_chunks_for_session = Arc::clone(&dropped_writer_chunks);
+            let capture_failure: Arc<std::sync::Mutex<Option<String>>> =
+                Arc::new(std::sync::Mutex::new(None));
+            let capture_failure_for_stream = Arc::clone(&capture_failure);
+            let capture_failure_for_session = Arc::clone(&capture_failure);
             let wf_buffer = Arc::clone(&waveform_buffer);
             let stream_queue_clone = Arc::clone(&streaming_queue);
             let (ready_tx, ready_rx) = bounded::<Result<(), String>>(1);
@@ -1404,7 +1453,22 @@ impl AudioCapture {
                                     Err(TrySendError::Disconnected(_)) => {}
                                 }
                             },
-                            |error| tracing::error!("Stream error: {}", error),
+                            {
+                                let capture_failure = Arc::clone(&capture_failure_for_stream);
+                                move |error| {
+                                    // Record as well as log: a device
+                                    // disconnect or sample-rate invalidation
+                                    // stops delivering callbacks, and without
+                                    // this the session had no way to know the
+                                    // microphone had gone away.
+                                    tracing::error!("Stream error: {}", error);
+                                    if let Ok(mut slot) = capture_failure.lock() {
+                                        if slot.is_none() {
+                                            *slot = Some(error.to_string());
+                                        }
+                                    }
+                                }
+                            },
                             None,
                         )
                     }};
@@ -1464,25 +1528,32 @@ impl AudioCapture {
             match ready_rx.recv_timeout(Duration::from_millis(1500)) {
                 Ok(Ok(())) => {}
                 Ok(Err(error)) => {
-                    capture_stop_flag.store(false, Ordering::SeqCst);
-                    let _ = capture_handle.join();
-                    let _ = join_writer_with_timeout(
+                    retire_recording_preparation_threads(
+                        &capture_stop_flag,
+                        capture_handle,
                         writer_handle,
-                        Duration::from_secs(5),
-                        "wav writer thread",
                     );
                     return Err(anyhow::anyhow!(error));
                 }
-                Err(_) => {
-                    capture_stop_flag.store(false, Ordering::SeqCst);
-                    let _ = capture_handle.join();
-                    let _ = join_writer_with_timeout(
+                Err(RecvTimeoutError::Timeout) => {
+                    self.microphone_preparation_stalled = true;
+                    retire_recording_preparation_threads(
+                        &capture_stop_flag,
+                        capture_handle,
                         writer_handle,
-                        Duration::from_secs(5),
-                        "wav writer thread",
                     );
                     return Err(anyhow::anyhow!(
-                        "Timed out waiting for microphone stream preparation"
+                        "Timed out waiting for microphone stream preparation. Plainsong is restarting audio capture automatically; retry in a moment."
+                    ));
+                }
+                Err(RecvTimeoutError::Disconnected) => {
+                    retire_recording_preparation_threads(
+                        &capture_stop_flag,
+                        capture_handle,
+                        writer_handle,
+                    );
+                    return Err(anyhow::anyhow!(
+                        "Microphone stream preparation stopped unexpectedly"
                     ));
                 }
             }
@@ -1505,6 +1576,7 @@ impl AudioCapture {
                 sample_rate,
                 dropped_stream_chunks: dropped_stream_chunks_for_session,
                 dropped_writer_chunks: dropped_writer_chunks_for_session,
+                capture_failure: capture_failure_for_session,
             });
         }
 
@@ -1569,10 +1641,22 @@ impl AudioCapture {
             mixed_capture.stop();
         }
         if let Some(handle) = session.capture_handle.take() {
-            let _ = handle.join();
+            if let Err(error) = join_thread_with_timeout(
+                handle,
+                Duration::from_secs(1),
+                "prepared microphone capture thread",
+            ) {
+                tracing::warn!("{}", error);
+            }
         }
         for handle in session.writer_handles.drain(..) {
-            let _ = handle.join();
+            if let Err(error) = join_writer_with_timeout(
+                handle,
+                Duration::from_secs(1),
+                "prepared microphone writer thread",
+            ) {
+                tracing::warn!("{}", error);
+            }
         }
     }
 
@@ -1623,6 +1707,18 @@ impl AudioCapture {
             join_writer_with_timeout(handle, Duration::from_secs(20), "wav writer thread")?;
         }
 
+        let capture_failure = session
+            .capture_failure
+            .lock()
+            .ok()
+            .and_then(|slot| slot.clone());
+        if let Some(reason) = capture_failure.as_deref() {
+            tracing::error!(
+                "Recording {} lost its capture stream before stop: {}",
+                recording_id,
+                reason
+            );
+        }
         let dropped_stream_chunks = session.dropped_stream_chunks.load(Ordering::Relaxed);
         let dropped_writer_chunks = session.dropped_writer_chunks.load(Ordering::Relaxed);
         if dropped_stream_chunks > 0
@@ -1699,6 +1795,7 @@ impl AudioCapture {
             dropped_mic_samples,
             dropped_system_samples,
             dropped_mixed_chunks,
+            capture_failure,
         })
     }
 
@@ -2256,15 +2353,42 @@ fn write_wav_file(
 }
 
 fn join_thread_with_timeout(handle: JoinHandle<()>, timeout: Duration, label: &str) -> Result<()> {
-    let (done_tx, done_rx) = bounded::<std::thread::Result<()>>(1);
-    std::thread::spawn(move || {
-        let _ = done_tx.send(handle.join());
-    });
+    // Poll the owned handle instead of moving it into another waiter thread.
+    // If Core Audio never returns, a timeout then detaches only the original
+    // worker rather than leaking an additional join waiter for every retry.
+    let started_at = Instant::now();
+    while !handle.is_finished() {
+        if started_at.elapsed() >= timeout {
+            return Err(anyhow::anyhow!("Timed out waiting for {}", label));
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    }
 
-    match done_rx.recv_timeout(timeout) {
-        Ok(Ok(())) => Ok(()),
-        Ok(Err(_)) => Err(anyhow::anyhow!("{} panicked", label)),
-        Err(_) => Err(anyhow::anyhow!("Timed out waiting for {}", label)),
+    match handle.join() {
+        Ok(()) => Ok(()),
+        Err(_) => Err(anyhow::anyhow!("{} panicked", label)),
+    }
+}
+
+fn retire_recording_preparation_threads(
+    capture_stop_flag: &Arc<AtomicBool>,
+    capture_handle: JoinHandle<()>,
+    writer_handle: JoinHandle<Result<()>>,
+) {
+    capture_stop_flag.store(false, Ordering::SeqCst);
+    if let Err(error) = join_thread_with_timeout(
+        capture_handle,
+        Duration::from_millis(250),
+        "microphone preparation thread",
+    ) {
+        tracing::warn!("{}", error);
+    }
+    if let Err(error) = join_writer_with_timeout(
+        writer_handle,
+        Duration::from_millis(250),
+        "microphone preparation writer thread",
+    ) {
+        tracing::warn!("{}", error);
     }
 }
 
@@ -2273,15 +2397,18 @@ fn join_writer_with_timeout(
     timeout: Duration,
     label: &str,
 ) -> Result<()> {
-    let (done_tx, done_rx) = bounded::<std::thread::Result<Result<()>>>(1);
-    std::thread::spawn(move || {
-        let _ = done_tx.send(handle.join());
-    });
+    // See join_thread_with_timeout: keep timeout paths to one detached worker.
+    let started_at = Instant::now();
+    while !handle.is_finished() {
+        if started_at.elapsed() >= timeout {
+            return Err(anyhow::anyhow!("Timed out waiting for {}", label));
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    }
 
-    match done_rx.recv_timeout(timeout) {
-        Ok(Ok(result)) => result.with_context(|| format!("{} failed", label)),
-        Ok(Err(_)) => Err(anyhow::anyhow!("{} panicked", label)),
-        Err(_) => Err(anyhow::anyhow!("Timed out waiting for {}", label)),
+    match handle.join() {
+        Ok(result) => result.with_context(|| format!("{} failed", label)),
+        Err(_) => Err(anyhow::anyhow!("{} panicked", label)),
     }
 }
 
@@ -2508,6 +2635,76 @@ mod recording_writer_tests {
         assert_eq!(std::fs::read(&path).unwrap(), b"do not truncate");
 
         let _ = std::fs::remove_dir_all(&root);
+    }
+}
+
+#[cfg(test)]
+mod recording_preparation_timeout_tests {
+    use super::{retire_recording_preparation_threads, AudioCapture};
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::Arc;
+    use std::time::{Duration, Instant};
+
+    #[test]
+    fn stalled_microphone_workers_do_not_undo_the_preparation_timeout() {
+        let capture_stop_flag = Arc::new(AtomicBool::new(true));
+        let capture_handle = std::thread::spawn(|| {
+            std::thread::sleep(Duration::from_secs(2));
+        });
+        let writer_handle = std::thread::spawn(|| -> anyhow::Result<()> {
+            std::thread::sleep(Duration::from_secs(2));
+            Ok(())
+        });
+
+        let started_at = Instant::now();
+        retire_recording_preparation_threads(&capture_stop_flag, capture_handle, writer_handle);
+
+        assert!(!capture_stop_flag.load(Ordering::SeqCst));
+        assert!(
+            started_at.elapsed() < Duration::from_secs(1),
+            "retiring stalled workers must remain bounded"
+        );
+    }
+
+    #[test]
+    fn a_stalled_microphone_attempt_blocks_only_further_microphone_retries() {
+        let mut audio = AudioCapture::new();
+        audio.microphone_preparation_stalled = true;
+
+        let error = audio
+            .ensure_microphone_preparation_retry_is_safe(true)
+            .expect_err("a second microphone attempt must be rejected");
+        assert!(error
+            .to_string()
+            .contains("Wait for Plainsong to restart audio capture"));
+        assert!(
+            audio
+                .ensure_microphone_preparation_retry_is_safe(false)
+                .is_ok(),
+            "a microphone stall must not block a system-audio-only recording"
+        );
+    }
+
+    #[test]
+    fn stalled_dictation_preparation_returns_without_joining_forever() {
+        let mut audio = AudioCapture::new();
+        audio.is_dictating.store(true, Ordering::SeqCst);
+        let capture_stop_flag = Arc::new(AtomicBool::new(true));
+        audio.dictation_capture_stop = Some(Arc::clone(&capture_stop_flag));
+        audio.dictation_thread = Some(std::thread::spawn(|| {
+            std::thread::sleep(Duration::from_secs(2));
+        }));
+
+        let started_at = Instant::now();
+        audio.retire_dictation_preparation_thread();
+
+        assert!(!audio.is_dictating.load(Ordering::SeqCst));
+        assert!(!capture_stop_flag.load(Ordering::SeqCst));
+        assert!(audio.dictation_thread.is_none());
+        assert!(
+            started_at.elapsed() < Duration::from_secs(1),
+            "retiring stalled dictation preparation must remain bounded"
+        );
     }
 }
 
@@ -2796,5 +2993,21 @@ mod hands_free_monitor_tests {
         let from_hands_free: crate::models::DictationStartOptions =
             serde_json::from_value(serde_json::json!({ "handsFreeTrigger": true })).unwrap();
         assert!(from_hands_free.hands_free_trigger);
+    }
+
+    #[test]
+    fn the_dictation_delivery_mode_defaults_to_system_and_accepts_preview() {
+        use crate::models::DictationDeliveryMode;
+
+        let default_options = crate::models::DictationStartOptions::default();
+        assert_eq!(default_options.delivery_mode, DictationDeliveryMode::System);
+
+        let from_empty: crate::models::DictationStartOptions =
+            serde_json::from_value(serde_json::json!({})).unwrap();
+        assert_eq!(from_empty.delivery_mode, DictationDeliveryMode::System);
+
+        let from_preview: crate::models::DictationStartOptions =
+            serde_json::from_value(serde_json::json!({ "deliveryMode": "preview" })).unwrap();
+        assert_eq!(from_preview.delivery_mode, DictationDeliveryMode::Preview);
     }
 }
