@@ -12,8 +12,8 @@ use crate::recording_audio::{
     ValidatedRecordingAudio,
 };
 use crate::store::{
-    CaptureSessionRecord, ContextSnapshotRecord, InsertionActionRecord, MeetingArtifactRecord,
-    PolicySnapshotRecord, RuntimeEventRecord, TranscriptArtifactRecord,
+    CaptureSessionRecord, ContextSnapshotRecord, DictationInsightTotals, InsertionActionRecord,
+    MeetingArtifactRecord, PolicySnapshotRecord, RuntimeEventRecord, TranscriptArtifactRecord,
 };
 use anyhow::{Context, Result};
 use chrono::Utc;
@@ -38,6 +38,10 @@ const SENSITIVE_AUDIT_DETAIL_KEYS: [&str; 4] = [
     "clipboard_text",
     "captured_context_text",
 ];
+
+const LEGACY_DICTATION_BYTE_COUNT_FLOOR: i64 = 86_400;
+const MAX_REPAIRABLE_DICTATION_CAPTURE_MS: i64 = 12 * 60 * 60 * 1_000;
+pub(crate) const CURRENT_SCHEMA_VERSION: i64 = 1;
 
 const AUDIT_LOG_APPEND_ONLY_TRIGGER_SQL: &str = "CREATE TRIGGER IF NOT EXISTS audit_log_no_update
      BEFORE UPDATE ON audit_log
@@ -154,6 +158,31 @@ fn verify_audit_log_append_only_triggers(conn: &Connection) -> Result<()> {
         anyhow::bail!(
             "Audit log append-only trigger verification failed: expected 2 triggers, found {}",
             trigger_count
+        );
+    }
+    Ok(())
+}
+
+pub(crate) fn validate_plaintext_database_file(path: &Path) -> Result<()> {
+    let conn = Connection::open(path)
+        .with_context(|| format!("Failed to open restored database {}", path.display()))?;
+    let schema_version: i64 = conn.query_row("PRAGMA user_version", [], |row| row.get(0))?;
+    if schema_version > CURRENT_SCHEMA_VERSION {
+        anyhow::bail!(
+            "Restored database schema version {} is newer than this binary supports ({})",
+            schema_version,
+            CURRENT_SCHEMA_VERSION
+        );
+    }
+
+    let mut stmt = conn.prepare("PRAGMA quick_check")?;
+    let results = stmt
+        .query_map([], |row| row.get::<_, String>(0))?
+        .collect::<std::result::Result<Vec<_>, _>>()?;
+    if results.len() != 1 || results[0] != "ok" {
+        anyhow::bail!(
+            "Restored database quick_check failed: {}",
+            results.join("; ")
         );
     }
     Ok(())
@@ -310,6 +339,7 @@ fn preserve_matching_action_item_provenance(
 
 pub struct Database {
     conn: Connection,
+    encrypted: bool,
 }
 
 #[expect(
@@ -318,30 +348,42 @@ pub struct Database {
 )]
 impl Database {
     /// Create new database connection with optional encryption
-    pub fn new_with_key(_key: Option<&str>) -> Result<Self> {
-        let app_dir = dirs::data_dir()
+    pub fn new_with_key(key: Option<&str>) -> Result<Self> {
+        let app_dir = crate::paths::data_dir()
             .context("Could not find data directory")?
             .join("Plainsong");
 
         fs::create_dir_all(&app_dir)?;
+        Self::open_at_path(&app_dir.join("plainsong.db"), key)
+    }
 
-        let db_path = app_dir.join("plainsong.db");
+    fn open_at_path(db_path: &Path, key: Option<&str>) -> Result<Self> {
         let conn = Connection::open(db_path)?;
 
-        // Set up encryption if key provided and SQLCipher is enabled
+        // SQLCipher reports its library version even for an unkeyed plaintext
+        // database, so encryption state must come from the successful key path.
         #[cfg(feature = "sqlcipher")]
-        if let Some(key) = _key {
+        let encrypted = if let Some(key) = key {
             let hex_key = hex::encode(key.as_bytes());
             // Validate hex encoding to prevent SQL injection
             if !hex_key.chars().all(|c| c.is_ascii_hexdigit()) {
                 return Err(anyhow::anyhow!("Invalid hex encoding in database key"));
             }
             conn.execute_batch(&format!("PRAGMA key = \"x'{}'\";", hex_key))?;
-            // Verify encryption is working
+            // Reading sqlite_master proves that this key actually opened the file.
             conn.execute("SELECT count(*) FROM sqlite_master;", [])?;
-        }
+            true
+        } else {
+            false
+        };
+        #[cfg(not(feature = "sqlcipher"))]
+        let encrypted = {
+            let _ = key;
+            false
+        };
 
-        let mut db = Self { conn };
+        conn.execute_batch("PRAGMA foreign_keys = ON;")?;
+        let mut db = Self { conn, encrypted };
         db.init_tables()?;
 
         Ok(db)
@@ -355,7 +397,11 @@ impl Database {
     #[cfg(test)]
     pub(crate) fn new_in_memory_for_test() -> Result<Self> {
         let conn = Connection::open_in_memory()?;
-        let mut db = Self { conn };
+        conn.execute_batch("PRAGMA foreign_keys = ON;")?;
+        let mut db = Self {
+            conn,
+            encrypted: false,
+        };
         db.init_tables()?;
         Ok(db)
     }
@@ -379,24 +425,14 @@ impl Database {
         Ok(())
     }
 
-    /// Check if database is encrypted
-    #[cfg(feature = "sqlcipher")]
+    /// Return the encryption state established by the successful open/rekey path.
     pub fn is_encrypted(&self) -> Result<bool> {
-        let cipher_version: Option<String> =
-            self.conn
-                .query_row("PRAGMA cipher_version;", [], |row| row.get(0))?;
-        Ok(cipher_version.is_some())
-    }
-
-    /// Check if database is encrypted (fallback when SQLCipher not enabled)
-    #[cfg(not(feature = "sqlcipher"))]
-    pub fn is_encrypted(&self) -> Result<bool> {
-        Ok(false)
+        Ok(self.encrypted)
     }
 
     /// Change database key (encrypt or re-encrypt)
     #[cfg(feature = "sqlcipher")]
-    pub fn change_key(&self, new_key: &str) -> Result<()> {
+    pub fn change_key(&mut self, new_key: &str) -> Result<()> {
         let hex_key = hex::encode(new_key.as_bytes());
         // Validate hex encoding to prevent SQL injection
         if !hex_key.chars().all(|c| c.is_ascii_hexdigit()) {
@@ -404,6 +440,9 @@ impl Database {
         }
         self.conn
             .execute_batch(&format!("PRAGMA rekey = \"x'{}'\";", hex_key))?;
+        self.conn
+            .execute("SELECT count(*) FROM sqlite_master;", [])?;
+        self.encrypted = true;
         tracing::info!("Database encryption key changed");
         Ok(())
     }
@@ -804,6 +843,97 @@ impl Database {
         Ok(())
     }
 
+    /// Aggregate counters behind the Dictation insights panel.
+    ///
+    /// This replaces a per-recording loop that issued two extra queries for
+    /// every dictation ever recorded — one for the transcript, one for the
+    /// latest insertion action — and counted words by splitting the full
+    /// transcript text in memory. Opening Dictation therefore got slower
+    /// forever as history accumulated. SQLite does the whole thing here.
+    pub fn get_dictation_insight_totals(&self) -> Result<DictationInsightTotals> {
+        let mut totals = DictationInsightTotals::default();
+
+        // Per-recording counters, including a word count taken from the stored
+        // transcript text rather than by materializing it in Rust.
+        let mut stmt = self.conn.prepare(
+            "SELECT COUNT(*),
+                    COALESCE(SUM(
+                        CASE
+                            WHEN t.full_text IS NULL OR TRIM(t.full_text) = '' THEN 0
+                            ELSE LENGTH(TRIM(t.full_text))
+                                 - LENGTH(REPLACE(TRIM(t.full_text), ' ', ''))
+                                 + 1
+                        END
+                    ), 0),
+                    COUNT(DISTINCT DATE(r.created_at)),
+                    COALESCE(SUM(CASE WHEN r.created_at >= ?1 THEN 1 ELSE 0 END), 0)
+             FROM recordings r
+             LEFT JOIN transcripts t ON t.recording_id = r.id
+             WHERE r.source_type = 'dictation'",
+        )?;
+        let cutoff = (chrono::Utc::now() - chrono::Duration::days(7)).to_rfc3339();
+        let row: (i64, i64, i64, i64) = stmt.query_row(params![cutoff], |row| {
+            Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?))
+        })?;
+        totals.total_dictations = row.0.max(0) as u64;
+        totals.dictated_words = row.1.max(0) as u64;
+        totals.active_days = row.2.max(0) as u64;
+        totals.last_seven_days_dictations = row.3.max(0) as u64;
+
+        // Insertion-action counters, scoped to the most recent action per
+        // recording so a retried insert is not counted twice.
+        let mut action_stmt = self.conn.prepare(
+            "WITH latest AS (
+                 SELECT ia.*,
+                        ROW_NUMBER() OVER (
+                            PARTITION BY ia.recording_id ORDER BY ia.created_at DESC, ia.id DESC
+                        ) AS rn
+                 FROM insertion_actions ia
+                 JOIN recordings r ON r.id = ia.recording_id
+                 WHERE r.source_type = 'dictation'
+             )
+             SELECT
+                 COALESCE(SUM(CASE WHEN command_applied IS NOT NULL THEN 1 ELSE 0 END), 0),
+                 COALESCE(SUM(CASE WHEN command_applied LIKE 'backtrack\\_%' ESCAPE '\\' THEN 1 ELSE 0 END), 0),
+                 COALESCE(SUM(COALESCE(snippet_applied_count, 0)), 0)
+             FROM latest WHERE rn = 1",
+        )?;
+        let action_row: (i64, i64, i64) =
+            action_stmt.query_row([], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))?;
+        totals.commands_used = action_row.0.max(0) as u64;
+        totals.backtracks_used = action_row.1.max(0) as u64;
+        totals.snippets_triggered = action_row.2.max(0) as u64;
+
+        // Most-used destination app.
+        let mut app_stmt = self.conn.prepare(
+            "WITH latest AS (
+                 SELECT ia.recording_id, ia.app_target, ia.created_at, ia.id,
+                        ROW_NUMBER() OVER (
+                            PARTITION BY ia.recording_id ORDER BY ia.created_at DESC, ia.id DESC
+                        ) AS rn
+                 FROM insertion_actions ia
+                 JOIN recordings r ON r.id = ia.recording_id
+                 WHERE r.source_type = 'dictation'
+             )
+             SELECT TRIM(app_target), COUNT(*) AS uses
+             FROM latest
+             WHERE rn = 1 AND app_target IS NOT NULL AND TRIM(app_target) <> ''
+             GROUP BY TRIM(app_target)
+             ORDER BY uses DESC, TRIM(app_target) ASC
+             LIMIT 1",
+        )?;
+        let mut app_rows = app_stmt.query_map([], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?))
+        })?;
+        if let Some(row) = app_rows.next() {
+            let (app_target, uses) = row?;
+            totals.top_app_target = Some(app_target);
+            totals.top_app_target_count = uses.max(0) as u64;
+        }
+
+        Ok(totals)
+    }
+
     pub fn get_latest_insertion_action(
         &self,
         recording_id: &str,
@@ -942,6 +1072,52 @@ impl Database {
     }
 
     fn init_tables(&mut self) -> Result<()> {
+        let schema_version: i64 = self
+            .conn
+            .query_row("PRAGMA user_version", [], |row| row.get(0))?;
+        if schema_version > CURRENT_SCHEMA_VERSION {
+            anyhow::bail!(
+                "Database schema version {} is newer than this binary supports ({})",
+                schema_version,
+                CURRENT_SCHEMA_VERSION
+            );
+        }
+
+        self.conn.execute_batch("BEGIN IMMEDIATE;")?;
+        let migration_result = self.init_schema_v1().and_then(|_| {
+            if schema_version < CURRENT_SCHEMA_VERSION {
+                self.conn.execute_batch(&format!(
+                    "PRAGMA user_version = {};",
+                    CURRENT_SCHEMA_VERSION
+                ))?;
+            }
+            Ok(())
+        });
+        if let Err(error) = migration_result {
+            let _ = self.conn.execute_batch("ROLLBACK;");
+            return Err(error);
+        }
+        if let Err(error) = self.conn.execute_batch("COMMIT;") {
+            let _ = self.conn.execute_batch("ROLLBACK;");
+            return Err(error.into());
+        }
+
+        // These potentially expensive data maintenance passes are not schema
+        // migrations. Run them only after the versioned DDL has committed so a
+        // crash cannot leave user_version claiming a partially-created schema.
+        if table_exists(&self.conn, "transcript_fts")? {
+            if let Err(error) = self.backfill_transcript_fts_if_needed() {
+                tracing::warn!(
+                    "Failed to run transcript_fts startup backfill check: {}",
+                    error
+                );
+            }
+        }
+        self.scrub_sensitive_audit_details()?;
+        Ok(())
+    }
+
+    fn init_schema_v1(&mut self) -> Result<()> {
         self.conn.execute(
             "CREATE TABLE IF NOT EXISTS projects (
                 id TEXT PRIMARY KEY,
@@ -1095,22 +1271,13 @@ impl Database {
             [],
         )?;
 
-        // Backward-compatible migrations for existing local DBs.
-        let _ = self
-            .conn
-            .execute("ALTER TABLE transcripts ADD COLUMN model_id TEXT", []);
-        let _ = self.conn.execute(
-            "ALTER TABLE transcripts ADD COLUMN requested_provider TEXT",
-            [],
-        );
-        let _ = self.conn.execute(
-            "ALTER TABLE transcripts ADD COLUMN actual_provider TEXT",
-            [],
-        );
-        let _ = self.conn.execute(
-            "ALTER TABLE transcripts ADD COLUMN revision INTEGER NOT NULL DEFAULT 0",
-            [],
-        );
+        // Legacy databases predate these columns. Check table metadata first so
+        // only the expected duplicate-column case is treated as already migrated;
+        // disk, lock, and malformed-schema errors must abort the transaction.
+        self.ensure_table_column("transcripts", "model_id", "TEXT")?;
+        self.ensure_table_column("transcripts", "requested_provider", "TEXT")?;
+        self.ensure_table_column("transcripts", "actual_provider", "TEXT")?;
+        self.ensure_table_column("transcripts", "revision", "INTEGER NOT NULL DEFAULT 0")?;
         self.migrate_transcripts_drop_fallback_columns()?;
 
         self.conn.execute(
@@ -1194,15 +1361,24 @@ impl Database {
                 transcription_latency_ms INTEGER,
                 insert_latency_ms INTEGER,
                 end_to_end_ms INTEGER,
-                created_at TEXT NOT NULL
+                created_at TEXT NOT NULL,
+                FOREIGN KEY (recording_id) REFERENCES recordings(id) ON DELETE CASCADE
             )",
             [],
         )?;
+        self.ensure_recording_evidence_foreign_keys("transcript_artifacts")?;
         self.conn.execute(
             "CREATE INDEX IF NOT EXISTS idx_transcript_artifacts_recording_created_at
              ON transcript_artifacts(recording_id, created_at DESC)",
             [],
         )?;
+        let repaired_dictation_durations = self.repair_legacy_dictation_durations()?;
+        if repaired_dictation_durations > 0 {
+            tracing::info!(
+                repaired_dictation_durations,
+                "Repaired legacy dictation durations that were stored as WAV byte counts"
+            );
+        }
 
         self.conn.execute(
             "CREATE TABLE IF NOT EXISTS insertion_actions (
@@ -1219,14 +1395,13 @@ impl Database {
                 snippet_applied_count INTEGER NOT NULL DEFAULT 0,
                 app_target TEXT,
                 error TEXT,
-                created_at TEXT NOT NULL
+                created_at TEXT NOT NULL,
+                FOREIGN KEY (recording_id) REFERENCES recordings(id) ON DELETE CASCADE
             )",
             [],
         )?;
-        let _ = self.conn.execute(
-            "ALTER TABLE insertion_actions ADD COLUMN app_target TEXT",
-            [],
-        );
+        self.ensure_table_column("insertion_actions", "app_target", "TEXT")?;
+        self.ensure_recording_evidence_foreign_keys("insertion_actions")?;
         self.conn.execute(
             "CREATE INDEX IF NOT EXISTS idx_insertion_actions_recording_created_at
              ON insertion_actions(recording_id, created_at DESC)",
@@ -1251,10 +1426,11 @@ impl Database {
             )",
             [],
         )?;
-        let _ = self.conn.execute(
-            "ALTER TABLE meeting_artifacts ADD COLUMN chat_messages TEXT NOT NULL DEFAULT '[]'",
-            [],
-        );
+        self.ensure_table_column(
+            "meeting_artifacts",
+            "chat_messages",
+            "TEXT NOT NULL DEFAULT '[]'",
+        )?;
         self.ensure_table_column("meeting_artifacts", "summary_provenance", "TEXT")?;
         self.ensure_table_column("meeting_artifacts", "action_items_provenance", "TEXT")?;
         self.conn.execute(
@@ -1304,10 +1480,11 @@ impl Database {
             )",
             [],
         )?;
-        let _ = self.conn.execute(
-            "ALTER TABLE asr_benchmarks ADD COLUMN non_empty_transcript INTEGER NOT NULL DEFAULT 0",
-            [],
-        );
+        self.ensure_table_column(
+            "asr_benchmarks",
+            "non_empty_transcript",
+            "INTEGER NOT NULL DEFAULT 0",
+        )?;
 
         self.conn.execute(
             "CREATE TABLE IF NOT EXISTS dictation_dictionary_entries (
@@ -1323,15 +1500,7 @@ impl Database {
             )",
             [],
         )?;
-        // Backward-compatible migration for existing local DBs created before
-        // category_scope existed. SQLite errors if the column is already
-        // present, so the error is deliberately discarded (same pattern as
-        // the transcripts/insertion_actions/meeting_artifacts/asr_benchmarks
-        // migrations above).
-        let _ = self.conn.execute(
-            "ALTER TABLE dictation_dictionary_entries ADD COLUMN category_scope TEXT",
-            [],
-        );
+        self.ensure_table_column("dictation_dictionary_entries", "category_scope", "TEXT")?;
         self.conn.execute(
             "CREATE INDEX IF NOT EXISTS idx_dictation_dictionary_entries_spoken_form
              ON dictation_dictionary_entries(spoken_form)",
@@ -1352,10 +1521,7 @@ impl Database {
             )",
             [],
         )?;
-        let _ = self.conn.execute(
-            "ALTER TABLE dictation_snippets ADD COLUMN category_scope TEXT",
-            [],
-        );
+        self.ensure_table_column("dictation_snippets", "category_scope", "TEXT")?;
         self.conn.execute(
             "CREATE INDEX IF NOT EXISTS idx_dictation_snippets_trigger
              ON dictation_snippets(trigger)",
@@ -1393,31 +1559,22 @@ impl Database {
             [],
         )?;
 
-        // Use FTS5 for cross-recording transcript retrieval.
-        let fts_ready = self
-            .conn
-            .execute(
-                "CREATE VIRTUAL TABLE IF NOT EXISTS transcript_fts USING fts5(
-                    recording_id UNINDEXED,
-                    segment_id UNINDEXED,
-                    text,
-                    start_time UNINDEXED,
-                    end_time UNINDEXED
-                )",
-                [],
-            )
-            .is_ok();
-
-        if fts_ready {
-            if let Err(error) = self.backfill_transcript_fts_if_needed() {
-                tracing::warn!(
-                    "Failed to run transcript_fts startup backfill check: {}",
-                    error
-                );
-            }
-        } else {
+        // Use FTS5 for cross-recording transcript retrieval. Some SQLite builds
+        // omit FTS5, so this optional index remains the one schema capability
+        // whose absence degrades search rather than preventing database startup.
+        if let Err(error) = self.conn.execute(
+            "CREATE VIRTUAL TABLE IF NOT EXISTS transcript_fts USING fts5(
+                recording_id UNINDEXED,
+                segment_id UNINDEXED,
+                text,
+                start_time UNINDEXED,
+                end_time UNINDEXED
+            )",
+            [],
+        ) {
             tracing::warn!(
-                "transcript_fts table unavailable; cross-recording search will be limited"
+                "transcript_fts table unavailable; cross-recording search will be limited: {}",
+                error
             );
         }
 
@@ -1440,8 +1597,6 @@ impl Database {
             [],
         )?;
 
-        self.scrub_sensitive_audit_details()?;
-
         self.conn.execute(
             "INSERT OR IGNORE INTO projects (id, name, description, created_at, updated_at) 
              VALUES ('default', 'Inbox', 'Default inbox for new recordings', ?1, ?1)",
@@ -1453,50 +1608,77 @@ impl Database {
             [Utc::now().to_rfc3339()],
         )?;
 
-        // Add summary and action_items columns to recordings table
-        let _ = self
-            .conn
-            .execute("ALTER TABLE recordings ADD COLUMN summary TEXT", []);
-        let _ = self
-            .conn
-            .execute("ALTER TABLE recordings ADD COLUMN action_items TEXT", []);
-        let _ = self
-            .conn
-            .execute("ALTER TABLE recordings ADD COLUMN meeting_notes TEXT", []);
-        let _ = self.conn.execute(
-            "ALTER TABLE recordings ADD COLUMN meeting_template_id TEXT",
-            [],
-        );
-        let _ = self.conn.execute(
-            "ALTER TABLE recordings ADD COLUMN notes_updated_at TEXT",
-            [],
-        );
-        let _ = self.conn.execute(
-            "ALTER TABLE recordings ADD COLUMN meeting_capture_mode TEXT",
-            [],
-        );
-        let _ = self.conn.execute(
-            "ALTER TABLE recordings ADD COLUMN consent_prompt_shown INTEGER NOT NULL DEFAULT 0",
-            [],
-        );
-        let _ = self.conn.execute(
-            "ALTER TABLE recordings ADD COLUMN consent_notice_mode TEXT",
-            [],
-        );
-        let _ = self.conn.execute(
-            "ALTER TABLE recordings ADD COLUMN consent_notice_surface TEXT",
-            [],
-        );
-        let _ = self.conn.execute(
-            "ALTER TABLE recordings ADD COLUMN consent_notice_message TEXT",
-            [],
-        );
-        let _ = self.conn.execute(
-            "ALTER TABLE recordings ADD COLUMN consent_notice_updated_at TEXT",
-            [],
-        );
+        self.ensure_table_column("recordings", "summary", "TEXT")?;
+        self.ensure_table_column("recordings", "action_items", "TEXT")?;
+        self.ensure_table_column("recordings", "meeting_notes", "TEXT")?;
+        self.ensure_table_column("recordings", "meeting_template_id", "TEXT")?;
+        self.ensure_table_column("recordings", "notes_updated_at", "TEXT")?;
+        self.ensure_table_column("recordings", "meeting_capture_mode", "TEXT")?;
+        self.ensure_table_column(
+            "recordings",
+            "consent_prompt_shown",
+            "INTEGER NOT NULL DEFAULT 0",
+        )?;
+        self.ensure_table_column("recordings", "consent_notice_mode", "TEXT")?;
+        self.ensure_table_column("recordings", "consent_notice_surface", "TEXT")?;
+        self.ensure_table_column("recordings", "consent_notice_message", "TEXT")?;
+        self.ensure_table_column("recordings", "consent_notice_updated_at", "TEXT")?;
 
         Ok(())
+    }
+
+    fn repair_legacy_dictation_durations(&self) -> Result<usize> {
+        let repaired = self.conn.execute(
+            "UPDATE recordings
+             SET duration = (
+                 SELECT MAX(
+                     1,
+                     CAST(
+                         ROUND(
+                             (
+                                 latest.end_to_end_ms
+                                 - COALESCE(latest.transcription_latency_ms, 0)
+                                 - COALESCE(latest.insert_latency_ms, 0)
+                             ) / 1000.0
+                         ) AS INTEGER
+                     )
+                 )
+                 FROM (
+                     SELECT
+                         end_to_end_ms,
+                         transcription_latency_ms,
+                         insert_latency_ms
+                     FROM transcript_artifacts
+                     WHERE recording_id = recordings.id
+                       AND end_to_end_ms IS NOT NULL
+                       AND (
+                           end_to_end_ms
+                           - COALESCE(transcription_latency_ms, 0)
+                           - COALESCE(insert_latency_ms, 0)
+                       ) BETWEEN 500 AND ?2
+                     ORDER BY created_at DESC
+                     LIMIT 1
+                 ) AS latest
+             )
+             WHERE source_type = 'dictation'
+               AND duration >= ?1
+               AND EXISTS (
+                   SELECT 1
+                   FROM transcript_artifacts
+                   WHERE recording_id = recordings.id
+                     AND end_to_end_ms IS NOT NULL
+                     AND (
+                         end_to_end_ms
+                         - COALESCE(transcription_latency_ms, 0)
+                         - COALESCE(insert_latency_ms, 0)
+                     ) BETWEEN 500 AND ?2
+               )",
+            params![
+                LEGACY_DICTATION_BYTE_COUNT_FLOOR,
+                MAX_REPAIRABLE_DICTATION_CAPTURE_MS
+            ],
+        )?;
+        Ok(repaired)
     }
 
     fn scrub_sensitive_audit_details(&mut self) -> Result<AuditDetailScrubCounts> {
@@ -1614,6 +1796,95 @@ impl Database {
         Ok(())
     }
 
+    fn ensure_recording_evidence_foreign_keys(&self, table_name: &str) -> Result<()> {
+        let has_cascade = {
+            let mut stmt = self
+                .conn
+                .prepare(&format!("PRAGMA foreign_key_list({})", table_name))?;
+            let rows = stmt.query_map([], |row| {
+                Ok((
+                    row.get::<_, String>(2)?,
+                    row.get::<_, String>(3)?,
+                    row.get::<_, String>(6)?,
+                ))
+            })?;
+            rows.collect::<std::result::Result<Vec<_>, _>>()?
+                .into_iter()
+                .any(|(parent, from, on_delete)| {
+                    parent == "recordings"
+                        && from == "recording_id"
+                        && on_delete.eq_ignore_ascii_case("cascade")
+                })
+        };
+        if has_cascade {
+            return Ok(());
+        }
+
+        // SQLite cannot add a foreign key with ALTER TABLE. Remove already-
+        // orphaned evidence and rebuild these two small append-only tables so
+        // future parent deletes are enforced atomically by the engine.
+        match table_name {
+            "transcript_artifacts" => self.conn.execute_batch(
+                "DELETE FROM transcript_artifacts
+                   WHERE NOT EXISTS (
+                       SELECT 1 FROM recordings
+                       WHERE recordings.id = transcript_artifacts.recording_id
+                   );
+                 CREATE TABLE transcript_artifacts_v1 (
+                    id TEXT PRIMARY KEY,
+                    recording_id TEXT NOT NULL,
+                    transcript_id TEXT,
+                    segment_count INTEGER NOT NULL DEFAULT 0,
+                    model_id TEXT,
+                    requested_provider TEXT,
+                    actual_provider TEXT,
+                    quality_score REAL,
+                    startup_latency_ms INTEGER,
+                    transcription_latency_ms INTEGER,
+                    insert_latency_ms INTEGER,
+                    end_to_end_ms INTEGER,
+                    created_at TEXT NOT NULL,
+                    FOREIGN KEY (recording_id) REFERENCES recordings(id) ON DELETE CASCADE
+                 );
+                 INSERT INTO transcript_artifacts_v1
+                    SELECT * FROM transcript_artifacts;
+                 DROP TABLE transcript_artifacts;
+                 ALTER TABLE transcript_artifacts_v1 RENAME TO transcript_artifacts;",
+            )?,
+            "insertion_actions" => self.conn.execute_batch(
+                "DELETE FROM insertion_actions
+                   WHERE recording_id IS NOT NULL
+                     AND NOT EXISTS (
+                         SELECT 1 FROM recordings
+                         WHERE recordings.id = insertion_actions.recording_id
+                     );
+                 CREATE TABLE insertion_actions_v1 (
+                    id TEXT PRIMARY KEY,
+                    session_id TEXT,
+                    recording_id TEXT,
+                    requested_mode TEXT NOT NULL,
+                    actual_mode TEXT NOT NULL,
+                    pasted INTEGER NOT NULL DEFAULT 0,
+                    copied INTEGER NOT NULL DEFAULT 0,
+                    failed INTEGER NOT NULL DEFAULT 0,
+                    undo_token TEXT,
+                    command_applied TEXT,
+                    snippet_applied_count INTEGER NOT NULL DEFAULT 0,
+                    app_target TEXT,
+                    error TEXT,
+                    created_at TEXT NOT NULL,
+                    FOREIGN KEY (recording_id) REFERENCES recordings(id) ON DELETE CASCADE
+                 );
+                 INSERT INTO insertion_actions_v1
+                    SELECT * FROM insertion_actions;
+                 DROP TABLE insertion_actions;
+                 ALTER TABLE insertion_actions_v1 RENAME TO insertion_actions;",
+            )?,
+            _ => anyhow::bail!("Unsupported recording evidence table migration"),
+        }
+        Ok(())
+    }
+
     fn transcripts_has_column(&self, column_name: &str) -> Result<bool> {
         let mut stmt = self.conn.prepare("PRAGMA table_info(transcripts)")?;
         let mut rows = stmt.query([])?;
@@ -1634,8 +1905,7 @@ impl Database {
         }
 
         self.conn.execute_batch(
-            "BEGIN IMMEDIATE;
-             ALTER TABLE transcripts RENAME TO transcripts_legacy_fallback;
+            "ALTER TABLE transcripts RENAME TO transcripts_legacy_fallback;
              CREATE TABLE transcripts (
                 id TEXT PRIMARY KEY,
                 recording_id TEXT NOT NULL,
@@ -1678,8 +1948,7 @@ impl Database {
                 created_at,
                 revision
              FROM transcripts_legacy_fallback;
-             DROP TABLE transcripts_legacy_fallback;
-             COMMIT;",
+             DROP TABLE transcripts_legacy_fallback;",
         )?;
         Ok(())
     }
@@ -2095,6 +2364,34 @@ impl Database {
 
     pub fn create_recording(&mut self, recording: &Recording) -> Result<()> {
         insert_recording_row(&self.conn, recording, &recording.audio_path)
+    }
+
+    /// Atomically persist a completed dictation row and its transcript before
+    /// any cursor delivery starts. If transcript serialization, FTS rebuild,
+    /// or either database write fails, the recording row is rolled back too,
+    /// so history can never expose a transcript-less completed dictation.
+    pub fn create_recording_with_transcript(
+        &mut self,
+        recording: &Recording,
+        transcript: &Transcript,
+    ) -> Result<()> {
+        if recording.id != transcript.recording_id {
+            anyhow::bail!(
+                "Recording id '{}' does not match transcript recording id '{}'",
+                recording.id,
+                transcript.recording_id
+            );
+        }
+
+        let tx = self
+            .conn
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .context("Failed to start dictation result transaction")?;
+        insert_recording_row(&tx, recording, &recording.audio_path)?;
+        Self::write_transcript_transaction(&tx, transcript)?;
+        tx.commit()
+            .context("Failed to commit dictation recording and transcript")?;
+        Ok(())
     }
 
     /// Atomically persist a renderer-compatible recording row and every enabled
@@ -4683,6 +4980,17 @@ impl Database {
             "DELETE FROM speaker_aliases WHERE recording_id = ?1",
             params![recording_id],
         )?;
+        // Keep explicit child deletes even with ON DELETE CASCADE: databases
+        // created by older binaries may be opened before their FK rebuild, and
+        // this transaction must never leave evidence rows orphaned.
+        tx.execute(
+            "DELETE FROM transcript_artifacts WHERE recording_id = ?1",
+            params![recording_id],
+        )?;
+        tx.execute(
+            "DELETE FROM insertion_actions WHERE recording_id = ?1",
+            params![recording_id],
+        )?;
         tx.execute(
             "DELETE FROM transcripts WHERE recording_id = ?1",
             params![recording_id],
@@ -5030,9 +5338,102 @@ mod tests {
 
     fn in_memory_db() -> Database {
         let conn = Connection::open_in_memory().expect("in-memory db");
-        let mut db = Database { conn };
+        let mut db = Database {
+            conn,
+            encrypted: false,
+        };
         db.init_tables().expect("init tables");
         db
+    }
+
+    #[test]
+    fn schema_version_one_and_foreign_keys_are_enabled() {
+        let db = in_memory_db();
+        let version: i64 = db
+            .conn
+            .query_row("PRAGMA user_version", [], |row| row.get(0))
+            .unwrap();
+        let foreign_keys: i64 = db
+            .conn
+            .query_row("PRAGMA foreign_keys", [], |row| row.get(0))
+            .unwrap();
+
+        assert_eq!(version, CURRENT_SCHEMA_VERSION);
+        assert_eq!(foreign_keys, 1);
+        assert!(!db.is_encrypted().unwrap());
+    }
+
+    #[test]
+    fn future_schema_version_is_rejected_before_migration() {
+        let path = std::env::temp_dir().join(format!(
+            "plainsong-future-schema-{}.db",
+            uuid::Uuid::new_v4()
+        ));
+        let conn = Connection::open(&path).unwrap();
+        conn.execute_batch("PRAGMA user_version = 2;").unwrap();
+        drop(conn);
+
+        let error = Database::open_at_path(&path, None)
+            .err()
+            .expect("future schemas must not be opened");
+        assert!(error
+            .to_string()
+            .contains("newer than this binary supports"));
+
+        let conn = Connection::open(&path).unwrap();
+        let version: i64 = conn
+            .query_row("PRAGMA user_version", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(version, 2, "rejection must not mutate the future database");
+        drop(conn);
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn failed_schema_migration_does_not_bump_version_or_commit_partial_ddl() {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch("CREATE VIEW recordings AS SELECT 'blocked' AS id;")
+            .unwrap();
+        let mut db = Database {
+            conn,
+            encrypted: false,
+        };
+
+        db.init_tables()
+            .expect_err("conflicting legacy schema must abort migration");
+        let version: i64 = db
+            .conn
+            .query_row("PRAGMA user_version", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(version, 0);
+        assert!(!table_exists(&db.conn, "projects").unwrap());
+    }
+
+    #[test]
+    fn recording_evidence_foreign_keys_cascade_on_parent_delete() {
+        let mut db = in_memory_db();
+        db.create_recording(&sample_recording("cascade", "inbox"))
+            .unwrap();
+        db.conn
+            .execute_batch(
+                "INSERT INTO transcript_artifacts (id, recording_id, created_at)
+                     VALUES ('artifact', 'cascade', '2026-01-01');
+                 INSERT INTO insertion_actions (
+                     id, recording_id, requested_mode, actual_mode, created_at
+                 ) VALUES ('insertion', 'cascade', 'paste', 'paste', '2026-01-01');
+                 DELETE FROM recordings WHERE id = 'cascade';",
+            )
+            .unwrap();
+
+        for table in ["transcript_artifacts", "insertion_actions"] {
+            let count: i64 = db
+                .conn
+                .query_row(&format!("SELECT COUNT(*) FROM {table}"), [], |row| {
+                    row.get(0)
+                })
+                .unwrap();
+            assert_eq!(count, 0, "{table} must cascade with its recording");
+        }
     }
 
     fn sample_project(_id: &str, name: &str) -> CreateProjectRequest {
@@ -5346,6 +5747,48 @@ mod tests {
     }
 
     #[test]
+    fn dictation_result_persistence_commits_recording_and_transcript_together() {
+        let mut db = in_memory_db();
+        let mut recording = sample_recording("dictation-result", "inbox");
+        recording.source_type = "dictation".to_string();
+        recording.audio_path.clear();
+        recording.status = "completed".to_string();
+        let transcript = sample_transcript(&recording.id);
+
+        db.create_recording_with_transcript(&recording, &transcript)
+            .unwrap();
+
+        assert!(db.get_recording(&recording.id).unwrap().is_some());
+        assert_eq!(
+            db.get_transcript(&recording.id)
+                .unwrap()
+                .expect("dictation transcript")
+                .full_text,
+            "Hello world"
+        );
+        assert_eq!(db.search_transcripts("hello", 10, None).unwrap().len(), 1);
+    }
+
+    #[test]
+    fn dictation_result_persistence_rolls_back_recording_when_transcript_write_fails() {
+        let mut db = in_memory_db();
+        db.conn.execute("DROP TABLE transcript_fts", []).unwrap();
+        let mut recording = sample_recording("dictation-rollback", "inbox");
+        recording.source_type = "dictation".to_string();
+        recording.audio_path.clear();
+        recording.status = "completed".to_string();
+        let transcript = sample_transcript(&recording.id);
+
+        let error = db
+            .create_recording_with_transcript(&recording, &transcript)
+            .expect_err("recording and transcript must share one transaction");
+
+        assert!(error.to_string().contains("transcript_fts"));
+        assert!(db.get_recording(&recording.id).unwrap().is_none());
+        assert!(db.get_transcript(&recording.id).unwrap().is_none());
+    }
+
+    #[test]
     fn recording_audio_schema_uses_the_synthesized_tables_and_status_checks() {
         let db = in_memory_db();
         for table in [
@@ -5531,6 +5974,43 @@ mod tests {
         let inbox_only = db.get_recordings(Some("inbox")).unwrap();
         assert_eq!(inbox_only.len(), 1);
         assert_eq!(inbox_only[0].id, "r1");
+    }
+
+    #[test]
+    fn repairs_legacy_dictation_byte_counts_from_timing_artifacts() {
+        let mut db = in_memory_db();
+        let mut dictation = sample_recording("legacy-dictation", "inbox");
+        dictation.source_type = "dictation".to_string();
+        dictation.duration = 1_748_012;
+        dictation.audio_path.clear();
+        dictation.status = "completed".to_string();
+        db.create_recording(&dictation).unwrap();
+        db.save_transcript_artifact(&TranscriptArtifactRecord {
+            id: "legacy-artifact".to_string(),
+            recording_id: dictation.id.clone(),
+            transcript_id: None,
+            segment_count: 1,
+            model_id: Some("base.en".to_string()),
+            requested_provider: Some("whisper".to_string()),
+            actual_provider: Some("whisper".to_string()),
+            quality_score: Some(0.9),
+            startup_latency_ms: Some(113),
+            transcription_latency_ms: Some(316),
+            insert_latency_ms: Some(2_402),
+            end_to_end_ms: Some(21_126),
+            created_at: Utc::now(),
+        })
+        .unwrap();
+
+        assert_eq!(db.repair_legacy_dictation_durations().unwrap(), 1);
+        assert_eq!(
+            db.get_recording(&dictation.id)
+                .unwrap()
+                .expect("repaired recording")
+                .duration,
+            18
+        );
+        assert_eq!(db.repair_legacy_dictation_durations().unwrap(), 0);
     }
 
     /// A vault migrated a year ago does not encrypt what was captured since —
@@ -6167,6 +6647,15 @@ mod tests {
             .unwrap();
         db.save_embedding("r1", "s1", "hello world", &[0.1, 0.2, 0.3], "m", 0.0, 1.0)
             .unwrap();
+        db.conn
+            .execute_batch(
+                "INSERT INTO transcript_artifacts (id, recording_id, created_at)
+                     VALUES ('artifact-r1', 'r1', '2026-01-01');
+                 INSERT INTO insertion_actions (
+                     id, recording_id, requested_mode, actual_mode, created_at
+                 ) VALUES ('insertion-r1', 'r1', 'paste', 'paste', '2026-01-01');",
+            )
+            .unwrap();
         assert!(db.has_embeddings("r1"));
         db.update_recording_status("r1", "completed").unwrap();
 
@@ -6174,6 +6663,17 @@ mod tests {
 
         assert!(db.get_meeting_artifact("r1").unwrap().is_none());
         assert!(!db.has_embeddings("r1"));
+        for table in ["transcript_artifacts", "insertion_actions"] {
+            let count: i64 = db
+                .conn
+                .query_row(
+                    &format!("SELECT COUNT(*) FROM {table} WHERE recording_id = 'r1'"),
+                    [],
+                    |row| row.get(0),
+                )
+                .unwrap();
+            assert_eq!(count, 0, "delete_recording must remove {table}");
+        }
     }
 
     #[test]
@@ -6835,6 +7335,8 @@ mod tests {
     #[test]
     fn test_save_and_get_transcript_artifact() {
         let mut db = in_memory_db();
+        db.create_recording(&sample_recording("recording-1", "inbox"))
+            .unwrap();
         let artifact = sample_transcript_artifact();
         db.save_transcript_artifact(&artifact).unwrap();
 
@@ -6850,6 +7352,8 @@ mod tests {
     #[test]
     fn test_save_and_get_insertion_action() {
         let mut db = in_memory_db();
+        db.create_recording(&sample_recording("recording-1", "inbox"))
+            .unwrap();
         let action = sample_insertion_action();
         db.save_insertion_action(&action).unwrap();
 
@@ -6993,7 +7497,10 @@ mod tests {
              );",
         )
         .unwrap();
-        let mut db = Database { conn };
+        let mut db = Database {
+            conn,
+            encrypted: false,
+        };
         db.init_tables().unwrap();
 
         let artifact = db

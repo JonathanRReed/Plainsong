@@ -11,14 +11,17 @@
 
 use anyhow::{Context, Result};
 use chrono::{DateTime, Utc};
+use rusqlite::{params, Connection, TransactionBehavior};
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use std::collections::HashSet;
-use std::path::{Path, PathBuf};
+use std::io::Read as _;
+use std::path::{Component, Path, PathBuf};
 use tokio::process::Command;
 
 const SETTINGS_BACKUP_FILENAME: &str = "settings.json";
 const BACKUP_MANIFEST_FILENAME: &str = "manifest.json";
-const BACKUP_MANIFEST_FORMAT_VERSION: u32 = 1;
+const BACKUP_MANIFEST_FORMAT_VERSION: u32 = 2;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
@@ -117,6 +120,27 @@ enum BackupComponent {
     Settings,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+struct BackupFileInventory {
+    path: String,
+    size_bytes: u64,
+    sha256: String,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+enum BackupDatabaseProtection {
+    PortablePlaintext,
+    VaultKeyRequired,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+enum RecordingPathFormat {
+    RelativeManagedV1,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct BackupManifest {
@@ -126,6 +150,9 @@ struct BackupManifest {
     timestamp: DateTime<Utc>,
     backup_type: BackupType,
     components: Vec<BackupComponent>,
+    files: Vec<BackupFileInventory>,
+    database_protection: Option<BackupDatabaseProtection>,
+    recording_path_format: Option<RecordingPathFormat>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -260,9 +287,15 @@ impl BackupManager {
 
             if matches!(backup_type, BackupType::Full | BackupType::Incremental) {
                 if let Some(db_source) = database_source.as_ref() {
-                    tokio::fs::copy(db_source, partial_path.join("plainsong.db"))
+                    let backup_database = partial_path.join("plainsong.db");
+                    tokio::fs::copy(db_source, &backup_database)
                         .await
                         .context("Failed to copy the database snapshot into the backup")?;
+                    prepare_database_for_portable_backup(
+                        &backup_database,
+                        &data_dir.join("recordings"),
+                    )
+                    .await?;
                     components.push(BackupComponent::Database);
                 }
 
@@ -412,9 +445,30 @@ impl BackupManager {
             .ok_or_else(|| anyhow::anyhow!("No backup directory configured"))?;
         let backup_path = resolve_existing_backup_path(backup_dir, backup_id)?;
         let manifest = validate_complete_backup(&backup_path, Some(backup_id)).await?;
+        if manifest.database_protection == Some(BackupDatabaseProtection::VaultKeyRequired) {
+            return Err(anyhow::anyhow!(
+                "This backup contains a vault-encrypted database whose Keychain-only key was not included. Portable vault restore is unsupported in v1, and no live data was changed."
+            ));
+        }
+        let live_database = data_dir.join("plainsong.db");
+        if manifest.components.contains(&BackupComponent::Database)
+            && live_database.is_file()
+            && classify_database_protection(&live_database).await?
+                == BackupDatabaseProtection::VaultKeyRequired
+        {
+            return Err(anyhow::anyhow!(
+                "Restoring a portable database over a vault-encrypted live database is unsupported in v1. The live vault and its Keychain key were left unchanged."
+            ));
+        }
 
-        restore_backup_into_targets(&backup_path, data_dir, settings_path, &manifest.components)
-            .await?;
+        restore_backup_into_targets(
+            &backup_path,
+            data_dir,
+            settings_path,
+            &manifest.components,
+            manifest.recording_path_format,
+        )
+        .await?;
 
         let outcome = BackupRestoreOutcome {
             restored_database: manifest.components.contains(&BackupComponent::Database),
@@ -838,7 +892,7 @@ impl Default for BackupManager {
 }
 
 fn default_data_dir() -> PathBuf {
-    dirs::data_dir()
+    crate::paths::data_dir()
         .unwrap_or_else(|| PathBuf::from("."))
         .join("Plainsong")
 }
@@ -848,7 +902,7 @@ fn default_backup_dir() -> PathBuf {
 }
 
 fn backup_config_path() -> Result<PathBuf> {
-    let config_dir = dirs::config_dir()
+    let config_dir = crate::paths::config_dir()
         .ok_or_else(|| anyhow::anyhow!("Could not determine config directory"))?
         .join("Plainsong");
     Ok(config_dir.join("backup-config.json"))
@@ -983,6 +1037,18 @@ async fn write_backup_manifest(
     backup_type: BackupType,
     components: &[BackupComponent],
 ) -> Result<()> {
+    let database_protection = if components.contains(&BackupComponent::Database) {
+        Some(classify_database_protection(&backup_path.join("plainsong.db")).await?)
+    } else {
+        None
+    };
+    let recording_path_format = match database_protection {
+        Some(BackupDatabaseProtection::PortablePlaintext) => {
+            Some(RecordingPathFormat::RelativeManagedV1)
+        }
+        _ => None,
+    };
+    let files = build_file_inventory(backup_path).await?;
     let manifest = BackupManifest {
         format_version: BACKUP_MANIFEST_FORMAT_VERSION,
         complete: true,
@@ -990,6 +1056,9 @@ async fn write_backup_manifest(
         timestamp,
         backup_type,
         components: components.to_vec(),
+        files,
+        database_protection,
+        recording_path_format,
     };
     let manifest_json =
         serde_json::to_string_pretty(&manifest).context("Failed to serialize backup manifest")?;
@@ -1045,6 +1114,224 @@ fn component_file_name(component: BackupComponent) -> &'static str {
 
 fn component_path(backup_path: &Path, component: BackupComponent) -> PathBuf {
     backup_path.join(component_file_name(component))
+}
+
+async fn classify_database_protection(path: &Path) -> Result<BackupDatabaseProtection> {
+    let path = path.to_path_buf();
+    tokio::task::spawn_blocking(move || {
+        let mut file = std::fs::File::open(&path)
+            .with_context(|| format!("Failed to inspect database backup {}", path.display()))?;
+        let mut header = [0u8; 16];
+        let bytes_read = file.read(&mut header)?;
+        if bytes_read == header.len() && &header == b"SQLite format 3\0" {
+            Ok(BackupDatabaseProtection::PortablePlaintext)
+        } else {
+            // SQLCipher intentionally randomizes the SQLite header. Treat every
+            // non-plaintext database conservatively as vault-protected so a
+            // corrupt or encrypted file is never swapped into live state.
+            Ok(BackupDatabaseProtection::VaultKeyRequired)
+        }
+    })
+    .await
+    .context("Failed to join database protection inspection")?
+}
+
+async fn build_file_inventory(backup_path: &Path) -> Result<Vec<BackupFileInventory>> {
+    let root = backup_path.to_path_buf();
+    tokio::task::spawn_blocking(move || {
+        let mut files = Vec::new();
+        for entry in walkdir::WalkDir::new(&root).follow_links(false) {
+            let entry =
+                entry.with_context(|| format!("Failed to inventory backup {}", root.display()))?;
+            if entry.path() == root {
+                continue;
+            }
+            if entry.file_type().is_symlink() {
+                anyhow::bail!(
+                    "Backup inventory refuses symlink {}",
+                    entry.path().display()
+                );
+            }
+            if entry.file_type().is_dir() {
+                continue;
+            }
+            if !entry.file_type().is_file() {
+                anyhow::bail!(
+                    "Backup inventory contains unsupported entry {}",
+                    entry.path().display()
+                );
+            }
+
+            let relative = entry.path().strip_prefix(&root)?.to_str().ok_or_else(|| {
+                anyhow::anyhow!(
+                    "Backup inventory path is not valid UTF-8: {}",
+                    entry.path().display()
+                )
+            })?;
+            if relative == BACKUP_MANIFEST_FILENAME {
+                continue;
+            }
+
+            let mut file = std::fs::File::open(entry.path())?;
+            let mut hasher = Sha256::new();
+            let mut buffer = [0u8; 1024 * 1024];
+            let mut size_bytes = 0u64;
+            loop {
+                let read = file.read(&mut buffer)?;
+                if read == 0 {
+                    break;
+                }
+                hasher.update(&buffer[..read]);
+                size_bytes += read as u64;
+            }
+            files.push(BackupFileInventory {
+                path: relative.replace('\\', "/"),
+                size_bytes,
+                sha256: hex::encode(hasher.finalize()),
+            });
+        }
+        files.sort_by(|left, right| left.path.cmp(&right.path));
+        Ok::<_, anyhow::Error>(files)
+    })
+    .await
+    .context("Failed to join backup inventory task")?
+}
+
+fn path_is_safe_relative(path: &Path) -> bool {
+    !path.as_os_str().is_empty()
+        && !path.is_absolute()
+        && path
+            .components()
+            .all(|component| matches!(component, Component::Normal(_)))
+}
+
+fn managed_relative_path(raw: &str, managed_root: &Path) -> Option<String> {
+    let path = Path::new(raw);
+    if !path.is_absolute() {
+        return None;
+    }
+    let relative = path.strip_prefix(managed_root).ok()?;
+    if !path_is_safe_relative(relative) {
+        return None;
+    }
+    Some(relative.to_string_lossy().to_string())
+}
+
+fn rebased_managed_path(raw: &str, managed_root: &Path) -> Option<String> {
+    let relative = Path::new(raw);
+    if !path_is_safe_relative(relative) {
+        return None;
+    }
+    Some(managed_root.join(relative).to_string_lossy().to_string())
+}
+
+fn sqlite_table_exists(conn: &Connection, table_name: &str) -> Result<bool> {
+    conn.query_row(
+        "SELECT EXISTS(
+             SELECT 1 FROM sqlite_schema WHERE type = 'table' AND name = ?1
+         )",
+        [table_name],
+        |row| row.get(0),
+    )
+    .map_err(Into::into)
+}
+
+fn rewrite_database_path_column<F>(
+    conn: &Connection,
+    table_name: &str,
+    column_name: &str,
+    mut rewrite: F,
+) -> Result<()>
+where
+    F: FnMut(&str) -> Option<String>,
+{
+    if !sqlite_table_exists(conn, table_name)? {
+        return Ok(());
+    }
+    let select_sql = format!(
+        "SELECT rowid, {column_name} FROM {table_name}
+         WHERE {column_name} IS NOT NULL AND TRIM({column_name}) <> ''"
+    );
+    let rows = {
+        let mut stmt = conn.prepare(&select_sql)?;
+        let mapped = stmt.query_map([], |row| {
+            Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?))
+        })?;
+        mapped.collect::<std::result::Result<Vec<_>, _>>()?
+    };
+    let update_sql = format!("UPDATE {table_name} SET {column_name} = ?1 WHERE rowid = ?2");
+    for (rowid, current) in rows {
+        if let Some(updated) = rewrite(&current) {
+            conn.execute(&update_sql, params![updated, rowid])?;
+        }
+    }
+    Ok(())
+}
+
+fn rewrite_database_recording_paths<F>(conn: &mut Connection, mut rewrite: F) -> Result<()>
+where
+    F: FnMut(&str) -> Option<String>,
+{
+    let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+    for (table_name, column_name) in [
+        ("recordings", "audio_path"),
+        ("recording_audio_assets", "path"),
+        ("recording_audio_operation_items", "source_path"),
+        ("recording_audio_operation_items", "staged_path"),
+        ("recording_audio_operation_items", "target_path"),
+    ] {
+        rewrite_database_path_column(&tx, table_name, column_name, &mut rewrite)?;
+    }
+    tx.commit()?;
+    Ok(())
+}
+
+async fn prepare_database_for_portable_backup(
+    database_path: &Path,
+    managed_recordings_root: &Path,
+) -> Result<()> {
+    if classify_database_protection(database_path).await?
+        == BackupDatabaseProtection::VaultKeyRequired
+    {
+        return Ok(());
+    }
+
+    let database_path = database_path.to_path_buf();
+    let managed_recordings_root = managed_recordings_root.to_path_buf();
+    tokio::task::spawn_blocking(move || {
+        crate::db::validate_plaintext_database_file(&database_path)?;
+        let mut conn = Connection::open(&database_path)?;
+        rewrite_database_recording_paths(&mut conn, |raw| {
+            managed_relative_path(raw, &managed_recordings_root)
+        })?;
+        drop(conn);
+        crate::db::validate_plaintext_database_file(&database_path)
+    })
+    .await
+    .context("Failed to join portable database preparation")??;
+    Ok(())
+}
+
+async fn prepare_staged_database_for_restore(
+    database_path: &Path,
+    managed_recordings_root: &Path,
+    recording_path_format: Option<RecordingPathFormat>,
+) -> Result<()> {
+    let database_path = database_path.to_path_buf();
+    let managed_recordings_root = managed_recordings_root.to_path_buf();
+    tokio::task::spawn_blocking(move || {
+        crate::db::validate_plaintext_database_file(&database_path)?;
+        if recording_path_format == Some(RecordingPathFormat::RelativeManagedV1) {
+            let mut conn = Connection::open(&database_path)?;
+            rewrite_database_recording_paths(&mut conn, |raw| {
+                rebased_managed_path(raw, &managed_recordings_root)
+            })?;
+        }
+        crate::db::validate_plaintext_database_file(&database_path)
+    })
+    .await
+    .context("Failed to join staged database validation")??;
+    Ok(())
 }
 
 async fn validate_complete_backup(
@@ -1107,6 +1394,19 @@ async fn validate_complete_backup(
     {
         return Err(anyhow::anyhow!(
             "Full and incremental backups must contain database or recording data"
+        ));
+    }
+    if component_set.contains(&BackupComponent::Database) != manifest.database_protection.is_some()
+    {
+        return Err(anyhow::anyhow!(
+            "Backup database protection metadata does not match its components"
+        ));
+    }
+    if manifest.recording_path_format.is_some()
+        && manifest.database_protection != Some(BackupDatabaseProtection::PortablePlaintext)
+    {
+        return Err(anyhow::anyhow!(
+            "Relative recording paths require a portable plaintext database"
         ));
     }
 
@@ -1184,6 +1484,13 @@ async fn validate_complete_backup(
                     .context("Settings component is not a valid settings document")?;
             }
         }
+    }
+
+    let actual_files = build_file_inventory(backup_path).await?;
+    if actual_files != manifest.files {
+        return Err(anyhow::anyhow!(
+            "Backup file inventory does not match the recorded SHA-256 hashes and sizes"
+        ));
     }
 
     Ok(manifest)
@@ -1349,19 +1656,27 @@ async fn commit_restore_units(units: &[RestoreUnit]) -> Result<()> {
 
     for unit in units {
         if let Some(parent) = unit.live_path.parent() {
-            tokio::fs::create_dir_all(parent).await?;
+            if let Err(error) = tokio::fs::create_dir_all(parent).await {
+                rollback_restore_units(&committed_units).await;
+                cleanup_restore_artifacts(units).await;
+                return Err(error).with_context(|| {
+                    format!("Failed to create live parent for {:?}", unit.component)
+                });
+            }
         }
 
         let had_live_target = unit.live_path.exists();
         if had_live_target {
-            tokio::fs::rename(&unit.live_path, &unit.rollback_path)
-                .await
-                .with_context(|| {
+            if let Err(error) = tokio::fs::rename(&unit.live_path, &unit.rollback_path).await {
+                rollback_restore_units(&committed_units).await;
+                cleanup_restore_artifacts(units).await;
+                return Err(error).with_context(|| {
                     format!(
                         "Failed to move live {:?} into rollback location",
                         unit.component
                     )
-                })?;
+                });
+            }
         }
 
         if let Err(err) = tokio::fs::rename(&unit.staged_path, &unit.live_path).await {
@@ -1380,7 +1695,6 @@ async fn commit_restore_units(units: &[RestoreUnit]) -> Result<()> {
         committed_units.push(unit.clone());
     }
 
-    cleanup_restore_artifacts(units).await;
     Ok(())
 }
 
@@ -1389,6 +1703,7 @@ async fn restore_backup_into_targets(
     data_dir: &Path,
     settings_path: &Path,
     components: &[BackupComponent],
+    recording_path_format: Option<RecordingPathFormat>,
 ) -> Result<()> {
     let transaction_id = format!("{}-{}", Utc::now().timestamp_millis(), std::process::id());
     let units = build_restore_units(
@@ -1403,11 +1718,48 @@ async fn restore_backup_into_targets(
         return Err(error);
     }
 
+    if let Some(database_unit) = units
+        .iter()
+        .find(|unit| unit.component == BackupComponent::Database)
+    {
+        if let Err(error) = prepare_staged_database_for_restore(
+            &database_unit.staged_path,
+            &data_dir.join("recordings"),
+            recording_path_format,
+        )
+        .await
+        {
+            cleanup_restore_artifacts(&units).await;
+            return Err(error.context("Staged database failed validation before restore"));
+        }
+    }
+
     if let Err(err) = commit_restore_units(&units).await {
         cleanup_restore_artifacts(&units).await;
         return Err(err);
     }
 
+    if let Some(database_unit) = units
+        .iter()
+        .find(|unit| unit.component == BackupComponent::Database)
+    {
+        let live_database = database_unit.live_path.clone();
+        let reopen_result = tokio::task::spawn_blocking(move || {
+            crate::db::validate_plaintext_database_file(&live_database)
+        })
+        .await
+        .context("Failed to join restored database reopen check")
+        .and_then(|result| result);
+        if let Err(error) = reopen_result {
+            // Do not discard the rollback copy until the database that was
+            // actually published has reopened and passed quick_check.
+            rollback_restore_units(&units).await;
+            cleanup_restore_artifacts(&units).await;
+            return Err(error.context("Restored database failed to reopen; live data rolled back"));
+        }
+    }
+
+    cleanup_restore_artifacts(&units).await;
     Ok(())
 }
 
@@ -2263,6 +2615,11 @@ mod tests {
                 timestamp: Utc::now(),
                 backup_type: BackupType::Settings,
                 components: vec![BackupComponent::Settings],
+                files: build_file_inventory(&incomplete_manifest)
+                    .await
+                    .expect("inventory incomplete generation"),
+                database_protection: None,
+                recording_path_format: None,
             };
             fs::write(
                 backup_manifest_path(&incomplete_manifest),
@@ -2299,6 +2656,326 @@ mod tests {
                 .await
                 .expect("list backups")
                 .is_empty());
+
+            let _ = fs::remove_dir_all(&root);
+        });
+    }
+
+    #[test]
+    fn restore_rejects_hash_mismatch_without_mutating_live_settings() {
+        let runtime = Runtime::new().expect("create tokio runtime");
+        runtime.block_on(async {
+            let root = unique_test_dir("hash-mismatch");
+            let data_dir = root.join("data");
+            let backup_dir = root.join("backups");
+            let settings_path = root.join("config/settings.json");
+            fs::create_dir_all(&data_dir).expect("create data dir");
+            write_settings(&settings_path, "dark");
+
+            let manager = manager_for(backup_dir.clone(), 7);
+            let info = manager
+                .create_backup_with_sources(&data_dir, &settings_path, BackupType::Settings, None)
+                .await
+                .expect("create settings backup");
+            write_settings(
+                &backup_dir.join(&info.id).join(SETTINGS_BACKUP_FILENAME),
+                "system",
+            );
+            write_settings(&settings_path, "light");
+
+            let error = manager
+                .restore_backup_to_targets(&info.id, &data_dir, &settings_path)
+                .await
+                .expect_err("hash mismatch must reject restore");
+            assert!(error.to_string().contains("inventory"));
+            let live: crate::settings::Settings = serde_json::from_str(
+                &fs::read_to_string(&settings_path).expect("read live settings"),
+            )
+            .expect("parse live settings");
+            assert_eq!(live.theme, "light");
+
+            let _ = fs::remove_dir_all(&root);
+        });
+    }
+
+    #[test]
+    fn restore_rejects_database_that_fails_quick_check() {
+        let runtime = Runtime::new().expect("create tokio runtime");
+        runtime.block_on(async {
+            let root = unique_test_dir("quick-check");
+            let backup_root = root.join("backups");
+            let backup_id = "backup_20260802_120000_deadbeef";
+            let generation = backup_root.join(backup_id);
+            let data_dir = root.join("data");
+            let settings_path = root.join("config/settings.json");
+            fs::create_dir_all(&generation).expect("create generation");
+            fs::create_dir_all(&data_dir).expect("create data dir");
+
+            let corrupt_database = generation.join("plainsong.db");
+            let conn = Connection::open(&corrupt_database).expect("create sqlite database");
+            conn.execute_batch(
+                "CREATE TABLE payload (id INTEGER PRIMARY KEY, value TEXT);
+                 INSERT INTO payload (value) VALUES (zeroblob(8192));
+                 PRAGMA user_version = 1;",
+            )
+            .expect("seed sqlite database");
+            drop(conn);
+            let mut bytes = fs::read(&corrupt_database).expect("read sqlite database");
+            bytes[100..116].fill(0xff);
+            fs::write(&corrupt_database, bytes).expect("corrupt sqlite page");
+
+            write_backup_manifest(
+                &generation,
+                backup_id,
+                Utc::now(),
+                BackupType::Full,
+                &[BackupComponent::Database],
+            )
+            .await
+            .expect("write manifest for corrupt database");
+
+            let live_database = data_dir.join("plainsong.db");
+            let live_conn = Connection::open(&live_database).expect("create live database");
+            live_conn
+                .execute_batch(
+                    "CREATE TABLE live_sentinel (value TEXT NOT NULL);
+                     INSERT INTO live_sentinel (value) VALUES ('known-good-live-data');
+                     PRAGMA user_version = 1;",
+                )
+                .expect("seed live database");
+            drop(live_conn);
+            let live_before = fs::read(&live_database).expect("read live database before restore");
+            let manager = manager_for(backup_root, 7);
+            let error = manager
+                .restore_backup_to_targets(backup_id, &data_dir, &settings_path)
+                .await
+                .expect_err("quick_check must reject corrupt database");
+            assert!(error.to_string().contains("validation"));
+            assert_eq!(
+                fs::read(&live_database).expect("read live database after rejection"),
+                live_before
+            );
+
+            let _ = fs::remove_dir_all(&root);
+        });
+    }
+
+    #[test]
+    fn full_restore_rebases_managed_recording_paths() {
+        let runtime = Runtime::new().expect("create tokio runtime");
+        runtime.block_on(async {
+            let root = unique_test_dir("recording-path-rebase");
+            let source_data = root.join("source-data");
+            let target_data = root.join("target-data");
+            let backup_dir = root.join("backups");
+            let source_settings = root.join("source-config/settings.json");
+            let target_settings = root.join("target-config/settings.json");
+            let snapshot = root.join("snapshot.db");
+            let source_recording = source_data.join("recordings/nested/meeting.wav");
+            fs::create_dir_all(source_recording.parent().expect("recording parent"))
+                .expect("create source recordings");
+            fs::write(&source_recording, "audio").expect("write source recording");
+            write_settings(&source_settings, "dark");
+
+            let conn = Connection::open(&snapshot).expect("create database snapshot");
+            conn.execute_batch(
+                "CREATE TABLE recordings (id TEXT PRIMARY KEY, audio_path TEXT);
+                 CREATE TABLE recording_audio_assets (
+                    recording_id TEXT, role TEXT, path TEXT
+                 );
+                 CREATE TABLE recording_audio_operation_items (
+                    operation_id TEXT, recording_id TEXT, role TEXT,
+                    source_path TEXT, staged_path TEXT, target_path TEXT
+                 );
+                 PRAGMA user_version = 1;",
+            )
+            .expect("create recording path tables");
+            conn.execute(
+                "INSERT INTO recordings (id, audio_path) VALUES ('r1', ?1)",
+                [source_recording.to_string_lossy().as_ref()],
+            )
+            .expect("seed source recording path");
+            conn.execute(
+                "INSERT INTO recording_audio_assets (recording_id, role, path)
+                 VALUES ('r1', 'primary', ?1)",
+                [source_recording.to_string_lossy().as_ref()],
+            )
+            .expect("seed source asset path");
+            conn.execute(
+                "INSERT INTO recording_audio_operation_items (
+                    operation_id, recording_id, role, source_path, staged_path, target_path
+                 ) VALUES ('op1', 'r1', 'primary', ?1, ?2, ?3)",
+                params![
+                    source_recording.to_string_lossy().as_ref(),
+                    source_data
+                        .join("recordings/nested/.meeting.stage")
+                        .to_string_lossy()
+                        .as_ref(),
+                    source_data
+                        .join("recordings/nested/meeting.wav.enc")
+                        .to_string_lossy()
+                        .as_ref(),
+                ],
+            )
+            .expect("seed operation paths");
+            drop(conn);
+
+            let manager = manager_for(backup_dir, 7);
+            let info = manager
+                .create_backup_with_sources(
+                    &source_data,
+                    &source_settings,
+                    BackupType::Full,
+                    Some(&snapshot),
+                )
+                .await
+                .expect("create portable full backup");
+            let stored_backup = Connection::open(
+                manager
+                    .config()
+                    .backup_dir
+                    .as_ref()
+                    .expect("backup dir")
+                    .join(&info.id)
+                    .join("plainsong.db"),
+            )
+            .expect("open backup database");
+            let stored_path: String = stored_backup
+                .query_row(
+                    "SELECT audio_path FROM recordings WHERE id = 'r1'",
+                    [],
+                    |row| row.get(0),
+                )
+                .expect("read portable stored path");
+            assert_eq!(
+                PathBuf::from(stored_path),
+                PathBuf::from("nested/meeting.wav")
+            );
+            let stored_asset_path: String = stored_backup
+                .query_row(
+                    "SELECT path FROM recording_audio_assets WHERE recording_id = 'r1'",
+                    [],
+                    |row| row.get(0),
+                )
+                .expect("read portable asset path");
+            assert_eq!(
+                PathBuf::from(stored_asset_path),
+                PathBuf::from("nested/meeting.wav")
+            );
+            let stored_operation_paths: (String, String, String) = stored_backup
+                .query_row(
+                    "SELECT source_path, staged_path, target_path
+                     FROM recording_audio_operation_items WHERE operation_id = 'op1'",
+                    [],
+                    |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+                )
+                .expect("read portable operation paths");
+            assert_eq!(
+                stored_operation_paths,
+                (
+                    "nested/meeting.wav".to_string(),
+                    "nested/.meeting.stage".to_string(),
+                    "nested/meeting.wav.enc".to_string(),
+                )
+            );
+            drop(stored_backup);
+
+            manager
+                .restore_backup_to_targets(&info.id, &target_data, &target_settings)
+                .await
+                .expect("restore portable full backup");
+
+            let restored =
+                Connection::open(target_data.join("plainsong.db")).expect("open restored database");
+            let restored_path: String = restored
+                .query_row(
+                    "SELECT audio_path FROM recordings WHERE id = 'r1'",
+                    [],
+                    |row| row.get(0),
+                )
+                .expect("read rebased path");
+            assert_eq!(
+                PathBuf::from(restored_path),
+                target_data.join("recordings/nested/meeting.wav")
+            );
+            let restored_asset_path: String = restored
+                .query_row(
+                    "SELECT path FROM recording_audio_assets WHERE recording_id = 'r1'",
+                    [],
+                    |row| row.get(0),
+                )
+                .expect("read rebased asset path");
+            assert_eq!(
+                PathBuf::from(restored_asset_path),
+                target_data.join("recordings/nested/meeting.wav")
+            );
+            let restored_operation_paths: (String, String, String) = restored
+                .query_row(
+                    "SELECT source_path, staged_path, target_path
+                     FROM recording_audio_operation_items WHERE operation_id = 'op1'",
+                    [],
+                    |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+                )
+                .expect("read rebased operation paths");
+            assert_eq!(
+                restored_operation_paths,
+                (
+                    target_data
+                        .join("recordings/nested/meeting.wav")
+                        .to_string_lossy()
+                        .to_string(),
+                    target_data
+                        .join("recordings/nested/.meeting.stage")
+                        .to_string_lossy()
+                        .to_string(),
+                    target_data
+                        .join("recordings/nested/meeting.wav.enc")
+                        .to_string_lossy()
+                        .to_string(),
+                )
+            );
+            assert!(target_data.join("recordings/nested/meeting.wav").is_file());
+
+            let _ = fs::remove_dir_all(&root);
+        });
+    }
+
+    #[test]
+    fn vault_database_restore_is_rejected_before_live_mutation() {
+        let runtime = Runtime::new().expect("create tokio runtime");
+        runtime.block_on(async {
+            let root = unique_test_dir("vault-restore-rejection");
+            let backup_root = root.join("backups");
+            let backup_id = "backup_20260802_120001_deadbeef";
+            let generation = backup_root.join(backup_id);
+            let data_dir = root.join("data");
+            let settings_path = root.join("config/settings.json");
+            fs::create_dir_all(&generation).expect("create generation");
+            fs::create_dir_all(&data_dir).expect("create data dir");
+            fs::write(generation.join("plainsong.db"), [0x7au8; 4096])
+                .expect("write encrypted-looking database");
+            write_backup_manifest(
+                &generation,
+                backup_id,
+                Utc::now(),
+                BackupType::Full,
+                &[BackupComponent::Database],
+            )
+            .await
+            .expect("write vault manifest");
+            let live_database = data_dir.join("plainsong.db");
+            fs::write(&live_database, "live-database").expect("write live database");
+
+            let manager = manager_for(backup_root, 7);
+            let error = manager
+                .restore_backup_to_targets(backup_id, &data_dir, &settings_path)
+                .await
+                .expect_err("vault restore must be rejected");
+            assert!(error.to_string().contains("Keychain-only key"));
+            assert_eq!(
+                fs::read_to_string(live_database).expect("read live database"),
+                "live-database"
+            );
 
             let _ = fs::remove_dir_all(&root);
         });

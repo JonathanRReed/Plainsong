@@ -62,6 +62,22 @@ pub struct TranscriptArtifactRecord {
     pub created_at: DateTime<Utc>,
 }
 
+/// Pre-aggregated counters for the Dictation insights panel, computed by
+/// SQLite rather than by walking every dictation and its transcript in Rust.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DictationInsightTotals {
+    pub total_dictations: u64,
+    pub dictated_words: u64,
+    pub active_days: u64,
+    pub last_seven_days_dictations: u64,
+    pub commands_used: u64,
+    pub backtracks_used: u64,
+    pub snippets_triggered: u64,
+    pub top_app_target: Option<String>,
+    pub top_app_target_count: u64,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct InsertionActionRecord {
