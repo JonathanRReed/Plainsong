@@ -107,6 +107,8 @@ artifacts/
 dist-electron/
 dist-native/
 release/
+/release-*/
+/nautilus-bot/release-*/
 
 # Stray duplicate/rename-experiment checkouts of the app that have
 # accidentally ended up at the repo root (see git history 2026-06-22)

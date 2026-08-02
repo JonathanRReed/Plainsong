@@ -37,7 +37,7 @@ no telemetry. macOS on Apple Silicon (arm64) only for v1.
   so no data migration).
 - Renderer restyled to the manuscript brand (see `STYLE.md`); themes collapsed
   to two.
-- Default local route is whisper.cpp (Metal/CoreML) `base.en`; hot path
+- Default local route is whisper.cpp (Metal) `base.en`; hot path
   unblocked (concurrent JSON-RPC dispatch, model pre-warm, in-process
   frontmost-app lookup).
 

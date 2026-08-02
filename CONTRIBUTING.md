@@ -12,7 +12,8 @@ bun run sidecar:build:release   # build the Rust transcription sidecar (required
 bun run dev
 ```
 
-You'll need [Bun](https://bun.sh) and a stable Rust toolchain. `bun run dev`
+You'll need [Bun](https://bun.sh), CMake, a stable Rust toolchain, and the
+Xcode Command Line Tools (including `xcrun` and `swiftc`). `bun run dev`
 does not build the sidecar; skip the sidecar build and the app boots into a
 "Plainsong sidecar not found" error. The Rust sidecar
 in `nautilus-bot/rust-sidecar/` does audio capture and speech recognition; the
@@ -32,6 +33,13 @@ bun run build:renderer && bun run electron:compile   # production build sanity
 ```
 
 CI must be green. Clippy is run with `-D warnings`, so warnings are errors.
+
+### Maintainer pre-publication checklist
+
+- [ ] Add and enable a ruleset for `main` that requires pull requests, requires
+  the `verify-web`, `verify-build`, and `verify-rust` checks, and blocks force
+  pushes and branch deletion. Until that ruleset is active, CI is advisory and
+  a green check is not an enforced merge condition.
 
 ## Guidelines
 

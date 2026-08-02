@@ -4,9 +4,15 @@
 
 Please report security issues privately rather than opening a public issue.
 
-- Use GitHub's **"Report a vulnerability"** (Security → Advisories) on the
-  repository, or
-- Email the maintainer at the address on their GitHub profile.
+Email **`security-contact@example.invalid`**. **This is a pre-publication
+placeholder, not a working inbox; the maintainer must replace it with an
+explicitly monitored address before the repository becomes public.** Once
+GitHub private vulnerability reporting is enabled, you may instead use
+**"Report a vulnerability"** under Security → Advisories.
+
+Maintainer pre-publication requirement: enable private vulnerability reporting
+at the public-repository cutover and verify that the reporting form is available
+without repository write access.
 
 Include what you found, how to reproduce it, and the potential impact. You'll
 get an acknowledgement as soon as possible, and we'll work with you on a fix and

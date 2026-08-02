@@ -21,14 +21,22 @@ audio and text. The code is open — you can verify all of it.
 ## What does connect to the network
 
 "No Plainsong servers" is literal, but it would be misleading to leave it there
-without naming the connections the app does make. There are two, both to third
-parties, both triggered by you:
+without naming the built-in downloads and update checks the app can make. They
+all go to third parties and are triggered by you:
 
 - **Downloading a speech model.** The first time you use local transcription,
   Plainsong downloads the model you chose from Hugging Face — about 148 MB for
   the default `base.en`. Hugging Face sees that request, and therefore your IP
   address, the same as any other download. It happens once per model. Nothing
   about your audio, transcripts, or usage is included.
+- **Downloading optional Silero voice-activity detection.** If you enable the
+  higher-accuracy Silero VAD model, Plainsong downloads its ONNX file from
+  `raw.githubusercontent.com`. The URL is pinned to an upstream commit and the
+  file must match the expected SHA-256 before Plainsong accepts it.
+- **Downloading an optional speaker-diarization model.** If you choose speaker
+  diarization, Plainsong downloads the selected WeSpeaker ECAPA-TDNN, ResNet34,
+  or CAM++ model from Hugging Face. Each URL is pinned to a model revision and
+  each file is checked against its expected SHA-256.
 - **Checking for updates.** When you ask Plainsong to check for a new version, it
   requests the release manifest from GitHub. There is no automatic check on
   launch and nothing downloads without your say-so.
@@ -114,8 +122,12 @@ time in System Settings.
 
 ## Verifying these claims
 
-This is open-source software. If you want to confirm any of the above, the
-network-touching code is in `nautilus-bot/rust-sidecar/src/llm/` (cloud LLM
-clients) and `nautilus-bot/rust-sidecar/src/asr/` (transcription providers), and
-secret handling is in `nautilus-bot/rust-sidecar/src/secrets.rs`. There is no
-hidden network layer.
+This is open-source software. If you want to confirm any of the above, start
+with `nautilus-bot/rust-sidecar/src/download/mod.rs` (model and VAD downloads),
+`nautilus-bot/rust-sidecar/src/asr/` and `nautilus-bot/rust-sidecar/src/llm/`
+(transcription and AI providers), `nautilus-bot/electron/main.ts` and
+`nautilus-bot/electron/updater-channel.ts` (manual update checks), and
+`nautilus-bot/rust-sidecar/src/backup.rs` (optional rclone backup). Provider
+command wiring is in `nautilus-bot/rust-sidecar/src/lib.rs`, and secret handling
+is in `nautilus-bot/rust-sidecar/src/secrets.rs`. There is no hidden network
+layer.

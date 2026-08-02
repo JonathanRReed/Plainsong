@@ -85,15 +85,14 @@ usage strings, and size, then creates or refreshes a draft GitHub release. A
 missing credential or failed trust check stops the workflow before any release
 asset reaches GitHub.
 
-The local v1.0.0 arm64 candidate produced on July 23, 2026 passes Developer ID
-signing, update metadata, TCC, size, direct sidecar smoke, and rendered-app
-checks. The live packaged app reports microphone, system audio, local routes,
-and installed models available, but Accessibility and cursor insertion are not
-yet granted for the packaged app identity. The candidate is not launchable
-because Apple notarization credentials were not available in the local
-environment. It has no stapled ticket and Gatekeeper correctly reports
-`source=Unnotarized Developer ID`. The repository is private and no public
-release has been published. See
+The exact local v1.0.0 arm64 candidate produced on July 30, 2026 passes
+Developer ID signing, update metadata, TCC, size, dependency, native-helper,
+DMG integrity, isolated renderer-readiness, and source test gates. First run
+now starts with an explicit in-app dictation test and never downloads a model
+without a user action. The candidate is not launchable because its dedicated
+`plainsong-notary` credential has not been confirmed. It has no stapled ticket
+and Gatekeeper correctly reports `source=Unnotarized Developer ID`. The
+repository is private and no public release has been published. See
 [docs/CODE_SIGNING.md](docs/CODE_SIGNING.md) and
 [docs/APPLE_DEVELOPER_SETUP.md](docs/APPLE_DEVELOPER_SETUP.md).
 
@@ -102,7 +101,7 @@ release has been published. See
 ```bash
 bun run lint        # typecheck + cargo fmt --check + clippy -D warnings
 bun run test        # Vitest (renderer + Electron)
-bun run test:rust   # Rust sidecar unit tests
+bun run test:rust   # Rust library and operator-binary unit tests
 bun run gate:ipc-contract
 bun run gate:release:local   # source checks + local package build
 bun run qa:packaged:macos:update-metadata
@@ -114,22 +113,33 @@ Use `bun run test` (Vitest), not `bun test`.
 ## Measuring real dictation latency
 
 `benchmark:latency` runs a fixture WAV through the actual transcription path and
-reports **measured** wall-clock latency and real-time factor (it requires the
-chosen model to be downloaded):
+reports measured wall-clock latency, conventional real-time factor, and
+real-time speedup. It requires the selected model to be downloaded:
 
 ```bash
+bun run benchmark:latency -- --help
 bun run benchmark:latency -- --provider whisper --model base.en --runs 5
-# → {"transcriptionMsP50":593,"transcriptionMsP95":600,"realTimeFactor":74.4,...}
+# {"transcriptionMsP50":593,"transcriptionMsP95":600,
+#  "realTimeFactor":0.01,"realtimeSpeedup":74.4,...}
 ```
 
-The default fixture is `scripts/fixtures/real-speech-44s.wav`, which contains 44 seconds of
-real spoken speech. The numbers above were measured with whisper.cpp `base.en`
-(Metal) on Apple Silicon. Earlier docs cited ~137 ms p50 / ~218× real-time;
-that was measured on a pure sine-tone fixture and is not representative of
-dictation, so do not quote it.
+Real-time factor is `transcription seconds / audio seconds`, so lower is
+faster. `realtimeSpeedup` is its inverse and is easier to read as "times faster
+than real time." The JSON receipt also includes the canonical fixture path,
+SHA-256, byte count, audio duration, warm-up time, every timed measurement,
+p50, p95, run count, model, provider, and transcript sample.
+
+The default fixture is `scripts/fixtures/real-speech-44s.wav`, which contains
+44 seconds of real spoken speech. The numbers above were measured with
+whisper.cpp `base.en` using Metal on Apple Silicon. Earlier documentation cited
+about 137 ms p50 and about 218 times real-time on a pure sine-tone fixture.
+That is not representative of dictation and must not be quoted as a product
+result.
 
 This replaces an earlier "benchmark" that multiplied fixture numbers by a CLI
-flag; the numbers here are real.
+flag. Invalid providers, model/provider combinations, run counts, flags, and
+fixture paths now fail before model initialization instead of silently
+changing the requested benchmark.
 
 ## ASR providers
 

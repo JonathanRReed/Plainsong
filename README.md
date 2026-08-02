@@ -77,7 +77,10 @@ the equivalent.
 
 - [Bun](https://bun.sh)
 - Rust toolchain (stable), which builds the local transcription sidecar
-- macOS (Windows/Linux are not yet GA targets)
+- [CMake](https://cmake.org/)
+- Xcode Command Line Tools, including `xcrun` and the Swift compiler (`swiftc`);
+  install them with `xcode-select --install`
+- macOS 13 or later on Apple Silicon (Windows/Linux are not yet GA targets)
 - Optional: [Ollama](https://ollama.com) running locally for on-device AI cleanup
 
 ## Verifying a change
