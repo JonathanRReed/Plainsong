@@ -1,5 +1,6 @@
 use async_trait::async_trait;
 use reqwest::StatusCode;
+use serde::de::DeserializeOwned;
 use serde_json::Value;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
@@ -9,6 +10,72 @@ use thiserror::Error;
 use super::{
     AnthropicClient, DeepSeekClient, GeminiClient, OllamaClient, OllamaCloudClient, OpenAIClient,
 };
+
+pub(crate) const MODEL_LIST_BODY_LIMIT: usize = 4 * 1024 * 1024;
+pub(crate) const COMPLETION_BODY_LIMIT: usize = 8 * 1024 * 1024;
+pub(crate) const MODEL_METADATA_BODY_LIMIT: usize = 8 * 1024 * 1024;
+pub(crate) const EMBEDDING_BODY_LIMIT: usize = 16 * 1024 * 1024;
+pub(crate) const BATCH_EMBEDDING_BODY_LIMIT: usize = 64 * 1024 * 1024;
+const ERROR_BODY_READ_LIMIT: usize = 64 * 1024;
+const ERROR_MESSAGE_SNIPPET_LIMIT: usize = 8 * 1024;
+
+#[derive(Debug, Error)]
+pub(crate) enum BoundedBodyError {
+    #[error("response body exceeds the {limit}-byte limit (declared length: {declared:?})")]
+    TooLarge { limit: usize, declared: Option<u64> },
+    #[error("failed while reading response body: {0}")]
+    Read(#[source] reqwest::Error),
+    #[error("response body is not valid JSON: {0}")]
+    Json(#[source] serde_json::Error),
+}
+
+pub(crate) async fn read_bounded_body(
+    mut response: reqwest::Response,
+    limit: usize,
+) -> Result<Vec<u8>, BoundedBodyError> {
+    let declared = response.content_length();
+    if declared.is_some_and(|length| length > limit as u64) {
+        return Err(BoundedBodyError::TooLarge { limit, declared });
+    }
+
+    let capacity = declared
+        .and_then(|length| usize::try_from(length).ok())
+        .unwrap_or_default()
+        .min(limit);
+    let mut body = Vec::with_capacity(capacity);
+    while let Some(chunk) = response.chunk().await.map_err(BoundedBodyError::Read)? {
+        if body.len().saturating_add(chunk.len()) > limit {
+            return Err(BoundedBodyError::TooLarge { limit, declared });
+        }
+        body.extend_from_slice(&chunk);
+    }
+    Ok(body)
+}
+
+pub(crate) async fn read_json_body<T: DeserializeOwned>(
+    response: reqwest::Response,
+    limit: usize,
+) -> Result<T, BoundedBodyError> {
+    let body = read_bounded_body(response, limit).await?;
+    serde_json::from_slice(&body).map_err(BoundedBodyError::Json)
+}
+
+pub(crate) async fn read_error_body(response: reqwest::Response) -> String {
+    match read_bounded_body(response, ERROR_BODY_READ_LIMIT).await {
+        Ok(body) => body_snippet(&body),
+        Err(error) => format!("Provider error response could not be retained safely: {error}"),
+    }
+}
+
+fn body_snippet(body: &[u8]) -> String {
+    let truncated = body.len() > ERROR_MESSAGE_SNIPPET_LIMIT;
+    let kept = &body[..body.len().min(ERROR_MESSAGE_SNIPPET_LIMIT)];
+    let mut snippet = String::from_utf8_lossy(kept).into_owned();
+    if truncated {
+        snippet.push_str("… [response truncated]");
+    }
+    snippet
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Provider {
@@ -318,6 +385,17 @@ impl LlmError {
     }
 }
 
+pub(crate) fn bounded_body_error_to_llm(
+    provider: Provider,
+    context: &str,
+    error: BoundedBodyError,
+) -> LlmError {
+    match error {
+        BoundedBodyError::Read(error) => LlmError::from_reqwest(provider, context, error),
+        other => LlmError::new(provider, ErrorKind::Parse, format!("{context}: {other}")),
+    }
+}
+
 pub fn classify_http_error(provider: Provider, status: StatusCode, body: String) -> LlmError {
     let lower = body.to_ascii_lowercase();
     let kind = match status.as_u16() {
@@ -590,6 +668,39 @@ impl CompletionTransport for ProviderRuntime {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    #[tokio::test]
+    async fn bounded_body_rejects_oversized_declared_body() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let mut request = [0_u8; 1024];
+            let _ = socket.read(&mut request).await.unwrap();
+            socket
+                .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 9\r\n\r\n123456789")
+                .await
+                .unwrap();
+        });
+        let response = reqwest::Client::new()
+            .get(format!("http://{address}/oversized"))
+            .send()
+            .await
+            .unwrap();
+
+        let error = read_bounded_body(response, 8)
+            .await
+            .expect_err("declared oversized bodies must be rejected before parsing");
+        assert!(matches!(
+            error,
+            BoundedBodyError::TooLarge {
+                limit: 8,
+                declared: Some(9)
+            }
+        ));
+        server.await.unwrap();
+    }
 
     #[test]
     fn model_budget_reserves_input_and_output_space() {

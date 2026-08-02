@@ -1,8 +1,9 @@
 //! DeepSeek client using its existing OpenAI-compatible raw HTTP endpoint.
 
 use crate::llm::transport::{
-    classify_http_error, CompletionRequest, CompletionResponse, CompletionTransport, ErrorKind,
-    LlmError, Provider, RequestOptions,
+    bounded_body_error_to_llm, classify_http_error, read_error_body, read_json_body,
+    CompletionRequest, CompletionResponse, CompletionTransport, ErrorKind, LlmError, Provider,
+    RequestOptions, COMPLETION_BODY_LIMIT, MODEL_LIST_BODY_LIMIT,
 };
 use anyhow::{Context, Result};
 use async_trait::async_trait;
@@ -42,13 +43,12 @@ impl DeepSeekClient {
             .context("Failed to fetch DeepSeek models")?;
         if !response.status().is_success() {
             let status = response.status();
-            let body = response.text().await.unwrap_or_default();
+            let body = read_error_body(response).await;
             anyhow::bail!("DeepSeek model list error {}: {}", status, body);
         }
-        let data: serde_json::Value = response
-            .json()
+        let data: serde_json::Value = read_json_body(response, MODEL_LIST_BODY_LIMIT)
             .await
-            .context("Failed to parse DeepSeek response")?;
+            .context("Failed to read or parse bounded DeepSeek response")?;
         let models = data["data"]
             .as_array()
             .map(|models| {
@@ -130,12 +130,14 @@ impl CompletionTransport for DeepSeekClient {
             })?;
         if !response.status().is_success() {
             let status = response.status();
-            let body = response.text().await.unwrap_or_default();
+            let body = read_error_body(response).await;
             return Err(classify_http_error(Provider::DeepSeek, status, body));
         }
-        let data: serde_json::Value = response.json().await.map_err(|error| {
-            LlmError::from_reqwest(Provider::DeepSeek, "Failed to parse response", error)
-        })?;
+        let data: serde_json::Value = read_json_body(response, COMPLETION_BODY_LIMIT)
+            .await
+            .map_err(|error| {
+                bounded_body_error_to_llm(Provider::DeepSeek, "Failed to read response", error)
+            })?;
         let finish_reason = data["choices"][0]["finish_reason"].as_str();
         if matches!(finish_reason, Some("length")) {
             return Err(LlmError::new(

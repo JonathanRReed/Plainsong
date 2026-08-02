@@ -1,8 +1,10 @@
 //! Ollama local LLM adapter using `/api/chat` and typed `/api/show` metadata.
 
 use crate::llm::transport::{
-    classify_http_error, CompletionRequest, CompletionResponse, CompletionTransport, ErrorKind,
-    LlmError, ModelContextMetadata, Provider, RequestOptions,
+    bounded_body_error_to_llm, classify_http_error, read_error_body, read_json_body,
+    CompletionRequest, CompletionResponse, CompletionTransport, ErrorKind, LlmError,
+    ModelContextMetadata, Provider, RequestOptions, COMPLETION_BODY_LIMIT, MODEL_LIST_BODY_LIMIT,
+    MODEL_METADATA_BODY_LIMIT,
 };
 use anyhow::{Context, Result};
 use async_trait::async_trait;
@@ -64,13 +66,12 @@ impl OllamaClient {
             .context("Failed to connect to Ollama")?;
         if !response.status().is_success() {
             let status = response.status();
-            let body = response.text().await.unwrap_or_default();
+            let body = read_error_body(response).await;
             anyhow::bail!("Ollama model list error {}: {}", status, body);
         }
-        let data: serde_json::Value = response
-            .json()
+        let data: serde_json::Value = read_json_body(response, MODEL_LIST_BODY_LIMIT)
             .await
-            .context("Failed to parse Ollama response")?;
+            .context("Failed to read or parse bounded Ollama response")?;
         let models = data["models"]
             .as_array()
             .map(|models| {
@@ -124,12 +125,14 @@ impl OllamaClient {
             })?;
         if !response.status().is_success() {
             let status = response.status();
-            let body = response.text().await.unwrap_or_default();
+            let body = read_error_body(response).await;
             return Err(classify_http_error(Provider::Ollama, status, body));
         }
-        let response: ShowResponse = response.json().await.map_err(|error| {
-            LlmError::from_reqwest(Provider::Ollama, "Failed to parse model metadata", error)
-        })?;
+        let response: ShowResponse = read_json_body(response, MODEL_METADATA_BODY_LIMIT)
+            .await
+            .map_err(|error| {
+                bounded_body_error_to_llm(Provider::Ollama, "Failed to read model metadata", error)
+            })?;
         Ok(response.context_metadata())
     }
 
@@ -184,12 +187,14 @@ impl CompletionTransport for OllamaClient {
             })?;
         if !response.status().is_success() {
             let status = response.status();
-            let body = response.text().await.unwrap_or_default();
+            let body = read_error_body(response).await;
             return Err(classify_http_error(Provider::Ollama, status, body));
         }
-        let data: ChatResponse = response.json().await.map_err(|error| {
-            LlmError::from_reqwest(Provider::Ollama, "Failed to parse response", error)
-        })?;
+        let data: ChatResponse = read_json_body(response, COMPLETION_BODY_LIMIT)
+            .await
+            .map_err(|error| {
+                bounded_body_error_to_llm(Provider::Ollama, "Failed to read response", error)
+            })?;
         if matches!(data.done_reason.as_deref(), Some("length")) {
             return Err(LlmError::new(
                 Provider::Ollama,

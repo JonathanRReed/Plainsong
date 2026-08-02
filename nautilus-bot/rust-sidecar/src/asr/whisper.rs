@@ -4,8 +4,51 @@ use super::{
 use anyhow::{Context, Result};
 use async_trait::async_trait;
 use std::collections::HashMap;
+use std::fs::OpenOptions;
+use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, OnceLock};
+
+struct TempWav {
+    path: PathBuf,
+}
+
+impl TempWav {
+    fn create(audio_data: &[u8]) -> Result<Self> {
+        let path = std::env::temp_dir().join(format!(
+            "plainsong-dictation-whisper-{}.wav",
+            uuid::Uuid::new_v4()
+        ));
+        let guard = Self { path };
+        let mut options = OpenOptions::new();
+        options.write(true).create_new(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            options.mode(0o600);
+        }
+        let mut file = options
+            .open(&guard.path)
+            .context("Failed to create temporary Whisper audio")?;
+        file.write_all(audio_data)
+            .context("Failed to write temporary Whisper audio")?;
+        Ok(guard)
+    }
+
+    fn path(&self) -> &Path {
+        &self.path
+    }
+}
+
+impl Drop for TempWav {
+    fn drop(&mut self) {
+        if let Err(error) = std::fs::remove_file(&self.path) {
+            if error.kind() != std::io::ErrorKind::NotFound {
+                tracing::warn!(path = ?self.path, "Failed to remove temporary Whisper audio: {error}");
+            }
+        }
+    }
+}
 
 fn whisper_context_cache() -> &'static Mutex<HashMap<String, Arc<whisper_rs::WhisperContext>>> {
     static CACHE: OnceLock<Mutex<HashMap<String, Arc<whisper_rs::WhisperContext>>>> =
@@ -56,7 +99,7 @@ pub struct WhisperProvider {
 
 impl WhisperProvider {
     pub fn new(selected_model_id: Option<&str>) -> Self {
-        let models_dir = dirs::data_dir()
+        let models_dir = crate::paths::data_dir()
             .unwrap_or_else(|| PathBuf::from("."))
             .join("Plainsong")
             .join("models")
@@ -108,6 +151,13 @@ impl WhisperProvider {
             }
         }
 
+        if !crate::download::is_whisper_model_artifact_trusted(&self.model_id, &self.model_path) {
+            anyhow::bail!(
+                "Whisper model '{}' has not passed Plainsong integrity verification. Re-download it from Settings.",
+                self.model_id
+            );
+        }
+
         tracing::info!("Loading Whisper model from {:?}", self.model_path);
 
         // Enable GPU acceleration on supported platforms
@@ -148,6 +198,25 @@ impl WhisperProvider {
         }
         self.load_model()
     }
+
+    async fn transcribe_owned_path(
+        &self,
+        audio_path: PathBuf,
+        temp_wav: Option<TempWav>,
+    ) -> Result<TranscriptionResult> {
+        let ctx = self.get_or_load_ctx()?;
+        let model_id = self.model_id.clone();
+        tokio::task::spawn_blocking(move || {
+            let result = transcribe_blocking(&ctx, &model_id, &audio_path);
+            // Tokio cannot cancel a running blocking closure. Keeping the guard in
+            // this closure leaves the WAV readable until inference actually exits,
+            // while still unlinking it after an async caller is cancelled.
+            drop(temp_wav);
+            result
+        })
+        .await
+        .context("Whisper inference task panicked")?
+    }
 }
 
 #[async_trait]
@@ -162,8 +231,8 @@ impl AsrProvider for WhisperProvider {
     }
 
     fn is_available(&self) -> bool {
-        // Model is available if either already loaded in cache OR file exists
-        self.ctx.is_some() || self.model_path.exists()
+        self.ctx.is_some()
+            || crate::download::is_whisper_model_artifact_trusted(&self.model_id, &self.model_path)
     }
 
     async fn prewarm(&self) {
@@ -213,24 +282,18 @@ impl AsrProvider for WhisperProvider {
         // inference in `spawn_blocking`; this brings Whisper in line. The
         // Whisper *state* is created inside the closure so only the
         // `Arc<WhisperContext>` (`Send + Sync`) crosses the boundary.
-        let ctx = self.get_or_load_ctx()?;
-        let model_id = self.model_id.clone();
-        let audio_path = audio_path.to_path_buf();
-        tokio::task::spawn_blocking(move || transcribe_blocking(&ctx, &model_id, &audio_path))
+        self.transcribe_owned_path(audio_path.to_path_buf(), None)
             .await
-            .context("Whisper inference task panicked")?
     }
 
     async fn transcribe_bytes(&self, audio_data: &[u8]) -> Result<TranscriptionResult> {
-        let temp_path = std::env::temp_dir().join(format!("whisper_{}.wav", uuid::Uuid::new_v4()));
-        std::fs::write(&temp_path, audio_data)?;
-        let result = self.transcribe(&temp_path).await;
-        let _ = std::fs::remove_file(&temp_path);
-        result
+        let temp_wav = TempWav::create(audio_data)?;
+        let temp_path = temp_wav.path().to_path_buf();
+        self.transcribe_owned_path(temp_path, Some(temp_wav)).await
     }
 
     fn download_status(&self) -> DownloadStatus {
-        if self.model_path.exists() {
+        if crate::download::is_whisper_model_artifact_trusted(&self.model_id, &self.model_path) {
             DownloadStatus::Downloaded
         } else {
             DownloadStatus::NotDownloaded
@@ -468,7 +531,7 @@ fn whisper_model_spec(model_id: &str) -> WhisperModelSpec {
             parameters: "39M",
             wer: 18.0,
             real_time_factor: 0.2,
-            url: "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-tiny.bin",
+            url: "https://huggingface.co/ggerganov/whisper.cpp/resolve/5359861c739e955e79d9a303bcbc70fb988958b1/ggml-tiny.bin",
         },
         "tiny.en" => WhisperModelSpec {
             id: "tiny.en",
@@ -476,7 +539,7 @@ fn whisper_model_spec(model_id: &str) -> WhisperModelSpec {
             parameters: "39M",
             wer: 15.0,
             real_time_factor: 0.2,
-            url: "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-tiny.en.bin",
+            url: "https://huggingface.co/ggerganov/whisper.cpp/resolve/5359861c739e955e79d9a303bcbc70fb988958b1/ggml-tiny.en.bin",
         },
         "large-v3-turbo" => WhisperModelSpec {
             id: "large-v3-turbo",
@@ -484,8 +547,7 @@ fn whisper_model_spec(model_id: &str) -> WhisperModelSpec {
             parameters: "809M",
             wer: 6.4,
             real_time_factor: 0.7,
-            url:
-                "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-large-v3-turbo.bin",
+            url: "https://huggingface.co/ggerganov/whisper.cpp/resolve/5359861c739e955e79d9a303bcbc70fb988958b1/ggml-large-v3-turbo.bin",
         },
         "large-v3" => WhisperModelSpec {
             id: "large-v3",
@@ -493,7 +555,7 @@ fn whisper_model_spec(model_id: &str) -> WhisperModelSpec {
             parameters: "1550M",
             wer: 6.0,
             real_time_factor: 1.5,
-            url: "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-large-v3.bin",
+            url: "https://huggingface.co/ggerganov/whisper.cpp/resolve/5359861c739e955e79d9a303bcbc70fb988958b1/ggml-large-v3.bin",
         },
         "medium" => WhisperModelSpec {
             id: "medium",
@@ -501,7 +563,7 @@ fn whisper_model_spec(model_id: &str) -> WhisperModelSpec {
             parameters: "769M",
             wer: 8.0,
             real_time_factor: 1.0,
-            url: "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-medium.bin",
+            url: "https://huggingface.co/ggerganov/whisper.cpp/resolve/5359861c739e955e79d9a303bcbc70fb988958b1/ggml-medium.bin",
         },
         "medium.en" => WhisperModelSpec {
             id: "medium.en",
@@ -509,7 +571,7 @@ fn whisper_model_spec(model_id: &str) -> WhisperModelSpec {
             parameters: "769M",
             wer: 8.2,
             real_time_factor: 1.0,
-            url: "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-medium.en.bin",
+            url: "https://huggingface.co/ggerganov/whisper.cpp/resolve/5359861c739e955e79d9a303bcbc70fb988958b1/ggml-medium.en.bin",
         },
         "small" => WhisperModelSpec {
             id: "small",
@@ -517,7 +579,7 @@ fn whisper_model_spec(model_id: &str) -> WhisperModelSpec {
             parameters: "244M",
             wer: 10.0,
             real_time_factor: 0.8,
-            url: "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-small.bin",
+            url: "https://huggingface.co/ggerganov/whisper.cpp/resolve/5359861c739e955e79d9a303bcbc70fb988958b1/ggml-small.bin",
         },
         "small.en" => WhisperModelSpec {
             id: "small.en",
@@ -525,7 +587,7 @@ fn whisper_model_spec(model_id: &str) -> WhisperModelSpec {
             parameters: "244M",
             wer: 10.4,
             real_time_factor: 0.8,
-            url: "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-small.en.bin",
+            url: "https://huggingface.co/ggerganov/whisper.cpp/resolve/5359861c739e955e79d9a303bcbc70fb988958b1/ggml-small.en.bin",
         },
         "base" => WhisperModelSpec {
             id: "base",
@@ -533,7 +595,7 @@ fn whisper_model_spec(model_id: &str) -> WhisperModelSpec {
             parameters: "74M",
             wer: 14.0,
             real_time_factor: 0.5,
-            url: "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-base.bin",
+            url: "https://huggingface.co/ggerganov/whisper.cpp/resolve/5359861c739e955e79d9a303bcbc70fb988958b1/ggml-base.bin",
         },
         _ => WhisperModelSpec {
             id: "base.en",
@@ -541,7 +603,7 @@ fn whisper_model_spec(model_id: &str) -> WhisperModelSpec {
             parameters: "74M",
             wer: 11.0,
             real_time_factor: 0.5,
-            url: "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-base.en.bin",
+            url: "https://huggingface.co/ggerganov/whisper.cpp/resolve/5359861c739e955e79d9a303bcbc70fb988958b1/ggml-base.en.bin",
         },
     }
 }
@@ -549,6 +611,18 @@ fn whisper_model_spec(model_id: &str) -> WhisperModelSpec {
 #[cfg(test)]
 mod cache_tests {
     use super::*;
+
+    #[test]
+    fn temporary_wav_is_removed_on_drop() {
+        let temp_wav = TempWav::create(b"not a real wav, but sufficient for lifecycle testing")
+            .expect("temporary audio should be created");
+        let path = temp_wav.path().to_path_buf();
+        assert!(path.exists());
+
+        drop(temp_wav);
+
+        assert!(!path.exists());
+    }
 
     #[test]
     fn model_load_gate_is_shared_per_model() {

@@ -6,12 +6,36 @@ use anyhow::{Context, Result};
 use async_trait::async_trait;
 use serde::Deserialize;
 use serde_json::Value;
-use std::path::Path;
+use std::{path::Path, time::Duration};
 
 const OPENAI_TRANSCRIPTION_URL: &str = "https://api.openai.com/v1/audio/transcriptions";
+const OPENAI_HTTP_TIMEOUTS: CloudAsrHttpTimeouts = CloudAsrHttpTimeouts {
+    connect: Duration::from_secs(10),
+    read: Duration::from_secs(90),
+    total: Duration::from_secs(120),
+};
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) struct CloudAsrHttpTimeouts {
+    pub connect: Duration,
+    pub read: Duration,
+    pub total: Duration,
+}
+
+pub(super) fn build_cloud_asr_client(timeouts: CloudAsrHttpTimeouts) -> reqwest::Client {
+    // A provider that accepts the upload but never answers must not hold the dictation
+    // session until IPC's five-minute deadline. The request deadline below is still
+    // applied separately so redirects, uploads, and body reads share one hard ceiling.
+    reqwest::Client::builder()
+        .connect_timeout(timeouts.connect)
+        .read_timeout(timeouts.read)
+        .build()
+        .expect("static cloud ASR HTTP client configuration must be valid")
+}
 
 pub struct OpenAiCloudWhisperProvider {
     model_id: String,
+    client: reqwest::Client,
 }
 
 #[derive(Deserialize)]
@@ -39,9 +63,7 @@ struct OpenAiSegment {
 
 impl Default for OpenAiCloudWhisperProvider {
     fn default() -> Self {
-        Self {
-            model_id: "whisper-1".to_string(),
-        }
+        Self::new(None)
     }
 }
 
@@ -50,6 +72,7 @@ impl OpenAiCloudWhisperProvider {
         Self {
             model_id: sanitize_openai_asr_model_id(selected_model_id.unwrap_or("whisper-1"))
                 .to_string(),
+            client: build_cloud_asr_client(OPENAI_HTTP_TIMEOUTS),
         }
     }
 
@@ -94,11 +117,12 @@ impl OpenAiCloudWhisperProvider {
             form = form.text("response_format", "json");
         }
 
-        let client = reqwest::Client::new();
-        let response = client
+        let response = self
+            .client
             .post(OPENAI_TRANSCRIPTION_URL)
             .bearer_auth(&api_key)
             .multipart(form)
+            .timeout(OPENAI_HTTP_TIMEOUTS.total)
             .send()
             .await
             .context("OpenAI Whisper API request failed")?;
@@ -210,8 +234,17 @@ impl AsrProvider for OpenAiCloudWhisperProvider {
 
 #[cfg(test)]
 mod tests {
-    use super::OpenAiCloudWhisperProvider;
+    use super::{OpenAiCloudWhisperProvider, OPENAI_HTTP_TIMEOUTS};
     use crate::asr::AsrProvider;
+    use std::time::Duration;
+
+    #[test]
+    fn openai_cloud_client_has_bounded_timeouts() {
+        assert_eq!(OPENAI_HTTP_TIMEOUTS.connect, Duration::from_secs(10));
+        assert_eq!(OPENAI_HTTP_TIMEOUTS.read, Duration::from_secs(90));
+        assert_eq!(OPENAI_HTTP_TIMEOUTS.total, Duration::from_secs(120));
+        assert!(OPENAI_HTTP_TIMEOUTS.total < Duration::from_secs(5 * 60));
+    }
 
     #[test]
     fn openai_asr_response_format_matches_selected_model() {

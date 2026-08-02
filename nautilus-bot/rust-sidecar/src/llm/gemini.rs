@@ -1,14 +1,29 @@
 //! Google Gemini client using the existing raw HTTP generateContent endpoint.
 
 use crate::llm::transport::{
-    classify_http_error, CompletionRequest, CompletionResponse, CompletionTransport, ErrorKind,
-    LlmError, Provider, RequestOptions,
+    bounded_body_error_to_llm, classify_http_error, read_error_body, read_json_body,
+    CompletionRequest, CompletionResponse, CompletionTransport, ErrorKind, LlmError, Provider,
+    RequestOptions, COMPLETION_BODY_LIMIT, MODEL_LIST_BODY_LIMIT,
 };
 use anyhow::{Context, Result};
 use async_trait::async_trait;
 use std::time::Duration;
 
 const GEMINI_API_URL: &str = "https://generativelanguage.googleapis.com/v1beta";
+
+fn supports_gemini_generate_content(model: &serde_json::Value) -> bool {
+    let is_gemini = model["name"]
+        .as_str()
+        .is_some_and(|name| name.trim_start_matches("models/").starts_with("gemini-"));
+    let supports_endpoint = model["supportedGenerationMethods"]
+        .as_array()
+        .is_some_and(|methods| {
+            methods
+                .iter()
+                .any(|method| method.as_str() == Some("generateContent"))
+        });
+    is_gemini && supports_endpoint
+}
 
 fn parse_completion_response(
     data: &serde_json::Value,
@@ -105,20 +120,19 @@ impl GeminiClient {
             .context("Failed to connect to Gemini API")?;
         if !response.status().is_success() {
             let status = response.status();
-            let body = response.text().await.unwrap_or_default();
+            let body = read_error_body(response).await;
             anyhow::bail!("Gemini model list error {}: {}", status, body);
         }
-        let data: serde_json::Value = response
-            .json()
+        let data: serde_json::Value = read_json_body(response, MODEL_LIST_BODY_LIMIT)
             .await
-            .context("Failed to parse Gemini response")?;
+            .context("Failed to read or parse bounded Gemini response")?;
         Ok(data["models"]
             .as_array()
             .map(|models| {
                 models
                     .iter()
+                    .filter(|model| supports_gemini_generate_content(model))
                     .filter_map(|model| model["name"].as_str().map(str::to_string))
-                    .filter(|id| id.contains("gemini"))
                     .collect()
             })
             .unwrap_or_default())
@@ -200,12 +214,14 @@ impl CompletionTransport for GeminiClient {
             })?;
         if !response.status().is_success() {
             let status = response.status();
-            let body = response.text().await.unwrap_or_default();
+            let body = read_error_body(response).await;
             return Err(classify_http_error(Provider::Gemini, status, body));
         }
-        let data: serde_json::Value = response.json().await.map_err(|error| {
-            LlmError::from_reqwest(Provider::Gemini, "Failed to parse response", error)
-        })?;
+        let data: serde_json::Value = read_json_body(response, COMPLETION_BODY_LIMIT)
+            .await
+            .map_err(|error| {
+                bounded_body_error_to_llm(Provider::Gemini, "Failed to read response", error)
+            })?;
         parse_completion_response(&data, &request.model)
     }
 }
@@ -219,6 +235,31 @@ impl Default for GeminiClient {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn model_filter_requires_generate_content_capability() {
+        assert!(supports_gemini_generate_content(&serde_json::json!({
+            "name": "models/gemini-2.5-flash",
+            "supportedGenerationMethods": ["generateContent", "countTokens"]
+        })));
+        for rejected in [
+            serde_json::json!({
+                "name": "models/gemini-embedding-001",
+                "supportedGenerationMethods": ["embedContent"]
+            }),
+            serde_json::json!({
+                "name": "models/gemini-stream-only",
+                "supportedGenerationMethods": ["streamGenerateContent"]
+            }),
+            serde_json::json!({"name": "models/gemini-missing-methods"}),
+            serde_json::json!({
+                "name": "models/text-bison",
+                "supportedGenerationMethods": ["generateContent"]
+            }),
+        ] {
+            assert!(!supports_gemini_generate_content(&rejected));
+        }
+    }
 
     #[test]
     fn prompt_block_is_reported_as_a_policy_error() {

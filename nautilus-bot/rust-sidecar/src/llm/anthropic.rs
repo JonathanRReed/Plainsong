@@ -1,8 +1,9 @@
 //! Anthropic Claude client using the existing raw HTTP Messages API style.
 
 use crate::llm::transport::{
-    classify_http_error, CompletionRequest, CompletionResponse, CompletionTransport, ErrorKind,
-    LlmError, Provider, RequestOptions,
+    bounded_body_error_to_llm, classify_http_error, read_error_body, read_json_body,
+    CompletionRequest, CompletionResponse, CompletionTransport, ErrorKind, LlmError, Provider,
+    RequestOptions, COMPLETION_BODY_LIMIT, MODEL_LIST_BODY_LIMIT,
 };
 use anyhow::{Context, Result};
 use async_trait::async_trait;
@@ -66,13 +67,12 @@ impl AnthropicClient {
             .context("Failed to fetch Anthropic models")?;
         if !response.status().is_success() {
             let status = response.status();
-            let body = response.text().await.unwrap_or_default();
+            let body = read_error_body(response).await;
             anyhow::bail!("Anthropic model list error {}: {}", status, body);
         }
-        let data: serde_json::Value = response
-            .json()
+        let data: serde_json::Value = read_json_body(response, MODEL_LIST_BODY_LIMIT)
             .await
-            .context("Failed to parse Anthropic response")?;
+            .context("Failed to read or parse bounded Anthropic response")?;
         let models = data["data"]
             .as_array()
             .map(|models| {
@@ -141,12 +141,14 @@ impl CompletionTransport for AnthropicClient {
             })?;
         if !response.status().is_success() {
             let status = response.status();
-            let body = response.text().await.unwrap_or_default();
+            let body = read_error_body(response).await;
             return Err(classify_http_error(Provider::Anthropic, status, body));
         }
-        let data: serde_json::Value = response.json().await.map_err(|error| {
-            LlmError::from_reqwest(Provider::Anthropic, "Failed to parse response", error)
-        })?;
+        let data: serde_json::Value = read_json_body(response, COMPLETION_BODY_LIMIT)
+            .await
+            .map_err(|error| {
+                bounded_body_error_to_llm(Provider::Anthropic, "Failed to read response", error)
+            })?;
         match data["stop_reason"].as_str() {
             Some("max_tokens") => {
                 return Err(LlmError::new(

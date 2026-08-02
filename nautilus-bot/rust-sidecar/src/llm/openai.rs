@@ -4,14 +4,51 @@
 //! implementing the provider-neutral completion transport used by analysis.
 
 use crate::llm::transport::{
-    classify_http_error, CompletionRequest, CompletionResponse, CompletionTransport, ErrorKind,
-    LlmError, Provider, RequestOptions,
+    bounded_body_error_to_llm, classify_http_error, read_error_body, read_json_body,
+    CompletionRequest, CompletionResponse, CompletionTransport, ErrorKind, LlmError, Provider,
+    RequestOptions, COMPLETION_BODY_LIMIT, MODEL_LIST_BODY_LIMIT,
 };
 use anyhow::{Context, Result};
 use async_trait::async_trait;
 use std::time::Duration;
 
 const OPENAI_API_URL: &str = "https://api.openai.com/v1";
+
+fn supports_openai_chat_completions(model_id: &str) -> bool {
+    let normalized = model_id.trim().to_ascii_lowercase();
+    let base = normalized
+        .strip_prefix("ft:")
+        .and_then(|fine_tuned| fine_tuned.split(':').next())
+        .unwrap_or(&normalized);
+    let supported_family = base.starts_with("gpt-3.5-turbo")
+        || base.starts_with("gpt-4")
+        || base.starts_with("gpt-5")
+        || base.starts_with("chatgpt-")
+        || ["o1", "o3", "o4"].iter().any(|family| {
+            base == *family
+                || base
+                    .strip_prefix(family)
+                    .is_some_and(|tail| tail.starts_with('-'))
+        });
+    let incompatible_variant = [
+        "audio",
+        "codex",
+        "embedding",
+        "image",
+        "instruct",
+        "moderation",
+        "realtime",
+        "transcribe",
+        "tts",
+    ]
+    .iter()
+    .any(|marker| base.split(['-', '_', '.']).any(|part| part == *marker));
+
+    // OpenAI's model-list response does not publish endpoint capabilities. Keep an
+    // explicit registry of chat families and fail closed on modality-only variants
+    // instead of treating any ID that happens to contain "gpt" as text-capable.
+    supported_family && !incompatible_variant
+}
 
 fn parse_completion_response(
     data: &serde_json::Value,
@@ -93,13 +130,12 @@ impl OpenAIClient {
             .context("Failed to connect to OpenAI")?;
         if !response.status().is_success() {
             let status = response.status();
-            let body = response.text().await.unwrap_or_default();
+            let body = read_error_body(response).await;
             anyhow::bail!("OpenAI model list error {}: {}", status, body);
         }
-        let data: serde_json::Value = response
-            .json()
+        let data: serde_json::Value = read_json_body(response, MODEL_LIST_BODY_LIMIT)
             .await
-            .context("Failed to parse OpenAI response")?;
+            .context("Failed to read or parse bounded OpenAI response")?;
         Ok(data["data"]
             .as_array()
             .map(|models| {
@@ -116,13 +152,7 @@ impl OpenAIClient {
             .list_all_models()
             .await?
             .into_iter()
-            .filter(|id| {
-                id.contains("gpt")
-                    || id.contains("o1")
-                    || id.contains("o3")
-                    || id.contains("o4")
-                    || id.contains("chatgpt")
-            })
+            .filter(|id| supports_openai_chat_completions(id))
             .collect::<Vec<_>>();
         tracing::info!("OpenAI returned {} models", models.len());
         Ok(models)
@@ -212,12 +242,14 @@ impl CompletionTransport for OpenAIClient {
             })?;
         if !response.status().is_success() {
             let status = response.status();
-            let body = response.text().await.unwrap_or_default();
+            let body = read_error_body(response).await;
             return Err(classify_http_error(Provider::OpenAi, status, body));
         }
-        let data: serde_json::Value = response.json().await.map_err(|error| {
-            LlmError::from_reqwest(Provider::OpenAi, "Failed to parse response", error)
-        })?;
+        let data: serde_json::Value = read_json_body(response, COMPLETION_BODY_LIMIT)
+            .await
+            .map_err(|error| {
+                bounded_body_error_to_llm(Provider::OpenAi, "Failed to read response", error)
+            })?;
         parse_completion_response(&data, &request.model)
     }
 }
@@ -231,6 +263,31 @@ impl Default for OpenAIClient {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn model_filter_excludes_non_completion_modalities() {
+        for accepted in [
+            "gpt-4o-mini",
+            "gpt-5",
+            "o3-mini",
+            "chatgpt-4o-latest",
+            "ft:gpt-4o-mini:plainsong:meeting:abc123",
+        ] {
+            assert!(supports_openai_chat_completions(accepted), "{accepted}");
+        }
+        for rejected in [
+            "gpt-4o-mini-transcribe",
+            "gpt-4o-realtime-preview",
+            "gpt-4o-mini-tts",
+            "gpt-image-1",
+            "gpt-3.5-turbo-instruct",
+            "text-embedding-3-large",
+            "omni-moderation-latest",
+            "gpt-5-codex",
+        ] {
+            assert!(!supports_openai_chat_completions(rejected), "{rejected}");
+        }
+    }
 
     #[test]
     fn structured_output_refusal_is_a_policy_error_with_provider_message() {

@@ -4,19 +4,27 @@
 //! Model: cohere-transcribe-03-2026, low WER, 14 languages, up to 25 MB audio.
 
 use super::{
-    AsrProvider, AsrProviderType, DownloadStatus, ModelInfo, TranscriptSegment, TranscriptionResult,
+    openai_cloud::{build_cloud_asr_client, CloudAsrHttpTimeouts},
+    AsrProvider, AsrProviderType, DownloadStatus, ModelInfo, TranscriptSegment,
+    TranscriptionResult,
 };
 use crate::secrets;
 use anyhow::{Context, Result};
 use async_trait::async_trait;
 use serde::Deserialize;
-use std::path::Path;
+use std::{path::Path, time::Duration};
 
 const COHERE_TRANSCRIPTION_URL: &str =
     "https://api.cohere.com/compatibility/v1/audio/transcriptions";
+const COHERE_HTTP_TIMEOUTS: CloudAsrHttpTimeouts = CloudAsrHttpTimeouts {
+    connect: Duration::from_secs(10),
+    read: Duration::from_secs(90),
+    total: Duration::from_secs(120),
+};
 
 pub struct CohereTranscribeProvider {
     model_id: String,
+    client: reqwest::Client,
 }
 
 #[derive(Deserialize)]
@@ -33,9 +41,7 @@ fn sanitize_cohere_model_id(model_id: &str) -> &'static str {
 
 impl Default for CohereTranscribeProvider {
     fn default() -> Self {
-        Self {
-            model_id: "cohere-transcribe-03-2026".to_string(),
-        }
+        Self::new(None)
     }
 }
 
@@ -46,6 +52,7 @@ impl CohereTranscribeProvider {
                 selected_model_id.unwrap_or("cohere-transcribe-03-2026"),
             )
             .to_string(),
+            client: build_cloud_asr_client(COHERE_HTTP_TIMEOUTS),
         }
     }
 
@@ -70,12 +77,12 @@ impl CohereTranscribeProvider {
             .text("model", self.model_id.clone())
             .text("language", "en");
 
-        let client = reqwest::Client::new();
-        let response = client
+        let response = self
+            .client
             .post(COHERE_TRANSCRIPTION_URL)
             .bearer_auth(&api_key)
             .multipart(form)
-            .timeout(std::time::Duration::from_secs(120))
+            .timeout(COHERE_HTTP_TIMEOUTS.total)
             .send()
             .await
             .context("Cohere Transcribe API request failed")?;
@@ -175,5 +182,19 @@ impl AsrProvider for CohereTranscribeProvider {
 
     async fn download_models(&self, _progress_cb: Box<dyn Fn(f32) + Send + Sync>) -> Result<()> {
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::COHERE_HTTP_TIMEOUTS;
+    use std::time::Duration;
+
+    #[test]
+    fn cohere_cloud_client_has_bounded_timeouts() {
+        assert_eq!(COHERE_HTTP_TIMEOUTS.connect, Duration::from_secs(10));
+        assert_eq!(COHERE_HTTP_TIMEOUTS.read, Duration::from_secs(90));
+        assert_eq!(COHERE_HTTP_TIMEOUTS.total, Duration::from_secs(120));
+        assert!(COHERE_HTTP_TIMEOUTS.total < Duration::from_secs(5 * 60));
     }
 }

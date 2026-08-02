@@ -1,16 +1,24 @@
 use super::{
-    AsrProvider, AsrProviderType, DownloadStatus, ModelInfo, TranscriptSegment, TranscriptionResult,
+    openai_cloud::{build_cloud_asr_client, CloudAsrHttpTimeouts},
+    AsrProvider, AsrProviderType, DownloadStatus, ModelInfo, TranscriptSegment,
+    TranscriptionResult,
 };
 use crate::secrets;
 use anyhow::{Context, Result};
 use async_trait::async_trait;
 use serde::Deserialize;
-use std::path::Path;
+use std::{path::Path, time::Duration};
 
 const SCRIBE_API_URL: &str = "https://api.elevenlabs.io/v1/speech-to-text";
+const ELEVENLABS_HTTP_TIMEOUTS: CloudAsrHttpTimeouts = CloudAsrHttpTimeouts {
+    connect: Duration::from_secs(10),
+    read: Duration::from_secs(90),
+    total: Duration::from_secs(120),
+};
 
 pub struct ElevenLabsScribeProvider {
     model_id: String,
+    client: reqwest::Client,
 }
 
 #[derive(Deserialize)]
@@ -39,9 +47,7 @@ struct ScribeWord {
 
 impl Default for ElevenLabsScribeProvider {
     fn default() -> Self {
-        Self {
-            model_id: "scribe_v2_realtime".to_string(),
-        }
+        Self::new(Some("scribe_v2_realtime"))
     }
 }
 
@@ -50,6 +56,7 @@ impl ElevenLabsScribeProvider {
         Self {
             model_id: sanitize_elevenlabs_asr_model_id(selected_model_id.unwrap_or("scribe_v2"))
                 .to_string(),
+            client: build_cloud_asr_client(ELEVENLABS_HTTP_TIMEOUTS),
         }
     }
 
@@ -74,11 +81,12 @@ impl ElevenLabsScribeProvider {
             .part("audio", part)
             .text("model_id", self.model_id.clone());
 
-        let client = reqwest::Client::new();
-        let response = client
+        let response = self
+            .client
             .post(SCRIBE_API_URL)
             .header("xi-api-key", &api_key)
             .multipart(form)
+            .timeout(ELEVENLABS_HTTP_TIMEOUTS.total)
             .send()
             .await
             .context("ElevenLabs Scribe API request failed")?;
@@ -196,5 +204,19 @@ impl AsrProvider for ElevenLabsScribeProvider {
 
     async fn download_models(&self, _progress_cb: Box<dyn Fn(f32) + Send + Sync>) -> Result<()> {
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::ELEVENLABS_HTTP_TIMEOUTS;
+    use std::time::Duration;
+
+    #[test]
+    fn elevenlabs_cloud_client_has_bounded_timeouts() {
+        assert_eq!(ELEVENLABS_HTTP_TIMEOUTS.connect, Duration::from_secs(10));
+        assert_eq!(ELEVENLABS_HTTP_TIMEOUTS.read, Duration::from_secs(90));
+        assert_eq!(ELEVENLABS_HTTP_TIMEOUTS.total, Duration::from_secs(120));
+        assert!(ELEVENLABS_HTTP_TIMEOUTS.total < Duration::from_secs(5 * 60));
     }
 }

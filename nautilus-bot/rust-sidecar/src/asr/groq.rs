@@ -5,18 +5,26 @@
 //! - whisper-large-v3-turbo: Fast + accurate, recommended for dictation
 
 use super::{
-    AsrProvider, AsrProviderType, DownloadStatus, ModelInfo, TranscriptSegment, TranscriptionResult,
+    openai_cloud::{build_cloud_asr_client, CloudAsrHttpTimeouts},
+    AsrProvider, AsrProviderType, DownloadStatus, ModelInfo, TranscriptSegment,
+    TranscriptionResult,
 };
 use crate::secrets;
 use anyhow::{Context, Result};
 use async_trait::async_trait;
 use serde::Deserialize;
-use std::path::Path;
+use std::{path::Path, time::Duration};
 
 const GROQ_TRANSCRIPTION_URL: &str = "https://api.groq.com/openai/v1/audio/transcriptions";
+const GROQ_HTTP_TIMEOUTS: CloudAsrHttpTimeouts = CloudAsrHttpTimeouts {
+    connect: Duration::from_secs(10),
+    read: Duration::from_secs(45),
+    total: Duration::from_secs(60),
+};
 
 pub struct GroqProvider {
     model_id: String,
+    client: reqwest::Client,
 }
 
 #[derive(Deserialize)]
@@ -43,9 +51,7 @@ fn sanitize_groq_model_id(model_id: &str) -> &'static str {
 
 impl Default for GroqProvider {
     fn default() -> Self {
-        Self {
-            model_id: "whisper-large-v3-turbo".to_string(),
-        }
+        Self::new(None)
     }
 }
 
@@ -54,6 +60,7 @@ impl GroqProvider {
         Self {
             model_id: sanitize_groq_model_id(selected_model_id.unwrap_or("whisper-large-v3-turbo"))
                 .to_string(),
+            client: build_cloud_asr_client(GROQ_HTTP_TIMEOUTS),
         }
     }
 
@@ -78,12 +85,12 @@ impl GroqProvider {
             .text("response_format", "verbose_json")
             .text("timestamp_granularities[]", "segment");
 
-        let client = reqwest::Client::new();
-        let response = client
+        let response = self
+            .client
             .post(GROQ_TRANSCRIPTION_URL)
             .bearer_auth(&api_key)
             .multipart(form)
-            .timeout(std::time::Duration::from_secs(60))
+            .timeout(GROQ_HTTP_TIMEOUTS.total)
             .send()
             .await
             .context("Groq Whisper API request failed")?;
@@ -191,5 +198,19 @@ impl AsrProvider for GroqProvider {
 
     async fn download_models(&self, _progress_cb: Box<dyn Fn(f32) + Send + Sync>) -> Result<()> {
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::GROQ_HTTP_TIMEOUTS;
+    use std::time::Duration;
+
+    #[test]
+    fn groq_cloud_client_has_bounded_timeouts() {
+        assert_eq!(GROQ_HTTP_TIMEOUTS.connect, Duration::from_secs(10));
+        assert_eq!(GROQ_HTTP_TIMEOUTS.read, Duration::from_secs(45));
+        assert_eq!(GROQ_HTTP_TIMEOUTS.total, Duration::from_secs(60));
+        assert!(GROQ_HTTP_TIMEOUTS.total < Duration::from_secs(5 * 60));
     }
 }

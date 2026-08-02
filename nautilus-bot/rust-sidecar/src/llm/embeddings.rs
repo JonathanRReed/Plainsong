@@ -3,6 +3,9 @@
 //! Uses the Ollama `/api/embed` endpoint to generate embeddings from text,
 //! enabling semantic search over transcript segments.
 
+use super::transport::{
+    read_error_body, read_json_body, BATCH_EMBEDDING_BODY_LIMIT, EMBEDDING_BODY_LIMIT,
+};
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 
@@ -69,14 +72,13 @@ impl OllamaEmbedder {
 
         if !response.status().is_success() {
             let status = response.status();
-            let text = response.text().await.unwrap_or_default();
+            let text = read_error_body(response).await;
             anyhow::bail!("Ollama embed returned {}: {}", status, text);
         }
 
-        let data: EmbedResponse = response
-            .json()
+        let data: EmbedResponse = read_json_body(response, EMBEDDING_BODY_LIMIT)
             .await
-            .context("Failed to parse Ollama embedding response")?;
+            .context("Failed to read or parse bounded Ollama embedding response")?;
 
         data.embeddings
             .into_iter()
@@ -104,14 +106,13 @@ impl OllamaEmbedder {
 
         if !response.status().is_success() {
             let status = response.status();
-            let text = response.text().await.unwrap_or_default();
+            let text = read_error_body(response).await;
             anyhow::bail!("Ollama batch embed returned {}: {}", status, text);
         }
 
-        let data: EmbedResponse = response
-            .json()
+        let data: EmbedResponse = read_json_body(response, BATCH_EMBEDDING_BODY_LIMIT)
             .await
-            .context("Failed to parse Ollama batch embedding response")?;
+            .context("Failed to read or parse bounded Ollama batch embedding response")?;
 
         Ok(data.embeddings)
     }
