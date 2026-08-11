@@ -1,13 +1,17 @@
 #!/usr/bin/env node
 import crypto from "node:crypto";
 import fs from "node:fs";
-import os from "node:os";
 import path from "node:path";
 import { spawn } from "node:child_process";
 import { createInterface } from "node:readline";
+import { createPackagedQaProfile } from "./lib/packaged-qa-profile.mjs";
 
 const repoRoot = path.resolve(import.meta.dirname, "..");
 const args = process.argv.slice(2);
+const qaProfile = createPackagedQaProfile({
+  args,
+  prefix: "plainsong-backup-restore-qa-",
+});
 
 function valueFor(name, fallback = null) {
   const index = args.indexOf(name);
@@ -37,17 +41,19 @@ const sidecarPath = path.join(
   "sidecar",
   "plainsong-sidecar"
 );
-const configRoot = process.env.PLAINSONG_CONFIG_DIR
-  ? path.resolve(process.env.PLAINSONG_CONFIG_DIR)
-  : path.join(os.homedir(), "Library", "Application Support");
+const configRoot = qaProfile.configRoot;
 const configDir = path.join(configRoot, "Plainsong");
 const settingsPath = path.join(configDir, "settings.json");
 const backupConfigPath = path.join(configDir, "backup-config.json");
+const approvedLocationsPath = path.join(configDir, "approved-locations.json");
 const originalSettingsBytes = fs.existsSync(settingsPath)
   ? fs.readFileSync(settingsPath)
   : null;
 const originalBackupConfigBytes = fs.existsSync(backupConfigPath)
   ? fs.readFileSync(backupConfigPath)
+  : null;
+const originalApprovedLocationsBytes = fs.existsSync(approvedLocationsPath)
+  ? fs.readFileSync(approvedLocationsPath)
   : null;
 
 function fail(message) {
@@ -76,6 +82,43 @@ function hashFile(filePath) {
 
 function clone(value) {
   return JSON.parse(JSON.stringify(value));
+}
+
+function canonicalJson(value) {
+  if (Array.isArray(value)) {
+    return value.map(canonicalJson);
+  }
+  if (value && typeof value === "object") {
+    return Object.fromEntries(
+      Object.entries(value)
+        .sort(([left], [right]) => left.localeCompare(right))
+        .map(([key, nested]) => [key, canonicalJson(nested)]),
+    );
+  }
+  return value;
+}
+
+function settingsMatch(left, right) {
+  return JSON.stringify(canonicalJson(left)) === JSON.stringify(canonicalJson(right));
+}
+
+function differencePaths(left, right, prefix = "") {
+  if (Array.isArray(left) || Array.isArray(right)) {
+    return JSON.stringify(left) === JSON.stringify(right) ? [] : [prefix || "root"];
+  }
+  if (
+    left &&
+    right &&
+    typeof left === "object" &&
+    typeof right === "object"
+  ) {
+    return [...new Set([...Object.keys(left), ...Object.keys(right)])]
+      .sort()
+      .flatMap((key) =>
+        differencePaths(left[key], right[key], prefix ? `${prefix}.${key}` : key),
+      );
+  }
+  return Object.is(left, right) ? [] : [prefix || "root"];
 }
 
 function restoreFile(filePath, originalBytes) {
@@ -120,6 +163,7 @@ function cloudSettings(base) {
 const child = spawn(sidecarPath, [], {
   cwd: repoRoot,
   stdio: ["pipe", "pipe", "pipe"],
+  env: { ...process.env, ...qaProfile.env },
 });
 
 const childExit = new Promise((resolve) => {
@@ -189,7 +233,7 @@ async function shutdown() {
   }
   const result = await Promise.race([
     childExit,
-    new Promise((resolve) => setTimeout(() => resolve(null), 3000)),
+    new Promise((resolve) => setTimeout(() => resolve(null), 15000)),
   ]);
   if (!result) {
     child.kill("SIGTERM");
@@ -282,12 +326,16 @@ async function run() {
     timedOut: false,
     rawSettingsRestored: false,
     rawBackupConfigRestored: false,
+    rawApprovedLocationsRestored: false,
     workDirCleaned: false,
     originalSettingsHash: hashBytes(originalSettingsBytes),
     restoredSettingsHash: null,
     originalBackupConfigHash: hashBytes(originalBackupConfigBytes),
     restoredBackupConfigHash: null,
+    originalApprovedLocationsHash: hashBytes(originalApprovedLocationsBytes),
+    restoredApprovedLocationsHash: null,
     checks: {},
+    approvals: {},
     cloud: null,
     stderr: "",
   };
@@ -297,12 +345,16 @@ async function run() {
     const originalConfig = await sendCommand("get_backup_config", {});
     await sendCommand("save_settings", { settings: originalSettings });
     artifact.checks.settingsPersistedForBackup = fs.existsSync(settingsPath);
+    const backupApproval = await sendCommand(
+      "approve_backup_location_privileged",
+      { path: workDir },
+    );
+    artifact.approvals.backup = backupApproval;
     const qaConfig = {
       ...originalConfig,
       enabled: true,
       intervalHours: 24,
       maxBackups: 10,
-      backupDir: workDir,
       cloudSync: false,
       cloudProvider: null,
       cloudRemoteName: null,
@@ -312,7 +364,12 @@ async function run() {
 
     await sendCommand("save_backup_config", { config: qaConfig });
     const savedConfig = await sendCommand("get_backup_config", {});
-    artifact.checks.configSaved = savedConfig.backupDir === workDir && savedConfig.cloudSync === false;
+    artifact.checks.configSaved =
+      backupApproval?.approved === true &&
+      savedConfig.backupLocationId === backupApproval.id &&
+      savedConfig.backupLocationApproved === true &&
+      savedConfig.backupDir === null &&
+      savedConfig.cloudSync === false;
 
     const backupInfo = await sendCommand("create_settings_backup_default", {});
     const backupPath = path.join(workDir, backupInfo.id);
@@ -343,21 +400,34 @@ async function run() {
 
     await sendCommand("restore_backup_default", { backupId: backupInfo.id });
     const restoredFromBackupHash = hashFile(settingsPath);
+    const restoredFromBackup = await sendCommand("get_settings", {});
+    const backupSettings = JSON.parse(fs.readFileSync(backupSettingsPath, "utf8"));
     artifact.restoredFromBackupHash = restoredFromBackupHash;
-    artifact.checks.restoreMatchedBackup =
-      Boolean(restoredFromBackupHash) && restoredFromBackupHash === backupSettingsHash;
+    artifact.restoreDifferencePaths = differencePaths(
+      restoredFromBackup,
+      backupSettings,
+    );
+    artifact.checks.restoreMatchedBackup = settingsMatch(
+      restoredFromBackup,
+      backupSettings,
+    );
 
     const listed = await sendCommand("list_backups", {});
     artifact.checks.listBackupsIncludesCreated = listed.some((item) => item.id === backupInfo.id);
 
     fs.mkdirSync(cloudRoot, { recursive: true });
+    const cloudApproval = await sendCommand(
+      "approve_cloud_backup_location_privileged",
+      {
+        provider: "i_cloud",
+        path: cloudRoot,
+        folder: cloudFolder,
+      },
+    );
+    artifact.approvals.cloud = cloudApproval;
     const cloudConfig = {
       ...qaConfig,
       cloudSync: true,
-      cloudProvider: "i_cloud",
-      cloudRemoteName: null,
-      cloudFolder,
-      icloudPath: cloudRoot,
     };
 
     await sendCommand("save_backup_config", { config: cloudConfig });
@@ -374,6 +444,7 @@ async function run() {
       restoredHash: null,
     };
     artifact.checks.cloudSetupReady =
+      cloudApproval?.approved === true &&
       cloudSetup.ready === true &&
       cloudConnection === null &&
       cloudSetup.provider === "i_cloud" &&
@@ -399,17 +470,25 @@ async function run() {
       Boolean(syncedSettingsHash) &&
       syncedSettingsHash === cloudBackupHash;
 
-    const cloudRestoreConfig = {
-      ...cloudConfig,
-      backupDir: path.join(cloudRoot, cloudFolder),
-    };
-    await sendCommand("save_backup_config", { config: cloudRestoreConfig });
+    const restoreApproval = await sendCommand(
+      "approve_backup_location_privileged",
+      { path: path.join(cloudRoot, cloudFolder) },
+    );
+    artifact.approvals.cloudRestore = restoreApproval;
     await sendCommand("save_settings", { settings: markerSettings(originalSettings) });
     await sendCommand("restore_backup_default", { backupId: cloudBackupInfo.id });
     const cloudRestoredHash = hashFile(settingsPath);
+    const cloudRestoredSettings = await sendCommand("get_settings", {});
+    const syncedSettings = JSON.parse(fs.readFileSync(syncedSettingsPath, "utf8"));
     artifact.cloud.restoredHash = cloudRestoredHash;
-    artifact.checks.cloudRestoreMatchedSyncedBackup =
-      Boolean(cloudRestoredHash) && cloudRestoredHash === syncedSettingsHash;
+    artifact.cloud.restoreDifferencePaths = differencePaths(
+      cloudRestoredSettings,
+      syncedSettings,
+    );
+    artifact.checks.cloudRestoreMatchedSyncedBackup = settingsMatch(
+      cloudRestoredSettings,
+      syncedSettings,
+    );
   } catch (error) {
     artifact.error = error instanceof Error ? error.message : String(error);
   } finally {
@@ -419,20 +498,28 @@ async function run() {
 
     restoreFile(settingsPath, originalSettingsBytes);
     restoreFile(backupConfigPath, originalBackupConfigBytes);
+    restoreFile(approvedLocationsPath, originalApprovedLocationsBytes);
     if (fs.existsSync(workDir)) {
       fs.rmSync(workDir, { recursive: true, force: true });
     }
     artifact.restoredSettingsHash = hashFile(settingsPath);
     artifact.restoredBackupConfigHash = hashFile(backupConfigPath);
+    artifact.restoredApprovedLocationsHash = hashFile(approvedLocationsPath);
     artifact.rawSettingsRestored = artifact.restoredSettingsHash === artifact.originalSettingsHash;
     artifact.rawBackupConfigRestored =
       artifact.restoredBackupConfigHash === artifact.originalBackupConfigHash;
+    artifact.rawApprovedLocationsRestored =
+      artifact.restoredApprovedLocationsHash ===
+      artifact.originalApprovedLocationsHash;
     artifact.workDirCleaned = !fs.existsSync(workDir);
 
     artifact.pass = Boolean(
       !didTimeOut &&
+        artifact.sidecarExit?.code === 0 &&
+        artifact.sidecarExit?.signal === null &&
         artifact.rawSettingsRestored &&
         artifact.rawBackupConfigRestored &&
+        artifact.rawApprovedLocationsRestored &&
       artifact.workDirCleaned &&
       artifact.checks.settingsPersistedForBackup &&
       artifact.checks.configSaved &&
@@ -456,6 +543,7 @@ run().catch(async (error) => {
   child.kill("SIGTERM");
   restoreFile(settingsPath, originalSettingsBytes);
   restoreFile(backupConfigPath, originalBackupConfigBytes);
+  restoreFile(approvedLocationsPath, originalApprovedLocationsBytes);
   await writeArtifact({
     generatedAt: new Date().toISOString(),
     appPath,

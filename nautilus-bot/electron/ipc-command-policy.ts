@@ -111,3 +111,38 @@ export function getCommandTimeoutMs(command: string): number {
   }
   return DEFAULT_COMMAND_TIMEOUT_MS;
 }
+
+function stringArgument(args: unknown, names: string[]): string | null {
+  if (!args || typeof args !== "object" || Array.isArray(args)) return null;
+  const record = args as Record<string, unknown>;
+  for (const name of names) {
+    const value = record[name];
+    if (typeof value === "string" && value.trim()) return value.trim();
+  }
+  return null;
+}
+
+export function getCommandWorkKey(command: string, args?: unknown): string | null {
+  if (command.startsWith("download_")) {
+    const target =
+      stringArgument(args, ["modelName", "modelId", "providerType", "assetId"]) ??
+      command;
+    return `${command}:${target}`;
+  }
+  if (command === "benchmark_asr_providers" || command === "benchmark_asr_providers_bytes") {
+    return "benchmark:active";
+  }
+  if (ANALYSIS_COMMANDS.has(command)) {
+    const target = stringArgument(args, ["runId", "recordingId"]) ?? command;
+    return `${command}:${target}`;
+  }
+  if (
+    command === "create_backup_default" ||
+    command === "create_settings_backup_default" ||
+    command === "restore_backup_default" ||
+    command === "sync_backup_to_cloud"
+  ) {
+    return `backup:${stringArgument(args, ["backupId"]) ?? command}`;
+  }
+  return null;
+}

@@ -354,4 +354,46 @@ describe("buildSnapshot", () => {
       "The required macOS Speech helper is missing or not executable.",
     );
   });
+
+  it("does not treat a provider marker as ready when the selected dictation model is missing", () => {
+    const providers = createProviders();
+    providers[0] = {
+      ...providers[0],
+      selectedModelId: "distil-large-v3",
+      runtimeStatus: "ready",
+      modelOptions: [{ id: "another-model", label: "Another model" }],
+    };
+
+    const snapshot = buildSnapshot(
+      createSettings("clipboard_only"),
+      providers,
+      createPermissions(),
+      false,
+      null,
+    );
+
+    expect(snapshot.dictationReady).toBe(false);
+    expect(snapshot.productReadiness.dictation.state).toBe("blocked");
+    expect(snapshot.dictationRoute.reason).toContain("is not available");
+  });
+
+  it("does not treat a meeting provider as ready for a different active model", () => {
+    const providers = createProviders();
+    providers[1] = {
+      ...providers[1],
+      selectedModelId: "parakeet-legacy-110m",
+      runtimeStatus: "ready",
+    };
+
+    const snapshot = buildSnapshot(
+      createSettings("clipboard_only"),
+      providers,
+      createPermissions(),
+      false,
+      null,
+    );
+
+    expect(snapshot.meetingReady).toBe(false);
+    expect(snapshot.meetingRoute.reason).toContain("has not confirmed");
+  });
 });

@@ -127,7 +127,12 @@ describe("resolveDictationShortcutDecision", () => {
     // Escape used to require phase "recording", so it did nothing during the
     // primed window (start acked, microphone already live) and did nothing at
     // all while a slow model held the session in stopping/transcribing.
-    for (const phase of ["primed", "stopping", "transcribing"] as const) {
+    for (const phase of [
+      "preparing",
+      "primed",
+      "stopping",
+      "transcribing",
+    ] as const) {
       expect(
         resolveDictationShortcutDecision({
           phase,

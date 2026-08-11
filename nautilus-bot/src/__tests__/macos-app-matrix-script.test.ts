@@ -5,6 +5,7 @@ import {
   evaluateCandidateEvidenceProvenance,
   evaluateComponentEquivalence,
 } from "../../scripts/lib/macos-component-equivalence.mjs";
+import { VERIFY_MODES } from "../../scripts/lib/app-matrix-readback.mjs";
 
 const repoRoot = path.resolve(import.meta.dirname, "../..");
 
@@ -14,6 +15,10 @@ const captureScript = fs.readFileSync(
 );
 const verifierScript = fs.readFileSync(
   path.join(repoRoot, "scripts", "verify-packaged-macos-app-matrix-insertion.mjs"),
+  "utf8",
+);
+const readBackScript = fs.readFileSync(
+  path.join(repoRoot, "scripts", "lib", "app-matrix-readback.mjs"),
   "utf8",
 );
 const preflightScript = fs.readFileSync(
@@ -30,6 +35,10 @@ const compatibilityMatrix = fs.readFileSync(
 );
 
 describe("macOS app matrix insertion scripts", () => {
+  it("loads the machine read-back implementation as valid JavaScript", () => {
+    expect(VERIFY_MODES).toContain("native-accessibility");
+  });
+
   it("matches a target by bundle identifier, case-insensitively", () => {
     // macOS can report a frontmost app without a name, so the bundle id has to
     // be a first-class way to identify the target rather than a fallback.
@@ -63,6 +72,55 @@ describe("macOS app matrix insertion scripts", () => {
     expect(verifierScript).toContain("externalFrontmostMatchedTarget");
   });
 
+  it("warms the sidecar before asking the operator to hold target focus", () => {
+    const snapshotIndex = captureScript.indexOf("const snapshot = snapshotUserState()");
+    const launchIndex = captureScript.indexOf("sidecar = launchSidecar()");
+    const warmupIndex = captureScript.indexOf(
+      'await sidecar.sendCommand("get_settings", {})',
+    );
+    const activationIndex = captureScript.indexOf(
+      "artifact.activationResult = activateTargetApp(targetApp)",
+    );
+    const prepareIndex = captureScript.indexOf("const prepared = await session.prepare()");
+
+    expect(snapshotIndex).toBeGreaterThan(-1);
+    expect(launchIndex).toBeGreaterThan(snapshotIndex);
+    expect(warmupIndex).toBeGreaterThan(launchIndex);
+    expect(activationIndex).toBeGreaterThan(warmupIndex);
+    expect(prepareIndex).toBeGreaterThan(activationIndex);
+  });
+
+  it("lets asynchronous target apps consume the staged clipboard before read-back replaces it", () => {
+    const insertIndex = captureScript.indexOf(
+      'artifact.sidecarResult = await sidecar.sendCommand("smoke_test_cursor_insert"',
+    );
+    const settleIndex = captureScript.indexOf(
+      "await sleep(Math.max(0, postInsertSettleMs))",
+    );
+    const readBackIndex = captureScript.indexOf("const observed = await session.readBack()");
+
+    expect(captureScript).toContain(
+      'const postInsertSettleMs = Number(valueFor("--post-insert-settle-ms", "1000"))',
+    );
+    expect(insertIndex).toBeGreaterThan(-1);
+    expect(settleIndex).toBeGreaterThan(insertIndex);
+    expect(readBackIndex).toBeGreaterThan(settleIndex);
+  });
+
+  it("requires disposable target text to be removed after machine read-back", () => {
+    expect(captureScript).toContain("targetSurfaceRestored");
+    expect(verifierScript).toContain("checks.targetSurfaceRestored must be true");
+    expect(readBackScript).toContain("cleanupProbeToken");
+    expect(readBackScript).toContain(
+      'setFocusedAccessibilityValue(accessibilityApp, "")',
+    );
+    expect(readBackScript).toContain("directAccessibilityFallback");
+    expect(readBackScript).toContain("targetSurfaceRestored: restored");
+    expect(readBackScript).toContain(
+      "targetSurfaceRestored: cleanupProbeMatched && !clearProbeBlocked",
+    );
+  });
+
   it("refuses to call a run PASS when it closes no matrix row", () => {
     // A read-back on a surface the harness itself owns proves insertion works
     // in that surface's host application; it does not close the row naming a
@@ -86,6 +144,18 @@ describe("macOS app matrix insertion scripts", () => {
     expect(compatibilityMatrix).not.toMatch(
       /\| Cursor \| [^|\n]+ \| [^|\n]+ \| REQUIRED \|/,
     );
+  });
+
+  it("rejects packaged receipts that predate the current app archive", () => {
+    expect(releaseAuditScript).toContain("candidateBuiltAtMs");
+    expect(releaseAuditScript).toContain("candidateBound");
+    expect(releaseAuditScript).toContain("predates the current candidate app archive");
+  });
+
+  it("binds ordinary release review signoff to the source snapshot that passed the source gates", () => {
+    expect(releaseAuditScript).toContain("reviewSourceMatchesGates");
+    expect(releaseAuditScript).toContain("sourceSnapshotSha256");
+    expect(releaseAuditScript).toContain("trackedDiffSha256");
   });
 
   it("accepts historical direct-sidecar evidence only through exact unsigned component equivalence", () => {
@@ -129,6 +199,46 @@ describe("macOS app matrix insertion scripts", () => {
     expect(provenance).toMatchObject({
       valid: true,
       mode: "verified-unsigned-component-equivalence",
+    });
+  });
+
+  it("binds same-path evidence to the exact packaged component bytes", () => {
+    const componentDigests = {
+      appAsar: "a".repeat(64),
+      sidecar: "b".repeat(64),
+      shortcutHelper: "c".repeat(64),
+      speechHelper: "d".repeat(64),
+    };
+
+    expect(
+      evaluateCandidateEvidenceProvenance({
+        artifactAppPath: "/candidate/Plainsong.app",
+        artifactSidecarPath:
+          "/candidate/Plainsong.app/Contents/Resources/sidecar/plainsong-sidecar",
+        candidateAppPath: "/candidate/Plainsong.app",
+        artifactComponents: componentDigests,
+        candidateComponents: componentDigests,
+      }),
+    ).toMatchObject({
+      valid: true,
+      mode: "exact-candidate-components",
+    });
+
+    expect(
+      evaluateCandidateEvidenceProvenance({
+        artifactAppPath: "/candidate/Plainsong.app",
+        artifactSidecarPath:
+          "/candidate/Plainsong.app/Contents/Resources/sidecar/plainsong-sidecar",
+        candidateAppPath: "/candidate/Plainsong.app",
+        artifactComponents: componentDigests,
+        candidateComponents: {
+          ...componentDigests,
+          appAsar: "e".repeat(64),
+        },
+      }),
+    ).toMatchObject({
+      valid: false,
+      mode: "stale-same-path-evidence",
     });
   });
 

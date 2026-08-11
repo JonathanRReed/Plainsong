@@ -1,13 +1,17 @@
 #!/usr/bin/env node
 import crypto from "node:crypto";
 import fs from "node:fs";
-import os from "node:os";
 import path from "node:path";
 import { spawn, spawnSync } from "node:child_process";
 import { createInterface } from "node:readline";
+import { createPackagedQaProfile } from "./lib/packaged-qa-profile.mjs";
 
 const repoRoot = path.resolve(import.meta.dirname, "..");
 const args = process.argv.slice(2);
+const qaProfile = createPackagedQaProfile({
+  args,
+  prefix: "plainsong-exports-qa-",
+});
 
 function valueFor(name, fallback = null) {
   const index = args.indexOf(name);
@@ -19,9 +23,7 @@ const appPath = path.resolve(repoRoot, valueFor("--app", "release/mac-arm64/Plai
 const outPath = path.resolve(repoRoot, valueFor("--out", "artifacts/qa/macos/exports.json"));
 const timeoutMs = Number(valueFor("--timeout-ms", "300000"));
 const sidecarPath = path.join(appPath, "Contents", "Resources", "sidecar", "plainsong-sidecar");
-const dataRoot = process.env.PLAINSONG_DATA_DIR
-  ? path.resolve(process.env.PLAINSONG_DATA_DIR)
-  : path.join(os.homedir(), "Library", "Application Support");
+const dataRoot = qaProfile.dataRoot;
 const dataDir = path.join(dataRoot, "Plainsong");
 const dbPath = path.join(dataDir, "plainsong.db");
 const dbSidecarPaths = [dbPath, `${dbPath}-wal`, `${dbPath}-shm`];
@@ -30,9 +32,7 @@ const recordingId = `qa-exports-${Date.now()}`;
 const transcriptId = `${recordingId}-transcript`;
 const now = new Date().toISOString();
 const exportDir = path.join(
-  process.env.PLAINSONG_DATA_DIR
-    ? path.join(dataDir, "qa-exports")
-    : path.join(os.homedir(), "Documents", "Plainsong"),
+  path.join(dataDir, "qa-exports"),
   `qa-packaged-exports-${Date.now()}`
 );
 const transcriptText =
@@ -199,6 +199,7 @@ function launchSidecar() {
   const child = spawn(sidecarPath, [], {
     cwd: repoRoot,
     stdio: ["pipe", "pipe", "pipe"],
+    env: { ...process.env, ...qaProfile.env },
   });
   const childExit = new Promise((resolve) => {
     child.on("exit", (code, signal) => resolve({ code, signal }));

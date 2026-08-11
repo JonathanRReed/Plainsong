@@ -14,30 +14,57 @@ const DISTIL_HF_REPO: &str = "distil-whisper/distil-large-v3.5";
 const DISTIL_HF_REVISION: &str = "728a7691f3ff1d3d971528d3203a6e9559165d41";
 
 /// Only the files needed for Candle inference (safetensors + tokenizer).
-const DISTIL_REQUIRED_FILES: [(&str, &str); 4] = [
+const DISTIL_REQUIRED_FILES: [(&str, &str, u64); 4] = [
     (
         "model.safetensors",
         "76ec9f754fc4b4810845dc36b71d1897c1342e702810c179e1569690084cfb0c",
+        3_025_686_376,
     ),
     (
         "config.json",
         "515a10a9979258d3fc71cf79b2cd055c189f07d78879a15bd9bc282673308b85",
+        1_249,
     ),
     (
         "tokenizer.json",
         "b3c8202bbf06d8ee4232c5984baa563784ac4737e2e7fdc42fa180200d3cfcdb",
+        2_480_645,
     ),
     (
         "preprocessor_config.json",
         "7ccc62c6f2765af1f3b46c00c9b5894426835a05021c8b9c01eecb6dfb542711",
+        340,
     ),
 ];
+
+fn weighted_bundle_progress(
+    completed_bytes: u64,
+    current_file_bytes: u64,
+    current_file_percentage: f64,
+) -> f32 {
+    let total_bytes = DISTIL_REQUIRED_FILES
+        .iter()
+        .map(|(_, _, expected_bytes)| expected_bytes)
+        .sum::<u64>();
+    let current_bytes =
+        current_file_bytes as f64 * (current_file_percentage.clamp(0.0, 100.0) / 100.0);
+    (((completed_bytes as f64 + current_bytes) / total_bytes as f64) * 100.0).clamp(0.0, 100.0)
+        as f32
+}
+
+fn distil_artifact_max_bytes(file_name: &str) -> u64 {
+    if file_name == "model.safetensors" {
+        4 * 1024 * 1024 * 1024
+    } else {
+        64 * 1024 * 1024
+    }
+}
 
 pub(crate) fn model_integrity_artifacts(models_root: &Path) -> Vec<(PathBuf, String)> {
     let model_dir = models_root.join("distil_whisper");
     DISTIL_REQUIRED_FILES
         .iter()
-        .map(|(file_name, sha256)| (model_dir.join(file_name), (*sha256).to_string()))
+        .map(|(file_name, sha256, _)| (model_dir.join(file_name), (*sha256).to_string()))
         .collect()
 }
 
@@ -58,11 +85,11 @@ impl DistilWhisperProvider {
     fn has_required_files(&self) -> bool {
         DISTIL_REQUIRED_FILES
             .iter()
-            .all(|(file_name, _)| self.model_dir.join(file_name).exists())
+            .all(|(file_name, _, _)| self.model_dir.join(file_name).exists())
     }
 
     fn has_trusted_required_files(&self) -> bool {
-        DISTIL_REQUIRED_FILES.iter().all(|(file_name, sha256)| {
+        DISTIL_REQUIRED_FILES.iter().all(|(file_name, sha256, _)| {
             crate::download::is_model_artifact_trusted(&self.model_dir.join(file_name), sha256)
         })
     }
@@ -136,11 +163,29 @@ impl AsrProvider for DistilWhisperProvider {
         self.has_required_files()
     }
 
+    async fn prewarm(&self) -> Result<()> {
+        if !self.has_required_files() {
+            anyhow::bail!(
+                "Distil-Whisper model not downloaded. Use the model manager to download it."
+            );
+        }
+        if !self.has_trusted_required_files() {
+            anyhow::bail!(
+                "Distil-Whisper model files have not passed Plainsong integrity verification. Re-download the model from Settings."
+            );
+        }
+        let model_dir = self.model_dir.clone();
+        tokio::task::spawn_blocking(move || super::whisper_candle::prewarm_runtime(&model_dir))
+            .await
+            .context("Distil-Whisper model warmup task panicked")??;
+        Ok(())
+    }
+
     fn model_info(&self) -> ModelInfo {
         ModelInfo {
             name: "Distil-Whisper Large v3.5".to_string(),
             version: DISTIL_MODEL_ID.to_string(),
-            size_mb: 1530.0,
+            size_mb: 2888.0,
             parameters: "756M".to_string(),
             languages: vec!["en".to_string()],
             word_error_rate: Some(6.6),
@@ -263,25 +308,37 @@ impl AsrProvider for DistilWhisperProvider {
 
         let manager = DownloadManager::new()?;
         let progress_cb = std::sync::Arc::new(progress_cb);
-        let n_files = DISTIL_REQUIRED_FILES.len() as f32;
+        let mut completed_bytes = 0;
 
-        for (i, (file_name, sha256)) in DISTIL_REQUIRED_FILES.iter().enumerate() {
+        for (file_name, sha256, expected_bytes) in DISTIL_REQUIRED_FILES {
             let destination = self.model_dir.join(file_name);
             let url = format!(
                 "https://huggingface.co/{}/resolve/{}/{}",
                 DISTIL_HF_REPO, DISTIL_HF_REVISION, file_name
             );
             let cb = progress_cb.clone();
+            let completed_before_file = completed_bytes;
             manager
-                .download_verified_model_asset(&url, &destination, sha256, move |p| {
-                    cb((i as f32 / n_files + p.percentage as f32 / 100.0 / n_files) * 100.0);
-                    tracing::info!(
-                        "Distil-Whisper {} download: {:.1}%",
-                        file_name,
-                        p.percentage
-                    );
-                })
+                .download_verified_model_asset(
+                    &url,
+                    &destination,
+                    sha256,
+                    distil_artifact_max_bytes(file_name),
+                    move |p| {
+                        cb(weighted_bundle_progress(
+                            completed_before_file,
+                            expected_bytes,
+                            p.percentage,
+                        ));
+                        tracing::info!(
+                            "Distil-Whisper {} download: {:.1}%",
+                            file_name,
+                            p.percentage
+                        );
+                    },
+                )
                 .await?;
+            completed_bytes += expected_bytes;
         }
         tracing::info!("Distil-Whisper model downloaded successfully");
         Ok(())
@@ -295,12 +352,20 @@ mod integrity_tests {
     #[test]
     fn runtime_assets_are_revision_and_digest_pinned() {
         assert_eq!(DISTIL_HF_REVISION.len(), 40);
-        for (file_name, sha256) in DISTIL_REQUIRED_FILES {
+        for (file_name, sha256, expected_bytes) in DISTIL_REQUIRED_FILES {
             assert!(!file_name.is_empty());
             assert_eq!(sha256.len(), 64);
+            assert!(expected_bytes > 0);
             assert!(sha256
                 .chars()
                 .all(|character| character.is_ascii_hexdigit()));
         }
+    }
+
+    #[test]
+    fn download_progress_is_weighted_by_artifact_bytes() {
+        let model_bytes = DISTIL_REQUIRED_FILES[0].2;
+        let halfway = weighted_bundle_progress(0, model_bytes, 50.0);
+        assert!(halfway > 49.0 && halfway < 51.0);
     }
 }

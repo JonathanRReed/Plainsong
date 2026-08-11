@@ -479,6 +479,12 @@ pub struct PrivacySettings {
     pub meetings_ai: AiLaneSettings,
     /// Optional absolute export root constraint
     pub export_root: Option<PathBuf>,
+    /// Opaque reference to a location approved through Electron's native picker.
+    pub export_location_id: Option<String>,
+    /// Safe, non-path label shown to the renderer.
+    pub export_location_label: Option<String>,
+    /// Runtime approval state. The registry remains authoritative at each sink.
+    pub export_location_approved: bool,
     /// Whether vault migration has completed
     pub vault_initialized: bool,
     /// Salt used to derive recording-encryption key material
@@ -611,6 +617,7 @@ fn normalize_transcription_provider_value(provider: &str) -> String {
         "elevenlabs_scribe" => "elevenlabs_scribe".to_string(),
         "openai_cloud" => "openai_cloud".to_string(),
         "groq" => "groq".to_string(),
+        "cohere_transcribe" => "cohere_transcribe".to_string(),
         _ => "whisper".to_string(),
     }
 }
@@ -649,6 +656,10 @@ fn normalize_transcription_model_id(provider: &str, model_id: &str) -> String {
         },
         "groq" => match model_id.trim() {
             "" => "whisper-large-v3-turbo".to_string(),
+            value => value.to_string(),
+        },
+        "cohere_transcribe" => match model_id.trim() {
+            "" => "cohere-transcribe-03-2026".to_string(),
             value => value.to_string(),
         },
         _ => "base.en".to_string(),
@@ -1345,6 +1356,28 @@ mod tests {
         normalize_loaded_transcription_settings(&mut retired_model);
         assert_eq!(retired_model.dictation_provider, "parakeet");
         assert_eq!(retired_model.dictation_model_id, "parakeet-tdt-0.6b-v3");
+    }
+
+    #[test]
+    fn cohere_transcribe_survives_settings_reload_with_its_model_slot() {
+        let mut transcription = TranscriptionSettings {
+            default_provider: "cohere_transcribe".to_string(),
+            selected_model_id: "cohere-transcribe-03-2026".to_string(),
+            ..Default::default()
+        };
+        transcription.provider_model_ids.insert(
+            "cohere_transcribe".to_string(),
+            "cohere-transcribe-03-2026".to_string(),
+        );
+
+        normalize_loaded_transcription_settings(&mut transcription);
+
+        assert_eq!(transcription.default_provider, "cohere_transcribe");
+        assert_eq!(transcription.selected_model_id, "cohere-transcribe-03-2026");
+        assert_eq!(
+            transcription.provider_model_ids.get("cohere_transcribe"),
+            Some(&"cohere-transcribe-03-2026".to_string())
+        );
     }
 
     #[test]

@@ -52,6 +52,11 @@ use std::time::{Duration, Instant};
 /// trade against clipping the end of the last word, and needs testing against
 /// human speech rather than a `say` fixture.
 const DICTATION_STOP_CAPTURE_TAIL_MS: u64 = 120;
+/// Core Audio can take longer than 1.5 seconds to construct its first input
+/// stream after launch, especially while the audio server is waking. This is
+/// only a failure deadline; successful stream starts still return immediately.
+/// Keep it bounded because the platform construction call is not cancellable.
+const MICROPHONE_STREAM_PREPARATION_TIMEOUT: Duration = Duration::from_secs(3);
 const DICTATION_MIN_CAPTURE_SECONDS: f32 = 0.35;
 const DICTATION_SHORT_CAPTURE_PEAK_THRESHOLD: f32 = 0.008;
 const DICTATION_SHORT_CAPTURE_RMS_THRESHOLD: f32 = 0.002;
@@ -201,7 +206,7 @@ pub struct AudioCapture {
     dictation_capture_stop: Option<Arc<AtomicBool>>,
     /// UI-only accumulator of mono dictation samples for streaming partials.
     /// Never feeds the final transcription; only read by the partial-decode task.
-    dictation_partial_buffer: Arc<std::sync::Mutex<Vec<f32>>>,
+    dictation_partial_buffer: Arc<std::sync::Mutex<DictationPartialBuffer>>,
     /// When true, capture callbacks append mono samples to the partial buffer.
     /// When false, callbacks do no extra work (no allocation, no lock).
     dictation_streaming_active: Arc<AtomicBool>,
@@ -251,6 +256,16 @@ pub struct AudioCapture {
     /// the number that moves when microphone cold-open cost changes, so it is
     /// measured rather than assumed.
     dictation_first_sample_us: Arc<AtomicU64>,
+}
+
+/// Bounded UI-only audio plus an absolute sample watermark. The watermark is
+/// required because the sample vector becomes a fixed-length sliding window
+/// after 30 seconds. Comparing vector lengths at that point made live preview
+/// stop forever even though new speech was still arriving.
+#[derive(Debug, Default)]
+pub(crate) struct DictationPartialBuffer {
+    pub(crate) samples: Vec<f32>,
+    pub(crate) total_samples: u64,
 }
 
 static SYSTEM_AUDIO_TEST_ACTIVE: AtomicBool = AtomicBool::new(false);
@@ -507,7 +522,9 @@ impl AudioCapture {
             dictation_audio_level: Arc::new(std::sync::atomic::AtomicU32::new(0)),
             dictation_callback_count: Arc::new(AtomicU64::new(0)),
             dictation_capture_stop: None,
-            dictation_partial_buffer: Arc::new(std::sync::Mutex::new(Vec::new())),
+            dictation_partial_buffer: Arc::new(std::sync::Mutex::new(
+                DictationPartialBuffer::default(),
+            )),
             dictation_streaming_active: Arc::new(AtomicBool::new(false)),
             dictation_vad_gate: Arc::new(std::sync::Mutex::new(None)),
             dictation_vad_session_id: Arc::new(AtomicU64::new(0)),
@@ -718,7 +735,8 @@ impl AudioCapture {
 
         while self.dictation_buffer.pop().is_some() {}
         if let Ok(mut partial) = self.dictation_partial_buffer.lock() {
-            partial.clear();
+            partial.samples.clear();
+            partial.total_samples = 0;
         }
 
         let (device, resolved_device) = self.resolve_input_device(preference)?;
@@ -904,10 +922,13 @@ impl AudioCapture {
 
                             if streaming {
                                 if let Ok(mut shared) = partial_buffer.lock() {
-                                    shared.extend_from_slice(&mono_scratch);
-                                    if shared.len() > max_partial_samples * 2 {
-                                        let overflow = shared.len() - max_partial_samples;
-                                        shared.drain(0..overflow);
+                                    shared.total_samples = shared
+                                        .total_samples
+                                        .saturating_add(mono_scratch.len() as u64);
+                                    shared.samples.extend_from_slice(&mono_scratch);
+                                    if shared.samples.len() > max_partial_samples * 2 {
+                                        let overflow = shared.samples.len() - max_partial_samples;
+                                        shared.samples.drain(0..overflow);
                                     }
                                 }
                             }
@@ -990,7 +1011,7 @@ impl AudioCapture {
         // path must retire the worker with a bounded join. An unbounded join
         // here would prevent the command from ever returning its timeout to
         // Electron, leaving the UI stuck on "Getting ready".
-        match startup_rx.recv_timeout(Duration::from_millis(1500)) {
+        match startup_rx.recv_timeout(MICROPHONE_STREAM_PREPARATION_TIMEOUT) {
             Ok(Ok(())) => {
                 tracing::info!("Dictation started (stream confirmed live)");
             }
@@ -1164,7 +1185,8 @@ impl AudioCapture {
         self.dictation_streaming_active
             .store(false, Ordering::SeqCst);
         if let Ok(mut partial) = self.dictation_partial_buffer.lock() {
-            partial.clear();
+            partial.samples.clear();
+            partial.total_samples = 0;
         }
 
         tracing::info!(
@@ -1258,7 +1280,8 @@ impl AudioCapture {
 
         while self.dictation_buffer.pop().is_some() {}
         if let Ok(mut partial) = self.dictation_partial_buffer.lock() {
-            partial.clear();
+            partial.samples.clear();
+            partial.total_samples = 0;
         }
     }
 
@@ -1525,7 +1548,7 @@ impl AudioCapture {
                 drop(stream);
             });
 
-            match ready_rx.recv_timeout(Duration::from_millis(1500)) {
+            match ready_rx.recv_timeout(MICROPHONE_STREAM_PREPARATION_TIMEOUT) {
                 Ok(Ok(())) => {}
                 Ok(Err(error)) => {
                     retire_recording_preparation_threads(
@@ -1835,7 +1858,9 @@ impl AudioCapture {
     }
 
     /// Clone of the UI-only partial sample buffer Arc, for the partial-decode task.
-    pub fn dictation_partial_buffer_handle(&self) -> Arc<std::sync::Mutex<Vec<f32>>> {
+    pub(crate) fn dictation_partial_buffer_handle(
+        &self,
+    ) -> Arc<std::sync::Mutex<DictationPartialBuffer>> {
         Arc::clone(&self.dictation_partial_buffer)
     }
 
@@ -2122,7 +2147,7 @@ impl AudioCapture {
 
         self.hands_free_monitor_thread = Some(capture_handle);
 
-        match startup_rx.recv_timeout(Duration::from_millis(1500)) {
+        match startup_rx.recv_timeout(MICROPHONE_STREAM_PREPARATION_TIMEOUT) {
             Ok(Ok(())) => {
                 self.hands_free_monitor_config = Some(monitor_config);
                 Ok(())
@@ -2640,10 +2665,24 @@ mod recording_writer_tests {
 
 #[cfg(test)]
 mod recording_preparation_timeout_tests {
-    use super::{retire_recording_preparation_threads, AudioCapture};
+    use super::{
+        retire_recording_preparation_threads, AudioCapture, MICROPHONE_STREAM_PREPARATION_TIMEOUT,
+    };
     use std::sync::atomic::{AtomicBool, Ordering};
     use std::sync::Arc;
     use std::time::{Duration, Instant};
+
+    #[test]
+    fn cold_core_audio_preparation_has_a_bounded_startup_budget() {
+        assert!(
+            MICROPHONE_STREAM_PREPARATION_TIMEOUT >= Duration::from_secs(3),
+            "cold Core Audio stream construction needs at least three seconds"
+        );
+        assert!(
+            MICROPHONE_STREAM_PREPARATION_TIMEOUT <= Duration::from_secs(5),
+            "a genuinely stalled Core Audio call must still fail closed promptly"
+        );
+    }
 
     #[test]
     fn stalled_microphone_workers_do_not_undo_the_preparation_timeout() {

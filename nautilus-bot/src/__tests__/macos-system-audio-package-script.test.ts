@@ -53,9 +53,11 @@ describe("macOS system-audio packaging gates", () => {
     expect(qaScript).toContain('valueFor("--timeout-ms", "90000")');
     expect(qaScript).toContain('method: "get_settings"');
     expect(qaScript).toContain("sidecarResponsiveAfterTest");
+    expect(qaScript).toContain("sidecarExitedCleanly");
+    expect(qaScript).toContain("child.kill(\"SIGTERM\"), 15000");
   });
 
-  it("verifies the known tone before combined meeting capture in the same sidecar", () => {
+  it("verifies system audio before combined meeting capture in the same sidecar", () => {
     for (const scriptName of [
       "capture-packaged-macos-meeting-mic.mjs",
       "capture-packaged-macos-meeting-soak.mjs",
@@ -72,10 +74,121 @@ describe("macOS system-audio packaging gates", () => {
       expect(verificationIndex).toBeGreaterThan(-1);
       expect(setupIndex).toBeGreaterThan(verificationIndex);
       expect(qaScript).toContain("systemAudioVerifiedForCombinedCapture");
-      expect(qaScript).toContain(
-        'artifact.systemAudioVerification?.verificationMethod === "known_tone"',
-      );
+      expect(qaScript).toContain('"known_tone"');
     }
+  });
+
+  it("starts external fixture audio before verifying a virtual loopback route", () => {
+    const qaScript = fs.readFileSync(
+      path.join(repoRoot, "scripts", "capture-packaged-macos-meeting-soak.mjs"),
+      "utf8",
+    );
+    const earlyFixtureIndex = qaScript.indexOf(
+      "if (speakFixture && virtualFixtureDeviceName)",
+    );
+    const verificationIndex = qaScript.indexOf(
+      'sendCommand(\n        "test_system_audio_capture"',
+    );
+
+    expect(earlyFixtureIndex).toBeGreaterThan(-1);
+    expect(verificationIndex).toBeGreaterThan(earlyFixtureIndex);
+    expect(qaScript).toContain('? "external_audio"');
+    expect(qaScript).toContain("if (speakFixture && !speechFixture)");
+  });
+
+  it("routes and restores both macOS output classes for the spoken fixture", () => {
+    const qaScript = fs.readFileSync(
+      path.join(repoRoot, "scripts", "capture-packaged-macos-meeting-soak.mjs"),
+      "utf8",
+    );
+
+    expect(qaScript).toContain('currentAudioSource("system")');
+    expect(qaScript).toContain(
+      'selectAudioSource(virtualFixtureDeviceName, "system")',
+    );
+    expect(qaScript).toContain("systemOutputDeviceRestored");
+    expect(qaScript).toContain("virtualFixtureSystemOutputSelected");
+    expect(qaScript).toContain("virtualFixtureSystemOutputRestored");
+  });
+
+  it("binds the three-hour soak receipt to the exact release identity", () => {
+    const qaScript = fs.readFileSync(
+      path.join(repoRoot, "scripts", "capture-packaged-macos-meeting-soak.mjs"),
+      "utf8",
+    );
+    const auditScript = fs.readFileSync(
+      path.join(repoRoot, "scripts", "capture-packaged-macos-release-audit.mjs"),
+      "utf8",
+    );
+    const meetingSoakStart = auditScript.indexOf('id: "meeting-soak"');
+    const meetingSoakEnd = auditScript.indexOf('id: "source-gates"');
+    const meetingSoakRequirement = auditScript.slice(
+      meetingSoakStart,
+      meetingSoakEnd,
+    );
+
+    expect(qaScript).toContain("collectReleaseCandidateIdentity");
+    expect(qaScript).toContain("candidateIdentity");
+    expect(meetingSoakStart).toBeGreaterThan(-1);
+    expect(meetingSoakEnd).toBeGreaterThan(meetingSoakStart);
+    expect(meetingSoakRequirement).toContain('candidateIdentityMode: "release"');
+  });
+
+  it("releases fixture audio before waiting for long-form transcription", () => {
+    const qaScript = fs.readFileSync(
+      path.join(repoRoot, "scripts", "capture-packaged-macos-meeting-soak.mjs"),
+      "utf8",
+    );
+    const stopRecordingIndex = qaScript.indexOf(
+      'await sidecar.sendCommand("stop_recording"',
+    );
+    const releaseFixtureIndex = qaScript.indexOf(
+      "await releaseFixtureEnvironment();",
+      stopRecordingIndex,
+    );
+    const transcriptWaitIndex = qaScript.indexOf(
+      "await waitForTranscript(sidecar, artifact.recordingId)",
+      stopRecordingIndex,
+    );
+
+    expect(stopRecordingIndex).toBeGreaterThan(-1);
+    expect(releaseFixtureIndex).toBeGreaterThan(stopRecordingIndex);
+    expect(transcriptWaitIndex).toBeGreaterThan(releaseFixtureIndex);
+  });
+
+  it("proves the observed recording duration instead of only the requested duration", () => {
+    const qaScript = fs.readFileSync(
+      path.join(repoRoot, "scripts", "capture-packaged-macos-meeting-soak.mjs"),
+      "utf8",
+    );
+    const auditScript = fs.readFileSync(
+      path.join(repoRoot, "scripts", "capture-packaged-macos-release-audit.mjs"),
+      "utf8",
+    );
+    const meetingSoakStart = auditScript.indexOf('id: "meeting-soak"');
+    const meetingSoakEnd = auditScript.indexOf('id: "source-gates"');
+    const meetingSoakRequirement = auditScript.slice(
+      meetingSoakStart,
+      meetingSoakEnd,
+    );
+
+    expect(qaScript).toContain("recordingDurationMs");
+    expect(qaScript).toContain("minimumDurationObserved");
+    expect(meetingSoakRequirement).toContain(
+      "artifact?.recordingDurationMs >= 3 * 60 * 60 * 1000",
+    );
+  });
+
+  it("can mute a native spoken fixture and restores the prior output state", () => {
+    const qaScript = fs.readFileSync(
+      path.join(repoRoot, "scripts", "capture-packaged-macos-meeting-soak.mjs"),
+      "utf8",
+    );
+
+    expect(qaScript).toContain('args.includes("--mute-fixture-output")');
+    expect(qaScript).toContain("artifact.fixtureOutputMutedDuring");
+    expect(qaScript).toContain("fixtureOutputMuteRestored");
+    expect(qaScript).toContain("fixtureOutputMuteRestoreErrorAbsent");
   });
 
   it("proves a virtual microphone timeout is bounded and leaves the sidecar usable", () => {

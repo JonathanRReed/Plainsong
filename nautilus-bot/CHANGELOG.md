@@ -2,11 +2,22 @@
 
 All notable changes to Plainsong are documented in this file.
 
-## [1.0.0] - 2026-07 (unreleased)
+## [0.9.0-beta.1] - 2026-08-08 (candidate)
 
 The free, open-source relaunch. The previously commercial app (NautilusBot /
 Nautilus) was rebuilt as **Plainsong** — MIT licensed, no trial, no tiers,
-no telemetry. macOS on Apple Silicon (arm64) only for v1.
+no telemetry. This limited beta targets macOS on Apple Silicon (arm64).
+
+Dictation and Meetings are both supported release pillars. The beta adds
+explicit runtime readiness, bounded recovery, local-first remote-processing
+revocation, guarded privileged storage operations, rollback-resistant beta
+updates, and exact-candidate QA receipts. The first invite-limited group accepts
+the formal real-device Dictation matrix, remaining Meeting lifecycle rows, and
+a repeat three-hour capture soak as documented beta risks. They remain required
+before public launch. Distribution still requires explicit approval, and
+automatic updates remain gated on the exact-candidate updater journey and
+publication of the beta update feed. The exact candidate has passed signing,
+notarization, stapling, Gatekeeper, update-metadata, and clean-install checks.
 
 ### Added
 - **Hold-to-talk dictation**: true press-and-hold via a native macOS

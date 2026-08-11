@@ -3,7 +3,7 @@
 use crate::llm::transport::{
     bounded_body_error_to_llm, classify_http_error, read_error_body, read_json_body,
     CompletionRequest, CompletionResponse, CompletionTransport, ErrorKind, LlmError,
-    ModelContextMetadata, Provider, RequestOptions, COMPLETION_BODY_LIMIT, MODEL_LIST_BODY_LIMIT,
+    ModelContextMetadata, Provider, COMPLETION_BODY_LIMIT, MODEL_LIST_BODY_LIMIT,
     MODEL_METADATA_BODY_LIMIT,
 };
 use anyhow::{Context, Result};
@@ -83,23 +83,6 @@ impl OllamaClient {
             .unwrap_or_default();
         tracing::info!("Ollama returned {} models", models.len());
         Ok(models)
-    }
-
-    pub async fn generate(&self, model: &str, prompt: &str) -> Result<String> {
-        let request = CompletionRequest {
-            model: model.to_string(),
-            system_prompt: None,
-            prompt: prompt.to_string(),
-            purpose: crate::llm::CompletionPurpose::Generic,
-            options: RequestOptions {
-                timeout: Duration::from_secs(120),
-                max_output_tokens: 1_024,
-                temperature: Some(0.7),
-                json_schema: None,
-                requested_context_tokens: None,
-            },
-        };
-        Ok(self.complete(&request).await?.text)
     }
 
     async fn cached_model_context(&self, model: &str) -> Option<ModelContextMetadata> {
@@ -394,6 +377,7 @@ struct ChatResponse {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::llm::RequestOptions;
     use std::sync::atomic::{AtomicUsize, Ordering};
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     use tokio::net::TcpListener;

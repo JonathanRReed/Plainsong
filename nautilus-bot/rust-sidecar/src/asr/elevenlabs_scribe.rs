@@ -1,7 +1,8 @@
 use super::{
+    cloud_asr_status_error,
     openai_cloud::{build_cloud_asr_client, CloudAsrHttpTimeouts},
-    AsrProvider, AsrProviderType, DownloadStatus, ModelInfo, TranscriptSegment,
-    TranscriptionResult,
+    read_cloud_asr_json, AsrProvider, AsrProviderType, DownloadStatus, ModelInfo,
+    TranscriptSegment, TranscriptionResult,
 };
 use crate::secrets;
 use anyhow::{Context, Result};
@@ -93,14 +94,10 @@ impl ElevenLabsScribeProvider {
 
         if !response.status().is_success() {
             let status = response.status();
-            let body = response.text().await.unwrap_or_default();
-            anyhow::bail!("ElevenLabs Scribe API error {}: {}", status, body);
+            return Err(cloud_asr_status_error("ElevenLabs Scribe", status));
         }
 
-        let result: ScribeResponse = response
-            .json()
-            .await
-            .context("Failed to parse ElevenLabs Scribe response")?;
+        let result: ScribeResponse = read_cloud_asr_json(response, "ElevenLabs Scribe").await?;
 
         let text = result.text.unwrap_or_default();
         let segments = result

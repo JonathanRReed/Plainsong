@@ -403,6 +403,12 @@ pub struct StreamingVadGate {
     in_speech: bool,
     /// Consecutive frames above threshold seen while not yet in speech.
     above_run: u32,
+    /// Quiet frames inside a candidate speech onset. Short consonant and
+    /// inter-syllable dips preserve the accumulated loud frames; a real pause
+    /// clears them so isolated clicks cannot add up to speech.
+    onset_gap_run: u32,
+    /// Maximum quiet gap tolerated while accumulating the speech onset.
+    max_onset_gap_frames: u32,
     /// Consecutive frames at/below threshold seen while in speech.
     below_run: u32,
 }
@@ -419,6 +425,12 @@ const NOISE_FLOOR_MARGIN_DB: f32 = 15.0;
 /// audio rather than jumping around frame-to-frame.
 const NOISE_FLOOR_EMA_ALPHA: f32 = 0.05;
 
+/// Speech energy naturally dips between syllables. Requiring every frame in
+/// the onset window to stay above threshold makes ordinary speech fail to arm
+/// hands-free dictation, especially with laptop microphones. A 120 ms gap is
+/// short enough to join syllables while still rejecting separated noises.
+const MAX_SPEECH_ONSET_GAP_SECONDS: f32 = 0.12;
+
 impl StreamingVadGate {
     /// Build a gate whose adaptive-threshold and hysteresis behavior are
     /// derived from `config`, the same [`VadConfig`] used by the batch
@@ -431,6 +443,9 @@ impl StreamingVadGate {
         let min_silence_frames = (config.min_silence_duration * frames_per_second)
             .ceil()
             .max(1.0) as u32;
+        let max_onset_gap_frames = (MAX_SPEECH_ONSET_GAP_SECONDS * frames_per_second)
+            .ceil()
+            .max(1.0) as u32;
 
         Self {
             frames_per_second,
@@ -440,6 +455,8 @@ impl StreamingVadGate {
             min_silence_frames,
             in_speech: false,
             above_run: 0,
+            onset_gap_run: 0,
+            max_onset_gap_frames,
             below_run: 0,
         }
     }
@@ -468,22 +485,27 @@ impl StreamingVadGate {
         if is_above {
             self.below_run = 0;
             if !self.in_speech {
+                self.onset_gap_run = 0;
                 self.above_run += 1;
                 if self.above_run >= self.min_speech_frames {
                     self.in_speech = true;
                     self.above_run = 0;
+                    self.onset_gap_run = 0;
                     edge = VadEdge::SpeechStarted;
                 }
             }
-        } else {
-            self.above_run = 0;
-            if self.in_speech {
-                self.below_run += 1;
-                if self.below_run >= self.min_silence_frames {
-                    self.in_speech = false;
-                    self.below_run = 0;
-                    edge = VadEdge::SilenceStarted;
-                }
+        } else if self.in_speech {
+            self.below_run += 1;
+            if self.below_run >= self.min_silence_frames {
+                self.in_speech = false;
+                self.below_run = 0;
+                edge = VadEdge::SilenceStarted;
+            }
+        } else if self.above_run > 0 {
+            self.onset_gap_run += 1;
+            if self.onset_gap_run >= self.max_onset_gap_frames {
+                self.above_run = 0;
+                self.onset_gap_run = 0;
             }
         }
 
@@ -728,6 +750,39 @@ mod tests {
         let edge = gate.push_frame(LOUD_DB);
         assert_eq!(edge, VadEdge::SpeechStarted);
         assert!(gate.is_speaking());
+    }
+
+    #[test]
+    fn streaming_gate_tolerates_short_natural_gaps_during_speech_onset() {
+        let mut gate = fixed_threshold_gate();
+
+        // Human speech rarely stays above an RMS threshold for 100 ms with no
+        // 10-20 ms consonant or inter-syllable dip. Ten loud frames separated
+        // by a short two-frame gap still represent sustained speech.
+        for _ in 0..5 {
+            assert_eq!(gate.push_frame(LOUD_DB), VadEdge::NoChange);
+        }
+        for _ in 0..2 {
+            assert_eq!(gate.push_frame(QUIET_DB), VadEdge::NoChange);
+        }
+        for _ in 0..4 {
+            assert_eq!(gate.push_frame(LOUD_DB), VadEdge::NoChange);
+        }
+        assert_eq!(gate.push_frame(LOUD_DB), VadEdge::SpeechStarted);
+        assert!(gate.is_speaking());
+    }
+
+    #[test]
+    fn streaming_gate_still_rejects_isolated_noise_spikes() {
+        let mut gate = fixed_threshold_gate();
+
+        for _ in 0..5 {
+            assert_eq!(gate.push_frame(LOUD_DB), VadEdge::NoChange);
+            for _ in 0..15 {
+                assert_eq!(gate.push_frame(QUIET_DB), VadEdge::NoChange);
+            }
+        }
+        assert!(!gate.is_speaking());
     }
 
     #[test]

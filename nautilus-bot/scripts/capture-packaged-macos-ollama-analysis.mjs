@@ -1,13 +1,17 @@
 #!/usr/bin/env node
 import crypto from "node:crypto";
 import fs from "node:fs";
-import os from "node:os";
 import path from "node:path";
 import { spawn, spawnSync } from "node:child_process";
 import { createInterface } from "node:readline";
+import { createPackagedQaProfile } from "./lib/packaged-qa-profile.mjs";
 
 const repoRoot = path.resolve(import.meta.dirname, "..");
 const args = process.argv.slice(2);
+const qaProfile = createPackagedQaProfile({
+  args,
+  prefix: "plainsong-ollama-qa-",
+});
 
 function valueFor(name, fallback = null) {
   const index = args.indexOf(name);
@@ -32,7 +36,7 @@ const sidecarPath = path.join(
   "sidecar",
   "plainsong-sidecar"
 );
-const dataDir = path.join(os.homedir(), "Library", "Application Support", "Plainsong");
+const dataDir = qaProfile.dataDir;
 const dbPath = path.join(dataDir, "plainsong.db");
 const dbSidecarPaths = [dbPath, `${dbPath}-wal`, `${dbPath}-shm`];
 const dbBackups = new Map();
@@ -197,6 +201,7 @@ seedFixture();
 const child = spawn(sidecarPath, [], {
   cwd: repoRoot,
   stdio: ["pipe", "pipe", "pipe"],
+  env: { ...process.env, ...qaProfile.env },
 });
 
 const childExit = new Promise((resolve) => {
@@ -264,7 +269,7 @@ async function shutdown() {
   }
   const result = await Promise.race([
     childExit,
-    new Promise((resolve) => setTimeout(() => resolve(null), 3000)),
+    new Promise((resolve) => setTimeout(() => resolve(null), 15000)),
   ]);
   if (!result) {
     child.kill("SIGTERM");

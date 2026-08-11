@@ -46,6 +46,7 @@ import {
   repairCursorInsertPermissions,
   requestDictationPermissions,
   saveSettings,
+  selectExportLocation,
   setProviderSecret,
   resetAppState,
   unlockVault,
@@ -58,6 +59,8 @@ import {
   listBackups,
   restoreBackupDefault,
   saveBackupConfig,
+  selectBackupLocation,
+  selectCloudBackupLocation,
   syncBackupToCloud,
   verifyBackupCloudConnection,
 } from "@/lib/backend/storage";
@@ -1225,6 +1228,12 @@ export function SettingsView() {
 
   // Function to refresh models for a specific provider
   const refreshModelsForProvider = useCallback(async (providerName: string) => {
+    if (
+      isRemoteAnalysisProvider(providerName) &&
+      !settings?.privacy.remoteProcessingEnabled
+    ) {
+      return [];
+    }
     setModelsLoading(true);
     try {
       switch (providerName) {
@@ -1276,7 +1285,7 @@ export function SettingsView() {
       setModelsLoading(false);
     }
     return [];
-  }, []);
+  }, [settings?.privacy.remoteProcessingEnabled]);
 
   useEffect(() => {
     let mounted = true;
@@ -1322,6 +1331,7 @@ export function SettingsView() {
 
     const loadModels = async () => {
       try {
+        const remoteEnabled = settings?.privacy.remoteProcessingEnabled === true;
         const [
           ollamaAvail,
           ollamaList,
@@ -1336,30 +1346,32 @@ export function SettingsView() {
             console.error("Ollama error:", e);
             return [];
           }),
-          hasProviderSecret("ollama-cloud")
+          remoteEnabled
+            ? hasProviderSecret("ollama-cloud")
             .then((hasSecret) =>
               hasSecret ? listOllamaCloudModels() : Promise.resolve([]),
             )
             .catch((e) => {
               console.error("Ollama Cloud error:", e);
               return [];
-            }),
-          listOpenAiModels().catch((e) => {
+            })
+            : Promise.resolve([]),
+          remoteEnabled ? listOpenAiModels().catch((e) => {
             console.error("OpenAI error:", e);
             return [];
-          }),
-          listAnthropicModels().catch((e) => {
+          }) : Promise.resolve([]),
+          remoteEnabled ? listAnthropicModels().catch((e) => {
             console.error("Anthropic error:", e);
             return [];
-          }),
-          listGeminiModels().catch((e) => {
+          }) : Promise.resolve([]),
+          remoteEnabled ? listGeminiModels().catch((e) => {
             console.error("Gemini error:", e);
             return [];
-          }),
-          listDeepSeekModels().catch((e) => {
+          }) : Promise.resolve([]),
+          remoteEnabled ? listDeepSeekModels().catch((e) => {
             console.error("DeepSeek error:", e);
             return [];
-          }),
+          }) : Promise.resolve([]),
         ]);
 
         if (mounted) {
@@ -1391,7 +1403,7 @@ export function SettingsView() {
     return () => {
       mounted = false;
     };
-  }, [activeTab]);
+  }, [activeTab, settings?.privacy.remoteProcessingEnabled]);
 
   const updateSettings = useCallback(
     (
@@ -3939,27 +3951,59 @@ export function SettingsView() {
                 {activeTab === "storage" && (
                   <div className="space-y-5">
                     <div className="space-y-2">
-                      <Label>Only allow exports into this folder</Label>
-                      <Input
-                        placeholder="/Users/you/Documents/Plainsong"
-                        value={settings.privacy.exportRoot ?? ""}
-                        onBlur={handleSettingsTextBlur}
-                        onKeyDown={handleSettingsTextKeyDown}
-                        onChange={(e: ChangeEvent<HTMLInputElement>) =>
-                          void updateSettings({
-                            ...settings,
-                            privacy: {
-                              ...settings.privacy,
-                              exportRoot: e.target.value.trim()
-                                ? e.target.value.trim()
-                                : null,
-                            },
-                          })
-                        }
-                      />
+                      <Label>Approved export folder</Label>
+                      <div className="flex flex-wrap items-center gap-3 rounded-lg border bg-muted/20 p-3">
+                        <div className="min-w-0 flex-1">
+                          <p className="text-sm font-medium">
+                            {settings.privacy.exportLocationLabel ??
+                              "Standard export folders"}
+                          </p>
+                          <p className="text-xs text-muted-foreground">
+                            {settings.privacy.exportLocationApproved
+                              ? "Approved through the macOS folder picker"
+                              : settings.privacy.exportLocationLabel
+                                ? "This legacy location needs to be selected again"
+                                : "Exports are limited to Plainsong-approved standard folders"}
+                          </p>
+                        </div>
+                        <Button
+                          type="button"
+                          variant="outline"
+                          onClick={async () => {
+                            setError(null);
+                            try {
+                              const selected = await selectExportLocation();
+                              if (!selected) return;
+                              const current = latestSettingsRef.current;
+                              if (!current) return;
+                              updateSettings(
+                                {
+                                  ...current,
+                                  privacy: {
+                                    ...current.privacy,
+                                    exportRoot: null,
+                                    exportLocationId: selected.id,
+                                    exportLocationLabel: selected.label,
+                                    exportLocationApproved: selected.approved,
+                                  },
+                                },
+                                { immediate: true },
+                              );
+                            } catch (error) {
+                              setError(
+                                error instanceof Error
+                                  ? error.message
+                                  : "Could not approve the export folder",
+                              );
+                            }
+                          }}
+                        >
+                          Choose export folder
+                        </Button>
+                      </div>
                       <p className="text-sm text-muted-foreground">
-                        Leave empty to export anywhere. With a full path here,
-                        exports can only land in it or a folder inside it.
+                        Plainsong stores the folder privately. The interface
+                        receives only an approval ID and this short label.
                       </p>
                     </div>
 
@@ -4301,6 +4345,52 @@ export function SettingsView() {
                           </p>
                         </div>
 
+                        <div className="space-y-2">
+                          <Label>Backup folder</Label>
+                          <div className="flex flex-wrap items-center gap-3 rounded-lg border bg-muted/20 p-3">
+                            <div className="min-w-0 flex-1">
+                              <p className="text-sm font-medium">
+                                {backupConfig.backupLocationLabel ?? "Choose a backup folder"}
+                              </p>
+                              <p className="text-xs text-muted-foreground">
+                                {backupConfig.backupLocationApproved
+                                  ? "Approved through the macOS folder picker"
+                                  : "A legacy custom folder must be selected again"}
+                              </p>
+                            </div>
+                            <Button
+                              type="button"
+                              variant="outline"
+                              disabled={backupBusy}
+                              onClick={async () => {
+                                setBackupBusy(true);
+                                setError(null);
+                                try {
+                                  const selected = await selectBackupLocation();
+                                  if (!selected) return;
+                                  setBackupConfig({
+                                    ...backupConfig,
+                                    backupDir: null,
+                                    backupLocationId: selected.id,
+                                    backupLocationLabel: selected.label,
+                                    backupLocationApproved: selected.approved,
+                                  });
+                                } catch (error) {
+                                  setError(
+                                    error instanceof Error
+                                      ? error.message
+                                      : "Could not approve the backup folder",
+                                  );
+                                } finally {
+                                  setBackupBusy(false);
+                                }
+                              }}
+                            >
+                              Choose backup folder
+                            </Button>
+                          </div>
+                        </div>
+
                         <SettingsSwitch
                           className="py-0"
                           label="Allow uploading to cloud storage"
@@ -4325,6 +4415,9 @@ export function SettingsView() {
                                   ...backupConfig,
                                   cloudProvider: (e.target.value ||
                                     null) as BackupConfig["cloudProvider"],
+                                  cloudLocationId: null,
+                                  cloudLocationLabel: null,
+                                  cloudLocationApproved: false,
                                 })
                               }
                               className="w-full p-2 border rounded-md bg-background"
@@ -4360,21 +4453,11 @@ export function SettingsView() {
 
                         {backupConfig.cloudProvider === "i_cloud" ? (
                           <div className="space-y-2">
-                            <Label>iCloud path (optional override)</Label>
-                            <Input
-                              value={backupConfig.icloudPath ?? ""}
-                              onChange={(
-                                e: ChangeEvent<HTMLInputElement>,
-                              ) =>
-                                setBackupConfig({
-                                  ...backupConfig,
-                                  icloudPath: e.target.value.trim()
-                                    ? e.target.value
-                                    : null,
-                                })
-                              }
-                              placeholder="/Users/you/Library/Mobile Documents/com~apple~CloudDocs"
-                            />
+                            <Label>iCloud destination</Label>
+                            <p className="text-sm text-muted-foreground">
+                              {backupConfig.cloudLocationLabel ??
+                                "Choose the iCloud folder in the native picker."}
+                            </p>
                           </div>
                         ) : (
                           <div className="space-y-2">
@@ -4395,6 +4478,51 @@ export function SettingsView() {
                             />
                           </div>
                         )}
+
+                        <div className="flex flex-wrap items-center gap-3">
+                          <Button
+                            type="button"
+                            variant="outline"
+                            disabled={backupBusy || !backupConfig.cloudProvider}
+                            onClick={async () => {
+                              if (!backupConfig.cloudProvider) return;
+                              setBackupBusy(true);
+                              setError(null);
+                              try {
+                                const selected = await selectCloudBackupLocation({
+                                  provider: backupConfig.cloudProvider,
+                                  remoteName: backupConfig.cloudRemoteName,
+                                  folder: backupConfig.cloudFolder,
+                                });
+                                if (!selected) return;
+                                setBackupConfig({
+                                  ...backupConfig,
+                                  cloudLocationId: selected.id,
+                                  cloudLocationLabel: selected.label,
+                                  cloudLocationApproved: selected.approved,
+                                  icloudPath: null,
+                                });
+                              } catch (error) {
+                                setError(
+                                  error instanceof Error
+                                    ? error.message
+                                    : "Could not approve the cloud destination",
+                                );
+                              } finally {
+                                setBackupBusy(false);
+                              }
+                            }}
+                          >
+                            {backupConfig.cloudProvider === "i_cloud"
+                              ? "Choose and approve cloud folder"
+                              : "Confirm cloud destination"}
+                          </Button>
+                          <p className="text-sm text-muted-foreground">
+                            {backupConfig.cloudLocationApproved
+                              ? `Approved: ${backupConfig.cloudLocationLabel}`
+                              : "Cloud uploads stay blocked until this destination is confirmed."}
+                          </p>
+                        </div>
 
                         <div className="grid gap-3 border-t pt-4 md:grid-cols-2">
                           <div>

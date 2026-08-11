@@ -1,6 +1,6 @@
 [package]
 name = "plainsong"
-version = "1.0.0"
+version = "0.9.0-beta.1"
 description = "Plainsong - free, open-source, local-first dictation and meeting capture"
 authors = ["Jonathan Reed"]
 edition = "2021"
@@ -84,10 +84,6 @@ walkdir = "2.5"
 # Optional progress bars
 indicatif = { version = "0.18", optional = true }
 
-# PDF generation
-genpdf = { version = "0.2", optional = true }
-base64 = { version = "0.23", optional = true }
-
 # Platform-specific dependencies
 [target.'cfg(target_os = "macos")'.dependencies]
 core-foundation = "0.10"
@@ -137,7 +133,6 @@ download-manager = ["indicatif"]
 # Retained so the ASR provider features keep their existing shape; `rubato` is
 # now an unconditional dependency, so this no longer gates anything.
 audio-processing = []
-export-pdf = ["genpdf", "base64"]
 desktop-shell = []
 
 # Speaker diarization (requires ONNX runtime)

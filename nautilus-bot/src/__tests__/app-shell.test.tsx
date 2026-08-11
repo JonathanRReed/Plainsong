@@ -205,6 +205,37 @@ describe("App shell", () => {
     expect(localStorage.getItem(ONBOARDING_STORAGE_KEY)).toBe("true");
   });
 
+  it("fails into first-run onboarding when onboarding storage cannot be read", async () => {
+    vi.mocked(localStorage.getItem).mockImplementation(() => {
+      throw new Error("storage unavailable");
+    });
+
+    render(<App />);
+
+    expect(
+      await screen.findByRole("dialog", { name: "First-run wizard" }),
+    ).toHaveTextContent("First-run wizard: full");
+  });
+
+  it("still closes onboarding when its completion marker cannot be stored", async () => {
+    vi.mocked(localStorage.setItem).mockImplementation(() => {
+      throw new Error("storage unavailable");
+    });
+
+    render(<App />);
+
+    expect(
+      await screen.findByRole("dialog", { name: "First-run wizard" }),
+    ).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "Complete setup" }));
+
+    await waitFor(() => {
+      expect(
+        screen.queryByRole("dialog", { name: "First-run wizard" }),
+      ).not.toBeInTheDocument();
+    });
+  });
+
   it("surfaces runtime provider warnings as toasts", async () => {
     localStorage.setItem(ONBOARDING_STORAGE_KEY, "true");
 

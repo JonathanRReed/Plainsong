@@ -1,3 +1,5 @@
+pub mod admission;
+mod approved_locations;
 pub mod asr;
 mod audio;
 mod backup;
@@ -12,8 +14,11 @@ mod events;
 mod export;
 mod llm;
 mod models;
+mod operation_coordinator;
 mod paths;
 mod recording_audio;
+mod remote_processing;
+mod safe_fs;
 mod secrets;
 pub mod settings;
 pub mod sidecar_handle;
@@ -59,6 +64,8 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 #[cfg(target_os = "macos")]
 use std::sync::Condvar;
+#[cfg(not(test))]
+use std::sync::LazyLock;
 use std::sync::Mutex as StdMutex;
 use std::time::Duration;
 use tokio::sync::Mutex;
@@ -70,7 +77,7 @@ pub struct AppState {
     ollama_client: Arc<llm::OllamaClient>,
     ollama_embedder: Arc<llm::OllamaEmbedder>,
     settings_manager: Arc<Mutex<settings::SettingsManager>>,
-    remote_processing_allowed: Arc<AtomicBool>,
+    remote_processing_gate: Arc<remote_processing::RemoteProcessingGate>,
     pub(crate) backup_manager: Arc<Mutex<backup::BackupManager>>,
     template_manager: Arc<export::templates::TemplateManager>,
     dictation_hotkey_active: Arc<Mutex<bool>>,
@@ -98,6 +105,13 @@ pub struct AppState {
     /// manual post-processing. Cleanup checks this while holding the database
     /// lock, so it cannot remove a file after a command has claimed it.
     active_meeting_audio_postprocessing: Arc<StdMutex<HashMap<String, usize>>>,
+    operation_coordinator: Arc<operation_coordinator::OperationCoordinator>,
+    active_capture_lease: Arc<Mutex<Option<(String, operation_coordinator::OperationLease)>>>,
+    /// Set as soon as the sidecar accepts a shutdown request. Meeting
+    /// post-processing failures caused by runtime teardown must remain
+    /// `processing` so the next launch can reconcile and offer saved-audio
+    /// recovery instead of misreporting a real transcription failure.
+    sidecar_shutting_down: Arc<AtomicBool>,
     /// The last few completed dictation results, newest first, for the
     /// re-paste/re-copy recovery hotkeys and the menu-bar menu. When insertion
     /// silently fails this is the path that keeps the user from losing thirty
@@ -109,6 +123,7 @@ pub struct AppState {
 struct MeetingAudioPostprocessingGuard {
     active: Arc<StdMutex<HashMap<String, usize>>>,
     recording_id: String,
+    _operation_lease: Option<operation_coordinator::OperationLease>,
 }
 
 impl MeetingAudioPostprocessingGuard {
@@ -122,7 +137,18 @@ impl MeetingAudioPostprocessingGuard {
         Self {
             active,
             recording_id: recording_id.to_string(),
+            _operation_lease: None,
         }
+    }
+
+    fn coordinated(
+        active: Arc<StdMutex<HashMap<String, usize>>>,
+        recording_id: &str,
+        operation_lease: operation_coordinator::OperationLease,
+    ) -> Self {
+        let mut guard = Self::new(active, recording_id);
+        guard._operation_lease = Some(operation_lease);
+        guard
     }
 }
 
@@ -170,6 +196,7 @@ const DICTATION_IDLE_RESET_ERROR_MS: u64 = 9000;
 /// pipeline output is already a good result, so on timeout we insert that
 /// rather than making the user wait on a slow or stuck model.
 const DICTATION_FORMAT_TIMEOUT: Duration = Duration::from_secs(6);
+const MAX_BENCHMARK_AUDIO_BYTES: usize = 6 * 1024 * 1024;
 /// Shown when a pre-insert LLM pass could not run. The user still gets their
 /// words — the locally formatted text — so this is a warning, not an error.
 /// These describe the formatting pass ONLY: they are appended to whatever the
@@ -189,7 +216,6 @@ const DICTATION_COMMAND_PREFIX_DEFAULT: &str = "command";
 const APP_BUNDLE_IDENTIFIER: &str = "com.plainsong.app";
 pub const SYSTEM_AUDIO_TEST_WORKER_ARGUMENT: &str = "--plainsong-system-audio-test-worker";
 pub const SYSTEM_AUDIO_TEST_WORKER_TIMEOUT_EXIT_CODE: i32 = 124;
-const STREAMING_PREVIEW_MAX_SECONDS: f64 = 90.0;
 /// Seconds at the end of an accumulated post-capture chunk searched, backwards,
 /// for a pause to cut at instead of cutting at the nominal frame count.
 const CHUNK_CUT_SEARCH_SECONDS: f64 = 8.0;
@@ -234,7 +260,25 @@ const PROVIDER_SECRET_NAMES: [&str; 9] = [
 enum DictationSessionState {
     Idle,
     Starting,
+    Primed,
     Recording,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum DictationModelWarmState {
+    Ready,
+    Deferred,
+    NotRequired,
+}
+
+impl DictationModelWarmState {
+    fn as_event_value(self) -> &'static str {
+        match self {
+            Self::Ready => "ready",
+            Self::Deferred => "deferred",
+            Self::NotRequired => "not_required",
+        }
+    }
 }
 
 /// What dictation does with the finished text.
@@ -302,6 +346,12 @@ struct DictationSessionTracker {
     started_at: Option<std::time::Instant>,
     started_at_epoch_ms: Option<i64>,
     startup_latency_ms: Option<u64>,
+    acknowledged_at_epoch_ms: Option<i64>,
+    capture_ready_at_epoch_ms: Option<i64>,
+    first_stable_partial_at_epoch_ms: Option<i64>,
+    stop_requested_at: Option<std::time::Instant>,
+    final_transcript_at_epoch_ms: Option<i64>,
+    insertion_completed_at_epoch_ms: Option<i64>,
     insertion_mode_at_start: Option<DictationInsertionMode>,
     copy_to_clipboard_at_start: Option<bool>,
     /// Set by the one stop that owns finalization for this session. Manual,
@@ -339,6 +389,92 @@ struct RecentDictationResult {
 const RECENT_DICTATION_RESULT_LIMIT: usize = 3;
 
 type AnalysisContextSegment = llm::GroundedSegment;
+
+const MAX_ANALYSIS_RECORDING_IDS: usize = 64;
+const MAX_ANALYSIS_SEGMENTS: usize = 100_000;
+
+fn validate_and_deduplicate_analysis_recording_ids(
+    recording_ids: Vec<String>,
+) -> Result<Vec<String>, String> {
+    if recording_ids.is_empty() {
+        return Err("recordingIds cannot be empty".to_string());
+    }
+    if recording_ids.len() > MAX_ANALYSIS_RECORDING_IDS {
+        return Err(format!(
+            "Analyze at most {} recordings at once",
+            MAX_ANALYSIS_RECORDING_IDS
+        ));
+    }
+
+    let mut seen = HashSet::with_capacity(recording_ids.len());
+    let mut unique = Vec::with_capacity(recording_ids.len());
+    for recording_id in recording_ids {
+        if recording_id.trim().is_empty() {
+            return Err("recordingIds cannot contain blank IDs".to_string());
+        }
+        if seen.insert(recording_id.clone()) {
+            unique.push(recording_id);
+        }
+    }
+    Ok(unique)
+}
+
+fn enforce_multi_recording_analysis_limits(
+    segment_count: usize,
+    transcript_bytes: usize,
+) -> Result<(), String> {
+    if segment_count > MAX_ANALYSIS_SEGMENTS {
+        return Err(format!(
+            "Selected transcripts contain too many segments (maximum {})",
+            MAX_ANALYSIS_SEGMENTS
+        ));
+    }
+    if transcript_bytes > llm::grounded::MAX_ANALYSIS_TRANSCRIPT_BYTES {
+        return Err(format!(
+            "Selected transcripts are too large for bounded analysis (maximum {} MiB)",
+            llm::grounded::MAX_ANALYSIS_TRANSCRIPT_BYTES / (1024 * 1024)
+        ));
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod multi_recording_analysis_bounds_tests {
+    use super::*;
+
+    #[test]
+    fn recording_id_input_is_capped_before_database_access() {
+        let ids = (0..=MAX_ANALYSIS_RECORDING_IDS)
+            .map(|index| format!("recording-{index}"))
+            .collect();
+        let error = validate_and_deduplicate_analysis_recording_ids(ids)
+            .expect_err("oversized recording selection must fail");
+        assert!(error.contains("at most"));
+    }
+
+    #[test]
+    fn duplicate_recording_ids_are_removed_without_reordering() {
+        let ids = vec!["a".to_string(), "b".to_string(), "a".to_string()];
+        assert_eq!(
+            validate_and_deduplicate_analysis_recording_ids(ids).expect("valid ids"),
+            vec!["a".to_string(), "b".to_string()]
+        );
+    }
+
+    #[test]
+    fn aggregate_segment_and_text_limits_fail_closed() {
+        assert!(enforce_multi_recording_analysis_limits(
+            MAX_ANALYSIS_SEGMENTS + 1,
+            llm::grounded::MAX_ANALYSIS_TRANSCRIPT_BYTES
+        )
+        .is_err());
+        assert!(enforce_multi_recording_analysis_limits(
+            MAX_ANALYSIS_SEGMENTS,
+            llm::grounded::MAX_ANALYSIS_TRANSCRIPT_BYTES + 1
+        )
+        .is_err());
+    }
+}
 
 #[derive(Debug, Clone, PartialEq)]
 struct RecordingAnalysisSnapshot {
@@ -479,6 +615,8 @@ struct DictationOverlayState {
     provider_model_label: Option<String>,
     dictation_route_preference: Option<String>,
     dictation_resolved_hosting: Option<String>,
+    model_readiness: Option<String>,
+    capture_ready: bool,
 }
 
 impl Default for DictationOverlayState {
@@ -513,6 +651,8 @@ impl Default for DictationOverlayState {
             provider_model_label: None,
             dictation_route_preference: None,
             dictation_resolved_hosting: None,
+            model_readiness: None,
+            capture_ready: false,
         }
     }
 }
@@ -634,7 +774,6 @@ struct SecurityStatus {
     export_root: Option<String>,
 }
 
-#[cfg(not(feature = "desktop-shell"))]
 fn validate_shortcut_settings(_shortcuts: &settings::KeyboardShortcuts) -> Result<(), String> {
     Ok(())
 }
@@ -1111,7 +1250,10 @@ async fn smoke_test_cursor_insert_impl(
     }
 
     #[cfg(target_os = "macos")]
-    let target = sanitize_dictation_target(get_frontmost_app_name(), get_frontmost_app_bundle_id());
+    let target = {
+        let (app_name, app_bundle_id, _) = capture_hotkey_target_context(false);
+        (app_name, app_bundle_id)
+    };
 
     #[cfg(not(target_os = "macos"))]
     let target = (get_frontmost_app_name(), None);
@@ -1136,7 +1278,10 @@ async fn smoke_test_cursor_insert_impl(
 
 async fn capture_selected_text_for_playback_impl() -> Result<Option<String>, String> {
     #[cfg(target_os = "macos")]
-    let target = sanitize_dictation_target(get_frontmost_app_name(), get_frontmost_app_bundle_id());
+    let target = {
+        let (app_name, app_bundle_id, _) = capture_hotkey_target_context(false);
+        (app_name, app_bundle_id)
+    };
 
     #[cfg(target_os = "windows")]
     let target = (get_frontmost_app_name(), None);
@@ -1153,6 +1298,9 @@ async fn capture_selected_text_for_playback_impl() -> Result<Option<String>, Str
 }
 
 async fn open_recording_audio_impl(state: &AppState, recording_id: &str) -> Result<(), String> {
+    let runtime_audio_lease = state
+        .operation_coordinator
+        .try_acquire(operation_coordinator::OperationKind::RuntimeAudio)?;
     let recording = {
         let db = state.db.lock().await;
         db.get_recording(recording_id)
@@ -1166,7 +1314,11 @@ async fn open_recording_audio_impl(state: &AppState, recording_id: &str) -> Resu
 
     let resolved = resolve_recording_audio_bundle_for_runtime(state, recording_id).await?;
     open_path_in_default_app(&resolved.primary)?;
-    schedule_recording_audio_bundle_cleanup(resolved, Duration::from_secs(120));
+    schedule_recording_audio_bundle_cleanup(
+        resolved,
+        Duration::from_secs(120),
+        runtime_audio_lease,
+    );
 
     let mut db = state.db.lock().await;
     let details = serde_json::json!({
@@ -2257,10 +2409,10 @@ async fn list_elevenlabs_asr_models() -> Result<Vec<String>, String> {
         return Ok(vec!["scribe_v2".to_string()]);
     }
 
-    let parsed = response
-        .json::<ElevenLabsAsrModelsResponse>()
-        .await
-        .map_err(|e| e.to_string())?;
+    let parsed: ElevenLabsAsrModelsResponse =
+        llm::transport::read_json_body(response, llm::transport::MODEL_LIST_BODY_LIMIT)
+            .await
+            .map_err(|e| e.to_string())?;
 
     let mut models: Vec<String> = parsed
         .models
@@ -3153,7 +3305,10 @@ async fn transform_selected_text_impl(
         .ok_or_else(|| format!("Unsupported selected-text transform: {}", command_key))?;
 
     #[cfg(target_os = "macos")]
-    let target = sanitize_dictation_target(get_frontmost_app_name(), get_frontmost_app_bundle_id());
+    let target = {
+        let (app_name, app_bundle_id, _) = capture_hotkey_target_context(false);
+        (app_name, app_bundle_id)
+    };
 
     #[cfg(target_os = "windows")]
     let target = (get_frontmost_app_name(), None);
@@ -3419,6 +3574,7 @@ where
     (cleared, failed)
 }
 
+#[cfg(test)]
 fn canonicalize_or_create_absolute_path(raw_path: &Path, label: &str) -> Result<PathBuf, String> {
     if !raw_path.is_absolute() {
         return Err(format!(
@@ -3427,28 +3583,11 @@ fn canonicalize_or_create_absolute_path(raw_path: &Path, label: &str) -> Result<
             raw_path.display()
         ));
     }
-
-    if raw_path.exists() {
-        return raw_path.canonicalize().map_err(|e| {
-            format!(
-                "Failed to resolve {} '{}': {}",
-                label,
-                raw_path.display(),
-                e
-            )
-        });
-    }
-
     std::fs::create_dir_all(raw_path)
-        .map_err(|e| format!("Failed to create {} '{}': {}", label, raw_path.display(), e))?;
-    raw_path.canonicalize().map_err(|e| {
-        format!(
-            "Failed to resolve {} '{}': {}",
-            label,
-            raw_path.display(),
-            e
-        )
-    })
+        .map_err(|error| format!("Failed to create {}: {}", label, error))?;
+    raw_path
+        .canonicalize()
+        .map_err(|error| format!("Failed to resolve {}: {}", label, error))
 }
 
 fn canonicalize_absolute_path_without_creation(
@@ -3535,9 +3674,16 @@ async fn validate_export_target_path(state: &AppState, raw_target: &str) -> Resu
         ));
     }
 
-    let export_root = {
+    let (export_location_id, legacy_export_root) = {
         let settings_manager = state.settings_manager.lock().await;
-        settings_manager.settings().privacy.export_root.clone()
+        (
+            settings_manager
+                .settings()
+                .privacy
+                .export_location_id
+                .clone(),
+            settings_manager.settings().privacy.export_root.clone(),
+        )
     };
 
     let resolved_target = if candidate.exists() {
@@ -3559,15 +3705,25 @@ async fn validate_export_target_path(state: &AppState, raw_target: &str) -> Resu
         canonicalize_absolute_path_without_creation(&candidate, "target")?
     };
 
-    if let Some(root) = export_root {
-        let canonical_root = canonicalize_absolute_path_without_creation(&root, "exportRoot")?;
+    if let Some(location_id) = export_location_id {
+        let canonical_root = approved_locations::registry()
+            .map_err(|error| error.to_string())?
+            .resolve_filesystem(
+                &location_id,
+                approved_locations::ApprovedLocationPurpose::Export,
+            )
+            .map_err(|error| error.to_string())?;
         if !resolved_target.starts_with(&canonical_root) {
             return Err(format!(
-                "target '{}' is outside configured exportRoot '{}'",
+                "target '{}' is outside approved export folder '{}'",
                 resolved_target.display(),
                 canonical_root.display()
             ));
         }
+    } else if legacy_export_root.is_some() {
+        return Err(
+            "The legacy export folder is not approved. Choose it again in Settings".to_string(),
+        );
     } else {
         let parent_to_check = resolved_target
             .parent()
@@ -3622,6 +3778,20 @@ fn enforce_remote_asr_provider_policy(
         ));
     }
     Ok(())
+}
+
+async fn run_with_remote_processing_gate<T, F>(state: &AppState, work: F) -> Result<T, String>
+where
+    F: std::future::Future<Output = Result<T, String>>,
+{
+    let mut grant = state.remote_processing_gate.grant()?;
+    tokio::pin!(work);
+    tokio::select! {
+        result = &mut work => result,
+        _ = grant.cancelled() => Err(
+            "Remote processing was revoked while the provider request was active".to_string()
+        ),
+    }
 }
 
 fn missing_provider_secret_error(provider: AnalysisProvider) -> String {
@@ -3693,7 +3863,7 @@ async fn selected_analysis_runtime(
             provider,
             model: selected_model,
             remote_processing_enabled,
-            remote_processing_allowed: Arc::clone(&state.remote_processing_allowed),
+            remote_processing_gate: Arc::clone(&state.remote_processing_gate),
             api_key,
             timeout,
         },
@@ -4850,10 +5020,19 @@ fn build_dictation_text_ready_payload(
     copied: bool,
     paste_error: Option<&str>,
     fallback_message: Option<&str>,
+    acknowledgement_latency_ms: Option<u64>,
+    capture_ready_latency_ms: Option<u64>,
+    first_stable_partial_latency_ms: Option<u64>,
+    final_transcript_latency_ms: Option<u64>,
     startup_latency_ms: Option<u64>,
     transcription_latency_ms: u64,
     insert_latency_ms: Option<u64>,
     end_to_end_ms: u64,
+    acknowledged_at_ms: Option<i64>,
+    capture_ready_at_ms: Option<i64>,
+    first_stable_partial_at_ms: Option<i64>,
+    final_transcript_at_ms: i64,
+    insertion_completed_at_ms: i64,
     insertion_mode_used: &str,
     command_applied: Option<&str>,
     dictionary_applied_count: usize,
@@ -4896,10 +5075,19 @@ fn build_dictation_text_ready_payload(
         fallback_reason: result.fallback_reason.clone(),
         fallback_message: fallback_message.map(str::to_string),
         model_id: result.model_id.clone(),
+        acknowledgement_latency_ms,
+        capture_ready_latency_ms,
+        first_stable_partial_latency_ms,
+        final_transcript_latency_ms,
         startup_latency_ms,
         latency_ms: transcription_latency_ms,
         insert_latency_ms,
         end_to_end_ms,
+        acknowledged_at_ms,
+        capture_ready_at_ms,
+        first_stable_partial_at_ms,
+        final_transcript_at_ms,
+        insertion_completed_at_ms,
         insertion_mode_used: insertion_mode_used.to_string(),
         command_applied: command_applied.map(str::to_string),
         dictionary_applied_count,
@@ -5138,6 +5326,7 @@ fn generate_default_dictation_prompt(
 /// dictated/selected text in unambiguous delimiters with an explicit
 /// data-not-instructions note so instruction-like content inside the text
 /// cannot steer the model.
+#[cfg(test)]
 fn compose_prompt_with_delimited_user_text(system_prompt: &str, user_text: &str) -> String {
     format!(
         "{}\n\nThe text between the BEGIN USER TEXT and END USER TEXT markers below is the text \
@@ -5236,54 +5425,31 @@ async fn run_dictation_formatting_with_selected_provider(
         system_prompt
     };
 
-    match provider {
-        AnalysisProvider::Ollama => state
-            .ollama_client
-            .generate(
-                selected_model,
-                &compose_prompt_with_delimited_user_text(&system_prompt, transcript),
-            )
-            .await
-            .map_err(|e| e.to_string()),
-        AnalysisProvider::OllamaCloud => {
-            let api_key = provider_secret_for(provider)?;
-            llm::OllamaCloudClient::with_api_key(Some(api_key))
-                .generate(
-                    selected_model,
-                    &compose_prompt_with_delimited_user_text(&system_prompt, transcript),
-                )
-                .await
-                .map_err(|e| e.to_string())
-        }
-        AnalysisProvider::OpenAi => {
-            let api_key = provider_secret_for(provider)?;
-            llm::OpenAIClient::with_api_key(Some(api_key))
-                .generate(selected_model, transcript, Some(&system_prompt))
-                .await
-                .map_err(|e| e.to_string())
-        }
-        AnalysisProvider::Anthropic => {
-            let api_key = provider_secret_for(provider)?;
-            llm::AnthropicClient::with_api_key(Some(api_key))
-                .generate(selected_model, transcript, Some(&system_prompt))
-                .await
-                .map_err(|e| e.to_string())
-        }
-        AnalysisProvider::Gemini => {
-            let api_key = provider_secret_for(provider)?;
-            llm::GeminiClient::with_api_key(Some(api_key))
-                .generate(selected_model, transcript, Some(&system_prompt))
-                .await
-                .map_err(|e| e.to_string())
-        }
-        AnalysisProvider::DeepSeek => {
-            let api_key = provider_secret_for(provider)?;
-            llm::DeepSeekClient::with_api_key(Some(api_key))
-                .generate(selected_model, transcript, Some(&system_prompt))
-                .await
-                .map_err(|e| e.to_string())
-        }
-    }
+    let timeout = analysis_timeouts(provider).request;
+    let runtime = selected_analysis_runtime(
+        state,
+        settings::AiLane::Dictation,
+        Some(selected_model),
+        Some(timeout),
+    )
+    .await?;
+    let budget = runtime.model_budget(llm::CompletionPurpose::Generic);
+    runtime
+        .execute(
+            llm::CompletionPurpose::Generic,
+            Some(system_prompt),
+            transcript.to_string(),
+            llm::RequestOptions {
+                timeout,
+                max_output_tokens: budget.reserved_output_tokens,
+                temperature: Some(0.1),
+                json_schema: None,
+                requested_context_tokens: None,
+            },
+        )
+        .await
+        .map(|response| response.text)
+        .map_err(|error| error.to_string())
 }
 
 async fn run_custom_dictation_transform_with_selected_provider(
@@ -5306,54 +5472,31 @@ async fn run_custom_dictation_transform_with_selected_provider(
         .unwrap_or_else(|| provider.default_model())
         .to_string();
 
-    let raw_output = match provider {
-        AnalysisProvider::Ollama => state
-            .ollama_client
-            .generate(
-                &selected_model,
-                &compose_prompt_with_delimited_user_text(system_prompt, transcript),
-            )
-            .await
-            .map_err(|e| e.to_string())?,
-        AnalysisProvider::OllamaCloud => {
-            let api_key = provider_secret_for(provider)?;
-            llm::OllamaCloudClient::with_api_key(Some(api_key))
-                .generate(
-                    &selected_model,
-                    &compose_prompt_with_delimited_user_text(system_prompt, transcript),
-                )
-                .await
-                .map_err(|e| e.to_string())?
-        }
-        AnalysisProvider::OpenAi => {
-            let api_key = provider_secret_for(provider)?;
-            llm::OpenAIClient::with_api_key(Some(api_key))
-                .generate(&selected_model, transcript, Some(system_prompt))
-                .await
-                .map_err(|e| e.to_string())?
-        }
-        AnalysisProvider::Anthropic => {
-            let api_key = provider_secret_for(provider)?;
-            llm::AnthropicClient::with_api_key(Some(api_key))
-                .generate(&selected_model, transcript, Some(system_prompt))
-                .await
-                .map_err(|e| e.to_string())?
-        }
-        AnalysisProvider::Gemini => {
-            let api_key = provider_secret_for(provider)?;
-            llm::GeminiClient::with_api_key(Some(api_key))
-                .generate(&selected_model, transcript, Some(system_prompt))
-                .await
-                .map_err(|e| e.to_string())?
-        }
-        AnalysisProvider::DeepSeek => {
-            let api_key = provider_secret_for(provider)?;
-            llm::DeepSeekClient::with_api_key(Some(api_key))
-                .generate(&selected_model, transcript, Some(system_prompt))
-                .await
-                .map_err(|e| e.to_string())?
-        }
-    };
+    let timeout = analysis_timeouts(provider).request;
+    let runtime = selected_analysis_runtime(
+        state,
+        settings::AiLane::Dictation,
+        Some(&selected_model),
+        Some(timeout),
+    )
+    .await?;
+    let budget = runtime.model_budget(llm::CompletionPurpose::Generic);
+    let raw_output = runtime
+        .execute(
+            llm::CompletionPurpose::Generic,
+            Some(system_prompt.to_string()),
+            transcript.to_string(),
+            llm::RequestOptions {
+                timeout,
+                max_output_tokens: budget.reserved_output_tokens,
+                temperature: Some(0.1),
+                json_schema: None,
+                requested_context_tokens: None,
+            },
+        )
+        .await
+        .map_err(|error| error.to_string())?
+        .text;
 
     let cleaned = sanitize_dictation_output(raw_output.trim(), transcript);
     if cleaned.trim().is_empty() {
@@ -5414,9 +5557,13 @@ async fn build_security_status(state: &AppState) -> Result<SecurityStatus, Strin
         .as_settings_value()
         .to_string(),
         remote_processing_enabled: privacy.remote_processing_enabled,
-        export_root: privacy
-            .export_root
-            .map(|path| path.to_string_lossy().to_string()),
+        export_root: privacy.export_location_label.or_else(|| {
+            privacy.export_root.and_then(|path| {
+                path.file_name()
+                    .and_then(|value| value.to_str())
+                    .map(ToString::to_string)
+            })
+        }),
     })
 }
 
@@ -5685,6 +5832,9 @@ async fn migrate_storage_encryption(state: &AppState, password: &str) -> Result<
     if password.len() < 8 {
         return Err("Vault password must be at least 8 characters".to_string());
     }
+    let _operation_lease = state
+        .operation_coordinator
+        .try_acquire(operation_coordinator::OperationKind::VaultMigration)?;
     let _storage_guard = state.audio_storage_gate.lock().await;
 
     let (already_initialized, existing_salt) = {
@@ -6551,10 +6701,15 @@ async fn resolve_recording_audio_bundle_for_runtime(
 fn schedule_recording_audio_bundle_cleanup(
     bundle: recording_audio::ResolvedRecordingAudioBundle,
     delay: Duration,
+    mut runtime_audio_lease: operation_coordinator::OperationLease,
 ) {
     tokio::spawn(async move {
-        tokio::time::sleep(delay).await;
+        tokio::select! {
+            _ = tokio::time::sleep(delay) => {}
+            _ = runtime_audio_lease.cancelled() => {}
+        }
         drop(bundle);
+        drop(runtime_audio_lease);
     });
 }
 
@@ -6971,6 +7126,155 @@ mod recent_dictation_result_tests {
 mod tests {
     use super::*;
     use std::path::PathBuf;
+
+    fn meeting_options_from_json(value: serde_json::Value) -> models::RecordingOptions {
+        serde_json::from_value(value).expect("deserialize meeting options")
+    }
+
+    #[test]
+    fn start_recording_rejects_missing_or_invalid_privileged_admission() {
+        let missing = meeting_options_from_json(serde_json::json!({
+            "mic": true,
+            "systemAudio": false,
+            "projectId": "default",
+            "consentPromptShown": true
+        }));
+        assert!(authorize_meeting_capture_options(missing)
+            .expect_err("renderer consent must not authorize capture")
+            .contains("privileged Electron admission"));
+
+        let invalid = meeting_options_from_json(serde_json::json!({
+            "mic": true,
+            "systemAudio": false,
+            "projectId": "default",
+            "admissionNonce": "renderer-controlled"
+        }));
+        assert!(authorize_meeting_capture_options(invalid)
+            .expect_err("invalid nonce must fail")
+            .contains("invalid"));
+    }
+
+    #[test]
+    fn start_recording_derives_consent_from_privileged_admission() {
+        let options = meeting_options_from_json(serde_json::json!({
+            "mic": true,
+            "systemAudio": false,
+            "projectId": "default",
+            "consentPromptShown": false,
+            "admissionNonce": uuid::Uuid::new_v4().to_string()
+        }));
+
+        let authorized =
+            authorize_meeting_capture_options(options).expect("accept valid privileged admission");
+        assert!(authorized.consent_prompt_shown);
+        assert!(authorized.admission_nonce.is_none());
+    }
+
+    #[test]
+    fn duplicate_meeting_stop_is_idempotent_only_after_safe_finalization() {
+        for status in ["processing", "completed", "error"] {
+            assert!(meeting_stop_is_already_terminal_or_processing(status));
+        }
+        for status in ["recording", "preparing", "cancelled", "unknown"] {
+            assert!(!meeting_stop_is_already_terminal_or_processing(status));
+        }
+    }
+
+    #[test]
+    fn interrupted_meeting_recovery_only_offers_retry_for_valid_primary_audio() {
+        let recoverable = interrupted_recording_recovery_state(true);
+        assert_eq!(recoverable.phase, "recoverable");
+        assert!(recoverable
+            .lifecycle_message
+            .contains("available for retry"));
+
+        let unavailable = interrupted_recording_recovery_state(false);
+        assert_eq!(unavailable.phase, "error");
+        assert!(!unavailable
+            .lifecycle_message
+            .contains("available for retry"));
+        assert!(unavailable
+            .lifecycle_message
+            .contains("unavailable or invalid"));
+    }
+
+    #[test]
+    fn interrupted_meeting_recovery_hydrates_late_overlay_subscribers() {
+        let mut overlay = RecordingOverlayState::default();
+        hydrate_interrupted_recording_overlay(
+            &mut overlay,
+            "meeting-processing-at-quit",
+            interrupted_recording_recovery_state(true),
+        );
+
+        assert_eq!(overlay.phase, "recoverable");
+        assert_eq!(
+            overlay.recording_id.as_deref(),
+            Some("meeting-processing-at-quit")
+        );
+        assert!(overlay
+            .message
+            .as_deref()
+            .is_some_and(|message| message.contains("available for retry")));
+    }
+
+    #[test]
+    fn shutdown_interruption_leaves_processing_meeting_for_startup_recovery() {
+        assert!(meeting_pipeline_failure_should_be_persisted(false));
+        assert!(!meeting_pipeline_failure_should_be_persisted(true));
+    }
+
+    #[test]
+    fn export_root_renderer_settings_cannot_replace_privileged_identity() {
+        let current = settings::PrivacySettings {
+            export_root: Some(PathBuf::from("/legacy/private/export")),
+            export_location_id: Some("approved-location".to_string()),
+            export_location_label: Some("Exports".to_string()),
+            export_location_approved: true,
+            vault_initialized: true,
+            vault_salt: Some("sidecar-owned-salt".to_string()),
+            ..settings::PrivacySettings::default()
+        };
+
+        let mut incoming = settings::PrivacySettings {
+            export_root: Some(PathBuf::from("/Users/test/Library/LaunchAgents")),
+            export_location_id: Some("renderer-id".to_string()),
+            export_location_label: Some("Renderer label".to_string()),
+            export_location_approved: true,
+            vault_initialized: false,
+            vault_salt: Some("renderer-salt".to_string()),
+            ..settings::PrivacySettings::default()
+        };
+
+        preserve_privileged_privacy_settings(&current, &mut incoming);
+
+        assert_eq!(incoming.export_root, current.export_root);
+        assert_eq!(incoming.export_location_id, current.export_location_id);
+        assert_eq!(
+            incoming.export_location_label,
+            current.export_location_label
+        );
+        assert!(incoming.export_location_approved);
+        assert!(incoming.vault_initialized);
+        assert_eq!(incoming.vault_salt.as_deref(), Some("sidecar-owned-salt"));
+    }
+
+    #[test]
+    fn export_root_renderer_settings_hide_raw_path_and_vault_salt() {
+        let mut persisted = settings::Settings::default();
+        persisted.privacy.export_root = Some(PathBuf::from("/legacy/private/export"));
+        persisted.privacy.vault_salt = Some("secret-salt".to_string());
+
+        let visible = visible_settings_for_renderer(&persisted);
+
+        assert!(visible.privacy.export_root.is_none());
+        assert!(visible.privacy.vault_salt.is_none());
+        assert_eq!(
+            visible.privacy.export_location_label.as_deref(),
+            Some("export")
+        );
+        assert!(!visible.privacy.export_location_approved);
+    }
 
     #[test]
     fn lsappinfo_name_is_read_from_the_leading_quoted_token() {
@@ -7487,6 +7791,66 @@ mod tests {
     }
 
     #[test]
+    fn restored_settings_cannot_replace_vault_or_export_identity() {
+        let mut current = settings::PrivacySettings {
+            vault_initialized: true,
+            vault_salt: Some("current-vault-salt".to_string()),
+            export_root: Some(PathBuf::from("/approved/current")),
+            export_location_id: Some("approved-location-id".to_string()),
+            export_location_label: Some("Current exports".to_string()),
+            export_location_approved: true,
+            ..settings::PrivacySettings::default()
+        };
+        let mut restored = settings::PrivacySettings {
+            remote_processing_enabled: true,
+            vault_initialized: false,
+            vault_salt: Some("attacker-controlled-salt".to_string()),
+            export_root: Some(PathBuf::from("/Users/victim/.ssh")),
+            export_location_id: Some("unapproved-location".to_string()),
+            export_location_label: Some("Hidden target".to_string()),
+            export_location_approved: true,
+            ..settings::PrivacySettings::default()
+        };
+
+        preserve_privileged_privacy_after_restore(&mut restored, &current);
+
+        assert!(restored.remote_processing_enabled);
+        assert_eq!(restored.vault_initialized, current.vault_initialized);
+        assert_eq!(restored.vault_salt, current.vault_salt);
+        assert_eq!(restored.export_root, current.export_root);
+        assert_eq!(restored.export_location_id, current.export_location_id);
+        assert_eq!(
+            restored.export_location_label,
+            current.export_location_label
+        );
+        assert_eq!(
+            restored.export_location_approved,
+            current.export_location_approved
+        );
+
+        current.vault_initialized = false;
+        current.vault_salt = None;
+        preserve_privileged_privacy_after_restore(&mut restored, &current);
+        assert!(!restored.vault_initialized);
+        assert!(restored.vault_salt.is_none());
+    }
+
+    #[test]
+    fn benchmark_asr_providers_bytes_rejects_oversized_audio_before_conversion() {
+        let error = validate_benchmark_audio_len(MAX_BENCHMARK_AUDIO_BYTES + 1)
+            .expect_err("oversized benchmark must be rejected");
+        assert!(error.starts_with("SIDECAR_SIZE_LIMIT:"));
+        validate_benchmark_audio_len(MAX_BENCHMARK_AUDIO_BYTES)
+            .expect("audio at the exact limit must be accepted");
+
+        let parsed = benchmark_audio_bytes_from_params(&serde_json::json!({
+            "audioBytes": [0, 1, 127, 255]
+        }))
+        .expect("legitimate bounded benchmark bytes");
+        assert_eq!(parsed, vec![0, 1, 127, 255]);
+    }
+
+    #[test]
     fn reset_locks_runtime_vault_without_forgetting_database_encryption() {
         let mut vault_state = VaultRuntimeState {
             unlocked: true,
@@ -7515,6 +7879,10 @@ mod tests {
         ));
         assert!(!hands_free_monitor_should_run(
             false,
+            DictationSessionState::Primed
+        ));
+        assert!(!hands_free_monitor_should_run(
+            false,
             DictationSessionState::Recording
         ));
 
@@ -7529,6 +7897,10 @@ mod tests {
         ));
         assert!(!hands_free_monitor_should_run(
             true,
+            DictationSessionState::Primed
+        ));
+        assert!(!hands_free_monitor_should_run(
+            true,
             DictationSessionState::Recording
         ));
 
@@ -7540,27 +7912,15 @@ mod tests {
     }
 
     #[test]
-    fn dictation_preview_floor_clears_the_whisper_pad_threshold() {
-        // `transcribe_blocking` pads anything under 1.1s up to 1.1s with
-        // silence, so a preview floor at or below that decodes mostly synthetic
-        // silence and still pays for a full beam search. This is the regression
-        // that made a real 2.7s dictation run three blank decodes.
-        const {
-            assert!(DICTATION_PARTIAL_MIN_SECONDS > 1.1);
-        }
-
-        // The old 0.5s floor would have.
-        let old_floor_samples = (16_000.0_f32 * 0.5) as usize;
-        let new_floor_samples = (16_000.0_f32 * DICTATION_PARTIAL_MIN_SECONDS) as usize;
-        assert!(partial_should_decode(
-            old_floor_samples,
-            0,
-            old_floor_samples
-        ));
+    fn dictation_preview_allows_early_real_speech_without_timer_floor() {
+        let sample_rate = 16_000;
+        let early_speech = (sample_rate as f32 * DICTATION_PARTIAL_INITIAL_SECONDS) as u64;
+        assert!(partial_should_decode(early_speech, 0, sample_rate, 0));
         assert!(!partial_should_decode(
-            old_floor_samples,
+            early_speech.saturating_sub(1),
             0,
-            new_floor_samples
+            sample_rate,
+            10_000
         ));
     }
 
@@ -7573,21 +7933,77 @@ mod tests {
         // A tone well above the trim threshold is worth decoding.
         let loud: Vec<f32> = (0..16_000).map(|i| (i as f32 * 0.05).sin() * 0.5).collect();
         assert!(partial_snapshot_has_speech(&loud));
+
+        let mut old_speech_then_silence = loud;
+        old_speech_then_silence.extend(vec![0.0; 8_000]);
+        assert!(!partial_recent_window_has_speech(
+            &old_speech_then_silence,
+            16_000
+        ));
     }
 
     #[test]
-    fn partial_should_decode_gates_correctly() {
-        let min_samples = 8000; // 0.5 s at 16 kHz
+    fn partial_scheduler_coalesces_unchanged_audio_and_adapts_its_cadence() {
+        let sample_rate = 16_000;
+        let initial = (sample_rate as f32 * DICTATION_PARTIAL_INITIAL_SECONDS) as u64;
+        let growth = (sample_rate as f32 * DICTATION_PARTIAL_GROWTH_SECONDS) as u64;
 
-        // Too short: never decode, even if it grew.
-        assert!(!partial_should_decode(4000, 0, min_samples));
-        // Long enough but unchanged since last decode: skip.
-        assert!(!partial_should_decode(8000, 8000, min_samples));
-        // Grown and long enough: decode.
-        assert!(partial_should_decode(8000, 0, min_samples));
-        assert!(partial_should_decode(20000, 8000, min_samples));
-        // Exactly at the threshold counts as long enough.
-        assert!(partial_should_decode(min_samples, 0, min_samples));
+        assert!(partial_should_decode(initial, 0, sample_rate, 0));
+        assert!(!partial_should_decode(
+            initial,
+            initial,
+            sample_rate,
+            10_000
+        ));
+        assert!(!partial_should_decode(
+            initial + growth - 1,
+            initial,
+            sample_rate,
+            10_000
+        ));
+        assert!(!partial_should_decode(
+            initial + growth,
+            initial,
+            sample_rate,
+            DICTATION_PARTIAL_FAST_INTERVAL_MS - 1
+        ));
+        assert!(partial_should_decode(
+            initial + growth,
+            initial,
+            sample_rate,
+            DICTATION_PARTIAL_FAST_INTERVAL_MS
+        ));
+
+        let long_total = (sample_rate as f32 * DICTATION_PARTIAL_LONG_UTTERANCE_SECONDS) as u64;
+        assert!(!partial_should_decode(
+            long_total + growth,
+            long_total,
+            sample_rate,
+            DICTATION_PARTIAL_LONG_INTERVAL_MS - 1
+        ));
+        assert!(partial_should_decode(
+            long_total + growth,
+            long_total,
+            sample_rate,
+            DICTATION_PARTIAL_LONG_INTERVAL_MS
+        ));
+    }
+
+    #[test]
+    fn partial_scheduler_uses_absolute_watermark_after_sliding_window_fills() {
+        let sample_rate = 16_000;
+        let fixed_window_len = sample_rate as usize * 30;
+        let first_total = fixed_window_len as u64;
+        let growth = (sample_rate as f32 * DICTATION_PARTIAL_GROWTH_SECONDS) as u64;
+
+        // The vector length remains fixed at 30 seconds, but the absolute
+        // watermark grows, so a later legitimate utterance still decodes.
+        assert!(partial_should_decode(
+            first_total + growth,
+            first_total,
+            sample_rate,
+            DICTATION_PARTIAL_LONG_INTERVAL_MS
+        ));
     }
 
     #[test]
@@ -7703,6 +8119,30 @@ mod tests {
                 "Keep the saved follow-up".to_string(),
             ]
         );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn template_export_writer_rejects_a_linked_parent_without_creating_outside_it() {
+        use std::os::unix::fs::symlink;
+
+        let root = std::env::temp_dir().join(format!(
+            "plainsong-template-export-parent-link-test-{}",
+            uuid::Uuid::new_v4()
+        ));
+        let approved = root.join("approved");
+        let outside = root.join("outside");
+        std::fs::create_dir_all(&approved).expect("create approved root");
+        std::fs::create_dir_all(&outside).expect("create outside root");
+        let root = root.canonicalize().expect("canonical test root");
+        symlink(&outside, approved.join("linked")).expect("create linked export parent");
+        let destination = approved.join("linked/nested/template.md");
+
+        write_template_export(&destination, b"private meeting export")
+            .expect_err("the template export write path must reject a linked parent");
+
+        assert!(!outside.join("nested").exists());
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     #[test]
@@ -8417,6 +8857,7 @@ mod tests {
         for state in [
             DictationSessionState::Idle,
             DictationSessionState::Starting,
+            DictationSessionState::Primed,
             DictationSessionState::Recording,
         ] {
             let runtime_state = Mutex::new(state);
@@ -8784,6 +9225,80 @@ mod tests {
         // Retired values from an older settings file.
         assert!(dictation_keep_warm_enabled("short"));
         assert!(dictation_keep_warm_enabled("long"));
+    }
+
+    #[tokio::test]
+    async fn dictation_model_readiness_is_truthful_when_warmup_is_deferred_or_unneeded() {
+        assert_eq!(
+            prepare_dictation_model(asr::AsrProviderType::Whisper, "missing-test-model", "off")
+                .await
+                .expect("off defers local loading"),
+            DictationModelWarmState::Deferred
+        );
+        assert_eq!(
+            prepare_dictation_model(
+                asr::AsrProviderType::OpenAiCloud,
+                "gpt-4o-mini-transcribe",
+                "on",
+            )
+            .await
+            .expect("cloud routes have no local runtime to warm"),
+            DictationModelWarmState::NotRequired
+        );
+    }
+
+    #[tokio::test]
+    async fn failed_local_model_warmup_never_acknowledges_ready() {
+        let error = acknowledge_dictation_model_warmup("base.en", async {
+            Err("synthetic load failure".to_string())
+        })
+        .await
+        .expect_err("a failed local model cannot be reported ready");
+        assert!(error.contains("Could not prepare"));
+        assert!(error.contains("synthetic load failure"));
+    }
+
+    #[tokio::test]
+    async fn shutdown_waits_for_native_background_model_warmups_to_finish() {
+        let completed = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let completed_for_task = completed.clone();
+        let (started_tx, started_rx) = tokio::sync::oneshot::channel::<()>();
+        let task = tokio::spawn(async move {
+            let _ = tokio::task::spawn_blocking(move || {
+                let _ = started_tx.send(());
+                std::thread::sleep(Duration::from_millis(50));
+                completed_for_task.store(true, std::sync::atomic::Ordering::SeqCst);
+            })
+            .await;
+        });
+
+        started_rx.await.expect("blocking warmup started");
+        join_background_tasks(vec![task]).await;
+
+        assert!(completed.load(std::sync::atomic::Ordering::SeqCst));
+    }
+
+    #[tokio::test]
+    async fn duplicate_background_model_warmups_are_detected() {
+        let task = tokio::spawn(std::future::pending::<()>());
+        let tasks = vec![DictationModelPrewarmTask {
+            provider: asr::AsrProviderType::Whisper,
+            model_id: "base.en".to_string(),
+            handle: task,
+        }];
+
+        assert!(has_matching_model_prewarm(
+            &tasks,
+            asr::AsrProviderType::Whisper,
+            "base.en",
+        ));
+        assert!(!has_matching_model_prewarm(
+            &tasks,
+            asr::AsrProviderType::DistilWhisper,
+            "distil-large-v3.5",
+        ));
+
+        tasks[0].handle.abort();
     }
 
     /// `paste` and `inline` were separate names for what `auto` already did,
@@ -9410,10 +9925,19 @@ mod tests {
             false,
             None,
             Some("fallback message"),
+            Some(10),
+            Some(95),
+            Some(800),
+            Some(180),
             Some(95),
             180,
             Some(24),
             320,
+            Some(1_000),
+            Some(1_085),
+            Some(1_790),
+            2_000,
+            2_024,
             "paste",
             Some("newline"),
             1,
@@ -9434,9 +9958,18 @@ mod tests {
         let payload = serde_json::to_value(payload).expect("payload should serialize");
 
         for key in [
+            "acknowledgementLatencyMs",
+            "captureReadyLatencyMs",
+            "firstStablePartialLatencyMs",
+            "finalTranscriptLatencyMs",
             "startupLatencyMs",
             "endToEndMs",
             "insertLatencyMs",
+            "acknowledgedAtMs",
+            "captureReadyAtMs",
+            "firstStablePartialAtMs",
+            "finalTranscriptAtMs",
+            "insertionCompletedAtMs",
             "insertionModeUsed",
             "commandApplied",
             "snippetAppliedCount",
@@ -9488,10 +10021,19 @@ mod tests {
             false,
             None,
             None,
+            Some(10),
+            Some(95),
+            Some(800),
+            Some(180),
             Some(95),
             180,
             Some(24),
             320,
+            Some(1_000),
+            Some(1_085),
+            Some(1_790),
+            2_000,
+            2_024,
             "paste",
             Some("newline"),
             1,
@@ -10012,12 +10554,12 @@ mod tests {
 
         assert!(!transcription.use_shared_asr_selection);
         assert_eq!(transcription.dictation_provider, "macos_apple_speech");
-        assert_eq!(transcription.meeting_provider, "distil_whisper");
+        assert_eq!(transcription.meeting_provider, "parakeet");
 
         let (meeting_provider, meeting_model_id) =
             resolve_transcription_provider_and_model(&transcription, TranscriptionScope::Meeting);
-        assert_eq!(meeting_provider, asr::AsrProviderType::DistilWhisper);
-        assert_eq!(meeting_model_id, "distil-large-v3.5");
+        assert_eq!(meeting_provider, asr::AsrProviderType::Parakeet);
+        assert_eq!(meeting_model_id, "parakeet-tdt-0.6b-v3");
     }
 
     #[test]
@@ -10081,13 +10623,13 @@ mod tests {
         assert!(!transcription.use_shared_asr_selection);
         assert_eq!(transcription.dictation_provider, "whisper");
         assert_eq!(transcription.dictation_model_id, "base.en");
-        assert_eq!(transcription.meeting_provider, "distil_whisper");
-        assert_eq!(transcription.meeting_model_id, "distil-large-v3.5");
+        assert_eq!(transcription.meeting_provider, "parakeet");
+        assert_eq!(transcription.meeting_model_id, "parakeet-tdt-0.6b-v3");
 
         let (meeting_provider, meeting_model_id) =
             resolve_transcription_provider_and_model(&transcription, TranscriptionScope::Meeting);
-        assert_eq!(meeting_provider, asr::AsrProviderType::DistilWhisper);
-        assert_eq!(meeting_model_id, "distil-large-v3.5");
+        assert_eq!(meeting_provider, asr::AsrProviderType::Parakeet);
+        assert_eq!(meeting_model_id, "parakeet-tdt-0.6b-v3");
     }
 
     #[test]
@@ -10107,8 +10649,8 @@ mod tests {
 
         assert!(!transcription.use_shared_asr_selection);
         assert_eq!(transcription.dictation_provider, "moonshine");
-        assert_eq!(transcription.meeting_provider, "distil_whisper");
-        assert_eq!(transcription.meeting_model_id, "distil-large-v3.5");
+        assert_eq!(transcription.meeting_provider, "parakeet");
+        assert_eq!(transcription.meeting_model_id, "parakeet-tdt-0.6b-v3");
     }
 
     #[test]
@@ -10148,6 +10690,22 @@ mod tests {
     }
 
     #[test]
+    fn meeting_chunks_respect_fixed_whisper_input_windows() {
+        assert_eq!(
+            meeting_transcription_chunk_seconds(asr::AsrProviderType::DistilWhisper),
+            30
+        );
+        assert_eq!(
+            meeting_transcription_chunk_seconds(asr::AsrProviderType::WhisperCandle),
+            30
+        );
+        assert_eq!(
+            meeting_transcription_chunk_seconds(asr::AsrProviderType::Parakeet),
+            90
+        );
+    }
+
+    #[test]
     fn whisper_candle_is_dictation_only_for_meetings() {
         let mut transcription = settings::TranscriptionSettings {
             use_shared_asr_selection: true,
@@ -10165,13 +10723,13 @@ mod tests {
         assert!(!transcription.use_shared_asr_selection);
         assert_eq!(transcription.dictation_provider, "whisper_candle");
         assert_eq!(transcription.dictation_model_id, "whisper-large-v3-turbo");
-        assert_eq!(transcription.meeting_provider, "distil_whisper");
-        assert_eq!(transcription.meeting_model_id, "distil-large-v3.5");
+        assert_eq!(transcription.meeting_provider, "parakeet");
+        assert_eq!(transcription.meeting_model_id, "parakeet-tdt-0.6b-v3");
 
         let (meeting_provider, meeting_model_id) =
             resolve_transcription_provider_and_model(&transcription, TranscriptionScope::Meeting);
-        assert_eq!(meeting_provider, asr::AsrProviderType::DistilWhisper);
-        assert_eq!(meeting_model_id, "distil-large-v3.5");
+        assert_eq!(meeting_provider, asr::AsrProviderType::Parakeet);
+        assert_eq!(meeting_model_id, "parakeet-tdt-0.6b-v3");
     }
 
     fn provider_info_for_test(
@@ -10988,6 +11546,140 @@ fn normalize_dictation_insertion_mode(value: &str) -> &'static str {
 /// for the same (unconditional) behavior, so they read as on.
 fn dictation_keep_warm_enabled(value: &str) -> bool {
     value.trim() != "off"
+}
+
+fn dictation_provider_uses_local_model(provider: asr::AsrProviderType) -> bool {
+    matches!(
+        provider,
+        asr::AsrProviderType::Whisper
+            | asr::AsrProviderType::WhisperCandle
+            | asr::AsrProviderType::DistilWhisper
+            | asr::AsrProviderType::Moonshine
+            | asr::AsrProviderType::Parakeet
+    )
+}
+
+const DICTATION_MODEL_WARMUP_TIMEOUT_SECONDS: u64 = 45;
+
+struct DictationModelPrewarmTask {
+    provider: asr::AsrProviderType,
+    model_id: String,
+    handle: tokio::task::JoinHandle<()>,
+}
+
+#[cfg(not(test))]
+static DICTATION_MODEL_PREWARM_TASKS: LazyLock<StdMutex<Vec<DictationModelPrewarmTask>>> =
+    LazyLock::new(|| StdMutex::new(Vec::new()));
+
+fn has_matching_model_prewarm(
+    tasks: &[DictationModelPrewarmTask],
+    provider: asr::AsrProviderType,
+    model_id: &str,
+) -> bool {
+    tasks
+        .iter()
+        .any(|task| task.provider == provider && task.model_id == model_id)
+}
+
+async fn join_background_tasks(tasks: Vec<tokio::task::JoinHandle<()>>) {
+    // Local model initializers run through spawn_blocking. Aborting the async
+    // wrapper detaches that native work instead of cancelling it, which lets
+    // whisper.cpp keep touching global state while shutdown clears its caches.
+    // Join the bounded warmup (it already has a 45-second timeout) before any
+    // provider cache is released.
+    for task in tasks {
+        let _ = task.await;
+    }
+}
+
+async fn acknowledge_dictation_model_warmup<F>(
+    model_id: &str,
+    warmup: F,
+) -> Result<DictationModelWarmState, String>
+where
+    F: std::future::Future<Output = Result<(), String>>,
+{
+    match tokio::time::timeout(
+        Duration::from_secs(DICTATION_MODEL_WARMUP_TIMEOUT_SECONDS),
+        warmup,
+    )
+    .await
+    {
+        Ok(Ok(())) => Ok(DictationModelWarmState::Ready),
+        Ok(Err(error)) => Err(format!(
+            "Could not prepare the selected local dictation model '{}': {}",
+            model_id, error
+        )),
+        Err(_) => Err(format!(
+            "Preparing the selected local dictation model '{}' exceeded {} seconds. Choose a smaller local model or try again.",
+            model_id, DICTATION_MODEL_WARMUP_TIMEOUT_SECONDS
+        )),
+    }
+}
+
+async fn prepare_dictation_model(
+    provider: asr::AsrProviderType,
+    model_id: &str,
+    keep_warm: &str,
+) -> Result<DictationModelWarmState, String> {
+    if !dictation_provider_uses_local_model(provider) {
+        return Ok(DictationModelWarmState::NotRequired);
+    }
+    if !dictation_keep_warm_enabled(keep_warm) {
+        return Ok(DictationModelWarmState::Deferred);
+    }
+
+    let provider_runtime = asr::AsrProviderFactory::create_with_model(provider, Some(model_id));
+    acknowledge_dictation_model_warmup(model_id, async move {
+        provider_runtime
+            .prewarm()
+            .await
+            .map_err(|error| error.to_string())
+    })
+    .await
+}
+
+#[cfg(test)]
+fn schedule_dictation_model_prewarm(_transcription: &settings::TranscriptionSettings) {
+    // Unit tests exercise startup and settings persistence with the user's
+    // real Application Support directory. Loading a Metal model there makes
+    // the test binary own native global state and can abort in whisper.cpp's
+    // process teardown. Warmup behavior itself is tested deterministically
+    // through `acknowledge_dictation_model_warmup`.
+}
+
+#[cfg(not(test))]
+fn schedule_dictation_model_prewarm(transcription: &settings::TranscriptionSettings) {
+    if !dictation_keep_warm_enabled(&transcription.dictation_keep_warm) {
+        return;
+    }
+    let (provider, model_id) =
+        resolve_transcription_provider_and_model(transcription, TranscriptionScope::Dictation);
+    if !dictation_provider_uses_local_model(provider) {
+        return;
+    }
+    let keep_warm = transcription.dictation_keep_warm.clone();
+    let mut tasks = DICTATION_MODEL_PREWARM_TASKS
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    tasks.retain(|existing| !existing.handle.is_finished());
+    if has_matching_model_prewarm(&tasks, provider, &model_id) {
+        return;
+    }
+    let task_model_id = model_id.clone();
+    let task = tokio::spawn(async move {
+        if let Err(error) = prepare_dictation_model(provider, &task_model_id, &keep_warm).await {
+            // Startup remains usable so the readiness and model screens can
+            // explain or repair the model. A dictation start repeats this
+            // acknowledged handshake and surfaces the failure in the HUD.
+            tracing::warn!("Background dictation model warmup failed: {}", error);
+        }
+    });
+    tasks.push(DictationModelPrewarmTask {
+        provider,
+        model_id,
+        handle: task,
+    });
 }
 
 fn normalize_dictation_retention_preset(value: &str) -> &'static str {
@@ -12050,20 +12742,18 @@ async fn auto_name_meeting_recording(
     Ok(Some(new_title))
 }
 
-/// Shortest span the dictation live preview will hand to the decoder.
-///
-/// `WhisperProvider::transcribe` VAD-trims its input and then pads anything
-/// under 1.1s back up to 1.1s with silence, so a span below that floor is
-/// decoded as mostly synthetic silence and still pays for a full beam search.
-/// Measured on a real 2.7s packaged dictation with the previous 0.5s floor: the
-/// preview decoded three times, each trimming to ~330ms of speech, padding to
-/// 1100ms, and returning `[BLANK_AUDIO]` — 344ms of GPU for no output.
-///
-/// `streaming.rs` already learned this and set its own floor above the padding
-/// threshold (`MIN_CHUNK_SECONDS`); the dictation preview never got the same
-/// fix. It cannot borrow that 5s value — dictation previews have to feel live —
-/// so it sits just above the pad floor instead.
-const DICTATION_PARTIAL_MIN_SECONDS: f32 = 1.2;
+/// Adaptive live-preview scheduler. A real speech onset can produce its first
+/// preview well before the old fixed 1.2-second floor, while later work is
+/// gated on both new audio and a short cadence. The decoder itself is still
+/// sequential, so ticks coalesce onto the newest snapshot rather than forming
+/// a queue of stale partial jobs.
+const DICTATION_PARTIAL_POLL_MS: u64 = 120;
+const DICTATION_PARTIAL_INITIAL_SECONDS: f32 = 0.35;
+const DICTATION_PARTIAL_GROWTH_SECONDS: f32 = 0.28;
+const DICTATION_PARTIAL_FAST_INTERVAL_MS: u64 = 220;
+const DICTATION_PARTIAL_LONG_INTERVAL_MS: u64 = 420;
+const DICTATION_PARTIAL_LONG_UTTERANCE_SECONDS: f32 = 8.0;
+const DICTATION_PARTIAL_RECENT_SPEECH_SECONDS: f32 = 0.45;
 
 /// Speech energy the preview requires before decoding, in dBFS.
 ///
@@ -12072,14 +12762,37 @@ const DICTATION_PARTIAL_MIN_SECONDS: f32 = 1.2;
 /// `[BLANK_AUDIO]`.
 const DICTATION_PARTIAL_MIN_SPEECH_DB: f32 = -40.0;
 
-/// Decide whether a streaming-partial tick should run a decode.
-///
-/// UI-only: this gates the live preview decode, never the final transcription.
-/// A short *final* utterance must still be padded and decoded — dropping it
-/// would lose a real word — so this floor deliberately applies to the preview
-/// alone.
-fn partial_should_decode(snapshot_len: usize, last_len: usize, min_samples: usize) -> bool {
-    snapshot_len >= min_samples && snapshot_len != last_len
+fn partial_should_decode(
+    total_samples: u64,
+    last_decoded_total_samples: u64,
+    sample_rate: u32,
+    elapsed_since_decode_ms: u64,
+) -> bool {
+    let sample_rate = u64::from(sample_rate.max(1));
+    let initial_samples = (sample_rate as f32 * DICTATION_PARTIAL_INITIAL_SECONDS).round() as u64;
+    if total_samples < initial_samples {
+        return false;
+    }
+
+    let required_growth = if last_decoded_total_samples == 0 {
+        initial_samples
+    } else {
+        (sample_rate as f32 * DICTATION_PARTIAL_GROWTH_SECONDS).round() as u64
+    };
+    if total_samples.saturating_sub(last_decoded_total_samples) < required_growth {
+        return false;
+    }
+
+    if last_decoded_total_samples == 0 {
+        return true;
+    }
+    let utterance_seconds = total_samples as f32 / sample_rate as f32;
+    let interval_ms = if utterance_seconds >= DICTATION_PARTIAL_LONG_UTTERANCE_SECONDS {
+        DICTATION_PARTIAL_LONG_INTERVAL_MS
+    } else {
+        DICTATION_PARTIAL_FAST_INTERVAL_MS
+    };
+    elapsed_since_decode_ms >= interval_ms
 }
 
 /// Whether a preview snapshot carries enough speech to be worth decoding.
@@ -12092,6 +12805,13 @@ fn partial_snapshot_has_speech(samples: &[f32]) -> bool {
         return false;
     }
     crate::audio::vad::calculate_energy_db(samples) > DICTATION_PARTIAL_MIN_SPEECH_DB
+}
+
+fn partial_recent_window_has_speech(samples: &[f32], sample_rate: u32) -> bool {
+    let recent_samples =
+        (sample_rate.max(1) as f32 * DICTATION_PARTIAL_RECENT_SPEECH_SECONDS).round() as usize;
+    let start = samples.len().saturating_sub(recent_samples.max(1));
+    partial_snapshot_has_speech(&samples[start..])
 }
 
 fn mono_samples_to_wav_bytes(samples: &[f32], sample_rate: u32) -> Result<Vec<u8>, String> {
@@ -12467,6 +13187,16 @@ mod chunk_boundary_tests {
     }
 }
 
+fn meeting_transcription_chunk_seconds(provider: asr::AsrProviderType) -> usize {
+    match provider {
+        // Candle Whisper flattens every mel tensor into the architecture's
+        // fixed 30-second N_FRAMES input. Feeding a longer chunk silently
+        // drops the tail, so meeting chunking must enforce that same window.
+        asr::AsrProviderType::WhisperCandle | asr::AsrProviderType::DistilWhisper => 30,
+        _ => 90,
+    }
+}
+
 async fn transcribe_recording_in_chunks(
     app: &impl crate::sidecar_handle::AppEmitter,
     asr_manager: Arc<asr::AsrManager>,
@@ -12487,7 +13217,7 @@ async fn transcribe_recording_in_chunks(
         return Err("Chunked transcription requires a valid WAV sample rate/channels".to_string());
     }
 
-    let chunk_seconds = 90usize;
+    let chunk_seconds = meeting_transcription_chunk_seconds(provider);
     let chunk_size_frames =
         (spec.sample_rate as usize * chunk_seconds).max(spec.sample_rate as usize);
     let total_duration_seconds =
@@ -12904,94 +13634,6 @@ async fn transcribe_recording_in_chunks(
     })
 }
 
-async fn emit_streaming_transcription_previews(
-    app: &(impl crate::sidecar_handle::AppEmitter + Clone + 'static),
-    streaming_transcriber: Arc<streaming::StreamingTranscriber>,
-    recording_id: &str,
-    audio_path: &Path,
-    provider: asr::AsrProviderType,
-    selected_model_id: String,
-) -> Result<(), String> {
-    let mut reader = hound::WavReader::open(audio_path).map_err(|e| {
-        format!(
-            "Failed to open recording '{}' for streaming preview: {}",
-            audio_path.display(),
-            e
-        )
-    })?;
-    let spec = reader.spec();
-    if spec.sample_rate == 0 {
-        return Err("Streaming preview requires non-zero sample rate".to_string());
-    }
-    if spec.channels == 0 {
-        return Err("Streaming preview requires at least one channel".to_string());
-    }
-
-    let (session_id, mut result_rx) = streaming_transcriber
-        .start_session(provider, spec.sample_rate, selected_model_id)
-        .await
-        .map_err(|e| e.to_string())?;
-
-    let app_handle = app.clone();
-    let event_recording_id = recording_id.to_string();
-    let receiver_task = tokio::spawn(async move {
-        while let Some(result) = result_rx.recv().await {
-            if !should_emit_streaming_result(&result) {
-                continue;
-            }
-            app_handle.emit_event(
-                "recording-transcription-stream",
-                streaming_stream_event_payload(&event_recording_id, &result),
-            );
-        }
-    });
-
-    let preview_limit_frames = (STREAMING_PREVIEW_MAX_SECONDS * spec.sample_rate as f64) as usize;
-    let chunk_size = (spec.sample_rate / 2).max(1) as usize; // 0.5s chunks
-    let channel_count = spec.channels as usize;
-    let mut mono_chunk: Vec<f32> = Vec::with_capacity(chunk_size);
-    let mut channel_accumulator: Vec<f32> = Vec::with_capacity(channel_count);
-    let mut frames_processed = 0usize;
-
-    for sample in reader.samples::<i16>() {
-        let normalized = sample.map_err(|e| e.to_string())? as f32 / i16::MAX as f32;
-        channel_accumulator.push(normalized);
-        if channel_accumulator.len() < channel_count {
-            continue;
-        }
-
-        let mono = channel_accumulator.iter().copied().sum::<f32>() / channel_count as f32;
-        channel_accumulator.clear();
-        mono_chunk.push(mono);
-        frames_processed += 1;
-
-        if mono_chunk.len() >= chunk_size {
-            streaming_transcriber
-                .feed_audio(&session_id, &mono_chunk)
-                .await
-                .map_err(|e| e.to_string())?;
-            mono_chunk.clear();
-        }
-        if frames_processed >= preview_limit_frames {
-            break;
-        }
-    }
-
-    if !mono_chunk.is_empty() {
-        streaming_transcriber
-            .feed_audio(&session_id, &mono_chunk)
-            .await
-            .map_err(|e| e.to_string())?;
-    }
-
-    let _ = streaming_transcriber
-        .finalize_session(&session_id)
-        .await
-        .map_err(|e| e.to_string())?;
-    let _ = receiver_task.await;
-    Ok(())
-}
-
 fn default_source_speaker_name(speaker_id: &str) -> Option<&'static str> {
     match speaker_id.trim().to_ascii_lowercase().as_str() {
         "me" => Some("Me"),
@@ -13055,6 +13697,26 @@ async fn persist_benchmark_results(state: &AppState, results: &[asr::BenchmarkRe
             tracing::warn!("Failed to persist ASR benchmark entry: {}", error);
         }
     }
+}
+
+fn benchmark_audio_bytes_from_params(params: &serde_json::Value) -> Result<Vec<u8>, String> {
+    let audio_bytes = params
+        .get("audioBytes")
+        .and_then(serde_json::Value::as_array)
+        .ok_or("audioBytes must be an array of bytes")?;
+    validate_benchmark_audio_len(audio_bytes.len())?;
+    serde_json::from_value(serde_json::Value::Array(audio_bytes.clone()))
+        .map_err(|error| format!("Invalid benchmark audio bytes: {error}"))
+}
+
+fn validate_benchmark_audio_len(len: usize) -> Result<(), String> {
+    if len > MAX_BENCHMARK_AUDIO_BYTES {
+        return Err(format!(
+            "SIDECAR_SIZE_LIMIT: benchmark audio exceeds {} bytes.",
+            MAX_BENCHMARK_AUDIO_BYTES
+        ));
+    }
+    Ok(())
 }
 
 fn asr_provider_to_settings_value(provider: asr::AsrProviderType) -> &'static str {
@@ -13266,8 +13928,8 @@ fn preferred_meeting_provider_candidates(
         Some(dictation_provider),
     ];
     let local_defaults = [
-        Some(asr::AsrProviderType::DistilWhisper),
         Some(asr::AsrProviderType::Parakeet),
+        Some(asr::AsrProviderType::DistilWhisper),
     ];
 
     let mut ordered_candidates = Vec::new();
@@ -13311,7 +13973,7 @@ fn preferred_meeting_provider(
         return provider;
     }
 
-    asr::AsrProviderType::DistilWhisper
+    asr::AsrProviderType::Parakeet
 }
 
 fn preferred_dictation_provider_candidates(
@@ -14509,6 +15171,25 @@ fn persisted_template_analysis(
         action_items.insert(0, format!("[{}]", note));
     }
     (summary, action_items)
+}
+
+fn write_template_export(path: &std::path::Path, contents: &[u8]) -> Result<(), String> {
+    if let Some(parent) = path.parent() {
+        safe_fs::ensure_directory_without_links(parent).map_err(|error| {
+            format!(
+                "Failed to create export directory '{}': {}",
+                parent.display(),
+                error
+            )
+        })?;
+    }
+    safe_fs::atomic_write(path, contents).map_err(|error| {
+        format!(
+            "Failed to write template export '{}': {}",
+            path.display(),
+            error
+        )
+    })
 }
 
 fn template_format_extension(format: &export::templates::ExportFormat) -> &'static str {
@@ -17072,9 +17753,17 @@ async fn reload_settings_after_restore(
             .transcription
             .meeting_custom_prompt
             .clone();
+        let privileged_privacy = settings_manager.settings().privacy.clone();
         settings_manager
             .reload_from_disk()
             .map_err(|error| format!("Failed to reload restored settings: {error}"))?;
+        preserve_privileged_privacy_after_restore(
+            &mut settings_manager.settings_mut().privacy,
+            &privileged_privacy,
+        );
+        settings_manager.save().map_err(|error| {
+            format!("Failed to preserve privileged settings after restore: {error}")
+        })?;
         (
             previous_meeting_custom_prompt,
             settings_manager.settings().clone(),
@@ -17086,10 +17775,9 @@ async fn reload_settings_after_restore(
         &restored_settings.transcription,
     )
     .await;
-    state.remote_processing_allowed.store(
-        restored_settings.privacy.remote_processing_enabled,
-        Ordering::SeqCst,
-    );
+    state
+        .remote_processing_gate
+        .set_allowed(restored_settings.privacy.remote_processing_enabled);
     // Same reasoning as `save_settings`: a backup restore must not rewrite the
     // snapshot an in-flight dictation is about to be finalized against.
     {
@@ -17133,6 +17821,18 @@ async fn reload_settings_after_restore(
 
     emit_settings_changed(handle, &visible_settings);
     Ok(())
+}
+
+fn preserve_privileged_privacy_after_restore(
+    restored: &mut settings::PrivacySettings,
+    current: &settings::PrivacySettings,
+) {
+    restored.export_root = current.export_root.clone();
+    restored.export_location_id = current.export_location_id.clone();
+    restored.export_location_label = current.export_location_label.clone();
+    restored.export_location_approved = current.export_location_approved;
+    restored.vault_initialized = current.vault_initialized;
+    restored.vault_salt = current.vault_salt.clone();
 }
 
 fn open_database_with_vault_key_recovery(
@@ -17244,13 +17944,16 @@ pub async fn build_app_state() -> Result<AppState, String> {
     }
 
     let initial_dictation_options = dictation_options_from_settings(settings_manager.settings());
-    let remote_processing_allowed = Arc::new(AtomicBool::new(
+    let remote_processing_gate = Arc::new(remote_processing::RemoteProcessingGate::new(
         settings_manager
             .settings()
             .privacy
             .remote_processing_enabled,
     ));
     let asr_manager = Arc::new(asr::AsrManager::new());
+    asr_manager
+        .set_remote_processing_gate(Arc::clone(&remote_processing_gate))
+        .await;
     // Sync the manager from persisted settings right away: `AsrManager::new`
     // hardcodes silence-skip/MLX/platform-optimization defaults, and without
     // this the user's saved transcription settings only take effect after the
@@ -17260,6 +17963,7 @@ pub async fn build_app_state() -> Result<AppState, String> {
         &settings_manager.settings().transcription,
     )
     .await;
+    schedule_dictation_model_prewarm(&settings_manager.settings().transcription);
     let streaming_transcriber = Arc::new(streaming::StreamingTranscriber::new(Arc::clone(
         &asr_manager,
     )));
@@ -17271,7 +17975,7 @@ pub async fn build_app_state() -> Result<AppState, String> {
         ollama_client: Arc::new(llm::OllamaClient::new()),
         ollama_embedder: Arc::new(llm::OllamaEmbedder::new()),
         settings_manager: Arc::new(Mutex::new(settings_manager)),
-        remote_processing_allowed,
+        remote_processing_gate,
         backup_manager: Arc::new(Mutex::new(backup::BackupManager::default())),
         template_manager: Arc::new(export::templates::TemplateManager::new()),
         dictation_hotkey_active: Arc::new(Mutex::new(false)),
@@ -17292,8 +17996,18 @@ pub async fn build_app_state() -> Result<AppState, String> {
         recording_stream_stop: Arc::new(AtomicBool::new(false)),
         recording_templates: Arc::new(StdMutex::new(std::collections::HashMap::new())),
         active_meeting_audio_postprocessing: Arc::new(StdMutex::new(HashMap::new())),
+        operation_coordinator: operation_coordinator::OperationCoordinator::new(),
+        active_capture_lease: Arc::new(Mutex::new(None)),
+        sidecar_shutting_down: Arc::new(AtomicBool::new(false)),
         recent_dictation_results: Arc::new(StdMutex::new(Vec::new())),
     })
+}
+
+/// Mark the runtime as shutting down before any active background work is
+/// cancelled. Startup reconciliation owns the durable outcome for meetings
+/// that are still processing after this point.
+pub fn begin_sidecar_shutdown(state: &AppState) {
+    state.sidecar_shutting_down.store(true, Ordering::SeqCst);
 }
 
 /// Push persisted transcription settings into the live `AsrManager`.
@@ -17339,10 +18053,55 @@ fn emit_settings_changed(
     handle: &crate::sidecar_handle::SidecarHandle,
     settings: &settings::Settings,
 ) {
-    match serde_json::to_value(settings) {
+    match serde_json::to_value(visible_settings_for_renderer(settings)) {
         Ok(payload) => handle.emit_event("settings-changed", payload),
         Err(error) => tracing::warn!("Failed to serialize settings-changed payload: {}", error),
     }
+}
+
+fn visible_settings_for_renderer(settings: &settings::Settings) -> settings::Settings {
+    let mut visible = settings.clone();
+    let legacy_label = visible
+        .privacy
+        .export_root
+        .as_ref()
+        .and_then(|path| path.file_name())
+        .and_then(|value| value.to_str())
+        .map(ToString::to_string);
+    visible.privacy.export_root = None;
+    match visible.privacy.export_location_id.as_deref() {
+        Some(id) => {
+            let summary = approved_locations::registry()
+                .map(|registry| {
+                    registry.summary(id, approved_locations::ApprovedLocationPurpose::Export)
+                })
+                .unwrap_or(approved_locations::ApprovedLocationSummary {
+                    id: id.to_string(),
+                    label: "Location needs reselection".to_string(),
+                    approved: false,
+                });
+            visible.privacy.export_location_label = Some(summary.label);
+            visible.privacy.export_location_approved = summary.approved;
+        }
+        None => {
+            visible.privacy.export_location_label = legacy_label;
+            visible.privacy.export_location_approved = false;
+        }
+    }
+    visible.privacy.vault_salt = None;
+    visible
+}
+
+fn preserve_privileged_privacy_settings(
+    current: &settings::PrivacySettings,
+    incoming: &mut settings::PrivacySettings,
+) {
+    incoming.export_root = current.export_root.clone();
+    incoming.export_location_id = current.export_location_id.clone();
+    incoming.export_location_label = current.export_location_label.clone();
+    incoming.export_location_approved = current.export_location_approved;
+    incoming.vault_initialized = current.vault_initialized;
+    incoming.vault_salt = current.vault_salt.clone();
 }
 
 /// Sidecar-compatible save_settings: applies normalized settings and emits frontend events.
@@ -17351,6 +18110,12 @@ async fn save_settings_for_sidecar(
     handle: &crate::sidecar_handle::SidecarHandle,
     mut settings: settings::Settings,
 ) -> Result<serde_json::Value, String> {
+    let privileged_privacy = {
+        let manager = state.settings_manager.lock().await;
+        manager.settings().privacy.clone()
+    };
+    preserve_privileged_privacy_settings(&privileged_privacy, &mut settings.privacy);
+
     settings::normalize_loaded_audio_settings(&mut settings.audio);
     settings.ui.color_scheme = normalize_color_scheme_value(&settings.ui.color_scheme);
     settings.transcription.dictation_silence_timeout_seconds =
@@ -17465,26 +18230,25 @@ async fn save_settings_for_sidecar(
         settings.transcription.dictation_project_id = "inbox".to_string();
     }
 
-    if let Some(export_root) = settings.privacy.export_root.as_ref() {
-        let canonical = canonicalize_or_create_absolute_path(export_root, "exportRoot")?;
-        settings.privacy.export_root = Some(canonical);
-    }
-
     let meeting_custom_prompt_changed =
         normalize_optional_trimmed(settings.transcription.meeting_custom_prompt.clone())
             != normalize_optional_trimmed(previous_meeting_custom_prompt);
     let remote_processing_enabled = settings.privacy.remote_processing_enabled;
+    if !remote_processing_enabled {
+        state.remote_processing_gate.set_allowed(false);
+    }
 
     {
         let mut settings_manager = state.settings_manager.lock().await;
         *settings_manager.settings_mut() = settings;
         settings_manager.save().map_err(|e| e.to_string())?;
         emit_settings_changed(handle, settings_manager.settings());
+        schedule_dictation_model_prewarm(&settings_manager.settings().transcription);
     }
 
-    state
-        .remote_processing_allowed
-        .store(remote_processing_enabled, Ordering::SeqCst);
+    if remote_processing_enabled {
+        state.remote_processing_gate.set_allowed(true);
+    }
 
     if meeting_custom_prompt_changed {
         let mut db = state.db.lock().await;
@@ -17614,8 +18378,8 @@ async fn reset_app_state_for_sidecar(
 
     apply_transcription_settings_to_asr_manager(&state.asr_manager, &defaults.transcription).await;
     state
-        .remote_processing_allowed
-        .store(defaults.privacy.remote_processing_enabled, Ordering::SeqCst);
+        .remote_processing_gate
+        .set_allowed(defaults.privacy.remote_processing_enabled);
     state.asr_manager.clear_runtime_errors().await;
 
     {
@@ -17730,6 +18494,16 @@ pub async fn reconcile_hands_free_monitor_for_sidecar(
 /// Nothing in here awaits any more, but the signature stays `async` because
 /// `bin/sidecar.rs` awaits it across the library boundary.
 pub async fn shutdown_for_sidecar() {
+    #[cfg(not(test))]
+    {
+        let tasks = {
+            let mut tracked = DICTATION_MODEL_PREWARM_TASKS
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            tracked.drain(..).map(|task| task.handle).collect()
+        };
+        join_background_tasks(tasks).await;
+    }
     asr::whisper::clear_all_cached_models();
 }
 
@@ -17742,10 +18516,52 @@ pub async fn backfill_recording_audio_for_sidecar(state: &AppState) -> Result<us
         .map_err(|error| error.to_string())
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct InterruptedRecordingRecoveryState {
+    phase: &'static str,
+    status_message: &'static str,
+    lifecycle_message: &'static str,
+}
+
+fn interrupted_recording_recovery_state(
+    primary_audio_ready: bool,
+) -> InterruptedRecordingRecoveryState {
+    if primary_audio_ready {
+        InterruptedRecordingRecoveryState {
+            phase: "recoverable",
+            status_message: "Transcription was interrupted before it finished.",
+            lifecycle_message:
+                "This meeting was interrupted. Saved audio remains available for retry.",
+        }
+    } else {
+        InterruptedRecordingRecoveryState {
+            phase: "error",
+            status_message: "Transcription was interrupted and saved audio could not be validated.",
+            lifecycle_message:
+                "This meeting was interrupted, but its saved audio is unavailable or invalid. Re-transcription is not available.",
+        }
+    }
+}
+
+fn hydrate_interrupted_recording_overlay(
+    overlay: &mut RecordingOverlayState,
+    recording_id: &str,
+    recovery: InterruptedRecordingRecoveryState,
+) {
+    overlay.phase = recovery.phase.to_string();
+    overlay.dismissed = false;
+    overlay.recording_id = Some(recording_id.to_string());
+    overlay.started_at_ms = None;
+    overlay.system_audio_active = None;
+    overlay.consent_prompt_shown = None;
+    overlay.message = Some(recovery.lifecycle_message.to_string());
+}
+
 /// Mark recordings stranded in "recording"/"processing" by a previous crash
 /// or restart as errored, so the meetings list stops showing an eternal
-/// spinner and the user can use retranscribe_recording instead. Runs at
-/// sidecar startup, before any new work can legitimately hold those states.
+/// spinner. Valid saved audio is exposed as recoverable for retranscription;
+/// missing or invalid audio stays a truthful terminal error. Runs at sidecar
+/// startup, before any new work can legitimately hold those states.
 pub async fn reconcile_interrupted_recordings_for_sidecar(
     state: &AppState,
     handle: &crate::sidecar_handle::SidecarHandle,
@@ -17763,6 +18579,7 @@ pub async fn reconcile_interrupted_recordings_for_sidecar(
             }
         }
     };
+    let mut hydrated_overlay = false;
     for recording in recordings
         .into_iter()
         .filter(|recording| matches!(recording.status.as_str(), "recording" | "processing"))
@@ -17814,6 +18631,23 @@ pub async fn reconcile_interrupted_recordings_for_sidecar(
                 },
             )
             .collect::<Vec<_>>();
+        let primary_audio_ready =
+            bundle
+                .primary
+                .as_ref()
+                .is_some_and(|asset| match asset.protection {
+                    recording_audio::RecordingAudioProtection::Plaintext => {
+                        updates.iter().any(|(role, lifecycle, _, _)| {
+                            *role == recording_audio::RecordingAudioRole::Primary
+                                && *lifecycle == recording_audio::RecordingAudioLifecycle::Ready
+                        })
+                    }
+                    recording_audio::RecordingAudioProtection::Encrypted => {
+                        asset.lifecycle == recording_audio::RecordingAudioLifecycle::Ready
+                            && asset.path.is_file()
+                    }
+                });
+        let recovery = interrupted_recording_recovery_state(primary_audio_ready);
 
         let mut db = state.db.lock().await;
         if let Err(error) = db.set_audio_asset_validation_states(&recording.id, &updates, "error") {
@@ -17832,12 +18666,27 @@ pub async fn reconcile_interrupted_recordings_for_sidecar(
             })),
             "warning",
         );
+        drop(db);
         handle.emit_event(
             "recording-status-changed",
             serde_json::json!({
                 "recordingId": &recording.id, "status": "error",
-                "message": "Transcription was interrupted before it finished.",
+                "message": recovery.status_message,
                 "updatedAt": chrono::Utc::now().to_rfc3339(),
+            }),
+        );
+        if !hydrated_overlay {
+            if let Ok(mut overlay) = state.recording_overlay_state.lock() {
+                hydrate_interrupted_recording_overlay(&mut overlay, &recording.id, recovery);
+                hydrated_overlay = true;
+            }
+        }
+        handle.emit_event(
+            "meeting-recording-state-changed",
+            serde_json::json!({
+                "phase": recovery.phase,
+                "recordingId": &recording.id,
+                "message": recovery.lifecycle_message,
             }),
         );
     }
@@ -17994,7 +18843,11 @@ fn resolve_silero_vad_model_path(
 /// Full overlay sync and tray updates are handled by Electron.
 /// Handles captured under the audio lock to drive the UI-only streaming-partial
 /// task: (partial sample buffer, is-dictating flag, capture sample rate).
-type PartialTaskHandles = (Arc<std::sync::Mutex<Vec<f32>>>, Arc<AtomicBool>, u32);
+type PartialTaskHandles = (
+    Arc<std::sync::Mutex<audio::DictationPartialBuffer>>,
+    Arc<AtomicBool>,
+    u32,
+);
 
 async fn start_dictation_for_sidecar(
     state: &AppState,
@@ -18082,6 +18935,12 @@ async fn start_dictation_for_sidecar(
         tracker.started_at = Some(std::time::Instant::now());
         tracker.started_at_epoch_ms = Some(session_started_at_ms);
         tracker.startup_latency_ms = None;
+        tracker.acknowledged_at_epoch_ms = None;
+        tracker.capture_ready_at_epoch_ms = None;
+        tracker.first_stable_partial_at_epoch_ms = None;
+        tracker.stop_requested_at = None;
+        tracker.final_transcript_at_epoch_ms = None;
+        tracker.insertion_completed_at_epoch_ms = None;
         tracker.insertion_mode_at_start = Some(DictationInsertionMode::from_settings_value(
             &settings_snapshot.transcription.dictation_insertion_mode,
         ));
@@ -18090,7 +18949,50 @@ async fn start_dictation_for_sidecar(
         tracker.next_session_id
     };
 
-    let startup_result: Result<(), String> = async {
+    {
+        let mut active_options = state.dictation_start_options.lock().await;
+        *active_options = options.clone();
+    }
+
+    if let Ok(mut overlay) = state.dictation_overlay_state.lock() {
+        overlay.phase = "preparing".to_string();
+        overlay.dismissed = false;
+        overlay.session_id = Some(session_id);
+        overlay.started_at_ms = Some(session_started_at_ms);
+        overlay.message = Some("Loading the selected dictation model".to_string());
+        overlay.dictation_provider =
+            Some(asr_provider_to_settings_value(dictation_provider).to_string());
+        overlay.dictation_model_id = Some(dictation_model_id.clone());
+        overlay.model_readiness = Some("loading".to_string());
+        overlay.capture_ready = false;
+    }
+    handle.emit_event(
+        "dictation-state-changed",
+        serde_json::json!({
+            "phase": "preparing",
+            "sessionId": session_id,
+            "startedAtMs": session_started_at_ms,
+            "message": "Loading the selected dictation model",
+            "dictationProvider": asr_provider_to_settings_value(dictation_provider),
+            "dictationModelId": dictation_model_id,
+            "modelReadiness": "loading",
+            "captureReady": false,
+        }),
+    );
+    {
+        let mut tracker = state.dictation_session_tracker.lock().await;
+        if tracker.active_session_id == Some(session_id) {
+            tracker.acknowledged_at_epoch_ms = Some(chrono::Utc::now().timestamp_millis());
+        }
+    }
+    handle.window_command("show-dictation-overlay", &serde_json::Value::Null);
+
+    state
+        .asr_manager
+        .set_provider_model_id(dictation_provider, dictation_model_id.clone())
+        .await;
+
+    let startup_result: Result<DictationModelWarmState, String> = async {
         #[cfg(target_os = "macos")]
         ensure_microphone_permission(
             settings_snapshot
@@ -18114,57 +19016,70 @@ async fn start_dictation_for_sidecar(
             })?;
         }
 
-        Ok(())
+        prepare_dictation_model(
+            dictation_provider,
+            &dictation_model_id,
+            &settings_snapshot.transcription.dictation_keep_warm,
+        )
+        .await
     }
     .await;
 
-    if let Err(error) = startup_result {
-        {
-            let mut runtime_state = state.dictation_runtime_state.lock().await;
-            *runtime_state = DictationSessionState::Idle;
-        }
-        {
-            let mut tracker = state.dictation_session_tracker.lock().await;
-            if tracker.active_session_id == Some(session_id) {
-                tracker.active_session_id = None;
-                tracker.stopping_session_id = None;
+    let model_warm_state = match startup_result {
+        Ok(model_warm_state) => model_warm_state,
+        Err(error) => {
+            reset_dictation_session_runtime(
+                &state.dictation_runtime_state,
+                &state.dictation_session_tracker,
+                &state.dictation_start_options,
+            )
+            .await;
+            if let Ok(mut overlay) = state.dictation_overlay_state.lock() {
+                overlay.phase = "error".to_string();
+                overlay.message = Some(error.clone());
+                overlay.model_readiness = Some("error".to_string());
+                overlay.capture_ready = false;
             }
+            handle.emit_event(
+                "dictation-state-changed",
+                serde_json::json!({
+                    "phase": "error",
+                    "sessionId": session_id,
+                    "message": error,
+                    "modelReadiness": "error",
+                    "captureReady": false,
+                }),
+            );
+            return Err(error);
         }
-        handle.emit_event(
-            "dictation-state-changed",
-            serde_json::json!({
-                "phase": "error",
-                "sessionId": session_id,
-                "message": error,
-            }),
-        );
-        return Err(error);
-    }
+    };
 
-    state
-        .asr_manager
-        .set_provider_model_id(dictation_provider, dictation_model_id.clone())
-        .await;
-
-    // Pre-warm the resolved model into cache while the user is speaking, so the
-    // first utterance doesn't pay a cold model load inside stop_dictation.
-    // Detached and best-effort; never blocks the start path. Gated on the
-    // "Keep warm" setting, which this used to ignore — leaving the control
-    // claiming to do something it never did.
-    if dictation_keep_warm_enabled(&settings_snapshot.transcription.dictation_keep_warm) {
-        let prewarm_provider = asr::AsrProviderFactory::create_with_model(
-            dictation_provider,
-            Some(&dictation_model_id),
-        );
-        tokio::spawn(async move {
-            prewarm_provider.prewarm().await;
-        });
-    }
-
+    // A cancellation can land while a cold model is loading. Do not let the
+    // completed warmup resurrect that cancelled session and open the mic.
+    if state
+        .dictation_session_tracker
+        .lock()
+        .await
+        .active_session_id
+        != Some(session_id)
     {
-        let mut active_options = state.dictation_start_options.lock().await;
-        *active_options = options.clone();
+        return Err("Dictation start was cancelled".to_string());
     }
+    {
+        let mut runtime_state = state.dictation_runtime_state.lock().await;
+        if *runtime_state != DictationSessionState::Starting {
+            return Err("Dictation start was cancelled".to_string());
+        }
+        *runtime_state = DictationSessionState::Primed;
+    }
+
+    let primed_message = match model_warm_state {
+        DictationModelWarmState::Ready => "Local model ready. Opening the microphone.",
+        DictationModelWarmState::Deferred => {
+            "Opening the microphone. The local model will load after capture."
+        }
+        DictationModelWarmState::NotRequired => "Opening the microphone.",
+    };
 
     // Update overlay state so get_dictation_overlay_state returns the correct snapshot.
     if let Ok(mut overlay) = state.dictation_overlay_state.lock() {
@@ -18172,7 +19087,9 @@ async fn start_dictation_for_sidecar(
         overlay.dismissed = false;
         overlay.session_id = Some(session_id);
         overlay.started_at_ms = Some(session_started_at_ms);
-        overlay.message = Some("Preparing dictation".to_string());
+        overlay.message = Some(primed_message.to_string());
+        overlay.model_readiness = Some(model_warm_state.as_event_value().to_string());
+        overlay.capture_ready = false;
         overlay.dictation_provider =
             Some(asr_provider_to_settings_value(dictation_provider).to_string());
         overlay.dictation_model_id = Some(dictation_model_id.clone());
@@ -18207,7 +19124,7 @@ async fn start_dictation_for_sidecar(
             "phase": "primed",
             "sessionId": session_id,
             "startedAtMs": session_started_at_ms,
-            "message": "Preparing dictation",
+            "message": primed_message,
             "dictationProvider": asr_provider_to_settings_value(dictation_provider),
             "dictationModelId": dictation_model_id,
             "requestedProvider": requested_provider_value,
@@ -18228,6 +19145,8 @@ async fn start_dictation_for_sidecar(
             "providerModelLabel": options.provider_model_label,
             "dictationRoutePreference": options.route_preference,
             "dictationResolvedHosting": options.resolved_hosting,
+            "modelReadiness": model_warm_state.as_event_value(),
+            "captureReady": false,
         }),
     );
 
@@ -18287,6 +19206,9 @@ async fn start_dictation_for_sidecar(
 
     {
         let mut audio = state.audio_capture.lock().await;
+        if *state.dictation_runtime_state.lock().await != DictationSessionState::Primed {
+            return Err("Dictation start was cancelled".to_string());
+        }
         audio.set_streaming_partials_enabled(streaming_partials_enabled);
         match audio.start_dictation(
             preferred_input_device.as_ref(),
@@ -18341,11 +19263,11 @@ async fn start_dictation_for_sidecar(
         let model_id = dictation_model_id.clone();
         let handle = handle.clone();
         tokio::spawn(async move {
-            let min_samples = (sample_rate as f32 * DICTATION_PARTIAL_MIN_SECONDS) as usize;
-            let mut last_decoded_len: usize = 0;
+            let mut last_decoded_total_samples: u64 = 0;
+            let mut last_decode_finished_at = std::time::Instant::now();
             let mut last_emitted_text = String::new();
             while is_dictating.load(std::sync::atomic::Ordering::SeqCst) {
-                tokio::time::sleep(Duration::from_millis(700)).await;
+                tokio::time::sleep(Duration::from_millis(DICTATION_PARTIAL_POLL_MS)).await;
 
                 // Stop promptly if dictation ended or a NEWER session started.
                 // Gating on the monotonic active session id (not the shared
@@ -18356,23 +19278,33 @@ async fn start_dictation_for_sidecar(
                     break;
                 }
 
-                let snapshot = {
+                let (snapshot, total_samples) = {
                     partial_buffer
                         .lock()
-                        .map(|buffer| buffer.clone())
+                        .map(|buffer| (buffer.samples.clone(), buffer.total_samples))
                         .unwrap_or_default()
                 };
 
-                if !partial_should_decode(snapshot.len(), last_decoded_len, min_samples) {
+                if !partial_should_decode(
+                    total_samples,
+                    last_decoded_total_samples,
+                    sample_rate,
+                    last_decode_finished_at.elapsed().as_millis() as u64,
+                ) {
                     continue;
                 }
 
-                // Long enough, but silence trims back below the pad floor and
-                // lands in the same wasted decode. Skip without advancing
-                // `last_decoded_len`, so the next tick reconsiders the same
-                // audio once speech has actually arrived.
-                if !partial_snapshot_has_speech(&snapshot) {
+                // Only recent audio may trigger another preview. Re-checking
+                // the entire sliding window let old speech repeatedly decode
+                // while the user was currently silent.
+                if !partial_recent_window_has_speech(&snapshot, sample_rate) {
                     continue;
+                }
+
+                if !is_dictating.load(std::sync::atomic::Ordering::SeqCst)
+                    || session_tracker.lock().await.active_session_id != Some(session_id)
+                {
+                    break;
                 }
 
                 let bytes = match mono_samples_to_wav_bytes(&snapshot, sample_rate) {
@@ -18386,16 +19318,26 @@ async fn start_dictation_for_sidecar(
                 let result = asr_manager
                     .transcribe_bytes_for_dictation(provider, &bytes, Some(&model_id))
                     .await;
-                last_decoded_len = snapshot.len();
+                last_decoded_total_samples = total_samples;
+                last_decode_finished_at = std::time::Instant::now();
 
                 match result {
                     Ok(transcription) => {
                         let text = transcription.text.trim().to_string();
                         // Re-check the live session id right before emit: the
                         // decode may have outlived the session it was started for.
-                        let still_current =
-                            session_tracker.lock().await.active_session_id == Some(session_id);
+                        let still_current = is_dictating.load(std::sync::atomic::Ordering::SeqCst)
+                            && session_tracker.lock().await.active_session_id == Some(session_id);
                         if still_current && !text.is_empty() && text != last_emitted_text {
+                            {
+                                let mut tracker = session_tracker.lock().await;
+                                if tracker.active_session_id == Some(session_id)
+                                    && tracker.first_stable_partial_at_epoch_ms.is_none()
+                                {
+                                    tracker.first_stable_partial_at_epoch_ms =
+                                        Some(chrono::Utc::now().timestamp_millis());
+                                }
+                            }
                             handle.emit_event(
                                 "dictation-state-changed",
                                 serde_json::json!({
@@ -18425,6 +19367,7 @@ async fn start_dictation_for_sidecar(
             tracker.startup_latency_ms = tracker.started_at.map(|started_at| {
                 started_at.elapsed().as_millis().min(u128::from(u64::MAX)) as u64
             });
+            tracker.capture_ready_at_epoch_ms = Some(chrono::Utc::now().timestamp_millis());
         }
     }
 
@@ -18432,6 +19375,7 @@ async fn start_dictation_for_sidecar(
     if let Ok(mut overlay) = state.dictation_overlay_state.lock() {
         overlay.phase = "recording".to_string();
         overlay.message = Some("Listening".to_string());
+        overlay.capture_ready = true;
     }
 
     handle.emit_event(
@@ -18459,6 +19403,8 @@ async fn start_dictation_for_sidecar(
             "providerModelLabel": options.provider_model_label,
             "dictationRoutePreference": options.route_preference,
             "dictationResolvedHosting": options.resolved_hosting,
+            "modelReadiness": model_warm_state.as_event_value(),
+            "captureReady": true,
         }),
     );
 
@@ -18486,6 +19432,12 @@ async fn reset_dictation_session_runtime(
         tracker.started_at = None;
         tracker.started_at_epoch_ms = None;
         tracker.startup_latency_ms = None;
+        tracker.acknowledged_at_epoch_ms = None;
+        tracker.capture_ready_at_epoch_ms = None;
+        tracker.first_stable_partial_at_epoch_ms = None;
+        tracker.stop_requested_at = None;
+        tracker.final_transcript_at_epoch_ms = None;
+        tracker.insertion_completed_at_epoch_ms = None;
     }
     {
         let mut active_options = start_options.lock().await;
@@ -18623,7 +19575,8 @@ fn push_recent_dictation_result(
 fn resolve_recent_dictation_repaste_target() -> (Option<String>, Option<String>) {
     #[cfg(target_os = "macos")]
     {
-        sanitize_dictation_target(get_frontmost_app_name(), get_frontmost_app_bundle_id())
+        let (app_name, app_bundle_id, _) = capture_hotkey_target_context(false);
+        (app_name, app_bundle_id)
     }
 
     #[cfg(not(target_os = "macos"))]
@@ -18720,6 +19673,7 @@ async fn stop_dictation_for_sidecar(
         }
 
         tracker.stopping_session_id = Some(active);
+        tracker.stop_requested_at = Some(std::time::Instant::now());
         active
     };
     let dictation_options = state.dictation_start_options.lock().await.clone();
@@ -18887,6 +19841,15 @@ async fn stop_dictation_for_sidecar(
             )
             .await);
         }
+    };
+
+    let final_transcript_at_epoch_ms = chrono::Utc::now().timestamp_millis();
+    let final_transcript_latency_ms = {
+        let mut tracker = state.dictation_session_tracker.lock().await;
+        tracker.final_transcript_at_epoch_ms = Some(final_transcript_at_epoch_ms);
+        tracker
+            .stop_requested_at
+            .map(|stopped_at| stopped_at.elapsed().as_millis().min(u128::from(u64::MAX)) as u64)
     };
 
     let raw_transcribed_text =
@@ -19424,12 +20387,37 @@ async fn stop_dictation_for_sidecar(
         }
     }
 
-    let end_to_end_ms = {
-        let tracker = state.dictation_session_tracker.lock().await;
-        tracker
+    let insertion_completed_at_epoch_ms = chrono::Utc::now().timestamp_millis();
+    let (
+        acknowledgement_latency_ms,
+        capture_ready_latency_ms,
+        first_stable_partial_latency_ms,
+        acknowledged_at_epoch_ms,
+        capture_ready_at_epoch_ms,
+        first_stable_partial_at_epoch_ms,
+        end_to_end_ms,
+    ) = {
+        let mut tracker = state.dictation_session_tracker.lock().await;
+        tracker.insertion_completed_at_epoch_ms = Some(insertion_completed_at_epoch_ms);
+        let started_at_epoch_ms = tracker.started_at_epoch_ms;
+        let elapsed_from_start = |event_at: Option<i64>| {
+            started_at_epoch_ms
+                .zip(event_at)
+                .map(|(start, event)| event.saturating_sub(start).max(0) as u64)
+        };
+        let end_to_end_ms = tracker
             .started_at
             .map(|started_at| started_at.elapsed().as_millis().min(u128::from(u64::MAX)) as u64)
-            .unwrap_or(transcription_latency_ms + insert_latency_ms.unwrap_or(0))
+            .unwrap_or(transcription_latency_ms + insert_latency_ms.unwrap_or(0));
+        (
+            elapsed_from_start(tracker.acknowledged_at_epoch_ms),
+            elapsed_from_start(tracker.capture_ready_at_epoch_ms),
+            elapsed_from_start(tracker.first_stable_partial_at_epoch_ms),
+            tracker.acknowledged_at_epoch_ms,
+            tracker.capture_ready_at_epoch_ms,
+            tracker.first_stable_partial_at_epoch_ms,
+            end_to_end_ms,
+        )
     };
     let fallback_message = build_provider_fallback_message(
         transcription_result.requested_provider,
@@ -19504,6 +20492,10 @@ async fn stop_dictation_for_sidecar(
             "model_id": transcription_result.model_id,
             "route_preference": dictation_options.route_preference,
             "resolved_hosting": dictation_options.resolved_hosting,
+            "acknowledgement_latency_ms": acknowledgement_latency_ms,
+            "capture_ready_latency_ms": capture_ready_latency_ms,
+            "first_stable_partial_latency_ms": first_stable_partial_latency_ms,
+            "final_transcript_latency_ms": final_transcript_latency_ms,
             "startup_latency_ms": startup_latency_ms,
             "transcription_latency_ms": transcription_latency_ms,
             "insert_latency_ms": insert_latency_ms,
@@ -19554,10 +20546,19 @@ async fn stop_dictation_for_sidecar(
         copied,
         paste_error.as_deref(),
         fallback_message.as_deref(),
+        acknowledgement_latency_ms,
+        capture_ready_latency_ms,
+        first_stable_partial_latency_ms,
+        final_transcript_latency_ms,
         startup_latency_ms,
         transcription_latency_ms,
         insert_latency_ms,
         end_to_end_ms,
+        acknowledged_at_epoch_ms,
+        capture_ready_at_epoch_ms,
+        first_stable_partial_at_epoch_ms,
+        final_transcript_at_epoch_ms,
+        insertion_completed_at_epoch_ms,
         actual_insertion_mode.as_str(),
         command_applied.as_deref(),
         dictionary_applied_count,
@@ -19926,6 +20927,46 @@ async fn persist_recording_finalization_failure(
 
 /// Sidecar-compatible start_recording. Emits state events via SidecarHandle.
 /// Overlay show/hide and tray updates are handled by Electron.
+fn authorize_meeting_capture_options(
+    mut options: models::RecordingOptions,
+) -> Result<models::RecordingOptions, String> {
+    let nonce = options
+        .admission_nonce
+        .take()
+        .ok_or("Meeting capture requires privileged Electron admission")?;
+    uuid::Uuid::parse_str(&nonce)
+        .map_err(|_| "Meeting capture admission proof is invalid".to_string())?;
+    options.consent_prompt_shown = true;
+    Ok(options)
+}
+
+fn emit_meeting_lifecycle_phase(
+    state: &AppState,
+    handle: &crate::sidecar_handle::SidecarHandle,
+    phase: &str,
+    recording_id: &str,
+    message: Option<&str>,
+) {
+    if let Ok(mut overlay) = state.recording_overlay_state.lock() {
+        overlay.phase = phase.to_string();
+        overlay.dismissed = false;
+        overlay.recording_id = Some(recording_id.to_string());
+        overlay.message = message.map(str::to_string);
+    }
+    handle.emit_event(
+        "meeting-recording-state-changed",
+        serde_json::json!({
+            "phase": phase,
+            "recordingId": recording_id,
+            "message": message,
+        }),
+    );
+}
+
+fn meeting_stop_is_already_terminal_or_processing(status: &str) -> bool {
+    matches!(status, "processing" | "completed" | "error")
+}
+
 async fn start_recording_for_sidecar(
     state: &AppState,
     handle: &crate::sidecar_handle::SidecarHandle,
@@ -19937,6 +20978,9 @@ async fn start_recording_for_sidecar(
             return Err("Cannot start recording while dictation is active".to_string());
         }
     }
+    let capture_lease = state
+        .operation_coordinator
+        .try_acquire(operation_coordinator::OperationKind::Capture)?;
     let _storage_guard = state.audio_storage_gate.try_lock().map_err(|_| {
         "Recording storage is busy with encryption, backup, deletion, or retention. Try again shortly."
             .to_string()
@@ -20048,6 +21092,26 @@ async fn start_recording_for_sidecar(
             .map_err(|error| error.to_string())?;
     }
 
+    if let Ok(mut overlay) = state.recording_overlay_state.lock() {
+        overlay.phase = "preparing".to_string();
+        overlay.dismissed = false;
+        overlay.recording_id = Some(recording_id.clone());
+        overlay.started_at_ms = None;
+        overlay.system_audio_active = Some(options.system_audio);
+        overlay.consent_prompt_shown = Some(options.consent_prompt_shown);
+        overlay.message = Some("Preparing meeting audio capture".to_string());
+    }
+    handle.emit_event(
+        "meeting-recording-state-changed",
+        serde_json::json!({
+            "phase": "preparing",
+            "recordingId": &recording_id,
+            "systemAudioActive": options.system_audio,
+            "consentPromptShown": options.consent_prompt_shown,
+            "message": "Preparing meeting audio capture",
+        }),
+    );
+
     let preparation_result = {
         let mut audio = state.audio_capture.lock().await;
         audio.start_recording(plan.clone(), options.clone(), Some(handle.clone()))
@@ -20055,6 +21119,7 @@ async fn start_recording_for_sidecar(
     if let Err(error) = preparation_result {
         let message = error.to_string();
         persist_or_rollback_recording_activation_failure(state, &plan, &message).await;
+        emit_meeting_lifecycle_phase(state, handle, "error", &recording_id, Some(&message));
         return Err(message);
     }
 
@@ -20068,6 +21133,7 @@ async fn start_recording_for_sidecar(
             audio.abort_prepared_recording();
         }
         persist_or_rollback_recording_activation_failure(state, &plan, &message).await;
+        emit_meeting_lifecycle_phase(state, handle, "error", &recording_id, Some(&message));
         return Err(message);
     }
 
@@ -20078,8 +21144,10 @@ async fn start_recording_for_sidecar(
     if let Err(error) = activation_result {
         let message = error.to_string();
         persist_or_rollback_recording_activation_failure(state, &plan, &message).await;
+        emit_meeting_lifecycle_phase(state, handle, "error", &recording_id, Some(&message));
         return Err(message);
     }
+    *state.active_capture_lease.lock().await = Some((recording_id.clone(), capture_lease));
 
     let maybe_stream_info = {
         let audio = state.audio_capture.lock().await;
@@ -20231,7 +21299,90 @@ async fn stop_recording_for_sidecar(
     handle: &crate::sidecar_handle::SidecarHandle,
     recording_id: String,
 ) -> Result<(), String> {
+    let result = stop_recording_for_sidecar_inner(state, handle, recording_id.clone()).await;
+    if let Err(message) = result.as_ref() {
+        let owns_stopping_lifecycle = state
+            .recording_overlay_state
+            .lock()
+            .map(|overlay| {
+                overlay.recording_id.as_deref() == Some(recording_id.as_str())
+                    && overlay.phase == "stopping"
+            })
+            .unwrap_or(false);
+        if owns_stopping_lifecycle {
+            {
+                let mut db = state.db.lock().await;
+                let _ = db.update_recording_status(&recording_id, "error");
+            }
+            handle.emit_event(
+                "recording-status-changed",
+                serde_json::json!({
+                    "recordingId": &recording_id,
+                    "status": "error",
+                    "message": message,
+                    "updatedAt": chrono::Utc::now().to_rfc3339(),
+                }),
+            );
+            emit_meeting_lifecycle_phase(
+                state.as_ref(),
+                handle,
+                "error",
+                &recording_id,
+                Some(message),
+            );
+        }
+    }
+    result
+}
+
+async fn stop_recording_for_sidecar_inner(
+    state: &Arc<AppState>,
+    handle: &crate::sidecar_handle::SidecarHandle,
+    recording_id: String,
+) -> Result<(), String> {
     tracing::info!("stop_recording_for_sidecar called for {}", recording_id);
+    let _capture_lease = {
+        let mut active_capture = state.active_capture_lease.lock().await;
+        match active_capture.as_ref() {
+            Some((active_recording_id, _)) if active_recording_id == &recording_id => {}
+            Some((active_recording_id, _)) => {
+                return Err(format!(
+                    "Cannot stop recording '{}'; '{}' is the active capture.",
+                    recording_id, active_recording_id
+                ));
+            }
+            None => {
+                drop(active_capture);
+                let stored_status = {
+                    let db = state.db.lock().await;
+                    db.get_recording(&recording_id)
+                        .map_err(|error| error.to_string())?
+                        .map(|recording| recording.status)
+                };
+                return match stored_status.as_deref() {
+                    Some(status) if meeting_stop_is_already_terminal_or_processing(status) => {
+                        Ok(())
+                    }
+                    Some(_) => Err(format!(
+                        "Meeting '{}' is not an active capture and is not safely finalized.",
+                        recording_id
+                    )),
+                    None => Err(format!("Meeting '{}' was not found.", recording_id)),
+                };
+            }
+        }
+        active_capture
+            .take()
+            .expect("active capture was checked before take")
+            .1
+    };
+    emit_meeting_lifecycle_phase(
+        state.as_ref(),
+        handle,
+        "stopping",
+        &recording_id,
+        Some("Stopping capture and saving audio"),
+    );
     let _storage_guard = state.audio_storage_gate.lock().await;
 
     state.recording_stream_stop.store(true, Ordering::SeqCst);
@@ -20245,19 +21396,6 @@ async fn stop_recording_for_sidecar(
         Err(error) => {
             let message = format!("Failed to finalize recording: {error}");
             persist_recording_finalization_failure(state.as_ref(), &recording_id, &message).await;
-            handle.emit_event(
-                "recording-status-changed",
-                serde_json::json!({
-                    "recordingId": &recording_id, "status": "error",
-                    "message": &message, "updatedAt": chrono::Utc::now().to_rfc3339(),
-                }),
-            );
-            handle.emit_event(
-                "meeting-recording-state-changed",
-                serde_json::json!({
-                    "phase": "error", "recordingId": &recording_id, "message": &message,
-                }),
-            );
             return Err(message);
         }
     };
@@ -20359,30 +21497,17 @@ async fn stop_recording_for_sidecar(
                     "warning",
                 );
                 drop(db);
-                handle.emit_event(
-                    "recording-status-changed",
-                    serde_json::json!({
-                        "recordingId": &recording_id,
-                        "status": "error",
-                        "message": &message,
-                        "updatedAt": chrono::Utc::now().to_rfc3339(),
-                    }),
-                );
                 return Err(message);
             }
         }
     }
 
-    // Update overlay state to transcribing so get_recording_overlay_state returns the correct phase.
-    if let Ok(mut overlay) = state.recording_overlay_state.lock() {
-        overlay.phase = "transcribing".to_string();
-    }
-
-    handle.emit_event(
-        "meeting-recording-state-changed",
-        serde_json::json!({
-            "phase": "transcribing", "recordingId": &recording_id,
-        }),
+    emit_meeting_lifecycle_phase(
+        state.as_ref(),
+        handle,
+        "processing",
+        &recording_id,
+        Some("Processing transcript"),
     );
     handle.emit_event(
         "recording-status-changed",
@@ -20399,9 +21524,13 @@ async fn stop_recording_for_sidecar(
     let pipeline_state = Arc::clone(state);
     let pipeline_handle = handle.clone();
     let pipeline_recording_id = recording_id.clone();
-    let audio_postprocessing_guard = MeetingAudioPostprocessingGuard::new(
+    let postprocessing_lease = state
+        .operation_coordinator
+        .try_acquire(operation_coordinator::OperationKind::PostProcess)?;
+    let audio_postprocessing_guard = MeetingAudioPostprocessingGuard::coordinated(
         Arc::clone(&state.active_meeting_audio_postprocessing),
         &recording_id,
+        postprocessing_lease,
     );
     tokio::spawn(async move {
         run_meeting_transcription_pipeline(
@@ -20426,9 +21555,11 @@ fn emit_completed_after_persistence(
     Ok(())
 }
 
-/// Full post-capture meeting transcription pipeline: streaming preview,
-/// chunked ASR (source-aware when the per-source WAVs exist), diarization,
-/// persistence, storage policy, auto-naming, auto-analysis, and retention.
+/// Full post-capture meeting transcription pipeline: chunked ASR (source-aware
+/// when the per-source WAVs exist), diarization, persistence, storage policy,
+/// auto-naming, auto-analysis, and retention. The chunked transcription itself
+/// emits progressive transcript events, so starting a second preview decoder
+/// here would duplicate local model work and delay the durable transcript.
 /// Shared by the stop-recording flow and the `retranscribe_recording`
 /// command.
 async fn run_meeting_transcription_pipeline(
@@ -20467,13 +21598,12 @@ async fn run_meeting_transcription_pipeline(
                         "updatedAt": chrono::Utc::now().to_rfc3339(),
                     }),
                 );
-                handle_clone.emit_event(
-                    "meeting-recording-state-changed",
-                    serde_json::json!({
-                        "phase": "error",
-                        "recordingId": &recording_id_clone,
-                        "message": &error,
-                    }),
+                emit_meeting_lifecycle_phase(
+                    state_clone.as_ref(),
+                    &handle_clone,
+                    "error",
+                    &recording_id_clone,
+                    Some(&error),
                 );
                 return;
             }
@@ -20523,8 +21653,15 @@ async fn run_meeting_transcription_pipeline(
                 "recording-status-changed",
                 serde_json::json!({
                     "recordingId": &recording_id_clone, "status": "error",
-                    "message": error, "updatedAt": chrono::Utc::now().to_rfc3339(),
+                    "message": &error, "updatedAt": chrono::Utc::now().to_rfc3339(),
                 }),
+            );
+            emit_meeting_lifecycle_phase(
+                state_clone.as_ref(),
+                &handle_clone,
+                "error",
+                &recording_id_clone,
+                Some(&error),
             );
             return;
         }
@@ -20532,30 +21669,6 @@ async fn run_meeting_transcription_pipeline(
     if let Some(warning) = meeting_route_warning {
         tracing::warn!("{}", warning);
     }
-
-    let preview_handle = handle_clone.clone();
-    let preview_path = path.clone();
-    let preview_rec_id = recording_id_clone.clone();
-    let preview_transcriber = Arc::clone(&state_clone.streaming_transcriber);
-    let preview_model_id = meeting_model_id.clone();
-    let preview_task = tokio::spawn(async move {
-        if let Err(error) = emit_streaming_transcription_previews(
-            &preview_handle,
-            preview_transcriber,
-            &preview_rec_id,
-            &preview_path,
-            meeting_provider,
-            preview_model_id,
-        )
-        .await
-        {
-            tracing::warn!(
-                "Streaming preview failed for recording {}: {}",
-                preview_rec_id,
-                error
-            );
-        }
-    });
 
     match transcribe_meeting_recording(
         &handle_clone,
@@ -20660,6 +21773,14 @@ async fn run_meeting_transcription_pipeline(
                         "message": format!("Failed to finalize transcript: {}", error),
                         "updatedAt": chrono::Utc::now().to_rfc3339(),
                     }),
+                );
+                let message = format!("Failed to finalize transcript: {error}");
+                emit_meeting_lifecycle_phase(
+                    state_clone.as_ref(),
+                    &handle_clone,
+                    "error",
+                    &recording_id_clone,
+                    Some(&message),
                 );
                 return;
             }
@@ -20971,6 +22092,15 @@ async fn run_meeting_transcription_pipeline(
             }
         }
         Err(e) => {
+            if !meeting_pipeline_failure_should_be_persisted(
+                state_clone.sidecar_shutting_down.load(Ordering::SeqCst),
+            ) {
+                tracing::info!(
+                    "Meeting transcription for {} was interrupted by sidecar shutdown; leaving it processing for startup recovery",
+                    recording_id_clone
+                );
+                return;
+            }
             tracing::error!("Failed to transcribe {}: {}", recording_id_clone, e);
             {
                 let mut db = state_clone.db.lock().await;
@@ -20997,37 +22127,65 @@ async fn run_meeting_transcription_pipeline(
                 "recording-status-changed",
                 serde_json::json!({
                     "recordingId": &recording_id_clone, "status": "error",
-                    "message": e, "updatedAt": chrono::Utc::now().to_rfc3339(),
+                    "message": &e, "updatedAt": chrono::Utc::now().to_rfc3339(),
                 }),
+            );
+            emit_meeting_lifecycle_phase(
+                state_clone.as_ref(),
+                &handle_clone,
+                "error",
+                &recording_id_clone,
+                Some(&e),
             );
         }
     }
 
-    preview_task.abort();
-    // Only clear the shared overlay state (and broadcast "idle") when it
-    // still belongs to this pipeline's recording: `retranscribe_recording`
-    // can run this pipeline while a *different* meeting records live (e.g.
-    // one started after the retranscribe was spawned), and unconditionally
-    // resetting here would flip that live session's UI to idle while capture
-    // keeps writing audio.
-    let owns_overlay = state_clone
-        .recording_overlay_state
-        .lock()
-        .map(|mut overlay| {
-            if overlay.recording_id.as_deref() == Some(recording_id_clone.as_str()) {
-                *overlay = RecordingOverlayState::default();
-                true
-            } else {
-                false
-            }
-        })
-        .unwrap_or(false);
-    if owns_overlay {
+    let terminal_phase = {
+        let db = state_clone.db.lock().await;
+        match db.get_recording(&recording_id_clone) {
+            Ok(Some(recording)) if recording.status == "completed" => "ready",
+            _ => "error",
+        }
+    };
+    // A retranscription may finish while another meeting is capturing. Update
+    // only the overlay that still owns this identifier, and retain the terminal
+    // state so a renderer remount cannot erase recovery information.
+    let terminal_update =
+        state_clone
+            .recording_overlay_state
+            .lock()
+            .ok()
+            .and_then(|mut overlay| {
+                if overlay.recording_id.as_deref() != Some(recording_id_clone.as_str()) {
+                    return None;
+                }
+                if overlay.phase == terminal_phase {
+                    return None;
+                }
+                overlay.phase = terminal_phase.to_string();
+                overlay.dismissed = false;
+                overlay.message = Some(if terminal_phase == "ready" {
+                    "Meeting transcript is ready".to_string()
+                } else {
+                    "Meeting processing failed. Open Meetings to retry from saved audio."
+                        .to_string()
+                });
+                Some(overlay.message.clone())
+            });
+    if let Some(message) = terminal_update {
         handle_clone.emit_event(
             "meeting-recording-state-changed",
-            serde_json::json!({ "phase": "idle" }),
+            serde_json::json!({
+                "phase": terminal_phase,
+                "recordingId": &recording_id_clone,
+                "message": message,
+            }),
         );
     }
+}
+
+fn meeting_pipeline_failure_should_be_persisted(sidecar_shutting_down: bool) -> bool {
+    !sidecar_shutting_down
 }
 
 /// Dispatch a JSON-RPC command by name to the appropriate handler function.
@@ -21081,8 +22239,8 @@ pub async fn dispatch_command(
                     handle.emit_event(
                         "dictation-state-changed",
                         serde_json::json!({
-                            "phase": "idle",
-                            "error": error,
+                            "phase": "error",
+                            "message": error,
                         }),
                     );
                     Err(error)
@@ -21166,6 +22324,10 @@ pub async fn dispatch_command(
             })
             .await
             .map_err(|error| format!("System-audio verification failed: {error}"))?;
+            handle.emit_event(
+                "readiness-invalidated",
+                serde_json::json!({ "reason": "system_audio_test_completed" }),
+            );
             serde_json::to_value(result).map_err(|error| error.to_string())
         }
 
@@ -21178,6 +22340,7 @@ pub async fn dispatch_command(
                     .unwrap_or(serde_json::Value::Object(Default::default())),
             )
             .map_err(|e| e.to_string())?;
+            let options = authorize_meeting_capture_options(options)?;
             let recording_id = start_recording_for_sidecar(state.as_ref(), handle, options).await?;
             Ok(serde_json::json!({ "recordingId": recording_id }))
         }
@@ -21325,6 +22488,10 @@ pub async fn dispatch_command(
                 _ => {}
             }
 
+            let postprocessing_lease = state
+                .operation_coordinator
+                .try_acquire(operation_coordinator::OperationKind::PostProcess)?;
+
             {
                 let mut db = state.db.lock().await;
                 db.update_recording_status(&recording_id, "processing")
@@ -21346,9 +22513,10 @@ pub async fn dispatch_command(
                 }),
             );
 
-            let audio_postprocessing_guard = MeetingAudioPostprocessingGuard::new(
+            let audio_postprocessing_guard = MeetingAudioPostprocessingGuard::coordinated(
                 Arc::clone(&state.active_meeting_audio_postprocessing),
                 &recording_id,
+                postprocessing_lease,
             );
             tokio::spawn(run_meeting_transcription_pipeline(
                 Arc::clone(state),
@@ -21648,23 +22816,28 @@ pub async fn dispatch_command(
             serde_json::to_value(result).map_err(|e| e.to_string())
         }
         "list_ollama_cloud_models" => {
-            let result = list_ollama_cloud_models().await?;
+            let result =
+                run_with_remote_processing_gate(state.as_ref(), list_ollama_cloud_models()).await?;
             serde_json::to_value(result).map_err(|e| e.to_string())
         }
         "list_openai_models" => {
-            let result = list_openai_models().await?;
+            let result =
+                run_with_remote_processing_gate(state.as_ref(), list_openai_models()).await?;
             serde_json::to_value(result).map_err(|e| e.to_string())
         }
         "list_anthropic_models" => {
-            let result = list_anthropic_models().await?;
+            let result =
+                run_with_remote_processing_gate(state.as_ref(), list_anthropic_models()).await?;
             serde_json::to_value(result).map_err(|e| e.to_string())
         }
         "list_gemini_models" => {
-            let result = list_gemini_models().await?;
+            let result =
+                run_with_remote_processing_gate(state.as_ref(), list_gemini_models()).await?;
             serde_json::to_value(result).map_err(|e| e.to_string())
         }
         "list_deepseek_models" => {
-            let result = list_deepseek_models().await?;
+            let result =
+                run_with_remote_processing_gate(state.as_ref(), list_deepseek_models()).await?;
             serde_json::to_value(result).map_err(|e| e.to_string())
         }
         "get_embedding_status" => {
@@ -21729,19 +22902,19 @@ pub async fn dispatch_command(
             serde_json::to_value(result).map_err(|e| e.to_string())
         }
         "analyze_recordings" => {
-            let recording_ids: Vec<String> = serde_json::from_value(params["recordingIds"].clone())
-                .map_err(|e| e.to_string())?;
+            let recording_ids = validate_and_deduplicate_analysis_recording_ids(
+                serde_json::from_value(params["recordingIds"].clone())
+                    .map_err(|e| e.to_string())?,
+            )?;
             let query: String =
                 serde_json::from_value(params["query"].clone()).map_err(|e| e.to_string())?;
             let model: Option<String> = serde_json::from_value(params["model"].clone())
                 .ok()
                 .flatten();
-            if recording_ids.is_empty() {
-                return Err("recordingIds cannot be empty".to_string());
-            }
             let context_segments = {
                 let db = state.db.lock().await;
                 let mut segments = Vec::new();
+                let mut transcript_bytes = 0usize;
                 for recording_id in &recording_ids {
                     let Some(transcript) = db
                         .get_transcript(recording_id)
@@ -21749,15 +22922,22 @@ pub async fn dispatch_command(
                     else {
                         continue;
                     };
-                    segments.extend(transcript.segments.into_iter().map(|segment| {
-                        AnalysisContextSegment {
+                    for segment in transcript.segments {
+                        transcript_bytes = transcript_bytes
+                            .checked_add(segment.text.len())
+                            .ok_or("Selected transcripts exceed analysis limits")?;
+                        enforce_multi_recording_analysis_limits(
+                            segments.len() + 1,
+                            transcript_bytes,
+                        )?;
+                        segments.push(AnalysisContextSegment {
                             recording_id: recording_id.clone(),
                             segment_id: segment.id,
                             text: segment.text,
                             start_time: segment.start_time,
                             end_time: segment.end_time,
-                        }
-                    }));
+                        });
+                    }
                 }
                 segments
             };
@@ -22227,8 +23407,7 @@ pub async fn dispatch_command(
             serde_json::to_value(results).map_err(|e| e.to_string())
         }
         "benchmark_asr_providers_bytes" => {
-            let audio_bytes: Vec<u8> =
-                serde_json::from_value(params["audioBytes"].clone()).map_err(|e| e.to_string())?;
+            let audio_bytes = benchmark_audio_bytes_from_params(&params)?;
             let temp_path = std::env::temp_dir()
                 .join(format!("nautilus-benchmark-{}.wav", uuid::Uuid::new_v4()));
             std::fs::write(&temp_path, &audio_bytes).map_err(|e| e.to_string())?;
@@ -22393,11 +23572,14 @@ pub async fn dispatch_command(
             Ok(serde_json::Value::Null)
         }
         "list_openai_asr_models" => {
-            let result = list_openai_asr_models().await?;
+            let result =
+                run_with_remote_processing_gate(state.as_ref(), list_openai_asr_models()).await?;
             serde_json::to_value(result).map_err(|e| e.to_string())
         }
         "list_elevenlabs_asr_models" => {
-            let result = list_elevenlabs_asr_models().await?;
+            let result =
+                run_with_remote_processing_gate(state.as_ref(), list_elevenlabs_asr_models())
+                    .await?;
             serde_json::to_value(result).map_err(|e| e.to_string())
         }
         "download_whisper_model" => {
@@ -22534,6 +23716,9 @@ pub async fn dispatch_command(
                     .unwrap_or(serde_json::Value::Null),
             )
             .map_err(|e| e.to_string())?;
+            let postprocessing_lease = state
+                .operation_coordinator
+                .try_acquire(operation_coordinator::OperationKind::PostProcess)?;
             let (
                 _audio_postprocessing_guard,
                 mut transcript,
@@ -22554,9 +23739,10 @@ pub async fn dispatch_command(
                 let existing_aliases = db
                     .get_speaker_aliases(&recording_id)
                     .map_err(|e| e.to_string())?;
-                let guard = MeetingAudioPostprocessingGuard::new(
+                let guard = MeetingAudioPostprocessingGuard::coordinated(
                     Arc::clone(&state.active_meeting_audio_postprocessing),
                     &recording_id,
+                    postprocessing_lease,
                 );
                 (guard, transcript, revision, existing_aliases)
             };
@@ -22961,8 +24147,35 @@ pub async fn dispatch_command(
         // ── Settings ──────────────────────────────────────────────────────────
         "get_settings" => {
             let settings_manager = state.settings_manager.lock().await;
-            let result = settings_manager.settings().clone();
+            let result = visible_settings_for_renderer(settings_manager.settings());
             serde_json::to_value(result).map_err(|e| e.to_string())
+        }
+        "approve_export_location_privileged" => {
+            let raw_path = params
+                .get("path")
+                .and_then(|value| value.as_str())
+                .ok_or("Native export-folder approval requires a path")?;
+            let registry = approved_locations::registry().map_err(|error| error.to_string())?;
+            let summary = registry
+                .approve_filesystem(
+                    approved_locations::ApprovedLocationPurpose::Export,
+                    Path::new(raw_path),
+                )
+                .map_err(|error| error.to_string())?;
+            let mut settings_manager = state.settings_manager.lock().await;
+            settings_manager.settings_mut().privacy.export_root = None;
+            settings_manager.settings_mut().privacy.export_location_id = Some(summary.id.clone());
+            settings_manager
+                .settings_mut()
+                .privacy
+                .export_location_label = Some(summary.label.clone());
+            settings_manager
+                .settings_mut()
+                .privacy
+                .export_location_approved = true;
+            settings_manager.save().map_err(|error| error.to_string())?;
+            emit_settings_changed(handle, settings_manager.settings());
+            serde_json::to_value(summary).map_err(|error| error.to_string())
         }
         "apply_global_shortcuts_now" => Ok(serde_json::json!({
             "ok": true,
@@ -23411,14 +24624,26 @@ pub async fn dispatch_command(
         }
         "request_dictation_permissions" => {
             let result = request_dictation_permissions_impl(state.as_ref()).await?;
+            handle.emit_event(
+                "readiness-invalidated",
+                serde_json::json!({ "reason": "dictation_permissions_requested" }),
+            );
             serde_json::to_value(result).map_err(|e| e.to_string())
         }
         "request_apple_speech_permission" => {
             let result = request_apple_speech_permission_impl(state.as_ref()).await?;
+            handle.emit_event(
+                "readiness-invalidated",
+                serde_json::json!({ "reason": "speech_permission_requested" }),
+            );
             serde_json::to_value(result).map_err(|e| e.to_string())
         }
         "repair_cursor_insert_permissions" => {
             let result = repair_cursor_insert_permissions_impl(state.as_ref()).await?;
+            handle.emit_event(
+                "readiness-invalidated",
+                serde_json::json!({ "reason": "cursor_permissions_repaired" }),
+            );
             serde_json::to_value(result).map_err(|e| e.to_string())
         }
         "open_permission_settings" => {
@@ -23580,6 +24805,9 @@ pub async fn dispatch_command(
             Ok(serde_json::Value::Null)
         }
         "lock_vault" => {
+            let _operation_lease = state
+                .operation_coordinator
+                .try_acquire(operation_coordinator::OperationKind::VaultLock)?;
             let _storage_guard = state.audio_storage_gate.try_lock().map_err(|_| {
                 "Cannot lock the vault while recording audio storage is busy".to_string()
             })?;
@@ -23599,6 +24827,13 @@ pub async fn dispatch_command(
                         .to_string(),
                 );
             }
+            // Runtime playback leases are revoked by the coordinator. Give
+            // their cleanup tasks a chance to drop file guards, then remove
+            // any remaining app-owned plaintext before zeroizing the key.
+            tokio::task::yield_now().await;
+            let data_dir = crate::paths::data_dir()
+                .ok_or("Could not find data directory while locking the vault")?;
+            remove_decrypted_runtime_audio_directory(&data_dir)?;
             let mut vault_state = state.vault_state.lock().await;
             if let Some(mut key) = vault_state.recording_key.take() {
                 use zeroize::Zeroize;
@@ -23818,22 +25053,7 @@ pub async fn dispatch_command(
                 }
             };
             let export_path_buf = std::path::PathBuf::from(&export_path);
-            if let Some(parent) = export_path_buf.parent() {
-                std::fs::create_dir_all(parent).map_err(|e| {
-                    format!(
-                        "Failed to create export directory '{}': {}",
-                        parent.display(),
-                        e
-                    )
-                })?;
-            }
-            std::fs::write(&export_path_buf, rendered).map_err(|e| {
-                format!(
-                    "Failed to write template export '{}': {}",
-                    export_path_buf.display(),
-                    e
-                )
-            })?;
+            write_template_export(&export_path_buf, rendered.as_bytes())?;
             let mut db = state.db.lock().await;
             let _ = db.log_audit_event("recording_template_exported", Some(serde_json::json!({"recording_id": &recording_id, "template_id": &template_id, "target": &export_path})), "info");
             serde_json::to_value(models::TemplateExportResponse {
@@ -23848,7 +25068,7 @@ pub async fn dispatch_command(
         // ── Backup ──────────────────────────────────────────────────
         "get_backup_config" => {
             let bm = state.backup_manager.lock().await;
-            serde_json::to_value(bm.config().clone()).map_err(|e| e.to_string())
+            serde_json::to_value(bm.config_for_renderer()).map_err(|e| e.to_string())
         }
         "save_backup_config" => {
             let config: backup::BackupConfig = serde_json::from_value(
@@ -23859,8 +25079,98 @@ pub async fn dispatch_command(
             )
             .map_err(|e| e.to_string())?;
             let mut bm = state.backup_manager.lock().await;
-            bm.set_config(config).map_err(|e| e.to_string())?;
+            bm.set_config_from_renderer(config)
+                .map_err(|e| e.to_string())?;
             Ok(serde_json::Value::Null)
+        }
+        "approve_backup_location_privileged" => {
+            let raw_path = params
+                .get("path")
+                .and_then(|value| value.as_str())
+                .ok_or("Native backup-folder approval requires a path")?;
+            let registry = approved_locations::registry().map_err(|error| error.to_string())?;
+            let summary = registry
+                .approve_filesystem(
+                    approved_locations::ApprovedLocationPurpose::Backup,
+                    Path::new(raw_path),
+                )
+                .map_err(|error| error.to_string())?;
+            let canonical = registry
+                .resolve_filesystem(
+                    &summary.id,
+                    approved_locations::ApprovedLocationPurpose::Backup,
+                )
+                .map_err(|error| error.to_string())?;
+            let mut bm = state.backup_manager.lock().await;
+            bm.set_backup_location_privileged(&summary, canonical)
+                .map_err(|error| error.to_string())?;
+            serde_json::to_value(summary).map_err(|error| error.to_string())
+        }
+        "approve_cloud_backup_location_privileged" => {
+            let provider: backup::CloudProvider = serde_json::from_value(
+                params
+                    .get("provider")
+                    .cloned()
+                    .ok_or("Cloud destination approval requires a provider")?,
+            )
+            .map_err(|error| error.to_string())?;
+            let registry = approved_locations::registry().map_err(|error| error.to_string())?;
+            let (summary, remote_name, cloud_folder, icloud_path) = match provider {
+                backup::CloudProvider::ICloud => {
+                    let raw_path = params
+                        .get("path")
+                        .and_then(|value| value.as_str())
+                        .ok_or("iCloud approval requires a picker-selected folder")?;
+                    let cloud_folder = params
+                        .get("folder")
+                        .and_then(|value| value.as_str())
+                        .unwrap_or("PlainsongBackups")
+                        .trim()
+                        .to_string();
+                    let summary = registry
+                        .approve_filesystem(
+                            approved_locations::ApprovedLocationPurpose::CloudBackup,
+                            Path::new(raw_path),
+                        )
+                        .map_err(|error| error.to_string())?;
+                    let canonical = registry
+                        .resolve_filesystem(
+                            &summary.id,
+                            approved_locations::ApprovedLocationPurpose::CloudBackup,
+                        )
+                        .map_err(|error| error.to_string())?;
+                    (summary, None, cloud_folder, Some(canonical))
+                }
+                backup::CloudProvider::GoogleDrive
+                | backup::CloudProvider::OneDrive
+                | backup::CloudProvider::ProtonDrive => {
+                    let remote_name = params
+                        .get("remoteName")
+                        .and_then(|value| value.as_str())
+                        .ok_or("rclone approval requires a remote name")?;
+                    let cloud_folder = params
+                        .get("folder")
+                        .and_then(|value| value.as_str())
+                        .ok_or("rclone approval requires a folder")?;
+                    let summary = registry
+                        .approve_rclone(remote_name, cloud_folder)
+                        .map_err(|error| error.to_string())?;
+                    let (remote_name, cloud_folder) = registry
+                        .resolve_rclone(&summary.id)
+                        .map_err(|error| error.to_string())?;
+                    (summary, Some(remote_name), cloud_folder, None)
+                }
+            };
+            let mut bm = state.backup_manager.lock().await;
+            bm.set_cloud_location_privileged(
+                provider,
+                &summary,
+                remote_name,
+                cloud_folder,
+                icloud_path,
+            )
+            .map_err(|error| error.to_string())?;
+            serde_json::to_value(summary).map_err(|error| error.to_string())
         }
         "list_backups" => {
             let bm = state.backup_manager.lock().await;
@@ -23868,6 +25178,9 @@ pub async fn dispatch_command(
             serde_json::to_value(backups).map_err(|e| e.to_string())
         }
         "create_backup_default" => {
+            let _operation_lease = state
+                .operation_coordinator
+                .try_acquire(operation_coordinator::OperationKind::Backup)?;
             let _storage_guard = state.audio_storage_gate.lock().await;
             if state.audio_capture.lock().await.is_recording() {
                 return Err("Stop the active meeting before creating a full backup".to_string());
@@ -23903,6 +25216,9 @@ pub async fn dispatch_command(
             serde_json::to_value(info).map_err(|e| e.to_string())
         }
         "create_settings_backup_default" => {
+            let _operation_lease = state
+                .operation_coordinator
+                .try_acquire(operation_coordinator::OperationKind::Backup)?;
             let data_dir = crate::paths::data_dir()
                 .ok_or("Could not find data directory")?
                 .join("Plainsong");
@@ -23914,6 +25230,28 @@ pub async fn dispatch_command(
             serde_json::to_value(info).map_err(|e| e.to_string())
         }
         "restore_backup_default" => {
+            let _operation_lease = state
+                .operation_coordinator
+                .try_acquire(operation_coordinator::OperationKind::Restore)?;
+            let _storage_guard = state.audio_storage_gate.try_lock().map_err(|_| {
+                "Cannot restore while recording encryption or storage cleanup is active."
+                    .to_string()
+            })?;
+            if state.audio_capture.lock().await.is_recording() {
+                return Err("Stop the active meeting before restoring a backup.".to_string());
+            }
+            if state
+                .db
+                .lock()
+                .await
+                .has_open_recording_audio_operations()
+                .map_err(|error| error.to_string())?
+            {
+                return Err(
+                    "Finish or retry recording audio encryption before restoring a backup."
+                        .to_string(),
+                );
+            }
             let backup_id: String =
                 serde_json::from_value(params["backupId"].clone()).map_err(|e| e.to_string())?;
             let data_dir = crate::paths::data_dir()

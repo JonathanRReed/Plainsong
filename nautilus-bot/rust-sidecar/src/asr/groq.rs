@@ -5,9 +5,10 @@
 //! - whisper-large-v3-turbo: Fast + accurate, recommended for dictation
 
 use super::{
+    cloud_asr_status_error,
     openai_cloud::{build_cloud_asr_client, CloudAsrHttpTimeouts},
-    AsrProvider, AsrProviderType, DownloadStatus, ModelInfo, TranscriptSegment,
-    TranscriptionResult,
+    read_cloud_asr_json, AsrProvider, AsrProviderType, DownloadStatus, ModelInfo,
+    TranscriptSegment, TranscriptionResult,
 };
 use crate::secrets;
 use anyhow::{Context, Result};
@@ -97,14 +98,11 @@ impl GroqProvider {
 
         if !response.status().is_success() {
             let status = response.status();
-            let body = response.text().await.unwrap_or_default();
-            anyhow::bail!("Groq Whisper API error {}: {}", status, body);
+            return Err(cloud_asr_status_error("Groq Whisper", status));
         }
 
-        let result = response
-            .json::<GroqTranscriptionResponse>()
-            .await
-            .context("Failed to parse Groq Whisper response")?;
+        let result: GroqTranscriptionResponse =
+            read_cloud_asr_json(response, "Groq Whisper").await?;
 
         let segments: Vec<TranscriptSegment> = result
             .segments

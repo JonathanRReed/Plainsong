@@ -200,7 +200,9 @@ function App() {
   const navigationFocusReadyRef = useRef(false);
 
   // UI overlays
-  const [wizardMode, setWizardMode] = useState<OnboardingMode | null>(null);
+  const [wizardMode, setWizardMode] = useState<
+    OnboardingMode | "unresolved" | null
+  >("unresolved");
 
   useEffect(() => {
     if (!import.meta.env.DEV || typeof performance === "undefined") return;
@@ -228,8 +230,15 @@ function App() {
   }, [activeView]);
 
   useEffect(() => {
-    const alreadyOnboarded = localStorage.getItem(ONBOARDING_STORAGE_KEY) === "true";
-    setWizardMode(alreadyOnboarded ? null : "full");
+    try {
+      const alreadyOnboarded =
+        localStorage.getItem(ONBOARDING_STORAGE_KEY) === "true";
+      setWizardMode(alreadyOnboarded ? null : "full");
+    } catch {
+      // If storage is unavailable, fail into onboarding instead of flashing a
+      // workspace whose setup state has not been established.
+      setWizardMode("full");
+    }
   }, []);
 
   useEffect(() => {
@@ -351,14 +360,38 @@ function App() {
     markOnboardingComplete?: boolean;
     meetingsCompleted?: boolean;
   }) => {
-    if (result?.markOnboardingComplete ?? wizardMode === "full") {
-      localStorage.setItem(ONBOARDING_STORAGE_KEY, "true");
-    }
-    if (result?.meetingsCompleted) {
-      localStorage.setItem(MEETING_ONBOARDING_STORAGE_KEY, "true");
+    try {
+      if (result?.markOnboardingComplete ?? wizardMode === "full") {
+        localStorage.setItem(ONBOARDING_STORAGE_KEY, "true");
+      }
+      if (result?.meetingsCompleted) {
+        localStorage.setItem(MEETING_ONBOARDING_STORAGE_KEY, "true");
+      }
+    } catch {
+      // Completion markers are best-effort state, not a reason to keep the wizard open.
     }
     setWizardMode(null);
   };
+
+  if (wizardMode === "unresolved") {
+    return (
+      <ThemeProvider>
+        <div
+          className="flex h-screen items-center justify-center bg-background text-foreground"
+          role="status"
+          aria-live="polite"
+          aria-label="Checking first-run setup"
+        >
+          <div className="flex flex-col items-center gap-3 text-center">
+            <span className="neume" aria-hidden="true" />
+            <p className="font-serif text-sm text-muted-foreground">
+              Checking your setup...
+            </p>
+          </div>
+        </div>
+      </ThemeProvider>
+    );
+  }
 
   const ActiveView = VIEW_COMPONENTS[activeView] ?? VIEW_COMPONENTS.dashboard;
   const activeViewLabel = VIEW_LABELS[activeView] ?? VIEW_LABELS.dashboard;

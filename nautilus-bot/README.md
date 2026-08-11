@@ -4,7 +4,7 @@
 
 - **Website:** https://plainsong.jonathanrreed.com
 - **Project repository:** https://github.com/JonathanRReed/Plainsong (currently private)
-- **Public release:** Pending notarization and launch; no public build is available yet.
+- **Release target:** Limited `0.9.0-beta.1` invite beta. No public build is available yet.
 
 This directory contains the Plainsong desktop app: the Electron main process,
 the React/TypeScript renderer, and the Rust transcription sidecar.
@@ -24,11 +24,11 @@ into searchable notes without sending a bot into the call.
 - **Bring your own keys.** Optional cloud transcription and AI cleanup use your
   own provider keys, stored in the OS keychain and sent directly to the
   provider, never through a Plainsong server.
-- **Honest about v1.** Three dictation activation modes ship: **toggle** (the
+- **Honest about the beta.** Three dictation activation modes ship: **toggle** (the
   onboarding default), **hold-to-talk** (selectable in Settings; a native
   CGEventTap helper with automatic fallback to toggle if the helper isn't
   running), and **hands-free** (VAD auto start/stop, with an optional Silero
-  VAD model download for better accuracy). v1 requires **macOS 13 or later**
+  VAD model download for better accuracy). The beta requires **macOS 13 or later**
   and is **arm64-only**.
 - **MIT licensed**, no trial, no tiers, no nags.
 
@@ -78,21 +78,28 @@ bun run electron:build:mac      # macOS (run on macOS)
 bun run release:mac             # build the macOS DMG, ZIP, and updater metadata
 ```
 
-`release:mac` never publishes. The official release workflow requires
+`release:mac` never publishes. The artifact-staging release workflow requires
 Developer ID signing and Apple notarization credentials, builds without direct
 publication, verifies signatures, stapling, Gatekeeper, updater metadata, TCC
-usage strings, and size, then creates or refreshes a draft GitHub release. A
-missing credential or failed trust check stops the workflow before any release
-asset reaches GitHub.
+usage strings, and size, then creates or refreshes an artifact-only draft
+GitHub release. That draft is not a beta-ready verdict because real-hardware,
+clean-install, updater-journey, and soak evidence remain in the aggregate
+release audit. A missing credential or failed artifact trust check stops the
+workflow before any release asset reaches GitHub.
 
-The exact local v1.0.0 arm64 candidate produced on July 30, 2026 passes
-Developer ID signing, update metadata, TCC, size, dependency, native-helper,
-DMG integrity, isolated renderer-readiness, and source test gates. First run
-now starts with an explicit in-app dictation test and never downloads a model
-without a user action. The candidate is not launchable because its dedicated
-`plainsong-notary` credential has not been confirmed. It has no stapled ticket
-and Gatekeeper correctly reports `source=Unnotarized Developer ID`. The
-repository is private and no public release has been published. See
+The current release target is `0.9.0-beta.1`, with Dictation and Meetings both
+treated as supported pillars. A release is not ready merely because source
+tests pass. The exact DMG, update ZIP, `beta-mac.yml`, clean-install journey,
+real-device Dictation and Meetings journeys, signing, notarization, Gatekeeper,
+and beta updater flow must all pass against the same candidate. The current
+candidate has passed signing, notarization, stapling, Gatekeeper,
+update-metadata, and clean-install checks, with 16 of 21 aggregate release
+claims proved. For the first invite-limited group, the real-device Dictation
+matrix, remaining Meeting lifecycle rows, and repeat three-hour capture soak
+are documented beta risks rather than claims of passing evidence. They remain
+required before public launch. The exact-candidate updater journey and public
+beta update feed remain distribution gates. The repository is private and no
+beta has been distributed. See
 [docs/CODE_SIGNING.md](docs/CODE_SIGNING.md) and
 [docs/APPLE_DEVELOPER_SETUP.md](docs/APPLE_DEVELOPER_SETUP.md).
 

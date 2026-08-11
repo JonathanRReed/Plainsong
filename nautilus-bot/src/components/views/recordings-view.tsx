@@ -926,7 +926,15 @@ export function RecordingsView() {
     error: recordingsError,
     refetch,
   } = useRecordings();
-  const { startMeeting, stopMeeting, isRecording, recordingId, formattedDuration } = useRecording();
+  const {
+    startMeeting,
+    stopMeeting,
+    isRecording,
+    recordingId,
+    formattedDuration,
+    meetingPhase = "idle",
+    meetingMessage = null,
+  } = useRecording();
   const { toast } = useToast();
   const [recordingStatusOverrides, setRecordingStatusOverrides] = useState<
     Record<string, Recording["status"]>
@@ -2085,7 +2093,6 @@ export function RecordingsView() {
         ...options,
         projectId: "default",
         meetingNotes: seededNotes.trim() || undefined,
-        consentPromptShown: true,
       });
       if (startedId) {
         setLiveMeetingNotes(seededNotes);
@@ -5191,7 +5198,11 @@ export function RecordingsView() {
               {isStopping ? "Stopping…" : "Stop meeting"}
             </Button>
           ) : (
-            <Button variant="active" onClick={openMeetingCapture}>
+            <Button
+              variant="active"
+              onClick={openMeetingCapture}
+              disabled={meetingsReadiness.state !== "ready"}
+            >
               <Mic2 className="h-4 w-4 mr-2" />
               New meeting
             </Button>
@@ -5234,6 +5245,59 @@ export function RecordingsView() {
                   }
                 >
                   {meetingsReadiness.cause.action.label}
+                </Button>
+              ) : null}
+            </div>
+          ) : null}
+
+          {recordingId &&
+          ["preparing", "stopping", "processing", "ready", "error", "cancelled", "recoverable"].includes(
+            meetingPhase,
+          ) ? (
+            <div
+              role={
+                ["error", "cancelled", "recoverable"].includes(meetingPhase)
+                  ? "alert"
+                  : "status"
+              }
+              className={`mb-4 flex flex-wrap items-center justify-between gap-3 rounded-md border px-4 py-3 ${
+                ["error", "cancelled", "recoverable"].includes(meetingPhase)
+                  ? "border-rust/35 bg-rust/10 text-rust"
+                  : "border-border/80 bg-muted/40 text-foreground"
+              }`}
+            >
+              <div>
+                <p className="font-medium">
+                  {meetingPhase === "ready"
+                    ? "Meeting ready"
+                    : ["error", "cancelled", "recoverable"].includes(meetingPhase)
+                      ? "Meeting needs attention"
+                      : meetingPhase === "preparing"
+                        ? "Preparing meeting capture"
+                        : meetingPhase === "stopping"
+                          ? "Saving meeting audio"
+                          : "Processing meeting"}
+                </p>
+                <p className="mt-1 text-sm leading-6">
+                  {meetingMessage ??
+                    (meetingPhase === "ready"
+                      ? "The transcript is ready to review."
+                      : "Plainsong is preserving the recording while this step finishes.")}
+                </p>
+              </div>
+              {recordings.some((recording) => recording.id === recordingId) ? (
+                <Button
+                  type="button"
+                  size="sm"
+                  variant="outline"
+                  onClick={() => {
+                    const recording = recordings.find(
+                      (candidate) => candidate.id === recordingId,
+                    );
+                    if (recording) openMeetingWorkspace(recording);
+                  }}
+                >
+                  Open meeting
                 </Button>
               ) : null}
             </div>

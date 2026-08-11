@@ -47,7 +47,7 @@ extraResources:
       - plainsong-sidecar.exe
 
 mac:
-  # arm64 only for v1: the Rust sidecar is compiled for the host arch by
+  # The limited beta is arm64 only: the Rust sidecar is compiled for the host arch by
   # `sidecar:build:release`, so an x64 artifact would bundle an arm64 binary and
   # be broken on Intel Macs. Intel support needs per-arch sidecar cross-compiles
   # (aarch64- + x86_64-apple-darwin) wired into the build, tracked as a follow-up.
@@ -57,7 +57,7 @@ mac:
     - target: zip
       arch: [arm64]
   category: public.app-category.productivity
-  # Keep the bundle metadata aligned with the documented v1 support floor.
+  # Keep the bundle metadata aligned with the documented beta support floor.
   minimumSystemVersion: "13.0"
   hardenedRuntime: true
   notarize: true
@@ -111,11 +111,17 @@ dmg:
   # then submits the signed DMG separately and staples its own notary ticket.
   sign: true
   # Stapling changes the DMG bytes after electron-builder has finished. Do not
-  # emit a pre-staple DMG blockmap/hash into latest-mac.yml; macOS updates use
+  # emit a pre-staple DMG blockmap/hash into beta-mac.yml; macOS updates use
   # the ZIP and its blockmap, while the final DMG is covered by SHA256SUMS.txt.
   writeUpdateInfo: false
 
 publish:
-  provider: github
-  owner: JonathanRReed
-  repo: Plainsong
+  # The repository remains private during the limited beta, so installed apps
+  # use a credential-free feed rather than GitHub Releases. This URL must match
+  # the public R2 custom domain verified by the release gate before invitations.
+  provider: generic
+  url: https://updates.plainsong.jonathanrreed.com/beta/
+  channel: beta
+  # R2 supports ordinary byte ranges. Avoid multipart range behavior that can
+  # vary between object stores and is unnecessary for this beta feed.
+  useMultipleRangeRequest: false

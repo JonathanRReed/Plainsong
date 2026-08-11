@@ -6,7 +6,7 @@
 //! faster than real time). It requires the chosen model to be downloaded.
 //!
 //! Usage:
-//!   benchmark-latency [--wav <path>] [--provider <name>] [--model <id>] [--runs N]
+//!   benchmark-latency [--wav <path>] [--provider <name>] [--model <id>] [--runs N] [--out <path>]
 //!
 //! Defaults: the bundled fixture, provider `whisper`, model `base.en`, 5 runs.
 //! Output: a JSON line on stdout plus a human-readable summary on stderr.
@@ -20,6 +20,7 @@ const DEFAULT_WAV: &str = "scripts/fixtures/real-speech-44s.wav";
 const DEFAULT_PROVIDER: &str = "whisper";
 const DEFAULT_RUNS: usize = 5;
 const MAX_RUNS: usize = 100;
+const DEFAULT_REPORT_PATH: &str = "artifacts/qa/dictation-latency.json";
 const HELP_TEXT: &str = "\
 Measure real Plainsong transcription latency with a downloaded ASR model.
 
@@ -32,6 +33,7 @@ Options:
                       distil_whisper, or macos_apple_speech [default: whisper]
   --model <ID>        Model ID for the selected provider [default: provider default]
   --runs <1..100>     Timed transcription runs after one warm-up [default: 5]
+  --out <PATH>        JSON report path [default: artifacts/qa/dictation-latency.json]
   -h, --help          Print this help without loading a model
 
 Output:
@@ -44,6 +46,7 @@ struct BenchmarkArgs {
     provider_type: AsrProviderType,
     model: String,
     runs: usize,
+    report_path: PathBuf,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -91,6 +94,7 @@ fn parse_args(args: &[String]) -> Result<ParseOutcome, String> {
     let mut provider_name = None;
     let mut model = None;
     let mut runs = None;
+    let mut report_path = None;
     let mut index = 0;
 
     while index < args.len() {
@@ -110,6 +114,10 @@ fn parse_args(args: &[String]) -> Result<ParseOutcome, String> {
             "--runs" => {
                 let value = next_value(args, &mut index, "--runs")?;
                 set_once(&mut runs, value, "--runs")?;
+            }
+            "--out" => {
+                let value = next_value(args, &mut index, "--out")?;
+                set_once(&mut report_path, value, "--out")?;
             }
             "--" => {}
             unknown => {
@@ -165,6 +173,7 @@ fn parse_args(args: &[String]) -> Result<ParseOutcome, String> {
         provider_type,
         model,
         runs,
+        report_path: PathBuf::from(report_path.unwrap_or_else(|| DEFAULT_REPORT_PATH.to_string())),
     }))
 }
 
@@ -205,7 +214,8 @@ struct BenchmarkReportInput<'a> {
     fixture_sha256: &'a str,
     fixture_bytes: usize,
     audio_seconds: f64,
-    warmup_ms: u64,
+    cold_model_preparation_ms: u64,
+    warmup_inference_ms: u64,
     wall_ms: &'a [u64],
     transcript: &'a str,
 }
@@ -225,25 +235,81 @@ fn build_report(input: BenchmarkReportInput<'_>) -> serde_json::Value {
         0.0
     };
     let transcript_sample: String = input.transcript.chars().take(160).collect();
+    let transcript_tail_sample: String = input
+        .transcript
+        .chars()
+        .rev()
+        .take(160)
+        .collect::<Vec<_>>()
+        .into_iter()
+        .rev()
+        .collect();
+    let transcript_character_count = input.transcript.chars().count();
+    let transcript_word_count = input.transcript.split_whitespace().count();
+    let logical_cpus = std::thread::available_parallelism()
+        .map(|value| value.get())
+        .unwrap_or(1);
+    let cpu_model = if cfg!(target_os = "macos") {
+        std::process::Command::new("sysctl")
+            .args(["-n", "machdep.cpu.brand_string"])
+            .output()
+            .ok()
+            .filter(|output| output.status.success())
+            .map(|output| String::from_utf8_lossy(&output.stdout).trim().to_string())
+    } else {
+        None
+    };
+    let memory_bytes = if cfg!(target_os = "macos") {
+        std::process::Command::new("sysctl")
+            .args(["-n", "hw.memsize"])
+            .output()
+            .ok()
+            .filter(|output| output.status.success())
+            .and_then(|output| {
+                String::from_utf8_lossy(&output.stdout)
+                    .trim()
+                    .parse::<u64>()
+                    .ok()
+            })
+    } else {
+        None
+    };
 
     serde_json::json!({
+        "schemaVersion": 1,
         "benchmarkVersion": env!("CARGO_PKG_VERSION"),
         "generatedAt": chrono::Utc::now().to_rfc3339(),
+        "thresholdProfile": "beta-reference-v1",
+        "metricScope": "provider_transcription_only",
+        "hostApplication": "benchmark-cli",
+        "warmState": "warm",
+        "hardware": {
+            "os": std::env::consts::OS,
+            "arch": std::env::consts::ARCH,
+            "logicalCpus": logical_cpus,
+            "cpuModel": cpu_model,
+            "memoryBytes": memory_bytes,
+        },
         "provider": input.provider,
         "model": input.model,
         "fixture": input.fixture,
         "fixtureSha256": input.fixture_sha256,
         "fixtureBytes": input.fixture_bytes,
         "audioSeconds": round_two(input.audio_seconds),
-        "warmupMs": input.warmup_ms,
+        "coldModelPreparationMs": input.cold_model_preparation_ms,
+        "warmupInferenceMs": input.warmup_inference_ms,
         "runs": input.wall_ms.len(),
+        "sampleCount": input.wall_ms.len(),
         "measurementsMs": input.wall_ms,
         "transcriptionMsP50": p50,
         "transcriptionMsP95": p95,
         "realTimeFactor": round_two(real_time_factor),
         "realTimeFactorDefinition": "transcription_seconds / audio_seconds; lower is faster",
         "realtimeSpeedup": round_two(realtime_speedup),
+        "transcriptCharacterCount": transcript_character_count,
+        "transcriptWordCount": transcript_word_count,
         "transcriptSample": transcript_sample,
+        "transcriptTailSample": transcript_tail_sample,
     })
 }
 
@@ -292,10 +358,25 @@ fn main() {
             args.provider_name, args.model, fixture, args.runs
         );
 
-        // Warm-up run (pays model load); not timed.
+        // Measure cold model preparation separately. Timed samples below are
+        // explicitly warm and may never silently include this load.
+        let cold_prepare_started = Instant::now();
+        if let Err(e) = provider.prewarm().await {
+            eprintln!(
+                "Model preparation failed for {}/{}: {e}\n\
+                 Download the selected model in Plainsong or run the model-provisioning step.",
+                args.provider_name, args.model
+            );
+            std::process::exit(1);
+        }
+        let cold_model_preparation_ms = cold_prepare_started.elapsed().as_millis() as u64;
+
+        // One functional inference warm-up catches a model that loads but
+        // cannot decode the fixture. It is also reported, but not included in
+        // the percentile sample.
         let warmup_started = Instant::now();
         let warmup_result = provider.transcribe_bytes(&audio_bytes).await;
-        let warmup_ms = warmup_started.elapsed().as_millis() as u64;
+        let warmup_inference_ms = warmup_started.elapsed().as_millis() as u64;
         if let Err(e) = warmup_result {
             eprintln!(
                 "Transcription warm-up failed for {}/{}: {e}\n\
@@ -336,11 +417,29 @@ fn main() {
             fixture_sha256: &fixture_sha256,
             fixture_bytes: audio_bytes.len(),
             audio_seconds,
-            warmup_ms,
+            cold_model_preparation_ms,
+            warmup_inference_ms,
             wall_ms: &wall_ms,
             transcript: &last_text,
         });
-        println!("{}", serde_json::to_string(&report).unwrap());
+        let report_json = serde_json::to_string(&report).unwrap();
+        if let Some(parent) = args.report_path.parent() {
+            if let Err(error) = std::fs::create_dir_all(parent) {
+                eprintln!("Failed to create latency report directory: {error}");
+                std::process::exit(1);
+            }
+        }
+        if let Err(error) = std::fs::write(
+            &args.report_path,
+            serde_json::to_string_pretty(&report).unwrap() + "\n",
+        ) {
+            eprintln!(
+                "Failed to write latency report '{}': {error}",
+                args.report_path.display()
+            );
+            std::process::exit(1);
+        }
+        println!("{report_json}");
         eprintln!(
             "p50 {p50}ms, p95 {p95}ms, {speedup:.1}x real-time for \
              {audio_seconds:.1}s of audio."
@@ -414,6 +513,42 @@ mod tests {
     }
 
     #[test]
+    fn report_path_can_be_overridden_without_touching_the_canonical_receipt() {
+        let args = match parse_args(&strings(&[
+            "--wav",
+            "Cargo.toml",
+            "--out",
+            "/tmp/plainsong-parakeet-comparison.json",
+        ]))
+        .expect("parse benchmark args")
+        {
+            ParseOutcome::Run(args) => args,
+            ParseOutcome::Help => panic!("expected runnable benchmark args"),
+        };
+
+        assert_eq!(
+            args.report_path,
+            PathBuf::from("/tmp/plainsong-parakeet-comparison.json")
+        );
+    }
+
+    #[test]
+    fn report_path_may_only_be_specified_once() {
+        let error = parse_args(&strings(&[
+            "--out",
+            "/tmp/first.json",
+            "--out",
+            "/tmp/second.json",
+        ]))
+        .unwrap_err();
+
+        assert!(
+            error.contains("--out may only be specified once"),
+            "{error}"
+        );
+    }
+
+    #[test]
     fn report_contains_complete_measurement_context() {
         let report = build_report(BenchmarkReportInput {
             provider: "whisper",
@@ -422,7 +557,8 @@ mod tests {
             fixture_sha256: "abc123",
             fixture_bytes: 42,
             audio_seconds: 2.5,
-            warmup_ms: 100,
+            cold_model_preparation_ms: 80,
+            warmup_inference_ms: 100,
             wall_ms: &[250, 300, 400],
             transcript: "spoken fixture",
         });
@@ -433,13 +569,22 @@ mod tests {
         assert_eq!(report["fixtureSha256"], "abc123");
         assert_eq!(report["fixtureBytes"], 42);
         assert_eq!(report["audioSeconds"], 2.5);
-        assert_eq!(report["warmupMs"], 100);
+        assert_eq!(report["schemaVersion"], 1);
+        assert_eq!(report["thresholdProfile"], "beta-reference-v1");
+        assert_eq!(report["metricScope"], "provider_transcription_only");
+        assert_eq!(report["warmState"], "warm");
+        assert_eq!(report["coldModelPreparationMs"], 80);
+        assert_eq!(report["warmupInferenceMs"], 100);
         assert_eq!(report["runs"], 3);
+        assert_eq!(report["sampleCount"], 3);
         assert_eq!(report["measurementsMs"], serde_json::json!([250, 300, 400]));
         assert_eq!(report["transcriptionMsP50"], 300);
         assert_eq!(report["transcriptionMsP95"], 400);
         assert_eq!(report["realTimeFactor"], 0.12);
         assert_eq!(report["realtimeSpeedup"], 8.33);
+        assert_eq!(report["transcriptCharacterCount"], 14);
+        assert_eq!(report["transcriptWordCount"], 2);
         assert_eq!(report["transcriptSample"], "spoken fixture");
+        assert_eq!(report["transcriptTailSample"], "spoken fixture");
     }
 }

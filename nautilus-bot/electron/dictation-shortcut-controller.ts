@@ -14,6 +14,7 @@ type DictationShortcutSource = "electron" | "native";
 // ignores a release seen then — the stateful runtime below handles that case).
 type DictationShortcutPhase =
   | "idle"
+  | "preparing"
   | "primed"
   | "recording"
   | "stopping"
@@ -43,6 +44,7 @@ function isIdleLikePhase(phase: DictationShortcutPhase): boolean {
 // way instead of inserting its text.
 function isCancellablePhase(phase: DictationShortcutPhase): boolean {
   return (
+    phase === "preparing" ||
     phase === "primed" ||
     phase === "recording" ||
     phase === "stopping" ||
@@ -402,7 +404,12 @@ export function createDictationShortcutSignalRuntime(deps: {
     // Events reach us in emission order, so a phase seen while the watchdog
     // is armed always belongs to the guarded session (a press is only
     // accepted after the previous session's terminal phase was processed).
-    if (watchdogTimer !== null && phase !== "primed" && phase !== "recording") {
+    if (
+      watchdogTimer !== null &&
+      phase !== "preparing" &&
+      phase !== "primed" &&
+      phase !== "recording"
+    ) {
       clearWatchdog();
     }
   };

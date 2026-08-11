@@ -2,49 +2,37 @@
 
 App bundle identifier: `com.plainsong.app`
 
-Plainsong v1 is an Apple Silicon macOS application packaged with
+Plainsong beta is an Apple Silicon macOS application packaged with
 `electron-builder`. The package includes the Electron application, Rust
 sidecar, native macOS shortcut helper, and Apple Speech helper.
 
 ## Current local status
 
-The exact July 30, 2026 v1.0.0 validation candidate is under
-`release-plainsong-launch-candidate-20260730/`:
+The current limited-beta candidate is built under `release/`:
 
-- `release-plainsong-launch-candidate-20260730/Plainsong-1.0.0-arm64.dmg`
-- `release-plainsong-launch-candidate-20260730/Plainsong-1.0.0-arm64-mac.zip`
-- `release-plainsong-launch-candidate-20260730/Plainsong-1.0.0-arm64-mac.zip.blockmap`
-- `release-plainsong-launch-candidate-20260730/latest-mac.yml`
-- `release-plainsong-launch-candidate-20260730/mac-arm64/Plainsong.app`
+- `release/Plainsong-0.9.0-beta.1-arm64.dmg`
+- `release/Plainsong-0.9.0-beta.1-arm64-mac.zip`
+- `release/Plainsong-0.9.0-beta.1-arm64-mac.zip.blockmap`
+- `release/beta-mac.yml`
+- `release/mac-arm64/Plainsong.app`
 
 Developer ID signing, hardened runtime, secure timestamps, embedded executable
-signatures, arm64 architecture, update metadata, TCC usage strings, Electron
-fuses, DMG integrity, mounted-app signature identity, ZIP extraction, and the
-package size gate all pass. The app, sidecar, shortcut helper, and Apple Speech
-helper are signed by
-`Developer ID Application: Jonathan Reed (AJ9VWBRNZN)`. The app CDHash is
-`557a50446a500d8cb995203f24e029102b8ed3a5`. The mounted DMG and
-ZIP-contained app have the same identity. The updater manifest matches the
-140,353,736-byte ZIP exactly.
-
-The candidate is not notarized. The required local `plainsong-notary`
-Keychain profile has not been confirmed, and no Plainsong submission has been
-made. Electron-builder could not generate notarization options without those
-credentials and skipped notarization, so the build has no stapled ticket.
-Every local trust check passes except the eight checks that specifically
-require notarization, stapling, or Gatekeeper acceptance. The trust report
-correctly records:
+signatures, arm64 architecture, beta update metadata, TCC usage strings,
+Electron fuses, DMG integrity, mounted-app signature identity, ZIP extraction,
+and the package size gate all pass. The app, sidecar, shortcut helper, and Apple
+Speech helper are signed by `Developer ID Application: Jonathan Reed
+(AJ9VWBRNZN)`. The app and DMG are notarized and stapled, and Gatekeeper reports:
 
 ```text
-Plainsong.app does not have a ticket stapled to it.
-source=Unnotarized Developer ID
+accepted
+source=Notarized Developer ID
 ```
 
-Do not distribute this candidate. Create `plainsong-notary` as documented in
-`APPLE_DEVELOPER_SETUP.md`, then rebuild through the official release workflow.
-The app-specific password belongs only in the login Keychain. Never write it
-to a repository file, build log, shell history, or release artifact, and never
-reuse another product's notarization profile.
+These facts must be regenerated for every rebuild. Exact hashes, Apple
+submission identifiers, and QA receipts belong in the candidate's `release/qa`
+evidence, not in this source guide. The current candidate has not been
+published. Keep the app-specific password only in the login Keychain, never in
+source, logs, shell history, or release artifacts.
 
 ## Release inputs
 
@@ -159,7 +147,7 @@ application. The release trust gate checks them independently, in addition to
 the deep application signature. The Speech helper alone receives the Speech
 Recognition entitlement.
 
-## Official release behavior
+## Artifact-staging release behavior
 
 `.github/workflows/release.yml` is the only official publication path. It:
 
@@ -169,16 +157,19 @@ Recognition entitlement.
 4. builds with direct publication disabled
 5. verifies updater metadata, signatures, stapling, Gatekeeper, TCC strings,
    size, and release assets
-6. creates or refreshes a draft GitHub release only after every gate passes
+6. creates or refreshes an artifact-only draft GitHub release after every
+   automated artifact gate passes
 
 A rerun may replace assets on an existing draft. It refuses to modify a
-published release. A human must review the draft before publishing it.
+published release. This workflow does not prove the real-hardware product,
+clean-install, updater-journey, or soak gates. A human must confirm the current
+aggregate release audit before publishing the draft.
 
 The repository is currently private, and no public release or deployment has
-occurred.
+occurred. The first distribution is a small invitation-only beta.
 
 ## Windows
 
-Windows is not a v1 release target. Do not add a Windows leg to the official
+Windows is not a beta release target. Do not add a Windows leg to the official
 workflow until the sidecar, packaging, signing, and platform QA have their own
 complete release path.

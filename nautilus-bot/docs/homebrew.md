@@ -5,9 +5,10 @@ to be public and a published (non-draft) release with a downloadable arm64
 artifact. The release must also be notarized and accepted by Gatekeeper.
 Those launch gates are tracked in `../../LAUNCH.md`.
 
-The July 23, 2026 v1.0.0 candidate is Developer ID signed but not notarized.
-Do not use its DMG or checksum for a cask submission. The final notarized
-release rebuild will produce a different artifact and checksum.
+The invitation-only `0.9.0-beta.1` candidate is Developer ID signed,
+notarized, stapled, and Gatekeeper accepted, but it is not a public release.
+Do not use its private DMG or checksum for a cask submission. Homebrew remains
+a post-first-public-release distribution surface.
 
 ## Cask template
 

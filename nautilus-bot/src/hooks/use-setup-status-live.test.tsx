@@ -70,6 +70,8 @@ describe("useSetupStatus live refresh", () => {
       expect(liveMocks.getSettings).toHaveBeenCalledTimes(1);
       expect(liveMocks.listeners.has("settings-changed")).toBe(true);
       expect(liveMocks.listeners.has("asr-download-progress")).toBe(true);
+      expect(liveMocks.listeners.has("readiness-invalidated")).toBe(true);
+      expect(liveMocks.listeners.has("sidecar-runtime-changed")).toBe(true);
     });
 
     await act(async () => {
@@ -102,11 +104,46 @@ describe("useSetupStatus live refresh", () => {
       expect(liveMocks.getSettings).toHaveBeenCalledTimes(4);
     });
 
+    await act(async () => {
+      liveMocks.listeners.get("readiness-invalidated")?.({ payload: {} });
+    });
+    await waitFor(() => {
+      expect(liveMocks.getSettings).toHaveBeenCalledTimes(5);
+    });
+
     unmount();
     expect(liveMocks.listeners.size).toBe(0);
 
     window.dispatchEvent(new Event("focus"));
-    expect(liveMocks.getSettings).toHaveBeenCalledTimes(4);
+    expect(liveMocks.getSettings).toHaveBeenCalledTimes(5);
+  });
+
+  it("blocks stale readiness immediately when the sidecar dies and refreshes on recovery", async () => {
+    const { result } = renderHook(() => useSetupStatus());
+
+    await waitFor(() => {
+      expect(result.current.loading).toBe(false);
+      expect(liveMocks.listeners.has("sidecar-runtime-changed")).toBe(true);
+    });
+
+    await act(async () => {
+      liveMocks.listeners.get("sidecar-runtime-changed")?.({
+        payload: { ready: false, reason: "Audio engine restarted" },
+      });
+    });
+    expect(result.current.error).toBe("Audio engine restarted");
+    expect(result.current.productReadiness.dictation.state).toBe("blocked");
+    expect(result.current.productReadiness.meetings.state).toBe("blocked");
+
+    await act(async () => {
+      liveMocks.listeners.get("sidecar-runtime-changed")?.({
+        payload: { ready: true },
+      });
+    });
+    await waitFor(() => {
+      expect(liveMocks.getSettings).toHaveBeenCalledTimes(2);
+      expect(result.current.error).toBeNull();
+    });
   });
 
   it("does not let a slower older refresh overwrite newer readiness data", async () => {

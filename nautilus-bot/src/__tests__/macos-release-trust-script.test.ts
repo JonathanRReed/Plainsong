@@ -23,6 +23,11 @@ function createTempRepo(scriptName: string) {
   const sourceScript = path.resolve(process.cwd(), "scripts", scriptName);
   const tempScript = path.join(tempScriptsDir, scriptName);
   copyFileSync(sourceScript, tempScript);
+  mkdirSync(path.join(tempScriptsDir, "lib"), { recursive: true });
+  copyFileSync(
+    path.resolve(process.cwd(), "scripts/lib/release-candidate-identity.mjs"),
+    path.join(tempScriptsDir, "lib/release-candidate-identity.mjs"),
+  );
 
   return { tempRoot, tempScript };
 }

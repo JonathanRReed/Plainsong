@@ -5,6 +5,7 @@ import { sanitizeUserFacingDictationMessage } from "@/lib/dictation-ui-message";
 
 export type DictationPhase =
   | "idle"
+  | "preparing"
   | "primed"
   | "recording"
   | "stopping"
@@ -64,6 +65,8 @@ export interface DictationStateChangedEvent {
   providerModelLabel?: string | null;
   dictationRoutePreference?: DictationRoutePreference | null;
   dictationResolvedHosting?: DictationRoutePreference | null;
+  modelReadiness?: "loading" | "ready" | "deferred" | "not_required" | "error" | null;
+  captureReady?: boolean;
 }
 
 interface DictationTextReadyEvent {
@@ -78,10 +81,19 @@ interface DictationTextReadyEvent {
   fallbackReason?: string | null;
   fallbackMessage?: string | null;
   modelId?: string;
+  acknowledgementLatencyMs?: number | null;
+  captureReadyLatencyMs?: number | null;
+  firstStablePartialLatencyMs?: number | null;
+  finalTranscriptLatencyMs?: number | null;
   startupLatencyMs?: number | null;
   latencyMs?: number;
   insertLatencyMs?: number;
   endToEndMs?: number;
+  acknowledgedAtMs?: number | null;
+  captureReadyAtMs?: number | null;
+  firstStablePartialAtMs?: number | null;
+  finalTranscriptAtMs?: number;
+  insertionCompletedAtMs?: number;
   insertionModeUsed?:
     | "auto"
     | "clipboard_only"

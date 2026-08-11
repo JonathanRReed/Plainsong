@@ -1,5 +1,7 @@
 #!/usr/bin/env node
+import crypto from "node:crypto";
 import fs from "node:fs";
+import os from "node:os";
 import path from "node:path";
 import { spawn } from "node:child_process";
 import { createInterface } from "node:readline";
@@ -29,6 +31,59 @@ const sidecarPath = path.join(
   "sidecar",
   "plainsong-sidecar"
 );
+const executablePath = path.join(appPath, "Contents", "MacOS", "Plainsong");
+const appSha256 = fs.existsSync(executablePath)
+  ? crypto.createHash("sha256").update(fs.readFileSync(executablePath)).digest("hex")
+  : null;
+const requestedProfileRoot = valueFor("--profile-root");
+const ownsProfileRoot = !requestedProfileRoot;
+const profileRoot = requestedProfileRoot
+  ? path.resolve(requestedProfileRoot)
+  : fs.mkdtempSync(path.join(os.tmpdir(), "plainsong-packaged-smoke-"));
+const configRoot = path.join(profileRoot, "config");
+const dataRoot = path.join(profileRoot, "data");
+const sourceProfileDir = path.join(
+  os.homedir(),
+  "Library",
+  "Application Support",
+  "Plainsong",
+);
+
+function cloneTree(source, destination) {
+  const sourceStat = fs.lstatSync(source);
+  if (sourceStat.isSymbolicLink()) {
+    throw new Error(`Refusing to clone a symlinked smoke fixture: ${source}`);
+  }
+  if (sourceStat.isDirectory()) {
+    fs.mkdirSync(destination, { recursive: true, mode: sourceStat.mode });
+    for (const entry of fs.readdirSync(source, { withFileTypes: true })) {
+      cloneTree(path.join(source, entry.name), path.join(destination, entry.name));
+    }
+    return;
+  }
+  if (!sourceStat.isFile()) {
+    throw new Error(`Unsupported smoke fixture entry: ${source}`);
+  }
+  fs.mkdirSync(path.dirname(destination), { recursive: true });
+  fs.copyFileSync(source, destination, fs.constants.COPYFILE_FICLONE);
+}
+
+function prepareIsolatedProfile() {
+  const configDir = path.join(configRoot, "Plainsong");
+  const dataDir = path.join(dataRoot, "Plainsong");
+  fs.mkdirSync(configDir, { recursive: true });
+  fs.mkdirSync(dataDir, { recursive: true });
+
+  const sourceSettings = path.join(sourceProfileDir, "settings.json");
+  if (fs.existsSync(sourceSettings)) {
+    cloneTree(sourceSettings, path.join(configDir, "settings.json"));
+  }
+
+  const sourceModels = path.join(sourceProfileDir, "models");
+  if (fs.existsSync(sourceModels)) {
+    cloneTree(sourceModels, path.join(dataDir, "models"));
+  }
+}
 
 const commands = [
   { key: "permissions", method: "get_permission_diagnostics", params: {} },
@@ -56,9 +111,23 @@ if (!fs.existsSync(sidecarPath)) {
   fail(`Packaged sidecar not found at ${sidecarPath}`);
 }
 
+try {
+  prepareIsolatedProfile();
+} catch (error) {
+  if (ownsProfileRoot) {
+    fs.rmSync(profileRoot, { recursive: true, force: true });
+  }
+  fail(`Could not prepare an isolated smoke profile: ${String(error)}`);
+}
+
 const child = spawn(sidecarPath, [], {
   cwd: repoRoot,
   stdio: ["pipe", "pipe", "pipe"],
+  env: {
+    ...process.env,
+    PLAINSONG_CONFIG_DIR: configRoot,
+    PLAINSONG_DATA_DIR: dataRoot,
+  },
 });
 
 const stderr = [];
@@ -130,6 +199,16 @@ rl.on("line", (line) => {
 child.on("exit", (code) => {
   clearTimeout(timeout);
 
+  let profileCleaned = !ownsProfileRoot;
+  if (ownsProfileRoot) {
+    try {
+      fs.rmSync(profileRoot, { recursive: true, force: true });
+      profileCleaned = !fs.existsSync(profileRoot);
+    } catch {
+      profileCleaned = false;
+    }
+  }
+
   const permissions = results.permissions ?? {};
   const dictationSetup = results.dictationSetup ?? {};
   const meetingSetup = results.meetingSetup ?? {};
@@ -141,13 +220,20 @@ child.on("exit", (code) => {
       permissions.postEventReady &&
       permissions.cursorInsertionReady &&
       dictationSetup.ok &&
-      meetingSetup.ok
+      meetingSetup.ok &&
+      profileCleaned
   );
 
   const artifact = {
     generatedAt: new Date().toISOString(),
     scope: "bundled-sidecar-direct",
     evidenceLevel: "component",
+    candidate: {
+      executableSha256: appSha256,
+      executableBytes: fs.existsSync(executablePath)
+        ? fs.statSync(executablePath).size
+        : null,
+    },
     appPath,
     sidecarPath,
     pass: componentPass,
@@ -170,6 +256,9 @@ child.on("exit", (code) => {
       cursorInsertionReady: Boolean(permissions.cursorInsertionReady),
       dictationSetupOk: Boolean(dictationSetup.ok),
       meetingSetupOk: Boolean(meetingSetup.ok),
+      exactExecutableIdentified: Boolean(appSha256),
+      profileIsolated: true,
+      profileCleaned,
       systemAudioAvailable: Boolean(meetingSetup.details?.some((detail) =>
         /system audio: available/i.test(String(detail))
       )),

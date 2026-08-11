@@ -3,7 +3,6 @@
 //! Supports multiple formats:
 //! - Markdown (.md) - Human-readable with formatting
 //! - JSON (.json) - Machine-readable with full metadata
-//! - PDF (.pdf) - Formatted document (if genpdf feature enabled)
 //! - TXT (.txt) - Plain text
 
 use anyhow::{Context, Result};
@@ -19,8 +18,6 @@ pub enum ExportFormat {
     Markdown,
     Json,
     Text,
-    #[cfg(feature = "export-pdf")]
-    Pdf,
 }
 
 impl ExportFormat {
@@ -29,8 +26,6 @@ impl ExportFormat {
             ExportFormat::Markdown => "md",
             ExportFormat::Json => "json",
             ExportFormat::Text => "txt",
-            #[cfg(feature = "export-pdf")]
-            ExportFormat::Pdf => "pdf",
         }
     }
 }
@@ -43,8 +38,6 @@ impl std::str::FromStr for ExportFormat {
             "md" | "markdown" => Ok(ExportFormat::Markdown),
             "json" => Ok(ExportFormat::Json),
             "txt" | "text" => Ok(ExportFormat::Text),
-            #[cfg(feature = "export-pdf")]
-            "pdf" => Ok(ExportFormat::Pdf),
             _ => Err(anyhow::anyhow!("Unknown export format: {}", s)),
         }
     }
@@ -61,8 +54,6 @@ pub fn export_recording(
         ExportFormat::Markdown => export_markdown(recording, transcript, include_metadata),
         ExportFormat::Json => export_json(recording, transcript),
         ExportFormat::Text => export_text(recording, transcript),
-        #[cfg(feature = "export-pdf")]
-        ExportFormat::Pdf => export_pdf(recording, transcript, include_metadata),
     }
 }
 
@@ -92,6 +83,46 @@ fn export_markdown(
         output.push_str(&format!("- **Status:** {}\n", recording.status));
         output.push_str(&format!("- **Recording ID:** {}\n", recording.id));
         output.push('\n');
+    }
+
+    if recording.source_type == "meeting" {
+        if let Some(summary) = recording
+            .summary
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+        {
+            output.push_str("## Summary\n\n");
+            output.push_str(summary);
+            output.push_str("\n\n");
+        }
+
+        let action_items = recording
+            .action_items
+            .as_deref()
+            .unwrap_or_default()
+            .iter()
+            .map(|item| item.trim())
+            .filter(|item| !item.is_empty())
+            .collect::<Vec<_>>();
+        if !action_items.is_empty() {
+            output.push_str("## Action Items\n\n");
+            for item in action_items {
+                output.push_str(&format!("- {}\n", item));
+            }
+            output.push('\n');
+        }
+
+        if let Some(notes) = recording
+            .meeting_notes
+            .as_deref()
+            .map(str::trim)
+            .filter(|notes| !notes.is_empty())
+        {
+            output.push_str("## Notes\n\n");
+            output.push_str(notes);
+            output.push_str("\n\n");
+        }
     }
 
     // Transcript
@@ -151,6 +182,12 @@ fn export_json(recording: &Recording, transcript: Option<&Transcript>) -> Result
             "source_type": recording.source_type,
             "status": recording.status,
             "audio_path": recording.audio_path,
+            "summary": recording.summary,
+            "action_items": recording.action_items,
+            "meeting_notes": recording.meeting_notes,
+            "meeting_template_id": recording.meeting_template_id,
+            "meeting_capture_mode": recording.meeting_capture_mode,
+            "consent_notice_mode": recording.consent_notice_mode,
         },
         "transcript": transcript.map(|t| {
             json!({
@@ -191,6 +228,52 @@ fn export_text(recording: &Recording, transcript: Option<&Transcript>) -> Result
         format_duration(recording.duration)
     ));
 
+    if recording.source_type == "meeting" {
+        if let Some(summary) = recording
+            .summary
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+        {
+            output.push_str("SUMMARY\n");
+            output.push_str(&"=".repeat(50));
+            output.push_str("\n\n");
+            output.push_str(summary);
+            output.push_str("\n\n");
+        }
+
+        let action_items = recording
+            .action_items
+            .as_deref()
+            .unwrap_or_default()
+            .iter()
+            .map(|item| item.trim())
+            .filter(|item| !item.is_empty())
+            .collect::<Vec<_>>();
+        if !action_items.is_empty() {
+            output.push_str("ACTION ITEMS\n");
+            output.push_str(&"=".repeat(50));
+            output.push_str("\n\n");
+            for item in action_items {
+                output.push_str(&format!("- {}\n", item));
+            }
+            output.push('\n');
+        }
+
+        if let Some(notes) = recording
+            .meeting_notes
+            .as_deref()
+            .map(str::trim)
+            .filter(|notes| !notes.is_empty())
+        {
+            output.push_str("NOTES\n");
+            output.push_str(&"=".repeat(50));
+            output.push_str("\n\n");
+            output.push_str(notes);
+            output.push_str("\n\n");
+        }
+    }
+
     if let Some(t) = transcript {
         output.push_str("TRANSCRIPT\n");
         output.push_str(&"=".repeat(50));
@@ -208,87 +291,6 @@ fn export_text(recording: &Recording, transcript: Option<&Transcript>) -> Result
     }
 
     Ok(output)
-}
-
-/// Export to PDF format (requires genpdf feature)
-#[cfg(feature = "export-pdf")]
-fn export_pdf(
-    recording: &Recording,
-    transcript: Option<&Transcript>,
-    include_metadata: bool,
-) -> Result<String> {
-    use genpdf::elements::Paragraph;
-    use genpdf::{Document, Element};
-
-    // Create document with builtin font
-    let mut doc = Document::new(genpdf::fonts::Builtin::Helvetica);
-    doc.set_title(&recording.title);
-    doc.set_minimal_conformance();
-
-    // Add title
-    doc.push(Paragraph::new(&recording.title));
-    doc.push(Paragraph::new(""));
-
-    // Add metadata
-    if include_metadata {
-        doc.push(Paragraph::new("Metadata"));
-        doc.push(Paragraph::new(format!(
-            "Date: {}",
-            recording.created_at.format("%Y-%m-%d %H:%M")
-        )));
-        doc.push(Paragraph::new(format!(
-            "Duration: {}",
-            format_duration(recording.duration)
-        )));
-        doc.push(Paragraph::new(format!("Type: {}", recording.source_type)));
-        doc.push(Paragraph::new(format!("Status: {}", recording.status)));
-        doc.push(Paragraph::new(""));
-    }
-
-    // Add transcript
-    if let Some(t) = transcript {
-        doc.push(Paragraph::new("Transcript"));
-        doc.push(Paragraph::new(""));
-
-        for segment in &t.segments {
-            let speaker = segment.speaker_id.as_deref().unwrap_or("Unknown");
-            let time = format_time_range(segment.start_time, segment.end_time);
-
-            let text = format!("[{}] {}: {}", time, speaker, segment.text);
-            doc.push(Paragraph::new(text));
-        }
-
-        doc.push(Paragraph::new(""));
-        doc.push(Paragraph::new("Full Text"));
-        doc.push(Paragraph::new(&t.full_text));
-        doc.push(Paragraph::new(""));
-
-        // Transcription info
-        doc.push(Paragraph::new("Transcription Info"));
-        doc.push(Paragraph::new(format!("Language: {}", t.language)));
-        doc.push(Paragraph::new(format!("Model: {}", t.model)));
-        doc.push(Paragraph::new(format!(
-            "Confidence: {:.1}%",
-            t.confidence * 100.0
-        )));
-    } else {
-        doc.push(Paragraph::new("Transcript not yet available"));
-    }
-
-    // Footer
-    doc.push(Paragraph::new(""));
-    doc.push(Paragraph::new(format!(
-        "Exported from Plainsong on {}",
-        Utc::now().format("%Y-%m-%d %H:%M")
-    )));
-
-    // Generate PDF to string (base64 encoded)
-    let mut buffer = Vec::new();
-    doc.render_to(&mut buffer).context("Failed to render PDF")?;
-
-    // Return as base64
-    use base64::{engine::general_purpose::STANDARD, Engine as _};
-    Ok(STANDARD.encode(&buffer))
 }
 
 /// Format duration in seconds to human-readable string
@@ -350,6 +352,105 @@ fn sanitize_filename(name: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use chrono::TimeZone;
+
+    fn meeting_recording_with_recap() -> Recording {
+        let now = Utc
+            .with_ymd_and_hms(2026, 8, 9, 2, 13, 0)
+            .single()
+            .expect("valid test timestamp");
+        Recording {
+            id: "meeting-1".to_string(),
+            title: "Limited beta review".to_string(),
+            project_id: "inbox".to_string(),
+            duration: 90,
+            created_at: now,
+            updated_at: now,
+            source_type: "meeting".to_string(),
+            audio_path: String::new(),
+            status: "completed".to_string(),
+            summary: Some("The signed candidate completed the local meeting flow.".to_string()),
+            action_items: Some(vec![
+                "Jonathan confirms export before beta invites.".to_string(),
+            ]),
+            summary_provenance: None,
+            action_items_provenance: None,
+            meeting_notes: Some(
+                "## Goals\nVerify the limited beta meeting flow.\n\n## Decisions\nKeep capture local."
+                    .to_string(),
+            ),
+            meeting_template_id: None,
+            meeting_capture_mode: Some("me_and_them".to_string()),
+            notes_updated_at: Some(now),
+            consent_prompt_shown: true,
+            consent_notice_mode: Some("manual".to_string()),
+            consent_notice_surface: None,
+            consent_notice_message: None,
+            consent_notice_updated_at: Some(now),
+        }
+    }
+
+    #[test]
+    fn meeting_markdown_export_includes_recap_notes_and_transcript() {
+        let now = Utc
+            .with_ymd_and_hms(2026, 8, 9, 2, 13, 0)
+            .single()
+            .expect("valid test timestamp");
+        let transcript = Transcript {
+            id: "transcript-1".to_string(),
+            recording_id: "meeting-1".to_string(),
+            segments: vec![],
+            full_text: "The local transcript stays in the full record.".to_string(),
+            language: "en".to_string(),
+            confidence: 0.91,
+            model: "distil-whisper-large-v3.5".to_string(),
+            model_id: None,
+            requested_provider: None,
+            actual_provider: Some("distil_whisper".to_string()),
+            created_at: now,
+        };
+
+        let output = export_markdown(&meeting_recording_with_recap(), Some(&transcript), true)
+            .expect("meeting markdown export");
+
+        assert!(
+            output.contains("## Summary\n\nThe signed candidate completed the local meeting flow.")
+        );
+        assert!(
+            output.contains("## Action Items\n\n- Jonathan confirms export before beta invites.")
+        );
+        assert!(output.contains("## Notes\n\n## Goals\nVerify the limited beta meeting flow."));
+        assert!(output.contains("## Full Text\n\nThe local transcript stays in the full record."));
+    }
+
+    #[test]
+    fn meeting_text_and_json_exports_include_saved_meeting_work() {
+        let recording = meeting_recording_with_recap();
+
+        let text = export_text(&recording, None).expect("meeting text export");
+        assert!(text.contains(
+            "SUMMARY\n==================================================\n\nThe signed candidate completed the local meeting flow."
+        ));
+        assert!(text.contains("ACTION ITEMS\n=================================================="));
+        assert!(text.contains("- Jonathan confirms export before beta invites."));
+        assert!(text.contains("NOTES\n=================================================="));
+        assert!(text.contains("## Decisions\nKeep capture local."));
+
+        let json = export_json(&recording, None).expect("meeting json export");
+        let parsed: serde_json::Value = serde_json::from_str(&json).expect("valid export json");
+        assert_eq!(
+            parsed["recording"]["summary"],
+            "The signed candidate completed the local meeting flow."
+        );
+        assert_eq!(
+            parsed["recording"]["action_items"][0],
+            "Jonathan confirms export before beta invites."
+        );
+        assert_eq!(
+            parsed["recording"]["meeting_notes"],
+            "## Goals\nVerify the limited beta meeting flow.\n\n## Decisions\nKeep capture local."
+        );
+    }
 
     #[test]
     fn test_format_duration() {

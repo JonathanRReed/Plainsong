@@ -1,13 +1,17 @@
 #!/usr/bin/env node
 import crypto from "node:crypto";
 import fs from "node:fs";
-import os from "node:os";
 import path from "node:path";
 import { spawn, spawnSync } from "node:child_process";
 import { createInterface } from "node:readline";
+import { createPackagedQaProfile } from "./lib/packaged-qa-profile.mjs";
 
 const repoRoot = path.resolve(import.meta.dirname, "..");
 const args = process.argv.slice(2);
+const qaProfile = createPackagedQaProfile({
+  args,
+  prefix: "plainsong-retention-qa-",
+});
 
 function valueFor(name, fallback = null) {
   const index = args.indexOf(name);
@@ -23,12 +27,8 @@ const outPath = path.resolve(
   repoRoot,
   valueFor("--out", "artifacts/qa/macos/retention-policies.json")
 );
-const dataRoot = process.env.PLAINSONG_DATA_DIR
-  ? path.resolve(process.env.PLAINSONG_DATA_DIR)
-  : path.join(os.homedir(), "Library", "Application Support");
-const configRoot = process.env.PLAINSONG_CONFIG_DIR
-  ? path.resolve(process.env.PLAINSONG_CONFIG_DIR)
-  : path.join(os.homedir(), "Library", "Application Support");
+const dataRoot = qaProfile.dataRoot;
+const configRoot = qaProfile.configRoot;
 const dataDir = path.join(dataRoot, "Plainsong");
 const configDir = path.join(configRoot, "Plainsong");
 const workDir = path.resolve(
@@ -243,6 +243,7 @@ function launchSidecar() {
   const child = spawn(sidecarPath, [], {
     cwd: repoRoot,
     stdio: ["pipe", "pipe", "pipe"],
+    env: { ...process.env, ...qaProfile.env },
   });
   const childExit = new Promise((resolve) => {
     child.on("exit", (code, signal) => resolve({ code, signal }));
@@ -307,7 +308,7 @@ function launchSidecar() {
     }
     const result = await Promise.race([
       childExit,
-      new Promise((resolve) => setTimeout(() => resolve(null), 3000)),
+      new Promise((resolve) => setTimeout(() => resolve(null), 15000)),
     ]);
     if (!result) {
       child.kill("SIGTERM");
@@ -413,6 +414,8 @@ async function runScenario(scenario) {
 
   result.pass = Boolean(
     !result.timedOut &&
+      result.sidecarExit?.code === 0 &&
+      result.sidecarExit?.signal === null &&
       result.checks.audioFileRemoved &&
       (scenario.kind === "audio-and-transcript"
         ? result.checks.recordingRemoved &&

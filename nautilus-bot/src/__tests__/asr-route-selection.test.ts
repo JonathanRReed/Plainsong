@@ -200,7 +200,7 @@ describe("asr-route-selection", () => {
 
     expect(selection.useSharedAsrSelection).toBe(false);
     expect(selection.dictationProvider).toBe("moonshine");
-    expect(selection.meetingProvider).toBe("distil_whisper");
+    expect(selection.meetingProvider).toBe("parakeet");
   });
 
   it("splits whisper candle shared selection into dictation plus meeting-grade fallback", () => {
@@ -218,7 +218,7 @@ describe("asr-route-selection", () => {
 
     expect(selection.useSharedAsrSelection).toBe(false);
     expect(selection.dictationProvider).toBe("whisper_candle");
-    expect(selection.meetingProvider).toBe("distil_whisper");
+    expect(selection.meetingProvider).toBe("parakeet");
   });
 
   it("falls back to a real engine when settings name a deleted one", () => {

@@ -18,6 +18,7 @@ import fs from "node:fs";
 import path from "node:path";
 
 import { VERIFY_MODES, normalizeReadBackValue } from "./lib/app-matrix-readback.mjs";
+import { evaluateAppMatrixTerminalStatus } from "./lib/app-matrix-terminal-status.mjs";
 
 const repoRoot = path.resolve(import.meta.dirname, "..");
 const args = process.argv.slice(2);
@@ -104,36 +105,7 @@ const readBack = artifact.readBack ?? {};
  */
 const closesMatrixRow = artifact.rowClosure?.closesMatrixRow === true;
 const outOfScope = artifact.status === "PASS_OUT_OF_SCOPE";
-if (outOfScope) {
-  if (artifact.checksAllPassed !== true) {
-    violations.push("A PASS_OUT_OF_SCOPE artifact must still record checksAllPassed true.");
-  }
-  if (artifact.pass === true) {
-    violations.push(
-      "A PASS_OUT_OF_SCOPE artifact must not report pass true: it closes no matrix row."
-    );
-  }
-  if (closesMatrixRow) {
-    violations.push(
-      "A PASS_OUT_OF_SCOPE artifact must record rowClosure.closesMatrixRow false; that is the " +
-        "whole reason it is out of scope."
-    );
-  }
-} else if (artifact.status !== "PASS" || artifact.pass !== true) {
-  violations.push("Artifact must be PASS with pass true, or PASS_OUT_OF_SCOPE.");
-} else if (!closesMatrixRow) {
-  violations.push(
-    "A PASS artifact must close the matrix row it names (rowClosure.closesMatrixRow true). A run " +
-      "that read its text back somewhere other than this product must terminate as " +
-      "PASS_OUT_OF_SCOPE instead."
-  );
-}
-if (artifact.verifyMode === "local-http-probe" && artifact.status === "PASS") {
-  violations.push(
-    "local-http-probe reads back a harness-owned page, so it can never terminate as PASS. " +
-      "Expected PASS_OUT_OF_SCOPE."
-  );
-}
+violations.push(...evaluateAppMatrixTerminalStatus(artifact));
 if (!matrixTargets.includes(artifact.targetApp)) {
   violations.push(`targetApp must be one of the frozen matrix targets. Found ${artifact.targetApp}.`);
 }
@@ -244,6 +216,18 @@ if (!readBack.prepareEvidence) {
 }
 if (!readBack.readBackEvidence) {
   violations.push("readBack.readBackEvidence must record how the post-insert read was made.");
+}
+if (["native-accessibility", "clipboard-sentinel"].includes(artifact.verifyMode)) {
+  if (artifact.checks?.targetSurfaceRestored !== true) {
+    violations.push(
+      "checks.targetSurfaceRestored must be true: the disposable target must be machine-verified empty after read-back."
+    );
+  }
+  if (readBack.cleanupEvidence?.targetSurfaceRestored !== true) {
+    violations.push(
+      "readBack.cleanupEvidence.targetSurfaceRestored must be true for native and clipboard target surfaces."
+    );
+  }
 }
 
 /* ---- the attestation must stay dead ---- */

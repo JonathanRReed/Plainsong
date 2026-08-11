@@ -116,6 +116,8 @@ const PARAKEET_LEGACY_TOKENS_SOURCES: [(&str, &str); 1] = [
         "450e56bd2f036fe5b6aa821865838cc5aa9d8b0106134ce9a9ba0664abe6cd10",
     ),
 ];
+const PARAKEET_LEGACY_ONNX_MAX_BYTES: u64 = 512 * 1024 * 1024;
+const PARAKEET_LEGACY_TOKENS_MAX_BYTES: u64 = 8 * 1024 * 1024;
 
 pub(crate) fn model_integrity_artifacts(models_root: &Path) -> Vec<(PathBuf, String)> {
     let legacy_dir = models_root.join("parakeet");
@@ -958,6 +960,42 @@ impl AsrProvider for ParakeetProvider {
         self.has_required_files()
     }
 
+    async fn prewarm(&self) -> Result<()> {
+        if let Some(reason) = self.missing_or_invalid_reason() {
+            return Err(anyhow::anyhow!(reason));
+        }
+        if !self.has_trusted_required_files() {
+            return Err(anyhow::anyhow!(
+                "Parakeet model files have not passed Plainsong integrity verification. Re-download the model from Settings."
+            ));
+        }
+
+        #[cfg(feature = "asr-parakeet")]
+        {
+            let is_legacy = self.is_legacy_model();
+            let model_dir = self.model_dir.clone();
+            let onnx_path = self.legacy_onnx_path();
+            tokio::task::spawn_blocking(move || -> Result<()> {
+                if is_legacy {
+                    drop(get_or_create_legacy_session(&onnx_path)?);
+                } else {
+                    drop(get_or_create_v3_runtime(&model_dir)?);
+                }
+                Ok(())
+            })
+            .await
+            .context("Parakeet model warmup task panicked")??;
+            return Ok(());
+        }
+
+        #[cfg(not(feature = "asr-parakeet"))]
+        {
+            Err(anyhow::anyhow!(
+                "Parakeet support is not compiled into this build."
+            ))
+        }
+    }
+
     fn model_info(&self) -> ModelInfo {
         if self.is_legacy_model() {
             return ModelInfo {
@@ -1117,10 +1155,16 @@ async fn download_v3(
         let total = total_bytes as f32;
         let share = expected_bytes as f32;
         manager
-            .download_verified_model_asset(&url, &destination, sha256, move |p| {
-                let done = base + share * (p.percentage as f32 / 100.0);
-                cb((done / total) * 100.0);
-            })
+            .download_verified_model_asset(
+                &url,
+                &destination,
+                sha256,
+                expected_bytes.saturating_mul(2),
+                move |p| {
+                    let done = base + share * (p.percentage as f32 / 100.0);
+                    cb((done / total) * 100.0);
+                },
+            )
             .await
             .with_context(|| format!("Failed to download Parakeet v3 {file_name}"))?;
 
@@ -1169,9 +1213,15 @@ async fn download_legacy(
         for (source, sha256) in PARAKEET_LEGACY_ONNX_SOURCES {
             let cb = progress_cb.clone();
             match manager
-                .download_verified_model_asset(source, &onnx_dest, sha256, move |p| {
-                    cb(p.percentage as f32 * 0.95);
-                })
+                .download_verified_model_asset(
+                    source,
+                    &onnx_dest,
+                    sha256,
+                    PARAKEET_LEGACY_ONNX_MAX_BYTES,
+                    move |p| {
+                        cb(p.percentage as f32 * 0.95);
+                    },
+                )
                 .await
             {
                 Ok(_) if is_valid_onnx_file(&onnx_dest, 4096) => {
@@ -1204,9 +1254,15 @@ async fn download_legacy(
         for (source, sha256) in PARAKEET_LEGACY_TOKENS_SOURCES {
             let cb = progress_cb.clone();
             match manager
-                .download_verified_model_asset(source, &vocab_dest, sha256, move |p| {
-                    cb(95.0 + p.percentage as f32 * 0.05);
-                })
+                .download_verified_model_asset(
+                    source,
+                    &vocab_dest,
+                    sha256,
+                    PARAKEET_LEGACY_TOKENS_MAX_BYTES,
+                    move |p| {
+                        cb(95.0 + p.percentage as f32 * 0.05);
+                    },
+                )
                 .await
             {
                 Ok(_) if is_valid_tokens_file(&vocab_dest) => {

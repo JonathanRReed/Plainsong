@@ -32,9 +32,19 @@ const gateCommands = [
   { id: "ipc-contract", command: "bun", args: ["run", "gate:ipc-contract"] },
   { id: "dead-code", command: "bun", args: ["run", "gate:dead-code"] },
   {
+    id: "dictation-latency",
+    command: "bun",
+    args: ["run", "gate:dictation-latency"],
+  },
+  {
     id: "dependency-audit",
     command: "bun",
     args: ["run", "gate:release:dependencies", "--", "--app", appPath],
+  },
+  {
+    id: "rust-dependency-audit",
+    command: "bun",
+    args: ["run", "gate:release:rust-dependencies"],
   },
   { id: "diff-check", command: "git", args: ["diff", "--check"] },
 ];

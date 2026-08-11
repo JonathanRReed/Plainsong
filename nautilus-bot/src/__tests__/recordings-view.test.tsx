@@ -74,6 +74,8 @@ let recordingState = {
   isRecording: false,
   recordingId: null as string | null,
   formattedDuration: "00:00",
+  meetingPhase: "idle",
+  meetingMessage: null as string | null,
 };
 const refetchRecordings = vi.fn();
 let recordingsLoading = false;
@@ -97,6 +99,8 @@ vi.mock("@/hooks/use-recording", () => ({
     isRecording: recordingState.isRecording,
     recordingId: recordingState.recordingId,
     formattedDuration: recordingState.formattedDuration,
+    meetingPhase: recordingState.meetingPhase,
+    meetingMessage: recordingState.meetingMessage,
   }),
 }));
 
@@ -310,6 +314,8 @@ describe("RecordingsView", () => {
     recordingState.isRecording = false;
     recordingState.recordingId = null;
     recordingState.formattedDuration = "00:00";
+    recordingState.meetingPhase = "idle";
+    recordingState.meetingMessage = null;
     recordingsLoading = false;
     recordingsHaveLoaded = true;
     recordingsError = null;
@@ -531,6 +537,7 @@ describe("RecordingsView", () => {
 
     render(<RecordingsView />);
 
+    expect(screen.getByRole("button", { name: "New meeting" })).toBeDisabled();
     expect(
       screen.getByRole("alert", { name: "Meetings need attention" }),
     ).toHaveTextContent("Choose a meeting-ready speech model.");
@@ -539,7 +546,6 @@ describe("RecordingsView", () => {
       (settingsTabListener.mock.calls[0]?.[0] as CustomEvent).detail,
     ).toEqual({ tab: "models" });
 
-    fireEvent.click(screen.getByRole("button", { name: "New meeting" }));
     expect(screen.queryByRole("dialog", { name: "Meeting consent" })).toBeNull();
     expect(startMeeting).not.toHaveBeenCalled();
 
@@ -555,6 +561,19 @@ describe("RecordingsView", () => {
     expect(screen.getByText("Weekly sync")).toBeInTheDocument();
     expect(screen.queryByText("Loading your meetings…")).not.toBeInTheDocument();
     expect(screen.queryByText("No meetings yet")).not.toBeInTheDocument();
+  });
+
+  it("keeps recoverable Meeting failures visible with a direct record action", () => {
+    recordingState.recordingId = "r1";
+    recordingState.meetingPhase = "recoverable";
+    recordingState.meetingMessage = "Saved audio remains available for retry.";
+
+    render(<RecordingsView />);
+
+    expect(screen.getByRole("alert")).toHaveTextContent(
+      "Saved audio remains available for retry.",
+    );
+    expect(screen.getByRole("button", { name: "Open meeting" })).toBeEnabled();
   });
 
   it("shows the empty state only after a successful empty response", () => {
@@ -1830,7 +1849,6 @@ describe("RecordingsView", () => {
         expect.objectContaining({
           systemAudio: true,
           projectId: "default",
-          consentPromptShown: true,
         }),
       );
     });

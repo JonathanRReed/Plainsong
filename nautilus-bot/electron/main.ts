@@ -14,8 +14,8 @@ import {
   Tray,
   type IpcMainInvokeEvent,
 } from "electron";
-import { execFile } from "child_process";
-import { existsSync, readFileSync, writeFileSync } from "fs";
+import { execFile, spawn } from "child_process";
+import { existsSync, readFileSync, unlinkSync, writeFileSync } from "fs";
 import path from "path";
 import { pathToFileURL } from "url";
 import { autoUpdater, type AppUpdater } from "electron-updater";
@@ -46,7 +46,21 @@ import {
   type OverlayPlacement,
   type OverlayWorkArea,
 } from "./overlay-placement";
-import { resolveUpdaterChannel, type UpdateChannel } from "./updater-channel";
+import {
+  allowUpdaterDowngrade,
+  effectiveUpdaterChannel,
+  isMonotonicUpdateCandidate,
+  macosUpdateRelauncherArgs,
+  resolveUpdaterChannel,
+  type UpdateChannel,
+  updaterInstallBlockedByActiveMeeting,
+  updaterResultHasAvailableUpdate,
+} from "./updater-channel";
+import {
+  awaitMacosUpdateRelauncherReadiness,
+  waitForMacosUpdateStaging,
+} from "./macos-updater-staging";
+import { runExplicitUpdaterInstallFlow } from "./updater-install-flow";
 import { resolveWindowUiSettings } from "./window-ui-settings";
 import {
   isRendererUrl,
@@ -60,6 +74,19 @@ import {
   shouldForwardRendererConsoleMessage,
 } from "./renderer-readiness";
 import { createDictationOverlayWindow, createRecordingOverlayWindow } from "./windows";
+import {
+  cloudLocationConfirmationDetail,
+  parseCloudLocationRequest,
+} from "./privileged-storage-locations";
+import { CaptureAdmissionController } from "./capture-admission";
+import { rendererPermissionAllowed } from "./renderer-permission-policy";
+import {
+  finalizeMeetingWithinBudget,
+  nextActiveMeetingRecordingId,
+  resolveMeetingStopId,
+  type MeetingFinalizationOutcome,
+  type MeetingLifecycleEvent,
+} from "./meeting-lifecycle";
 
 // Packaging is the only thing that decides development mode. This used to also
 // honour `NODE_ENV=development`, which meant an ambient environment variable
@@ -116,6 +143,7 @@ if (isDev) {
 let mainWindow: BrowserWindow | null = null;
 let ipcBridge: IpcBridge | null = null;
 let dictationPhase = "idle";
+const captureAdmission = new CaptureAdmissionController();
 // Session id from the most recent `dictation-state-changed` event, used to
 // drop stale VAD `silence_stop` signals emitted for an earlier session.
 let dictationSessionId: number | null = null;
@@ -430,6 +458,16 @@ function setUpdateStatus(next: UpdateStatusPayload): void {
   broadcastRendererEvent("update-status-changed", next);
 }
 
+function updateRollbackError(candidateVersion: string): string {
+  return `Update ${candidateVersion} was rejected because it is not newer than the running version ${app.getVersion()}.`;
+}
+
+function candidateIsMonotonic(info: UpdateInfoPayload | null | undefined): boolean {
+  return Boolean(
+    info?.version && isMonotonicUpdateCandidate(app.getVersion(), info.version),
+  );
+}
+
 async function getUpdateChannelFromSidecar(): Promise<UpdateChannel> {
   if (!ipcBridge) {
     return "stable";
@@ -461,9 +499,18 @@ function configureAutoUpdater(updater: AppUpdater): void {
 
     updater.on("update-available", (info) => {
       updateReadyToInstall = false;
+      const normalized = normalizeUpdateInfo(info);
+      if (!candidateIsMonotonic(normalized)) {
+        setUpdateStatus({
+          status: "error",
+          info: normalized ?? undefined,
+          error: updateRollbackError(normalized?.version ?? "unknown"),
+        });
+        return;
+      }
       setUpdateStatus({
         status: "updateAvailable",
-        info: normalizeUpdateInfo(info),
+        info: normalized,
         installBlockedReason: updateInstallBlockedReason,
       });
     });
@@ -482,10 +529,20 @@ function configureAutoUpdater(updater: AppUpdater): void {
     });
 
     updater.on("update-downloaded", (info) => {
+      const normalized = normalizeUpdateInfo(info);
+      if (!candidateIsMonotonic(normalized)) {
+        updateReadyToInstall = false;
+        setUpdateStatus({
+          status: "error",
+          info: normalized ?? undefined,
+          error: updateRollbackError(normalized?.version ?? "unknown"),
+        });
+        return;
+      }
       updateReadyToInstall = true;
       setUpdateStatus({
         status: "updateAvailable",
-        info: normalizeUpdateInfo(info),
+        info: normalized,
         progress: 100,
         installBlockedReason: updateInstallBlockedReason,
       });
@@ -541,16 +598,26 @@ async function checkForUpdatesInElectron(): Promise<UpdateInfoPayload | null> {
 
   updateInstallBlockedReason = (await isMacAppCodeSigned()) ? undefined : "unsigned";
 
-  const channel = await getUpdateChannelFromSidecar();
+  const configuredChannel = await getUpdateChannelFromSidecar();
+  const channel = effectiveUpdaterChannel(configuredChannel, app.getVersion());
   // Stable must request `latest-mac.yml` (what electron-builder publishes);
   // requesting `stable-mac.yml` 404s with no fallback. See updater-channel.ts.
   autoUpdater.channel = resolveUpdaterChannel(channel);
   autoUpdater.allowPrerelease = channel === "beta";
-  autoUpdater.allowDowngrade = channel === "beta";
+  autoUpdater.allowDowngrade = allowUpdaterDowngrade(channel);
 
   const result = await autoUpdater.checkForUpdates();
+  if (!updaterResultHasAvailableUpdate(result)) {
+    return null;
+  }
   const info = normalizeUpdateInfo(result?.updateInfo);
-  return info ?? null;
+  if (!info || !candidateIsMonotonic(info)) {
+    const error = updateRollbackError(info?.version ?? "unknown");
+    updateReadyToInstall = false;
+    setUpdateStatus({ status: "error", info: info ?? undefined, error });
+    throw new Error(error);
+  }
+  return info;
 }
 
 async function installUpdateInElectron(): Promise<void> {
@@ -558,8 +625,20 @@ async function installUpdateInElectron(): Promise<void> {
     throw new Error("Updates are only available in packaged builds.");
   }
 
+  if (updaterInstallBlockedByActiveMeeting(activeMeetingRecordingId)) {
+    throw new Error(
+      "Finish the active meeting before installing the update so its recording can be finalized safely.",
+    );
+  }
+
   if (!updateStatus.info) {
     throw new Error("No downloaded or available update is ready to install.");
+  }
+  if (!candidateIsMonotonic(updateStatus.info)) {
+    const error = updateRollbackError(updateStatus.info.version);
+    updateReadyToInstall = false;
+    setUpdateStatus({ status: "error", info: updateStatus.info, error });
+    throw new Error(error);
   }
 
   if (!(await isMacAppCodeSigned())) {
@@ -575,20 +654,71 @@ async function installUpdateInElectron(): Promise<void> {
     throw new Error(error);
   }
 
-  if (!updateReadyToInstall) {
-    setUpdateStatus({
-      status: "downloading",
-      info: updateStatus.info,
-      progress: updateStatus.progress,
-    });
-    await autoUpdater.downloadUpdate();
-  }
+  const updateInfo = updateStatus.info;
+  const appBundlePath = path.resolve(app.getPath("exe"), "..", "..", "..");
+  const readyFilePath = path.join(
+    app.getPath("temp"),
+    `plainsong-update-relauncher-${process.pid}-${Date.now()}.ready`,
+  );
 
-  setUpdateStatus({
-    status: "installing",
-    info: updateStatus.info,
+  await runExplicitUpdaterInstallFlow({
+    updater: autoUpdater,
+    updateReadyToInstall,
+    setDownloading: () => {
+      setUpdateStatus({
+        status: "downloading",
+        info: updateInfo,
+        progress: updateStatus.progress,
+      });
+    },
+    setInstalling: () => {
+      setUpdateStatus({ status: "installing", info: updateInfo });
+    },
+    waitForMacosStaging: () =>
+      waitForMacosUpdateStaging({
+        appBundlePath,
+        expectedVersion: updateInfo.version,
+        cachePath: path.join(app.getPath("home"), "Library", "Caches"),
+      }),
+    launchMacosRelauncher: async () => {
+      const relauncher = spawn(
+        "/bin/sh",
+        macosUpdateRelauncherArgs(
+          appBundlePath,
+          updateInfo.version,
+          readyFilePath,
+        ),
+        { detached: true, stdio: "ignore" },
+      );
+      try {
+        await new Promise<void>((resolve, reject) => {
+          relauncher.once("spawn", resolve);
+          relauncher.once("error", reject);
+        });
+        await awaitMacosUpdateRelauncherReadiness({
+          child: relauncher,
+          readyFilePath,
+        });
+        relauncher.unref();
+      } finally {
+        try {
+          unlinkSync(readyFilePath);
+        } catch {
+          // The helper may have failed before creating its readiness marker.
+        }
+      }
+    },
+    quitApp: () => app.quit(),
+    onFailure: (error) => {
+      // Explicit consent applies only to this attempted install. If download,
+      // staging, or helper handoff fails, an ordinary later quit must not
+      // apply the abandoned update.
+      updateReadyToInstall = false;
+      const message =
+        error instanceof Error ? error.message : "Failed to install update";
+      setUpdateStatus({ status: "error", info: updateInfo, error: message });
+    },
   });
-  autoUpdater.quitAndInstall();
 }
 
 // ── Overlay placement ────────────────────────────────────────────────────────
@@ -869,6 +999,18 @@ async function handleLocalCommand(
 ): Promise<{ handled: boolean; result?: unknown }> {
   const senderWindow = BrowserWindow.fromWebContents(event.sender);
 
+  const chooseDirectory = async (title: string): Promise<string | null> => {
+    const options: Electron.OpenDialogOptions = {
+      title,
+      buttonLabel: "Choose folder",
+      properties: ["openDirectory", "createDirectory"],
+    };
+    const result = senderWindow
+      ? await dialog.showOpenDialog(senderWindow, options)
+      : await dialog.showOpenDialog(options);
+    return result.canceled ? null : (result.filePaths[0] ?? null);
+  };
+
   switch (command) {
     case "__window_set_size__": {
       if (!senderWindow) {
@@ -963,6 +1105,133 @@ async function handleLocalCommand(
         handled: true,
         result: { conflicts: shortcutConflicts },
       };
+    case "select_export_location": {
+      const selectedPath = await chooseDirectory("Choose a dedicated export folder");
+      if (!selectedPath) {
+        return { handled: true, result: null };
+      }
+      if (!ipcBridge) {
+        throw new Error("Storage approval service is not ready");
+      }
+      return {
+        handled: true,
+        result: await ipcBridge.invokeSidecar("approve_export_location_privileged", {
+          path: selectedPath,
+        }),
+      };
+    }
+    case "select_backup_location": {
+      const selectedPath = await chooseDirectory("Choose a dedicated backup folder");
+      if (!selectedPath) {
+        return { handled: true, result: null };
+      }
+      if (!ipcBridge) {
+        throw new Error("Storage approval service is not ready");
+      }
+      return {
+        handled: true,
+        result: await ipcBridge.invokeSidecar("approve_backup_location_privileged", {
+          path: selectedPath,
+        }),
+      };
+    }
+    case "select_cloud_backup_location": {
+      const request = parseCloudLocationRequest(args);
+      if (!ipcBridge) {
+        throw new Error("Storage approval service is not ready");
+      }
+      if (request.provider === "i_cloud") {
+        const selectedPath = await chooseDirectory("Choose an iCloud backup folder");
+        if (!selectedPath) {
+          return { handled: true, result: null };
+        }
+        return {
+          handled: true,
+          result: await ipcBridge.invokeSidecar(
+            "approve_cloud_backup_location_privileged",
+            {
+              provider: request.provider,
+              path: selectedPath,
+              folder: request.folder,
+            },
+          ),
+        };
+      }
+
+      const messageOptions: Electron.MessageBoxOptions = {
+        type: "warning",
+        title: "Confirm cloud backup destination",
+        message: "Allow this cloud destination?",
+        detail: cloudLocationConfirmationDetail(request),
+        buttons: ["Cancel", "Allow destination"],
+        defaultId: 0,
+        cancelId: 0,
+        noLink: true,
+      };
+      const confirmation = senderWindow
+        ? await dialog.showMessageBox(senderWindow, messageOptions)
+        : await dialog.showMessageBox(messageOptions);
+      if (confirmation.response !== 1) {
+        return { handled: true, result: null };
+      }
+      return {
+        handled: true,
+        result: await ipcBridge.invokeSidecar(
+          "approve_cloud_backup_location_privileged",
+          {
+            provider: request.provider,
+            remoteName: request.remoteName,
+            folder: request.folder,
+          },
+        ),
+      };
+    }
+    case "begin_meeting_capture": {
+      if (!senderWindow || senderWindow !== mainWindow) {
+        throw new Error("Meeting capture can only start from the main Plainsong window");
+      }
+      if (!ipcBridge) {
+        throw new Error("Meeting capture service is not ready");
+      }
+      const route = event.senderFrame?.url ?? senderWindow.webContents.getURL();
+      const grant = captureAdmission.consume(senderWindow.id, route);
+      const payload = (args ?? {}) as { options?: unknown };
+      const suppliedOptions =
+        payload.options && typeof payload.options === "object"
+          ? (payload.options as Record<string, unknown>)
+          : {};
+      const result = (await ipcBridge.invoke("start_recording", {
+        options: {
+          ...suppliedOptions,
+          consentPromptShown: true,
+          admissionNonce: grant.nonce,
+        },
+      })) as { recordingId?: unknown };
+      if (typeof result?.recordingId !== "string" || !result.recordingId) {
+        throw new Error("Meeting capture did not return a recording ID");
+      }
+      activeMeetingRecordingId = result.recordingId;
+      return { handled: true, result: result.recordingId };
+    }
+    case "end_meeting_capture": {
+      if (!senderWindow) {
+        throw new Error("Meeting capture stop requires a Plainsong window");
+      }
+      if (!ipcBridge) {
+        throw new Error("Meeting capture service is not ready");
+      }
+      const route = event.senderFrame?.url ?? senderWindow.webContents.getURL();
+      captureAdmission.consume(senderWindow.id, route);
+      const payload = (args ?? {}) as { recordingId?: unknown };
+      const requestedRecordingId =
+        typeof payload.recordingId === "string" ? payload.recordingId : null;
+      const recordingId = resolveMeetingStopId(
+        activeMeetingRecordingId,
+        requestedRecordingId,
+      );
+      await ipcBridge.invokeSidecar("stop_recording", { recordingId });
+      return { handled: true, result: null };
+    }
     default:
       return { handled: false };
   }
@@ -1108,6 +1377,12 @@ async function handleNativeDictationShortcutEvent(
   settings: AppSettings,
   rawEvent: NativeShortcutRawEvent,
 ): Promise<void> {
+  qaLog("dictation native shortcut event", {
+    type: rawEvent.type,
+    key: rawEvent.key,
+    phase: dictationPhase,
+    nativeShortcutAvailable,
+  });
   if (!shouldHandleDictationShortcutSource({ source: "native", nativeShortcutAvailable })) {
     return;
   }
@@ -1355,8 +1630,6 @@ function isAllowedExternalUrl(rawUrl: string): boolean {
 // unexpected origin loaded into a window would otherwise be able to open the
 // microphone under the grant the user gave Plainsong. Only the packaged
 // renderer origin (or the loopback dev server) may ask, and only for media.
-const RENDERER_ALLOWED_PERMISSIONS = new Set(["media", "clipboard-sanitized-write"]);
-
 function isTrustedRendererOrigin(rawUrl: string | undefined | null): boolean {
   if (!rawUrl) {
     return false;
@@ -1367,10 +1640,16 @@ function isTrustedRendererOrigin(rawUrl: string | undefined | null): boolean {
 function installRendererPermissionHandlers(): void {
   const defaultSession = session.defaultSession;
 
-  defaultSession.setPermissionRequestHandler((webContents, permission, callback) => {
-    const requestUrl = webContents?.getURL();
-    const allowed =
-      RENDERER_ALLOWED_PERMISSIONS.has(permission) && isTrustedRendererOrigin(requestUrl);
+  defaultSession.setPermissionRequestHandler((_webContents, permission, callback, details) => {
+    const requestUrl =
+      "securityOrigin" in details && typeof details.securityOrigin === "string"
+        ? details.securityOrigin
+        : details.requestingUrl;
+    const allowed = rendererPermissionAllowed(
+      permission,
+      { requestingOrigin: requestUrl, isMainFrame: details.isMainFrame },
+      isTrustedRendererOrigin,
+    );
 
     if (!allowed) {
       console.warn("[security] denied renderer permission request", {
@@ -1382,14 +1661,34 @@ function installRendererPermissionHandlers(): void {
     callback(allowed);
   });
 
-  defaultSession.setPermissionCheckHandler((_webContents, permission, requestingOrigin) => {
-    return (
-      RENDERER_ALLOWED_PERMISSIONS.has(permission) && isTrustedRendererOrigin(requestingOrigin)
+  defaultSession.setPermissionCheckHandler(
+    (_webContents, permission, requestingOrigin, details) =>
+      rendererPermissionAllowed(
+        permission,
+        {
+          requestingOrigin: details.securityOrigin ?? requestingOrigin,
+          isMainFrame: details.isMainFrame,
+        },
+        isTrustedRendererOrigin,
+      ),
     );
-  });
 }
 
 function configureWindowSecurity(win: BrowserWindow): void {
+  win.webContents.on("before-input-event", (_event, input) => {
+    if (input.type === "keyDown" && !input.isAutoRepeat) {
+      captureAdmission.observe(win.id, win.webContents.getURL());
+    }
+  });
+  win.webContents.on("before-mouse-event", (_event, mouse) => {
+    if (mouse.type === "mouseDown") {
+      captureAdmission.observe(win.id, win.webContents.getURL());
+    }
+  });
+  win.webContents.once("destroyed", () => {
+    captureAdmission.clear(win.id);
+  });
+
   win.webContents.setWindowOpenHandler(({ url }) => {
     if (isAllowedExternalUrl(url)) {
       void shell.openExternal(url);
@@ -1536,21 +1835,30 @@ process.on("unhandledRejection", (reason) => {
 // capture and WAV-writer threads were live, so everything since the last
 // five-second header checkpoint was lost and the meeting was left marked
 // errored. Stop and finalize first, then continue the normal quit.
-async function finalizeActiveMeetingBeforeQuit(): Promise<void> {
+async function finalizeActiveMeetingBeforeQuit(): Promise<MeetingFinalizationOutcome> {
   if (!activeMeetingRecordingId || !ipcBridge) {
-    return;
+    return { status: "confirmed" };
   }
 
   const recordingId = activeMeetingRecordingId;
-  activeMeetingRecordingId = null;
   console.log("[main] finalizing active meeting before quit", { recordingId });
 
-  try {
-    await ipcBridge.invoke("stop_recording", {});
+  const result = await finalizeMeetingWithinBudget(() =>
+    ipcBridge!.invokeSidecar("stop_recording", { recordingId }).then(() => undefined),
+  );
+  if (result.status === "confirmed") {
     console.log("[main] meeting finalized before quit", { recordingId });
-  } catch (error) {
-    console.error("[main] failed to finalize meeting before quit", { recordingId, error });
+  } else if (result.status === "timed_out") {
+    console.error("[main] meeting finalization remains recoverable after bounded quit", {
+      recordingId,
+    });
+  } else {
+    console.error("[main] meeting finalization failed; cancelling quit", {
+      recordingId,
+      error: result.error,
+    });
   }
+  return result;
 }
 
 app.on("before-quit", (event) => {
@@ -1560,7 +1868,20 @@ app.on("before-quit", (event) => {
   if (!isQuitting && activeMeetingRecordingId && ipcBridge) {
     event.preventDefault();
     isQuitting = true;
-    void finalizeActiveMeetingBeforeQuit().finally(() => {
+    void finalizeActiveMeetingBeforeQuit().then((result) => {
+      if (result.status === "failed") {
+        isQuitting = false;
+        const reason =
+          result.error instanceof Error
+            ? result.error.message
+            : "The meeting could not be finalized safely.";
+        dialog.showErrorBox(
+          "Finish the meeting before quitting",
+          `${reason}\n\nPlainsong stayed open so you can retry without losing the meeting.`,
+        );
+        showAndFocusMainWindow();
+        return;
+      }
       app.quit();
     });
     return;
@@ -1717,13 +2038,16 @@ async function bootstrap() {
     // five seconds — so the message says recovery is possible.
     if (activeMeetingRecordingId) {
       const interruptedRecordingId = activeMeetingRecordingId;
-      activeMeetingRecordingId = null;
       broadcastRendererEvent("meeting-recording-state-changed", {
-        phase: "error",
+        phase: "recoverable",
         recordingId: interruptedRecordingId,
         message:
           "Recording stopped unexpectedly because the audio engine restarted. Audio captured before the interruption was saved.",
       });
+      activeMeetingRecordingId = nextActiveMeetingRecordingId(
+        activeMeetingRecordingId,
+        { phase: "recoverable", recordingId: interruptedRecordingId },
+      );
       refreshTray();
     }
   });
@@ -1743,12 +2067,21 @@ async function bootstrap() {
       typeof payload === "object" &&
       "phase" in payload
     ) {
-      const meetingPhase = (payload as { phase?: unknown }).phase;
-      const meetingId = (payload as { recordingId?: unknown }).recordingId;
-      if (meetingPhase === "recording" && typeof meetingId === "string") {
-        activeMeetingRecordingId = meetingId;
-      } else if (meetingPhase === "idle" || meetingPhase === "error") {
-        activeMeetingRecordingId = null;
+      const lifecycle = payload as {
+        phase?: unknown;
+        recordingId?: unknown;
+      };
+      if (typeof lifecycle.phase === "string") {
+        activeMeetingRecordingId = nextActiveMeetingRecordingId(
+          activeMeetingRecordingId,
+          {
+            phase: lifecycle.phase as MeetingLifecycleEvent["phase"],
+            recordingId:
+              typeof lifecycle.recordingId === "string"
+                ? lifecycle.recordingId
+                : null,
+          },
+        );
       }
     }
 

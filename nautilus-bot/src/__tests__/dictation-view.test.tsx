@@ -496,17 +496,16 @@ describe("DictationView modes", () => {
     expect(screen.queryByText("Ready")).not.toBeInTheDocument();
     expect(screen.getByText("Setup needed")).toBeInTheDocument();
     expect(
-      screen.getByRole("button", { name: "Complete setup to start" }),
-    ).toBeDisabled();
+      screen.getAllByText(
+        "Text insertion needs Accessibility access for the current mode.",
+      ),
+    ).toHaveLength(1);
 
     fireEvent.click(screen.getByRole("button", { name: "Repair text insertion" }));
     expect(
       (navigationListener.mock.calls[0]?.[0] as CustomEvent).detail,
     ).toEqual({ view: "setup" });
 
-    fireEvent.click(
-      screen.getByRole("button", { name: "Complete setup to start" }),
-    );
     expect(backendMocks.startDictation).not.toHaveBeenCalled();
 
     window.removeEventListener(OPEN_MAIN_VIEW_EVENT, navigationListener);
@@ -543,14 +542,14 @@ describe("DictationView modes", () => {
       await screen.findAllByText(
         "Moonshine model exists but failed to initialize.",
       ),
-    ).not.toHaveLength(0);
+    ).toHaveLength(1);
     expect(
       screen.queryByText("Dictation has no model yet"),
     ).not.toBeInTheDocument();
     expect(screen.queryByText(/is not on this Mac/i)).not.toBeInTheDocument();
     expect(
-      screen.getByRole("button", { name: "Complete setup to start" }),
-    ).toBeDisabled();
+      screen.getByRole("button", { name: "Review models" }),
+    ).toBeEnabled();
   });
 
   it("keeps a hands-free choice and states one hotkey behavior", async () => {
@@ -976,6 +975,82 @@ describe("DictationView modes", () => {
     expect(screen.getByText("Runtime mode: Meeting Follow-up")).toBeInTheDocument();
   });
 
+  it("does not label a cold local model as primed before warmup acknowledges", async () => {
+    render(<DictationView />);
+
+    await screen.findByRole("tab", { name: "Profiles" });
+    const handler = backendMocks.eventListeners.get("dictation-state-changed");
+
+    await act(async () => {
+      handler?.({
+        payload: {
+          phase: "preparing",
+          message: "Loading the selected dictation model",
+          modelReadiness: "loading",
+          captureReady: false,
+        },
+      });
+    });
+
+    expect(await screen.findByText("Loading local model")).toBeInTheDocument();
+    expect(screen.queryByText("Model primed")).toBeNull();
+
+    fireEvent.click(screen.getByRole("button", { name: "Cancel dictation" }));
+    await waitFor(() => {
+      expect(backendMocks.invoke).toHaveBeenCalledWith("force_stop_dictation");
+    });
+
+    await act(async () => {
+      handler?.({
+        payload: {
+          phase: "primed",
+          message: "Local model ready. Opening the microphone.",
+          modelReadiness: "ready",
+          captureReady: false,
+        },
+      });
+    });
+
+    expect(await screen.findByText("Model primed")).toBeInTheDocument();
+    expect(screen.getByText("Local model ready. Opening the microphone.")).toBeInTheDocument();
+    expect(screen.queryByText("--:--")).toBeNull();
+  });
+
+  it("shows every measured latency segment for the latest dictation", async () => {
+    render(<DictationView />);
+    await screen.findByRole("tab", { name: "Profiles" });
+    const handler = backendMocks.eventListeners.get("dictation-text-ready");
+
+    await act(async () => {
+      handler?.({
+        payload: {
+          text: "Measured result",
+          pasted: true,
+          copied: false,
+          actualProvider: "whisper",
+          acknowledgementLatencyMs: 42,
+          captureReadyLatencyMs: 210,
+          firstStablePartialLatencyMs: 910,
+          finalTranscriptLatencyMs: 330,
+          startupLatencyMs: 210,
+          latencyMs: 300,
+          insertLatencyMs: 30,
+          endToEndMs: 1_240,
+        },
+      });
+    });
+
+    for (const label of [
+      "Acknowledged",
+      "Capture ready",
+      "First preview",
+      "Final transcript",
+      "Total time",
+    ]) {
+      expect(await screen.findByText(label)).toBeInTheDocument();
+    }
+  });
+
   it("surfaces auto-activated app matcher details in the latest result", async () => {
     render(<DictationView />);
 
@@ -1131,6 +1206,9 @@ describe("DictationView modes", () => {
     expect(
       screen.getByText(/UsefulSensors Moonshine · Moonshine Base is not on this Mac/i),
     ).toBeInTheDocument();
+    expect(
+      screen.getByRole("button", { name: /download usefulsensors moonshine/i }),
+    ).toBeEnabled();
 
     // And the shortcut press says so out loud rather than only in the console.
     fireEvent.keyDown(window, {

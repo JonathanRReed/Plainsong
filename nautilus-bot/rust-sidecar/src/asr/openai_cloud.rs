@@ -1,5 +1,6 @@
 use super::{
-    AsrProvider, AsrProviderType, DownloadStatus, ModelInfo, TranscriptSegment, TranscriptionResult,
+    cloud_asr_status_error, read_cloud_asr_json, AsrProvider, AsrProviderType, DownloadStatus,
+    ModelInfo, TranscriptSegment, TranscriptionResult,
 };
 use crate::secrets;
 use anyhow::{Context, Result};
@@ -129,14 +130,10 @@ impl OpenAiCloudWhisperProvider {
 
         if !response.status().is_success() {
             let status = response.status();
-            let body = response.text().await.unwrap_or_default();
-            anyhow::bail!("OpenAI Whisper API error {}: {}", status, body);
+            return Err(cloud_asr_status_error("OpenAI Whisper", status));
         }
 
-        let payload = response
-            .json::<Value>()
-            .await
-            .context("Failed to parse OpenAI Whisper response")?;
+        let payload: Value = read_cloud_asr_json(response, "OpenAI Whisper").await?;
 
         let result: OpenAiTranscriptionResponse = serde_json::from_value(payload.clone())
             .context("Failed to decode OpenAI transcription payload")?;

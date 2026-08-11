@@ -8,6 +8,91 @@ import {
   shouldRecycleSidecarAfterCommandError,
 } from "../../electron/sidecar-recovery-policy";
 import { buildSidecarEnv } from "../../electron/sidecar-env";
+import { isRendererCommandAllowed } from "../../electron/ipc-bridge";
+import { parseCloudLocationRequest } from "../../electron/privileged-storage-locations";
+import { CaptureAdmissionController } from "../../electron/capture-admission";
+
+describe("privileged storage command admission", () => {
+  it("allows native picker requests but never raw privileged approval commands", () => {
+    expect(isRendererCommandAllowed("select_export_location")).toBe(true);
+    expect(isRendererCommandAllowed("select_backup_location")).toBe(true);
+    expect(isRendererCommandAllowed("select_cloud_backup_location")).toBe(true);
+
+    expect(isRendererCommandAllowed("approve_export_location_privileged")).toBe(false);
+    expect(isRendererCommandAllowed("approve_backup_location_privileged")).toBe(false);
+    expect(isRendererCommandAllowed("approve_cloud_backup_location_privileged")).toBe(false);
+  });
+
+  it("rejects renderer path traversal and command injection before confirmation", () => {
+    expect(() =>
+      parseCloudLocationRequest({
+        provider: "google_drive",
+        remoteName: "gdrive;rm",
+        folder: "PlainsongBackups",
+      }),
+    ).toThrow("valid rclone remote");
+    expect(() =>
+      parseCloudLocationRequest({
+        provider: "google_drive",
+        remoteName: "gdrive",
+        folder: "../outside",
+      }),
+    ).toThrow("safe relative path");
+    expect(
+      parseCloudLocationRequest({
+        provider: "google_drive",
+        remoteName: "gdrive:",
+        folder: "PlainsongBackups",
+      }),
+    ).toEqual({
+      provider: "google_drive",
+      remoteName: "gdrive",
+      folder: "PlainsongBackups",
+    });
+  });
+});
+
+describe("meeting capture admission", () => {
+  it("requires a recent route-bound user input and consumes it once", () => {
+    let now = 10_000;
+    const admission = new CaptureAdmissionController({
+      maxAgeMs: 1_000,
+      now: () => now,
+    });
+
+    expect(() => admission.consume(7, "plainsong://app/meetings")).toThrow(
+      "recent click or key press",
+    );
+
+    admission.observe(7, "plainsong://app/meetings");
+    const granted = admission.consume(7, "plainsong://app/meetings");
+    expect(granted.nonce).toMatch(/^[0-9a-f-]{36}$/);
+    expect(() => admission.consume(7, "plainsong://app/meetings")).toThrow(
+      "recent click or key press",
+    );
+
+    admission.observe(7, "plainsong://app/meetings");
+    expect(() => admission.consume(8, "plainsong://app/meetings")).toThrow(
+      "recent click or key press",
+    );
+    expect(() => admission.consume(7, "plainsong://app/settings")).toThrow(
+      "same page",
+    );
+
+    admission.observe(7, "plainsong://app/meetings");
+    now += 1_001;
+    expect(() => admission.consume(7, "plainsong://app/meetings")).toThrow(
+      "recent click or key press",
+    );
+  });
+
+  it("keeps raw start and stop commands outside renderer admission", () => {
+    expect(isRendererCommandAllowed("begin_meeting_capture")).toBe(true);
+    expect(isRendererCommandAllowed("end_meeting_capture")).toBe(true);
+    expect(isRendererCommandAllowed("start_recording")).toBe(false);
+    expect(isRendererCommandAllowed("stop_recording")).toBe(false);
+  });
+});
 
 describe("buildSidecarEnv", () => {
   it("passes only runtime variables needed by the sidecar", () => {
@@ -17,6 +102,13 @@ describe("buildSidecarEnv", () => {
       RUST_LOG: "info",
       OPENAI_API_KEY: "sk-test-secret",
       ELEVENLABS_API_KEY: "xi-test-secret",
+      MISTRAL_API_KEY: "mistral-test-secret",
+      ANTHROPIC_API_KEY: "anthropic-test-secret",
+      GEMINI_API_KEY: "gemini-test-secret",
+      DEEPSEEK_API_KEY: "deepseek-test-secret",
+      GROQ_API_KEY: "groq-test-secret",
+      CO_API_KEY: "cohere-test-secret",
+      OLLAMA_CLOUD_API_KEY: "ollama-test-secret",
       GITHUB_TOKEN: "ghp_secret",
       PLAINSONG_QA_MODE: "1",
       PLAINSONG_CONFIG_DIR: "/tmp/nautilus-config",
@@ -31,10 +123,17 @@ describe("buildSidecarEnv", () => {
       PLAINSONG_QA_MODE: "1",
       PLAINSONG_CONFIG_DIR: "/tmp/nautilus-config",
       PLAINSONG_DATA_DIR: "/tmp/nautilus",
-      OPENAI_API_KEY: "sk-test-secret",
-      ELEVENLABS_API_KEY: "xi-test-secret",
     });
     expect(env.GITHUB_TOKEN).toBeUndefined();
+    expect(env.OPENAI_API_KEY).toBeUndefined();
+    expect(env.ELEVENLABS_API_KEY).toBeUndefined();
+    expect(env.MISTRAL_API_KEY).toBeUndefined();
+    expect(env.ANTHROPIC_API_KEY).toBeUndefined();
+    expect(env.GEMINI_API_KEY).toBeUndefined();
+    expect(env.DEEPSEEK_API_KEY).toBeUndefined();
+    expect(env.GROQ_API_KEY).toBeUndefined();
+    expect(env.CO_API_KEY).toBeUndefined();
+    expect(env.OLLAMA_CLOUD_API_KEY).toBeUndefined();
     expect(env.PLAINSONG_MACOS_SPEECH_HELPER_PATH).toBeUndefined();
   });
 
@@ -68,6 +167,24 @@ describe("getCommandTimeoutMs", () => {
 });
 
 describe("sidecar fault recovery policy", () => {
+  it("does not apply the microphone recovery budget to model downloads", async () => {
+    const attempt = vi.fn(
+      () => new Promise<string>((resolve) => setTimeout(() => resolve("downloaded"), 20)),
+    );
+    const recover = vi.fn<(remainingMs: number) => Promise<void>>().mockResolvedValue(undefined);
+
+    await expect(
+      retryOnceAfterMicrophonePreparationTimeout(
+        "download_asr_models",
+        attempt,
+        recover,
+        5,
+      ),
+    ).resolves.toBe("downloaded");
+    expect(attempt).toHaveBeenCalledOnce();
+    expect(recover).not.toHaveBeenCalled();
+  });
+
   it("recycles recording and dictation commands whose microphone preparation timed out", () => {
     const recordingTimeout = new Error(
       "Timed out waiting for microphone stream preparation. Plainsong is restarting audio capture automatically; retry in a moment.",
@@ -110,7 +227,7 @@ describe("sidecar fault recovery policy", () => {
         new Error("Timed out waiting for microphone stream preparation"),
       )
       .mockResolvedValueOnce("recording-recovered");
-    const recover = vi.fn<() => Promise<void>>().mockResolvedValue(undefined);
+    const recover = vi.fn<(remainingMs: number) => Promise<void>>().mockResolvedValue(undefined);
 
     await expect(
       retryOnceAfterMicrophonePreparationTimeout(
@@ -127,7 +244,7 @@ describe("sidecar fault recovery policy", () => {
     const attempt = vi
       .fn<() => Promise<string>>()
       .mockRejectedValue(new Error("Microphone permission is not ready"));
-    const recover = vi.fn<() => Promise<void>>().mockResolvedValue(undefined);
+    const recover = vi.fn<(remainingMs: number) => Promise<void>>().mockResolvedValue(undefined);
 
     await expect(
       retryOnceAfterMicrophonePreparationTimeout(
@@ -140,13 +257,13 @@ describe("sidecar fault recovery policy", () => {
     expect(recover).not.toHaveBeenCalled();
   });
 
-  it("recycles after a second stall but does not attempt a third start", async () => {
+  it("recycles only once after a second stall and does not attempt a third start", async () => {
     const attempt = vi
       .fn<() => Promise<string>>()
       .mockRejectedValue(
         new Error("Timed out waiting for microphone stream preparation"),
       );
-    const recover = vi.fn<() => Promise<void>>().mockResolvedValue(undefined);
+    const recover = vi.fn<(remainingMs: number) => Promise<void>>().mockResolvedValue(undefined);
 
     await expect(
       retryOnceAfterMicrophonePreparationTimeout(
@@ -156,7 +273,29 @@ describe("sidecar fault recovery policy", () => {
       ),
     ).rejects.toThrow(MICROPHONE_RECOVERY_MESSAGE);
     expect(attempt).toHaveBeenCalledTimes(2);
-    expect(recover).toHaveBeenCalledTimes(2);
+    expect(recover).toHaveBeenCalledOnce();
+  });
+
+  it("bounds a stalled process replacement inside the combined recovery budget", async () => {
+    const attempt = vi
+      .fn<() => Promise<string>>()
+      .mockRejectedValue(
+        new Error("Timed out waiting for microphone stream preparation"),
+      );
+    const recover = vi.fn<(remainingMs: number) => Promise<void>>(
+      () => new Promise(() => {}),
+    );
+
+    const recovery = retryOnceAfterMicrophonePreparationTimeout(
+      "start_recording",
+      attempt,
+      recover,
+      25,
+    );
+
+    await expect(recovery).rejects.toThrow(MICROPHONE_RECOVERY_MESSAGE);
+    expect(attempt).toHaveBeenCalledOnce();
+    expect(recover).toHaveBeenCalledOnce();
   });
 });
 

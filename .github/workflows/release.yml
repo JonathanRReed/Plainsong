@@ -1,20 +1,25 @@
-name: Release
+name: Beta release candidate
 
-# Cut a release by pushing a tag like v1.2.3, or trigger manually.
+# Cut the first beta candidate with tag v0.9.0-beta.1, or trigger manually for
+# that existing tag. The package-version check below remains authoritative.
 # Builds the Rust sidecar + Electron app, requires Developer ID signing and
 # Apple notarization, verifies the stapled app with Gatekeeper, then stages the
-# verified assets in a draft GitHub Release.
+# artifact-verified assets in a draft GitHub Release. This workflow does not
+# run the real-hardware Dictation, Meetings, clean-install, updater-journey, or
+# three-hour soak gates, so its draft is not by itself a beta-ready verdict.
 #
-# v1 ships macOS arm64 only. The Windows leg was removed: the sidecar's
+# The limited beta ships macOS arm64 only. The Windows leg was removed: the sidecar's
 # default cargo features (whisper-gpu = Metal) do not compile on
 # Windows, and Windows support is tracked as future platform work in
 # LAUNCH.md ("Windows/Linux support").
 #
 # Official releases fail closed if signing or notarization credentials are
 # missing. electron-builder never publishes directly. After every source,
-# package, updater, signing, stapling, and Gatekeeper check succeeds, the final
-# step creates or refreshes a draft release for human review. Updater users see
-# nothing until that draft is deliberately published.
+# package, updater-metadata, signing, stapling, and Gatekeeper check succeeds,
+# the final step creates or refreshes an artifact-only draft for human review.
+# Publishing still requires the current aggregate release audit and manual
+# product gates. Updater users see nothing until the draft is deliberately
+# published.
 
 on:
   push:
@@ -23,7 +28,7 @@ on:
   workflow_dispatch:
     inputs:
       tag:
-        description: "Existing tag to build (e.g. v1.2.3)"
+        description: "Existing beta tag to build (first: v0.9.0-beta.1)"
         required: true
 
 permissions:
@@ -38,7 +43,7 @@ env:
 
 jobs:
   release:
-    name: Build, verify, and stage draft (macOS arm64)
+    name: Build, verify, and stage artifact draft (macOS arm64)
     runs-on: macos-latest
     timeout-minutes: 90
     defaults:
@@ -222,14 +227,15 @@ jobs:
             echo "Expected at least one updater blockmap" >&2
             exit 1
           fi
-          test -s release/latest-mac.yml
-          shasum -a 256 "${DMGS[@]}" "${ZIPS[@]}" \
+          test -s release/beta-mac.yml
+          shasum -a 256 "${DMGS[@]}" "${ZIPS[@]}" "${BLOCKMAPS[@]}" release/beta-mac.yml \
             | sed 's#  release/#  #' > release/SHA256SUMS.txt
           test -s release/SHA256SUMS.txt
 
-      # Only verified artifacts reach GitHub. Existing public releases are
-      # never modified; a rerun may refresh assets on an existing draft.
-      - name: Stage verified draft release
+      # Only artifact-verified files reach GitHub. This step does not assert
+      # beta readiness. Existing public releases are never modified; a rerun
+      # may refresh assets on an existing draft.
+      - name: Stage artifact-only draft release
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
@@ -238,7 +244,7 @@ jobs:
             release/*.dmg
             release/*-mac.zip
             release/*.blockmap
-            release/latest-mac.yml
+            release/beta-mac.yml
             release/SHA256SUMS.txt
           )
           if gh release view "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then

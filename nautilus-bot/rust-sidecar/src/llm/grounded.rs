@@ -16,7 +16,7 @@ const MAX_CONTEXT_REPLANS: usize = 3;
 // non-configurable ceiling so bad provider metadata cannot create a billing loop.
 const MAX_REMOTE_CONTEXT_REPLANS: usize = 2;
 const MAX_TRANSIENT_RETRIES: usize = 2;
-const MAX_ANALYSIS_TRANSCRIPT_BYTES: usize = 16 * 1024 * 1024;
+pub(crate) const MAX_ANALYSIS_TRANSCRIPT_BYTES: usize = 16 * 1024 * 1024;
 const MAX_ANALYSIS_NOTES_BYTES: usize = 256 * 1024;
 const MAX_ANALYSIS_INSTRUCTION_BYTES: usize = 64 * 1024;
 const MIN_CLAIM_SUPPORT: f64 = 0.01;

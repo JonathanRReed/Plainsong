@@ -7,6 +7,7 @@
     "electron/preload.ts",
     "scripts/capture-packaged-macos-app-matrix-insertion.mjs",
     "scripts/capture-packaged-macos-recovery-shortcuts.mjs",
+    "scripts/sanitize-meeting-soak-receipt.mjs",
     "scripts/sign-macos.mjs",
     "scripts/verify-macos-speech-helper.mjs",
     "scripts/verify-macos-system-audio.mjs",
@@ -42,6 +43,7 @@
     "tw-animate-css"
   ],
   "ignoreIssues": {
+    "electron/macos-updater-staging.ts": ["exports"],
     "src/lib/backend.ts": ["exports"],
     "src/lib/backend/recordings.ts": ["types"],
     "src/lib/backend/settings.ts": ["exports", "types"]

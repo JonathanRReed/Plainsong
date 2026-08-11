@@ -99,7 +99,7 @@ const POWER_MODEL_OPTIONS: Array<{
     id: "distil-large-v3.5",
     providerType: "distil_whisper",
     label: "Distil Whisper",
-    size: "1.5 GB",
+    size: "2.8 GiB",
     desc: "Accuracy upgrade for demanding solo dictation",
   },
   {
@@ -113,8 +113,8 @@ const POWER_MODEL_OPTIONS: Array<{
     id: "parakeet-tdt-0.6b-v3",
     providerType: "parakeet",
     label: "Parakeet TDT 0.6B v3",
-    size: "2.3 GB",
-    desc: "Higher-accuracy upgrade when meeting quality matters more",
+    size: "640 MB",
+    desc: "Fast local long-form route for meetings and multilingual dictation",
   },
 ];
 
@@ -354,6 +354,12 @@ export function FirstRunWizard({ mode = "full", onComplete }: Props) {
   const [selectedModelId, setSelectedModelId] = useState("base.en");
   const [downloadPercent, setDownloadPercent] = useState<number | null>(null);
   const downloadingProviderTypeRef = useRef<AsrProviderType | null>(null);
+  const [meetingModelState, setMeetingModelState] = useState<
+    "idle" | "downloading" | "done" | "error"
+  >("idle");
+  const [meetingModelError, setMeetingModelError] = useState<string | null>(null);
+  const [meetingDownloadPercent, setMeetingDownloadPercent] = useState<number | null>(null);
+  const meetingDownloadingProviderTypeRef = useRef<AsrProviderType | null>(null);
   const modelInteractionStartedRef = useRef(false);
   // Captures whatever dictation provider was already persisted at mount, so
   // ensureDefaultModelDownloading can tell "nothing configured yet" apart
@@ -402,7 +408,13 @@ export function FirstRunWizard({ mode = "full", onComplete }: Props) {
     if (mode === "dictation") {
       return ["permissions", "dictation-model", "hotkey"] as Step[];
     }
-    return ["dictation-model", "try-dictation", "use-everywhere", "ready"] as Step[];
+    return [
+      "dictation-model",
+      "try-dictation",
+      "use-everywhere",
+      "meeting-setup",
+      "ready",
+    ] as Step[];
   }, [mode]);
 
   const stepIndex = steps.indexOf(step);
@@ -737,10 +749,12 @@ export function FirstRunWizard({ mode = "full", onComplete }: Props) {
     let cancelled = false;
     void listen<[AsrProviderType, number]>("asr-download-progress", (event) => {
       const [providerType, percent] = event.payload;
-      if (providerType !== downloadingProviderTypeRef.current) {
-        return;
+      if (providerType === downloadingProviderTypeRef.current) {
+        setDownloadPercent(percent);
       }
-      setDownloadPercent(percent);
+      if (providerType === meetingDownloadingProviderTypeRef.current) {
+        setMeetingDownloadPercent(percent);
+      }
     }).then((fn) => {
       if (cancelled) {
         fn();
@@ -877,6 +891,74 @@ export function FirstRunWizard({ mode = "full", onComplete }: Props) {
     }
   }, [meetingRecommendedRoute, refreshMeetingSetup]);
 
+  const startMeetingModelDownload = useCallback(async () => {
+    const route = meetingRecommendedRoute;
+    if (!route) {
+      setMeetingModelState("error");
+      setMeetingModelError(
+        "No compatible local meeting model is available for this Mac."
+      );
+      return false;
+    }
+
+    setMeetingModelState("downloading");
+    setMeetingModelError(null);
+    setMeetingDownloadPercent(0);
+    try {
+      const routeSaved = await applyRecommendedMeetingRoute();
+      if (!mountedRef.current) {
+        return false;
+      }
+      if (!routeSaved) {
+        setMeetingModelState("error");
+        setMeetingModelError(
+          "The recommended meeting route could not be saved. Retry after resolving the settings error above."
+        );
+        return false;
+      }
+
+      // A repair can be only a route-selection change when the model is
+      // already present. Re-check first so reopening onboarding never starts
+      // a redundant multi-gigabyte fetch.
+      const beforeDownload = await refreshMeetingSetup();
+      if (!mountedRef.current) {
+        return false;
+      }
+      if (beforeDownload.routeReady) {
+        setMeetingModelState("done");
+        return true;
+      }
+
+      meetingDownloadingProviderTypeRef.current = route.providerType;
+      await downloadAsrModels(route.providerType);
+      if (!mountedRef.current) {
+        return false;
+      }
+
+      const afterDownload = await refreshMeetingSetup();
+      if (!mountedRef.current) {
+        return false;
+      }
+      if (!afterDownload.routeReady) {
+        throw new Error(
+          "The download finished, but the meeting route is still not ready. Re-check the route or choose another model in Settings."
+        );
+      }
+
+      setMeetingModelState("done");
+      return true;
+    } catch (error) {
+      if (!mountedRef.current) {
+        return false;
+      }
+      setMeetingModelState("error");
+      setMeetingModelError(error instanceof Error ? error.message : String(error));
+      return false;
+    } finally {
+      meetingDownloadingProviderTypeRef.current = null;
+    }
+  }, [applyRecommendedMeetingRoute, meetingRecommendedRoute, refreshMeetingSetup]);
+
   const persistMeetingStep = useCallback(async () => {
     setSaveBusy(true);
     setSaveError(null);
@@ -888,7 +970,11 @@ export function FirstRunWizard({ mode = "full", onComplete }: Props) {
       settings.transcription.meetingRetentionCustomMonths = Math.max(1, meetingRetentionCustomMonths);
       settings.transcription.meetingRetentionDeleteMode = meetingRetentionDeleteMode;
       await saveSettings(settings);
-      localStorage.setItem(MEETING_ONBOARDING_STORAGE_KEY, "true");
+      try {
+        localStorage.setItem(MEETING_ONBOARDING_STORAGE_KEY, "true");
+      } catch {
+        // The saved settings are authoritative if browser storage is unavailable.
+      }
       return true;
     } catch (error) {
       setSaveError(error instanceof Error ? error.message : String(error));
@@ -944,7 +1030,7 @@ export function FirstRunWizard({ mode = "full", onComplete }: Props) {
     if (step === "ready") {
       completeWizard({
         markOnboardingComplete: true,
-        meetingsCompleted: false,
+        meetingsCompleted: mode === "full",
       });
       return;
     }
@@ -958,7 +1044,7 @@ export function FirstRunWizard({ mode = "full", onComplete }: Props) {
 
     if (step === "meeting-setup") {
       if (meetingRouteReady === false) {
-        const fixed = await applyRecommendedMeetingRoute();
+        const fixed = await startMeetingModelDownload();
         if (!fixed) {
           return;
         }
@@ -1004,7 +1090,11 @@ export function FirstRunWizard({ mode = "full", onComplete }: Props) {
       : step === "ready"
         ? "Start using Plainsong"
         : step === "meeting-setup" && meetingRouteReady === false
-          ? "Fix meeting route"
+          ? meetingModelState === "error"
+            ? "Retry meeting model download"
+            : meetingModelState === "downloading"
+              ? "Downloading meeting model…"
+              : "Download meeting model"
           : isLastStep
             ? mode === "meetings" || step === "meeting-setup"
               ? "Finish meeting setup"
@@ -1121,6 +1211,8 @@ export function FirstRunWizard({ mode = "full", onComplete }: Props) {
               Boolean(perms?.postEventReady)
             }
             scratchCompleted={scratchState === "complete"}
+            meetingReady={meetingRouteReady === true}
+            fullMeetingCaptureReady={meetingSystemAudioCapability?.ready === true}
           />
         ) : null}
 
@@ -1180,6 +1272,9 @@ export function FirstRunWizard({ mode = "full", onComplete }: Props) {
             systemAudioCapability={meetingSystemAudioCapability}
             systemAudioTestLoading={systemAudioTestLoading}
             systemAudioTestStatus={systemAudioTestStatus}
+            meetingModelState={meetingModelState}
+            meetingModelError={meetingModelError}
+            meetingDownloadPercent={meetingDownloadPercent}
             onTestSystemAudio={() => void testMeetingSystemAudio()}
             meetingAudioStorageMode={meetingAudioStorageMode}
             onMeetingAudioStorageModeChange={setMeetingAudioStorageMode}
@@ -1223,10 +1318,13 @@ export function FirstRunWizard({ mode = "full", onComplete }: Props) {
                 <Button
                   variant="ghost"
                   onClick={() =>
-                    completeWizard({ markOnboardingComplete: true, meetingsCompleted: false })
+                  completeWizard({ markOnboardingComplete: true, meetingsCompleted: false })
                   }
                   className="text-muted-foreground"
-                  disabled={scratchBusy}
+                  disabled={
+                    scratchBusy ||
+                    (step === "meeting-setup" && meetingModelState === "downloading")
+                  }
                 >
                   Skip setup for now
                 </Button>
@@ -1240,6 +1338,7 @@ export function FirstRunWizard({ mode = "full", onComplete }: Props) {
               <Button
                 variant="outline"
                 onClick={() => completeWizard({ markOnboardingComplete: true, meetingsCompleted: false })}
+                disabled={meetingModelState === "downloading"}
               >
                 Finish with dictation only
               </Button>
@@ -1251,6 +1350,7 @@ export function FirstRunWizard({ mode = "full", onComplete }: Props) {
               saveBusy ||
               permissionRequestBusy ||
               scratchBusy ||
+              (step === "meeting-setup" && meetingModelState === "downloading") ||
               // Only block Continue for a download in progress while the
               // user is still on a visible, foreground model surface.
               (modelState === "downloading" &&
@@ -1599,6 +1699,8 @@ function ReadyStep({
   microphoneReady,
   insertionReady,
   scratchCompleted,
+  meetingReady,
+  fullMeetingCaptureReady,
 }: {
   displayShortcut: string;
   hotkeyMode: "hold_to_talk" | "toggle" | "hands_free";
@@ -1609,6 +1711,8 @@ function ReadyStep({
   microphoneReady: boolean | undefined;
   insertionReady: boolean;
   scratchCompleted: boolean;
+  meetingReady: boolean;
+  fullMeetingCaptureReady: boolean;
 }) {
   const localDictation =
     scratchCompleted
@@ -1665,6 +1769,15 @@ function ReadyStep({
         : "Finish the Accessibility grant before relying on insertion.",
       tone: insertionReady ? ("ready" as const) : ("attention" as const),
     },
+    {
+      label: "Meetings",
+      detail: fullMeetingCaptureReady
+        ? "Mic and system audio are verified for Me + Them capture."
+        : meetingReady
+          ? "Mic-only capture is ready. You can verify system audio later from Setup."
+          : "Meeting capture still needs a meeting-ready transcription route.",
+      tone: meetingReady ? ("ready" as const) : ("attention" as const),
+    },
   ];
 
   return (
@@ -1710,10 +1823,10 @@ function ReadyStep({
       <div className="flex items-start gap-3 border-t border-border pt-5">
         <Users className="mt-0.5 h-4 w-4 shrink-0 text-muted-foreground" />
         <div>
-          <p className="text-sm font-medium">Meetings are optional</p>
+          <p className="text-sm font-medium">Both ways of working stay local by default</p>
           <p className="text-xs text-muted-foreground">
-            Configure meeting capture, retention, and system audio later from
-            Setup. Dictation does not wait on it.
+            Dictation and meeting audio remain on this Mac unless you explicitly
+            enable a remote transcription or analysis provider.
           </p>
         </div>
       </div>
@@ -2152,6 +2265,9 @@ function MeetingSetupStep({
   systemAudioCapability,
   systemAudioTestLoading,
   systemAudioTestStatus,
+  meetingModelState,
+  meetingModelError,
+  meetingDownloadPercent,
   onTestSystemAudio,
   meetingAudioStorageMode,
   onMeetingAudioStorageModeChange,
@@ -2175,6 +2291,9 @@ function MeetingSetupStep({
   systemAudioCapability: SystemAudioCapability | null;
   systemAudioTestLoading: boolean;
   systemAudioTestStatus: string | null;
+  meetingModelState: "idle" | "downloading" | "done" | "error";
+  meetingModelError: string | null;
+  meetingDownloadPercent: number | null;
   onTestSystemAudio(): void;
   meetingAudioStorageMode: "always" | "transcript_only";
   onMeetingAudioStorageModeChange(value: "always" | "transcript_only"): void;
@@ -2242,6 +2361,22 @@ function MeetingSetupStep({
             <p className="mt-2 text-xs text-destructive" role="alert">
               Couldn&apos;t save the recommended meeting route: {saveError}. Retry the route;
               your storage and retention choices are still here.
+            </p>
+          ) : null}
+          {meetingModelState === "downloading" ? (
+            <div className="mt-3 space-y-1.5" aria-live="polite">
+              <Progress value={meetingDownloadPercent} className="h-1.5" />
+              <p className="text-xs text-muted-foreground">
+                Downloading the local meeting model
+                {meetingDownloadPercent === null
+                  ? "…"
+                  : ` · ${Math.round(meetingDownloadPercent)}%`}
+              </p>
+            </div>
+          ) : null}
+          {meetingModelError ? (
+            <p className="mt-2 text-xs text-destructive" role="alert">
+              Meeting model download failed: {meetingModelError}
             </p>
           ) : null}
         </div>

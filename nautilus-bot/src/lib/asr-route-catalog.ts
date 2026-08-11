@@ -84,8 +84,8 @@ const MEETING_PROVIDER_ORDER_BY_POLICY: Record<
   AsrProviderType[]
 > = {
   prefer_local: [
-    "distil_whisper",
     "parakeet",
+    "distil_whisper",
     "openai_cloud",
     "elevenlabs_scribe",
     "groq",
@@ -96,8 +96,8 @@ const MEETING_PROVIDER_ORDER_BY_POLICY: Record<
     "elevenlabs_scribe",
     "groq",
     "cohere_transcribe",
-    "distil_whisper",
     "parakeet",
+    "distil_whisper",
   ],
 };
 
@@ -300,13 +300,13 @@ function routeSummary(
     return "Lowest-friction local dictation route for fast everyday writing.";
   }
   if (providerType === "distil_whisper") {
-    return "Balanced default with strong local speed and good meeting coverage.";
+    return "English-only accuracy alternative that is slower on long local meetings.";
   }
   if (providerType === "parakeet") {
     // The only surviving non-v3 route is the legacy 110M export, which is
     // English-only and short-form -- it must not claim meeting coverage.
     return modelId === "parakeet-tdt-0.6b-v3"
-      ? "Higher-accuracy local meeting route with the current recommended Parakeet release."
+      ? "Fast local long-form meeting route with the current recommended Parakeet release."
       : "Legacy English-only Parakeet export, kept as a short-form dictation fallback.";
   }
   if (providerType === "openai_cloud") {

@@ -418,7 +418,8 @@ const ASR_MODEL_CAPABILITIES_WITHOUT_LANGUAGE_EVIDENCE: readonly Omit<
     providerType: "distil_whisper",
     modelId: "distil-large-v3.5",
     languages: ENGLISH_ONLY,
-    sizeMib: 1530,
+    // Pinned bundle: 3,028,168,610 bytes across the four required files.
+    sizeMib: 2888,
     tier: "more",
     pauseBehavior: "encoder_decoder",
     tradeoff: "that is a lot of disk for a model that cannot switch out of English.",

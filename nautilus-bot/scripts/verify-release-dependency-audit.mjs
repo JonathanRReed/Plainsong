@@ -6,18 +6,6 @@ import { pathToFileURL } from "node:url";
 
 const repoRoot = path.resolve(import.meta.dirname, "..");
 const args = process.argv.slice(2);
-const knownAdvisoryId = 1124334;
-const knownAdvisoryUrl =
-  "https://github.com/advisories/GHSA-mh99-v99m-4gvg";
-
-const allowedAffectedLockEntries = new Map([
-  ["@electron/asar/minimatch/brace-expansion", "1.1.17"],
-  ["@electron/universal/minimatch/brace-expansion", "2.1.3"],
-  ["dir-compare/minimatch/brace-expansion", "1.1.17"],
-  ["filelist/minimatch/brace-expansion", "2.1.3"],
-  ["glob/minimatch/brace-expansion", "1.1.17"],
-]);
-
 const excludedPackagedModules = [
   "@electron/asar",
   "@electron/universal",
@@ -49,8 +37,11 @@ function isAffectedBraceExpansionVersion(version) {
     return true;
   }
   const [major, minor, patch] = parts;
-  if (major < 5) return true;
-  return major === 5 && minor === 0 && patch <= 7;
+  if (major === 1) return minor < 1 || (minor === 1 && patch < 18);
+  if (major === 2) return minor < 1 || (minor === 1 && patch < 4);
+  if (major === 4) return true;
+  if (major === 5) return minor === 0 && patch < 9;
+  return major < 1;
 }
 
 function packagedModuleForEntry(entry) {
@@ -75,29 +66,17 @@ export function evaluateReleaseDependencyAudit({
     ([packageName, advisories]) =>
       advisories.map((advisory) => ({ packageName, ...advisory })),
   );
-  const expectedAdvisories = advisoryEntries.filter(
-    (advisory) =>
-      advisory.packageName === "brace-expansion" &&
-      advisory.id === knownAdvisoryId &&
-      advisory.url === knownAdvisoryUrl,
-  );
-  const unexpectedAdvisories = advisoryEntries.filter(
-    (advisory) => !expectedAdvisories.includes(advisory),
-  );
+  const unexpectedAdvisories = advisoryEntries;
 
   const affectedLockEntries = lockEntries.filter((entry) =>
     isAffectedBraceExpansionVersion(entry.version),
   );
-  const unexpectedAffectedLockEntries = affectedLockEntries.filter(
-    (entry) => allowedAffectedLockEntries.get(entry.key) !== entry.version,
-  );
+  const unexpectedAffectedLockEntries = affectedLockEntries;
   const rootEntry = lockEntries.find((entry) => entry.key === "brace-expansion");
   const rootEntryPatched =
     !rootEntry || !isAffectedBraceExpansionVersion(rootEntry.version);
   const auditMatchesInstalledState =
-    affectedLockEntries.length === 0
-      ? expectedAdvisories.length === 0
-      : expectedAdvisories.length === 1;
+    affectedLockEntries.length === 0 && advisoryEntries.length === 0;
 
   const packagedExcludedModules = [
     ...new Set(packagedEntries.map(packagedModuleForEntry).filter(Boolean)),
@@ -117,17 +96,8 @@ export function evaluateReleaseDependencyAudit({
   return {
     pass: Object.values(checks).every(Boolean),
     checks,
-    acceptedException:
-      expectedAdvisories.length === 1 &&
-      affectedLockEntries.length > 0 &&
-      unexpectedAffectedLockEntries.length === 0 &&
-      packagedExcludedModules.length === 0,
-    advisory: {
-      packageName: "brace-expansion",
-      id: knownAdvisoryId,
-      url: knownAdvisoryUrl,
-      severity: expectedAdvisories[0]?.severity ?? null,
-    },
+    acceptedException: false,
+    advisory: null,
     counts: {
       advisories: advisoryEntries.length,
       unexpectedAdvisories: unexpectedAdvisories.length,

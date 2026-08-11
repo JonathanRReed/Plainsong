@@ -16,8 +16,34 @@ pub mod windows_sdk_dictation_provider;
 
 use anyhow::Result;
 use async_trait::async_trait;
+use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
+
+pub(crate) const CLOUD_ASR_RESPONSE_BODY_LIMIT: usize = 16 * 1024 * 1024;
+
+pub(crate) async fn read_cloud_asr_json<T: DeserializeOwned>(
+    response: reqwest::Response,
+    provider_label: &str,
+) -> Result<T> {
+    crate::llm::transport::read_json_body(response, CLOUD_ASR_RESPONSE_BODY_LIMIT)
+        .await
+        .map_err(|error| {
+            anyhow::anyhow!(
+                "{} response was invalid or exceeded the {} MiB limit: {}",
+                provider_label,
+                CLOUD_ASR_RESPONSE_BODY_LIMIT / (1024 * 1024),
+                error
+            )
+        })
+}
+
+pub(crate) fn cloud_asr_status_error(
+    provider_label: &str,
+    status: reqwest::StatusCode,
+) -> anyhow::Error {
+    anyhow::anyhow!("{} API returned HTTP {}", provider_label, status.as_u16())
+}
 
 pub(crate) fn model_integrity_artifacts(models_root: &Path) -> Vec<(PathBuf, String)> {
     let mut artifacts = Vec::new();
@@ -97,14 +123,33 @@ pub trait AsrProvider: Send + Sync {
     fn model_info(&self) -> ModelInfo;
     async fn transcribe(&self, audio_path: &Path) -> Result<TranscriptionResult>;
     async fn transcribe_bytes(&self, audio_data: &[u8]) -> Result<TranscriptionResult>;
-    /// Optionally pre-load the model into cache so the first transcription after
-    /// dictation start doesn't pay a cold model load. Best-effort; default no-op.
-    async fn prewarm(&self) {}
+    /// Optionally pre-load the model into the same process cache used by
+    /// transcription. Unlike the old best-effort hook, this acknowledgement is
+    /// allowed to fail so callers cannot publish a false "model ready" state.
+    async fn prewarm(&self) -> Result<()> {
+        Ok(())
+    }
     fn download_status(&self) -> DownloadStatus;
     async fn download_models(&self, progress_cb: Box<dyn Fn(f32) + Send + Sync>) -> Result<()>;
 }
 
 pub struct AsrProviderFactory;
+
+#[cfg(test)]
+mod cloud_response_security_tests {
+    use super::cloud_asr_status_error;
+
+    #[test]
+    fn provider_status_errors_never_include_response_body_content() {
+        let marker = "secret-transcript-marker";
+        let error = cloud_asr_status_error("Test ASR", reqwest::StatusCode::BAD_REQUEST);
+        let rendered = error.to_string();
+
+        assert!(rendered.contains("Test ASR"));
+        assert!(rendered.contains("400"));
+        assert!(!rendered.contains(marker));
+    }
+}
 
 /// ASR Provider type
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Hash)]

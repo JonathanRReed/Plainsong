@@ -35,15 +35,13 @@ import {
 import { getMeetingTemplateOption } from "@/lib/meeting-templates";
 import { rebaseMeetingNotes } from "@/lib/meeting-notes";
 import { AudioWaveform } from "@/components/ui/audio-waveform";
-
-interface MeetingRecordingStateChangedEvent {
-  phase: "idle" | "recording" | "transcribing" | "error";
-  recordingId?: string | null;
-  startedAtMs?: number | null;
-  systemAudioActive?: boolean | null;
-  consentPromptShown?: boolean | null;
-  message?: string | null;
-}
+import {
+  INITIAL_MEETING_LIFECYCLE_STATE,
+  reduceMeetingLifecycleState,
+  type MeetingLifecycleEvent,
+  type MeetingLifecyclePhase,
+  type MeetingLifecycleState,
+} from "@/features/meetings/runtime";
 
 type DisplayMode = "full" | "compact" | "minimal";
 
@@ -52,9 +50,7 @@ export function RecordingPopup() {
   const [recordingId, setRecordingId] = useState<string | null>(null);
   const [startedAtMs, setStartedAtMs] = useState<number | null>(null);
   const [systemAudioActive, setSystemAudioActive] = useState(false);
-  const [phase, setPhase] = useState<"recording" | "transcribing" | "error">(
-    "recording",
-  );
+  const [phase, setPhase] = useState<MeetingLifecyclePhase>("recording");
   const [transcriptionPreview, setTranscriptionPreview] = useState("");
   const [previewDelay, setPreviewDelay] = useState(() =>
     describeTranscriptDelay(null),
@@ -83,6 +79,9 @@ export function RecordingPopup() {
   const [copiedNotice, setCopiedNotice] = useState(false);
   const [transcriptCommitted, setTranscriptCommitted] = useState(false);
   const recordingIdRef = useRef<string | null>(null);
+  const lifecycleRef = useRef<MeetingLifecycleState>(
+    INITIAL_MEETING_LIFECYCLE_STATE,
+  );
   const lastSavedMeetingNotesRef = useRef("");
 
   useEffect(() => {
@@ -96,53 +95,53 @@ export function RecordingPopup() {
 
     const setup = async () => {
       try {
-        const initialState = await invoke<MeetingRecordingStateChangedEvent>(
+        const initialState = await invoke<MeetingLifecycleEvent>(
           "get_recording_overlay_state",
         );
-        if (
-          (initialState.phase === "recording" ||
-            initialState.phase === "transcribing") &&
-          initialState.recordingId
-        ) {
-          setRecordingId(initialState.recordingId);
+        const next = reduceMeetingLifecycleState(
+          INITIAL_MEETING_LIFECYCLE_STATE,
+          initialState,
+        );
+        lifecycleRef.current = next;
+        if (next.phase !== "idle" && next.recordingId) {
+          setRecordingId(next.recordingId);
           setStartedAtMs(
-            typeof initialState.startedAtMs === "number"
-              ? initialState.startedAtMs
+            typeof next.startedAtMs === "number"
+              ? next.startedAtMs
               : Date.now(),
           );
-          setSystemAudioActive(Boolean(initialState.systemAudioActive));
-          setConsentPromptShown(Boolean(initialState.consentPromptShown));
+          setSystemAudioActive(next.systemAudioActive);
+          setConsentPromptShown(next.consentPromptShown);
           setConsentNoticeMode(null);
           setConsentNoticeMessage(null);
-          setPhase(initialState.phase);
-          setMessage(initialState.message ?? null);
+          setPhase(next.phase);
+          setMessage(next.message);
         }
       } catch (error) {
         console.error("Failed to load initial recording popup state:", error);
       }
 
-      unlisten = await listen<MeetingRecordingStateChangedEvent>(
+      unlisten = await listen<MeetingLifecycleEvent>(
         "meeting-recording-state-changed",
         (event) => {
           const payload = event.payload;
-          if (
-            (payload.phase === "recording" ||
-              payload.phase === "transcribing") &&
-            payload.recordingId
-          ) {
-            setRecordingId(payload.recordingId);
+          const next = reduceMeetingLifecycleState(
+            lifecycleRef.current,
+            payload,
+          );
+          lifecycleRef.current = next;
+          if (next.phase !== "idle" && next.recordingId) {
+            setRecordingId(next.recordingId);
             setStartedAtMs(
-              typeof payload.startedAtMs === "number"
-                ? payload.startedAtMs
-                : Date.now(),
+              typeof next.startedAtMs === "number" ? next.startedAtMs : Date.now(),
             );
-            setSystemAudioActive(Boolean(payload.systemAudioActive));
-            setConsentPromptShown(Boolean(payload.consentPromptShown));
+            setSystemAudioActive(next.systemAudioActive);
+            setConsentPromptShown(next.consentPromptShown);
             setConsentNoticeMode(null);
             setConsentNoticeMessage(null);
-            setPhase(payload.phase);
-            setMessage(payload.message ?? null);
-            if (payload.phase === "recording") {
+            setPhase(next.phase);
+            setMessage(next.message);
+            if (next.phase === "recording") {
               setTranscriptionPreview("");
               setTranscriptCommitted(false);
               setPreviewDelay(describeTranscriptDelay(null));
@@ -229,7 +228,7 @@ export function RecordingPopup() {
   }, []);
 
   useEffect(() => {
-    if (!recordingId || phase === "transcribing") {
+    if (!recordingId || phase !== "recording") {
       setElapsed(0);
       return;
     }
@@ -244,7 +243,7 @@ export function RecordingPopup() {
   }, [phase, recordingId, startedAtMs]);
 
   useEffect(() => {
-    if (!recordingId || phase === "transcribing") {
+    if (!recordingId || phase !== "recording") {
       setLevels([]);
       return;
     }
@@ -408,7 +407,12 @@ export function RecordingPopup() {
     return `${mins.toString().padStart(2, "0")}:${secs.toString().padStart(2, "0")}`;
   }, [elapsed]);
 
-  const isTranscribing = phase === "transcribing";
+  const isTranscribing = phase === "stopping" || phase === "processing";
+  const isPreparing = phase === "preparing";
+  const isFailure =
+    phase === "error" || phase === "recoverable" || phase === "cancelled";
+  const isReady = phase === "ready";
+  const captureIsLive = phase === "recording";
 
   const cycleDisplayMode = async () => {
     const next: DisplayMode =
@@ -476,11 +480,25 @@ export function RecordingPopup() {
 
   const previewText =
     transcriptionPreview.trim() ||
-    (isTranscribing
-      ? "Generating the first transcript preview for this meeting."
-      : "Capture is live. Stop when you want Plainsong to save and process the meeting.");
+    (isFailure
+      ? message || "Saved meeting audio needs your attention."
+      : isReady
+        ? "The transcript is ready in Meetings."
+        : isTranscribing
+          ? "Generating the first transcript preview for this meeting."
+          : isPreparing
+            ? "Preparing microphone and system audio capture."
+            : "Capture is live. Stop when you want Plainsong to save and process the meeting.");
 
-  const statusLabel = isTranscribing ? "Processing" : "Live meeting";
+  const statusLabel = isFailure
+    ? "Needs attention"
+    : isReady
+      ? "Ready"
+      : isPreparing
+        ? "Preparing"
+        : isTranscribing
+          ? "Processing"
+          : "Live meeting";
   const captureModeLabel = systemAudioActive ? "Me + Them" : "Mic only";
   const notesSummary =
     meetingNotes.trim() || "Open the meeting view to keep notes current.";
@@ -502,23 +520,25 @@ export function RecordingPopup() {
       >
         <div className="flex items-center gap-2 rounded-full border border-border/80 bg-background/95 px-3 py-2 text-foreground shadow-[0_20px_60px_hsl(34_26%_4%/0.45)] backdrop-blur-md">
           <div className="inline-flex h-6 w-6 items-center justify-center rounded-full bg-muted/80 text-foreground">
-            {isTranscribing ? (
+            {isTranscribing || isPreparing ? (
               <Loader2 className="h-3.5 w-3.5 animate-spin" />
+            ) : isReady ? (
+              <CheckCircle2 className="h-3.5 w-3.5" />
             ) : (
               <Mic className="h-3.5 w-3.5" />
             )}
           </div>
           <AudioWaveform
             levels={levels.length ? levels : undefined}
-            active={!isTranscribing}
+            active={captureIsLive}
             size="sm"
             barCount={9}
           />
           <span className="font-mono text-xs font-medium uppercase tracking-[0.18em]">
-            {isTranscribing ? "Processing" : captureModeLabel}
+            {captureIsLive ? captureModeLabel : statusLabel}
           </span>
           <span className="time-spec font-mono text-sm text-muted-foreground">
-            {isTranscribing ? "…" : elapsedText}
+            {captureIsLive ? elapsedText : "…"}
           </span>
           <button
             type="button"
@@ -529,7 +549,7 @@ export function RecordingPopup() {
           >
             <AppWindow className="h-3.5 w-3.5" />
           </button>
-          {!isTranscribing && (
+          {captureIsLive && (
             <button
               type="button"
               className="inline-flex h-7 w-7 items-center justify-center rounded-full border border-border/80 bg-card text-foreground hover:bg-muted disabled:opacity-50"
@@ -600,7 +620,12 @@ export function RecordingPopup() {
         </div>
 
         <div className="flex flex-wrap items-center gap-2">
-          {isTranscribing ? (
+          {isFailure ? (
+            <span className="inline-flex items-center gap-2 rounded-full border border-rust/30 bg-rust/10 px-2.5 py-1 font-mono text-[11px] font-medium uppercase tracking-[0.16em] text-rust">
+              <span className="neume neume-hollow" aria-hidden="true" />
+              {statusLabel}
+            </span>
+          ) : isTranscribing || isPreparing ? (
             <span className="inline-flex items-center gap-2 rounded-full border border-rust/30 bg-rust/10 px-2.5 py-1 font-mono text-[11px] font-medium uppercase tracking-[0.16em] text-rust">
               <Loader2 className="h-3.5 w-3.5 animate-spin" aria-hidden="true" />
               {statusLabel}
@@ -614,7 +639,7 @@ export function RecordingPopup() {
               {statusLabel}
             </span>
           )}
-          {!isTranscribing && (
+          {captureIsLive && (
             <span className="inline-flex items-center gap-2 rounded-full border border-border/80 bg-muted/60 px-2.5 py-1 text-[11px] font-medium text-muted-foreground">
               <span className="neume neume-hollow" />
               Instant notes
@@ -651,6 +676,15 @@ export function RecordingPopup() {
           ) : null}
         </div>
 
+        {isFailure && message ? (
+          <div
+            role="alert"
+            className="mt-3 rounded-xl border border-rust/30 bg-rust/10 p-2.5 text-sm leading-5 text-rust"
+          >
+            {message}
+          </div>
+        ) : null}
+
         {audioSourceWarning ? (
           <div
             role="status"
@@ -674,7 +708,7 @@ export function RecordingPopup() {
               <div className="flex h-14 items-center rounded-2xl border border-border/80 bg-muted/40 px-3 shadow-lg shadow-foreground/20">
                 <AudioWaveform
                   levels={waveformBars}
-                  active={!isTranscribing}
+                  active={captureIsLive}
                   size="lg"
                   glow
                   glowColor="rgba(200,149,67,0.45)"
@@ -683,14 +717,22 @@ export function RecordingPopup() {
             )}
             <div>
               <p className="manuscript text-lg font-medium leading-snug tracking-tight">
-                {isTranscribing ? "Finishing your meeting" : recordingTitle}
+                {isFailure
+                  ? "Meeting needs attention"
+                  : isReady
+                    ? "Meeting ready"
+                    : isPreparing
+                      ? "Preparing your meeting"
+                      : isTranscribing
+                        ? "Finishing your meeting"
+                        : recordingTitle}
               </p>
               <p className="text-sm text-muted-foreground">
                 {stopping
                   ? "Stopping capture and handing off to transcription."
                   : message ||
-                    (isTranscribing
-                      ? "Plainsong is preparing the transcript and summary."
+                    (isTranscribing || isPreparing || isFailure || isReady
+                      ? previewText
                       : meetingTemplateDescription)}
               </p>
             </div>
@@ -699,13 +741,13 @@ export function RecordingPopup() {
           <div className="flex items-center gap-3">
             <div className="rounded-2xl border border-border/80 bg-muted/40 px-3 py-2 text-right shadow-lg shadow-foreground/10">
               <p className="font-mono text-[10px] uppercase tracking-[0.18em] text-muted-foreground">
-                {isTranscribing ? "Status" : "Elapsed"}
+                {captureIsLive ? "Elapsed" : "Status"}
               </p>
               <p className="time-spec font-mono text-base font-medium text-foreground">
-                {isTranscribing ? "Saving" : elapsedText}
+                {captureIsLive ? elapsedText : statusLabel}
               </p>
             </div>
-            {!isTranscribing && (
+            {captureIsLive && (
               <button
                 type="button"
                 className="inline-flex h-10 w-10 items-center justify-center rounded-full border border-border/80 bg-card text-foreground hover:bg-muted hover:scale-105 transition-all disabled:opacity-50 disabled:hover:scale-100"

@@ -3,9 +3,14 @@ import fs from "node:fs";
 import path from "node:path";
 import { spawn } from "node:child_process";
 import { createInterface } from "node:readline";
+import { createPackagedQaProfile } from "./lib/packaged-qa-profile.mjs";
 
 const repoRoot = path.resolve(import.meta.dirname, "..");
 const args = process.argv.slice(2);
+const qaProfile = createPackagedQaProfile({
+  args,
+  prefix: "plainsong-whisper-qa-",
+});
 
 function valueFor(name, fallback = null) {
   const index = args.indexOf(name);
@@ -54,6 +59,7 @@ if (!fs.existsSync(fixturePath)) {
 const child = spawn(sidecarPath, [], {
   cwd: repoRoot,
   stdio: ["pipe", "pipe", "pipe"],
+  env: { ...process.env, ...qaProfile.env },
 });
 
 const childExit = new Promise((resolve) => {
@@ -121,7 +127,7 @@ async function shutdown() {
   }
   const result = await Promise.race([
     childExit,
-    new Promise((resolve) => setTimeout(() => resolve(null), 3000)),
+    new Promise((resolve) => setTimeout(() => resolve(null), 15000)),
   ]);
   if (!result) {
     child.kill("SIGTERM");

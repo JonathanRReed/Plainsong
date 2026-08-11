@@ -3,7 +3,7 @@
 use crate::llm::transport::{
     bounded_body_error_to_llm, classify_http_error, read_error_body, read_json_body,
     CompletionRequest, CompletionResponse, CompletionTransport, ErrorKind, LlmError, Provider,
-    RequestOptions, COMPLETION_BODY_LIMIT, MODEL_LIST_BODY_LIMIT,
+    COMPLETION_BODY_LIMIT, MODEL_LIST_BODY_LIMIT,
 };
 use anyhow::{Context, Result};
 use async_trait::async_trait;
@@ -69,23 +69,6 @@ impl OllamaCloudClient {
             .context("No models found in Ollama Cloud response")?;
         tracing::info!("Ollama Cloud returned {} models", models.len());
         Ok(models)
-    }
-
-    pub async fn generate(&self, model: &str, prompt: &str) -> Result<String> {
-        let request = CompletionRequest {
-            model: model.to_string(),
-            system_prompt: None,
-            prompt: prompt.to_string(),
-            purpose: crate::llm::CompletionPurpose::Generic,
-            options: RequestOptions {
-                timeout: Duration::from_secs(120),
-                max_output_tokens: 1_024,
-                temperature: Some(0.7),
-                json_schema: None,
-                requested_context_tokens: None,
-            },
-        };
-        Ok(self.complete(&request).await?.text)
     }
 }
 

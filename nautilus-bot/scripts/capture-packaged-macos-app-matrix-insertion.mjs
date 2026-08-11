@@ -20,7 +20,6 @@
  */
 import crypto from "node:crypto";
 import fs from "node:fs";
-import os from "node:os";
 import path from "node:path";
 import { spawn, spawnSync } from "node:child_process";
 import { createInterface } from "node:readline";
@@ -33,9 +32,14 @@ import {
   normalizeReadBackValue,
   readFrontmostApplication,
 } from "./lib/app-matrix-readback.mjs";
+import { createPackagedQaProfile } from "./lib/packaged-qa-profile.mjs";
 
 const repoRoot = path.resolve(import.meta.dirname, "..");
 const args = process.argv.slice(2);
+const qaProfile = createPackagedQaProfile({
+  args,
+  prefix: "plainsong-app-matrix-qa-",
+});
 
 function valueFor(name, fallback = null) {
   const index = args.indexOf(name);
@@ -63,6 +67,7 @@ const timeoutMs = Number(valueFor("--timeout-ms", "45000"));
 const prepareDelayMs = Number(valueFor("--prepare-delay-ms", "4000"));
 const readyTimeoutMs = Number(valueFor("--ready-timeout-ms", "20000"));
 const readBackTimeoutMs = Number(valueFor("--readback-timeout-ms", "20000"));
+const postInsertSettleMs = Number(valueFor("--post-insert-settle-ms", "1000"));
 const browserAppArg = valueFor("--browser-app", "")?.trim() ?? "";
 const editorAppArg = valueFor("--editor-app", "")?.trim() ?? "";
 const activateTarget = !args.includes("--no-activate-target");
@@ -170,20 +175,9 @@ const recommendedVerifyModes = {
   "HubSpot (Chrome)": "clipboard-sentinel",
 };
 
-/*
- * User state. The packaged sidecar opens the operator's REAL data directory: build_app_state()
- * creates plainsong.db plus its -wal/-shm, reconcile_interrupted_recordings_for_sidecar() rewrites
- * any in-flight recording to error, and spawn_storage_retention_maintenance() fires its first tick
- * immediately, deleting recordings and audio under the retention policies. Every one of those is a
- * mutation of the operator's own data caused by this harness, so it is snapshotted before the
- * sidecar starts and restored on every exit path.
- */
-const dataRoot = process.env.PLAINSONG_DATA_DIR
-  ? path.resolve(process.env.PLAINSONG_DATA_DIR)
-  : path.join(os.homedir(), "Library", "Application Support");
-const configRoot = process.env.PLAINSONG_CONFIG_DIR
-  ? path.resolve(process.env.PLAINSONG_CONFIG_DIR)
-  : path.join(os.homedir(), "Library", "Application Support");
+/* The snapshot/restore below is defense in depth inside a disposable profile. */
+const dataRoot = qaProfile.dataRoot;
+const configRoot = qaProfile.configRoot;
 const dataDir = path.join(dataRoot, "Plainsong");
 const configDir = path.join(configRoot, "Plainsong");
 const settingsPath = path.join(configDir, "settings.json");
@@ -198,6 +192,43 @@ function hashBytes(bytes) {
   if (!bytes) return null;
   return crypto.createHash("sha256").update(bytes).digest("hex");
 }
+
+function componentDigestsForApp(bundlePath) {
+  const components = {
+    appAsar: path.join(bundlePath, "Contents", "Resources", "app.asar"),
+    sidecar: path.join(
+      bundlePath,
+      "Contents",
+      "Resources",
+      "sidecar",
+      "plainsong-sidecar",
+    ),
+    shortcutHelper: path.join(
+      bundlePath,
+      "Contents",
+      "Resources",
+      "shortcut-helper",
+      "plainsong-native-shortcut-helper",
+    ),
+    speechHelper: path.join(
+      bundlePath,
+      "Contents",
+      "Resources",
+      "sidecar",
+      "nautilus-macos-speech-helper-aarch64-apple-darwin",
+    ),
+  };
+  return Object.fromEntries(
+    Object.entries(components).map(([name, filePath]) => [
+      name,
+      fs.existsSync(filePath) && fs.statSync(filePath).isFile()
+        ? hashBytes(fs.readFileSync(filePath))
+        : null,
+    ]),
+  );
+}
+
+const candidateComponents = componentDigestsForApp(appPath);
 
 function snapshotDbFiles() {
   for (const filePath of dbSidecarPaths) {
@@ -329,6 +360,9 @@ function markdownFor(report) {
     `- Read-back mode recognized: ${yesNo(checks.readBackModeRecognized)}`,
     `- Pre-insert field empty: ${yesNo(checks.readBackPreInsertEmpty)}`,
     `- Read-back matched sample: ${yesNo(checks.readBackMatchedSample)}`,
+    ...(checks.targetSurfaceRestored === undefined
+      ? []
+      : [`- Disposable target restored to empty: ${yesNo(checks.targetSurfaceRestored)}`]),
     `- External frontmost matched target: ${yesNo(checks.externalFrontmostMatchedTarget)}`,
     `- Sidecar exited cleanly: ${yesNo(checks.sidecarExitedCleanly)}`,
     `- User database restored: ${yesNo(checks.dbRestored)}`,
@@ -441,6 +475,7 @@ function blockedReport(reason, extra = {}) {
     generatedAt,
     appPath,
     sidecarPath,
+    candidateComponents,
     targetApp,
     verifyMode,
     sampleText,
@@ -655,6 +690,7 @@ function launchSidecar() {
   const child = spawn(sidecarPath, [], {
     cwd: repoRoot,
     stdio: ["pipe", "pipe", "pipe"],
+    env: { ...process.env, ...qaProfile.env },
   });
   const childExit = new Promise((resolve) => {
     child.on("exit", (code, signal) => resolve({ code, signal }));
@@ -714,7 +750,7 @@ function launchSidecar() {
     }
     const result = await Promise.race([
       childExit,
-      new Promise((resolve) => setTimeout(() => resolve(null), 3000)),
+      new Promise((resolve) => setTimeout(() => resolve(null), 15000)),
     ]);
     if (!result) {
       child.kill("SIGTERM");
@@ -745,6 +781,9 @@ if (!matrixTargets.includes(targetApp)) {
 }
 if (!sampleText) {
   finish(blockedReport("Smoke test text cannot be empty."), 1);
+}
+if (!Number.isFinite(postInsertSettleMs) || postInsertSettleMs < 0) {
+  finish(blockedReport("--post-insert-settle-ms must be a non-negative number."), 1);
 }
 if (!verifyMode) {
   finish(
@@ -859,6 +898,7 @@ async function run() {
     generatedAt,
     appPath,
     sidecarPath,
+    candidateComponents,
     targetApp,
     verifyMode,
     runNonce,
@@ -866,6 +906,7 @@ async function run() {
     scratchTargetSource: scratchTargetArg ? "operator" : "harness-staged",
     sampleText,
     prepareDelayMs,
+    postInsertSettleMs,
     activateTarget,
     activationResult: null,
     promptShown: false,
@@ -914,13 +955,8 @@ async function run() {
       settingsPath,
       dbPaths: dbSidecarPaths,
       note:
-        process.env.PLAINSONG_DATA_DIR || process.env.PLAINSONG_CONFIG_DIR
-          ? "The harness is using explicit isolated data and configuration roots. settings.json, " +
-            "plainsong.db and its -wal/-shm are still snapshotted and restored on every exit path."
-          : "The packaged sidecar opens the operator's real data directory and its startup path " +
-            "reconciles interrupted recordings and runs retention maintenance immediately, both " +
-            "of which delete rows and audio. settings.json, plainsong.db and its -wal/-shm are " +
-            "therefore snapshotted before the sidecar starts and restored on every exit path.",
+        "The harness uses isolated data and configuration roots. settings.json, plainsong.db, " +
+        "and its -wal/-shm are still snapshotted and restored inside that profile on every exit path.",
     },
     userStateSnapshotTaken: false,
     originalDbHashes: null,
@@ -944,24 +980,35 @@ async function run() {
     sidecarStderr: "",
   };
 
-  if (verifyMode === "clipboard-sentinel" && process.stdin.isTTY && !suppressPrompt) {
-    artifact.promptShown = true;
-    console.log(`Prepare this EMPTY scratch target in ${targetApp}: ${scratchTargetArg}`);
-    console.log(`The helper will paste this exact text: ${sampleText}`);
-    console.log(
-      "To prove the field is empty rather than assume it, the helper first types a throwaway " +
-        "probe token into it and deletes it again. Use a disposable target."
-    );
-    await question(`Press Enter, then refocus ${targetApp} within ${prepareDelayMs} ms: `);
-    await sleep(Math.max(0, prepareDelayMs));
-  } else if (verifyMode === "clipboard-sentinel") {
-    await sleep(Math.max(0, prepareDelayMs));
-  }
-
   let session = null;
   let sidecar = null;
 
   try {
+    // Snapshot and warm the sidecar before the operator has to hold a focused
+    // scratch field. Cold model discovery can take several seconds and must
+    // not sit between the pre-insert read and the actual insertion.
+    const snapshot = snapshotUserState();
+    artifact.userStateSnapshotTaken = true;
+    artifact.originalDbHashes = snapshot.originalDbHashes;
+    artifact.originalSettingsHash = snapshot.originalSettingsHash;
+
+    sidecar = launchSidecar();
+    await sidecar.sendCommand("get_settings", {});
+
+    if (verifyMode === "clipboard-sentinel" && process.stdin.isTTY && !suppressPrompt) {
+      artifact.promptShown = true;
+      console.log(`Prepare this EMPTY scratch target in ${targetApp}: ${scratchTargetArg}`);
+      console.log(`The helper will paste this exact text: ${sampleText}`);
+      console.log(
+        "To prove the field is empty rather than assume it, the helper first types a throwaway " +
+          "probe token into it and deletes it again. Use a disposable target."
+      );
+      await question(`Press Enter, then refocus ${targetApp} within ${prepareDelayMs} ms: `);
+      await sleep(Math.max(0, prepareDelayMs));
+    } else if (verifyMode === "clipboard-sentinel") {
+      await sleep(Math.max(0, prepareDelayMs));
+    }
+
     if (activateTarget) {
       artifact.activationResult = activateTargetApp(targetApp);
       // A failed activation is not a no-op to sail past: nothing came to the front, so the
@@ -1074,13 +1121,6 @@ async function run() {
       scopeCaveats.push(artifact.rowClosure.reason);
     }
 
-    // Snapshot immediately before the sidecar opens the operator's data directory.
-    const snapshot = snapshotUserState();
-    artifact.userStateSnapshotTaken = true;
-    artifact.originalDbHashes = snapshot.originalDbHashes;
-    artifact.originalSettingsHash = snapshot.originalSettingsHash;
-
-    sidecar = launchSidecar();
     artifact.sidecarResult = await sidecar.sendCommand("smoke_test_cursor_insert", {
       text: sampleText,
     });
@@ -1092,6 +1132,11 @@ async function run() {
     );
     artifact.selfReported.pasteReported = Boolean(artifact.sidecarResult?.pasted);
 
+    // CGEvent::post returning does not mean an asynchronous target has consumed
+    // the clipboard yet. Slack in particular may read it on a later event-loop
+    // turn. The read-back seeds its own clipboard sentinel, so wait before that
+    // evidence step can replace the staged insertion text.
+    await sleep(Math.max(0, postInsertSettleMs));
     const observed = await session.readBack();
     artifact.readBack.readBackEvidence = observed.evidence ?? null;
     if (!observed.ok) {
@@ -1129,6 +1174,10 @@ async function run() {
   }
 
   artifact.checks.sidecarExitedCleanly = artifact.sidecarExit?.code === 0;
+  if (["native-accessibility", "clipboard-sentinel"].includes(verifyMode)) {
+    artifact.checks.targetSurfaceRestored =
+      artifact.readBack.cleanupEvidence?.targetSurfaceRestored === true;
+  }
   const allChecksPassed = Object.values(artifact.checks).every(Boolean);
   artifact.checksAllPassed = allChecksPassed;
   const closesMatrixRow = artifact.rowClosure?.closesMatrixRow === true;
@@ -1166,6 +1215,7 @@ run().catch((error) => {
       generatedAt,
       appPath,
       sidecarPath,
+      candidateComponents,
       targetApp,
       verifyMode,
       scratchTarget: scratchTargetArg,

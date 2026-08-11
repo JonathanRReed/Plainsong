@@ -4,6 +4,8 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 
+import { collectReleaseCandidateIdentity } from "./lib/release-candidate-identity.mjs";
+
 const repoRoot = path.resolve(import.meta.dirname, "..");
 const args = process.argv.slice(2);
 
@@ -33,6 +35,10 @@ const requestedReleaseDir = path.resolve(
 const releaseDir = fs.existsSync(requestedReleaseDir)
   ? fs.realpathSync(requestedReleaseDir)
   : requestedReleaseDir;
+const candidateIdentity = collectReleaseCandidateIdentity({
+  candidatePath: releaseDir,
+  appPath,
+});
 
 function appBundlePaths(bundlePath) {
   return {
@@ -634,6 +640,7 @@ const checks = {
 
 const artifact = {
   generatedAt: new Date().toISOString(),
+  candidateIdentity,
   status: Object.values(checks).every(Boolean) ? "PASS" : "FAIL",
   pass: Object.values(checks).every(Boolean),
   paths: {

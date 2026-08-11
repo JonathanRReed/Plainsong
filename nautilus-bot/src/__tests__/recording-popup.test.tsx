@@ -170,6 +170,29 @@ describe("RecordingPopup", () => {
     });
   });
 
+  it("retains the recording identifier and recovery text after a terminal error", async () => {
+    await act(async () => {
+      render(<RecordingPopup />);
+    });
+    await screen.findByText("Board sync");
+
+    await act(async () => {
+      popupMocks.listeners.get("meeting-recording-state-changed")?.({
+        payload: {
+          phase: "recoverable",
+          recordingId: "r1",
+          message: "Saved audio can be retried after relaunch.",
+        },
+      });
+    });
+
+    expect(screen.getByRole("alert")).toHaveTextContent(
+      "Saved audio can be retried after relaunch.",
+    );
+    expect(screen.getByRole("button", { name: "Open Workspace" })).toBeVisible();
+    expect(screen.queryByRole("button", { name: "Stop recording" })).not.toBeInTheDocument();
+  });
+
   it("offers manual consent recovery from the popup when automation did not send", async () => {
     popupMocks.getRecording.mockResolvedValueOnce({
       id: "r1",

@@ -21,16 +21,17 @@ const reviewedLock = `
 `;
 
 describe("release dependency audit", () => {
-  it("accepts the reviewed build-only advisory when it is absent from the app", () => {
+  it("rejects the previously reviewed build-only advisory after patched releases exist", () => {
     const report = evaluateReleaseDependencyAudit({
       audit: knownAudit,
       lockEntries: parseBraceExpansionLockEntries(reviewedLock),
       packagedEntries: ["/node_modules/react/index.js"],
     });
 
-    expect(report.pass).toBe(true);
-    expect(report.acceptedException).toBe(true);
-    expect(report.counts.affectedLockEntries).toBe(2);
+    expect(report.pass).toBe(false);
+    expect(report.acceptedException).toBe(false);
+    expect(report.counts.affectedLockEntries).toBe(3);
+    expect(report.checks.noUnexpectedAdvisories).toBe(false);
   });
 
   it("rejects any additional advisory", () => {
@@ -77,12 +78,27 @@ describe("release dependency audit", () => {
     const report = evaluateReleaseDependencyAudit({
       audit: {},
       lockEntries: parseBraceExpansionLockEntries(
-        '    "brace-expansion": ["brace-expansion@5.0.8", "", {}],',
+        `    "brace-expansion": ["brace-expansion@5.0.9", "", {}],
+    "@electron/asar/minimatch/brace-expansion": ["brace-expansion@1.1.18", "", {}],
+    "@electron/universal/minimatch/brace-expansion": ["brace-expansion@2.1.4", "", {}],`,
       ),
       packagedEntries: [],
     });
 
     expect(report.pass).toBe(true);
     expect(report.acceptedException).toBe(false);
+    expect(report.counts.affectedLockEntries).toBe(0);
+  });
+
+  it("rejects each version family below the current patched floor", () => {
+    const report = evaluateReleaseDependencyAudit({
+      audit: {},
+      lockEntries: parseBraceExpansionLockEntries(reviewedLock),
+      packagedEntries: [],
+    });
+
+    expect(report.pass).toBe(false);
+    expect(report.counts.affectedLockEntries).toBe(3);
+    expect(report.checks.auditMatchesInstalledState).toBe(false);
   });
 });
