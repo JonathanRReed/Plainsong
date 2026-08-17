@@ -57,7 +57,7 @@ tokenizers = { version = "0.23", optional = true }
 # resamples whichever of the mic/loopback devices is running at the lower rate
 # onto the session's target rate, so this has to be present in every build, not
 # only the ones that happen to enable an ASR provider.
-rubato = "4.0"
+rubato = "5.0"
 
 # FFT for FBank feature extraction in diarization
 rustfft = { version = "6.2", optional = true }
