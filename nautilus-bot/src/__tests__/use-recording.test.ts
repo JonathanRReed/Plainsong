@@ -81,6 +81,23 @@ describe("meeting lifecycle reconciliation", () => {
     ).toEqual(live);
   });
 
+  it("does not let a different active identifier replace a live meeting", () => {
+    const live = {
+      ...INITIAL_MEETING_LIFECYCLE_STATE,
+      phase: "recording" as const,
+      recordingId: "meeting-live",
+      startedAtMs: 100,
+    };
+
+    expect(
+      reduceMeetingLifecycleState(live, {
+        phase: "recording",
+        recordingId: "meeting-reconnect",
+        startedAtMs: 200,
+      }),
+    ).toEqual(live);
+  });
+
   it("normalizes the legacy transcribing phase to processing", () => {
     expect(
       reduceMeetingLifecycleState(INITIAL_MEETING_LIFECYCLE_STATE, {

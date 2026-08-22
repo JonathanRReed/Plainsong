@@ -2113,6 +2113,20 @@ export function RecordingsView() {
     }
   };
 
+  const handleStopMeeting = async () => {
+    setIsStopping(true);
+    try {
+      await stopMeeting();
+    } catch (error) {
+      toast(
+        error instanceof Error ? error.message : "Plainsong could not stop this meeting.",
+        "error",
+      );
+    } finally {
+      setIsStopping(false);
+    }
+  };
+
   const handleRecordingClick = (recording: Recording) => {
     openMeetingWorkspace(recording);
   };
@@ -5193,7 +5207,11 @@ export function RecordingsView() {
         </div>
         <div className="flex gap-2">
           {isRecording ? (
-            <Button variant="destructive" disabled={isStopping} onClick={async () => { setIsStopping(true); try { await stopMeeting(); } finally { setIsStopping(false); } }}>
+            <Button
+              variant="destructive"
+              disabled={isStopping}
+              onClick={() => void handleStopMeeting()}
+            >
               <Square className="h-4 w-4 mr-2 fill-current" />
               {isStopping ? "Stopping…" : "Stop meeting"}
             </Button>

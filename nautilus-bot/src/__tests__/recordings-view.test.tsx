@@ -1867,6 +1867,28 @@ describe("RecordingsView", () => {
     });
   });
 
+  it("surfaces a Stop failure instead of returning an unhandled rejection", async () => {
+    stopMeeting.mockRejectedValueOnce(new Error("Meeting audio is still finalizing"));
+    recordingState = {
+      isRecording: true,
+      recordingId: "r1",
+      formattedDuration: "02:04",
+      meetingPhase: "recording",
+      meetingMessage: null,
+    };
+
+    render(<RecordingsView />);
+    fireEvent.click(screen.getByRole("button", { name: "Stop meeting" }));
+
+    await waitFor(() => {
+      expect(toast).toHaveBeenCalledWith(
+        "Meeting audio is still finalizing",
+        "error",
+      );
+    });
+    expect(screen.getByRole("button", { name: "Stop meeting" })).toBeEnabled();
+  });
+
   it("searches meeting notes, recaps, and action items, not just the title and date", async () => {
     recordings = [
       {

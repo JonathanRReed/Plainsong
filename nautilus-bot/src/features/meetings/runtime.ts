@@ -65,8 +65,7 @@ export function reduceMeetingLifecycleState(
     incomingId &&
     current.recordingId &&
     incomingId !== current.recordingId &&
-    ACTIVE_PHASES.has(current.phase) &&
-    !ACTIVE_PHASES.has(phase)
+    ACTIVE_PHASES.has(current.phase)
   ) {
     return current;
   }

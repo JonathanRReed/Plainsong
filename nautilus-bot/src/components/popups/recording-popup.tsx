@@ -474,6 +474,16 @@ export function RecordingPopup() {
       await stopRecording(recordingId);
     } catch (error) {
       console.error("Failed to stop recording from popup:", error);
+      const failureMessage =
+        error instanceof Error ? error.message : "Plainsong could not stop this meeting.";
+      const failed = reduceMeetingLifecycleState(lifecycleRef.current, {
+        phase: "error",
+        recordingId,
+        message: failureMessage,
+      });
+      lifecycleRef.current = failed;
+      setPhase(failed.phase);
+      setMessage(failed.message);
       setStopping(false);
     }
   };

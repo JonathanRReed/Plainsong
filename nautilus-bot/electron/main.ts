@@ -78,7 +78,10 @@ import {
   cloudLocationConfirmationDetail,
   parseCloudLocationRequest,
 } from "./privileged-storage-locations";
-import { CaptureAdmissionController } from "./capture-admission";
+import {
+  CaptureAdmissionController,
+  observeCaptureAdmissionForWindow,
+} from "./capture-admission";
 import { rendererPermissionAllowed } from "./renderer-permission-policy";
 import {
   finalizeMeetingWithinBudget,
@@ -1675,19 +1678,7 @@ function installRendererPermissionHandlers(): void {
 }
 
 function configureWindowSecurity(win: BrowserWindow): void {
-  win.webContents.on("before-input-event", (_event, input) => {
-    if (input.type === "keyDown" && !input.isAutoRepeat) {
-      captureAdmission.observe(win.id, win.webContents.getURL());
-    }
-  });
-  win.webContents.on("before-mouse-event", (_event, mouse) => {
-    if (mouse.type === "mouseDown") {
-      captureAdmission.observe(win.id, win.webContents.getURL());
-    }
-  });
-  win.webContents.once("destroyed", () => {
-    captureAdmission.clear(win.id);
-  });
+  observeCaptureAdmissionForWindow(win, captureAdmission);
 
   win.webContents.setWindowOpenHandler(({ url }) => {
     if (isAllowedExternalUrl(url)) {

@@ -1,4 +1,5 @@
 import { randomUUID } from "node:crypto";
+import type { BrowserWindow } from "electron";
 
 type Observation = { observedAt: number; route: string };
 
@@ -56,4 +57,23 @@ export class CaptureAdmissionController {
   clear(windowId: number): void {
     this.observations.delete(windowId);
   }
+}
+
+export function observeCaptureAdmissionForWindow(
+  win: BrowserWindow,
+  controller: CaptureAdmissionController,
+): void {
+  win.webContents.on("before-input-event", (_event, input) => {
+    if (input.type === "keyDown" && !input.isAutoRepeat) {
+      controller.observe(win.id, win.webContents.getURL());
+    }
+  });
+  win.webContents.on("before-mouse-event", (_event, mouse) => {
+    if (mouse.type === "mouseDown") {
+      controller.observe(win.id, win.webContents.getURL());
+    }
+  });
+  win.webContents.once("destroyed", () => {
+    controller.clear(win.id);
+  });
 }

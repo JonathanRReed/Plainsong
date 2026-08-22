@@ -1,3 +1,5 @@
+import { EventEmitter } from "node:events";
+import type { BrowserWindow } from "electron";
 import { describe, expect, it, vi } from "vitest";
 import { getCommandTimeoutMs } from "../../electron/ipc-command-policy";
 import {
@@ -10,7 +12,10 @@ import {
 import { buildSidecarEnv } from "../../electron/sidecar-env";
 import { isRendererCommandAllowed } from "../../electron/ipc-bridge";
 import { parseCloudLocationRequest } from "../../electron/privileged-storage-locations";
-import { CaptureAdmissionController } from "../../electron/capture-admission";
+import {
+  CaptureAdmissionController,
+  observeCaptureAdmissionForWindow,
+} from "../../electron/capture-admission";
 
 describe("privileged storage command admission", () => {
   it("allows native picker requests but never raw privileged approval commands", () => {
@@ -82,6 +87,36 @@ describe("meeting capture admission", () => {
     admission.observe(7, "plainsong://app/meetings");
     now += 1_001;
     expect(() => admission.consume(7, "plainsong://app/meetings")).toThrow(
+      "recent click or key press",
+    );
+  });
+
+  it("observes real Electron keyboard and mouse events and clears on destroy", () => {
+    const admission = new CaptureAdmissionController();
+    const webContents = new EventEmitter() as EventEmitter & {
+      getURL: () => string;
+    };
+    webContents.getURL = () => "plainsong://app/meetings";
+    const win = { id: 7, webContents } as unknown as BrowserWindow;
+
+    observeCaptureAdmissionForWindow(win, admission);
+
+    webContents.emit("before-input-event", {}, { type: "keyDown", isAutoRepeat: false });
+    expect(admission.consume(7, webContents.getURL()).windowId).toBe(7);
+
+    webContents.emit("before-mouse-event", {}, { type: "mouseDown" });
+    expect(admission.consume(7, webContents.getURL()).route).toBe(
+      "plainsong://app/meetings",
+    );
+
+    webContents.emit("before-input-event", {}, { type: "keyDown", isAutoRepeat: true });
+    expect(() => admission.consume(7, webContents.getURL())).toThrow(
+      "recent click or key press",
+    );
+
+    webContents.emit("before-mouse-event", {}, { type: "mouseDown" });
+    webContents.emit("destroyed");
+    expect(() => admission.consume(7, webContents.getURL())).toThrow(
       "recent click or key press",
     );
   });

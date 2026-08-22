@@ -86,7 +86,8 @@ describe("RecordingPopup", () => {
     popupMocks.invoke.mockClear();
     popupMocks.getRecording.mockClear();
     popupMocks.getWaveformData.mockClear();
-    popupMocks.stopRecording.mockClear();
+    popupMocks.stopRecording.mockReset();
+    popupMocks.stopRecording.mockResolvedValue(undefined);
     popupMocks.updateRecordingNotes.mockClear();
     popupMocks.windowHandle.setSize.mockClear();
     popupMocks.windowHandle.show.mockClear();
@@ -191,6 +192,26 @@ describe("RecordingPopup", () => {
     );
     expect(screen.getByRole("button", { name: "Open Workspace" })).toBeVisible();
     expect(screen.queryByRole("button", { name: "Stop recording" })).not.toBeInTheDocument();
+  });
+
+  it("surfaces a Stop failure without losing the active recording", async () => {
+    popupMocks.stopRecording.mockRejectedValueOnce(
+      new Error("Sidecar stopped before the meeting was saved"),
+    );
+
+    await act(async () => {
+      render(<RecordingPopup />);
+    });
+    await screen.findByText("Board sync");
+
+    fireEvent.click(screen.getByRole("button", { name: "Stop recording" }));
+
+    await waitFor(() => {
+      expect(screen.getByRole("alert")).toHaveTextContent(
+        "Sidecar stopped before the meeting was saved",
+      );
+    });
+    expect(screen.getByRole("button", { name: "Open Workspace" })).toBeVisible();
   });
 
   it("offers manual consent recovery from the popup when automation did not send", async () => {

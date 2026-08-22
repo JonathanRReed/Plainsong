@@ -1770,18 +1770,28 @@ fn build_restore_units(
 }
 
 async fn remove_path_if_exists(path: &Path) -> Result<()> {
-    if !path.exists() {
-        return Ok(());
-    }
+    let metadata = match tokio::fs::symlink_metadata(path).await {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => {
+            return Err(error)
+                .with_context(|| format!("Failed to inspect restore path {}", path.display()))
+        }
+    };
 
-    if path.is_dir() {
+    if metadata.file_type().is_symlink() || metadata.is_file() {
+        tokio::fs::remove_file(path)
+            .await
+            .with_context(|| format!("Failed to remove file {}", path.display()))?;
+    } else if metadata.is_dir() {
         tokio::fs::remove_dir_all(path)
             .await
             .with_context(|| format!("Failed to remove directory {}", path.display()))?;
     } else {
-        tokio::fs::remove_file(path)
-            .await
-            .with_context(|| format!("Failed to remove file {}", path.display()))?;
+        anyhow::bail!(
+            "Restore path is not a file or directory: {}",
+            path.display()
+        );
     }
     Ok(())
 }
@@ -2498,6 +2508,36 @@ mod tests {
         assert!(validate_backup_id("../outside").is_err());
         assert!(validate_backup_id("backup/2026").is_err());
         assert!(validate_backup_id("backup\\2026").is_err());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn restore_cleanup_removes_links_without_touching_their_targets() {
+        use std::os::unix::fs::symlink;
+
+        let runtime = Runtime::new().expect("create tokio runtime");
+        runtime.block_on(async {
+            let root = unique_test_dir("restore-cleanup-links");
+            let outside = root.join("outside");
+            let directory_link = root.join("directory-link");
+            let broken_link = root.join("broken-link");
+            fs::create_dir_all(&outside).expect("create outside directory");
+            fs::write(outside.join("sentinel.txt"), "keep").expect("write sentinel");
+            symlink(&outside, &directory_link).expect("create directory link");
+            symlink(root.join("missing"), &broken_link).expect("create broken link");
+
+            remove_path_if_exists(&directory_link)
+                .await
+                .expect("remove directory link");
+            remove_path_if_exists(&broken_link)
+                .await
+                .expect("remove broken link");
+
+            assert!(outside.join("sentinel.txt").is_file());
+            assert!(fs::symlink_metadata(&directory_link).is_err());
+            assert!(fs::symlink_metadata(&broken_link).is_err());
+            let _ = fs::remove_dir_all(&root);
+        });
     }
 
     #[test]
