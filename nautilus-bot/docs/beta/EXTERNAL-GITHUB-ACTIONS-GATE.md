@@ -13,7 +13,7 @@
 - Execution host: GitHub-hosted macOS or Linux runner, which was never allocated for the observed failing jobs
 - Principal or identity class: repository Actions service identity; account owner intervention may be required
 - Provider account, tenant, or control plane: Jonathan's GitHub account and the private `JonathanRReed/Plainsong` repository
-- Target resource, environment, and release subject: the `Beta release candidate` workflow for a future `v0.9.0-beta.1` tag
+- Target resource, environment, and release subject: the `Beta release candidate` workflow for a future `v0.9.0-beta.2` tag
 - Required permission or credential class: working GitHub Actions execution plus the signing and notarization secret classes named by the workflow; secret values must never be exported to chat or source
 - Authority source and approval status: read-only diagnosis is authorized; billing, plan, spending-limit, secret, push, tag, or release changes are not yet authorized
 - Cost, security, public, restart, and rollback effects: resolving an account or billing restriction may change paid account state; adding repository or organization secrets changes credential exposure; pushing a tag triggers remote release automation

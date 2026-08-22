@@ -4,7 +4,7 @@
 
 - **Website:** https://plainsong.jonathanrreed.com
 - **Project repository:** https://github.com/JonathanRReed/Plainsong (currently private)
-- **Release target:** Limited `0.9.0-beta.1` invite beta. No public build is available yet.
+- **Release target:** Private `0.9.0-beta.2` integration candidate. No public build is available yet.
 
 This directory contains the Plainsong desktop app: the Electron main process,
 the React/TypeScript renderer, and the Rust transcription sidecar.
@@ -87,19 +87,15 @@ clean-install, updater-journey, and soak evidence remain in the aggregate
 release audit. A missing credential or failed artifact trust check stops the
 workflow before any release asset reaches GitHub.
 
-The current release target is `0.9.0-beta.1`, with Dictation and Meetings both
+The current release target is `0.9.0-beta.2`, with Dictation and Meetings both
 treated as supported pillars. A release is not ready merely because source
 tests pass. The exact DMG, update ZIP, `beta-mac.yml`, clean-install journey,
 real-device Dictation and Meetings journeys, signing, notarization, Gatekeeper,
-and beta updater flow must all pass against the same candidate. The current
-candidate has passed signing, notarization, stapling, Gatekeeper,
-update-metadata, and clean-install checks, with 16 of 21 aggregate release
-claims proved. For the first invite-limited group, the real-device Dictation
-matrix, remaining Meeting lifecycle rows, and repeat three-hour capture soak
-are documented beta risks rather than claims of passing evidence. They remain
-required before public launch. The exact-candidate updater journey and public
-beta update feed remain distribution gates. The repository is private and no
-beta has been distributed. See
+and beta updater flow must all pass against the same candidate. Historical
+`1.0.0` and `0.9.0-beta.1` receipts do not prove this revision. Fresh aggregate
+evidence will be generated after integration and packaging. The exact-candidate
+updater journey and public beta update feed remain distribution gates. The
+repository is private and no beta has been distributed. See
 [docs/CODE_SIGNING.md](docs/CODE_SIGNING.md) and
 [docs/APPLE_DEVELOPER_SETUP.md](docs/APPLE_DEVELOPER_SETUP.md).
 

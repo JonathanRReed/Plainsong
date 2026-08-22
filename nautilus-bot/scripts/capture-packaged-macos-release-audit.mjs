@@ -20,7 +20,10 @@ const candidatePath = path.resolve(
   repoRoot,
   valueFor("--candidate", "release")
 );
-const qaPath = path.join(candidatePath, "qa");
+const qaPath = path.resolve(
+  repoRoot,
+  valueFor("--qa-dir", "artifacts/qa/macos")
+);
 const outPath = path.resolve(
   repoRoot,
   valueFor("--out", path.join(qaPath, "release-readiness-audit.json"))
@@ -214,7 +217,8 @@ const appVersion = plistScalar(
 );
 const betaManifest = path.join(candidatePath, "beta-mac.yml");
 const artifactsMatchVersion =
-  appVersion === "0.9.0-beta.1" &&
+  typeof appVersion === "string" &&
+  appVersion.length > 0 &&
   packageVersion === appVersion &&
   Boolean(dmg && path.basename(dmg).includes(appVersion)) &&
   Boolean(zip && path.basename(zip).includes(appVersion)) &&
@@ -261,12 +265,12 @@ function reviewSourceMatchesGates(artifact) {
 const requirements = [
   {
     id: "beta-identity",
-    label: "Package and release artifacts share the 0.9.0-beta.1 identity",
+    label: `Package and release artifacts share the ${packageVersion ?? "declared"} identity`,
     status: artifactsMatchVersion ? "proved" : "missing",
     evidence: relative(candidatePath),
     detail: artifactsMatchVersion
       ? "The package version, DMG, update ZIP, and beta-mac.yml identify one beta candidate."
-      : "Expected package version 0.9.0-beta.1 plus matching versioned DMG, ZIP, and beta-mac.yml.",
+      : `Expected package version ${packageVersion ?? "from package.json"} plus matching versioned DMG, ZIP, and beta-mac.yml.`,
   },
   {
     id: "release-artifacts",
@@ -350,7 +354,7 @@ const requirements = [
   artifactRequirement({
     id: "meeting-microphone",
     label: "Real microphone meeting capture passes",
-    file: evidenceFile("meeting-mic.json"),
+    file: evidenceFile("capture-meeting-mic.json"),
     candidateBound: true,
     missingDetail: "The exact-candidate microphone meeting artifact is missing.",
     failedDetail: (artifact) =>
@@ -359,7 +363,7 @@ const requirements = [
   artifactRequirement({
     id: "meeting-system-audio",
     label: "Real system-audio capture passes with a known tone",
-    file: evidenceFile("system-audio-test.json"),
+    file: evidenceFile("capture-system-audio-test.json"),
     candidateBound: true,
     missingDetail: "The exact-candidate system-audio artifact is missing.",
     failedDetail: (artifact) =>

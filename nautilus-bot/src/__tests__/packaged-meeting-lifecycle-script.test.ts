@@ -160,6 +160,29 @@ describe("packaged Meeting lifecycle receipt", () => {
     ).toBe(false);
   });
 
+  it("uses the packaged QA producers' canonical receipt directory and filenames", () => {
+    const lifecycleSource = fs.readFileSync(
+      path.join(repoRoot, "scripts", "capture-packaged-macos-meeting-lifecycle.mjs"),
+      "utf8",
+    );
+    const auditSource = fs.readFileSync(
+      path.join(repoRoot, "scripts", "capture-packaged-macos-release-audit.mjs"),
+      "utf8",
+    );
+
+    for (const source of [lifecycleSource, auditSource]) {
+      expect(source).toContain('"artifacts/qa/macos"');
+    }
+    for (const receipt of [
+      "capture-meeting-mic.json",
+      "capture-meeting-system-audio.json",
+      "capture-system-audio-test.json",
+    ]) {
+      expect(lifecycleSource + auditSource).toContain(receipt);
+    }
+    expect(auditSource).toContain('valueFor("--qa-dir", "artifacts/qa/macos")');
+  });
+
   it("is required by the exact-candidate release audit", () => {
     const auditSource = fs.readFileSync(
       path.join(repoRoot, "scripts", "capture-packaged-macos-release-audit.mjs"),

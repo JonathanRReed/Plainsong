@@ -32,10 +32,10 @@ describe("reproducible package and release configuration", () => {
     const builder = readRepoFile("electron-builder.yml");
     const release = readWorkspaceFile(".github/workflows/release.yml");
 
-    expect(packageJson.version).toBe("0.9.0-beta.1");
-    expect(cargoToml).toMatch(/^version = "0\.9\.0-beta\.1"$/m);
+    expect(packageJson.version).toBe("0.9.0-beta.2");
+    expect(cargoToml).toMatch(/^version = "0\.9\.0-beta\.2"$/m);
     expect(cargoLock).toMatch(
-      /name = "plainsong"\nversion = "0\.9\.0-beta\.1"/,
+      /name = "plainsong"\nversion = "0\.9\.0-beta\.2"/,
     );
     expect(builder).toMatch(
       /publish:\s*[\s\S]*?provider:\s*generic[\s\S]*?url:\s*https:\/\/updates\.plainsong\.jonathanrreed\.com\/beta\/[\s\S]*?channel:\s*beta[\s\S]*?useMultipleRangeRequest:\s*false/,
@@ -96,12 +96,12 @@ describe("reproducible package and release configuration", () => {
     expect(packageJson.scripts["gate:dictation-latency"]).toContain(
       "verify-dictation-latency.mjs",
     );
-    expect(packageJson.scripts["gate:release:local"]).toContain(
+    expect(packageJson.scripts["gate:release:local"]).not.toContain(
       "gate:dictation-latency",
     );
     const sourceGate = readRepoFile("scripts/capture-source-gates.mjs");
-    expect(sourceGate).toContain('id: "dictation-latency"');
-    expect(sourceGate).toContain('"gate:dictation-latency"');
+    expect(sourceGate).not.toContain('id: "dictation-latency"');
+    expect(sourceGate).not.toContain('"gate:dictation-latency"');
     expect(sidecarBuild).toMatch(/"build",\s*"--locked",\s*"--release"/);
   });
 
@@ -154,6 +154,14 @@ describe("reproducible package and release configuration", () => {
       release.indexOf("      - name: Verify release assets"),
     );
 
+    expectInOrder(release, [
+      "bun run licenses:generate",
+      "      - name: Build signed and notarized release",
+      "bun run release:mac",
+      "bun run gate:release:licenses",
+      "bun run gate:cold-start",
+      "      - name: Notarize and staple signed DMG",
+    ]);
     expect(builder).toMatch(
       /dmg:\s*[\s\S]*?sign:\s*true[\s\S]*?writeUpdateInfo:\s*false/,
     );

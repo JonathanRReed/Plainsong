@@ -14,7 +14,7 @@ function valueFor(name, fallback = null) {
 
 const inputPath = path.resolve(
   repoRoot,
-  valueFor("--input", "release/qa/capture-soak-3h.json"),
+  valueFor("--input", "artifacts/qa/macos/capture-soak-3h.json"),
 );
 const outputPath = path.resolve(
   repoRoot,

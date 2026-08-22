@@ -1,56 +1,35 @@
 # Plainsong limited beta launch checklist
 
-Release target: `0.9.0-beta.1`
+Release target: `0.9.0-beta.2`
 
-Last reconciled: August 10, 2026
+Last reconciled: August 22, 2026
 
-This checklist is the release boundary for the first limited beta. Dictation
-and Meetings are both supported product pillars. Source readiness, packaged
-candidate readiness, and distribution are separate states.
+This checklist is the release boundary for the private integration candidate.
+Dictation and Meetings are both supported product pillars. Source readiness,
+packaged candidate readiness, and distribution are separate states.
 
 ## Current verdict
 
-The current source passes all 11 source gates, including lint, TypeScript,
-Vitest, Rust tests, builds, IPC reachability, dead-code checks, dependency
-checks, and the committed Dictation latency budget. The current signed and
-notarized `0.9.0-beta.1` candidate has release identity
-`046a6dd6562e94f8a04656f251acb454c8c301fbd90accaec70602dc69a6983d`.
-Its DMG, ZIP, blockmap, manifest, app, and native helpers are bound to that
-identity and the current aggregate audit proves 16 of 21 release requirements.
+The untouched dual-pillar source baseline passes IPC, dead-code, TypeScript,
+Vitest, renderer and Electron builds, Rust formatting, Clippy, and 748 Rust
+library and binary tests. Integration repairs and dependency reconciliation are
+still in progress, so those receipts do not yet prove the final revision.
 
-The candidate is configured to use the credential-free generic feed at
-`https://updates.plainsong.jonathanrreed.com/beta/`, but the host is not
-provisioned or serving the candidate assets. Clearing that gate requires
-publishing the exact manifest, ZIP, and blockmap at the configured origin and
-passing the live feed verifier.
+No exact `0.9.0-beta.2` package has been qualified. Historical `1.0.0` and
+`0.9.0-beta.1` artifacts, hashes, signatures, and QA receipts do not prove the
+current build. Fresh package, trust, clean-install, Dictation, Meetings,
+accessibility, and updater evidence is required after the final source revision
+is fixed.
+
+The app is configured to use the credential-free generic feed at
+`https://updates.plainsong.jonathanrreed.com/beta/`. That host was previously
+recorded as unprovisioned; its current state must be refreshed before any
+release decision. GitHub Actions runner availability was also previously
+blocked by account state and must be refreshed independently. Neither external
+gate can be waived by local source results.
 
 No beta artifact has been distributed, tagged, pushed, published, or sent to
 testers from this work. Those external actions still require explicit approval.
-
-Five aggregate audit rows remain contradicted. For the first invite-limited
-group, the owner accepted three interference-prone observation rows as known
-beta risks on August 10, 2026: the formal current-hash four-app Dictation
-matrix, the remaining real-device Meeting lifecycle rows, and a repeat
-three-hour exact-candidate soak. Core exact-candidate Dictation and Meeting
-flows, including local transcription, insertion, microphone and system-audio
-capture, Me + Them capture, persistence, export, recovery, clean installation,
-and package trust, have separate passing evidence. Foreground app changes and
-unrelated audio activity contaminated attempts to repeat the three accepted
-rows while the Mac was also in active use.
-
-This limited-beta acceptance does not convert those rows into passing evidence.
-They remain required before a broader public launch. The signed beta.1 to
-beta.2 updater journey and the public update feed also remain genuine
-distribution gates, not accepted risks. Separately, GitHub reports that CI jobs
-were not started because recent account payments failed or the Actions spending
-limit must be increased. A beta tag must not be pushed until that account gate
-is cleared and Actions can allocate and run, or the user explicitly approves a
-manual local-release fallback. See
-`nautilus-bot/docs/beta/EXTERNAL-GITHUB-ACTIONS-GATE.md`.
-
-The historical `1.0.0` package was a prelaunch artifact and is not the beta
-candidate. Its checksums, signatures, and QA receipts do not prove anything
-about `0.9.0-beta.1`.
 
 ## Supported beta shape
 
@@ -76,11 +55,8 @@ bun run test
 bun run test:rust
 bun run gate:ipc-contract
 bun run gate:dead-code
-bun run gate:dictation-latency
 bun run build:renderer
 bun run build:electron
-bun run gate:release:dependencies
-bun run licenses:generate
 git diff --check
 ```
 
@@ -90,8 +66,8 @@ Source-ready does not mean beta-ready.
 
 The following evidence must refer to the same app digest and package version:
 
-- `Plainsong-0.9.0-beta.1-arm64.dmg`
-- `Plainsong-0.9.0-beta.1-arm64-mac.zip`
+- `Plainsong-0.9.0-beta.2-arm64.dmg`
+- `Plainsong-0.9.0-beta.2-arm64-mac.zip`
 - matching ZIP blockmap
 - `beta-mac.yml`
 - `SHA256SUMS.txt`, covering the DMG, ZIP, blockmap, and beta manifest
@@ -105,7 +81,9 @@ The following evidence must refer to the same app digest and package version:
 Required packaged commands:
 
 ```bash
+bun run licenses:generate
 bun run release:mac
+bun run gate:release:dependencies
 bun run gate:packaged:macos:native
 bun run qa:packaged:macos:update-metadata
 bun run gate:size
@@ -132,6 +110,14 @@ The exact candidate must pass all of these on real hardware:
   focus, contrast, loading, empty, disabled, error, and reduced-motion states
 - support bundle preview and redaction checks
 
+Measured latency is a model- and hardware-dependent runtime gate, not a
+clean-checkout source gate:
+
+```bash
+bun run benchmark:latency -- --provider whisper --model base.en --runs 5
+bun run gate:dictation-latency
+```
+
 The aggregate release audit is:
 
 ```bash
@@ -142,7 +128,7 @@ It must report `PASS`. Missing evidence is a blocker, not an implicit pass.
 
 ## Beta update gate
 
-- `0.9.0-beta.1` requests `beta-mac.yml`.
+- `0.9.0-beta.2` requests `beta-mac.yml`.
 - The installed updater contains no repository token or other feed credential.
 - The manifest, ZIP, blockmap, and checksum set are mutually consistent.
 - Update policy accepts only a strictly newer semantic version.
@@ -162,9 +148,9 @@ bun run qa:packaged:macos:public-update-feed -- \
 The GitHub repository is currently private. A private GitHub release API is
 not a client-reachable feed. Before inviting testers, either the release feed
 must be public or the verified beta assets must be placed on another public,
-credential-free update host. The current signed candidate is already bound to
-the dedicated generic feed above, so another rebuild is required only if that
-origin changes. This is an external distribution gate, not something source
+credential-free update host. The integrated candidate is configured for the
+dedicated generic feed above; its package and live feed still require fresh
+verification. This is an external distribution gate, not something source
 tests can waive.
 
 The existing Cloudflare Pages site cannot host the candidate update ZIP because
@@ -194,7 +180,7 @@ These steps require separate user authorization:
 
 1. Review the exact candidate receipt and checksums.
 2. Confirm the beta feed is publicly reachable without credentials.
-3. Create and push tag `v0.9.0-beta.1`.
+3. Create and push tag `v0.9.0-beta.2`.
 4. Let the release workflow create or refresh an artifact-only draft release.
 5. Review the aggregate release audit, draft, release notes, assets, and invite
    kit. A green artifact workflow is not a beta-ready verdict.

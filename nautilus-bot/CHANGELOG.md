@@ -2,7 +2,19 @@
 
 All notable changes to Plainsong are documented in this file.
 
-## [0.9.0-beta.1] - 2026-08-08 (candidate)
+## [0.9.0-beta.2] - 2026-08-22 (integration candidate)
+
+This private candidate reconciles the full dual-pillar beta with current
+application, Rust, and workflow dependency updates. It repairs exact-candidate
+QA receipt wiring, separates measured latency from clean-checkout source gates,
+closes release-workflow verification gaps, and fixes validated Dictation and
+Meetings lifecycle defects before a new package is qualified.
+
+No `0.9.0-beta.2` artifact has been published or distributed. Signing,
+notarization, Gatekeeper, clean-install, real-device, and updater claims require
+fresh evidence from the exact final revision.
+
+## [0.9.0-beta.1] - 2026-08-08 (historical candidate)
 
 The free, open-source relaunch. The previously commercial app (NautilusBot /
 Nautilus) was rebuilt as **Plainsong** — MIT licensed, no trial, no tiers,
@@ -16,8 +28,8 @@ the formal real-device Dictation matrix, remaining Meeting lifecycle rows, and
 a repeat three-hour capture soak as documented beta risks. They remain required
 before public launch. Distribution still requires explicit approval, and
 automatic updates remain gated on the exact-candidate updater journey and
-publication of the beta update feed. The exact candidate has passed signing,
-notarization, stapling, Gatekeeper, update-metadata, and clean-install checks.
+publication of the beta update feed. Its historical receipts do not establish
+those states for later candidates.
 
 ### Added
 - **Hold-to-talk dictation**: true press-and-hold via a native macOS

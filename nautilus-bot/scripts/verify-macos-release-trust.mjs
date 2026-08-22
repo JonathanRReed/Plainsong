@@ -21,11 +21,11 @@ const appPath = path.resolve(
 );
 const outPath = path.resolve(
   repoRoot,
-  valueFor("--out", "artifacts/release/macos-trust.json"),
+  valueFor("--out", "artifacts/qa/macos/macos-trust.json"),
 );
 const markdownPath = path.resolve(
   repoRoot,
-  valueFor("--markdown", "artifacts/release/macos-trust.md"),
+  valueFor("--markdown", "artifacts/qa/macos/macos-trust.md"),
 );
 const expectedTeam = valueFor("--expected-team", process.env.APPLE_TEAM_ID ?? null);
 const requestedReleaseDir = path.resolve(

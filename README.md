@@ -42,20 +42,17 @@ into searchable notes without sending a bot into your call.
 
 ## Install
 
-The Plainsong `0.9.0-beta.1` invite beta targets **macOS 13 or later on Apple
-Silicon (arm64)**.
+The Plainsong `0.9.0-beta.2` integration candidate targets **macOS 13 or later
+on Apple Silicon (arm64)**.
 
-> Beta status, August 10, 2026: the exact beta candidate has passed signing,
-> notarization, stapling, Gatekeeper, update-metadata, and clean-install checks.
-> The aggregate audit proves 16 of 21 release claims. The first invite-limited
-> group may test with three documented observation risks: the formal real-device
-> Dictation matrix, remaining Meeting lifecycle rows, and a repeat three-hour
-> soak. They remain required before public launch. Artifact distribution still
-> requires explicit approval, and automatic updates remain withheld pending the
-> exact-candidate updater journey and publication of the beta update feed.
+> Beta status, August 22, 2026: source integration and exact-candidate
+> qualification are in progress. Historical `1.0.0` and `0.9.0-beta.1`
+> artifacts do not prove the current build. No installer is public or approved
+> for distribution. The current revision must produce fresh package, trust,
+> clean-install, Dictation, Meetings, and updater evidence before invitations.
 
-Invited testers will receive the verified DMG and its SHA-256 checksum directly
-after the release gate passes:
+Invited testers will receive a verified DMG and its SHA-256 checksum only after
+the release gate passes and distribution is explicitly approved:
 
 1. Download the DMG.
 2. Drag `Plainsong.app` into `/Applications`.

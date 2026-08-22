@@ -128,7 +128,7 @@ jobs:
     name: Package and verify (macOS)
     needs: [verify-build, verify-rust]
     # Build the ZIP target so electron-builder emits the same app-update.yml,
-    # latest-mac.yml, ZIP, and blockmap used by the updater. Runs on main
+    # beta-mac.yml, ZIP, and blockmap used by the updater. Runs on main
     # pushes and a weekly cron (not on PRs) to keep macOS runner cost in check.
     if: github.event_name == 'push' || github.event_name == 'schedule'
     runs-on: macos-latest

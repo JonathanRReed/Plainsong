@@ -13,7 +13,7 @@
 - Execution host: the signed arm64 Plainsong app on a tester Mac; the diagnostic ran from the beta worktree on Jonathan's Mac
 - Principal or identity class: anonymous HTTPS reader for the update client; an authenticated Cloudflare account owner would perform provisioning and upload
 - Provider account, tenant, or control plane: the active Cloudflare account and active `jonathanrreed.com` zone were resolved through the existing secure Wrangler session; exact identifiers remain in local release evidence rather than source
-- Target resource, environment, and release subject: a proposed production R2 bucket on `updates.plainsong.jonathanrreed.com`, serving Plainsong `0.9.0-beta.1` update assets
+- Target resource, environment, and release subject: a proposed production R2 bucket on `updates.plainsong.jonathanrreed.com`, serving Plainsong `0.9.0-beta.2` update assets
 - Required permission or credential class: Cloudflare R2 bucket administration, DNS or custom-domain administration, and object write access; credential values must remain in Cloudflare or a secure credential store
 - Authority source and approval status: the user authorized beta preparation, but has not yet authorized creating a public bucket, changing DNS, incurring provider usage, uploading release artifacts, committing, pushing, tagging, publishing, or inviting testers
 - Cost, security, public, restart, and rollback effects: R2 Standard has usage-based storage and operation pricing with a free tier; the bucket and custom domain would be public; rollback is disabling or removing the custom domain and public access; the app needs another rebuild only if the approved feed origin changes

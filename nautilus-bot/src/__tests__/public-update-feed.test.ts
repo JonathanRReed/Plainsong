@@ -8,7 +8,7 @@ import {
   type PublicUpdateFeedEvidence,
 } from "../../scripts/lib/public-update-feed.mjs";
 
-const VERSION = "0.9.0-beta.1";
+const VERSION = "0.9.0-beta.2";
 const ZIP_NAME = `Plainsong-${VERSION}-arm64-mac.zip`;
 const ZIP_SHA256 = "a".repeat(64);
 const ZIP_SHA512 = "b".repeat(88);

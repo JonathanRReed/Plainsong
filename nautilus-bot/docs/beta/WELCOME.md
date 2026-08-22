@@ -1,6 +1,6 @@
 # Welcome to the Plainsong limited beta
 
-Thank you for testing Plainsong `0.9.0-beta.1`. This beta has two supported
+Thank you for testing Plainsong `0.9.0-beta.2`. This beta has two supported
 pillars: fast system-wide Dictation and local-first Meeting capture.
 
 ## Supported Macs

@@ -154,7 +154,7 @@ stapling, and Gatekeeper acceptance all pass.
 
 After the release changes are merged and the intended beta tag exists, trigger
 `.github/workflows/release.yml` with that tag. For this candidate, the tag is
-`v0.9.0-beta.1`.
+`v0.9.0-beta.2`.
 
 The workflow:
 

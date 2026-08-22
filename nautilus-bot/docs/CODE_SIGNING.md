@@ -8,31 +8,23 @@ sidecar, native macOS shortcut helper, and Apple Speech helper.
 
 ## Current local status
 
-The current limited-beta candidate is built under `release/`:
+The current integration target is `0.9.0-beta.2`. Its expected outputs are:
 
-- `release/Plainsong-0.9.0-beta.1-arm64.dmg`
-- `release/Plainsong-0.9.0-beta.1-arm64-mac.zip`
-- `release/Plainsong-0.9.0-beta.1-arm64-mac.zip.blockmap`
+- `release/Plainsong-0.9.0-beta.2-arm64.dmg`
+- `release/Plainsong-0.9.0-beta.2-arm64-mac.zip`
+- `release/Plainsong-0.9.0-beta.2-arm64-mac.zip.blockmap`
 - `release/beta-mac.yml`
 - `release/mac-arm64/Plainsong.app`
 
-Developer ID signing, hardened runtime, secure timestamps, embedded executable
-signatures, arm64 architecture, beta update metadata, TCC usage strings,
-Electron fuses, DMG integrity, mounted-app signature identity, ZIP extraction,
-and the package size gate all pass. The app, sidecar, shortcut helper, and Apple
-Speech helper are signed by `Developer ID Application: Jonathan Reed
-(AJ9VWBRNZN)`. The app and DMG are notarized and stapled, and Gatekeeper reports:
+No exact `0.9.0-beta.2` package trust claim is established until these artifacts
+are rebuilt and the current gates pass. Historical signatures, notarization
+tickets, Gatekeeper results, and hashes belong to their historical artifacts
+and do not prove this revision.
 
-```text
-accepted
-source=Notarized Developer ID
-```
-
-These facts must be regenerated for every rebuild. Exact hashes, Apple
-submission identifiers, and QA receipts belong in the candidate's `release/qa`
-evidence, not in this source guide. The current candidate has not been
-published. Keep the app-specific password only in the login Keychain, never in
-source, logs, shell history, or release artifacts.
+Exact hashes, Apple submission identifiers, and QA receipts belong under
+`artifacts/qa/macos/`, not in this source guide. The current candidate has not
+been published. Keep the app-specific password only in the login Keychain,
+never in source, logs, shell history, or release artifacts.
 
 ## Release inputs
 
@@ -156,7 +148,7 @@ Recognition entitlement.
 3. requires the full signing and notarization credential set
 4. builds with direct publication disabled
 5. verifies updater metadata, signatures, stapling, Gatekeeper, TCC strings,
-   size, and release assets
+   size, packaged licenses, cold start, and release assets
 6. creates or refreshes an artifact-only draft GitHub release after every
    automated artifact gate passes
 

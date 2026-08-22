@@ -30,11 +30,11 @@ const requestedManifest = valueFor("--manifest", "beta-mac.yml");
 const rawFeedUrl = valueFor("--feed-url", "");
 const outPath = path.resolve(
   repoRoot,
-  valueFor("--out", "release/qa/public-update-feed.json"),
+  valueFor("--out", "artifacts/qa/macos/public-update-feed.json"),
 );
 const markdownPath = path.resolve(
   repoRoot,
-  valueFor("--markdown", "release/qa/public-update-feed.md"),
+  valueFor("--markdown", "artifacts/qa/macos/public-update-feed.md"),
 );
 const timeoutMs = Number(valueFor("--timeout-ms", "180000"));
 

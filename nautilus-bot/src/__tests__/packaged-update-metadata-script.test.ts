@@ -29,7 +29,7 @@ function createTempRepo(scriptName: string) {
 
   writeFileSync(
     path.join(tempRoot, "package.json"),
-    JSON.stringify({ name: "plainsong", version: "0.9.0-beta.1" }, null, 2),
+    JSON.stringify({ name: "plainsong", version: "0.9.0-beta.2" }, null, 2),
   );
 
   return { tempRoot, tempScript };
@@ -103,7 +103,7 @@ describe("verify-packaged-macos-update-metadata.mjs", () => {
       const appPath = path.join(tempRoot, "release", "mac-arm64", "Plainsong.app");
       const resourcesPath = path.join(appPath, "Contents", "Resources");
       mkdirSync(resourcesPath, { recursive: true });
-      writeAppInfoPlist(appPath, "0.9.0-beta.1");
+      writeAppInfoPlist(appPath, "0.9.0-beta.2");
       writeFileSync(
         path.join(resourcesPath, "app-update.yml"),
         "provider: generic\nurl: https://updates.plainsong.jonathanrreed.com/beta/\nchannel: beta\nuseMultipleRangeRequest: false\n",
@@ -136,7 +136,7 @@ describe("verify-packaged-macos-update-metadata.mjs", () => {
       const releasePath = path.join(tempRoot, "release");
       const distElectronPath = path.join(tempRoot, "dist-electron");
       mkdirSync(resourcesPath, { recursive: true });
-      writeAppInfoPlist(appPath, "0.9.0-beta.1");
+      writeAppInfoPlist(appPath, "0.9.0-beta.2");
       mkdirSync(distElectronPath, { recursive: true });
       writeFileSync(
         path.join(resourcesPath, "app-update.yml"),
@@ -146,7 +146,7 @@ describe("verify-packaged-macos-update-metadata.mjs", () => {
         path.join(distElectronPath, "updater-channel.js"),
         'exports.updaterChannelManifestFilename = () => "beta-mac.yml";\n',
       );
-      const zipName = "Plainsong-0.9.0-beta.1-arm64-mac.zip";
+      const zipName = "Plainsong-0.9.0-beta.2-arm64-mac.zip";
       const zipPath = path.join(releasePath, zipName);
       writeFileSync(zipPath, "signed beta zip fixture");
       writeFileSync(`${zipPath}.blockmap`, "blockmap fixture");
@@ -154,7 +154,7 @@ describe("verify-packaged-macos-update-metadata.mjs", () => {
       const sha512 = crypto.createHash("sha512").update(zipBytes).digest("base64");
       writeFileSync(
         path.join(releasePath, "beta-mac.yml"),
-        `version: 0.9.0-beta.1\npath: ${zipName}\nsha512: ${sha512}\nsize: ${zipBytes.byteLength}\nreleaseDate: '2026-08-08T00:00:00.000Z'\n`,
+        `version: 0.9.0-beta.2\npath: ${zipName}\nsha512: ${sha512}\nsize: ${zipBytes.byteLength}\nreleaseDate: '2026-08-08T00:00:00.000Z'\n`,
       );
 
       const outPath = path.join(tempRoot, "artifacts", "update.json");
@@ -193,7 +193,7 @@ describe("verify-packaged-macos-update-metadata.mjs", () => {
     try {
       writeFileSync(
         path.join(tempRoot, "package.json"),
-        JSON.stringify({ name: "plainsong", version: "0.9.0-beta.2" }, null, 2),
+        JSON.stringify({ name: "plainsong", version: "0.9.0-beta.1" }, null, 2),
       );
       const appPath = path.join(tempRoot, "release", "mac-arm64", "Plainsong.app");
       const resourcesPath = path.join(appPath, "Contents", "Resources");
@@ -201,7 +201,7 @@ describe("verify-packaged-macos-update-metadata.mjs", () => {
       const distElectronPath = path.join(tempRoot, "dist-electron");
       mkdirSync(resourcesPath, { recursive: true });
       mkdirSync(distElectronPath, { recursive: true });
-      writeAppInfoPlist(appPath, "0.9.0-beta.1");
+      writeAppInfoPlist(appPath, "0.9.0-beta.2");
       writeFileSync(
         path.join(resourcesPath, "app-update.yml"),
         "provider: github\nowner: JonathanRReed\nrepo: Plainsong\nchannel: beta\n",
@@ -210,7 +210,7 @@ describe("verify-packaged-macos-update-metadata.mjs", () => {
         path.join(distElectronPath, "updater-channel.js"),
         'exports.updaterChannelManifestFilename = () => "beta-mac.yml";\n',
       );
-      const zipName = "Plainsong-0.9.0-beta.1-arm64-mac.zip";
+      const zipName = "Plainsong-0.9.0-beta.2-arm64-mac.zip";
       const zipPath = path.join(releasePath, zipName);
       writeFileSync(zipPath, "signed beta zip fixture");
       writeFileSync(`${zipPath}.blockmap`, "blockmap fixture");
@@ -218,7 +218,7 @@ describe("verify-packaged-macos-update-metadata.mjs", () => {
       const sha512 = crypto.createHash("sha512").update(zipBytes).digest("base64");
       writeFileSync(
         path.join(releasePath, "beta-mac.yml"),
-        `version: 0.9.0-beta.1\npath: ${zipName}\nsha512: ${sha512}\nsize: ${zipBytes.byteLength}\n`,
+        `version: 0.9.0-beta.2\npath: ${zipName}\nsha512: ${sha512}\nsize: ${zipBytes.byteLength}\n`,
       );
       const outPath = path.join(tempRoot, "artifacts", "update.json");
 
@@ -230,7 +230,7 @@ describe("verify-packaged-macos-update-metadata.mjs", () => {
       const artifact = JSON.parse(readFileSync(outPath, "utf8"));
 
       expect(result.status).toBe(1);
-      expect(artifact.appVersion).toBe("0.9.0-beta.1");
+      expect(artifact.appVersion).toBe("0.9.0-beta.2");
       expect(artifact.releaseChannel).toBe("beta");
       expect(artifact.checks.versionMatchesPackagedApp).toBe(true);
       expect(artifact.checks.packageVersionMatchesPackagedApp).toBe(false);

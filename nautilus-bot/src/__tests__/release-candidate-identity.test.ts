@@ -27,9 +27,9 @@ function fixture() {
     fs.writeFileSync(target, contents);
   }
   for (const [name, contents] of [
-    ["Plainsong-0.9.0-beta.1-arm64.dmg", "dmg"],
-    ["Plainsong-0.9.0-beta.1-arm64-mac.zip", "zip"],
-    ["Plainsong-0.9.0-beta.1-arm64-mac.zip.blockmap", "blockmap"],
+    ["Plainsong-0.9.0-beta.2-arm64.dmg", "dmg"],
+    ["Plainsong-0.9.0-beta.2-arm64-mac.zip", "zip"],
+    ["Plainsong-0.9.0-beta.2-arm64-mac.zip.blockmap", "blockmap"],
     ["beta-mac.yml", "manifest"],
   ]) {
     fs.writeFileSync(path.join(candidatePath, name), contents);
@@ -88,6 +88,8 @@ describe("release candidate identity", () => {
           path.join(repoRoot, "scripts/capture-packaged-macos-release-audit.mjs"),
           "--candidate",
           candidatePath,
+          "--qa-dir",
+          qaPath,
           "--out",
           outPath,
           "--markdown",

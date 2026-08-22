@@ -89,7 +89,7 @@ export function evaluateMeetingLifecycleEvidence({
       "microphoneCapture",
       "automated",
       microphone?.pass === true && microphone?.expectedCaptureMode === "mic_only",
-      "meeting-mic.json",
+      "capture-meeting-mic.json",
       "The packaged mic-only capture must pass.",
     ),
     check(
@@ -98,14 +98,14 @@ export function evaluateMeetingLifecycleEvidence({
       combined?.pass === true &&
         combined?.includeSystemAudio === true &&
         combined?.systemAudioVerification?.capability?.ready === true,
-      "meeting-system-audio.json",
+      "capture-meeting-system-audio.json",
       "The packaged known-tone system-audio verification must pass.",
     ),
     check(
       "combinedCapture",
       "automated",
       combined?.pass === true && combined?.expectedCaptureMode === "me_and_them",
-      "meeting-system-audio.json",
+      "capture-meeting-system-audio.json",
       "The packaged Me + Them capture must preserve both source files.",
     ),
     check(
@@ -113,7 +113,7 @@ export function evaluateMeetingLifecycleEvidence({
       "automated",
       microphone?.checks?.overlayEnteredProcessing === true &&
         microphone?.checks?.recordingStatusProcessing === true,
-      "meeting-mic.json",
+      "capture-meeting-mic.json",
       "Normal Stop must persist processing state before returning.",
     ),
     check(
@@ -121,7 +121,7 @@ export function evaluateMeetingLifecycleEvidence({
       "automated",
       microphone?.checks?.duplicateStopIdempotent === true &&
         combined?.checks?.duplicateStopIdempotent === true,
-      "meeting-mic.json, meeting-system-audio.json",
+      "capture-meeting-mic.json, capture-meeting-system-audio.json",
       "Duplicate Stop must be idempotent for both capture modes.",
     ),
     check(
@@ -220,7 +220,7 @@ async function main() {
   );
   const qaDir = path.resolve(
     repoRoot,
-    valueFor(args, "--qa-dir", "release/qa"),
+    valueFor(args, "--qa-dir", "artifacts/qa/macos"),
   );
   const outPath = path.resolve(
     repoRoot,
@@ -278,8 +278,8 @@ async function main() {
     candidateIdentityTarget,
     candidateAppSha256,
     candidateComponents,
-    microphone: readJson(path.join(qaDir, "meeting-mic.json")),
-    combined: readJson(path.join(qaDir, "meeting-system-audio.json")),
+    microphone: readJson(path.join(qaDir, "capture-meeting-mic.json")),
+    combined: readJson(path.join(qaDir, "capture-meeting-system-audio.json")),
     soak: readJson(path.join(qaDir, "capture-soak-3h.json")),
     realDevice: readJson(path.join(qaDir, "meeting-lifecycle-real-device.json")),
   });

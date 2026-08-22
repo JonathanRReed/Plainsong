@@ -5,10 +5,10 @@ to be public and a published (non-draft) release with a downloadable arm64
 artifact. The release must also be notarized and accepted by Gatekeeper.
 Those launch gates are tracked in `../../LAUNCH.md`.
 
-The invitation-only `0.9.0-beta.1` candidate is Developer ID signed,
-notarized, stapled, and Gatekeeper accepted, but it is not a public release.
-Do not use its private DMG or checksum for a cask submission. Homebrew remains
-a post-first-public-release distribution surface.
+The private `0.9.0-beta.2` integration candidate is not a public release and
+has no reusable public cask checksum. Do not use a private or historical DMG for
+a cask submission. Homebrew remains a post-first-public-release distribution
+surface.
 
 ## Cask template
 
@@ -18,8 +18,8 @@ the DMG.
 
 ```ruby
 cask "plainsong" do
-  version "1.0.0"
-  sha256 "REPLACE_WITH_SHA256_OF_DMG" # shasum -a 256 Plainsong-1.0.0-arm64.dmg
+  version "0.9.0-beta.2"
+  sha256 "REPLACE_WITH_SHA256_OF_DMG" # shasum -a 256 Plainsong-0.9.0-beta.2-arm64.dmg
 
   url "https://github.com/JonathanRReed/Plainsong/releases/download/v#{version}/Plainsong-#{version}-arm64.dmg"
   name "Plainsong"

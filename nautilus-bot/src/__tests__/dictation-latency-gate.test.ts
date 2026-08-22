@@ -7,7 +7,7 @@ import {
 function validReport(overrides: Record<string, unknown> = {}) {
   return {
     schemaVersion: 1,
-    benchmarkVersion: "0.9.0-beta.1",
+    benchmarkVersion: "0.9.0-beta.2",
     generatedAt: "2026-08-08T12:00:00Z",
     thresholdProfile: "beta-reference-v1",
     metricScope: "provider_transcription_only",

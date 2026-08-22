@@ -1,4 +1,4 @@
-# Known limitations in Plainsong 0.9.0-beta.1
+# Known limitations in Plainsong 0.9.0-beta.2
 
 This is a limited beta for testing, not a 1.0 release. Please report behavior
 that falls outside these boundaries instead of working around macOS security or
@@ -6,14 +6,12 @@ using sensitive content.
 
 ## Evidence boundary for the first invite group
 
-- The exact signed candidate has passing evidence for the core local Dictation
-  and Meeting paths. Formal current-hash repetitions of the four-app Dictation
-  matrix, remaining real-device Meeting lifecycle rows, and the three-hour soak
-  are accepted observation risks for this small initial group because foreground
-  app changes and unrelated audio activity interfered with repeat runs.
-- These observations are not recorded as passing evidence and must be repeated
-  before a broader public launch. Report insertion failures, source-routing
-  mistakes, long-session drift, or recovery failures immediately.
+- The exact integration candidate still requires fresh package, trust,
+  Dictation, Meetings, accessibility, and updater evidence before distribution.
+  Historical candidate receipts are not carried forward.
+- Formal current-hash repetitions of the insertion matrix, real-device Meeting
+  lifecycle rows, and soak remain required. Report insertion failures,
+  source-routing mistakes, long-session drift, or recovery failures immediately.
 - Automatic beta updates are not available until the signed updater journey and
   public beta feed pass their release gates. Initial testers receive a verified
   DMG and checksum through the private invitation channel after approval.
