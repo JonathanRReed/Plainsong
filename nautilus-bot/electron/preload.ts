@@ -1,4 +1,4 @@
-import { contextBridge, ipcRenderer } from "electron";
+import { contextBridge, ipcRenderer } from "electron/renderer";
 
 type EventHandler = (payload: unknown) => void;
 type IpcEventHandler = (_event: Electron.IpcRendererEvent, payload: unknown) => void;

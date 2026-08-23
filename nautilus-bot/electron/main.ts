@@ -5,15 +5,14 @@ import {
   globalShortcut,
   ipcMain,
   Menu,
-  nativeImage,
   net,
   protocol,
   screen,
   session,
-  shell,
   Tray,
   type IpcMainInvokeEvent,
-} from "electron";
+} from "electron/main";
+import { nativeImage, shell } from "electron/common";
 import { execFile, spawn } from "child_process";
 import { existsSync, readFileSync, unlinkSync, writeFileSync } from "fs";
 import path from "path";

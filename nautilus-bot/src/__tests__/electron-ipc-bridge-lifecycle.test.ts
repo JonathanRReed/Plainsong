@@ -11,7 +11,7 @@ const mocks = vi.hoisted(() => ({
   handle: vi.fn(),
 }));
 
-vi.mock("electron", () => ({
+vi.mock("electron/main", () => ({
   default: {},
   ipcMain: {
     handle: mocks.handle,
