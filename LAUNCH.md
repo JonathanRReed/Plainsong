@@ -2,7 +2,7 @@
 
 Release target: `0.9.0-beta.2`
 
-Last reconciled: August 22, 2026
+Last reconciled: August 23, 2026
 
 This checklist is the release boundary for the private integration candidate.
 Dictation and Meetings are both supported product pillars. Source readiness,
@@ -10,16 +10,23 @@ packaged candidate readiness, and distribution are separate states.
 
 ## Current verdict
 
-The untouched dual-pillar source baseline passes IPC, dead-code, TypeScript,
-Vitest, renderer and Electron builds, Rust formatting, Clippy, and 748 Rust
-library and binary tests. Integration repairs and dependency reconciliation are
-still in progress, so those receipts do not yet prove the final revision.
+The integrated `0.9.0-beta.2` source baseline passes IPC, dead-code, TypeScript,
+Vitest (868 tests), renderer and Electron builds, Rust formatting, Clippy, and
+Rust library and binary tests. QA receipt wiring, latency gate separation,
+release-workflow gates, version contracts, Meeting lifecycle recovery, capture
+admission, and Electron 43 module resolution have been repaired. Dependency
+updates from all three Dependabot branches have been reconciled.
 
-No exact `0.9.0-beta.2` package has been qualified. Historical `1.0.0` and
-`0.9.0-beta.1` artifacts, hashes, signatures, and QA receipts do not prove the
-current build. Fresh package, trust, clean-install, Dictation, Meetings,
-accessibility, and updater evidence is required after the final source revision
-is fixed.
+A local `0.9.0-beta.2` package has been built and verified: native helpers,
+licenses, third-party notices, Electron fuses, Developer ID code signatures,
+hardened runtime, secure timestamps, arm64 architecture, zip extraction, size
+gate (374 MB / 450 MB), and cold-start gate (2428 ms / 2500 ms) all pass.
+
+No `0.9.0-beta.2` artifact has been notarized, stapled, or distributed. Apple
+notarization, Gatekeeper acceptance, DMG build, clean-install, real-device
+Dictation matrix, Meeting lifecycle soak, and updater journey evidence is
+required before any release decision. Historical `1.0.0` and `0.9.0-beta.1`
+artifacts, hashes, signatures, and QA receipts do not prove the current build.
 
 The app is configured to use the credential-free generic feed at
 `https://updates.plainsong.jonathanrreed.com/beta/`. That host was previously
