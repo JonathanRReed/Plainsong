@@ -61,12 +61,12 @@ describe("reproducible package and release configuration", () => {
     };
 
     expect(packageJson.packageManager).toBe("bun@1.3.14");
-    expect(packageJson.devDependencies.knip).toBe("6.29.0");
+    expect(packageJson.devDependencies.knip).toBe("6.32.2");
     expect(packageJson.scripts["gate:dead-code"]).toContain(
       "bunx --no-install knip",
     );
     expect(knipConfig.$schema).toBe(
-      "https://unpkg.com/knip@6.29.0/schema.json",
+      "https://unpkg.com/knip@6.32.2/schema.json",
     );
   });
 

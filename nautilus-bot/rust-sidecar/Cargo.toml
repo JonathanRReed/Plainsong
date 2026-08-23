@@ -42,7 +42,7 @@ libc = "0.2"
 whisper-rs = { version = "0.16", optional = true }
 
 # ONNX Runtime for Parakeet and other ONNX models
-ort = { version = "2.0.0-rc.12", optional = true }
+ort = { version = "2.0.0-rc.13", optional = true }
 ndarray = { version = "0.17", optional = true }
 
 # Candle for HuggingFace models (Canary, etc.)
@@ -57,7 +57,7 @@ tokenizers = { version = "0.23", optional = true }
 # resamples whichever of the mic/loopback devices is running at the lower rate
 # onto the session's target rate, so this has to be present in every build, not
 # only the ones that happen to enable an ASR provider.
-rubato = "4.0"
+rubato = "5.0"
 
 # FFT for FBank feature extraction in diarization
 rustfft = { version = "6.2", optional = true }

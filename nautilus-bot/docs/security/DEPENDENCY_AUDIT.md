@@ -6,10 +6,10 @@ and the locked Rust graph.
 
 ## Current state
 
-- `bun audit --json` reports no advisories.
+- `bun audit --json` reports no advisories across 564 checked packages.
 - Every `brace-expansion` copy in `bun.lock` is at its patched floor or newer.
 - `cargo audit --json --no-fetch --file rust-sidecar/Cargo.lock` reports zero
-  vulnerabilities across 507 locked dependencies.
+  vulnerabilities across 506 locked dependencies.
 - Cargo Audit reports one informational maintenance warning for the transitive
   `paste 1.0.15` crate used below the local ML dependency graph. It is
   unmaintained, not a published vulnerability, and has no direct replacement
