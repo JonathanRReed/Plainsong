@@ -179,6 +179,8 @@ pub struct RecordingOptions {
     pub consent_prompt_shown: bool,
     #[serde(default)]
     pub meeting_capture_mode: Option<String>,
+    #[serde(default)]
+    pub admission_nonce: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]

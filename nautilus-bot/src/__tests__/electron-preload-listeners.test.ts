@@ -9,7 +9,7 @@ const preloadMocks = vi.hoisted(() => ({
   removeListener: vi.fn(),
 }));
 
-vi.mock("electron", () => ({
+vi.mock("electron/renderer", () => ({
   contextBridge: {
     exposeInMainWorld: vi.fn((_name: string, api: typeof preloadMocks.exposedApi) => {
       preloadMocks.exposedApi = api;

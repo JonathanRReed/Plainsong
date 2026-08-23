@@ -20,10 +20,56 @@ use std::time::Duration;
 use tokio::sync::{mpsc, oneshot};
 use tokio::task::AbortHandle;
 
+const MAX_JSON_RPC_LINE_BYTES: usize = 32 * 1024 * 1024;
+
 type ActiveAnalysisRun = (AbortHandle, Value, String);
 type ActiveAnalysisRuns = Arc<Mutex<HashMap<String, ActiveAnalysisRun>>>;
 type ActiveRequests = Arc<Mutex<HashMap<String, AbortHandle>>>;
 type ActiveResponseClaims = Arc<Mutex<HashSet<String>>>;
+
+enum BoundedLine {
+    Eof,
+    Line(Vec<u8>),
+    TooLong,
+}
+
+fn read_bounded_line(reader: &mut impl BufRead, max_bytes: usize) -> io::Result<BoundedLine> {
+    let mut line = Vec::new();
+    let mut too_long = false;
+    loop {
+        let buffer = reader.fill_buf()?;
+        if buffer.is_empty() {
+            return if too_long {
+                Ok(BoundedLine::TooLong)
+            } else if line.is_empty() {
+                Ok(BoundedLine::Eof)
+            } else {
+                Ok(BoundedLine::Line(line))
+            };
+        }
+
+        let newline = buffer.iter().position(|byte| *byte == b'\n');
+        let take = newline.unwrap_or(buffer.len());
+        if !too_long {
+            if line.len().saturating_add(take) > max_bytes {
+                too_long = true;
+                line.clear();
+            } else {
+                line.extend_from_slice(&buffer[..take]);
+            }
+        }
+        let consumed = take + usize::from(newline.is_some());
+        reader.consume(consumed);
+
+        if newline.is_some() {
+            return if too_long {
+                Ok(BoundedLine::TooLong)
+            } else {
+                Ok(BoundedLine::Line(line))
+            };
+        }
+    }
+}
 
 #[derive(Debug, Deserialize)]
 struct JsonRpcRequest {
@@ -192,6 +238,7 @@ async fn run_sidecar() -> Result<(), String> {
     let active_requests: ActiveRequests = Arc::new(Mutex::new(HashMap::new()));
     let active_analysis_runs: ActiveAnalysisRuns = Arc::new(Mutex::new(HashMap::new()));
     let active_response_claims: ActiveResponseClaims = Arc::new(Mutex::new(HashSet::new()));
+    let admission = plainsong_lib::admission::AdmissionController::default();
 
     // Spawn task to flush events from channel to stdout
     tokio::spawn(async move {
@@ -227,9 +274,34 @@ async fn run_sidecar() -> Result<(), String> {
     eprintln!("[sidecar] ready");
 
     let stdin = io::stdin();
-    for line in stdin.lock().lines() {
-        let line = match line {
-            Ok(l) => l,
+    let mut stdin = stdin.lock();
+    loop {
+        let line = match read_bounded_line(&mut stdin, MAX_JSON_RPC_LINE_BYTES) {
+            Ok(BoundedLine::Eof) => break,
+            Ok(BoundedLine::TooLong) => {
+                tracing::warn!(
+                    "Rejected JSON-RPC request larger than {} bytes",
+                    MAX_JSON_RPC_LINE_BYTES
+                );
+                write_response(
+                    Value::Null,
+                    Err(format!(
+                        "SIDECAR_SIZE_LIMIT: JSON-RPC request exceeds {} bytes.",
+                        MAX_JSON_RPC_LINE_BYTES
+                    )),
+                );
+                continue;
+            }
+            Ok(BoundedLine::Line(line)) => match String::from_utf8(line) {
+                Ok(line) => line,
+                Err(error) => {
+                    write_response(
+                        Value::Null,
+                        Err(format!("Parse error: request is not UTF-8 ({error})")),
+                    );
+                    continue;
+                }
+            },
             Err(e) => {
                 tracing::warn!("stdin read error: {}", e);
                 break;
@@ -243,13 +315,14 @@ async fn run_sidecar() -> Result<(), String> {
         let request: JsonRpcRequest = match serde_json::from_str(&line) {
             Ok(r) => r,
             Err(e) => {
-                tracing::warn!("Invalid JSON-RPC request: {} | input: {}", e, line);
+                tracing::warn!("Invalid JSON-RPC request: {}", e);
                 write_response(Value::Null, Err(format!("Parse error: {}", e)));
                 continue;
             }
         };
 
         if request.method == "shutdown" {
+            plainsong_lib::begin_sidecar_shutdown(&state);
             write_response(request.id.unwrap_or(Value::Null), Ok(Value::Null));
             let aborted = abort_active_requests(
                 &active_requests,
@@ -327,6 +400,13 @@ async fn run_sidecar() -> Result<(), String> {
         let response_id_for_cancel = id.clone();
         let request_key = response_key(&id);
         let request_key_for_cancel = request_key.clone().unwrap_or_default();
+        let admission_lease = match admission.admit(&request.method, &request.params) {
+            Ok(lease) => lease,
+            Err(error) => {
+                write_response(id, Err(error));
+                continue;
+            }
+        };
         let state = Arc::clone(&state);
         let handle = handle.clone();
         let method = request.method;
@@ -343,6 +423,7 @@ async fn run_sidecar() -> Result<(), String> {
         let analysis_run_id_for_task = analysis_run_id.clone();
         let (start_tx, start_rx) = oneshot::channel();
         let task = tokio::spawn(async move {
+            let _admission_lease = admission_lease;
             let _ = start_rx.await;
             let result = plainsong_lib::dispatch_command(&state, &handle, &method, params).await;
             if let Some(request_key) = request_key_for_task.as_deref() {
@@ -395,6 +476,35 @@ async fn run_sidecar() -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::io::Cursor;
+
+    #[test]
+    fn oversized_json_rpc_line_is_drained_without_hiding_the_next_request() {
+        let mut input = Cursor::new(b"123456789\n{}\n".to_vec());
+        assert!(matches!(
+            read_bounded_line(&mut input, 8).expect("oversized line"),
+            BoundedLine::TooLong
+        ));
+        let BoundedLine::Line(next) = read_bounded_line(&mut input, 8).expect("next bounded line")
+        else {
+            panic!("next request should remain readable");
+        };
+        assert_eq!(next, b"{}");
+    }
+
+    #[test]
+    fn bounded_json_rpc_line_accepts_exact_limit_and_eof_without_newline() {
+        let mut input = Cursor::new(b"12345678".to_vec());
+        let BoundedLine::Line(line) = read_bounded_line(&mut input, 8).expect("bounded line")
+        else {
+            panic!("exactly bounded request should be accepted");
+        };
+        assert_eq!(line, b"12345678");
+        assert!(matches!(
+            read_bounded_line(&mut input, 8).expect("eof"),
+            BoundedLine::Eof
+        ));
+    }
 
     #[tokio::test]
     async fn shutdown_aborts_and_clears_active_requests() {

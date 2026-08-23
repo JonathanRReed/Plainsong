@@ -291,6 +291,7 @@ const HUD_STATE_NEUME: Record<HudState, string> = {
 
 function resolveHudState(phase: DictationPhase): HudState {
   switch (phase) {
+    case "preparing":
     case "primed":
       return "priming";
     case "recording":
@@ -618,7 +619,11 @@ export function DictationPopup() {
 
   const handleStopFromPopup = async () => {
     try {
-      await stopDictation();
+      if (phase === "preparing") {
+        await invoke("force_stop_dictation");
+      } else {
+        await stopDictation();
+      }
     } catch (error) {
       console.error("Failed to stop dictation from popup:", error);
     }
@@ -854,7 +859,8 @@ export function DictationPopup() {
         : activationMatcher
           ? `Auto via "${activationMatcher}"`
           : null;
-    const isCapturePhaseValue = phase === "primed" || phase === "recording";
+    const isCapturePhaseValue =
+      phase === "preparing" || phase === "primed" || phase === "recording";
 
     return {
       modeMeta: modeMetaValue,
@@ -1028,7 +1034,9 @@ export function DictationPopup() {
   if (displayMode === "minimal") {
     const statusLabel =
       hudState === "priming"
-        ? "Getting ready"
+        ? phase === "preparing"
+          ? "Loading model"
+          : "Model ready"
         : hudState === "recording"
           ? "Listening"
           : hudState === "processing"
@@ -1094,8 +1102,10 @@ export function DictationPopup() {
 
   const compact = displayMode === "compact";
   const phaseLabel =
-    phase === "primed"
-      ? "Getting ready"
+    phase === "preparing"
+      ? "Loading model"
+      : phase === "primed"
+        ? "Model ready"
       : phase === "recording"
         ? "Listening"
         : phase === "transcribing"

@@ -23,6 +23,9 @@ interface DictationCaptureHeroProps {
   isAvailable: boolean;
   unavailableTitle: string;
   unavailableDetail: string;
+  unavailableActionLabel: string;
+  unavailableActionBusy: boolean;
+  unavailableRole: "alert" | "status";
   formattedDuration: string;
   hotkeyInstruction: string;
   hotkeyPressed: boolean;
@@ -34,6 +37,7 @@ interface DictationCaptureHeroProps {
   onStart: () => void;
   onStop: () => void;
   onReadSelectedText: () => void;
+  onUnavailableAction: () => void;
 }
 
 /**
@@ -51,6 +55,9 @@ export function DictationCaptureHero({
   isAvailable,
   unavailableTitle,
   unavailableDetail,
+  unavailableActionLabel,
+  unavailableActionBusy,
+  unavailableRole,
   formattedDuration,
   hotkeyInstruction,
   hotkeyPressed,
@@ -62,6 +69,7 @@ export function DictationCaptureHero({
   onStart,
   onStop,
   onReadSelectedText,
+  onUnavailableAction,
 }: DictationCaptureHeroProps) {
   const isUnavailable = !isAvailable && !isCaptureLive && !isBusy;
   const ringToneClass = isCaptureLive
@@ -78,6 +86,8 @@ export function DictationCaptureHero({
 
   return (
     <Card
+      role={isUnavailable ? unavailableRole : undefined}
+      aria-label={isUnavailable ? "Dictation needs attention" : undefined}
       className={cn(
         "border transition-colors duration-200",
         isBusy
@@ -171,9 +181,15 @@ export function DictationCaptureHero({
               {isUnavailable ? unavailableTitle : phaseTitle}
             </p>
             {isCaptureLive ? (
-              <p className="time-spec mt-2 font-mono text-3xl font-semibold text-foreground">
-                {phase === "recording" ? formattedDuration : "--:--"}
-              </p>
+              phase === "recording" ? (
+                <p className="time-spec mt-2 font-mono text-3xl font-semibold text-foreground">
+                  {formattedDuration}
+                </p>
+              ) : (
+                <p className="mt-2 text-sm text-muted-foreground">
+                  {phaseDetail}
+                </p>
+              )
             ) : (
               <p className="mt-1 text-sm text-muted-foreground">
                 {isUnavailable ? unavailableDetail : phaseDetail}
@@ -181,10 +197,10 @@ export function DictationCaptureHero({
             )}
           </div>
 
-          {isCaptureLive ? (
+          {isCaptureLive || phase === "preparing" ? (
             <Button variant="outline" size="lg" onClick={onStop}>
               <Square className="mr-2 h-4 w-4 fill-current" />
-              Stop dictation
+              {phase === "preparing" ? "Cancel dictation" : "Stop dictation"}
             </Button>
           ) : isBusy ? (
             <Button variant="outline" size="lg" disabled>
@@ -195,11 +211,15 @@ export function DictationCaptureHero({
             <Button
               variant="outline"
               size="lg"
-              disabled
-              aria-label="Complete setup to start"
+              onClick={onUnavailableAction}
+              disabled={unavailableActionBusy}
             >
-              <TriangleAlert className="mr-2 h-4 w-4" />
-              Complete setup to start
+              {unavailableActionBusy ? (
+                <RefreshCw className="mr-2 h-4 w-4 animate-spin" />
+              ) : (
+                <TriangleAlert className="mr-2 h-4 w-4" />
+              )}
+              {unavailableActionLabel}
             </Button>
           ) : (
             <Button variant="default" size="lg" onClick={onStart}>

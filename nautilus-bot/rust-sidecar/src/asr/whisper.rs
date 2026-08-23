@@ -235,21 +235,22 @@ impl AsrProvider for WhisperProvider {
             || crate::download::is_whisper_model_artifact_trusted(&self.model_id, &self.model_path)
     }
 
-    async fn prewarm(&self) {
+    async fn prewarm(&self) -> Result<()> {
         // Load the model into the global context cache on a blocking thread so
         // the first utterance after dictation start doesn't pay a cold load.
-        // Best-effort: a missing/undownloaded model just no-ops here and the
-        // normal transcription path reports it.
+        // This is an acknowledged readiness operation: a missing or invalid
+        // model must fail here instead of letting the UI claim it is ready.
         if !self.model_path.exists() {
-            return;
+            anyhow::bail!(
+                "Whisper model '{}' is not downloaded. Download it from Settings before dictating.",
+                self.model_id
+            );
         }
         let provider = self.clone();
-        let _ = tokio::task::spawn_blocking(move || {
-            if let Err(error) = provider.load_model() {
-                tracing::debug!("Whisper prewarm skipped: {}", error);
-            }
-        })
-        .await;
+        tokio::task::spawn_blocking(move || provider.load_model().map(|_| ()))
+            .await
+            .context("Whisper model warmup task panicked")??;
+        Ok(())
     }
 
     fn model_info(&self) -> ModelInfo {

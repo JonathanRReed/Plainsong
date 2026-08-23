@@ -3,6 +3,10 @@ const REQUIRED_APP_MATRIX_COMPONENTS = [
   "shortcutHelper",
   "speechHelper",
 ];
+const REQUIRED_EXACT_CANDIDATE_COMPONENTS = [
+  "appAsar",
+  ...REQUIRED_APP_MATRIX_COMPONENTS,
+];
 
 export function evaluateComponentEquivalence({
   referenceApp,
@@ -44,6 +48,8 @@ export function evaluateCandidateEvidenceProvenance({
   artifactAppPath,
   artifactSidecarPath,
   candidateAppPath,
+  artifactComponents,
+  candidateComponents,
   equivalence,
 }) {
   if (!candidateAppPath) {
@@ -72,10 +78,19 @@ export function evaluateCandidateEvidenceProvenance({
   }
 
   if (artifactAppPath === candidateAppPath) {
+    const exactComponentsMatch = REQUIRED_EXACT_CANDIDATE_COMPONENTS.every(
+      (name) =>
+        /^[a-f0-9]{64}$/i.test(artifactComponents?.[name] ?? "") &&
+        artifactComponents[name] === candidateComponents?.[name],
+    );
     return {
-      valid: true,
-      mode: "exact-candidate",
-      summary: "The insertion capture ran against the requested exact candidate.",
+      valid: exactComponentsMatch,
+      mode: exactComponentsMatch
+        ? "exact-candidate-components"
+        : "stale-same-path-evidence",
+      summary: exactComponentsMatch
+        ? "The insertion capture is bound to the requested candidate's app archive and packaged helper bytes."
+        : "The insertion capture names the candidate path, but its recorded app archive or helper hashes do not match the current bundle at that path.",
     };
   }
 

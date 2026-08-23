@@ -23,6 +23,33 @@ function expectInOrder(source: string, values: string[]) {
 }
 
 describe("reproducible package and release configuration", () => {
+  it("aligns the first beta identity and stages its channel assets", () => {
+    const packageJson = JSON.parse(readRepoFile("package.json")) as {
+      version: string;
+    };
+    const cargoToml = readRepoFile("rust-sidecar/Cargo.toml");
+    const cargoLock = readRepoFile("rust-sidecar/Cargo.lock");
+    const builder = readRepoFile("electron-builder.yml");
+    const release = readWorkspaceFile(".github/workflows/release.yml");
+
+    expect(packageJson.version).toBe("0.9.0-beta.2");
+    expect(cargoToml).toMatch(/^version = "0\.9\.0-beta\.2"$/m);
+    expect(cargoLock).toMatch(
+      /name = "plainsong"\nversion = "0\.9\.0-beta\.2"/,
+    );
+    expect(builder).toMatch(
+      /publish:\s*[\s\S]*?provider:\s*generic[\s\S]*?url:\s*https:\/\/updates\.plainsong\.jonathanrreed\.com\/beta\/[\s\S]*?channel:\s*beta[\s\S]*?useMultipleRangeRequest:\s*false/,
+    );
+    expect(builder).toMatch(/publish:\s*[\s\S]*?channel:\s*beta/);
+    expect(release).toContain("release/beta-mac.yml");
+    expect(release).not.toContain("release/latest-mac.yml");
+    expect(release).toContain('EXPECTED_TAG="v$PKG"');
+    expect(release).toContain('shasum -a 256 "${DMGS[@]}" "${ZIPS[@]}" "${BLOCKMAPS[@]}" release/beta-mac.yml');
+    expect(release).toContain("Stage artifact-only draft release");
+    expect(release).toContain("does not assert");
+    expect(release).not.toContain("Stage verified draft release");
+  });
+
   it("pins Bun and Knip to the declared local toolchain", () => {
     const packageJson = JSON.parse(readRepoFile("package.json")) as {
       packageManager: string;
@@ -34,12 +61,12 @@ describe("reproducible package and release configuration", () => {
     };
 
     expect(packageJson.packageManager).toBe("bun@1.3.14");
-    expect(packageJson.devDependencies.knip).toBe("6.29.0");
+    expect(packageJson.devDependencies.knip).toBe("6.32.2");
     expect(packageJson.scripts["gate:dead-code"]).toContain(
       "bunx --no-install knip",
     );
     expect(knipConfig.$schema).toBe(
-      "https://unpkg.com/knip@6.29.0/schema.json",
+      "https://unpkg.com/knip@6.32.2/schema.json",
     );
   });
 
@@ -66,6 +93,15 @@ describe("reproducible package and release configuration", () => {
     expect(packageJson.scripts["benchmark:latency"]).toContain(
       "cargo run --release --locked",
     );
+    expect(packageJson.scripts["gate:dictation-latency"]).toContain(
+      "verify-dictation-latency.mjs",
+    );
+    expect(packageJson.scripts["gate:release:local"]).not.toContain(
+      "gate:dictation-latency",
+    );
+    const sourceGate = readRepoFile("scripts/capture-source-gates.mjs");
+    expect(sourceGate).not.toContain('id: "dictation-latency"');
+    expect(sourceGate).not.toContain('"gate:dictation-latency"');
     expect(sidecarBuild).toMatch(/"build",\s*"--locked",\s*"--release"/);
   });
 
@@ -118,6 +154,14 @@ describe("reproducible package and release configuration", () => {
       release.indexOf("      - name: Verify release assets"),
     );
 
+    expectInOrder(release, [
+      "bun run licenses:generate",
+      "      - name: Build signed and notarized release",
+      "bun run release:mac",
+      "bun run gate:release:licenses",
+      "bun run gate:cold-start",
+      "      - name: Notarize and staple signed DMG",
+    ]);
     expect(builder).toMatch(
       /dmg:\s*[\s\S]*?sign:\s*true[\s\S]*?writeUpdateInfo:\s*false/,
     );

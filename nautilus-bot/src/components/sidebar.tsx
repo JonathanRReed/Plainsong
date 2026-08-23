@@ -15,7 +15,6 @@ import {
   Keyboard,
 } from "lucide-react";
 import type { ViewId } from "@/App";
-import { getSettings } from "@/lib/backend/settings";
 import {
   defaultDictationShortcut,
   dictationInstruction,
@@ -93,12 +92,6 @@ interface LocalModeStatus {
   detail: string;
 }
 
-const DEFAULT_LOCAL_MODE_STATUS: LocalModeStatus = {
-  active: true,
-  label: "Local only",
-  detail: "Using local analysis with privacy-first defaults.",
-};
-
 // Honesty contract: when settings can't be read we don't assert a Local claim
 // we can't verify — the chip goes hollow and says so.
 const UNKNOWN_LOCAL_MODE_STATUS: LocalModeStatus = {
@@ -163,14 +156,31 @@ export function Sidebar({
   isCollapsed = false,
   onToggleCollapse,
 }: SidebarProps) {
-  const { productReadiness } = useProductReadinessStatus();
+  const { productReadiness, settings } = useProductReadinessStatus();
   const sidebarReadiness = selectReadinessForSurface(
     productReadiness,
     "sidebar",
   );
   const { isRecording, formattedDuration, recordingMode } = useRecording();
-  const [localModeStatus, setLocalModeStatus] = useState<LocalModeStatus>(DEFAULT_LOCAL_MODE_STATUS);
-  const [dictationHotkey, setDictationHotkey] = useState<DictationHotkey>(DEFAULT_DICTATION_HOTKEY);
+  const localModeStatus = settings
+    ? deriveLocalModeStatus(
+        settings.privacy.dictationAi?.provider,
+        settings.privacy.meetingsAi?.provider,
+        settings.privacy.remoteProcessingEnabled,
+      )
+    : UNKNOWN_LOCAL_MODE_STATUS;
+  const shortcut = settings?.shortcuts?.toggleDictation || defaultDictationShortcut();
+  const dictationMode: DictationShortcutMode = settings?.transcription?.dictationHandsFreeEnabled
+    ? "hands_free"
+    : settings?.transcription?.dictationPushToTalk
+      ? "hold_to_talk"
+      : "toggle";
+  const dictationHotkey: DictationHotkey = settings
+    ? {
+        label: formatShortcutForDisplay(shortcut),
+        instruction: dictationInstruction(shortcut, dictationMode),
+      }
+    : DEFAULT_DICTATION_HOTKEY;
   const [shortcutsOpen, setShortcutsOpen] = useState(false);
   const isMoreView = moreNavItems.some((item) => item.id === activeView);
   const [showMoreItems, setShowMoreItems] = useState(isMoreView);
@@ -182,59 +192,6 @@ export function Sidebar({
     { label: "Start dictation", keys: shortcutKeys(dictationHotkey.label.replace(/ \+ /g, "+")) },
     ...navShortcuts,
   ];
-
-  useEffect(() => {
-    let mounted = true;
-    let intervalId: ReturnType<typeof setInterval> | undefined;
-
-    const refreshLocalMode = async () => {
-      try {
-        const settings = await getSettings();
-        if (!mounted) {
-          return;
-        }
-        setLocalModeStatus(
-          deriveLocalModeStatus(
-            settings.privacy.dictationAi?.provider,
-            settings.privacy.meetingsAi?.provider,
-            settings.privacy.remoteProcessingEnabled
-          )
-        );
-        const shortcut =
-          settings.shortcuts?.toggleDictation || defaultDictationShortcut();
-        const transcription = settings.transcription;
-        const mode: DictationShortcutMode = transcription?.dictationHandsFreeEnabled
-          ? "hands_free"
-          : transcription?.dictationPushToTalk
-            ? "hold_to_talk"
-            : "toggle";
-        setDictationHotkey({
-          label: formatShortcutForDisplay(shortcut),
-          instruction: dictationInstruction(shortcut, mode),
-        });
-      } catch {
-        if (mounted) {
-          setLocalModeStatus(UNKNOWN_LOCAL_MODE_STATUS);
-          setDictationHotkey(DEFAULT_DICTATION_HOTKEY);
-        }
-      }
-    };
-
-    void refreshLocalMode().then(() => {
-      if (mounted) {
-        intervalId = setInterval(() => {
-          void refreshLocalMode();
-        }, 5000);
-      }
-    });
-
-    return () => {
-      mounted = false;
-      if (intervalId) {
-        clearInterval(intervalId);
-      }
-    };
-  }, []);
 
   useEffect(() => {
     if (isMoreView) {

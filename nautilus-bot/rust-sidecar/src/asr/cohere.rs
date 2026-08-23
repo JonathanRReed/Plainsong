@@ -4,9 +4,10 @@
 //! Model: cohere-transcribe-03-2026, low WER, 14 languages, up to 25 MB audio.
 
 use super::{
+    cloud_asr_status_error,
     openai_cloud::{build_cloud_asr_client, CloudAsrHttpTimeouts},
-    AsrProvider, AsrProviderType, DownloadStatus, ModelInfo, TranscriptSegment,
-    TranscriptionResult,
+    read_cloud_asr_json, AsrProvider, AsrProviderType, DownloadStatus, ModelInfo,
+    TranscriptSegment, TranscriptionResult,
 };
 use crate::secrets;
 use anyhow::{Context, Result};
@@ -89,14 +90,11 @@ impl CohereTranscribeProvider {
 
         if !response.status().is_success() {
             let status = response.status();
-            let body = response.text().await.unwrap_or_default();
-            anyhow::bail!("Cohere Transcribe API error {}: {}", status, body);
+            return Err(cloud_asr_status_error("Cohere Transcribe", status));
         }
 
-        let result = response
-            .json::<CohereTranscriptionResponse>()
-            .await
-            .context("Failed to parse Cohere Transcribe response")?;
+        let result: CohereTranscriptionResponse =
+            read_cloud_asr_json(response, "Cohere Transcribe").await?;
 
         let text = result.text;
         let elapsed = start.elapsed().as_millis() as u64;

@@ -6,6 +6,8 @@ export {
   listBackups,
   restoreBackupDefault,
   saveBackupConfig,
+  selectBackupLocation,
+  selectCloudBackupLocation,
   syncBackupToCloud,
   verifyBackupCloudConnection,
 } from "../backend";

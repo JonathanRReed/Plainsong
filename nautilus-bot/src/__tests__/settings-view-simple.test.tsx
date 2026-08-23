@@ -244,6 +244,21 @@ vi.mock("@/lib/backend", () => ({
   })),
   saveSettings: vi.fn(async () => { }),
   saveBackupConfig: vi.fn(),
+  selectExportLocation: vi.fn(async () => ({
+    id: "approved-export-location",
+    label: "Plainsong exports",
+    approved: true,
+  })),
+  selectBackupLocation: vi.fn(async () => ({
+    id: "approved-backup-location",
+    label: "Beta backups",
+    approved: true,
+  })),
+  selectCloudBackupLocation: vi.fn(async () => ({
+    id: "approved-cloud-location",
+    label: "gdrive:PlainsongBackups",
+    approved: true,
+  })),
   setProviderSecret: vi.fn(async () => { }),
   restoreBackupDefault: vi.fn(async () => {}),
   syncBackupToCloud: vi.fn(),
@@ -446,7 +461,7 @@ describe("SettingsView performance behavior", () => {
     ).toBeLessThan(vi.mocked(backend.getAsrProviders).mock.invocationCallOrder[0]);
   });
 
-  it("does not probe local Ollama for a key or query Ollama Cloud without one", async () => {
+  it("does not contact remote model providers while remote processing is disabled", async () => {
     const backend = await import("@/lib/backend");
 
     render(
@@ -460,10 +475,14 @@ describe("SettingsView performance behavior", () => {
 
     fireEvent.click(screen.getByText("AI & Keys"));
     await screen.findByText("API keys");
-    await waitFor(() => {
-      expect(backend.hasProviderSecret).toHaveBeenCalledWith("ollama-cloud");
+    await act(async () => {
+      await Promise.resolve();
     });
     expect(backend.listOllamaCloudModels).not.toHaveBeenCalled();
+    expect(backend.listOpenAiModels).not.toHaveBeenCalled();
+    expect(backend.listAnthropicModels).not.toHaveBeenCalled();
+    expect(backend.listGeminiModels).not.toHaveBeenCalled();
+    expect(backend.listDeepSeekModels).not.toHaveBeenCalled();
   });
 
   it("renders settings before backup config finishes loading", async () => {
@@ -708,23 +727,35 @@ describe("SettingsView performance behavior", () => {
     expect(backend.saveSettings).toHaveBeenCalledTimes(1);
   });
 
-  it("flushes text-field saves immediately on blur", async () => {
+  it("requires the native folder picker instead of accepting a raw export path", async () => {
     const backend = await import("@/lib/backend");
     render(<ToastProvider><SettingsView /></ToastProvider>);
 
     await screen.findByText("How Plainsong listens, writes, and what it keeps.");
     fireEvent.click(screen.getByText("Storage"));
-    await screen.findByText("Only allow exports into this folder");
+    await screen.findByText("Approved export folder");
 
-    const exportRootInput = screen.getByPlaceholderText("/Users/you/Documents/Plainsong");
-    fireEvent.change(exportRootInput, {
-      target: { value: "/Users/test/Plainsong" },
-    });
-    fireEvent.blur(exportRootInput);
+    expect(
+      screen.queryByPlaceholderText("/Users/you/Documents/Plainsong"),
+    ).not.toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "Choose export folder" }));
 
     await waitFor(() => {
-      expect(backend.saveSettings).toHaveBeenCalledTimes(1);
+      expect(backend.selectExportLocation).toHaveBeenCalledTimes(1);
     });
+    await waitFor(() => {
+      expect(backend.saveSettings).toHaveBeenCalledWith(
+        expect.objectContaining({
+          privacy: expect.objectContaining({
+            exportRoot: null,
+            exportLocationId: "approved-export-location",
+            exportLocationLabel: "Plainsong exports",
+            exportLocationApproved: true,
+          }),
+        }),
+      );
+    });
+    expect(await screen.findByText("Plainsong exports")).toBeInTheDocument();
   });
 
   it("offers a real hold-to-talk option once the native shortcut helper is available", async () => {

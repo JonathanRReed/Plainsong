@@ -36,6 +36,11 @@ const gateCommands = [
     command: "bun",
     args: ["run", "gate:release:dependencies", "--", "--app", appPath],
   },
+  {
+    id: "rust-dependency-audit",
+    command: "bun",
+    args: ["run", "gate:release:rust-dependencies"],
+  },
   { id: "diff-check", command: "git", args: ["diff", "--check"] },
 ];
 

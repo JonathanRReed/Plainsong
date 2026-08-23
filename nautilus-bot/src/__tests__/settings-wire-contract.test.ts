@@ -56,6 +56,9 @@ const PRIVACY_WIRE_SHAPE: Settings["privacy"] = {
   dictationAi: { provider: "ollama", modelId: null },
   meetingsAi: { provider: "ollama", modelId: null },
   exportRoot: null,
+  exportLocationId: null,
+  exportLocationLabel: null,
+  exportLocationApproved: false,
   vaultInitialized: false,
   vaultSalt: null,
 };

@@ -23,6 +23,11 @@ function createTempRepo(scriptName: string) {
   const sourceScript = path.resolve(process.cwd(), "scripts", scriptName);
   const tempScript = path.join(tempScriptsDir, scriptName);
   copyFileSync(sourceScript, tempScript);
+  mkdirSync(path.join(tempScriptsDir, "lib"), { recursive: true });
+  copyFileSync(
+    path.resolve(process.cwd(), "scripts/lib/release-candidate-identity.mjs"),
+    path.join(tempScriptsDir, "lib/release-candidate-identity.mjs"),
+  );
 
   return { tempRoot, tempScript };
 }
@@ -86,8 +91,8 @@ function createFakeMacosApp(
   // just the bundle inside them.
   const releaseDir = path.join(tempRoot, archiveDirectoryName);
   mkdirSync(releaseDir, { recursive: true });
-  const dmgPath = path.join(releaseDir, "Plainsong-1.0.0-arm64.dmg");
-  const zipPath = path.join(releaseDir, "Plainsong-1.0.0-arm64-mac.zip");
+  const dmgPath = path.join(releaseDir, "Plainsong-0.9.0-beta.2-arm64.dmg");
+  const zipPath = path.join(releaseDir, "Plainsong-0.9.0-beta.2-arm64-mac.zip");
   writeFileSync(dmgPath, "dmg", "utf8");
   writeFileSync(zipPath, "zip", "utf8");
 

@@ -3,6 +3,8 @@
 //! Generates waveform data for display and export.
 use anyhow::Result;
 
+const MAX_WAVEFORM_POINTS: usize = 20_000;
+
 /// Waveform data structure
 #[derive(Debug, Clone)]
 #[cfg_attr(
@@ -31,6 +33,12 @@ pub struct WaveformData {
 /// three-hour meeting that is gigabytes of allocation to produce a few hundred
 /// display points, and the peak landed on whoever opened the recording detail.
 pub fn generate_waveform_from_file(path: &str, max_points: usize) -> Result<WaveformData> {
+    if max_points > MAX_WAVEFORM_POINTS {
+        anyhow::bail!(
+            "Waveform point count exceeds the maximum {}",
+            MAX_WAVEFORM_POINTS
+        );
+    }
     let mut reader = hound::WavReader::open(path)?;
     let spec = reader.spec();
     let channels = spec.channels.max(1);
@@ -210,5 +218,16 @@ mod tests {
         );
 
         let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn rejects_excessive_point_counts_before_opening_or_allocating() {
+        let error = generate_waveform_from_file("/path/that/does/not/exist.wav", 20_001)
+            .expect_err("oversized waveform requests must fail at the input boundary");
+
+        assert!(
+            error.to_string().contains("maximum 20000"),
+            "unexpected error: {error}"
+        );
     }
 }

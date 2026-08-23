@@ -59,11 +59,16 @@ const electronLocalCommands = new Set([
   "__window_set_size__",
   "__window_show__",
   "__window_start_drag__",
+  "begin_meeting_capture",
   "check_for_updates",
+  "end_meeting_capture",
   "get_dictation_shortcut_capability_status",
   "get_shortcut_conflicts",
   "get_update_status",
   "install_update",
+  "select_backup_location",
+  "select_cloud_backup_location",
+  "select_export_location",
 ]);
 
 const intentionallyPendingSidecarCommands = new Set([
@@ -74,7 +79,13 @@ const intentionallyPendingSidecarCommands = new Set([
 // CLI/headless entry points or by the sidecar itself. Anything else the
 // dispatcher answers but no renderer can call is dead weight — either add it
 // to the bridge allowlist or delete the arm.
-const intentionallyUnreachableSidecarCommands = new Set([]);
+const intentionallyUnreachableSidecarCommands = new Set([
+  "approve_backup_location_privileged",
+  "approve_cloud_backup_location_privileged",
+  "approve_export_location_privileged",
+  "start_recording",
+  "stop_recording",
+]);
 
 const bridge = read(bridgePath);
 const sidecar = read(sidecarPath);

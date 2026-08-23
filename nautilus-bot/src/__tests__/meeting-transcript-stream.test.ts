@@ -1,3 +1,5 @@
+import fs from "node:fs";
+import path from "node:path";
 import { describe, expect, it } from "vitest";
 import {
   appendTranscriptStreamLine,
@@ -7,6 +9,8 @@ import {
   type RecordingTranscriptionStreamEvent,
   type TranscriptStreamLine,
 } from "@/lib/meeting-transcript-stream";
+
+const repoRoot = path.resolve(import.meta.dirname, "../..");
 
 function segment(
   overrides: Partial<RecordingTranscriptionStreamEvent> = {}
@@ -123,5 +127,28 @@ describe("describeAudioSourceWarning", () => {
     });
 
     expect(warning.title).toBe("Microphone has gone silent");
+  });
+});
+
+describe("meeting post-capture transcript streaming", () => {
+  it("uses the final chunked transcription as the only post-capture ASR pass", () => {
+    const rust = fs.readFileSync(
+      path.join(repoRoot, "rust-sidecar", "src", "lib.rs"),
+      "utf8"
+    );
+    const pipelineStart = rust.indexOf("async fn run_meeting_transcription_pipeline(");
+    const pipelineEnd = rust.indexOf("/// Dispatch a JSON-RPC command", pipelineStart);
+    const pipeline = rust.slice(pipelineStart, pipelineEnd);
+    const chunkedStart = rust.indexOf("async fn transcribe_recording_in_chunks(");
+    const chunkedEnd = rust.indexOf("fn default_source_speaker_name", chunkedStart);
+    const chunked = rust.slice(chunkedStart, chunkedEnd);
+
+    expect(pipelineStart).toBeGreaterThanOrEqual(0);
+    expect(pipelineEnd).toBeGreaterThan(pipelineStart);
+    expect(chunkedStart).toBeGreaterThanOrEqual(0);
+    expect(chunkedEnd).toBeGreaterThan(chunkedStart);
+    expect(pipeline).not.toContain("emit_streaming_transcription_previews");
+    expect(pipeline).not.toContain("preview_task");
+    expect(chunked).toContain('"recording-transcription-stream"');
   });
 });

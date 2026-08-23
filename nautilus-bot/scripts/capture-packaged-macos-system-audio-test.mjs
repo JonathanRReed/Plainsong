@@ -3,9 +3,14 @@ import fs from "node:fs";
 import path from "node:path";
 import { spawn } from "node:child_process";
 import { createInterface } from "node:readline";
+import { createPackagedQaProfile } from "./lib/packaged-qa-profile.mjs";
 
 const repoRoot = path.resolve(import.meta.dirname, "..");
 const args = process.argv.slice(2);
+const qaProfile = createPackagedQaProfile({
+  args,
+  prefix: "plainsong-system-audio-qa-",
+});
 
 function valueFor(name, fallback) {
   const index = args.indexOf(name);
@@ -47,6 +52,7 @@ if (!fs.existsSync(sidecarPath)) {
 const child = spawn(sidecarPath, [], {
   cwd: repoRoot,
   stdio: ["pipe", "pipe", "pipe"],
+  env: { ...process.env, ...qaProfile.env },
 });
 const stderr = [];
 child.stderr.on("data", (chunk) => stderr.push(String(chunk)));
@@ -56,21 +62,33 @@ const healthRequestId = "system-audio-post-test-health";
 let settled = false;
 let pendingSystemAudioResult = null;
 let pendingSystemAudioChecks = null;
+let finalArtifact = null;
+let finalExitCode = 1;
+let shutdownTimer = null;
+
+function writeArtifact(artifact, exitCode) {
+  fs.mkdirSync(path.dirname(outPath), { recursive: true });
+  fs.writeFileSync(outPath, `${JSON.stringify(artifact, null, 2)}\n`, "utf8");
+  console.log(JSON.stringify(artifact, null, 2));
+  process.exitCode = exitCode;
+}
 
 function finish(artifact, exitCode) {
   if (settled) return;
   settled = true;
   clearTimeout(timeout);
-  fs.mkdirSync(path.dirname(outPath), { recursive: true });
-  fs.writeFileSync(outPath, `${JSON.stringify(artifact, null, 2)}\n`, "utf8");
-  console.log(JSON.stringify(artifact, null, 2));
+  finalArtifact = artifact;
+  finalExitCode = exitCode;
   if (child.stdin.writable) {
     child.stdin.write(
       `${JSON.stringify({ jsonrpc: "2.0", id: "shutdown", method: "shutdown", params: {} })}\n`,
     );
   }
-  setTimeout(() => child.kill("SIGTERM"), 1000).unref();
-  process.exitCode = exitCode;
+  // Native model warmup can still be finishing when the system-audio probe
+  // completes. Give the sidecar the same bounded shutdown window as the other
+  // packaged QA harnesses so the evidence cannot hide a forced termination.
+  shutdownTimer = setTimeout(() => child.kill("SIGTERM"), 15000);
+  shutdownTimer.unref();
 }
 
 const timeout = setTimeout(() => {
@@ -163,8 +181,30 @@ rl.on("line", (line) => {
 });
 
 child.on("exit", (code, signal) => {
+  if (shutdownTimer) clearTimeout(shutdownTimer);
+
+  if (finalArtifact) {
+    const sidecarExitedCleanly = code === 0 && signal === null;
+    const checks = finalArtifact.checks
+      ? { ...finalArtifact.checks, sidecarExitedCleanly }
+      : null;
+    const pass = finalArtifact.pass === true && sidecarExitedCleanly;
+    writeArtifact(
+      {
+        ...finalArtifact,
+        pass,
+        ...(checks ? { checks } : {}),
+        sidecarExit: { code, signal },
+      },
+      pass ? 0 : Math.max(1, finalExitCode),
+    );
+    return;
+  }
+
   if (!settled) {
-    finish(
+    settled = true;
+    clearTimeout(timeout);
+    writeArtifact(
       {
         pass: false,
         reason: "sidecar_exit",

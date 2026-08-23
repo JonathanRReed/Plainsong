@@ -94,6 +94,7 @@ describe("ASR model capability metadata", () => {
     expect(getAsrModelCapability("whisper", "large-v3-turbo")?.sizeMib).toBe(1620);
     expect(getAsrModelCapability("whisper", "large-v3")?.sizeMib).toBe(2900);
     expect(getAsrModelCapability("parakeet", "parakeet-tdt-0.6b-v3")?.sizeMib).toBe(639);
+    expect(getAsrModelCapability("distil_whisper", "distil-large-v3.5")?.sizeMib).toBe(2888);
   });
 
   it("states one size for base and base.en, which are the same size on disk", () => {

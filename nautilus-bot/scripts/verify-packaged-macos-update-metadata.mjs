@@ -1,8 +1,11 @@
 #!/usr/bin/env node
 import crypto from "node:crypto";
+import { spawnSync } from "node:child_process";
 import fs from "node:fs";
 import { createRequire } from "node:module";
 import path from "node:path";
+
+import { collectReleaseCandidateIdentity } from "./lib/release-candidate-identity.mjs";
 
 const repoRoot = path.resolve(import.meta.dirname, "..");
 const args = process.argv.slice(2);
@@ -22,7 +25,10 @@ const appPath = path.resolve(
   repoRoot,
   valueFor("--app", "release/mac-arm64/Plainsong.app")
 );
-const latestPath = path.resolve(repoRoot, valueFor("--latest", "release/latest-mac.yml"));
+const manifestPath = path.resolve(
+  repoRoot,
+  valueFor("--manifest", valueFor("--latest", "release/beta-mac.yml")),
+);
 const outPath = path.resolve(
   repoRoot,
   valueFor("--out", "artifacts/qa/macos/update-metadata.json")
@@ -32,7 +38,14 @@ const markdownPath = path.resolve(
   valueFor("--markdown", "artifacts/qa/macos/update-metadata.md")
 );
 const appUpdatePath = path.join(appPath, "Contents", "Resources", "app-update.yml");
+const appInfoPlistPath = path.join(appPath, "Contents", "Info.plist");
 const packageJsonPath = path.join(repoRoot, "package.json");
+const expectedBetaFeedUrl =
+  "https://updates.plainsong.jonathanrreed.com/beta/";
+const candidateIdentity = collectReleaseCandidateIdentity({
+  candidatePath: path.dirname(manifestPath),
+  appPath,
+});
 
 function readText(filePath) {
   return fs.readFileSync(filePath, "utf8");
@@ -50,6 +63,13 @@ function scalarValue(text, key) {
   return match?.[1]?.trim() ?? null;
 }
 
+function booleanScalarValue(text, key) {
+  const value = scalarValue(text, key);
+  if (value === "true") return true;
+  if (value === "false") return false;
+  return null;
+}
+
 function firstFileUrl(text) {
   const match = text.match(/^\s*-\s+url:\s*['"]?([^'"\n]+)['"]?\s*$/m);
   return match?.[1]?.trim() ?? null;
@@ -62,6 +82,16 @@ function firstIndentedScalarValue(text, key) {
 
 function sha512Base64(filePath) {
   return crypto.createHash("sha512").update(fs.readFileSync(filePath)).digest("base64");
+}
+
+function plistScalar(filePath, key) {
+  if (!fs.existsSync(filePath)) return null;
+  const result = spawnSync(
+    "/usr/bin/plutil",
+    ["-extract", key, "raw", "-o", "-", filePath],
+    { encoding: "utf8" },
+  );
+  return result.status === 0 ? String(result.stdout).trim() || null : null;
 }
 
 function renderMarkdown(artifact) {
@@ -79,16 +109,18 @@ Generated: ${artifact.generatedAt}
 ## Result
 
 - App update metadata: ${artifact.paths.appUpdate}
-- Latest manifest: ${artifact.paths.latest}
+- Beta manifest: ${artifact.paths.manifest}
 - Error: ${artifact.error ?? "none"}
 - Update provider: ${artifact.updateConfig?.provider ?? "missing"}
-- GitHub owner: ${artifact.updateConfig?.owner ?? "missing"}
-- GitHub repo: ${artifact.updateConfig?.repo ?? "missing"}
-- Stable channel requests: ${artifact.stableChannel?.requestedManifest ?? "missing"}
-- Published channel file: ${artifact.stableChannel?.publishedManifest ?? "missing"}
-- Manifest version: ${artifact.latest?.version ?? "missing"}
+- Update feed: ${artifact.updateConfig?.url ?? "missing"}
+- Multiple range requests: ${artifact.updateConfig?.useMultipleRangeRequest ?? "missing"}
+- Release channel: ${artifact.releaseChannel ?? "missing"}
+- Installed app requests: ${artifact.channel?.requestedManifest ?? "missing"}
+- Packaged channel file: ${artifact.channel?.packagedManifest ?? "missing"}
+- Manifest version: ${artifact.manifest?.version ?? "missing"}
+- Packaged app version: ${artifact.appVersion ?? "missing"}
 - Package version: ${artifact.packageVersion ?? "missing"}
-- ZIP artifact: ${artifact.latest?.zipPath ?? "missing"}
+- ZIP artifact: ${artifact.manifest?.zipPath ?? "missing"}
 - ZIP SHA-512 matches manifest: ${artifact.checks.zipSha512MatchesManifest ? "yes" : "no"}
 - ZIP size matches manifest: ${artifact.checks.zipSizeMatchesManifest ? "yes" : "no"}
 - Blockmap exists: ${artifact.checks.blockmapExists ? "yes" : "no"}
@@ -112,35 +144,46 @@ function writeArtifact(artifact) {
 try {
   const packageJson = JSON.parse(readRequired(packageJsonPath, "package.json"));
   const appUpdate = readRequired(appUpdatePath, "packaged app-update.yml");
+  const appVersion = plistScalar(appInfoPlistPath, "CFBundleShortVersionString");
 
-  // The manifest filename the shipped app requests for the default (stable)
-  // channel, resolved through the same compiled module the packaged main
-  // process uses. electron-builder publishes `latest-mac.yml` for stable
-  // releases, so any drift here is the stable-channel
-  // ERR_UPDATER_CHANNEL_FILE_NOT_FOUND bug this check exists to catch.
+  const prerelease = String(appVersion ?? "").match(
+    /^\d+\.\d+\.\d+-([0-9A-Za-z-]+)(?:\.|$)/,
+  );
+  const releaseChannel = prerelease?.[1] ?? "latest";
+
+  // Resolve the exact manifest filename through the same compiled module used
+  // by the packaged main process. The beta candidate must request beta-mac.yml
+  // and electron-builder must package that same channel.
   const require = createRequire(import.meta.url);
-  let requestedStableManifest = null;
+  let requestedManifest = null;
   try {
     const { updaterChannelManifestFilename } = require(
       path.join(repoRoot, "dist-electron", "updater-channel.js")
     );
-    requestedStableManifest = updaterChannelManifestFilename("stable", "darwin");
+    requestedManifest = updaterChannelManifestFilename(
+      releaseChannel === "beta" ? "beta" : "stable",
+      "darwin",
+    );
   } catch {
-    // Left null: stableChannelResolverLoaded fails below. Run
+    // Left null: channelResolverLoaded fails below. Run
     // `bun run build:electron` first so dist-electron/updater-channel.js exists.
   }
-  const publishedChannel = scalarValue(appUpdate, "channel") ?? "latest";
-  const publishedStableManifest = `${publishedChannel}-mac.yml`;
+  const packagedChannel = scalarValue(appUpdate, "channel") ?? "latest";
+  const packagedManifest = `${packagedChannel}-mac.yml`;
 
-  const latest = packOnly ? null : readRequired(latestPath, "latest mac manifest");
-  const zipName = latest ? (scalarValue(latest, "path") ?? firstFileUrl(latest)) : null;
-  const zipPath = zipName ? path.join(path.dirname(latestPath), zipName) : null;
-  const blockmapPath = zipPath ? `${zipPath}.blockmap` : null;
-  const expectedSha512 = latest
-    ? (scalarValue(latest, "sha512") ?? firstIndentedScalarValue(latest, "sha512"))
+  const manifest = packOnly
+    ? null
+    : readRequired(manifestPath, `${releaseChannel} mac manifest`);
+  const zipName = manifest
+    ? (scalarValue(manifest, "path") ?? firstFileUrl(manifest))
     : null;
-  const expectedSizeRaw = latest
-    ? (scalarValue(latest, "size") ?? firstIndentedScalarValue(latest, "size"))
+  const zipPath = zipName ? path.join(path.dirname(manifestPath), zipName) : null;
+  const blockmapPath = zipPath ? `${zipPath}.blockmap` : null;
+  const expectedSha512 = manifest
+    ? (scalarValue(manifest, "sha512") ?? firstIndentedScalarValue(manifest, "sha512"))
+    : null;
+  const expectedSizeRaw = manifest
+    ? (scalarValue(manifest, "size") ?? firstIndentedScalarValue(manifest, "size"))
     : null;
   const expectedSize = Number(expectedSizeRaw);
   const actualSize = zipPath && fs.existsSync(zipPath) ? fs.statSync(zipPath).size : null;
@@ -148,28 +191,35 @@ try {
 
   const artifact = {
     generatedAt: new Date().toISOString(),
+    candidateIdentity,
     mode: packOnly ? "pack-only" : "full",
     pass: false,
     paths: {
       app: appPath,
+      appInfoPlist: appInfoPlistPath,
       appUpdate: appUpdatePath,
-      latest: latestPath,
+      manifest: manifestPath,
     },
     packageVersion: packageJson.version ?? null,
+    appVersion,
     updateConfig: {
       provider: scalarValue(appUpdate, "provider"),
-      owner: scalarValue(appUpdate, "owner"),
-      repo: scalarValue(appUpdate, "repo"),
+      url: scalarValue(appUpdate, "url"),
+      useMultipleRangeRequest: booleanScalarValue(
+        appUpdate,
+        "useMultipleRangeRequest",
+      ),
       updaterCacheDirName: scalarValue(appUpdate, "updaterCacheDirName"),
     },
-    stableChannel: {
-      requestedManifest: requestedStableManifest,
-      publishedManifest: publishedStableManifest,
+    releaseChannel,
+    channel: {
+      requestedManifest,
+      packagedManifest,
     },
-    latest: latest
+    manifest: manifest
       ? {
-          version: scalarValue(latest, "version"),
-          releaseDate: scalarValue(latest, "releaseDate"),
+          version: scalarValue(manifest, "version"),
+          releaseDate: scalarValue(manifest, "releaseDate"),
           zipName,
           zipPath,
           expectedSha512,
@@ -184,21 +234,29 @@ try {
 
   artifact.checks = {
     appUpdateMetadataExists: fs.existsSync(appUpdatePath),
-    providerIsGithub: artifact.updateConfig.provider === "github",
-    ownerConfigured: Boolean(artifact.updateConfig.owner),
-    repoConfigured: Boolean(artifact.updateConfig.repo),
-    stableChannelResolverLoaded: Boolean(requestedStableManifest),
-    stableChannelRequestsPublishedManifest:
-      requestedStableManifest === publishedStableManifest,
+    appInfoPlistExists: fs.existsSync(appInfoPlistPath),
+    appVersionPresent: Boolean(appVersion),
+    packageVersionMatchesPackagedApp:
+      Boolean(appVersion) && artifact.packageVersion === appVersion,
+    providerIsGeneric: artifact.updateConfig.provider === "generic",
+    betaFeedUrlMatchesExpected:
+      artifact.updateConfig.url === expectedBetaFeedUrl,
+    multipleRangeRequestsDisabled:
+      artifact.updateConfig.useMultipleRangeRequest === false,
+    releaseChannelIsBeta: releaseChannel === "beta",
+    packagedChannelMatchesRelease: packagedChannel === releaseChannel,
+    channelResolverLoaded: Boolean(requestedManifest),
+    installedChannelRequestsPackagedManifest:
+      requestedManifest === packagedManifest,
   };
   if (!packOnly) {
     Object.assign(artifact.checks, {
-      latestManifestExists: fs.existsSync(latestPath),
-      stableChannelManifestEmitted:
-        Boolean(requestedStableManifest) &&
-        path.basename(latestPath) === requestedStableManifest &&
-        fs.existsSync(latestPath),
-      versionMatchesPackage: artifact.latest.version === artifact.packageVersion,
+      releaseManifestExists: fs.existsSync(manifestPath),
+      betaChannelManifestEmitted:
+        Boolean(requestedManifest) &&
+        path.basename(manifestPath) === requestedManifest &&
+        fs.existsSync(manifestPath),
+      versionMatchesPackagedApp: artifact.manifest.version === artifact.appVersion,
       zipPathPresent: Boolean(zipPath),
       zipArtifactExists: Boolean(zipPath && fs.existsSync(zipPath)),
       zipSha512Present: Boolean(expectedSha512),
@@ -217,13 +275,14 @@ try {
 } catch (error) {
   const artifact = {
     generatedAt: new Date().toISOString(),
+    candidateIdentity,
     mode: packOnly ? "pack-only" : "full",
     pass: false,
     error: error instanceof Error ? error.message : String(error),
     paths: {
       app: appPath,
       appUpdate: appUpdatePath,
-      latest: latestPath,
+      manifest: manifestPath,
     },
     checks: {},
   };

@@ -227,6 +227,21 @@ describe("asr-route-catalog", () => {
     expect(recommended?.modelId).toBe("base.en");
   });
 
+  it("recommends Parakeet before Distil Whisper for local meetings", () => {
+    const routes = buildAsrRouteCatalog(
+      [providers[1], providers[2]],
+      "prefer_local",
+    );
+    const recommended = getRecommendedLaneRoute(
+      routes,
+      "meeting",
+      "prefer_local",
+    );
+
+    expect(recommended?.providerType).toBe("parakeet");
+    expect(recommended?.modelId).toBe("parakeet-tdt-0.6b-v3");
+  });
+
   it("marks missing cloud credentials as BYOK-required instead of generic failure", () => {
     const routes = buildAsrRouteCatalog(providers, "prefer_local");
     const openAiRoute = routes.find(

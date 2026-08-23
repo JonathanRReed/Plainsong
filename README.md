@@ -20,7 +20,8 @@ into searchable notes without sending a bot into your call.
   Cohere, DeepSeek, and Gemini. Usage is billed to you, keys are stored in the OS keychain,
   never routed through our servers.
 - **Actually free and open.** MIT licensed, no trial, no tiers, no nags. Build
-  it yourself today; the first public release will follow notarization.
+  it yourself today; the first public release will follow completion of the
+  remaining beta qualification gates and explicit distribution approval.
 
 > Status: this is an active rebuild of a previously commercial app into a fully
 > free, open-source project. macOS is the primary target today; Windows and
@@ -41,14 +42,17 @@ into searchable notes without sending a bot into your call.
 
 ## Install
 
-Plainsong v1 runs on **macOS 13 or later on Apple Silicon (arm64)**.
+The Plainsong `0.9.0-beta.2` integration candidate targets **macOS 13 or later
+on Apple Silicon (arm64)**.
 
-> Launch status, July 28, 2026: the v1.0.0 arm64 candidate is built and
-> Developer ID signed, but it is not notarized or published. The repository is
-> still private, so there is no public download yet.
+> Beta status, August 22, 2026: source integration and exact-candidate
+> qualification are in progress. Historical `1.0.0` and `0.9.0-beta.1`
+> artifacts do not prove the current build. No installer is public or approved
+> for distribution. The current revision must produce fresh package, trust,
+> clean-install, Dictation, Meetings, and updater evidence before invitations.
 
-After a notarized v1.0.0 appears on
-[GitHub Releases](https://github.com/JonathanRReed/Plainsong/releases):
+Invited testers will receive a verified DMG and its SHA-256 checksum only after
+the release gate passes and distribution is explicitly approved:
 
 1. Download the DMG.
 2. Drag `Plainsong.app` into `/Applications`.
@@ -56,8 +60,8 @@ After a notarized v1.0.0 appears on
    Accessibility access so it can insert text into other apps. Then let it
    download the `base.en` model.
 
-Homebrew is planned. A cask will be submitted once the first release is
-published (see [nautilus-bot/docs/homebrew.md](./nautilus-bot/docs/homebrew.md)).
+Homebrew is planned after the beta and first public release (see
+[nautilus-bot/docs/homebrew.md](./nautilus-bot/docs/homebrew.md)).
 
 ## Quick start (from source)
 

@@ -1,14 +1,20 @@
 #!/usr/bin/env node
 import crypto from "node:crypto";
 import fs from "node:fs";
-import os from "node:os";
 import path from "node:path";
 import { spawn, spawnSync } from "node:child_process";
 import { createInterface } from "node:readline";
 import { matchSpokenFixture } from "./lib/spoken-fixture-match.mjs";
+import { createPackagedQaProfile } from "./lib/packaged-qa-profile.mjs";
+import { sanitizeMeetingSoakReceipt } from "./lib/meeting-soak-receipt.mjs";
+import { collectReleaseCandidateIdentity } from "./lib/release-candidate-identity.mjs";
 
 const repoRoot = path.resolve(import.meta.dirname, "..");
 const args = process.argv.slice(2);
+const qaProfile = createPackagedQaProfile({
+  args,
+  prefix: "plainsong-meeting-soak-qa-",
+});
 
 function valueFor(name, fallback = null) {
   const index = args.indexOf(name);
@@ -20,6 +26,14 @@ const appPath = path.resolve(
   repoRoot,
   valueFor("--app", "release/mac-arm64/Plainsong.app")
 );
+const candidatePath = path.resolve(
+  repoRoot,
+  valueFor("--candidate", path.resolve(appPath, "../..")),
+);
+const candidateIdentity = collectReleaseCandidateIdentity({
+  candidatePath,
+  appPath,
+});
 const outPath = path.resolve(
   repoRoot,
   valueFor("--out", "artifacts/qa/macos/capture-soak-3h.json")
@@ -36,6 +50,7 @@ const timeoutMs = Number(
   valueFor("--timeout-ms", String(recordMs + transcriptTimeoutMs + 120000))
 );
 const speakFixture = args.includes("--speak-fixture");
+const muteFixtureOutput = args.includes("--mute-fixture-output");
 const speakFixtureText = valueFor(
   "--speak-fixture-text",
   "Plainsong packaged meeting soak fixture. The transcript should contain this repeated launch readiness sentence."
@@ -57,9 +72,9 @@ const sidecarPath = path.join(
   "sidecar",
   "plainsong-sidecar"
 );
-const configDir = path.join(os.homedir(), "Library", "Application Support", "Plainsong");
+const configDir = qaProfile.configDir;
 const settingsPath = path.join(configDir, "settings.json");
-const dbPath = path.join(configDir, "plainsong.db");
+const dbPath = path.join(qaProfile.dataDir, "plainsong.db");
 const dbSidecarPaths = [dbPath, `${dbPath}-wal`, `${dbPath}-shm`];
 const dbBackups = new Map();
 const originalSettingsBytes = fs.existsSync(settingsPath)
@@ -101,6 +116,12 @@ if (recordMs < minRecordMs) {
 }
 if (speakFixture && speakFixtureText.trim().length === 0) {
   fail("--speak-fixture-text cannot be empty when --speak-fixture is enabled.");
+}
+if (muteFixtureOutput && !speakFixture) {
+  fail("--mute-fixture-output requires --speak-fixture.");
+}
+if (muteFixtureOutput && virtualFixtureDeviceName) {
+  fail("--mute-fixture-output cannot be combined with --virtual-fixture-device.");
 }
 if (virtualFixtureDeviceName && !speakFixture && !expectStartFailure) {
   fail(
@@ -199,13 +220,36 @@ function switchAudioSource(args) {
   return String(result.stdout).trim();
 }
 
-function currentSystemOutput() {
-  return switchAudioSource(["-c", "-t", "output"]);
+function currentAudioSource(type) {
+  return switchAudioSource(["-c", "-t", type]);
 }
 
-function selectSystemOutput(deviceName) {
-  switchAudioSource(["-s", deviceName, "-t", "output"]);
-  return currentSystemOutput();
+function selectAudioSource(deviceName, type) {
+  switchAudioSource(["-s", deviceName, "-t", type]);
+  return currentAudioSource(type);
+}
+
+function runAppleScript(script) {
+  const result = spawnSync("/usr/bin/osascript", ["-e", script], {
+    cwd: repoRoot,
+    encoding: "utf8",
+  });
+  if (result.error) {
+    throw new Error(`osascript failed to start: ${result.error.message}`);
+  }
+  if (result.status !== 0) {
+    throw new Error(`osascript failed: ${String(result.stderr).trim()}`);
+  }
+  return String(result.stdout).trim();
+}
+
+function currentOutputMuted() {
+  return runAppleScript("output muted of (get volume settings)") === "true";
+}
+
+function setOutputMuted(muted) {
+  runAppleScript(`set volume output muted ${muted ? "true" : "false"}`);
+  return currentOutputMuted();
 }
 
 function childExitPromise(child) {
@@ -258,6 +302,13 @@ function qaSettings(base, virtualFixtureDevice) {
   const next = JSON.parse(JSON.stringify(base));
   next.transcription = {
     ...next.transcription,
+    useSharedAsrSelection: false,
+    meetingProvider: "parakeet",
+    meetingModelId: "parakeet-tdt-0.6b-v3",
+    providerModelIds: {
+      ...(next.transcription?.providerModelIds ?? {}),
+      parakeet: "parakeet-tdt-0.6b-v3",
+    },
     enableAutoAnalysis: false,
     meetingAudioStorageMode: "always",
     meetingRetentionPreset: "never",
@@ -285,6 +336,7 @@ function launchSidecar() {
   const child = spawn(sidecarPath, [], {
     cwd: repoRoot,
     stdio: ["pipe", "pipe", "pipe"],
+    env: { ...process.env, ...qaProfile.env },
   });
   const childExit = new Promise((resolve) => {
     child.on("exit", (code, signal) => resolve({ code, signal }));
@@ -359,7 +411,7 @@ function launchSidecar() {
     }
     const result = await Promise.race([
       childExit,
-      new Promise((resolve) => setTimeout(() => resolve(null), 3000)),
+      new Promise((resolve) => setTimeout(() => resolve(null), 15000)),
     ]);
     if (!result) {
       child.kill("SIGTERM");
@@ -433,6 +485,9 @@ function transcriptCharCount(transcript) {
   }
   if (typeof transcript?.full_text === "string") {
     return transcript.full_text.trim().length;
+  }
+  if (Number.isFinite(transcript?.fullTextLength)) {
+    return transcript.fullTextLength;
   }
   return 0;
 }
@@ -526,6 +581,7 @@ Generated: ${artifact.generatedAt}
 
 - Record duration requested: ${artifact.recordMs} ms
 - Minimum required duration: ${artifact.minRecordMs} ms
+- Observed recording duration: ${artifact.recordingDurationMs ?? "not measured"} ms
 - System audio requested: ${artifact.includeSystemAudio ? "yes" : "no"}
 - Expected start failure: ${artifact.expectStartFailure ? "yes" : "no"}
 - Start failure: ${artifact.startFailure?.message ?? "none"}
@@ -535,6 +591,12 @@ Generated: ${artifact.generatedAt}
 - Recording status: ${artifact.recordingAfterTranscriptWait?.status ?? "unknown"}
 - Transcript characters: ${transcriptChars}
 - Spoken fixture captured: ${artifact.fixtureTranscriptMatch?.matched ?? "not requested"}
+- Fixture output muted: ${artifact.muteFixtureOutput ? "yes" : "no"}
+- Fixture output mute restored: ${artifact.fixtureOutputMuteRestored ?? "not requested"}
+- Spoken fixture coverage: ${artifact.fixtureTranscriptMatch?.coverage ?? "not requested"}
+- Spoken fixture ordered coverage: ${artifact.fixtureTranscriptMatch?.orderedCoverage ?? "not requested"}
+- Spoken fixture omissions: ${artifact.fixtureTranscriptMatch?.omissions?.join(", ") || "none"}
+- Spoken fixture order violations: ${artifact.fixtureTranscriptMatch?.orderViolations?.join(", ") || "none"}
 - Transcript wait timed out: ${artifact.transcriptWait?.timedOut ? "yes" : "no"}
 - Terminal empty transcript: ${artifact.transcriptWait?.terminalEmptyTranscript ? "yes" : "no"}
 - Audio file bytes: ${artifact.audioFile?.sizeBytes ?? 0}
@@ -549,10 +611,11 @@ ${Object.entries(artifact.checks ?? {})
 
 async function writeArtifact(artifact) {
   fs.mkdirSync(path.dirname(outPath), { recursive: true });
-  const json = JSON.stringify(artifact, null, 2);
+  const safeArtifact = sanitizeMeetingSoakReceipt(artifact);
+  const json = JSON.stringify(safeArtifact, null, 2);
   fs.writeFileSync(outPath, `${json}\n`, "utf8");
   fs.mkdirSync(path.dirname(markdownPath), { recursive: true });
-  fs.writeFileSync(markdownPath, `${renderMarkdown(artifact)}\n`, "utf8");
+  fs.writeFileSync(markdownPath, `${renderMarkdown(safeArtifact)}\n`, "utf8");
   console.log(
     JSON.stringify(
       {
@@ -583,7 +646,10 @@ async function run() {
   const artifact = {
     generatedAt: new Date().toISOString(),
     appPath,
+    candidatePath,
+    candidateIdentity,
     sidecarPath,
+    sidecarSha256: hashBytes(fs.readFileSync(sidecarPath)),
     dbPath,
     settingsPath,
     recordMs,
@@ -592,6 +658,7 @@ async function run() {
     pollIntervalMs,
     includeSystemAudio,
     speakFixture,
+    muteFixtureOutput,
     speakFixtureText: speakFixture ? speakFixtureText : null,
     speakFixtureIntervalMs,
     virtualFixtureDeviceName,
@@ -604,6 +671,16 @@ async function run() {
     systemOutputAfter: null,
     systemOutputRestored: false,
     systemOutputRestoreError: null,
+    systemOutputDeviceBefore: null,
+    systemOutputDeviceDuring: null,
+    systemOutputDeviceAfter: null,
+    systemOutputDeviceRestored: false,
+    systemOutputDeviceRestoreError: null,
+    fixtureOutputMutedBefore: null,
+    fixtureOutputMutedDuring: null,
+    fixtureOutputMutedAfter: null,
+    fixtureOutputMuteRestored: false,
+    fixtureOutputMuteRestoreError: null,
     speechFixtureRuns: [],
     fixtureTranscriptMatch: null,
     expectedCaptureMode,
@@ -619,6 +696,10 @@ async function run() {
     settingsRestored: false,
     checks: {},
     recordingId: null,
+    recordingStartedAt: null,
+    recordingStopRequestedAt: null,
+    recordingStoppedAt: null,
+    recordingDurationMs: null,
     startRecordingAttempted: false,
     startFailure: null,
     startFailureRecovery: {
@@ -645,6 +726,65 @@ async function run() {
   const sidecar = launchSidecar();
   let speechFixture = null;
 
+  async function releaseFixtureEnvironment() {
+    if (speechFixture) {
+      const fixture = speechFixture;
+      speechFixture = null;
+      await fixture.stop();
+      artifact.speechFixtureRuns = fixture.runs;
+    }
+    if (
+      virtualFixtureDeviceName &&
+      artifact.systemOutputBefore &&
+      !artifact.systemOutputRestored
+    ) {
+      try {
+        artifact.systemOutputAfter = selectAudioSource(
+          artifact.systemOutputBefore,
+          "output",
+        );
+        artifact.systemOutputRestored =
+          artifact.systemOutputAfter === artifact.systemOutputBefore;
+      } catch (error) {
+        artifact.systemOutputRestoreError =
+          error instanceof Error ? error.message : String(error);
+      }
+    }
+    if (
+      virtualFixtureDeviceName &&
+      artifact.systemOutputDeviceBefore &&
+      !artifact.systemOutputDeviceRestored
+    ) {
+      try {
+        artifact.systemOutputDeviceAfter = selectAudioSource(
+          artifact.systemOutputDeviceBefore,
+          "system",
+        );
+        artifact.systemOutputDeviceRestored =
+          artifact.systemOutputDeviceAfter === artifact.systemOutputDeviceBefore;
+      } catch (error) {
+        artifact.systemOutputDeviceRestoreError =
+          error instanceof Error ? error.message : String(error);
+      }
+    }
+    if (
+      muteFixtureOutput &&
+      artifact.fixtureOutputMutedBefore !== null &&
+      !artifact.fixtureOutputMuteRestored
+    ) {
+      try {
+        artifact.fixtureOutputMutedAfter = setOutputMuted(
+          artifact.fixtureOutputMutedBefore,
+        );
+        artifact.fixtureOutputMuteRestored =
+          artifact.fixtureOutputMutedAfter === artifact.fixtureOutputMutedBefore;
+      } catch (error) {
+        artifact.fixtureOutputMuteRestoreError =
+          error instanceof Error ? error.message : String(error);
+      }
+    }
+  }
+
   try {
     const originalSettings = await sidecar.sendCommand("get_settings", {});
     if (virtualFixtureDeviceName) {
@@ -659,11 +799,21 @@ async function run() {
           `Virtual fixture input is unavailable: ${virtualFixtureDeviceName}`,
         );
       }
-      artifact.systemOutputBefore = currentSystemOutput();
-      artifact.systemOutputDuring = selectSystemOutput(virtualFixtureDeviceName);
+      artifact.systemOutputBefore = currentAudioSource("output");
+      artifact.systemOutputDeviceBefore = currentAudioSource("system");
+      artifact.systemOutputDuring = selectAudioSource(
+        virtualFixtureDeviceName,
+        "output",
+      );
+      artifact.systemOutputDeviceDuring = selectAudioSource(virtualFixtureDeviceName, "system");
       if (artifact.systemOutputDuring !== virtualFixtureDeviceName) {
         throw new Error(
           `System output did not switch to ${virtualFixtureDeviceName}.`,
+        );
+      }
+      if (artifact.systemOutputDeviceDuring !== virtualFixtureDeviceName) {
+        throw new Error(
+          `System sound-effects output did not switch to ${virtualFixtureDeviceName}.`,
         );
       }
     }
@@ -671,20 +821,42 @@ async function run() {
       settings: qaSettings(originalSettings, artifact.virtualFixtureDevice),
     });
 
+    if (muteFixtureOutput) {
+      artifact.fixtureOutputMutedBefore = currentOutputMuted();
+      artifact.fixtureOutputMutedDuring = setOutputMuted(true);
+      if (artifact.fixtureOutputMutedDuring !== true) {
+        throw new Error("The spoken-fixture output could not be muted.");
+      }
+    }
+
+    // A virtual loopback route cannot inject the verifier's internal tone by
+    // design. Start the external spoken fixture before the route preflight so
+    // the verifier can prove that the selected cable is carrying real output.
+    if (speakFixture && virtualFixtureDeviceName) {
+      speechFixture = startSpeechFixture();
+    }
+
     if (includeSystemAudio) {
       artifact.systemAudioVerification = await sidecar.sendCommand(
         "test_system_audio_capture",
         {},
       );
+      const expectedVerificationMethod = virtualFixtureDeviceName
+        ? "external_audio"
+        : "known_tone";
+      const verificationSignalPassed = virtualFixtureDeviceName
+        ? Number(artifact.systemAudioVerification?.nonSilentFrames) > 0
+        : Number(artifact.systemAudioVerification?.detectedToneAmplitude) >= 0.005;
       if (
         artifact.systemAudioVerification?.capability?.ready !== true ||
         Number(artifact.systemAudioVerification?.callbacks) <= 0 ||
         Number(artifact.systemAudioVerification?.nonSilentFrames) <= 0 ||
-        Number(artifact.systemAudioVerification?.detectedToneAmplitude) < 0.005 ||
-        artifact.systemAudioVerification?.verificationMethod !== "known_tone"
+        !verificationSignalPassed ||
+        artifact.systemAudioVerification?.verificationMethod !==
+          expectedVerificationMethod
       ) {
         throw new Error(
-          "Packaged system-audio verification did not capture the known tone in this sidecar session.",
+          `Packaged system-audio verification did not capture the expected ${expectedVerificationMethod} signal in this sidecar session.`,
         );
       }
     }
@@ -707,6 +879,7 @@ async function run() {
           template: "meeting",
           meetingNotes: "Packaged QA long meeting soak.",
           consentPromptShown: true,
+          admissionNonce: crypto.randomUUID(),
           meetingCaptureMode: expectedCaptureMode,
         },
       });
@@ -732,8 +905,10 @@ async function run() {
       if (!artifact.recordingId) {
         throw new Error("start_recording did not return a recordingId.");
       }
+      const recordingStartedAtMs = Date.now();
+      artifact.recordingStartedAt = new Date(recordingStartedAtMs).toISOString();
 
-      if (speakFixture) {
+      if (speakFixture && !speechFixture) {
         speechFixture = startSpeechFixture();
       }
 
@@ -743,9 +918,16 @@ async function run() {
         {},
       );
 
+      const recordingStopRequestedAtMs = Date.now();
+      artifact.recordingStopRequestedAt = new Date(
+        recordingStopRequestedAtMs,
+      ).toISOString();
+      artifact.recordingDurationMs =
+        recordingStopRequestedAtMs - recordingStartedAtMs;
       await sidecar.sendCommand("stop_recording", {
         recordingId: artifact.recordingId,
       });
+      artifact.recordingStoppedAt = new Date().toISOString();
       artifact.overlayAfterStop = await sidecar.sendCommand(
         "get_recording_overlay_state",
         {},
@@ -753,6 +935,8 @@ async function run() {
       artifact.recordingAfterStop = await sidecar.sendCommand("get_recording", {
         recordingId: artifact.recordingId,
       });
+
+      await releaseFixtureEnvironment();
 
       const transcriptWait = await waitForTranscript(sidecar, artifact.recordingId);
       artifact.recordingAfterTranscriptWait = transcriptWait.recording;
@@ -789,20 +973,7 @@ async function run() {
       ? relevantEvents(sidecar.events, artifact.recordingId)
       : sidecar.events.slice(-20);
   } finally {
-    if (speechFixture) {
-      await speechFixture.stop();
-      artifact.speechFixtureRuns = speechFixture.runs;
-    }
-    if (virtualFixtureDeviceName && artifact.systemOutputBefore) {
-      try {
-        artifact.systemOutputAfter = selectSystemOutput(artifact.systemOutputBefore);
-        artifact.systemOutputRestored =
-          artifact.systemOutputAfter === artifact.systemOutputBefore;
-      } catch (error) {
-        artifact.systemOutputRestoreError =
-          error instanceof Error ? error.message : String(error);
-      }
-    }
+    await releaseFixtureEnvironment();
     artifact.timedOut = sidecar.didTimeOut();
     artifact.stderr = stderrEvidence(sidecar.stderr);
     artifact.sidecarExit = await sidecar.shutdown();
@@ -852,8 +1023,20 @@ async function run() {
         artifact.virtualFixtureDevice?.deviceName === virtualFixtureDeviceName,
       virtualFixtureOutputSelected:
         artifact.systemOutputDuring === virtualFixtureDeviceName,
+      virtualFixtureSystemOutputSelected:
+        artifact.systemOutputDeviceDuring === virtualFixtureDeviceName,
       virtualFixtureOutputRestored: artifact.systemOutputRestored === true,
+      virtualFixtureSystemOutputRestored:
+        artifact.systemOutputDeviceRestored === true,
       systemOutputRestoreErrorAbsent: artifact.systemOutputRestoreError === null,
+      systemOutputDeviceRestoreErrorAbsent:
+        artifact.systemOutputDeviceRestoreError === null,
+      fixtureOutputMutedDuring:
+        !muteFixtureOutput || artifact.fixtureOutputMutedDuring === true,
+      fixtureOutputMuteRestored:
+        !muteFixtureOutput || artifact.fixtureOutputMuteRestored === true,
+      fixtureOutputMuteRestoreErrorAbsent:
+        artifact.fixtureOutputMuteRestoreError === null,
       sidecarExitedCleanly:
         artifact.sidecarExit?.code === 0 && artifact.sidecarExit?.signal === null,
       audioFilesCleaned: artifact.audioFilesCleaned,
@@ -868,12 +1051,19 @@ async function run() {
         (artifact.systemAudioVerification?.capability?.ready === true &&
           Number(artifact.systemAudioVerification?.callbacks) > 0 &&
           Number(artifact.systemAudioVerification?.nonSilentFrames) > 0 &&
-          Number(artifact.systemAudioVerification?.detectedToneAmplitude) >= 0.005 &&
-          artifact.systemAudioVerification?.verificationMethod === "known_tone"),
+          (virtualFixtureDeviceName
+            ? artifact.systemAudioVerification?.verificationMethod ===
+              "external_audio"
+            : Number(artifact.systemAudioVerification?.detectedToneAmplitude) >=
+                0.005 &&
+              artifact.systemAudioVerification?.verificationMethod === "known_tone")),
       minimumDurationRequested: artifact.recordMs >= artifact.minRecordMs,
+      minimumDurationObserved:
+        Number.isFinite(artifact.recordingDurationMs) &&
+        artifact.recordingDurationMs >= artifact.minRecordMs,
       recordingIdReturned: Boolean(artifact.recordingId),
       overlayEnteredRecording: artifact.overlayWhileRecording?.phase === "recording",
-      overlayEnteredTranscribing: artifact.overlayAfterStop?.phase === "transcribing",
+      overlayEnteredProcessing: artifact.overlayAfterStop?.phase === "processing",
       recordingRowPreserved:
         artifact.recordingAfterTranscriptWait?.id === artifact.recordingId,
       recordingSourceMeeting:
@@ -892,8 +1082,24 @@ async function run() {
       virtualFixtureOutputSelected:
         !virtualFixtureDeviceName ||
         artifact.systemOutputDuring === virtualFixtureDeviceName,
+      virtualFixtureSystemOutputSelected:
+        !virtualFixtureDeviceName ||
+        artifact.systemOutputDeviceDuring === virtualFixtureDeviceName,
       virtualFixtureOutputRestored:
         !virtualFixtureDeviceName || artifact.systemOutputRestored === true,
+      virtualFixtureSystemOutputRestored:
+        !virtualFixtureDeviceName ||
+        artifact.systemOutputDeviceRestored === true,
+      systemOutputRestoreErrorAbsent:
+        artifact.systemOutputRestoreError === null,
+      systemOutputDeviceRestoreErrorAbsent:
+        artifact.systemOutputDeviceRestoreError === null,
+      fixtureOutputMutedDuring:
+        !muteFixtureOutput || artifact.fixtureOutputMutedDuring === true,
+      fixtureOutputMuteRestored:
+        !muteFixtureOutput || artifact.fixtureOutputMuteRestored === true,
+      fixtureOutputMuteRestoreErrorAbsent:
+        artifact.fixtureOutputMuteRestoreError === null,
       recordingCompleted:
         artifact.recordingAfterTranscriptWait?.status === "completed",
       transcriptWaitCompleted: artifact.transcriptWait?.timedOut === false,
@@ -957,7 +1163,12 @@ run().catch(async (error) => {
   await writeArtifact({
     generatedAt: new Date().toISOString(),
     appPath,
+    candidatePath,
+    candidateIdentity,
     sidecarPath,
+    sidecarSha256: fs.existsSync(sidecarPath)
+      ? hashBytes(fs.readFileSync(sidecarPath))
+      : null,
     recordMs,
     minRecordMs,
     transcriptTimeoutMs,

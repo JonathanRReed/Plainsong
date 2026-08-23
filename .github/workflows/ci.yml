@@ -109,7 +109,7 @@ jobs:
           components: rustfmt, clippy
 
       - name: Rust cache
-        uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2.9.1
+        uses: Swatinem/rust-cache@258712b0b7b1ddf8bddc9fc3b0faca682b2736c3 # post-v2.9.2 cleanup fix (#377)
         with:
           workspaces: nautilus-bot/rust-sidecar
 
@@ -128,7 +128,7 @@ jobs:
     name: Package and verify (macOS)
     needs: [verify-build, verify-rust]
     # Build the ZIP target so electron-builder emits the same app-update.yml,
-    # latest-mac.yml, ZIP, and blockmap used by the updater. Runs on main
+    # beta-mac.yml, ZIP, and blockmap used by the updater. Runs on main
     # pushes and a weekly cron (not on PRs) to keep macOS runner cost in check.
     if: github.event_name == 'push' || github.event_name == 'schedule'
     runs-on: macos-latest
@@ -151,7 +151,7 @@ jobs:
         uses: dtolnay/rust-toolchain@d0befba8b9ddf874327619e84c39b094edd58b66 # 1.93.0
 
       - name: Rust cache
-        uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2.9.1
+        uses: Swatinem/rust-cache@258712b0b7b1ddf8bddc9fc3b0faca682b2736c3 # post-v2.9.2 cleanup fix (#377)
         with:
           workspaces: nautilus-bot/rust-sidecar
 

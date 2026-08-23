@@ -5,7 +5,7 @@ use anyhow::{Context, Result};
 use async_trait::async_trait;
 use std::path::{Path, PathBuf};
 #[cfg(feature = "asr-canary")]
-use std::{cell::RefCell, thread_local};
+use std::sync::{Mutex, OnceLock};
 
 // ---------------------------------------------------------------------------
 // Model: openai/whisper-large-v3-turbo via Candle (experimental local path)
@@ -32,6 +32,14 @@ const WHISPER_CANDLE_REQUIRED_FILES: [(&str, &str); 4] = [
         "7ccc62c6f2765af1f3b46c00c9b5894426835a05021c8b9c01eecb6dfb542711",
     ),
 ];
+
+fn whisper_candle_artifact_max_bytes(file_name: &str) -> u64 {
+    if file_name == "model.safetensors" {
+        4 * 1024 * 1024 * 1024
+    } else {
+        64 * 1024 * 1024
+    }
+}
 
 pub(crate) fn model_integrity_artifacts(models_root: &Path) -> Vec<(PathBuf, String)> {
     let model_dir = models_root.join("canary");
@@ -84,15 +92,15 @@ fn load_runtime(model_dir: &Path) -> Result<WhisperCandleRuntime> {
 }
 
 #[cfg(feature = "asr-canary")]
-thread_local! {
-    static RUNTIME_CACHE: RefCell<Option<WhisperCandleRuntime>> = const { RefCell::new(None) };
+fn runtime_cache() -> &'static Mutex<Option<WhisperCandleRuntime>> {
+    static CACHE: OnceLock<Mutex<Option<WhisperCandleRuntime>>> = OnceLock::new();
+    CACHE.get_or_init(|| Mutex::new(None))
 }
 
 #[cfg(feature = "asr-canary")]
 pub(crate) fn clear_cached_runtime(model_dir: &Path) {
     let model_dir_key = model_dir.to_string_lossy().to_string();
-    RUNTIME_CACHE.with(|cache| {
-        let mut cache = cache.borrow_mut();
+    if let Ok(mut cache) = runtime_cache().lock() {
         if cache
             .as_ref()
             .map(|runtime| runtime.model_dir_key == model_dir_key)
@@ -104,7 +112,7 @@ pub(crate) fn clear_cached_runtime(model_dir: &Path) {
                 model_dir.display()
             );
         }
-    });
+    }
 }
 
 #[cfg(not(feature = "asr-canary"))]
@@ -174,8 +182,10 @@ pub(super) fn run_whisper_candle_inference_on_samples(
     use candle_transformers::models::whisper as w;
 
     let model_dir_key = model_dir.to_string_lossy().to_string();
-    RUNTIME_CACHE.with(|cache| {
-        let mut cache = cache.borrow_mut();
+    {
+        let mut cache = runtime_cache().lock().map_err(|error| {
+            anyhow::anyhow!("Whisper Candle runtime cache is unavailable: {}", error)
+        })?;
         let should_reload = cache
             .as_ref()
             .map(|runtime| runtime.model_dir_key != model_dir_key)
@@ -261,7 +271,30 @@ pub(super) fn run_whisper_candle_inference_on_samples(
             .map_err(|e| anyhow::anyhow!("Tokenizer decode failed: {}", e))?;
 
         Ok(text.trim().to_string())
-    })
+    }
+}
+
+#[cfg(feature = "asr-canary")]
+pub(super) fn prewarm_runtime(model_dir: &Path) -> Result<()> {
+    let model_dir_key = model_dir.to_string_lossy().to_string();
+    let mut cache = runtime_cache().lock().map_err(|error| {
+        anyhow::anyhow!("Whisper Candle runtime cache is unavailable: {}", error)
+    })?;
+    if cache
+        .as_ref()
+        .is_some_and(|runtime| runtime.model_dir_key == model_dir_key)
+    {
+        return Ok(());
+    }
+    *cache = Some(load_runtime(model_dir)?);
+    Ok(())
+}
+
+#[cfg(not(feature = "asr-canary"))]
+pub(super) fn prewarm_runtime(_model_dir: &Path) -> Result<()> {
+    Err(anyhow::anyhow!(
+        "Whisper Candle support is not compiled into this build."
+    ))
 }
 
 #[cfg(feature = "asr-canary")]
@@ -302,6 +335,24 @@ impl AsrProvider for WhisperCandleProvider {
 
     fn is_available(&self) -> bool {
         self.has_required_files()
+    }
+
+    async fn prewarm(&self) -> Result<()> {
+        if !self.has_required_files() {
+            anyhow::bail!(
+                "Whisper Candle model is not downloaded. Use the model manager to download it."
+            );
+        }
+        if !self.has_trusted_required_files() {
+            anyhow::bail!(
+                "Whisper Candle model files have not passed Plainsong integrity verification. Re-download the model from Settings."
+            );
+        }
+        let model_dir = self.model_dir.clone();
+        tokio::task::spawn_blocking(move || prewarm_runtime(&model_dir))
+            .await
+            .context("Whisper Candle model warmup task panicked")??;
+        Ok(())
     }
 
     fn model_info(&self) -> ModelInfo {
@@ -464,14 +515,20 @@ impl AsrProvider for WhisperCandleProvider {
             let cb = progress_cb.clone();
             let n_files = WHISPER_CANDLE_REQUIRED_FILES.len() as f32;
             manager
-                .download_verified_model_asset(&url, &destination, sha256, move |p| {
-                    cb((i as f32 / n_files + p.percentage as f32 / 100.0 / n_files) * 100.0);
-                    tracing::info!(
-                        "Whisper Candle {} download: {:.1}%",
-                        file_name,
-                        p.percentage
-                    );
-                })
+                .download_verified_model_asset(
+                    &url,
+                    &destination,
+                    sha256,
+                    whisper_candle_artifact_max_bytes(file_name),
+                    move |p| {
+                        cb((i as f32 / n_files + p.percentage as f32 / 100.0 / n_files) * 100.0);
+                        tracing::info!(
+                            "Whisper Candle {} download: {:.1}%",
+                            file_name,
+                            p.percentage
+                        );
+                    },
+                )
                 .await?;
         }
 

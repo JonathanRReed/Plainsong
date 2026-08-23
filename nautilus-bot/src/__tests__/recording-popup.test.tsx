@@ -86,7 +86,8 @@ describe("RecordingPopup", () => {
     popupMocks.invoke.mockClear();
     popupMocks.getRecording.mockClear();
     popupMocks.getWaveformData.mockClear();
-    popupMocks.stopRecording.mockClear();
+    popupMocks.stopRecording.mockReset();
+    popupMocks.stopRecording.mockResolvedValue(undefined);
     popupMocks.updateRecordingNotes.mockClear();
     popupMocks.windowHandle.setSize.mockClear();
     popupMocks.windowHandle.show.mockClear();
@@ -168,6 +169,49 @@ describe("RecordingPopup", () => {
       view: "recordings",
       recordingId: "r1",
     });
+  });
+
+  it("retains the recording identifier and recovery text after a terminal error", async () => {
+    await act(async () => {
+      render(<RecordingPopup />);
+    });
+    await screen.findByText("Board sync");
+
+    await act(async () => {
+      popupMocks.listeners.get("meeting-recording-state-changed")?.({
+        payload: {
+          phase: "recoverable",
+          recordingId: "r1",
+          message: "Saved audio can be retried after relaunch.",
+        },
+      });
+    });
+
+    expect(screen.getByRole("alert")).toHaveTextContent(
+      "Saved audio can be retried after relaunch.",
+    );
+    expect(screen.getByRole("button", { name: "Open Workspace" })).toBeVisible();
+    expect(screen.queryByRole("button", { name: "Stop recording" })).not.toBeInTheDocument();
+  });
+
+  it("surfaces a Stop failure without losing the active recording", async () => {
+    popupMocks.stopRecording.mockRejectedValueOnce(
+      new Error("Sidecar stopped before the meeting was saved"),
+    );
+
+    await act(async () => {
+      render(<RecordingPopup />);
+    });
+    await screen.findByText("Board sync");
+
+    fireEvent.click(screen.getByRole("button", { name: "Stop recording" }));
+
+    await waitFor(() => {
+      expect(screen.getByRole("alert")).toHaveTextContent(
+        "Sidecar stopped before the meeting was saved",
+      );
+    });
+    expect(screen.getByRole("button", { name: "Open Workspace" })).toBeVisible();
   });
 
   it("offers manual consent recovery from the popup when automation did not send", async () => {

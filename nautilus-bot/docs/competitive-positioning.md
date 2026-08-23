@@ -44,7 +44,7 @@ Read from the GitHub releases API, exact bytes, not vendor marketing. Ours is
 | Handy `v0.9.4` aarch64 | 17 MB | MIT, Tauri, also Intel/Windows/Linux |
 | VoiceInk `v2.1` | 30 MB | closest architectural comparison: macOS-only, Apple Silicon, local-first |
 | Muesli `v0.8.0` | 90 MB | does both surfaces, as we do |
-| **Plainsong `v1.0.0`** | **136 MB** | 352 MB installed, ~493 MB once `base.en` lands |
+| **Plainsong `0.9.0-beta.1` candidate** | **136 MB** | 352 MB installed, ~493 MB once `base.en` lands |
 
 There is no architecture defence: 275 MB of our 352 MB installed is the Electron
 framework. Every competitor above also ships a small-model option (Handy's

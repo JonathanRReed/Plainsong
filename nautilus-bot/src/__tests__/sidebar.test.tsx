@@ -5,6 +5,20 @@ import type { ProductReadinessSnapshot } from "@/features/readiness/product-read
 import { OPEN_SETTINGS_TAB_EVENT } from "@/lib/navigation";
 
 const readinessContext = vi.hoisted(() => ({
+  settings: {
+    privacy: {
+      dictationAi: { provider: "ollama", modelId: null },
+      meetingsAi: { provider: "ollama", modelId: null },
+      remoteProcessingEnabled: false,
+    },
+    shortcuts: {
+      toggleDictation: "Cmd+Shift+Space",
+    },
+    transcription: {
+      dictationHandsFreeEnabled: false,
+      dictationPushToTalk: false,
+    },
+  },
   productReadiness: {
     evidenceObservedAt: 1,
     dictation: { domain: "dictation", state: "ready", cause: null },
@@ -12,6 +26,10 @@ const readinessContext = vi.hoisted(() => ({
     fullCapture: { domain: "full_capture", state: "ready", cause: null },
     overall: { domain: "overall", state: "ready", cause: null },
   } as ProductReadinessSnapshot,
+}));
+
+const backendMocks = vi.hoisted(() => ({
+  getSettings: vi.fn(async () => readinessContext.settings),
 }));
 
 vi.mock("@/features/readiness/product-readiness-context", () => ({
@@ -27,13 +45,7 @@ vi.mock("@/hooks/use-recording", () => ({
 }));
 
 vi.mock("@/lib/backend/settings", () => ({
-  getSettings: vi.fn(async () => ({
-    privacy: {
-      dictationAi: { provider: "ollama", modelId: null },
-      meetingsAi: { provider: "ollama", modelId: null },
-      remoteProcessingEnabled: false,
-    },
-  })),
+  getSettings: backendMocks.getSettings,
 }));
 
 vi.mock("@/components/theme-toggle", () => ({
@@ -43,6 +55,20 @@ vi.mock("@/components/theme-toggle", () => ({
 describe("Sidebar collapsed layout", () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    readinessContext.settings = {
+      privacy: {
+        dictationAi: { provider: "ollama", modelId: null },
+        meetingsAi: { provider: "ollama", modelId: null },
+        remoteProcessingEnabled: false,
+      },
+      shortcuts: {
+        toggleDictation: "Cmd+Shift+Space",
+      },
+      transcription: {
+        dictationHandsFreeEnabled: false,
+        dictationPushToTalk: false,
+      },
+    };
     readinessContext.productReadiness = {
       evidenceObservedAt: 1,
       dictation: { domain: "dictation", state: "ready", cause: null },
@@ -223,6 +249,23 @@ describe("Sidebar collapsed layout", () => {
     fireEvent.click(localStatus);
 
     expect(onViewChange).toHaveBeenCalledWith("settings");
+  });
+
+  it("derives privacy and shortcut labels from shared readiness settings without polling", () => {
+    render(
+      <Sidebar
+        activeView="dashboard"
+        onToggleCollapse={vi.fn()}
+        onViewChange={vi.fn()}
+      />,
+    );
+
+    expect(backendMocks.getSettings).not.toHaveBeenCalled();
+    expect(
+      screen.getByRole("button", {
+        name: /Local only\. Remote processing is disabled by policy\./,
+      }),
+    ).toBeInTheDocument();
   });
 
   it("surfaces the canonical blocker without cluttering a ready sidebar", () => {

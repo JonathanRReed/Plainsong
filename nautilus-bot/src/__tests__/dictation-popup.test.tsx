@@ -474,8 +474,29 @@ describe("DictationPopup", () => {
       render(<DictationPopup />);
     });
 
-    expect(await screen.findByText("Getting ready")).toBeInTheDocument();
+    expect(await screen.findByText("Model ready")).toBeInTheDocument();
     expect(screen.getByText("00:00")).toBeInTheDocument();
+  });
+
+  it("shows cold-model preparation truthfully and lets the user cancel it", async () => {
+    popupMocks.invoke.mockResolvedValueOnce({
+      phase: "preparing",
+      startedAtMs: Date.now(),
+      sessionId: 31,
+      message: "Loading the selected dictation model",
+      modelReadiness: "loading",
+    } as any);
+
+    await act(async () => {
+      render(<DictationPopup />);
+    });
+
+    expect(await screen.findByText("Loading model")).toBeInTheDocument();
+    expect(screen.getByText("00:00")).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "Stop" }));
+    await waitFor(() => {
+      expect(popupMocks.invoke).toHaveBeenCalledWith("force_stop_dictation");
+    });
   });
 
   it("labels priming, recording and processing distinctly", async () => {
@@ -499,7 +520,7 @@ describe("DictationPopup", () => {
       render(<DictationPopup />);
     });
 
-    expect(await screen.findByText("Getting ready")).toBeInTheDocument();
+    expect(await screen.findByText("Model ready")).toBeInTheDocument();
 
     const handler = popupMocks.listeners.get("dictation-state-changed");
     expect(handler).toBeDefined();
@@ -508,7 +529,7 @@ describe("DictationPopup", () => {
       handler?.({ payload: { phase: "recording", sessionId: 40 } });
     });
     expect(await screen.findByText("Listening")).toBeInTheDocument();
-    expect(screen.queryByText("Getting ready")).toBeNull();
+    expect(screen.queryByText("Model ready")).toBeNull();
 
     await act(async () => {
       handler?.({ payload: { phase: "transcribing", sessionId: 40 } });

@@ -2,7 +2,6 @@ use async_trait::async_trait;
 use reqwest::StatusCode;
 use serde::de::DeserializeOwned;
 use serde_json::Value;
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 use thiserror::Error;
@@ -513,7 +512,7 @@ pub struct ProviderSelection {
     pub provider: Provider,
     pub model: String,
     pub remote_processing_enabled: bool,
-    pub remote_processing_allowed: Arc<AtomicBool>,
+    pub remote_processing_gate: Arc<crate::remote_processing::RemoteProcessingGate>,
     pub api_key: Option<String>,
     pub timeout: Duration,
 }
@@ -577,10 +576,7 @@ impl ProviderRuntime {
 
     fn enforce_live_remote_policy(&self) -> Result<(), LlmError> {
         if self.selection.provider.is_remote()
-            && !self
-                .selection
-                .remote_processing_allowed
-                .load(Ordering::SeqCst)
+            && !self.selection.remote_processing_gate.is_allowed()
         {
             return Err(LlmError::new(
                 self.selection.provider,
@@ -606,15 +602,22 @@ impl ProviderRuntime {
             return self.transport.complete(request).await;
         }
 
+        let mut grant = self
+            .selection
+            .remote_processing_gate
+            .grant()
+            .map_err(|message| {
+                LlmError::new(self.selection.provider, ErrorKind::Policy, message)
+            })?;
         let completion = self.transport.complete(request);
         tokio::pin!(completion);
-        loop {
-            tokio::select! {
-                result = &mut completion => return result,
-                _ = tokio::time::sleep(Duration::from_millis(100)) => {
-                    self.enforce_live_remote_policy()?;
-                }
-            }
+        tokio::select! {
+            result = &mut completion => result,
+            _ = grant.cancelled() => Err(LlmError::new(
+                self.selection.provider,
+                ErrorKind::Policy,
+                "Remote processing was disabled while analysis was running; the active request was cancelled and no further meeting data was sent.",
+            )),
         }
     }
 
@@ -749,20 +752,20 @@ mod tests {
 
     #[tokio::test]
     async fn live_remote_policy_stops_subsequent_calls() {
-        let allowed = Arc::new(AtomicBool::new(true));
+        let gate = Arc::new(crate::remote_processing::RemoteProcessingGate::new(true));
         let runtime = ProviderRuntime::new(
             ProviderSelection {
                 provider: Provider::OpenAi,
                 model: "gpt-4o-mini".to_string(),
                 remote_processing_enabled: true,
-                remote_processing_allowed: Arc::clone(&allowed),
+                remote_processing_gate: Arc::clone(&gate),
                 api_key: Some("not-used".to_string()),
                 timeout: Duration::from_secs(1),
             },
             &OllamaClient::new(),
         )
         .unwrap();
-        allowed.store(false, Ordering::SeqCst);
+        gate.set_allowed(false);
         let error = runtime
             .complete(&CompletionRequest {
                 model: "ignored".to_string(),

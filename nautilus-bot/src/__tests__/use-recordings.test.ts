@@ -192,6 +192,27 @@ describe("useRecordings", () => {
     expect(mockedGetRecordings).toHaveBeenCalledTimes(2);
   });
 
+  it("reconciles persistence after every Meeting lifecycle event", async () => {
+    const { getRecordings } = await import("@/lib/backend");
+    const mockedGetRecordings = vi.mocked(getRecordings);
+    mockedGetRecordings.mockResolvedValueOnce([]).mockResolvedValueOnce(mockRecordings);
+
+    const { result } = renderHook(() => useRecordings(), { wrapper });
+    await waitFor(() => expect(result.current.recordings).toEqual([]));
+    await waitFor(() => {
+      expect(eventMocks.listeners.get("meeting-recording-state-changed")).toBeDefined();
+    });
+
+    await act(async () => {
+      eventMocks.listeners.get("meeting-recording-state-changed")?.({
+        payload: { phase: "error", recordingId: "r1" },
+      });
+    });
+
+    await waitFor(() => expect(result.current.recordings).toEqual(mockRecordings));
+    expect(mockedGetRecordings).toHaveBeenCalledTimes(2);
+  });
+
   it("removes listeners that finish registering after unmount", async () => {
     const pendingUnlisten = deferred<() => void>();
     const unlisten = vi.fn();
@@ -211,6 +232,6 @@ describe("useRecordings", () => {
       await pendingUnlisten.promise;
     });
 
-    expect(unlisten).toHaveBeenCalledTimes(3);
+    expect(unlisten).toHaveBeenCalledTimes(4);
   });
 });

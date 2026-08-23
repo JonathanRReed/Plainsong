@@ -27,13 +27,13 @@ This matrix is the default source of truth for DP-02 in `docs/evals/dictation-pa
 
 | App | Status | Mode Used | Launch Gate | Notes |
 | --- | --- | --- | --- | --- |
-| Apple Notes | PARTIAL | auto | REQUIRED | Packaged insertion verified in `release-launch-candidate-clean-20260730/qa/app-matrix-insertion-apple-notes.md`. In a brand-new empty note, click the body once to establish the insertion caret before dictating. |
-| Google Docs (Chrome) | SUPPORTED | auto | REQUIRED | Packaged insertion verified in `release-launch-candidate-clean-20260730/qa/app-matrix-insertion-google-docs-chrome.md`. |
-| Slack | SUPPORTED | auto | REQUIRED | Packaged insertion verified in `release-launch-candidate-clean-20260730/qa/app-matrix-insertion-slack.md`. |
+| Apple Notes | PARTIAL | auto | REQUIRED | Packaged insertion verified in `artifacts/qa/macos/app-matrix-insertion-apple-notes.md`. In a brand-new empty note, click the body once to establish the insertion caret before dictating. |
+| Google Docs (Chrome) | SUPPORTED | auto | REQUIRED | Packaged insertion verified in `artifacts/qa/macos/app-matrix-insertion-google-docs-chrome.md`. |
+| Slack | SUPPORTED | auto | REQUIRED | Packaged insertion verified in `artifacts/qa/macos/app-matrix-insertion-slack.md`. |
 | Notion | DEFERRED | auto | DEFERRED | Optional notes-workspace compatibility. No installation or packaged QA is required for v1. |
 | VS Code | DEFERRED | clipboard_only | DEFERRED | Optional editor compatibility. Existing evidence may inform future work, but no further host-app QA is required for v1. |
 | Cursor | DEFERRED | clipboard_only | DEFERRED | Removed from the required launch target set. No installation or packaged QA is required. |
-| Messages | SUPPORTED | auto | REQUIRED | Packaged insertion verified in `release-launch-candidate-clean-20260730/qa/app-matrix-insertion-messages.md`. |
+| Messages | SUPPORTED | auto | REQUIRED | Packaged insertion verified in `artifacts/qa/macos/app-matrix-insertion-messages.md`. |
 | HubSpot (Chrome) | DEFERRED | clipboard_only | DEFERRED | Optional CRM compatibility that requires a user-present signed-in workspace. It does not block v1. |
 
 ## Windows

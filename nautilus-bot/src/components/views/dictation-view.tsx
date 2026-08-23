@@ -82,6 +82,7 @@ import {
   requestReadinessDestination,
 } from "@/lib/navigation";
 import { sanitizeUserFacingDictationMessage } from "@/lib/dictation-ui-message";
+import { invoke } from "@/lib/electron";
 import { speakTextAloud, stopSpeakingText } from "@/lib/text-to-speech";
 import { useToast } from "@/components/toast";
 import { Button } from "@/components/ui/button";
@@ -557,9 +558,17 @@ function getDictationPhaseSummary(
     "Plainsong is ready for the next capture.";
 
   switch (phase) {
+    case "preparing":
+      return {
+        title: "Loading local model",
+        detail:
+          message?.trim() ||
+          "Plainsong is preparing the selected model before it opens the microphone.",
+        tone: "active",
+      };
     case "primed":
       return {
-        title: "Mic primed",
+        title: "Model primed",
         detail:
           message?.trim() ||
           "The model is loaded and Plainsong is about to listen.",
@@ -669,6 +678,18 @@ export function DictationView() {
   const [fallbackStatus, setFallbackStatus] = useState<string | null>(null);
   const [pasteStatus, setPasteStatus] = useState<string | null>(null);
   const [startupLatencyMs, setStartupLatencyMs] = useState<number | null>(null);
+  const [acknowledgementLatencyMs, setAcknowledgementLatencyMs] = useState<
+    number | null
+  >(null);
+  const [captureReadyLatencyMs, setCaptureReadyLatencyMs] = useState<
+    number | null
+  >(null);
+  const [firstStablePartialLatencyMs, setFirstStablePartialLatencyMs] = useState<
+    number | null
+  >(null);
+  const [finalTranscriptLatencyMs, setFinalTranscriptLatencyMs] = useState<
+    number | null
+  >(null);
   const [latencyMs, setLatencyMs] = useState<number | null>(null);
   const [insertLatencyMs, setInsertLatencyMs] = useState<number | null>(null);
   const [endToEndMs, setEndToEndMs] = useState<number | null>(null);
@@ -693,7 +714,6 @@ export function DictationView() {
     null,
   );
   const [contextChars, setContextChars] = useState<number | null>(null);
-  const [dictationError, setDictationError] = useState<string | null>(null);
   const [saveToInbox, setSaveToInbox] = useState(true);
   const [dictationProfile, setDictationProfile] = useState<
     "normal_speed" | "power_rewrite"
@@ -977,6 +997,7 @@ export function DictationView() {
   const isDictationCaptureLive =
     dictationPhase === "primed" || dictationPhase === "recording";
   const isDictationBusy =
+    dictationPhase === "preparing" ||
     dictationPhase === "primed" ||
     dictationPhase === "recording" ||
     dictationPhase === "stopping" ||
@@ -1283,6 +1304,10 @@ export function DictationView() {
       Boolean(appTarget) ||
       Boolean(activationMatcher) ||
       contextChars !== null ||
+      acknowledgementLatencyMs !== null ||
+      captureReadyLatencyMs !== null ||
+      firstStablePartialLatencyMs !== null ||
+      finalTranscriptLatencyMs !== null ||
       startupLatencyMs !== null ||
       latencyMs !== null ||
       insertLatencyMs !== null ||
@@ -1369,6 +1394,30 @@ export function DictationView() {
       endToEndMs !== null
         ? { label: "Total time", value: formatDurationMetric(endToEndMs) ?? "" }
         : null,
+      acknowledgementLatencyMs !== null
+        ? {
+            label: "Acknowledged",
+            value: formatDurationMetric(acknowledgementLatencyMs) ?? "",
+          }
+        : null,
+      captureReadyLatencyMs !== null
+        ? {
+            label: "Capture ready",
+            value: formatDurationMetric(captureReadyLatencyMs) ?? "",
+          }
+        : null,
+      firstStablePartialLatencyMs !== null
+        ? {
+            label: "First preview",
+            value: formatDurationMetric(firstStablePartialLatencyMs) ?? "",
+          }
+        : null,
+      finalTranscriptLatencyMs !== null
+        ? {
+            label: "Final transcript",
+            value: formatDurationMetric(finalTranscriptLatencyMs) ?? "",
+          }
+        : null,
       latencyMs !== null
         ? { label: "Transcribing", value: formatDurationMetric(latencyMs) ?? "" }
         : null,
@@ -1412,11 +1461,15 @@ export function DictationView() {
     };
   }, [
     activationMatcher,
+    acknowledgementLatencyMs,
     appTarget,
     commandApplied,
     contextChars,
+    captureReadyLatencyMs,
     endToEndMs,
     fallbackStatus,
+    finalTranscriptLatencyMs,
+    firstStablePartialLatencyMs,
     insertLatencyMs,
     insertionModeUsed,
     lastModelId,
@@ -2290,7 +2343,6 @@ export function DictationView() {
       setLastProviderModelLabel(payload.providerModelLabel);
     }
     if (payload.phase === "error") {
-      setDictationError(payload.message ?? "Dictation failed.");
     }
   }, [dictationStateEvent]);
 
@@ -2306,7 +2358,6 @@ export function DictationView() {
       setLatestCorrectionBaseline(text);
       setLatestResultDirty(false);
       setLatestLearnStatus(null);
-      setDictationError(null);
     }
     if (payload.actualProvider) {
       setLastProvider(payload.actualProvider);
@@ -2330,6 +2381,10 @@ export function DictationView() {
     setLastProviderModelLabel(payload.providerModelLabel ?? null);
     setLastResolvedHosting(payload.resolvedHosting ?? null);
     setStartupLatencyMs(payload.startupLatencyMs ?? null);
+    setAcknowledgementLatencyMs(payload.acknowledgementLatencyMs ?? null);
+    setCaptureReadyLatencyMs(payload.captureReadyLatencyMs ?? null);
+    setFirstStablePartialLatencyMs(payload.firstStablePartialLatencyMs ?? null);
+    setFinalTranscriptLatencyMs(payload.finalTranscriptLatencyMs ?? null);
     setLatencyMs(payload.latencyMs ?? null);
     setInsertLatencyMs(payload.insertLatencyMs ?? null);
     setEndToEndMs(payload.endToEndMs ?? null);
@@ -2374,16 +2429,17 @@ export function DictationView() {
 
   const handleStopDictation = async () => {
     try {
+      if (dictationPhase === "preparing") {
+        await invoke("force_stop_dictation");
+        return;
+      }
       const text = await stopDictation();
       if (text?.trim()) {
         setTranscribedText(text);
         setLatestCorrectionBaseline(text);
         setLatestResultDirty(false);
         setLatestLearnStatus(null);
-        setDictationError(null);
         void refetchDictationHistory();
-      } else {
-        setDictationError(null);
       }
     } catch (error) {
       const message =
@@ -2391,7 +2447,9 @@ export function DictationView() {
           error instanceof Error ? error.message : String(error),
           { phase: "error" },
         ) ?? "Dictation failed.";
-      setDictationError(message);
+      setDictationPhase("error");
+      setDictationPhaseMessage(message);
+      setDictationPhasePreview(null);
     }
   };
 
@@ -2403,7 +2461,6 @@ export function DictationView() {
       setDictationPhase("error");
       setDictationPhaseMessage(message);
       setDictationPhasePreview(null);
-      setDictationError(message);
       return;
     }
 
@@ -2414,7 +2471,6 @@ export function DictationView() {
     if (dictationRouteOverrideEnabled) {
       setNextCaptureRoutePreference(null);
     }
-    setDictationError(null);
     try {
       await startDictation({
         saveToInbox,
@@ -2437,7 +2493,6 @@ export function DictationView() {
       setDictationPhase("error");
       setDictationPhaseMessage(message);
       setDictationPhasePreview(null);
-      setDictationError(message);
     }
   };
 
@@ -3120,13 +3175,41 @@ export function DictationView() {
       ? "Checking setup"
       : dictationRouteReadiness?.status === "downloading"
         ? "Model downloading"
+        : dictationRouteReadiness?.status === "missing"
+          ? "Dictation has no model yet"
         : "Setup needed";
   const dictationUnavailableDetail = dictationRouteReadiness
     ? dictationRouteReadiness.status === "downloading"
-      ? `${dictationRouteReadiness.routeLabel} is still downloading. Re-check it above when the transfer finishes.`
-      : `${dictationRouteReadiness.routeLabel} must be downloaded before capture can start.`
+      ? `${dictationRouteReadiness.routeLabel} is still downloading. Use Re-check model when the transfer finishes.`
+      : routeDownloadError
+        ? `Download failed: ${routeDownloadError}`
+        : `${dictationRouteReadiness.routeLabel} is not on this Mac. Download it before capture can start.`
     : dictationReadiness.cause?.message ??
       "Plainsong could not confirm that dictation is ready.";
+  const dictationUnavailableActionLabel = dictationRouteReadiness
+    ? dictationRouteReadiness.status === "missing"
+      ? routeDownloadBusy
+        ? "Downloading…"
+        : `Download ${dictationRouteReadiness.providerLabel}`
+      : "Re-check model"
+    : dictationReadiness.cause?.action.label ?? "Re-check setup";
+  const handleDictationUnavailableAction = () => {
+    if (dictationRouteReadiness?.status === "missing") {
+      void handleDownloadDictationRouteModel();
+      return;
+    }
+    if (dictationRouteReadiness?.status === "downloading") {
+      void refreshDictationRouteReadiness();
+      return;
+    }
+    if (dictationReadiness.cause) {
+      requestReadinessDestination(
+        dictationReadiness.cause.action.destination,
+      );
+      return;
+    }
+    void refreshProductReadiness();
+  };
 
   return (
     <div className="h-full flex flex-col">
@@ -3158,110 +3241,6 @@ export function DictationView() {
 
       <ScrollArea className="flex-1">
         <div className="p-6 max-w-4xl mx-auto space-y-6">
-          {dictationReadiness.state !== "ready" &&
-          !dictationRouteReadiness ? (
-            <div
-              role={
-                dictationReadiness.state === "unknown" ? "status" : "alert"
-              }
-              aria-label="Dictation needs attention"
-              className="rounded-md border border-rust/40 bg-rust/10 px-4 py-3"
-            >
-              <div className="flex flex-wrap items-start justify-between gap-3">
-                <div className="flex min-w-0 items-start gap-2.5">
-                  <span
-                    className="neume neume-rust mt-1 shrink-0"
-                    aria-hidden="true"
-                  />
-                  <div className="min-w-0">
-                    <p className="text-sm font-medium text-rust">
-                      Dictation needs attention
-                    </p>
-                    <p className="mt-1 text-sm leading-6 text-rust">
-                      {dictationReadiness.cause?.message ??
-                        "Plainsong could not confirm that dictation is ready."}
-                    </p>
-                  </div>
-                </div>
-                {dictationReadiness.cause ? (
-                  <Button
-                    variant="outline"
-                    size="sm"
-                    onClick={() =>
-                      requestReadinessDestination(
-                        dictationReadiness.cause!.action.destination,
-                      )
-                    }
-                  >
-                    {dictationReadiness.cause.action.label}
-                  </Button>
-                ) : null}
-              </div>
-            </div>
-          ) : null}
-
-          {dictationRouteReadiness && (
-            <div
-              role="alert"
-              className="rounded-md border border-rust/40 bg-rust/10 px-4 py-3"
-            >
-              <div className="flex flex-wrap items-start justify-between gap-3">
-                <div className="flex min-w-0 items-start gap-2.5">
-                  <span
-                    className="neume neume-rust mt-1 shrink-0"
-                    aria-hidden="true"
-                  />
-                  <div className="min-w-0">
-                    <p className="text-sm font-medium text-rust">
-                      {dictationRouteReadiness.status === "downloading"
-                        ? "The dictation model is still downloading"
-                        : "Dictation has no model yet"}
-                    </p>
-                    <p className="mt-1 text-sm text-rust">
-                      {dictationRouteReadiness.status === "downloading"
-                        ? `${dictationRouteReadiness.routeLabel} is still coming down. Until it finishes, ${hotkeyLabel} does nothing.`
-                        : `${dictationRouteReadiness.routeLabel} is not on this Mac, so ${hotkeyLabel} does nothing at all. Download it once and dictation works offline.`}
-                    </p>
-                    {routeDownloadError ? (
-                      <p className="mt-1 text-sm text-rust">
-                        Download failed: {routeDownloadError}
-                      </p>
-                    ) : null}
-                  </div>
-                </div>
-                <div className="flex shrink-0 flex-wrap items-center gap-2">
-                  {dictationRouteReadiness.status === "missing" ? (
-                    <Button
-                      variant="outline"
-                      size="sm"
-                      disabled={routeDownloadBusy}
-                      onClick={() => void handleDownloadDictationRouteModel()}
-                    >
-                      <Download className="mr-2 h-4 w-4" />
-                      {routeDownloadBusy
-                        ? "Downloading…"
-                        : `Download ${dictationRouteReadiness.providerLabel}`}
-                    </Button>
-                  ) : null}
-                  <Button
-                    variant="outline"
-                    size="sm"
-                    onClick={() => void refreshDictationRouteReadiness()}
-                  >
-                    <RefreshCw className="mr-2 h-4 w-4" />
-                    Re-check
-                  </Button>
-                </div>
-              </div>
-            </div>
-          )}
-
-          {dictationError && (
-            <div className="rounded-md border border-rust/40 bg-rust/10 px-4 py-3">
-              <p className="text-sm text-rust">{dictationError}</p>
-            </div>
-          )}
-
           <DictationCaptureHero
             phase={dictationPhase}
             phaseTitle={dictationPhaseSummary.title}
@@ -3272,6 +3251,11 @@ export function DictationView() {
             isAvailable={dictationAvailable}
             unavailableTitle={dictationUnavailableTitle}
             unavailableDetail={dictationUnavailableDetail}
+            unavailableActionLabel={dictationUnavailableActionLabel}
+            unavailableActionBusy={routeDownloadBusy}
+            unavailableRole={
+              dictationReadiness.state === "unknown" ? "status" : "alert"
+            }
             formattedDuration={formattedDuration}
             hotkeyInstruction={hotkeyInstruction}
             hotkeyPressed={hotkeyPressed}
@@ -3283,6 +3267,7 @@ export function DictationView() {
             onStart={launchDictation}
             onStop={handleStopDictation}
             onReadSelectedText={() => void handleReadSelectedText()}
+            onUnavailableAction={handleDictationUnavailableAction}
           />
 
           {transcribedText && (

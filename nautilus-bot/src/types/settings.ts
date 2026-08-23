@@ -186,6 +186,9 @@ interface PrivacySettings {
    */
   meetingsAi: AiLaneSettings;
   exportRoot: string | null;
+  exportLocationId?: string | null;
+  exportLocationLabel?: string | null;
+  exportLocationApproved?: boolean;
   vaultInitialized: boolean;
   vaultSalt: string | null;
 }

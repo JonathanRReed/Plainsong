@@ -104,7 +104,7 @@ describe("model presets", () => {
     expect(presetDiskLabel(preset("light"))).toBe("781 MiB");
     // One model serving both lanes is counted once.
     expect(presetDiskLabel(preset("balanced"))).toBe("639 MiB");
-    expect(presetDiskLabel(preset("largest_models"))).toBe("3.1 GiB");
+    expect(presetDiskLabel(preset("largest_models"))).toBe("4.4 GiB");
   });
 
   it("states a downside for every preset", () => {

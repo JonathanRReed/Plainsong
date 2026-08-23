@@ -1,12 +1,17 @@
 import { EventEmitter } from "node:events";
 import { PassThrough } from "node:stream";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import {
+  finalizeMeetingWithinBudget,
+  nextActiveMeetingRecordingId,
+  resolveMeetingStopId,
+} from "../../electron/meeting-lifecycle";
 
 const mocks = vi.hoisted(() => ({
   handle: vi.fn(),
 }));
 
-vi.mock("electron", () => ({
+vi.mock("electron/main", () => ({
   default: {},
   ipcMain: {
     handle: mocks.handle,
@@ -20,6 +25,68 @@ type FakeChild = EventEmitter & {
   killed: boolean;
   kill: ReturnType<typeof vi.fn>;
 };
+
+describe("Electron meeting lifecycle mirror", () => {
+  it("does not clear the active identifier when Stop enters processing", () => {
+    expect(
+      nextActiveMeetingRecordingId("meeting-1", {
+        phase: "processing",
+        recordingId: "meeting-1",
+      }),
+    ).toBe("meeting-1");
+  });
+
+  it("clears only after a confirmed terminal event", () => {
+    expect(
+      nextActiveMeetingRecordingId("meeting-1", {
+        phase: "ready",
+        recordingId: "meeting-1",
+      }),
+    ).toBeNull();
+    expect(
+      nextActiveMeetingRecordingId("meeting-2", {
+        phase: "ready",
+        recordingId: "meeting-1",
+      }),
+    ).toBe("meeting-2");
+  });
+
+  it("does not let background processing replace a live capture identifier", () => {
+    expect(
+      nextActiveMeetingRecordingId("meeting-live", {
+        phase: "processing",
+        recordingId: "meeting-retry",
+      }),
+    ).toBe("meeting-live");
+  });
+
+  it("uses the caller identifier for idempotent duplicate Stop", () => {
+    expect(resolveMeetingStopId(null, "meeting-1")).toBe("meeting-1");
+    expect(() => resolveMeetingStopId("meeting-2", "meeting-1")).toThrow(
+      "does not match",
+    );
+  });
+
+  it("distinguishes a confirmed stop, timeout, and immediate stop failure", async () => {
+    await expect(
+      finalizeMeetingWithinBudget(async () => undefined, 25),
+    ).resolves.toEqual({ status: "confirmed" });
+
+    await expect(
+      finalizeMeetingWithinBudget(
+        () => new Promise<void>(() => undefined),
+        1,
+      ),
+    ).resolves.toEqual({ status: "timed_out" });
+
+    const error = new Error("audio finalization failed");
+    await expect(
+      finalizeMeetingWithinBudget(async () => {
+        throw error;
+      }, 25),
+    ).resolves.toEqual({ status: "failed", error });
+  });
+});
 
 function fakeChildProcess(): FakeChild {
   const child = new EventEmitter() as FakeChild;
@@ -147,6 +214,43 @@ describe("IpcBridge shutdown lifecycle", () => {
     expect(spawnProcess).toHaveBeenCalledTimes(2);
     consoleWarn.mockRestore();
   });
+
+  it("rejects duplicate privileged work before sending a second request", async () => {
+    const child = fakeChildProcess();
+    const { IpcBridge } = await import("../../electron/ipc-bridge");
+    const spawnProcess = vi.fn(
+      () => child,
+    ) as unknown as typeof import("node:child_process").spawn;
+    let firstRequestId: string | null = null;
+    replyToSidecarRequests(child, (request) => {
+      if (request.method === "download_whisper_model") {
+        firstRequestId = request.id;
+      }
+      return null;
+    });
+
+    const bridge = new IpcBridge("/tmp/plainsong-sidecar", spawnProcess);
+    bridge.start();
+    const first = bridge.invoke("download_whisper_model", {
+      modelName: "base.en",
+    });
+    await vi.advanceTimersByTimeAsync(0);
+
+    await expect(
+      bridge.invoke("download_whisper_model", { modelName: "base.en" }),
+    ).rejects.toThrow("SIDECAR_DUPLICATE");
+    expect(firstRequestId).not.toBeNull();
+
+    child.stdout.write(
+      `${JSON.stringify({
+        jsonrpc: "2.0",
+        id: firstRequestId,
+        result: null,
+      })}\n`,
+    );
+    await expect(first).resolves.toBeNull();
+    bridge.shutdown();
+  });
 });
 
 describe("IpcBridge crash-loop containment", () => {
@@ -157,6 +261,42 @@ describe("IpcBridge crash-loop containment", () => {
 
   afterEach(() => {
     vi.useRealTimers();
+  });
+
+  it("probes a replacement sidecar and announces recovery without a renderer request", async () => {
+    const firstChild = fakeChildProcess();
+    const replacementChild = fakeChildProcess();
+    const consoleWarn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const spawnProcess = vi
+      .fn()
+      .mockReturnValueOnce(firstChild)
+      .mockReturnValueOnce(replacementChild) as unknown as typeof import("node:child_process").spawn;
+    replyToSidecarRequests(replacementChild, (request) =>
+      request.method === "get_settings" ? { result: {} } : null,
+    );
+
+    const { IpcBridge } = await import("../../electron/ipc-bridge");
+    const bridge = new IpcBridge("/tmp/plainsong-sidecar", spawnProcess);
+    const runtimeEvents: Array<{ name: string; payload: unknown }> = [];
+    bridge.onEvent((name, payload) => runtimeEvents.push({ name, payload }));
+    bridge.start();
+
+    firstChild.emit("exit", 1, null);
+    await vi.advanceTimersByTimeAsync(1_000);
+    replacementChild.emit("spawn");
+    await vi.advanceTimersByTimeAsync(0);
+
+    expect(runtimeEvents).toContainEqual({
+      name: "sidecar-runtime-changed",
+      payload: { ready: false, reason: "Sidecar process exited (code=1, signal=null)" },
+    });
+    expect(runtimeEvents).toContainEqual({
+      name: "sidecar-runtime-changed",
+      payload: { ready: true },
+    });
+
+    bridge.shutdown();
+    consoleWarn.mockRestore();
   });
 
   it("stops respawning a sidecar that starts and immediately dies", async () => {

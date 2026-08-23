@@ -1,4 +1,5 @@
 #!/usr/bin/env node
+import crypto from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
 import { spawnSync } from "node:child_process";
@@ -99,6 +100,44 @@ function canonicalExistingPath(value) {
     return null;
   }
 }
+
+function componentDigestsForApp(bundlePath) {
+  if (!bundlePath) return null;
+  const components = {
+    appAsar: path.join(bundlePath, "Contents", "Resources", "app.asar"),
+    sidecar: path.join(
+      bundlePath,
+      "Contents",
+      "Resources",
+      "sidecar",
+      "plainsong-sidecar",
+    ),
+    shortcutHelper: path.join(
+      bundlePath,
+      "Contents",
+      "Resources",
+      "shortcut-helper",
+      "plainsong-native-shortcut-helper",
+    ),
+    speechHelper: path.join(
+      bundlePath,
+      "Contents",
+      "Resources",
+      "sidecar",
+      "nautilus-macos-speech-helper-aarch64-apple-darwin",
+    ),
+  };
+  return Object.fromEntries(
+    Object.entries(components).map(([name, filePath]) => [
+      name,
+      fs.existsSync(filePath) && fs.statSync(filePath).isFile()
+        ? crypto.createHash("sha256").update(fs.readFileSync(filePath)).digest("hex")
+        : null,
+    ]),
+  );
+}
+
+const candidateComponents = componentDigestsForApp(candidateAppPath);
 
 function writeText(filePath, body) {
   fs.mkdirSync(path.dirname(filePath), { recursive: true });
@@ -298,6 +337,8 @@ function verifyLinkedInsertionEvidence(row) {
     artifactAppPath,
     artifactSidecarPath,
     candidateAppPath,
+    artifactComponents: artifact?.candidateComponents,
+    candidateComponents,
     equivalence: componentEquivalence,
   });
   const canonicalVerifierPassed = result.status === 0;

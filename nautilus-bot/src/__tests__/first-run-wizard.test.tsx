@@ -258,11 +258,12 @@ describe("FirstRunWizard", () => {
     expect(
       await screen.findByRole("heading", { name: /dictation model/i })
     ).toBeInTheDocument();
-    expect(screen.getByText(/^step 1 of 4$/i)).toBeInTheDocument();
+    expect(screen.getByText(/^step 1 of 5$/i)).toBeInTheDocument();
     expect(
       screen.getByRole("button", { name: /download and continue/i })
     ).toBeInTheDocument();
     expect(screen.getByText(/downloaded on demand/i)).toBeInTheDocument();
+    expect(screen.getByText("2.8 GiB")).toBeInTheDocument();
     expect(screen.queryByText(/already ships with/i)).not.toBeInTheDocument();
   });
 
@@ -274,7 +275,7 @@ describe("FirstRunWizard", () => {
     });
     await waitFor(() => expect(modelHeading).toHaveFocus());
     expect(screen.getByRole("status")).toHaveTextContent(
-      "Step 1 of 4: Dictation model",
+      "Step 1 of 5: Dictation model",
     );
 
     await clickPrimary(/skip model download/i);
@@ -284,7 +285,7 @@ describe("FirstRunWizard", () => {
     });
     await waitFor(() => expect(tryHeading).toHaveFocus());
     expect(screen.getByRole("status")).toHaveTextContent(
-      "Step 2 of 4: Try dictation here",
+      "Step 2 of 5: Try dictation here",
     );
   });
 
@@ -409,6 +410,10 @@ describe("FirstRunWizard", () => {
 
     await clickPrimary(/^continue$/i);
     await clickPrimary(/^continue$/i);
+    expect(
+      await screen.findByRole("heading", { name: /meeting setup/i }),
+    ).toBeInTheDocument();
+    await clickPrimary(/download meeting model/i);
 
     expect(
       await screen.findByText(/the model download was skipped/i)
@@ -420,7 +425,7 @@ describe("FirstRunWizard", () => {
     await clickPrimary(/start using plainsong/i);
     expect(onComplete).toHaveBeenCalledWith({
       markOnboardingComplete: true,
-      meetingsCompleted: false,
+      meetingsCompleted: true,
     });
     expect(downloadAsrModels).not.toHaveBeenCalled();
   });
@@ -521,12 +526,23 @@ describe("FirstRunWizard", () => {
     await clickPrimary(/download and continue/i);
     await clickPrimary(/^continue$/i);
     await clickPrimary(/^continue$/i);
+    expect(
+      await screen.findByRole("heading", { name: /meeting setup/i }),
+    ).toBeInTheDocument();
+    await clickPrimary(/download meeting model/i);
+    expect(
+      await screen.findByRole("heading", { name: /^ready$/i }),
+    ).toBeInTheDocument();
+    expect(screen.getByText("Meetings")).toBeInTheDocument();
+    expect(
+      screen.getByText(/both ways of working stay local by default/i),
+    ).toBeInTheDocument();
     await clickPrimary(/start using plainsong/i);
 
     await waitFor(() => {
       expect(onComplete).toHaveBeenCalledWith({
         markOnboardingComplete: true,
-        meetingsCompleted: false,
+        meetingsCompleted: true,
       });
     });
 
@@ -539,6 +555,109 @@ describe("FirstRunWizard", () => {
     // (set from Settings) is left untouched, not silently reset to toggle.
     expect(currentSettings.transcription.dictationPushToTalk).toBe(true);
     expect(currentSettings.transcription.dictationHandsFreeEnabled).toBe(false);
+  });
+
+  it("downloads a meeting-grade model before full onboarding advances", async () => {
+    const asrBackend = await import("@/lib/backend/asr");
+    const getAsrProviders = vi.mocked(asrBackend.getAsrProviders);
+    const downloadAsrModels = vi.mocked(asrBackend.downloadAsrModels);
+    let meetingModelDownloaded = false;
+    const meetingProviders = (): AsrProviderInfo[] =>
+      providers.map((provider) =>
+        provider.providerType === "distil_whisper"
+          ? {
+              ...provider,
+              downloadStatus: meetingModelDownloaded
+                ? ("Downloaded" as const)
+                : ("NotDownloaded" as const),
+              runtimeStatus: meetingModelDownloaded
+                ? ("ready" as const)
+                : ("missing_model" as const),
+            }
+          : provider
+      );
+    getAsrProviders.mockImplementation(async () => meetingProviders());
+    downloadAsrModels.mockImplementation(async (providerType) => {
+      if (providerType === "distil_whisper") {
+        meetingModelDownloaded = true;
+      }
+    });
+
+    render(<FirstRunWizard onComplete={vi.fn()} />);
+
+    await clickPrimary(/skip model download/i);
+    await clickPrimary(/^continue$/i);
+    await clickPrimary(/^continue$/i);
+    expect(
+      await screen.findByRole("heading", { name: /meeting setup/i })
+    ).toBeInTheDocument();
+
+    await clickPrimary(/download meeting model/i);
+
+    expect(downloadAsrModels).toHaveBeenCalledWith("distil_whisper");
+    expect(
+      await screen.findByRole("heading", { name: /^ready$/i })
+    ).toBeInTheDocument();
+    expect(currentSettings.transcription.useSharedAsrSelection).toBe(false);
+    expect(currentSettings.transcription.meetingProvider).toBe(
+      "distil_whisper"
+    );
+    expect(currentSettings.transcription.meetingModelId).toBe(
+      "distil-large-v3"
+    );
+  });
+
+  it("keeps meeting setup open and offers a retry after a failed download", async () => {
+    const asrBackend = await import("@/lib/backend/asr");
+    const getAsrProviders = vi.mocked(asrBackend.getAsrProviders);
+    const downloadAsrModels = vi.mocked(asrBackend.downloadAsrModels);
+    let meetingModelDownloaded = false;
+    getAsrProviders.mockImplementation(async (): Promise<AsrProviderInfo[]> =>
+      providers.map((provider) =>
+        provider.providerType === "distil_whisper"
+          ? {
+              ...provider,
+              downloadStatus: meetingModelDownloaded
+                ? "Downloaded"
+                : "NotDownloaded",
+              runtimeStatus: meetingModelDownloaded
+                ? "ready"
+                : "missing_model",
+            }
+          : provider
+      )
+    );
+    downloadAsrModels
+      .mockRejectedValueOnce(new Error("Network unavailable"))
+      .mockImplementationOnce(async (providerType) => {
+        if (providerType === "distil_whisper") {
+          meetingModelDownloaded = true;
+        }
+      });
+
+    render(<FirstRunWizard onComplete={vi.fn()} />);
+
+    await clickPrimary(/skip model download/i);
+    await clickPrimary(/^continue$/i);
+    await clickPrimary(/^continue$/i);
+    await screen.findByRole("heading", { name: /meeting setup/i });
+    await clickPrimary(/download meeting model/i);
+
+    expect(
+      await screen.findByText(
+        /meeting model download failed: network unavailable/i
+      )
+    ).toBeInTheDocument();
+    expect(
+      screen.getByRole("heading", { name: /meeting setup/i })
+    ).toBeInTheDocument();
+
+    await clickPrimary(/retry meeting model download/i);
+
+    expect(downloadAsrModels).toHaveBeenCalledTimes(2);
+    expect(
+      await screen.findByRole("heading", { name: /^ready$/i })
+    ).toBeInTheDocument();
   });
 
   it("keeps a failed local model download on the model step until retry succeeds", async () => {
@@ -795,6 +914,42 @@ describe("FirstRunWizard", () => {
     expect(currentSettings.transcription.useSharedAsrSelection).toBe(false);
     expect(currentSettings.transcription.meetingModelId).toBe("distil-large-v3");
     expect(storage.get(MEETING_ONBOARDING_STORAGE_KEY)).toBe("true");
+  });
+
+  it("finishes meeting setup when settings save but the local marker cannot be stored", async () => {
+    const onComplete = vi.fn();
+    const backend = await import("@/lib/backend/settings");
+
+    currentSettings.transcription.useSharedAsrSelection = false;
+    currentSettings.transcription.meetingProvider = "distil_whisper";
+    currentSettings.transcription.meetingModelId = "distil-large-v3";
+    vi.stubGlobal("localStorage", {
+      getItem: (key: string) => storage.get(key) ?? null,
+      setItem: () => {
+        throw new Error("storage unavailable");
+      },
+      removeItem: (key: string) => {
+        storage.delete(key);
+      },
+      clear: () => {
+        storage.clear();
+      },
+    });
+
+    render(<FirstRunWizard mode="meetings" onComplete={onComplete} />);
+    const finishButton = await screen.findByRole("button", {
+      name: /finish meeting setup/i,
+    });
+    await waitFor(() => expect(finishButton).toBeEnabled());
+    fireEvent.click(finishButton);
+
+    await waitFor(() => {
+      expect(backend.saveSettings).toHaveBeenCalledTimes(1);
+      expect(onComplete).toHaveBeenCalledWith({
+        markOnboardingComplete: false,
+        meetingsCompleted: true,
+      });
+    });
   });
 
   it("keeps meeting choices and the wizard open when saving fails, then clears the error on retry", async () => {

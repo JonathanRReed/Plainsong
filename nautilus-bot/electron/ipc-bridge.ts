@@ -1,8 +1,8 @@
-import { ipcMain, type IpcMainInvokeEvent } from "electron";
+import { ipcMain, type IpcMainInvokeEvent } from "electron/main";
 import { spawn, ChildProcess } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { createInterface } from "node:readline";
-import { getCommandTimeoutMs } from "./ipc-command-policy";
+import { getCommandTimeoutMs, getCommandWorkKey } from "./ipc-command-policy";
 import { buildSidecarEnv } from "./sidecar-env";
 import {
   isExpectedSidecarStdinClose,
@@ -64,6 +64,7 @@ const ALLOWED_RENDERER_COMMANDS = new Set<string>([
   "ask_memory",
   "benchmark_asr_providers",
   "benchmark_asr_providers_bytes",
+  "begin_meeting_capture",
   "cancel_analysis_run",
   "capture_selected_text_for_playback",
   "check_for_updates",
@@ -89,6 +90,7 @@ const ALLOWED_RENDERER_COMMANDS = new Set<string>([
   "download_silero_vad_model",
   "download_whisper_model",
   "edit_transcript_speaker_turn",
+  "end_meeting_capture",
   "export_backup_archive",
   "export_dictation_dictionary_csv",
   "export_recording",
@@ -189,6 +191,9 @@ const ALLOWED_RENDERER_COMMANDS = new Set<string>([
   "save_backup_config",
   "save_settings",
   "search_transcripts",
+  "select_backup_location",
+  "select_cloud_backup_location",
+  "select_export_location",
   "set_asr_provider_model",
   "set_default_asr_provider",
   "set_provider_secret",
@@ -196,9 +201,7 @@ const ALLOWED_RENDERER_COMMANDS = new Set<string>([
   "set_update_channel",
   "smoke_test_cursor_insert",
   "start_dictation",
-  "start_recording",
   "stop_dictation",
-  "stop_recording",
   "summarize_recording",
   "summarize_recording_grounded",
   "sync_backup_to_cloud",
@@ -221,6 +224,10 @@ const ALLOWED_RENDERER_COMMANDS = new Set<string>([
   "verify_system_audio_setup",
 ]);
 
+export function isRendererCommandAllowed(command: string): boolean {
+  return ALLOWED_RENDERER_COMMANDS.has(command);
+}
+
 
 export class IpcBridge {
   private sidecarPath: string;
@@ -237,6 +244,8 @@ export class IpcBridge {
   private restartAttempts = 0;
   private restartTimer: ReturnType<typeof setTimeout> | null = null;
   private readonly maxRestarts = 5;
+  private readonly inFlightWorkKeys = new Set<string>();
+  private sidecarHealthy = false;
 
   constructor(sidecarPath: string, spawnProcess: typeof spawn = spawn) {
     this.sidecarPath = sidecarPath;
@@ -361,12 +370,21 @@ export class IpcBridge {
       // reset the counter on every cycle and restarted forever. The counter is
       // cleared in handleSidecarMessage() on the first well-formed JSON-RPC
       // reply, which is the earliest evidence the sidecar is actually usable.
+      if (this.restartAttempts > 0) {
+        void this.invokeSidecar("get_settings", {}).catch((error) => {
+          if (!this.shuttingDown) {
+            console.warn(`[sidecar] replacement health probe failed: ${error}`);
+          }
+        });
+      }
     });
   }
 
   // Shared termination path for both 'exit' and 'error': schedule a backoff
   // restart and reject all pending requests with a clear message.
   private handleSidecarTermination(reason: string): void {
+    this.sidecarHealthy = false;
+    this.eventCallback?.("sidecar-runtime-changed", { ready: false, reason });
     // A single dead process can emit both 'error' and 'exit'. Without this
     // guard each one schedules its own restart, so the pool of live sidecars
     // grows instead of being replaced.
@@ -403,6 +421,10 @@ export class IpcBridge {
   }
 
   private handleSidecarMessage(msg: JsonRpcResponse): void {
+    if (!this.sidecarHealthy) {
+      this.sidecarHealthy = true;
+      this.eventCallback?.("sidecar-runtime-changed", { ready: true });
+    }
     // First readable message from this generation: the sidecar is talking, so
     // the backoff budget has been earned back. See the 'spawn' handler.
     if (this.restartAttempts > 0) {
@@ -476,15 +498,27 @@ export class IpcBridge {
     });
   }
 
-  invoke(command: string, args?: unknown): Promise<unknown> {
-    return retryOnceAfterMicrophonePreparationTimeout(
-      command,
-      () => this.invokeSidecar(command, args),
-      () =>
-        this.recycleSidecarAfterFault(
-          "microphone stream preparation timed out",
-        ),
-    );
+  async invoke(command: string, args?: unknown): Promise<unknown> {
+    const workKey = getCommandWorkKey(command, args);
+    if (workKey && this.inFlightWorkKeys.has(workKey)) {
+      throw new Error(
+        `SIDECAR_DUPLICATE: ${command} is already running for this target.`,
+      );
+    }
+    if (workKey) this.inFlightWorkKeys.add(workKey);
+    try {
+      return await retryOnceAfterMicrophonePreparationTimeout(
+        command,
+        () => this.invokeSidecar(command, args),
+        (remainingMs) =>
+          this.recycleSidecarAfterFault(
+            "microphone stream preparation timed out",
+            remainingMs,
+          ),
+      );
+    } finally {
+      if (workKey) this.inFlightWorkKeys.delete(workKey);
+    }
   }
 
   private waitForReplacementSidecar(
@@ -516,13 +550,19 @@ export class IpcBridge {
     });
   }
 
-  private async recycleSidecarAfterFault(reason: string): Promise<void> {
+  private async recycleSidecarAfterFault(
+    reason: string,
+    recoveryBudgetMs: number,
+  ): Promise<void> {
     const sidecarProcess = this.process;
     if (!sidecarProcess || sidecarProcess.killed) {
       throw new Error("The audio sidecar is not available to restart");
     }
     console.warn(`[sidecar] recycling unhealthy process: ${reason}`);
-    const replacement = this.waitForReplacementSidecar(sidecarProcess);
+    const replacement = this.waitForReplacementSidecar(
+      sidecarProcess,
+      Math.max(1, Math.min(4_000, recoveryBudgetMs)),
+    );
     if (!sidecarProcess.kill("SIGTERM")) {
       throw new Error("Failed to stop the unhealthy audio sidecar");
     }
@@ -542,7 +582,7 @@ export class IpcBridge {
         throw new Error("Renderer command rejected: untrusted sender");
       }
 
-      if (!ALLOWED_RENDERER_COMMANDS.has(command)) {
+      if (!isRendererCommandAllowed(command)) {
         throw new Error(`Renderer command is not allowed: ${command}`);
       }
 

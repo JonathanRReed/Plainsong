@@ -2,9 +2,14 @@
 import fs from "node:fs";
 import path from "node:path";
 import { spawn, spawnSync } from "node:child_process";
+import { createPackagedQaProfile } from "./lib/packaged-qa-profile.mjs";
 
 const repoRoot = path.resolve(import.meta.dirname, "..");
 const args = process.argv.slice(2);
+const qaProfile = createPackagedQaProfile({
+  args,
+  prefix: "plainsong-idle-cpu-qa-",
+});
 
 function valueFor(name, fallback = null) {
   const index = args.indexOf(name);
@@ -187,11 +192,12 @@ async function run() {
 
   const stdout = [];
   const stderr = [];
-  const child = spawn(appExecutablePath, [], {
+  const child = spawn(appExecutablePath, qaProfile.appArgs, {
     cwd: repoRoot,
     stdio: ["ignore", "pipe", "pipe"],
     env: {
       ...process.env,
+      ...qaProfile.env,
       ELECTRON_ENABLE_LOGGING: "1",
       PLAINSONG_QA_IDLE_CPU: "1",
     },

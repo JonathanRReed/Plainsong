@@ -142,6 +142,8 @@ async function main() {
       viteProcess = spawnChild("bun", [
         "x",
         "vite",
+        "--configLoader",
+        "runner",
         "--host",
         devServer.hostname,
         "--port",
@@ -152,7 +154,13 @@ async function main() {
     }
   } else {
     console.log(`[dev] Building renderer for file mode at ${rendererEntryPath}`);
-    const buildProcess = spawnChild("bun", ["x", "vite", "build"]);
+    const buildProcess = spawnChild("bun", [
+      "x",
+      "vite",
+      "build",
+      "--configLoader",
+      "runner",
+    ]);
     await waitForExit(buildProcess, "Vite build");
 
     if (!fs.existsSync(rendererEntryPath)) {

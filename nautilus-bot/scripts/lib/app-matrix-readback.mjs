@@ -345,6 +345,26 @@ JSON.stringify({
   }
 }
 
+function setFocusedAccessibilityValue(appName, value) {
+  const encodedName = JSON.stringify(String(appName ?? ""));
+  const encodedValue = JSON.stringify(String(value ?? ""));
+  const script = `
+const systemEvents = Application("System Events");
+const process = systemEvents.processes.byName(${encodedName});
+if (!process.exists()) {
+  throw new Error("Application process is not running");
+}
+const focused = process.attributes.byName("AXFocusedUIElement").value();
+focused.value = ${encodedValue};
+`;
+  const result = runProcess("osascript", ["-l", "JavaScript", "-e", script]);
+  return {
+    ok: result.status === 0,
+    status: result.status,
+    error: result.stderr || result.spawnError || null,
+  };
+}
+
 function openWithApp({ bundleId, appName, argument }) {
   if (bundleId) {
     const byBundle = runProcess("open", argument ? ["-b", bundleId, argument] : ["-b", bundleId]);
@@ -852,11 +872,14 @@ function nativeAccessibilityReadBack(options = {}) {
     targetLabel = accessibilityApp || "the target application",
     verifySurfaceIdentity = null,
     expectedRoles = ["AXTextArea", "AXTextField"],
+    sampleText = "",
+    cleanupSettleMs = 400,
   } = options;
 
   let frontmostAtPrepare = null;
   let preparedElement = null;
   let surfaceIdentity = null;
+  let lastObservedValue = null;
 
   function readOrBlocked(phase) {
     const read = readFocusedAccessibilityElement(accessibilityApp);
@@ -1036,10 +1059,11 @@ function nativeAccessibilityReadBack(options = {}) {
         };
       }
 
+      lastObservedValue = normalizeReadBackValue(observedElement.value);
       return {
         ok: true,
         blockedReason: null,
-        observedValue: normalizeReadBackValue(observedElement.value),
+        observedValue: lastObservedValue,
         observedValueRaw: observedElement.value,
         evidence: {
           frontmostAtPrepare,
@@ -1056,11 +1080,102 @@ function nativeAccessibilityReadBack(options = {}) {
     },
 
     async cleanup() {
+      const expected = normalizeReadBackValue(sampleText);
+      if (!expected || lastObservedValue !== expected) {
+        return {
+          targetSurfaceRestored: false,
+          reason:
+            "The harness did not machine-read the exact inserted sample, so it refused to " +
+            "select and delete text it could not prove belonged to this run.",
+        };
+      }
+
+      const gate = frontmostGate({
+        expectedBundleIds,
+        appLabel: targetLabel,
+        phase: "before clearing the inserted sample",
+      });
+      if (gate.blockedReason) {
+        return {
+          targetSurfaceRestored: false,
+          reason: gate.blockedReason,
+          frontmostAtCleanup: gate.frontmost,
+        };
+      }
+
+      const before = readOrBlocked("before cleanup");
+      const sameElement =
+        before.ok &&
+        (!preparedElement?.identifier ||
+          !before.read.element.identifier ||
+          preparedElement.identifier === before.read.element.identifier);
+      const stillOwnsExactSample =
+        before.ok && normalizeReadBackValue(before.read.element.value) === expected;
+      if (!sameElement || !stillOwnsExactSample) {
+        return {
+          targetSurfaceRestored: false,
+          reason:
+            "The focused field changed or no longer contained the exact inserted sample, so the " +
+            "harness refused to delete text from it.",
+          frontmostAtCleanup: gate.frontmost,
+          focusedRole: before.read?.element?.role ?? null,
+          focusedIdentifier: before.read?.element?.identifier ?? null,
+        };
+      }
+
+      const selectAll = pressKeystroke("a", ["command"]);
+      const selectBlocked = keystrokeBlockedReason("Cmd+A (select inserted sample for cleanup)", selectAll);
+      if (selectBlocked) {
+        return { targetSurfaceRestored: false, reason: selectBlocked };
+      }
+      await sleep(cleanupSettleMs);
+      const remove = pressKeyCode(KEY_CODE_DELETE);
+      const removeBlocked = keystrokeBlockedReason("Delete (remove inserted sample)", remove);
+      if (removeBlocked) {
+        return { targetSurfaceRestored: false, reason: removeBlocked };
+      }
+      await sleep(cleanupSettleMs);
+
+      let after = readOrBlocked("after cleanup");
+      let restored = after.ok && normalizeReadBackValue(after.read.element.value) === "";
+      let directAccessibilityFallback = null;
+
+      // Some native editors accept the cleanup keystrokes but do not apply them to the AX-focused
+      // field. A direct AX value reset is safe only after the same field has been re-read and is
+      // still proven to contain this run's exact nonce-bound sample. Never use it for an unknown
+      // or changed value.
+      const fallbackStillOwnsExactSample =
+        after.ok &&
+        (!preparedElement?.identifier ||
+          !after.read.element.identifier ||
+          preparedElement.identifier === after.read.element.identifier) &&
+        normalizeReadBackValue(after.read.element.value) === expected;
+      if (!restored && fallbackStillOwnsExactSample) {
+        const write = setFocusedAccessibilityValue(accessibilityApp, "");
+        await sleep(cleanupSettleMs);
+        after = readOrBlocked("after direct accessibility cleanup");
+        restored = after.ok && normalizeReadBackValue(after.read.element.value) === "";
+        directAccessibilityFallback = {
+          attempted: true,
+          writeStatus: write.status,
+          writeError: write.error,
+          confirmedEmpty: restored,
+        };
+      }
       return {
-        mutatedByReadBack: false,
+        targetSurfaceRestored: restored,
+        removedExactSample: true,
+        postCleanupValueLength: after.ok ? after.read.element.value.length : null,
+        postCleanupValueSha256: after.ok ? sha256(after.read.element.value) : null,
+        selectAllStatus: selectAll.status,
+        deleteStatus: remove.status,
+        directAccessibilityFallback,
         note:
-          "The native accessibility strategy is read-only. It did not type a probe token or " +
-          "modify the clipboard.",
+          restored
+            ? directAccessibilityFallback
+              ? "System Events confirmed the same native text field was empty after the exact sample was cleared through the guarded direct-accessibility fallback."
+              : "System Events confirmed the same native text field was empty after the exact sample was selected and deleted."
+            : "The cleanup keystrokes completed, but System Events did not confirm an empty native text field afterward.",
       };
     },
   };
@@ -1116,9 +1231,11 @@ function clipboardSentinelReadBack(options = {}) {
   const sentinelPre = `PLAINSONG-READBACK-PRE-${nonce}`;
   const sentinelProbe = `PLAINSONG-READBACK-PROBE-${nonce}`;
   const sentinelPost = `PLAINSONG-READBACK-POST-${nonce}`;
+  const sentinelCleanup = `PLAINSONG-READBACK-CLEANUP-${nonce}`;
   // Alphanumeric on purpose: punctuation invites autocorrect, emoji substitution and markdown
   // transforms in Slack/Notion, any of which would break the exact comparison below.
   const probeToken = `plainsongprobe${nonce}`;
+  const cleanupProbeToken = `plainsongcleanup${nonce}`;
   let originalClipboard = null;
   let originalClipboardCaptured = false;
   let clipboardInfoBefore = null;
@@ -1127,6 +1244,7 @@ function clipboardSentinelReadBack(options = {}) {
   let probeTyped = false;
   let probeCleared = false;
   let probeUndo = null;
+  let lastObservedValue = null;
 
   /**
    * Seeds a sentinel, selects all, copies, and POLLS the pasteboard until it stops holding the
@@ -1553,10 +1671,11 @@ function clipboardSentinelReadBack(options = {}) {
       // Unchanged here is fail-safe in the honest direction: it can only produce an empty
       // observed value, which fails the exact match. It can never manufacture a PASS.
       const observedRaw = result.clipboardUnchanged ? "" : result.rawValue;
+      lastObservedValue = normalizeReadBackValue(observedRaw);
       return {
         ok: true,
         blockedReason: null,
-        observedValue: normalizeReadBackValue(observedRaw),
+        observedValue: lastObservedValue,
         observedValueRaw: observedRaw,
         evidence: {
           frontmostAtPrepare,
@@ -1577,6 +1696,88 @@ function clipboardSentinelReadBack(options = {}) {
     },
 
     async cleanup() {
+      const expected = normalizeReadBackValue(sampleText);
+      let targetCleanupEvidence = {
+        targetSurfaceRestored: false,
+        cleanupProbeToken,
+        reason:
+          "The exact inserted sample was not machine-read, so the harness refused to delete text it could not prove belonged to this run.",
+      };
+
+      if (expected && lastObservedValue === expected) {
+        const gate = frontmostGate({
+          expectedBundleIds,
+          appLabel: targetLabel,
+          phase: "before clearing the inserted sample",
+        });
+        if (gate.blockedReason) {
+          targetCleanupEvidence = {
+            targetSurfaceRestored: false,
+            cleanupProbeToken,
+            reason: gate.blockedReason,
+            frontmostAtCleanup: gate.frontmost,
+          };
+        } else {
+          const selectAll = pressKeystroke("a", ["command"]);
+          const selectBlocked = keystrokeBlockedReason(
+            "Cmd+A (select inserted sample for cleanup)",
+            selectAll,
+          );
+          await sleep(selectSettleMs);
+          const remove = selectBlocked ? null : pressKeyCode(KEY_CODE_DELETE);
+          const removeBlocked = remove
+            ? keystrokeBlockedReason("Delete (remove inserted sample)", remove)
+            : selectBlocked;
+          await sleep(typeSettleMs);
+          const typed = removeBlocked ? null : pressKeystroke(cleanupProbeToken, []);
+          const typedBlocked = typed
+            ? keystrokeBlockedReason("the cleanup probe token", typed)
+            : removeBlocked;
+          await sleep(typeSettleMs);
+          const verified = typedBlocked ? null : await selectAllAndCopy(sentinelCleanup);
+          const cleanupReadBack = verified?.clipboardUnchanged
+            ? ""
+            : normalizeReadBackValue(verified?.rawValue);
+          const cleanupProbeMatched =
+            !verified?.blockedReason &&
+            cleanupReadBack.toLowerCase() === cleanupProbeToken.toLowerCase();
+          const clearProbe = cleanupProbeMatched ? pressKeyCode(KEY_CODE_DELETE) : null;
+          const clearProbeBlocked = clearProbe
+            ? keystrokeBlockedReason("Delete (clear the cleanup probe token)", clearProbe)
+            : null;
+          await sleep(typeSettleMs);
+
+          targetCleanupEvidence = {
+            targetSurfaceRestored: cleanupProbeMatched && !clearProbeBlocked,
+            cleanupProbeToken,
+            cleanupProbeMatched,
+            cleanupReadBackLength: cleanupReadBack.length,
+            cleanupReadBackSha256: sha256(cleanupReadBack),
+            selectAllStatus: selectAll.status,
+            deleteStatus: remove?.status ?? null,
+            cleanupProbeTypeStatus: typed?.status ?? null,
+            cleanupProbeDeleteStatus: clearProbe?.status ?? null,
+            reason:
+              selectBlocked ??
+              removeBlocked ??
+              typedBlocked ??
+              verified?.blockedReason ??
+              clearProbeBlocked ??
+              null,
+            note:
+              cleanupProbeMatched && !clearProbeBlocked
+                ? "The exact sample was deleted, a unique cleanup probe was read back alone, and that selected probe was deleted, proving the scratch field is empty again."
+                : "The harness could not machine-verify that the scratch field returned to empty after removing the inserted sample.",
+          };
+
+          if (!targetCleanupEvidence.targetSurfaceRestored) {
+            pressKeystroke("a", ["command"]);
+            await sleep(selectSettleMs);
+            pressKeyCode(KEY_CODE_DELETE);
+          }
+        }
+      }
+
       const probeEvidence = {
         probeToken,
         probeTyped,
@@ -1590,6 +1791,7 @@ function clipboardSentinelReadBack(options = {}) {
       };
       if (!restoreClipboard || !originalClipboardCaptured) {
         return {
+          ...targetCleanupEvidence,
           clipboardRestored: false,
           clipboardRestoreSkipped: true,
           reason: restoreClipboard
@@ -1603,6 +1805,7 @@ function clipboardSentinelReadBack(options = {}) {
       const restored = pbcopy(originalClipboard ?? "");
       const check = pbpaste();
       return {
+        ...targetCleanupEvidence,
         clipboardRestored: restored.ok && check.ok && check.text === (originalClipboard ?? ""),
         restoreStderr: restored.stderr || null,
         clipboardInfoBefore,

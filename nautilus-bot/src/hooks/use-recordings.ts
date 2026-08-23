@@ -38,6 +38,7 @@ export function useRecordings(projectId?: string) {
   useEffect(() => {
     let disposed = false;
     let unlistenStatus: (() => void) | undefined;
+    let unlistenLifecycle: (() => void) | undefined;
     let unlistenAnalysis: (() => void) | undefined;
     let unlistenTitle: (() => void) | undefined;
 
@@ -58,6 +59,12 @@ export function useRecordings(projectId?: string) {
     };
 
     const setup = async () => {
+      retainUnlistener(
+        (unlisten) => {
+          unlistenLifecycle = unlisten;
+        },
+        await listen("meeting-recording-state-changed", refresh),
+      );
       retainUnlistener(
         (unlisten) => {
           unlistenStatus = unlisten;
@@ -83,6 +90,7 @@ export function useRecordings(projectId?: string) {
     return () => {
       disposed = true;
       unlistenStatus?.();
+      unlistenLifecycle?.();
       unlistenAnalysis?.();
       unlistenTitle?.();
     };

@@ -41,9 +41,15 @@ import os from "node:os";
 import path from "node:path";
 import { spawn, spawnSync } from "node:child_process";
 import { createInterface } from "node:readline";
+import { createPackagedQaProfile } from "./lib/packaged-qa-profile.mjs";
+import { matchSpokenFixture } from "./lib/spoken-fixture-match.mjs";
 
 const repoRoot = path.resolve(import.meta.dirname, "..");
 const args = process.argv.slice(2);
+const qaProfile = createPackagedQaProfile({
+  args,
+  prefix: "plainsong-dictation-hotkey-qa-",
+});
 
 function valueFor(name, fallback = null) {
   const index = args.indexOf(name);
@@ -97,6 +103,7 @@ const speakFixtureText = String(
   )
 );
 const speakTimeoutMs = Number(valueFor("--speak-timeout-ms", "30000"));
+const fixtureOutputVolume = Number(valueFor("--fixture-output-volume", "65"));
 
 const sidecarPath = path.join(
   appPath,
@@ -115,9 +122,9 @@ const nativeShortcutHelperPath = path.join(
   "shortcut-helper",
   "plainsong-native-shortcut-helper"
 );
-const configDir = path.join(os.homedir(), "Library", "Application Support", "Plainsong");
+const configDir = qaProfile.configDir;
 const settingsPath = path.join(configDir, "settings.json");
-const dbPath = path.join(configDir, "plainsong.db");
+const dbPath = path.join(qaProfile.dataDir, "plainsong.db");
 const dbSidecarPaths = [dbPath, `${dbPath}-wal`, `${dbPath}-shm`];
 const dbBackups = new Map();
 let originalSettingsBytes = null;
@@ -129,8 +136,6 @@ const SHORTCUT_KEY_CODE = 49; // kVK_Space
 const CG_EVENT_FLAG_MASK_SHIFT = 0x20000;
 const CG_EVENT_FLAG_MASK_COMMAND = 0x100000;
 const SHORTCUT_CG_EVENT_FLAGS = CG_EVENT_FLAG_MASK_COMMAND | CG_EVENT_FLAG_MASK_SHIFT;
-const CG_EVENT_SOURCE_STATE_HID_SYSTEM_STATE = 1;
-const CG_HID_EVENT_TAP = 0;
 
 // Documented caps (never narrow scope silently).
 const DICTATION_ID_SNAPSHOT_LIMIT = 200;
@@ -187,6 +192,13 @@ if (!Number.isFinite(maxHoldMs) || maxHoldMs <= 0) {
 }
 if (mode !== "toggle" && speakFixtureText.trim().length === 0) {
   fail("--speak-fixture-text cannot be empty for hold or hands-free mode.");
+}
+if (
+  !Number.isFinite(fixtureOutputVolume) ||
+  fixtureOutputVolume < 1 ||
+  fixtureOutputVolume > 100
+) {
+  fail("--fixture-output-volume must be a number from 1 through 100.");
 }
 
 function hashBytes(bytes) {
@@ -397,6 +409,7 @@ function launchSidecar() {
   const child = spawn(sidecarPath, [], {
     cwd: repoRoot,
     stdio: ["pipe", "pipe", "pipe"],
+    env: { ...process.env, ...qaProfile.env },
   });
   const childExit = new Promise((resolve) => {
     child.on("exit", (code, signal) => resolve({ code, signal }));
@@ -456,7 +469,7 @@ function launchSidecar() {
     }
     const result = await Promise.race([
       childExit,
-      new Promise((resolve) => setTimeout(() => resolve(null), 3000)),
+      new Promise((resolve) => setTimeout(() => resolve(null), 15000)),
     ]);
     if (!result) {
       child.kill("SIGTERM");
@@ -476,11 +489,12 @@ function launchSidecar() {
 function launchApp() {
   const stderr = [];
   const stdout = [];
-  const child = spawn(appExecutablePath, [], {
+  const child = spawn(appExecutablePath, qaProfile.appArgs, {
     cwd: repoRoot,
     stdio: ["ignore", "pipe", "pipe"],
     env: {
       ...process.env,
+      ...qaProfile.env,
       ELECTRON_ENABLE_LOGGING: "1",
       PLAINSONG_QA_PACKAGED_HOTKEY: "1",
     },
@@ -644,24 +658,6 @@ function pressDictationShortcut() {
   ]);
 }
 
-// A `key code ... using {...}` chord cannot express hold duration: it is one
-// atomic press. Posting the CGEvents directly through JXA's ObjC bridge gives a
-// separate keyDown and keyUp, with the hold time controlled from here.
-// Modifier keys are deliberately NOT posted as their own key events - the flags
-// ride on the Space events instead - so an interrupted run can never strand a
-// modifier in the "down" state on the operator's machine.
-function buildSyntheticKeyEventScript(kind) {
-  const isDown = kind === "down" ? "true" : "false";
-  return [
-    'ObjC.import("ApplicationServices");',
-    `var source = $.CGEventSourceCreate(${CG_EVENT_SOURCE_STATE_HID_SYSTEM_STATE});`,
-    `var event = $.CGEventCreateKeyboardEvent(source, ${SHORTCUT_KEY_CODE}, ${isDown});`,
-    `$.CGEventSetFlags(event, ${SHORTCUT_CG_EVENT_FLAGS});`,
-    `$.CGEventPost(${CG_HID_EVENT_TAP}, event);`,
-    `"posted ${kind}";`,
-  ].join("\n");
-}
-
 const keyEventsPosted = [];
 
 // The artifact stores capped copies of these (a 4000-char clipboard excerpt, a
@@ -670,69 +666,254 @@ const keyEventsPosted = [];
 let clipboardAfterRunFullText = "";
 let appLogsFullCombined = "";
 
-function postSyntheticKeyEvent(kind) {
-  const startedAt = Date.now();
-  const result = runCommandAllowFailure("osascript", [
-    "-l",
-    "JavaScript",
-    "-e",
-    buildSyntheticKeyEventScript(kind),
-  ]);
-  const record = {
-    kind,
+const syntheticHoldDriverSourcePath = path.join(
+  repoRoot,
+  "scripts",
+  "native-macos-key-hold-driver.swift"
+);
+
+function syntheticHoldDriverBinaryPath() {
+  const source = fs.readFileSync(syntheticHoldDriverSourcePath);
+  const digest = crypto.createHash("sha256").update(source).digest("hex").slice(0, 16);
+  return path.join(os.tmpdir(), `plainsong-key-hold-driver-${digest}`);
+}
+
+function ensureSyntheticHoldDriver() {
+  const binaryPath = syntheticHoldDriverBinaryPath();
+  if (fs.existsSync(binaryPath)) return binaryPath;
+  const build = spawnSync("xcrun", ["swiftc", syntheticHoldDriverSourcePath, "-o", binaryPath], {
+    cwd: repoRoot,
+    encoding: "utf8",
+  });
+  if (build.status !== 0 || !fs.existsSync(binaryPath)) {
+    throw new BlockedError(
+      `Could not compile the persistent macOS hold driver (exit ${build.status}): ${String(build.stderr ?? "").trim() || "no stderr"}. This is a failure of the harness input path, not a verdict on the app.`
+    );
+  }
+  return binaryPath;
+}
+
+async function launchSyntheticHoldDriver() {
+  const binaryPath = ensureSyntheticHoldDriver();
+  const child = spawn(
+    binaryPath,
+    [
+      "--key-code",
+      String(SHORTCUT_KEY_CODE),
+      "--flags",
+      String(SHORTCUT_CG_EVENT_FLAGS),
+      "--max-hold-ms",
+      String(maxHoldMs),
+    ],
+    { cwd: repoRoot, stdio: ["pipe", "pipe", "pipe"] }
+  );
+  const lines = createInterface({ input: child.stdout });
+  const received = [];
+  const waiters = new Set();
+  let stderr = "";
+  child.stderr.on("data", (chunk) => {
+    stderr += String(chunk);
+  });
+  lines.on("line", (line) => {
+    received.push({ line: line.trim(), atEpochMs: Date.now() });
+    for (const wake of waiters) wake();
+    waiters.clear();
+  });
+  const childExit = new Promise((resolve) => {
+    child.on("exit", (code, signal) => resolve({ code, signal }));
+  });
+
+  const waitForLine = async (expected, deadlineMs) => {
+    const started = Date.now();
+    while (Date.now() - started < deadlineMs) {
+      const match = received.find((entry) => entry.line === expected);
+      if (match) return match;
+      await Promise.race([
+        new Promise((resolve) => {
+          waiters.add(resolve);
+          setTimeout(() => {
+            waiters.delete(resolve);
+            resolve();
+          }, 100);
+        }),
+        childExit,
+      ]);
+    }
+    return null;
+  };
+
+  const down = await waitForLine("down", 5000);
+  const downRecord = {
+    kind: "down",
     keyCode: SHORTCUT_KEY_CODE,
     flags: SHORTCUT_CG_EVENT_FLAGS,
-    postedAtEpochMs: startedAt,
-    completedAtEpochMs: Date.now(),
-    ok: result.status === 0,
-    exitStatus: result.status,
-    stderr: result.stderr || null,
+    postedAtEpochMs: down?.atEpochMs ?? Date.now(),
+    completedAtEpochMs: down?.atEpochMs ?? Date.now(),
+    ok: Boolean(down),
+    exitStatus: down ? 0 : null,
+    stderr: down ? null : stderr.trim() || "Hold driver did not report key-down.",
   };
-  keyEventsPosted.push(record);
-  return record;
+  keyEventsPosted.push(downRecord);
+
+  let released = false;
+  return {
+    downRecord,
+    release: async () => {
+      if (released) return keyEventsPosted.find((event) => event.kind === "up") ?? null;
+      released = true;
+      const requestedAtEpochMs = Date.now();
+      child.stdin.end("\n");
+      const up = await waitForLine("up", 5000);
+      const exit = await Promise.race([
+        childExit,
+        sleep(5000).then(() => ({ code: null, signal: "timeout" })),
+      ]);
+      const upRecord = {
+        kind: "up",
+        keyCode: SHORTCUT_KEY_CODE,
+        flags: SHORTCUT_CG_EVENT_FLAGS,
+        postedAtEpochMs: requestedAtEpochMs,
+        completedAtEpochMs: up?.atEpochMs ?? Date.now(),
+        ok: Boolean(up) && exit.code === 0,
+        exitStatus: exit.code,
+        stderr: stderr.trim() || null,
+      };
+      keyEventsPosted.push(upRecord);
+      lines.close();
+      return upRecord;
+    },
+  };
+}
+
+function snapshotOutputVolume() {
+  const result = runCommandAllowFailure("osascript", [
+    "-e",
+    "set s to get volume settings",
+    "-e",
+    'return ((output volume of s) as text) & "," & ((output muted of s) as text)',
+  ]);
+  const match = /^(\d+)\s*,\s*(true|false)$/i.exec(result.stdout.trim());
+  return {
+    ok: result.status === 0 && Boolean(match),
+    volume: match ? Number(match[1]) : null,
+    muted: match ? match[2].toLowerCase() === "true" : null,
+    error: result.status === 0 && match ? null : result.stderr || result.stdout || "unreadable",
+  };
+}
+
+function setFixtureOutputVolume() {
+  const result = runCommandAllowFailure("osascript", [
+    "-e",
+    `set volume output volume ${fixtureOutputVolume} without output muted`,
+  ]);
+  return {
+    ok: result.status === 0,
+    volume: fixtureOutputVolume,
+    muted: false,
+    error: result.status === 0 ? null : result.stderr || "unknown",
+  };
+}
+
+function restoreOutputVolume(snapshot) {
+  if (!snapshot.ok || snapshot.volume === null || snapshot.muted === null) {
+    return { ok: false, error: "The original speaker state was not readable." };
+  }
+  const muteClause = snapshot.muted ? "with output muted" : "without output muted";
+  const result = runCommandAllowFailure("osascript", [
+    "-e",
+    `set volume output volume ${snapshot.volume} ${muteClause}`,
+  ]);
+  return {
+    ok: result.status === 0,
+    volume: snapshot.volume,
+    muted: snapshot.muted,
+    error: result.status === 0 ? null : result.stderr || "unknown",
+  };
 }
 
 // Deterministic speech, same approach as
 // scripts/capture-packaged-macos-meeting-soak.mjs:180. `maxMs` bounds the run
 // and kills the voice, so a stuck `say` can never bleed into a later phase.
+// The speaker is made audible only for the fixture, then restored exactly.
 async function speakFixture(maxMs = speakTimeoutMs) {
   const startedAt = Date.now();
-  const child = spawn("say", [speakFixtureText], { cwd: repoRoot, stdio: "ignore" });
-  const exited = new Promise((resolve) => {
-    child.on("exit", (code, signal) => resolve({ code, signal, error: null }));
-    child.on("error", (error) => resolve({ code: null, signal: null, error: error.message }));
-  });
-  const result = await Promise.race([exited, sleep(maxMs).then(() => null)]);
-  if (!result) {
-    child.kill("SIGTERM");
-    const forced = await exited;
+  const audioOutput = {
+    original: snapshotOutputVolume(),
+    temporary: null,
+    restored: null,
+  };
+  if (!audioOutput.original.ok) {
     return {
       startedAtEpochMs: startedAt,
       finishedAtEpochMs: Date.now(),
-      timedOut: true,
+      timedOut: false,
       maxMs,
-      ...forced,
+      code: null,
+      signal: null,
+      error: `Could not read the original speaker state: ${audioOutput.original.error}`,
+      audioOutput,
     };
   }
+
+  audioOutput.temporary = setFixtureOutputVolume();
+  if (!audioOutput.temporary.ok) {
+    audioOutput.restored = restoreOutputVolume(audioOutput.original);
+    return {
+      startedAtEpochMs: startedAt,
+      finishedAtEpochMs: Date.now(),
+      timedOut: false,
+      maxMs,
+      code: null,
+      signal: null,
+      error: `Could not make the spoken fixture audible: ${audioOutput.temporary.error}`,
+      audioOutput,
+    };
+  }
+
+  let speechResult;
+  try {
+    const child = spawn("say", [speakFixtureText], { cwd: repoRoot, stdio: "ignore" });
+    const exited = new Promise((resolve) => {
+      child.on("exit", (code, signal) => resolve({ code, signal, error: null }));
+      child.on("error", (error) =>
+        resolve({ code: null, signal: null, error: error.message })
+      );
+    });
+    const result = await Promise.race([exited, sleep(maxMs).then(() => null)]);
+    if (!result) {
+      child.kill("SIGTERM");
+      speechResult = { timedOut: true, ...(await exited) };
+    } else {
+      speechResult = { timedOut: false, ...result };
+    }
+  } finally {
+    audioOutput.restored = restoreOutputVolume(audioOutput.original);
+  }
+
   return {
     startedAtEpochMs: startedAt,
     finishedAtEpochMs: Date.now(),
-    timedOut: false,
     maxMs,
-    ...result,
+    ...speechResult,
+    audioOutput,
   };
 }
 
-// `say` failing to run at all is a failure of this harness's fixture tooling,
-// not a verdict on the app, so it blocks rather than fails. (`say` exits 0 even
-// with the output muted, which is why an inaudible fixture is handled by the
-// mode-specific ambiguity checks instead.)
+// A fixture-tooling failure blocks instead of being misreported as a product
+// failure. `say` exits 0 while muted, so speaker preparation/restoration are
+// explicit requirements as well as the process exit.
 function assertSpeechFixturePlayed(speech) {
-  if (speech.code === 0 && !speech.timedOut && !speech.error) {
+  if (
+    speech.code === 0 &&
+    !speech.timedOut &&
+    !speech.error &&
+    speech.audioOutput?.temporary?.ok &&
+    speech.audioOutput?.restored?.ok
+  ) {
     return;
   }
   throw new BlockedError(
-    `The spoken fixture did not play: \`say\` exited code=${speech.code}, signal=${speech.signal}, timedOut=${speech.timedOut}, error=${speech.error ?? "none"}. No audio reached the microphone, so this run cannot judge the activation mode.`
+    `The spoken fixture did not play and restore cleanly: \`say\` exited code=${speech.code}, signal=${speech.signal}, timedOut=${speech.timedOut}, error=${speech.error ?? "none"}, speakerPrepared=${speech.audioOutput?.temporary?.ok ?? false}, speakerRestored=${speech.audioOutput?.restored?.ok ?? false}. No trustworthy audio fixture reached the microphone, so this run cannot judge the activation mode.`
   );
 }
 
@@ -811,6 +992,7 @@ const SHARED_EXTERNAL_EVIDENCE_CLASS = {
   recordingCompleted: "external",
   transcriptPersisted: "external",
   transcriptNonEmpty: "external",
+  spokenFixtureMatched: "external",
   insertionActionPersisted: "external",
   clipboardOnlyMode: "external",
   clipboardMatchesTranscript: "external",
@@ -905,6 +1087,7 @@ async function run() {
       measuredHoldMs: null,
       resolvedBehavior: null,
       resolvedCapability: null,
+      fixtureMatch: null,
       handsFreeAutoStartObserved: null,
       handsFreeAutoStopObserved: null,
       handsFreeMonitorFailure: null,
@@ -1202,17 +1385,15 @@ async function runHoldActivation(artifact, appRun) {
   }
 
   const holdCursor = logCursor(appRun);
-  let downPosted = null;
+  let holdDriver = null;
 
   try {
-    downPosted = postSyntheticKeyEvent("down");
-    // completedAtEpochMs, not postedAtEpochMs: osascript had already posted the
-    // event by the time it exited, so measuring from here makes measuredHoldMs
-    // a lower bound on the true hold rather than an optimistic one.
+    holdDriver = await launchSyntheticHoldDriver();
+    const downPosted = holdDriver.downRecord;
     artifact.activation.holdStartedAtEpochMs = downPosted.completedAtEpochMs;
     if (!downPosted.ok) {
       throw new BlockedError(
-        `Could not post the synthetic key-down through osascript JXA (exit ${downPosted.exitStatus}): ${downPosted.stderr ?? "no stderr"}. ` +
+        `Could not post the synthetic key-down through the persistent hold driver (exit ${downPosted.exitStatus}): ${downPosted.stderr ?? "no stderr"}. ` +
           "This is a failure of the harness's own input path, not a verdict on the app. Grant Accessibility trust to the terminal running this harness, or perform the hold manually and re-check the artifact."
       );
     }
@@ -1263,11 +1444,11 @@ async function runHoldActivation(artifact, appRun) {
     assertSpeechFixturePlayed(speech);
     await sleep(holdTrailMs);
   } finally {
-    if (downPosted) {
-      const upPosted = postSyntheticKeyEvent("up");
+    if (holdDriver) {
+      const upPosted = await holdDriver.release();
       artifact.activation.holdReleasedAtEpochMs = upPosted.postedAtEpochMs;
       artifact.activation.measuredHoldMs =
-        upPosted.postedAtEpochMs - downPosted.completedAtEpochMs;
+        upPosted.postedAtEpochMs - holdDriver.downRecord.completedAtEpochMs;
       artifact.nativeHelper.pidsAfterHold = nativeHelperPids();
     }
     // Capture the phase slice even when this phase is unwinding with a BLOCKED
@@ -1413,6 +1594,8 @@ function buildToggleChecks(artifact) {
 
 function buildActivationChecks(artifact, clipboardSentinel) {
   const transcriptText = String(artifact.newRecording?.transcriptText ?? "");
+  const fixtureMatch = matchSpokenFixture(transcriptText, speakFixtureText);
+  artifact.activation.fixtureMatch = fixtureMatch;
   const clipboardText = clipboardAfterRunFullText;
   // Untruncated: a log line that scrolled past the 12000-char artifact tail
   // must not be able to turn an absence check into a pass.
@@ -1434,6 +1617,7 @@ function buildActivationChecks(artifact, clipboardSentinel) {
     // Stricter than toggle: a spoken fixture must produce actual text, so an
     // empty transcript can never stand in for a working activation mode.
     transcriptNonEmpty: transcriptText.trim().length > 0,
+    spokenFixtureMatched: fixtureMatch.matched,
     insertionActionPersisted:
       artifact.insertionAction?.recordingId === artifact.newRecording?.id,
     clipboardOnlyMode: artifact.insertionAction?.requestedMode === "clipboard_only",

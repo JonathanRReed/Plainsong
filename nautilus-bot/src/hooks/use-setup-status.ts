@@ -122,7 +122,18 @@ function buildRouteStatus(
   }
 
   const routeSummary = summarizeRoute(provider, modelId);
-  const baseReady = provider.inferenceEnabled && provider.runtimeStatus === "ready";
+  const modelIsKnown = Boolean(
+    modelId && provider.modelOptions.some((option) => option.id === modelId),
+  );
+  const selectedModelMatches = Boolean(
+    modelId && provider.selectedModelId === modelId,
+  );
+  const baseReady = Boolean(
+    provider.inferenceEnabled &&
+      provider.runtimeStatus === "ready" &&
+      modelIsKnown &&
+      selectedModelMatches,
+  );
 
   if (
     kind === "meeting" &&
@@ -177,7 +188,13 @@ function buildRouteStatus(
     ready: baseReady,
     reason: baseReady
       ? null
-      : provider.runtimeMessage ?? `${provider.name} is not ready yet.`,
+      : !modelId
+        ? `Choose a ${kind} model for ${provider.name}.`
+        : !modelIsKnown
+          ? `${modelId} is not available for ${provider.name}. Choose or download a model.`
+          : !selectedModelMatches
+            ? `${provider.name} has not confirmed ${modelId} as its active model.`
+            : provider.runtimeMessage ?? `${provider.name} is not ready yet.`,
   };
 }
 
@@ -436,6 +453,38 @@ export function useSetupStatus() {
           "Failed to subscribe to readiness model downloads:",
           nextError,
         );
+      });
+
+    void listen("readiness-invalidated", () => {
+      if (!disposed) {
+        void refresh();
+      }
+    })
+      .then(retainUnlistener)
+      .catch((nextError) => {
+        console.warn("Failed to subscribe to readiness invalidation:", nextError);
+      });
+
+    void listen<{ ready?: boolean; reason?: string }>(
+      "sidecar-runtime-changed",
+      (event) => {
+        if (disposed) return;
+        if (event.payload?.ready === false) {
+          refreshSequenceRef.current += 1;
+          setLoading(false);
+          setError(
+            event.payload.reason ??
+              "The local audio engine stopped. Plainsong is reconnecting.",
+          );
+          setObservedAt(Date.now());
+          return;
+        }
+        void refresh();
+      },
+    )
+      .then(retainUnlistener)
+      .catch((nextError) => {
+        console.warn("Failed to subscribe to sidecar readiness:", nextError);
       });
 
     const handleWindowFocus = () => {

@@ -4,6 +4,8 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 
+import { collectReleaseCandidateIdentity } from "./lib/release-candidate-identity.mjs";
+
 const repoRoot = path.resolve(import.meta.dirname, "..");
 const args = process.argv.slice(2);
 
@@ -19,11 +21,11 @@ const appPath = path.resolve(
 );
 const outPath = path.resolve(
   repoRoot,
-  valueFor("--out", "artifacts/release/macos-trust.json"),
+  valueFor("--out", "artifacts/qa/macos/macos-trust.json"),
 );
 const markdownPath = path.resolve(
   repoRoot,
-  valueFor("--markdown", "artifacts/release/macos-trust.md"),
+  valueFor("--markdown", "artifacts/qa/macos/macos-trust.md"),
 );
 const expectedTeam = valueFor("--expected-team", process.env.APPLE_TEAM_ID ?? null);
 const requestedReleaseDir = path.resolve(
@@ -33,6 +35,10 @@ const requestedReleaseDir = path.resolve(
 const releaseDir = fs.existsSync(requestedReleaseDir)
   ? fs.realpathSync(requestedReleaseDir)
   : requestedReleaseDir;
+const candidateIdentity = collectReleaseCandidateIdentity({
+  candidatePath: releaseDir,
+  appPath,
+});
 
 function appBundlePaths(bundlePath) {
   return {
@@ -634,6 +640,7 @@ const checks = {
 
 const artifact = {
   generatedAt: new Date().toISOString(),
+  candidateIdentity,
   status: Object.values(checks).every(Boolean) ? "PASS" : "FAIL",
   pass: Object.values(checks).every(Boolean),
   paths: {

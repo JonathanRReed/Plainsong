@@ -56,6 +56,12 @@ pub struct BackupConfig {
     pub max_backups: u32,
     /// Backup directory path
     pub backup_dir: Option<PathBuf>,
+    /// Opaque reference to an Electron-approved backup directory.
+    pub backup_location_id: Option<String>,
+    /// Safe, non-path label shown to the renderer.
+    pub backup_location_label: Option<String>,
+    /// Cached UI state. The approved-location registry is authoritative.
+    pub backup_location_approved: bool,
     /// Enable explicit, user-triggered cloud uploads.
     pub cloud_sync: bool,
     /// Cloud provider (if cloud sync enabled)
@@ -66,6 +72,12 @@ pub struct BackupConfig {
     pub cloud_folder: String,
     /// Optional iCloud path override
     pub icloud_path: Option<PathBuf>,
+    /// Opaque reference to an Electron-confirmed cloud destination.
+    pub cloud_location_id: Option<String>,
+    /// Safe destination label shown to the renderer.
+    pub cloud_location_label: Option<String>,
+    /// Cached UI state. The approved-location registry is authoritative.
+    pub cloud_location_approved: bool,
 }
 
 impl Default for BackupConfig {
@@ -75,11 +87,17 @@ impl Default for BackupConfig {
             interval_hours: 24,
             max_backups: 7,
             backup_dir: Some(default_backup_dir()),
+            backup_location_id: None,
+            backup_location_label: None,
+            backup_location_approved: false,
             cloud_sync: false,
             cloud_provider: None,
             cloud_remote_name: None,
             cloud_folder: "PlainsongBackups".to_string(),
             icloud_path: None,
+            cloud_location_id: None,
+            cloud_location_label: None,
+            cloud_location_approved: false,
         }
     }
 }
@@ -198,11 +216,31 @@ impl BackupManager {
         if config.backup_dir.is_none() {
             config.backup_dir = Some(default_backup_dir());
         }
+        if config.backup_location_id.is_none()
+            && config.backup_dir.as_ref() == Some(&default_backup_dir())
+        {
+            config.backup_location_id =
+                Some(crate::approved_locations::BUILTIN_BACKUP_LOCATION_ID.to_string());
+            config.backup_location_label = Some("Plainsong backups".to_string());
+            config.backup_location_approved = true;
+        }
+        #[cfg(test)]
+        if config.backup_location_id.is_none()
+            && config
+                .backup_dir
+                .as_ref()
+                .is_some_and(|path| path.starts_with(std::env::temp_dir()))
+        {
+            config.backup_location_id = Some("test-approved-backup-location".to_string());
+            config.backup_location_label = Some("Test backups".to_string());
+            config.backup_location_approved = true;
+        }
         config.enabled = false;
         config.max_backups = config.max_backups.max(1);
         Self { config }
     }
 
+    #[cfg(test)]
     pub fn config(&self) -> &BackupConfig {
         &self.config
     }
@@ -216,6 +254,110 @@ impl BackupManager {
         self.config = config;
         self.persist_config()?;
         Ok(())
+    }
+
+    /// Save renderer-editable backup preferences without accepting authority
+    /// over a filesystem or cloud destination from renderer JSON.
+    pub fn set_config_from_renderer(&mut self, mut config: BackupConfig) -> Result<()> {
+        config.backup_dir = self.config.backup_dir.clone();
+        config.backup_location_id = self.config.backup_location_id.clone();
+        config.backup_location_label = self.config.backup_location_label.clone();
+        config.backup_location_approved = self.config.backup_location_approved;
+        config.cloud_provider = self.config.cloud_provider.clone();
+        config.cloud_remote_name = self.config.cloud_remote_name.clone();
+        config.cloud_folder = self.config.cloud_folder.clone();
+        config.icloud_path = self.config.icloud_path.clone();
+        config.cloud_location_id = self.config.cloud_location_id.clone();
+        config.cloud_location_label = self.config.cloud_location_label.clone();
+        config.cloud_location_approved = self.config.cloud_location_approved;
+        self.set_config(config)
+    }
+
+    pub fn set_backup_location_privileged(
+        &mut self,
+        summary: &crate::approved_locations::ApprovedLocationSummary,
+        canonical_path: PathBuf,
+    ) -> Result<()> {
+        self.config.backup_dir = Some(canonical_path);
+        self.config.backup_location_id = Some(summary.id.clone());
+        self.config.backup_location_label = Some(summary.label.clone());
+        self.config.backup_location_approved = summary.approved;
+        self.persist_config()
+    }
+
+    pub fn set_cloud_location_privileged(
+        &mut self,
+        provider: CloudProvider,
+        summary: &crate::approved_locations::ApprovedLocationSummary,
+        remote_name: Option<String>,
+        cloud_folder: String,
+        icloud_path: Option<PathBuf>,
+    ) -> Result<()> {
+        self.config.cloud_provider = Some(provider);
+        self.config.cloud_remote_name = remote_name;
+        self.config.cloud_folder = cloud_folder;
+        self.config.icloud_path = icloud_path;
+        self.config.cloud_location_id = Some(summary.id.clone());
+        self.config.cloud_location_label = Some(summary.label.clone());
+        self.config.cloud_location_approved = summary.approved;
+        self.persist_config()
+    }
+
+    pub fn config_for_renderer(&self) -> BackupConfig {
+        let mut visible = self.config.clone();
+        visible.backup_dir = None;
+        visible.cloud_remote_name = None;
+        visible.icloud_path = None;
+        visible
+    }
+
+    fn resolved_backup_dir(&self) -> Result<PathBuf> {
+        let id = self
+            .config
+            .backup_location_id
+            .as_deref()
+            .ok_or_else(|| anyhow::anyhow!("Backup folder needs reselection in Settings"))?;
+        #[cfg(test)]
+        if id == "test-approved-backup-location" {
+            return self
+                .config
+                .backup_dir
+                .clone()
+                .ok_or_else(|| anyhow::anyhow!("Test backup directory is missing"));
+        }
+        crate::approved_locations::registry()?.resolve_filesystem(
+            id,
+            crate::approved_locations::ApprovedLocationPurpose::Backup,
+        )
+    }
+
+    fn resolved_cloud_config(&self) -> Result<BackupConfig> {
+        let id =
+            self.config.cloud_location_id.as_deref().ok_or_else(|| {
+                anyhow::anyhow!("Cloud destination needs confirmation in Settings")
+            })?;
+        let provider = self
+            .config
+            .cloud_provider
+            .clone()
+            .ok_or_else(|| anyhow::anyhow!("No cloud provider configured"))?;
+        let mut resolved = self.config.clone();
+        match provider {
+            CloudProvider::ICloud => {
+                resolved.icloud_path =
+                    Some(crate::approved_locations::registry()?.resolve_filesystem(
+                        id,
+                        crate::approved_locations::ApprovedLocationPurpose::CloudBackup,
+                    )?);
+            }
+            CloudProvider::GoogleDrive | CloudProvider::OneDrive | CloudProvider::ProtonDrive => {
+                let (remote_name, folder) =
+                    crate::approved_locations::registry()?.resolve_rclone(id)?;
+                resolved.cloud_remote_name = Some(remote_name);
+                resolved.cloud_folder = folder;
+            }
+        }
+        Ok(resolved)
     }
 
     /// Create a full data backup now. If the live database exists, `db_snapshot`
@@ -245,12 +387,9 @@ impl BackupManager {
         backup_type: BackupType,
         db_snapshot: Option<&Path>,
     ) -> Result<BackupInfo> {
-        let backup_dir = self
-            .config
-            .backup_dir
-            .as_ref()
-            .ok_or_else(|| anyhow::anyhow!("No backup directory configured"))?;
-        tokio::fs::create_dir_all(backup_dir).await?;
+        let backup_dir = self.resolved_backup_dir()?;
+        crate::safe_fs::ensure_directory_without_links(&backup_dir)
+            .context("Backup destination contains a linked or invalid directory component")?;
 
         let database_source = if matches!(backup_type, BackupType::Full | BackupType::Incremental) {
             validated_database_snapshot(data_dir, db_snapshot).await?
@@ -273,14 +412,12 @@ impl BackupManager {
         );
         let backup_path = backup_dir.join(&backup_id);
         let partial_path = backup_dir.join(format!(".{}.partial-{}", backup_id, &nonce[8..16]));
-        tokio::fs::create_dir(&partial_path)
-            .await
-            .with_context(|| {
-                format!(
-                    "Failed to create partial backup generation {}",
-                    partial_path.display()
-                )
-            })?;
+        crate::safe_fs::ensure_directory_without_links(&partial_path).with_context(|| {
+            format!(
+                "Failed to create partial backup generation {} without following links",
+                partial_path.display()
+            )
+        })?;
 
         let build_result = async {
             let mut components = Vec::new();
@@ -288,7 +425,7 @@ impl BackupManager {
             if matches!(backup_type, BackupType::Full | BackupType::Incremental) {
                 if let Some(db_source) = database_source.as_ref() {
                     let backup_database = partial_path.join("plainsong.db");
-                    tokio::fs::copy(db_source, &backup_database)
+                    copy_regular_file_without_links(db_source, &backup_database)
                         .await
                         .context("Failed to copy the database snapshot into the backup")?;
                     prepare_database_for_portable_backup(
@@ -326,9 +463,12 @@ impl BackupManager {
             }
 
             if settings_path.is_file() {
-                tokio::fs::copy(settings_path, partial_path.join(SETTINGS_BACKUP_FILENAME))
-                    .await
-                    .context("Failed to copy settings into the backup")?;
+                copy_regular_file_without_links(
+                    settings_path,
+                    &partial_path.join(SETTINGS_BACKUP_FILENAME),
+                )
+                .await
+                .context("Failed to copy settings into the backup")?;
                 components.push(BackupComponent::Settings);
             }
 
@@ -374,15 +514,19 @@ impl BackupManager {
                 }
             }
 
-            tokio::fs::rename(&partial_path, &backup_path)
-                .await
+            crate::safe_fs::ensure_directory_without_links(&backup_dir).with_context(|| {
+                format!(
+                    "Backup destination changed before publication: {}",
+                    backup_dir.display()
+                )
+            })?;
+            crate::safe_fs::publish_directory_without_replacement(&partial_path, &backup_path)
                 .with_context(|| {
                     format!(
                         "Failed to atomically publish backup {}",
                         backup_path.display()
                     )
                 })?;
-            sync_directory_best_effort(backup_dir).await;
 
             Ok::<_, anyhow::Error>((size_bytes, items_count))
         }
@@ -438,12 +582,8 @@ impl BackupManager {
         data_dir: &Path,
         settings_path: &Path,
     ) -> Result<BackupRestoreOutcome> {
-        let backup_dir = self
-            .config
-            .backup_dir
-            .as_ref()
-            .ok_or_else(|| anyhow::anyhow!("No backup directory configured"))?;
-        let backup_path = resolve_existing_backup_path(backup_dir, backup_id)?;
+        let backup_dir = self.resolved_backup_dir()?;
+        let backup_path = resolve_existing_backup_path(&backup_dir, backup_id)?;
         let manifest = validate_complete_backup(&backup_path, Some(backup_id)).await?;
         if manifest.database_protection == Some(BackupDatabaseProtection::VaultKeyRequired) {
             return Err(anyhow::anyhow!(
@@ -466,6 +606,7 @@ impl BackupManager {
             data_dir,
             settings_path,
             &manifest.components,
+            &manifest.files,
             manifest.recording_path_format,
         )
         .await?;
@@ -481,18 +622,14 @@ impl BackupManager {
 
     /// List only complete, validated, visible backup generations.
     pub async fn list_backups(&self) -> Result<Vec<BackupInfo>> {
-        let backup_dir = self
-            .config
-            .backup_dir
-            .as_ref()
-            .ok_or_else(|| anyhow::anyhow!("No backup directory configured"))?;
+        let backup_dir = self.resolved_backup_dir()?;
 
         if !backup_dir.exists() {
             return Ok(Vec::new());
         }
 
         let mut backups = Vec::new();
-        let mut entries = tokio::fs::read_dir(backup_dir).await?;
+        let mut entries = tokio::fs::read_dir(&backup_dir).await?;
         while let Some(entry) = entries.next_entry().await? {
             let path = entry.path();
             let Some(backup_id) = path.file_name().and_then(|name| name.to_str()) else {
@@ -547,11 +684,7 @@ impl BackupManager {
             return Ok(());
         }
 
-        let backup_dir = self
-            .config
-            .backup_dir
-            .as_ref()
-            .ok_or_else(|| anyhow::anyhow!("No backup directory configured"))?;
+        let backup_dir = self.resolved_backup_dir()?;
         let to_delete = &backups[self.config.max_backups as usize..];
 
         for backup in to_delete {
@@ -567,14 +700,10 @@ impl BackupManager {
 
     /// Export backup to external path as zip archive.
     pub async fn export_backup(&self, backup_id: &str, target_path: &Path) -> Result<()> {
-        let backup_dir = self
-            .config
-            .backup_dir
-            .as_ref()
-            .ok_or_else(|| anyhow::anyhow!("No backup directory configured"))?;
+        let backup_dir = self.resolved_backup_dir()?;
 
         let safe_backup_id = validate_backup_id(backup_id)?;
-        let source = resolve_existing_backup_path(backup_dir, &safe_backup_id)?;
+        let source = resolve_existing_backup_path(&backup_dir, &safe_backup_id)?;
         validate_complete_backup(&source, Some(&safe_backup_id)).await?;
 
         let zip_path = target_path.join(format!("{}.zip", safe_backup_id));
@@ -601,8 +730,8 @@ impl BackupManager {
             ));
         }
 
-        if let Some(dir) = self.config.backup_dir.as_ref() {
-            match tokio::fs::create_dir_all(dir).await {
+        match self.resolved_backup_dir() {
+            Ok(dir) => match tokio::fs::create_dir_all(&dir).await {
                 Ok(_) => checks.push(pass_check(
                     "backup_dir_access",
                     "Backup directory access",
@@ -613,13 +742,12 @@ impl BackupManager {
                     "Backup directory access",
                     &format!("Backup directory is not writable: {}", e),
                 )),
-            }
-        } else {
-            checks.push(fail_check(
+            },
+            Err(error) => checks.push(fail_check(
                 "backup_dir_access",
                 "Backup directory access",
-                "No backup directory is configured.",
-            ));
+                &error.to_string(),
+            )),
         }
 
         let provider = self.config.cloud_provider.clone();
@@ -640,13 +768,37 @@ impl BackupManager {
             };
         };
 
+        let resolved_cloud = match self.resolved_cloud_config() {
+            Ok(config) => {
+                checks.push(pass_check(
+                    "cloud_destination_approved",
+                    "Cloud destination approved",
+                    "The destination was confirmed in a native dialog.",
+                ));
+                config
+            }
+            Err(error) => {
+                checks.push(fail_check(
+                    "cloud_destination_approved",
+                    "Cloud destination approved",
+                    &error.to_string(),
+                ));
+                return CloudSetupReport {
+                    provider,
+                    ready: false,
+                    checks,
+                    checked_at: Utc::now(),
+                };
+            }
+        };
+
         checks.push(pass_check(
             "provider_selected",
             "Cloud provider selected",
             &format!("Using provider {:?}", provider_value),
         ));
 
-        match validate_cloud_folder(&self.config.cloud_folder) {
+        match validate_cloud_folder(&resolved_cloud.cloud_folder) {
             Ok(cloud_folder) => checks.push(pass_check(
                 "cloud_folder",
                 "Cloud folder configured",
@@ -660,7 +812,8 @@ impl BackupManager {
         }
 
         match provider_value {
-            CloudProvider::ICloud => match resolve_icloud_root(self.config.icloud_path.as_ref()) {
+            CloudProvider::ICloud => match resolve_icloud_root(resolved_cloud.icloud_path.as_ref())
+            {
                 Ok(path) => {
                     checks.push(pass_check(
                         "icloud_path_resolved",
@@ -720,7 +873,7 @@ impl BackupManager {
                     }
                 }
 
-                let remote = self.config.cloud_remote_name.clone().or_else(|| {
+                let remote = resolved_cloud.cloud_remote_name.clone().or_else(|| {
                     provider_value
                         .default_remote_name()
                         .map(ToString::to_string)
@@ -804,23 +957,19 @@ impl BackupManager {
         if !self.config.cloud_sync {
             return Err(anyhow::anyhow!("Manual cloud sync is disabled"));
         }
-        let provider = self
-            .config
+        let resolved_cloud = self.resolved_cloud_config()?;
+        let provider = resolved_cloud
             .cloud_provider
             .as_ref()
             .ok_or_else(|| anyhow::anyhow!("No cloud provider configured"))?;
-        let backup_dir = self
-            .config
-            .backup_dir
-            .as_ref()
-            .ok_or_else(|| anyhow::anyhow!("No backup directory configured"))?;
-        let source = resolve_existing_backup_path(backup_dir, backup_id)?;
+        let backup_dir = self.resolved_backup_dir()?;
+        let source = resolve_existing_backup_path(&backup_dir, backup_id)?;
         validate_complete_backup(&source, Some(backup_id)).await?;
 
         match provider {
-            CloudProvider::ICloud => sync_to_icloud(&self.config, &source).await,
+            CloudProvider::ICloud => sync_to_icloud(&resolved_cloud, &source).await,
             CloudProvider::GoogleDrive | CloudProvider::OneDrive | CloudProvider::ProtonDrive => {
-                sync_to_rclone(provider, &self.config, &source).await
+                sync_to_rclone(provider, &resolved_cloud, &source).await
             }
         }
     }
@@ -828,11 +977,12 @@ impl BackupManager {
     fn persist_config(&self) -> Result<()> {
         let config_path = backup_config_path()?;
         if let Some(parent) = config_path.parent() {
-            std::fs::create_dir_all(parent)?;
+            crate::safe_fs::ensure_directory_without_links(parent)?;
         }
-        let json = serde_json::to_string_pretty(&self.config)?;
-        std::fs::write(config_path, json)?;
-        Ok(())
+        let mut json = serde_json::to_vec_pretty(&self.config)?;
+        json.push(b'\n');
+        crate::safe_fs::atomic_write(&config_path, &json)
+            .context("Failed to persist backup configuration atomically")
     }
 }
 
@@ -886,7 +1036,14 @@ async fn validated_database_snapshot(
 
 impl Default for BackupManager {
     fn default() -> Self {
-        let config = load_persisted_backup_config().unwrap_or_default();
+        let config = match load_persisted_backup_config() {
+            Ok(Some(config)) => config,
+            Ok(None) => BackupConfig::default(),
+            Err(error) => {
+                tracing::error!("Backup configuration could not be loaded: {error:#}");
+                BackupConfig::default()
+            }
+        };
         Self::new(config)
     }
 }
@@ -897,7 +1054,7 @@ fn default_data_dir() -> PathBuf {
         .join("Plainsong")
 }
 
-fn default_backup_dir() -> PathBuf {
+pub(crate) fn default_backup_dir() -> PathBuf {
     default_data_dir().join("backups")
 }
 
@@ -908,10 +1065,22 @@ fn backup_config_path() -> Result<PathBuf> {
     Ok(config_dir.join("backup-config.json"))
 }
 
-fn load_persisted_backup_config() -> Option<BackupConfig> {
-    let path = backup_config_path().ok()?;
-    let raw = std::fs::read_to_string(path).ok()?;
-    serde_json::from_str::<BackupConfig>(&raw).ok()
+fn load_backup_config_from_path(path: &Path) -> Result<Option<BackupConfig>> {
+    let raw = match std::fs::read_to_string(path) {
+        Ok(raw) => raw,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => {
+            return Err(error)
+                .with_context(|| format!("Failed to read backup configuration {}", path.display()))
+        }
+    };
+    serde_json::from_str::<BackupConfig>(&raw)
+        .with_context(|| format!("Failed to parse backup configuration {}", path.display()))
+        .map(Some)
+}
+
+fn load_persisted_backup_config() -> Result<Option<BackupConfig>> {
+    load_backup_config_from_path(&backup_config_path()?)
 }
 
 fn validate_backup_id(raw_backup_id: &str) -> Result<String> {
@@ -1062,9 +1231,12 @@ async fn write_backup_manifest(
     };
     let manifest_json =
         serde_json::to_string_pretty(&manifest).context("Failed to serialize backup manifest")?;
-    tokio::fs::write(backup_manifest_path(backup_path), manifest_json)
-        .await
-        .context("Failed to write backup manifest")?;
+    let manifest_path = backup_manifest_path(backup_path);
+    tokio::task::spawn_blocking(move || {
+        crate::safe_fs::atomic_write(&manifest_path, manifest_json.as_bytes())
+    })
+    .await
+    .context("Failed to join backup-manifest writer")??;
     Ok(())
 }
 
@@ -1136,6 +1308,36 @@ async fn classify_database_protection(path: &Path) -> Result<BackupDatabaseProte
     .context("Failed to join database protection inspection")?
 }
 
+fn build_file_inventory_entry(path: &Path, relative: String) -> Result<BackupFileInventory> {
+    let metadata = std::fs::symlink_metadata(path)
+        .with_context(|| format!("Failed to inspect inventory file {}", path.display()))?;
+    if metadata.file_type().is_symlink() || !metadata.file_type().is_file() {
+        anyhow::bail!(
+            "Backup inventory refuses non-regular file {}",
+            path.display()
+        );
+    }
+
+    let mut file = std::fs::File::open(path)
+        .with_context(|| format!("Failed to open inventory file {}", path.display()))?;
+    let mut hasher = Sha256::new();
+    let mut buffer = [0u8; 1024 * 1024];
+    let mut size_bytes = 0u64;
+    loop {
+        let read = file.read(&mut buffer)?;
+        if read == 0 {
+            break;
+        }
+        hasher.update(&buffer[..read]);
+        size_bytes += read as u64;
+    }
+    Ok(BackupFileInventory {
+        path: relative.replace('\\', "/"),
+        size_bytes,
+        sha256: hex::encode(hasher.finalize()),
+    })
+}
+
 async fn build_file_inventory(backup_path: &Path) -> Result<Vec<BackupFileInventory>> {
     let root = backup_path.to_path_buf();
     tokio::task::spawn_blocking(move || {
@@ -1172,23 +1374,10 @@ async fn build_file_inventory(backup_path: &Path) -> Result<Vec<BackupFileInvent
                 continue;
             }
 
-            let mut file = std::fs::File::open(entry.path())?;
-            let mut hasher = Sha256::new();
-            let mut buffer = [0u8; 1024 * 1024];
-            let mut size_bytes = 0u64;
-            loop {
-                let read = file.read(&mut buffer)?;
-                if read == 0 {
-                    break;
-                }
-                hasher.update(&buffer[..read]);
-                size_bytes += read as u64;
-            }
-            files.push(BackupFileInventory {
-                path: relative.replace('\\', "/"),
-                size_bytes,
-                sha256: hex::encode(hasher.finalize()),
-            });
+            files.push(build_file_inventory_entry(
+                entry.path(),
+                relative.to_string(),
+            )?);
         }
         files.sort_by(|left, right| left.path.cmp(&right.path));
         Ok::<_, anyhow::Error>(files)
@@ -1581,18 +1770,28 @@ fn build_restore_units(
 }
 
 async fn remove_path_if_exists(path: &Path) -> Result<()> {
-    if !path.exists() {
-        return Ok(());
-    }
+    let metadata = match tokio::fs::symlink_metadata(path).await {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => {
+            return Err(error)
+                .with_context(|| format!("Failed to inspect restore path {}", path.display()))
+        }
+    };
 
-    if path.is_dir() {
+    if metadata.file_type().is_symlink() || metadata.is_file() {
+        tokio::fs::remove_file(path)
+            .await
+            .with_context(|| format!("Failed to remove file {}", path.display()))?;
+    } else if metadata.is_dir() {
         tokio::fs::remove_dir_all(path)
             .await
             .with_context(|| format!("Failed to remove directory {}", path.display()))?;
     } else {
-        tokio::fs::remove_file(path)
-            .await
-            .with_context(|| format!("Failed to remove file {}", path.display()))?;
+        anyhow::bail!(
+            "Restore path is not a file or directory: {}",
+            path.display()
+        );
     }
     Ok(())
 }
@@ -1631,6 +1830,91 @@ async fn stage_restore_units(units: &[RestoreUnit]) -> Result<()> {
         }
     }
 
+    Ok(())
+}
+
+async fn build_staged_restore_inventory(units: &[RestoreUnit]) -> Result<Vec<BackupFileInventory>> {
+    let units = units.to_vec();
+    tokio::task::spawn_blocking(move || {
+        let mut files = Vec::new();
+        for unit in units {
+            match unit.path_kind {
+                RestorePathKind::File => {
+                    files.push(build_file_inventory_entry(
+                        &unit.staged_path,
+                        component_file_name(unit.component).to_string(),
+                    )?);
+                }
+                RestorePathKind::Directory => {
+                    let metadata =
+                        std::fs::symlink_metadata(&unit.staged_path).with_context(|| {
+                            format!(
+                                "Failed to inspect staged {:?} directory {}",
+                                unit.component,
+                                unit.staged_path.display()
+                            )
+                        })?;
+                    if metadata.file_type().is_symlink() || !metadata.file_type().is_dir() {
+                        anyhow::bail!(
+                            "Staged {:?} component is not a regular directory",
+                            unit.component
+                        );
+                    }
+                    for entry in walkdir::WalkDir::new(&unit.staged_path).follow_links(false) {
+                        let entry = entry.with_context(|| {
+                            format!("Failed to inventory staged {:?} component", unit.component)
+                        })?;
+                        if entry.path() == unit.staged_path {
+                            continue;
+                        }
+                        if entry.file_type().is_symlink() {
+                            anyhow::bail!(
+                                "Staged restore inventory refuses symlink {}",
+                                entry.path().display()
+                            );
+                        }
+                        if entry.file_type().is_dir() {
+                            continue;
+                        }
+                        if !entry.file_type().is_file() {
+                            anyhow::bail!(
+                                "Staged restore inventory contains unsupported entry {}",
+                                entry.path().display()
+                            );
+                        }
+                        let relative = entry
+                            .path()
+                            .strip_prefix(&unit.staged_path)?
+                            .to_str()
+                            .ok_or_else(|| {
+                                anyhow::anyhow!(
+                                    "Staged restore path is not valid UTF-8: {}",
+                                    entry.path().display()
+                                )
+                            })?;
+                        files.push(build_file_inventory_entry(
+                            entry.path(),
+                            format!("{}/{}", component_file_name(unit.component), relative),
+                        )?);
+                    }
+                }
+            }
+        }
+        files.sort_by(|left, right| left.path.cmp(&right.path));
+        Ok::<_, anyhow::Error>(files)
+    })
+    .await
+    .context("Failed to join staged restore inventory task")?
+}
+
+async fn validate_staged_restore_inventory(
+    units: &[RestoreUnit],
+    expected: &[BackupFileInventory],
+) -> Result<()> {
+    let actual = build_staged_restore_inventory(units).await?;
+    if actual != expected {
+        anyhow::bail!("Staged restore inventory does not match the validated backup manifest");
+    }
     Ok(())
 }
 
@@ -1703,6 +1987,7 @@ async fn restore_backup_into_targets(
     data_dir: &Path,
     settings_path: &Path,
     components: &[BackupComponent],
+    expected_files: &[BackupFileInventory],
     recording_path_format: Option<RecordingPathFormat>,
 ) -> Result<()> {
     let transaction_id = format!("{}-{}", Utc::now().timestamp_millis(), std::process::id());
@@ -1716,6 +2001,11 @@ async fn restore_backup_into_targets(
     if let Err(error) = stage_restore_units(&units).await {
         cleanup_restore_artifacts(&units).await;
         return Err(error);
+    }
+
+    if let Err(error) = validate_staged_restore_inventory(&units, expected_files).await {
+        cleanup_restore_artifacts(&units).await;
+        return Err(error.context("Staged backup bytes failed manifest validation"));
     }
 
     if let Some(database_unit) = units
@@ -1811,7 +2101,7 @@ async fn copy_dir_recursive(src: &Path, dst: &Path) -> Result<()> {
             src.display()
         ));
     }
-    tokio::fs::create_dir_all(dst).await?;
+    crate::safe_fs::ensure_directory_without_links(dst)?;
     let mut entries = tokio::fs::read_dir(src).await?;
     while let Some(entry) = entries.next_entry().await? {
         let path = entry.path();
@@ -1829,7 +2119,7 @@ async fn copy_dir_recursive(src: &Path, dst: &Path) -> Result<()> {
         if metadata.file_type().is_dir() {
             Box::pin(copy_dir_recursive(&path, &dest_path)).await?;
         } else if metadata.file_type().is_file() {
-            tokio::fs::copy(&path, dest_path).await?;
+            copy_regular_file_without_links(&path, &dest_path).await?;
         } else {
             return Err(anyhow::anyhow!(
                 "Refusing to copy unsupported directory entry: {}",
@@ -1838,6 +2128,31 @@ async fn copy_dir_recursive(src: &Path, dst: &Path) -> Result<()> {
         }
     }
     Ok(())
+}
+
+async fn copy_regular_file_without_links(src: &Path, dst: &Path) -> Result<u64> {
+    let src = src.to_path_buf();
+    let dst = dst.to_path_buf();
+    tokio::task::spawn_blocking(move || {
+        let metadata = std::fs::symlink_metadata(&src)
+            .with_context(|| format!("Failed to inspect source file {}", src.display()))?;
+        if metadata.file_type().is_symlink() || !metadata.file_type().is_file() {
+            anyhow::bail!(
+                "Refusing to copy a symlink or non-file source: {}",
+                src.display()
+            );
+        }
+        let mut copied = 0;
+        crate::safe_fs::atomic_replace_with(&dst, |destination| {
+            let mut source = crate::safe_fs::open_regular_file_without_links(&src)?;
+            copied = std::io::copy(&mut source, destination)
+                .with_context(|| format!("Failed to copy source file {}", src.display()))?;
+            Ok(())
+        })?;
+        Ok::<_, anyhow::Error>(copied)
+    })
+    .await
+    .context("Failed to join safe file-copy task")?
 }
 
 async fn sync_backup_tree(path: &Path) -> Result<()> {
@@ -1871,30 +2186,6 @@ async fn sync_backup_tree(path: &Path) -> Result<()> {
     .await
     .context("Failed to join backup sync task")??;
     Ok(())
-}
-
-async fn sync_directory_best_effort(path: &Path) {
-    #[cfg(unix)]
-    {
-        let directory = path.to_path_buf();
-        let sync_result = tokio::task::spawn_blocking(move || {
-            std::fs::File::open(&directory).and_then(|file| file.sync_all())
-        })
-        .await;
-        match sync_result {
-            Ok(Ok(())) => {}
-            Ok(Err(error)) => tracing::warn!(
-                "Failed to sync backup directory {} after publication: {}",
-                path.display(),
-                error
-            ),
-            Err(error) => tracing::warn!(
-                "Failed to join backup directory sync for {}: {}",
-                path.display(),
-                error
-            ),
-        }
-    }
 }
 
 async fn count_dir_items(path: &Path) -> Result<u32> {
@@ -1941,41 +2232,40 @@ async fn create_zip_archive(src: &Path, dst: &Path) -> Result<()> {
     let dst_path = dst.to_path_buf();
 
     tokio::task::spawn_blocking(move || -> Result<()> {
-        use std::fs::File;
-        use std::io::{Read, Write};
         use zip::write::SimpleFileOptions;
         use zip::CompressionMethod;
 
-        let file = File::create(&dst_path)
-            .with_context(|| format!("Failed to create zip file {}", dst_path.display()))?;
-        let mut zip = zip::ZipWriter::new(file);
-        let options = SimpleFileOptions::default().compression_method(CompressionMethod::Deflated);
+        crate::safe_fs::atomic_replace_with(&dst_path, |file| {
+            let mut zip = zip::ZipWriter::new(file);
+            let options =
+                SimpleFileOptions::default().compression_method(CompressionMethod::Deflated);
 
-        for entry in walkdir::WalkDir::new(&src_path)
-            .into_iter()
-            .filter_map(|e| e.ok())
-        {
-            let path = entry.path();
-            let rel = path
-                .strip_prefix(&src_path)
-                .with_context(|| format!("Failed to strip path prefix for {}", path.display()))?;
-            if rel.as_os_str().is_empty() {
-                continue;
+            for entry in walkdir::WalkDir::new(&src_path).follow_links(false) {
+                let entry = entry.with_context(|| {
+                    format!("Failed to walk backup source {}", src_path.display())
+                })?;
+                if entry.file_type().is_symlink() {
+                    anyhow::bail!("Backup archive refuses symlink {}", entry.path().display());
+                }
+                let path = entry.path();
+                let rel = path.strip_prefix(&src_path).with_context(|| {
+                    format!("Failed to strip path prefix for {}", path.display())
+                })?;
+                if rel.as_os_str().is_empty() {
+                    continue;
+                }
+                let rel_name = rel.to_string_lossy().replace('\\', "/");
+                if path.is_dir() {
+                    zip.add_directory(rel_name, options)?;
+                } else {
+                    zip.start_file(rel_name, options)?;
+                    let mut source = std::fs::File::open(path)?;
+                    std::io::copy(&mut source, &mut zip)?;
+                }
             }
-            let rel_name = rel.to_string_lossy().replace('\\', "/");
-            if path.is_dir() {
-                zip.add_directory(rel_name, options)?;
-            } else {
-                zip.start_file(rel_name, options)?;
-                let mut f = File::open(path)?;
-                let mut buffer = Vec::new();
-                f.read_to_end(&mut buffer)?;
-                zip.write_all(&buffer)?;
-            }
-        }
-
-        zip.finish()?;
-        Ok(())
+            zip.finish()?;
+            Ok(())
+        })
     })
     .await
     .context("Failed to join archive writer task")??;
@@ -2073,7 +2363,8 @@ async fn sync_to_icloud(config: &BackupConfig, source: &Path) -> Result<()> {
         .ok_or_else(|| anyhow::anyhow!("Invalid backup path"))?;
     let folder = validate_cloud_folder(&config.cloud_folder)?;
     let destination_root = root.join(folder);
-    tokio::fs::create_dir_all(&destination_root).await?;
+    crate::safe_fs::ensure_directory_without_links(&destination_root)
+        .context("iCloud destination contains a linked or invalid directory component")?;
     let destination = destination_root.join(backup_id);
     let transaction_id = format!("{}-{}", Utc::now().timestamp_millis(), std::process::id());
     let temp_destination =
@@ -2084,6 +2375,9 @@ async fn sync_to_icloud(config: &BackupConfig, source: &Path) -> Result<()> {
     remove_path_if_exists(&temp_destination).await?;
     remove_path_if_exists(&previous_destination).await?;
     copy_dir_recursive(source, &temp_destination).await?;
+
+    crate::safe_fs::ensure_directory_without_links(&destination_root)
+        .context("iCloud destination changed while the backup was being copied")?;
 
     if destination.exists() {
         tokio::fs::rename(&destination, &previous_destination)
@@ -2216,6 +2510,36 @@ mod tests {
         assert!(validate_backup_id("backup\\2026").is_err());
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn restore_cleanup_removes_links_without_touching_their_targets() {
+        use std::os::unix::fs::symlink;
+
+        let runtime = Runtime::new().expect("create tokio runtime");
+        runtime.block_on(async {
+            let root = unique_test_dir("restore-cleanup-links");
+            let outside = root.join("outside");
+            let directory_link = root.join("directory-link");
+            let broken_link = root.join("broken-link");
+            fs::create_dir_all(&outside).expect("create outside directory");
+            fs::write(outside.join("sentinel.txt"), "keep").expect("write sentinel");
+            symlink(&outside, &directory_link).expect("create directory link");
+            symlink(root.join("missing"), &broken_link).expect("create broken link");
+
+            remove_path_if_exists(&directory_link)
+                .await
+                .expect("remove directory link");
+            remove_path_if_exists(&broken_link)
+                .await
+                .expect("remove broken link");
+
+            assert!(outside.join("sentinel.txt").is_file());
+            assert!(fs::symlink_metadata(&directory_link).is_err());
+            assert!(fs::symlink_metadata(&broken_link).is_err());
+            let _ = fs::remove_dir_all(&root);
+        });
+    }
+
     #[test]
     fn backup_id_accepts_expected_characters() {
         let value = validate_backup_id("backup_20260219_154500").expect("valid backup id");
@@ -2249,6 +2573,48 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
+    fn backup_creation_rejects_an_approved_root_replaced_by_a_symlink() {
+        use std::os::unix::fs::symlink;
+
+        let runtime = Runtime::new().expect("create tokio runtime");
+        runtime.block_on(async {
+            let root = unique_test_dir("approved-root-swap");
+            let destination = root.join("backups");
+            let outside = root.join("outside");
+            let data_dir = root.join("data");
+            let settings_path = root.join("config/settings.json");
+            fs::create_dir_all(&destination).expect("create approved destination");
+            fs::create_dir_all(&outside).expect("create outside destination");
+            write_settings(&settings_path, "dark");
+            let manager = manager_for(destination.clone(), 7);
+
+            fs::remove_dir(&destination).expect("remove approved destination");
+            symlink(&outside, &destination).expect("replace destination with symlink");
+
+            manager
+                .create_backup_with_sources(&data_dir, &settings_path, BackupType::Settings, None)
+                .await
+                .expect_err("a swapped approved root must fail closed");
+            assert!(directory_entry_names(&outside).is_empty());
+            let _ = fs::remove_dir_all(&root);
+        });
+    }
+
+    #[test]
+    fn malformed_backup_config_is_reported_instead_of_treated_as_missing() {
+        let root = unique_test_dir("malformed-config");
+        fs::create_dir_all(&root).expect("create config root");
+        let path = root.join("backup-config.json");
+        fs::write(&path, "{\"cloudSync\":").expect("write truncated config");
+
+        let error = load_backup_config_from_path(&path)
+            .expect_err("truncated config must remain distinguishable from a missing file");
+        assert!(error.to_string().contains("parse backup configuration"));
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[cfg(unix)]
+    #[test]
     fn recursive_copy_rejects_nested_file_and_directory_symlinks() {
         use std::os::unix::fs::symlink;
 
@@ -2278,6 +2644,74 @@ mod tests {
                 .expect_err("nested directory symlink must be rejected");
             assert!(directory_error.to_string().contains("symlink"));
 
+            let _ = fs::remove_dir_all(&root);
+        });
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn backup_archive_replaces_a_link_leaf_without_writing_through_it() {
+        use std::os::unix::fs::symlink;
+
+        let runtime = Runtime::new().expect("create tokio runtime");
+        runtime.block_on(async {
+            let root = unique_test_dir("archive-link");
+            fs::create_dir_all(&root).expect("create archive test root");
+            let root = root.canonicalize().expect("canonical archive test root");
+            let source = root.join("source");
+            let outside = root.join("outside.zip");
+            let destination = root.join("backup.zip");
+            fs::create_dir_all(&source).expect("create source");
+            fs::write(source.join("settings.json"), "{}").expect("write archive source");
+            fs::write(&outside, "keep me").expect("write outside target");
+            symlink(&outside, &destination).expect("create archive link");
+
+            create_zip_archive(&source, &destination)
+                .await
+                .expect("safe archive export");
+
+            assert_eq!(
+                fs::read_to_string(&outside).expect("read outside target"),
+                "keep me"
+            );
+            assert!(!fs::symlink_metadata(&destination)
+                .expect("inspect archive destination")
+                .file_type()
+                .is_symlink());
+
+            let _ = fs::remove_dir_all(&root);
+        });
+    }
+
+    #[test]
+    fn staged_restore_inventory_rejects_bytes_changed_after_source_validation() {
+        let runtime = Runtime::new().expect("create tokio runtime");
+        runtime.block_on(async {
+            let root = unique_test_dir("staged-integrity");
+            let backup_path = root.join("backup");
+            let data_dir = root.join("data");
+            let settings_path = root.join("config/settings.json");
+            fs::create_dir_all(&backup_path).expect("create backup source");
+            write_settings(&backup_path.join(SETTINGS_BACKUP_FILENAME), "dark");
+            let expected = build_file_inventory(&backup_path)
+                .await
+                .expect("build validated inventory");
+            let units = build_restore_units(
+                &backup_path,
+                &data_dir,
+                &settings_path,
+                &[BackupComponent::Settings],
+                "test-transaction",
+            );
+            stage_restore_units(&units).await.expect("stage restore");
+            write_settings(&units[0].staged_path, "light");
+
+            let error = validate_staged_restore_inventory(&units, &expected)
+                .await
+                .expect_err("changed staged bytes must be rejected");
+            assert!(error.to_string().contains("inventory"));
+
+            cleanup_restore_artifacts(&units).await;
             let _ = fs::remove_dir_all(&root);
         });
     }
@@ -2326,6 +2760,65 @@ mod tests {
         });
         assert!(!manager.config().enabled);
         assert_eq!(manager.config().max_backups, 1);
+    }
+
+    #[test]
+    fn backup_dir_renderer_config_cannot_replace_privileged_destination() {
+        let approved_dir = unique_test_dir("approved-renderer-destination");
+        let mut manager = BackupManager::new(BackupConfig {
+            backup_dir: Some(approved_dir.clone()),
+            backup_location_id: Some("approved-backup-location".to_string()),
+            backup_location_label: Some("Beta backups".to_string()),
+            backup_location_approved: true,
+            ..BackupConfig::default()
+        });
+
+        let malicious_dir = unique_test_dir("renderer-controlled-destination");
+        manager
+            .set_config_from_renderer(BackupConfig {
+                max_backups: 3,
+                backup_dir: Some(malicious_dir),
+                backup_location_id: Some("renderer-id".to_string()),
+                backup_location_label: Some("Renderer path".to_string()),
+                backup_location_approved: true,
+                ..BackupConfig::default()
+            })
+            .expect("ordinary backup preferences should still save");
+
+        assert_eq!(manager.config().max_backups, 3);
+        assert_eq!(manager.config().backup_dir.as_ref(), Some(&approved_dir));
+        assert_eq!(
+            manager.config().backup_location_id.as_deref(),
+            Some("approved-backup-location")
+        );
+        assert_eq!(
+            manager.config().backup_location_label.as_deref(),
+            Some("Beta backups")
+        );
+        assert!(manager.config().backup_location_approved);
+    }
+
+    #[test]
+    fn backup_dir_legacy_custom_location_fails_closed_until_reselected() {
+        let runtime = Runtime::new().expect("create tokio runtime");
+        runtime.block_on(async {
+            let legacy_dir = unique_test_dir("legacy-unapproved-destination");
+            std::fs::create_dir_all(&legacy_dir).expect("create legacy destination");
+            let manager = BackupManager::new(BackupConfig {
+                backup_dir: Some(legacy_dir.clone()),
+                backup_location_id: Some("legacy-unapproved-location".to_string()),
+                backup_location_label: Some("Legacy backups".to_string()),
+                backup_location_approved: false,
+                ..BackupConfig::default()
+            });
+
+            let error = manager
+                .list_backups()
+                .await
+                .expect_err("unapproved legacy destination must fail closed");
+            assert!(error.to_string().contains("not approved"));
+            let _ = std::fs::remove_dir_all(legacy_dir);
+        });
     }
 
     #[test]

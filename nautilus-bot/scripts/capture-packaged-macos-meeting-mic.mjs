@@ -1,13 +1,17 @@
 #!/usr/bin/env node
 import crypto from "node:crypto";
 import fs from "node:fs";
-import os from "node:os";
 import path from "node:path";
 import { spawn } from "node:child_process";
 import { createInterface } from "node:readline";
+import { createPackagedQaProfile } from "./lib/packaged-qa-profile.mjs";
 
 const repoRoot = path.resolve(import.meta.dirname, "..");
 const args = process.argv.slice(2);
+const qaProfile = createPackagedQaProfile({
+  args,
+  prefix: "plainsong-meeting-mic-qa-",
+});
 
 function valueFor(name, fallback = null) {
   const index = args.indexOf(name);
@@ -19,15 +23,20 @@ const appPath = path.resolve(
   repoRoot,
   valueFor("--app", "release/mac-arm64/Plainsong.app")
 );
+const includeSystemAudio = args.includes("--system-audio");
 const outPath = path.resolve(
   repoRoot,
-  valueFor("--out", "artifacts/qa/macos/capture-meeting-mic.json")
+  valueFor(
+    "--out",
+    includeSystemAudio
+      ? "artifacts/qa/macos/capture-meeting-system-audio.json"
+      : "artifacts/qa/macos/capture-meeting-mic.json",
+  )
 );
 const recordMs = Number(valueFor("--record-ms", "3500"));
 const timeoutMs = Number(valueFor("--timeout-ms", "90000"));
 const inputDeviceId = valueFor("--input-device-id", "")?.trim() ?? "";
 const inputDeviceName = valueFor("--input-device-name", "")?.trim() ?? "";
-const includeSystemAudio = args.includes("--system-audio");
 const expectedCaptureMode = includeSystemAudio ? "me_and_them" : "mic_only";
 const sidecarPath = path.join(
   appPath,
@@ -36,12 +45,8 @@ const sidecarPath = path.join(
   "sidecar",
   "plainsong-sidecar"
 );
-const dataRoot = process.env.PLAINSONG_DATA_DIR
-  ? path.resolve(process.env.PLAINSONG_DATA_DIR)
-  : path.join(os.homedir(), "Library", "Application Support");
-const configRoot = process.env.PLAINSONG_CONFIG_DIR
-  ? path.resolve(process.env.PLAINSONG_CONFIG_DIR)
-  : path.join(os.homedir(), "Library", "Application Support");
+const dataRoot = qaProfile.dataRoot;
+const configRoot = qaProfile.configRoot;
 const dataDir = path.join(dataRoot, "Plainsong");
 const configDir = path.join(configRoot, "Plainsong");
 const settingsPath = path.join(configDir, "settings.json");
@@ -163,6 +168,7 @@ function launchSidecar() {
   const child = spawn(sidecarPath, [], {
     cwd: repoRoot,
     stdio: ["pipe", "pipe", "pipe"],
+    env: { ...process.env, ...qaProfile.env },
   });
   const childExit = new Promise((resolve) => {
     child.on("exit", (code, signal) => resolve({ code, signal }));
@@ -237,7 +243,7 @@ function launchSidecar() {
     }
     const result = await Promise.race([
       childExit,
-      new Promise((resolve) => setTimeout(() => resolve(null), 3000)),
+      new Promise((resolve) => setTimeout(() => resolve(null), 15000)),
     ]);
     if (!result) {
       child.kill("SIGTERM");
@@ -318,6 +324,7 @@ async function run() {
     systemAudioVerification: null,
     overlayWhileRecording: null,
     overlayAfterStop: null,
+    duplicateStop: null,
     audioFile: null,
     sidecarAudioFiles: [],
     audioFilesCleaned: false,
@@ -366,6 +373,7 @@ async function run() {
           ? "Packaged QA microphone and system audio capture."
           : "Packaged QA mic-only capture.",
         consentPromptShown: true,
+        admissionNonce: crypto.randomUUID(),
         meetingCaptureMode: expectedCaptureMode,
       },
     });
@@ -379,6 +387,15 @@ async function run() {
     artifact.overlayWhileRecording = await sidecar.sendCommand("get_recording_overlay_state", {});
 
     await sidecar.sendCommand("stop_recording", { recordingId: artifact.recordingId });
+    try {
+      await sidecar.sendCommand("stop_recording", { recordingId: artifact.recordingId });
+      artifact.duplicateStop = { accepted: true, error: null };
+    } catch (error) {
+      artifact.duplicateStop = {
+        accepted: false,
+        error: error instanceof Error ? error.message : String(error),
+      };
+    }
     artifact.overlayAfterStop = await sidecar.sendCommand("get_recording_overlay_state", {});
     artifact.recordingAfterStop = await sidecar.sendCommand("get_recording", {
       recordingId: artifact.recordingId,
@@ -431,6 +448,8 @@ async function run() {
   }
 
   artifact.checks = {
+    sidecarCleanExit:
+      artifact.sidecarExit?.code === 0 && artifact.sidecarExit?.signal === null,
     meetingSetupReady: Boolean(artifact.meetingSetup?.ok),
     systemAudioVerifiedForCombinedCapture:
       !includeSystemAudio ||
@@ -441,7 +460,8 @@ async function run() {
         artifact.systemAudioVerification?.verificationMethod === "known_tone"),
     recordingIdReturned: Boolean(artifact.recordingId),
     overlayEnteredRecording: artifact.overlayWhileRecording?.phase === "recording",
-    overlayEnteredTranscribing: artifact.overlayAfterStop?.phase === "transcribing",
+    overlayEnteredProcessing: artifact.overlayAfterStop?.phase === "processing",
+    duplicateStopIdempotent: artifact.duplicateStop?.accepted === true,
     recordingRowPreserved: artifact.recordingAfterStop?.id === artifact.recordingId,
     recordingSourceMeeting: artifact.recordingAfterStop?.sourceType === "meeting",
     captureModeMatches: artifact.recordingAfterStop?.meetingCaptureMode === expectedCaptureMode,

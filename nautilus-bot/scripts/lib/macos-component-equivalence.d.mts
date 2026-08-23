@@ -24,6 +24,13 @@ export interface ComponentEquivalenceArtifact {
   components: Record<string, PackagedComponentComparison>;
 }
 
+export interface ExactCandidateComponentDigests {
+  appAsar: string | null;
+  sidecar: string | null;
+  shortcutHelper: string | null;
+  speechHelper: string | null;
+}
+
 export function evaluateComponentEquivalence(input: {
   referenceApp: string;
   candidateApp: string;
@@ -41,7 +48,9 @@ export function evaluateCandidateEvidenceProvenance(input: {
   artifactAppPath: string | null;
   artifactSidecarPath: string | null;
   candidateAppPath: string | null;
-  equivalence: ComponentEquivalenceArtifact | null;
+  artifactComponents?: ExactCandidateComponentDigests | null;
+  candidateComponents?: ExactCandidateComponentDigests | null;
+  equivalence?: ComponentEquivalenceArtifact | null;
 }): {
   valid: boolean;
   mode: string;

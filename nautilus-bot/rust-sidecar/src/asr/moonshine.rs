@@ -7,7 +7,7 @@ use async_trait::async_trait;
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 #[cfg(feature = "asr-parakeet")]
-use std::{cell::RefCell, thread_local};
+use std::sync::{Mutex, OnceLock};
 
 // ---------------------------------------------------------------------------
 // UsefulSensors Moonshine, native ONNX inference, no Python required.
@@ -28,6 +28,14 @@ const MOONSHINE_BASE_HF_REVISION: &str = "7a73d8d55ac0ba2ef3ae761593f6784b51f96d
 const MOONSHINE_LOCAL_ENCODER: &str = "encoder_model.onnx";
 const MOONSHINE_LOCAL_DECODER: &str = "decoder_model_merged.onnx";
 const MOONSHINE_LOCAL_TOKENIZER: &str = "tokenizer.json";
+
+fn moonshine_artifact_max_bytes(local_name: &str) -> u64 {
+    if local_name == MOONSHINE_LOCAL_TOKENIZER {
+        64 * 1024 * 1024
+    } else {
+        1024 * 1024 * 1024
+    }
+}
 
 /// BOS / EOS token IDs for the Moonshine tokenizer (only used in ONNX path).
 #[cfg(feature = "asr-parakeet")]
@@ -78,15 +86,15 @@ fn load_runtime(model_dir: &Path) -> Result<MoonshineRuntime> {
 }
 
 #[cfg(feature = "asr-parakeet")]
-thread_local! {
-    static RUNTIME_CACHE: RefCell<Option<MoonshineRuntime>> = const { RefCell::new(None) };
+fn runtime_cache() -> &'static Mutex<Option<MoonshineRuntime>> {
+    static CACHE: OnceLock<Mutex<Option<MoonshineRuntime>>> = OnceLock::new();
+    CACHE.get_or_init(|| Mutex::new(None))
 }
 
 #[cfg(feature = "asr-parakeet")]
 pub(crate) fn clear_cached_runtime(model_dir: &Path) {
     let model_dir_key = model_dir.to_string_lossy().to_string();
-    RUNTIME_CACHE.with(|cache| {
-        let mut cache = cache.borrow_mut();
+    if let Ok(mut cache) = runtime_cache().lock() {
         if cache
             .as_ref()
             .map(|runtime| runtime.model_dir_key == model_dir_key)
@@ -98,7 +106,7 @@ pub(crate) fn clear_cached_runtime(model_dir: &Path) {
                 model_dir.display()
             );
         }
-    });
+    }
 }
 
 #[cfg(not(feature = "asr-parakeet"))]
@@ -296,8 +304,10 @@ fn run_moonshine_onnx(model_dir: &Path, audio_path: &Path) -> Result<String> {
     }
 
     let model_dir_key = model_dir.to_string_lossy().to_string();
-    RUNTIME_CACHE.with(|cache| {
-        let mut cache = cache.borrow_mut();
+    {
+        let mut cache = runtime_cache().lock().map_err(|error| {
+            anyhow::anyhow!("Moonshine runtime cache is unavailable: {}", error)
+        })?;
         let should_reload = cache
             .as_ref()
             .map(|runtime| runtime.model_dir_key != model_dir_key)
@@ -523,7 +533,30 @@ fn run_moonshine_onnx(model_dir: &Path, audio_path: &Path) -> Result<String> {
             .map_err(|e| anyhow::anyhow!("Moonshine tokenizer decode failed: {}", e))?;
 
         Ok(text.trim().to_string())
-    })
+    }
+}
+
+#[cfg(feature = "asr-parakeet")]
+fn prewarm_runtime(model_dir: &Path) -> Result<()> {
+    let model_dir_key = model_dir.to_string_lossy().to_string();
+    let mut cache = runtime_cache()
+        .lock()
+        .map_err(|error| anyhow::anyhow!("Moonshine runtime cache is unavailable: {}", error))?;
+    if cache
+        .as_ref()
+        .is_some_and(|runtime| runtime.model_dir_key == model_dir_key)
+    {
+        return Ok(());
+    }
+    *cache = Some(load_runtime(model_dir)?);
+    Ok(())
+}
+
+#[cfg(not(feature = "asr-parakeet"))]
+fn prewarm_runtime(_model_dir: &Path) -> Result<()> {
+    Err(anyhow::anyhow!(
+        "Moonshine ONNX support is not compiled into this build."
+    ))
 }
 
 #[cfg(feature = "asr-parakeet")]
@@ -560,6 +593,24 @@ impl AsrProvider for MoonshineProvider {
 
     fn is_available(&self) -> bool {
         self.has_required_files()
+    }
+
+    async fn prewarm(&self) -> Result<()> {
+        if !self.has_required_files() {
+            anyhow::bail!(
+                "Moonshine model is not downloaded. Use the model manager to download it."
+            );
+        }
+        if !self.has_trusted_required_files() {
+            anyhow::bail!(
+                "Moonshine model files have not passed Plainsong integrity verification. Re-download the model from Settings."
+            );
+        }
+        let model_dir = self.model_dir.clone();
+        tokio::task::spawn_blocking(move || prewarm_runtime(&model_dir))
+            .await
+            .context("Moonshine model warmup task panicked")??;
+        Ok(())
     }
 
     fn model_info(&self) -> ModelInfo {
@@ -725,10 +776,16 @@ impl AsrProvider for MoonshineProvider {
             );
             let cb = progress_cb.clone();
             manager
-                .download_verified_model_asset(&url, &destination, sha256, move |p| {
-                    cb((i as f32 / n_files + p.percentage as f32 / 100.0 / n_files) * 100.0);
-                    tracing::info!("Moonshine {} download: {:.1}%", local_name, p.percentage);
-                })
+                .download_verified_model_asset(
+                    &url,
+                    &destination,
+                    sha256,
+                    moonshine_artifact_max_bytes(local_name),
+                    move |p| {
+                        cb((i as f32 / n_files + p.percentage as f32 / 100.0 / n_files) * 100.0);
+                        tracing::info!("Moonshine {} download: {:.1}%", local_name, p.percentage);
+                    },
+                )
                 .await?;
         }
 

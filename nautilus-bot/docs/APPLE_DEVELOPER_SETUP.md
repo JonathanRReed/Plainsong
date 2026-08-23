@@ -1,34 +1,26 @@
 # Apple Developer release setup
 
-This guide covers the remaining Apple-side work required to notarize and stage
-the first Plainsong macOS release.
+This guide covers the Apple-side work required to reproduce and stage the
+limited Plainsong macOS beta.
 
 ## Confirmed local state
 
-As of July 30, 2026:
+As of August 8, 2026:
 
 - a Developer ID Application identity for team `AJ9VWBRNZN` is installed
-- the exact
-  `release-plainsong-launch-candidate-20260730/mac-arm64/Plainsong.app`
-  candidate, sidecar, native shortcut helper, and Apple Speech helper are
-  Developer ID signed
+- the local `plainsong-notary` Keychain profile authenticates successfully
+- the exact `release/mac-arm64/Plainsong.app` beta candidate, sidecar, native
+  shortcut helper, and Apple Speech helper are Developer ID signed
 - hardened runtime and secure timestamps are present
-- the packaged arm64 DMG, ZIP, blockmap, and updater manifest were built
-- **no authenticated** `plainsong-notary` Keychain profile has been confirmed
-  on this machine. Before the current credential-creation attempt, a July 30
-  check with
-  `xcrun notarytool history --keychain-profile plainsong-notary` reports
-  "No Keychain password item found." Creating the profile needs the account
-  holder because it requires an Apple ID and an app-specific password
-- notarization was explicitly deferred before a Plainsong submission was made
-- the current clean candidate was rebuilt without notarization inputs
-- stapler reports that no ticket is attached
-- Gatekeeper reports `source=Unnotarized Developer ID`
+- the app and DMG are notarized and stapled
+- Gatekeeper reports `source=Notarized Developer ID` for both surfaces
+- the arm64 DMG, ZIP, blockmap, and beta updater manifest are built locally
+- no release, update feed, website deployment, or beta invitation has been
+  published
 
-When notarization is resumed, use only `plainsong-notary`. The final candidate
-must run through the credentialed release workflow and pass stapler and
-Gatekeeper verification before publication. Do not publish the current local
-candidate.
+Use only `plainsong-notary` for local notarization. A new final candidate must
+still run the full credentialed build, DMG submission, stapler, Gatekeeper, and
+repository trust gates. Never transfer trust receipts from an older candidate.
 
 ## 1. Confirm Apple team access
 
@@ -100,11 +92,11 @@ APPLE_TEAM_ID="AJ9VWBRNZN" bun run gate:release:macos:trust
 bun run gate:size
 ```
 
-### Creating the `notarytool` Keychain profile
+### Recreating the `notarytool` Keychain profile
 
-No profile exists on this machine yet, so this step comes first and only the
-account holder can perform it: it takes an Apple ID and an app-specific
-password, which nobody else should handle.
+The `plainsong-notary` profile already exists on the release machine. Use these
+steps only when replacing it or provisioning another trusted release machine.
+Only the account holder should handle the Apple ID and app-specific password.
 
 1. Create an app-specific password at
    [account.apple.com](https://account.apple.com/) under Sign-In and Security →
@@ -116,9 +108,7 @@ password, which nobody else should handle.
    xcrun notarytool store-credentials "plainsong-notary" --apple-id "<apple-id-email>" --team-id "AJ9VWBRNZN"
    ```
 
-3. Confirm the profile resolves. An empty submission history is the expected
-   result before the first submission — the point is that it authenticates
-   rather than reporting a missing Keychain item:
+3. Confirm the profile resolves and authenticates:
 
    ```bash
    xcrun notarytool history --keychain-profile "plainsong-notary"
@@ -160,10 +150,11 @@ source=Notarized Developer ID
 Signing success alone is not enough. A release is blocked until notarization,
 stapling, and Gatekeeper acceptance all pass.
 
-## 6. Run the official release workflow
+## 6. Run the artifact-staging release workflow
 
-After the release changes are merged and the intended `v1.0.0` tag exists,
-trigger `.github/workflows/release.yml` with that tag.
+After the release changes are merged and the intended beta tag exists, trigger
+`.github/workflows/release.yml` with that tag. For this candidate, the tag is
+`v0.9.0-beta.2`.
 
 The workflow:
 
@@ -172,15 +163,19 @@ The workflow:
 3. builds the DMG, ZIP, blockmaps, and updater metadata without publishing
 4. verifies signatures, notarization, stapling, Gatekeeper, TCC strings, size,
    and updater metadata
-5. creates or refreshes a draft GitHub release only after every check passes
+5. creates or refreshes an artifact-only draft GitHub release after every
+   automated artifact check passes
 
-The workflow refuses to overwrite a published release.
+The workflow refuses to overwrite a published release. Its draft does not
+prove the real-hardware Dictation, Meetings, clean-install, updater-journey, or
+three-hour soak gates. The aggregate release audit remains authoritative for
+beta readiness.
 
 ## 7. Review before launch
 
 Before publishing the draft:
 
-1. verify the draft contains the DMG, ZIP, blockmaps, `latest-mac.yml`, and
+1. verify the draft contains the DMG, ZIP, blockmap, `beta-mac.yml`, and
    checksum file
 2. install the DMG on a clean Apple Silicon Mac
 3. confirm Gatekeeper opens it without a bypass

@@ -1,4 +1,4 @@
-import { BrowserWindow } from "electron";
+import { BrowserWindow } from "electron/main";
 import path from "path";
 
 // Initial bounds are placeholders — the windows are created hidden (show: false)

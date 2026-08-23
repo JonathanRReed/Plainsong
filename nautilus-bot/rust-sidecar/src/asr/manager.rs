@@ -9,6 +9,7 @@ use anyhow::Result;
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use tokio::sync::RwLock;
 
 // Parakeet legacy 110M: one sherpa-onnx CTC graph plus tokens. `encoder.onnx`
@@ -55,6 +56,7 @@ pub struct AsrManager {
     last_runtime_errors: RwLock<HashMap<AsrProviderType, String>>,
     provider_inventory_cache: RwLock<Option<Vec<ProviderInventory>>>,
     provider_info_cache: RwLock<Option<Vec<ProviderInfo>>>,
+    remote_processing_gate: RwLock<Option<Arc<crate::remote_processing::RemoteProcessingGate>>>,
     models_dir: PathBuf,
 }
 
@@ -99,8 +101,16 @@ impl AsrManager {
             last_runtime_errors: RwLock::new(HashMap::new()),
             provider_inventory_cache: RwLock::new(None),
             provider_info_cache: RwLock::new(None),
+            remote_processing_gate: RwLock::new(None),
             models_dir,
         }
+    }
+
+    pub async fn set_remote_processing_gate(
+        &self,
+        gate: Arc<crate::remote_processing::RemoteProcessingGate>,
+    ) {
+        *self.remote_processing_gate.write().await = Some(gate);
     }
 
     fn normalize_model_id(provider_type: AsrProviderType, model_id: &str) -> String {
@@ -740,10 +750,30 @@ impl AsrManager {
         fallback_reason: Option<String>,
     ) -> Result<TranscriptionResult> {
         let provider = Self::provider_with_model(actual_provider, Some(model_id));
-        let primary_result = match (file_path, audio_data) {
-            (Some(path), None) => provider.transcribe(path).await,
-            (None, Some(bytes)) => provider.transcribe_bytes(bytes).await,
-            _ => Err(anyhow::anyhow!("Invalid transcription input")),
+        let request = async {
+            match (file_path, audio_data) {
+                (Some(path), None) => provider.transcribe(path).await,
+                (None, Some(bytes)) => provider.transcribe_bytes(bytes).await,
+                _ => Err(anyhow::anyhow!("Invalid transcription input")),
+            }
+        };
+        tokio::pin!(request);
+        let primary_result = if actual_provider.is_remote() {
+            let gate = self
+                .remote_processing_gate
+                .read()
+                .await
+                .clone()
+                .ok_or_else(|| anyhow::anyhow!("Remote processing gate is unavailable"))?;
+            let mut grant = gate.grant().map_err(anyhow::Error::msg)?;
+            tokio::select! {
+                result = &mut request => result,
+                _ = grant.cancelled() => Err(anyhow::anyhow!(
+                    "Remote processing was revoked while transcription was active"
+                )),
+            }
+        } else {
+            request.await
         };
 
         match primary_result {

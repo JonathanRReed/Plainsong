@@ -21,6 +21,14 @@ import {
 import { logger } from "@/lib/logger";
 import { formatMeetingStartError } from "@/lib/meeting-start-error";
 import type { DictationStateChangedEvent as SharedDictationStateChangedEvent } from "@/features/dictation/runtime";
+import {
+  INITIAL_MEETING_LIFECYCLE_STATE,
+  meetingPhaseIsCapturing,
+  reduceMeetingLifecycleState,
+  type MeetingLifecycleEvent,
+  type MeetingLifecyclePhase,
+  type MeetingLifecycleState,
+} from "@/features/meetings/runtime";
 
 interface RecordingState {
   isRecording: boolean;
@@ -28,21 +36,11 @@ interface RecordingState {
   recordingMode: "dictation" | "meeting" | null;
   duration: number;
   isSystemAudioActive: boolean;
+  meetingPhase: MeetingLifecyclePhase;
+  meetingMessage: string | null;
 }
 
-interface MeetingRecordingStateChangedEvent {
-  phase: "idle" | "recording" | "transcribing" | "error";
-  recordingId?: string | null;
-  startedAtMs?: number | null;
-  systemAudioActive?: boolean | null;
-}
-
-interface RecordingOverlayState {
-  phase: "idle" | "recording" | "transcribing" | "error";
-  recordingId?: string | null;
-  startedAtMs?: number | null;
-  systemAudioActive?: boolean | null;
-}
+type RecordingOverlayState = MeetingLifecycleEvent;
 
 interface RecordingContextValue extends RecordingState {
   formattedDuration: string;
@@ -54,7 +52,6 @@ interface RecordingContextValue extends RecordingState {
     projectId: string;
     template?: string;
     meetingNotes?: string;
-    consentPromptShown?: boolean;
   }) => Promise<string | null>;
   stopMeeting: () => Promise<void>;
 }
@@ -65,9 +62,49 @@ const INITIAL_STATE: RecordingState = {
   recordingMode: null,
   duration: 0,
   isSystemAudioActive: false,
+  meetingPhase: "idle",
+  meetingMessage: null,
 };
 
 const RecordingContext = createContext<RecordingContextValue | null>(null);
+
+function lifecycleFromRecordingState(state: RecordingState): MeetingLifecycleState {
+  if (state.recordingMode !== "meeting") {
+    return INITIAL_MEETING_LIFECYCLE_STATE;
+  }
+  return {
+    phase: state.meetingPhase,
+    recordingId: state.recordingId,
+    startedAtMs: null,
+    systemAudioActive: state.isSystemAudioActive,
+    consentPromptShown: false,
+    message: state.meetingMessage,
+  };
+}
+
+function reconcileMeetingState(
+  state: RecordingState,
+  event: MeetingLifecycleEvent,
+): RecordingState {
+  const current = lifecycleFromRecordingState(state);
+  const next = reduceMeetingLifecycleState(current, event);
+  if (next === current) {
+    return state;
+  }
+  if (next.phase === "idle") {
+    return INITIAL_STATE;
+  }
+  return {
+    ...state,
+    isRecording: meetingPhaseIsCapturing(next.phase),
+    recordingId: next.recordingId,
+    recordingMode: "meeting",
+    duration: next.phase === "recording" ? state.duration : 0,
+    isSystemAudioActive: next.systemAudioActive,
+    meetingPhase: next.phase,
+    meetingMessage: next.message,
+  };
+}
 
 export function RecordingProvider({ children }: { children: ReactNode }) {
   const [state, setState] = useState<RecordingState>(INITIAL_STATE);
@@ -141,18 +178,21 @@ export function RecordingProvider({ children }: { children: ReactNode }) {
       projectId: string;
       template?: string;
       meetingNotes?: string;
-      consentPromptShown?: boolean;
     }) => {
       try {
         const recordingId = await startRecording(options);
-        setState({
-          isRecording: true,
-          recordingId,
-          recordingMode: "meeting",
-          duration: 0,
-          isSystemAudioActive: options.systemAudio,
-        });
-        startTimer();
+        setState((prev) =>
+          prev.recordingId === recordingId && prev.meetingPhase === "recording"
+            ? prev
+            : reconcileMeetingState(prev, {
+                phase: "recording",
+                recordingId,
+                systemAudioActive: options.systemAudio,
+              }),
+        );
+        if (stateRef.current.recordingId !== recordingId) {
+          startTimer();
+        }
         return recordingId;
       } catch (error) {
         console.error("Failed to start meeting:", error);
@@ -169,11 +209,17 @@ export function RecordingProvider({ children }: { children: ReactNode }) {
     try {
       await stopRecording(currentId);
       clearTimer();
-      setState(INITIAL_STATE);
     } catch (error) {
       logger.error("Failed to stop meeting:", error);
       clearTimer();
       const message = error instanceof Error ? error.message : String(error);
+      setState((prev) =>
+        reconcileMeetingState(prev, {
+          phase: "error",
+          recordingId: currentId,
+          message,
+        }),
+      );
       if (message.includes("timeout") || message.includes("busy")) {
         throw new Error(`${message}. Please wait a moment and try again.`);
       }
@@ -184,27 +230,13 @@ export function RecordingProvider({ children }: { children: ReactNode }) {
   useEffect(() => {
     void invoke<RecordingOverlayState>("get_recording_overlay_state")
       .then((overlayState) => {
-        if (overlayState.phase === "recording" && overlayState.recordingId) {
-          setState({
-            isRecording: true,
-            recordingId: overlayState.recordingId,
-            recordingMode: "meeting",
-            duration: 0,
-            isSystemAudioActive: Boolean(overlayState.systemAudioActive),
-          });
-          startTimer(overlayState.startedAtMs);
-          return;
+        if (overlayState.phase !== "idle") {
+          setState((prev) => reconcileMeetingState(prev, overlayState));
         }
-
-        if (overlayState.phase === "transcribing") {
+        if (overlayState.phase === "recording" && overlayState.recordingId) {
+          startTimer(overlayState.startedAtMs);
+        } else {
           clearTimer();
-          setState({
-            isRecording: false,
-            recordingId: overlayState.recordingId ?? null,
-            recordingMode: "meeting",
-            duration: 0,
-            isSystemAudioActive: Boolean(overlayState.systemAudioActive),
-          });
         }
       })
       .catch((error) => {
@@ -230,6 +262,7 @@ export function RecordingProvider({ children }: { children: ReactNode }) {
               return;
             }
             setState({
+              ...INITIAL_STATE,
               isRecording: true,
               recordingId: null,
               recordingMode: "dictation",
@@ -269,38 +302,17 @@ export function RecordingProvider({ children }: { children: ReactNode }) {
         }
       );
 
-      unlistenMeeting = await listen<MeetingRecordingStateChangedEvent>(
+      unlistenMeeting = await listen<MeetingLifecycleEvent>(
         "meeting-recording-state-changed",
         (event) => {
           if (!mounted) return;
 
           const payload = event.payload;
+          setState((prev) => reconcileMeetingState(prev, payload));
           if (payload.phase === "recording" && payload.recordingId) {
-            setState({
-              isRecording: true,
-              recordingId: payload.recordingId,
-              recordingMode: "meeting",
-              duration: 0,
-              isSystemAudioActive: Boolean(payload.systemAudioActive),
-            });
             startTimer(payload.startedAtMs);
-            return;
-          }
-
-          if (payload.phase === "transcribing") {
+          } else {
             clearTimer();
-            setState((prev) => ({
-              ...prev,
-              isRecording: false,
-              recordingMode: "meeting",
-              recordingId: payload.recordingId ?? prev.recordingId,
-            }));
-            return;
-          }
-
-          if (payload.phase === "idle" && stateRef.current.recordingMode === "meeting") {
-            clearTimer();
-            setState(INITIAL_STATE);
           }
         }
       );
@@ -338,6 +350,7 @@ export function RecordingProvider({ children }: { children: ReactNode }) {
 
             if (overlayState.phase === "recording" && !stateRef.current.isRecording) {
               setState({
+                ...INITIAL_STATE,
                 isRecording: true,
                 recordingId: null,
                 recordingMode: "dictation",
@@ -357,36 +370,17 @@ export function RecordingProvider({ children }: { children: ReactNode }) {
         void invoke<RecordingOverlayState>("get_recording_overlay_state")
           .then((overlayState) => {
             if (!mounted) return;
-
-            if (overlayState.phase === "idle" || overlayState.phase === "error") {
-              clearTimer();
-              setState(INITIAL_STATE);
-              return;
-            }
-
+            setState((prev) => reconcileMeetingState(prev, overlayState));
             if (overlayState.phase === "recording" && overlayState.recordingId) {
-              if (!stateRef.current.isRecording || stateRef.current.recordingId !== overlayState.recordingId) {
-                setState({
-                  isRecording: true,
-                  recordingId: overlayState.recordingId,
-                  recordingMode: "meeting",
-                  duration: 0,
-                  isSystemAudioActive: Boolean(overlayState.systemAudioActive),
-                });
+              if (
+                !stateRef.current.isRecording ||
+                stateRef.current.recordingId !== overlayState.recordingId
+              ) {
                 startTimer(overlayState.startedAtMs);
               }
               return;
             }
-
-            if (overlayState.phase === "transcribing") {
-              clearTimer();
-              setState((prev) => ({
-                ...prev,
-                isRecording: false,
-                recordingMode: "meeting",
-                recordingId: overlayState.recordingId ?? prev.recordingId,
-              }));
-            }
+            clearTimer();
           })
           .catch((error) => {
             logger.debug("Transient backend polling error:", error);

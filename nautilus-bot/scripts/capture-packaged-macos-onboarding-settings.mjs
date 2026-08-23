@@ -24,6 +24,14 @@ const outPath = path.resolve(
   valueFor("--out", "artifacts/qa/macos/onboarding-settings.json")
 );
 const timeoutMs = Number(valueFor("--timeout-ms", "90000"));
+const requestedProfileRoot = valueFor("--profile-root");
+const ownedProfileRoot =
+  !requestedProfileRoot && !process.env.PLAINSONG_CONFIG_DIR
+    ? fs.mkdtempSync(path.join(os.tmpdir(), "plainsong-onboarding-"))
+    : null;
+const profileRoot = requestedProfileRoot
+  ? path.resolve(requestedProfileRoot)
+  : ownedProfileRoot ?? path.dirname(path.resolve(process.env.PLAINSONG_CONFIG_DIR));
 const sidecarPath = path.join(
   appPath,
   "Contents",
@@ -33,7 +41,10 @@ const sidecarPath = path.join(
 );
 const configRoot = process.env.PLAINSONG_CONFIG_DIR
   ? path.resolve(process.env.PLAINSONG_CONFIG_DIR)
-  : path.join(os.homedir(), "Library", "Application Support");
+  : path.join(profileRoot, "config");
+const dataRoot = process.env.PLAINSONG_DATA_DIR
+  ? path.resolve(process.env.PLAINSONG_DATA_DIR)
+  : path.join(profileRoot, "data");
 const settingsPath = path.join(
   configRoot,
   "Plainsong",
@@ -298,6 +309,11 @@ function evaluateChecks(settings, expected) {
 const child = spawn(sidecarPath, [], {
   cwd: repoRoot,
   stdio: ["pipe", "pipe", "pipe"],
+  env: {
+    ...process.env,
+    PLAINSONG_CONFIG_DIR: configRoot,
+    PLAINSONG_DATA_DIR: dataRoot,
+  },
 });
 
 const childExit = new Promise((resolve) => {
@@ -368,7 +384,7 @@ async function shutdown() {
 
   const result = await Promise.race([
     childExit,
-    new Promise((resolve) => setTimeout(() => resolve(null), 3000)),
+    new Promise((resolve) => setTimeout(() => resolve(null), 15000)),
   ]);
   if (!result) {
     child.kill("SIGTERM");
@@ -401,6 +417,12 @@ async function run() {
     generatedAt: new Date().toISOString(),
     appPath,
     sidecarPath,
+    scope: "isolated-packaged-sidecar-settings",
+    evidenceLevel: "component",
+    isolatedProfile: Boolean(profileRoot),
+    launchReady: false,
+    launchReadyReason:
+      "This isolated sidecar receipt proves settings persistence only. The clean-install renderer and macOS permission journey require a separate exact-app walkthrough.",
     pass: false,
     timedOut: false,
     restored: false,
@@ -469,6 +491,9 @@ async function run() {
     );
 
     await writeArtifact(artifact);
+    if (ownedProfileRoot) {
+      fs.rmSync(ownedProfileRoot, { recursive: true, force: true });
+    }
     clearTimeout(timeout);
     process.exit(artifact.pass ? 0 : 1);
   }
@@ -485,5 +510,8 @@ run().catch(async (error) => {
     error: error instanceof Error ? error.message : String(error),
     stderr: stderr.join("").trim(),
   });
+  if (ownedProfileRoot) {
+    fs.rmSync(ownedProfileRoot, { recursive: true, force: true });
+  }
   process.exit(1);
 });

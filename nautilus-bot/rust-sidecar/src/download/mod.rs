@@ -13,6 +13,7 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
 const WHISPER_MODEL_REVISION: &str = "5359861c739e955e79d9a303bcbc70fb988958b1";
 const MODEL_INTEGRITY_RECEIPT_VERSION: &str = "plainsong-model-integrity-v1";
+const MAX_GENERIC_MODEL_ARTIFACT_BYTES: u64 = 4 * 1024 * 1024 * 1024;
 
 /// Download manager for ASR models
 pub struct DownloadManager {
@@ -34,12 +35,14 @@ const SILERO_VAD_ONNX_FILE: &str = "silero_vad.onnx";
 /// HTML/error-page payloads (same defensive pattern as
 /// `min_expected_model_bytes` for Whisper models).
 const SILERO_VAD_MIN_EXPECTED_BYTES: u64 = 512 * 1024;
+const SILERO_VAD_MAX_BYTES: u64 = 8 * 1024 * 1024;
 
 #[derive(Clone, Copy)]
 struct DiarizationModelInfo {
     url: &'static str,
     file_name: &'static str,
     sha256: &'static str,
+    max_bytes: u64,
 }
 
 fn diarization_model_info(model_id: &str) -> Option<DiarizationModelInfo> {
@@ -48,16 +51,19 @@ fn diarization_model_info(model_id: &str) -> Option<DiarizationModelInfo> {
             url: "https://huggingface.co/Wespeaker/wespeaker-ecapa-tdnn512-LM/resolve/a2f3dcb1c8702caccc7a55ceb57f5e8d1842112b/voxceleb_ECAPA512_LM.onnx",
             file_name: "ecapa_tdnn_speaker.onnx",
             sha256: "d71b85d9b48058ef68004f04f1b78acebefb9dfcf542e19b976a12a5ad1f10b0",
+            max_bytes: 256 * 1024 * 1024,
         }),
         "resnet34_speaker" => Some(DiarizationModelInfo {
             url: "https://huggingface.co/Wespeaker/wespeaker-resnet34-LM/resolve/f0c48c298fd835726c27956a5d617bad7115627e/voxceleb_resnet34_LM.onnx",
             file_name: "resnet34_speaker.onnx",
             sha256: "7bb2f06e9df17cdf1ef14ee8a15ab08ed28e8d0ef5054ee135741560df2ec068",
+            max_bytes: 256 * 1024 * 1024,
         }),
         "campplus_speaker" => Some(DiarizationModelInfo {
             url: "https://huggingface.co/Wespeaker/wespeaker-voxceleb-campplus-LM/resolve/c5e01c6fcffcce160861e7e79782828320192b5c/voxceleb_CAM%2B%2B_LM.onnx",
             file_name: "campplus_speaker.onnx",
             sha256: "1068e4ac3a76bb9c769e6816ef30bf89363f6e966f1d938210cb8ed4038f8e93",
+            max_bytes: 256 * 1024 * 1024,
         }),
         _ => None,
     }
@@ -235,7 +241,7 @@ async fn remove_model_artifact(path: &Path) {
 }
 
 /// HTTP client for model downloads. Deliberately no total-request timeout:
-/// model files run to ~1.5 GB, and a total timeout kills any healthy
+/// model files run to ~2.8 GiB, and a total timeout kills any healthy
 /// transfer slower than (size / timeout) — e.g. a 5-minute cap required
 /// ~41 Mbps sustained for distil-large-v3.5, so slower connections failed
 /// on every attempt. Instead, bound how long we wait to connect and how
@@ -246,6 +252,36 @@ fn build_download_client() -> reqwest::Result<reqwest::Client> {
         .read_timeout(std::time::Duration::from_secs(60))
         .redirect(reqwest::redirect::Policy::limited(10))
         .build()
+}
+
+fn download_size_limit_error(url: &str, max_bytes: u64) -> anyhow::Error {
+    anyhow::anyhow!(
+        "SIDECAR_SIZE_LIMIT: download from {} exceeds the pinned artifact ceiling of {} bytes.",
+        url,
+        max_bytes
+    )
+}
+
+fn checked_download_size(
+    current: u64,
+    next_chunk_bytes: usize,
+    max_bytes: u64,
+    url: &str,
+) -> Result<u64> {
+    let next = current
+        .checked_add(next_chunk_bytes as u64)
+        .ok_or_else(|| download_size_limit_error(url, max_bytes))?;
+    if next > max_bytes {
+        return Err(download_size_limit_error(url, max_bytes));
+    }
+    Ok(next)
+}
+
+fn progress_percent_bucket(current_bytes: u64, total_bytes: u64) -> Option<u8> {
+    if total_bytes == 0 {
+        return None;
+    }
+    Some((((current_bytes as f64 / total_bytes as f64) * 100.0).floor() as u64).min(100) as u8)
 }
 
 /// Download progress information
@@ -302,6 +338,13 @@ impl DownloadManager {
         } else {
             0
         };
+        if start_byte > MAX_GENERIC_MODEL_ARTIFACT_BYTES {
+            tokio::fs::remove_file(&temp_path).await.ok();
+            return Err(download_size_limit_error(
+                url,
+                MAX_GENERIC_MODEL_ARTIFACT_BYTES,
+            ));
+        }
 
         // Build request with resume support
         let mut request = self.client.get(url);
@@ -355,10 +398,26 @@ impl DownloadManager {
         }
 
         // Get total size
-        let total_size = response
-            .content_length()
-            .map(|l| l + start_byte)
+        let declared_remaining = response.content_length();
+        if declared_remaining
+            .is_some_and(|length| length > MAX_GENERIC_MODEL_ARTIFACT_BYTES - start_byte)
+        {
+            tokio::fs::remove_file(&temp_path).await.ok();
+            return Err(download_size_limit_error(
+                url,
+                MAX_GENERIC_MODEL_ARTIFACT_BYTES,
+            ));
+        }
+        let total_size = declared_remaining
+            .map(|length| length + start_byte)
             .unwrap_or(0);
+        if total_size > MAX_GENERIC_MODEL_ARTIFACT_BYTES {
+            tokio::fs::remove_file(&temp_path).await.ok();
+            return Err(download_size_limit_error(
+                url,
+                MAX_GENERIC_MODEL_ARTIFACT_BYTES,
+            ));
+        }
 
         // Open file for writing (append only when the server honored the
         // resume; otherwise truncate any stale partial content).
@@ -371,13 +430,25 @@ impl DownloadManager {
         let mut stream = response.bytes_stream();
         let bytes_downloaded = Arc::new(AtomicU64::new(start_byte));
         let start_time = std::time::Instant::now();
+        let mut last_progress_bucket = None;
 
         while let Some(chunk) = stream.next().await {
             let chunk = chunk?;
+            let current = match checked_download_size(
+                bytes_downloaded.load(Ordering::SeqCst),
+                chunk.len(),
+                MAX_GENERIC_MODEL_ARTIFACT_BYTES,
+                url,
+            ) {
+                Ok(current) => current,
+                Err(error) => {
+                    drop(file);
+                    tokio::fs::remove_file(&temp_path).await.ok();
+                    return Err(error);
+                }
+            };
             file.write_all(&chunk).await?;
-
-            let current = bytes_downloaded.fetch_add(chunk.len() as u64, Ordering::SeqCst)
-                + chunk.len() as u64;
+            bytes_downloaded.store(current, Ordering::SeqCst);
 
             // Calculate progress
             let elapsed_secs = start_time.elapsed().as_secs_f64();
@@ -387,18 +458,20 @@ impl DownloadManager {
                 0.0
             };
 
-            let progress = DownloadProgress {
-                bytes_downloaded: current,
-                total_bytes: total_size,
-                percentage: if total_size > 0 {
-                    (current as f64 / total_size as f64) * 100.0
-                } else {
-                    0.0
-                },
-                speed_mbps,
-            };
-
-            progress_callback(progress);
+            let current_bucket = progress_percent_bucket(current, total_size);
+            if current_bucket != last_progress_bucket {
+                last_progress_bucket = current_bucket;
+                progress_callback(DownloadProgress {
+                    bytes_downloaded: current,
+                    total_bytes: total_size,
+                    percentage: if total_size > 0 {
+                        (current as f64 / total_size as f64) * 100.0
+                    } else {
+                        0.0
+                    },
+                    speed_mbps,
+                });
+            }
         }
 
         // Close file
@@ -470,6 +543,7 @@ impl DownloadManager {
             &model_info.url,
             &destination,
             &model_info.sha256,
+            model_info.max_bytes,
             progress_callback,
         )
         .await?;
@@ -492,10 +566,17 @@ impl DownloadManager {
         url: &str,
         destination: &PathBuf,
         expected_sha256: &str,
+        max_bytes: u64,
         progress_callback: impl Fn(DownloadProgress) + Send + Sync + 'static,
     ) -> Result<()> {
-        self.download_verified_model_asset(url, destination, expected_sha256, progress_callback)
-            .await
+        self.download_verified_model_asset(
+            url,
+            destination,
+            expected_sha256,
+            max_bytes,
+            progress_callback,
+        )
+        .await
     }
 
     /// Download or migrate a model asset under an immutable URL and
@@ -505,6 +586,7 @@ impl DownloadManager {
         url: &str,
         destination: &PathBuf,
         expected_sha256: &str,
+        max_bytes: u64,
         progress_callback: impl Fn(DownloadProgress) + Send + Sync + 'static,
     ) -> Result<()> {
         if destination.exists() {
@@ -530,6 +612,10 @@ impl DownloadManager {
         } else {
             0
         };
+        if start_byte > max_bytes {
+            tokio::fs::remove_file(&temp_path).await.ok();
+            return Err(download_size_limit_error(url, max_bytes));
+        }
 
         if start_byte > 0 {
             request = request.header("Range", format!("bytes={}-", start_byte));
@@ -581,10 +667,18 @@ impl DownloadManager {
             start_byte = 0;
         }
 
-        let total_size = response
-            .content_length()
-            .map(|l| l + start_byte)
+        let declared_remaining = response.content_length();
+        if declared_remaining.is_some_and(|length| length > max_bytes - start_byte) {
+            tokio::fs::remove_file(&temp_path).await.ok();
+            return Err(download_size_limit_error(url, max_bytes));
+        }
+        let total_size = declared_remaining
+            .map(|length| length + start_byte)
             .unwrap_or(0);
+        if total_size > max_bytes {
+            tokio::fs::remove_file(&temp_path).await.ok();
+            return Err(download_size_limit_error(url, max_bytes));
+        }
 
         // Preflight: refuse to stream a download the disk can't hold, so the
         // user gets a clear "need N free" error instead of a mid-download
@@ -621,9 +715,23 @@ impl DownloadManager {
         let mut stream = response.bytes_stream();
         let bytes_downloaded = Arc::new(AtomicU64::new(start_byte));
         let _start_time = std::time::Instant::now();
+        let mut last_progress_bucket = None;
 
         while let Some(chunk) = stream.next().await {
             let chunk = chunk?;
+            let current = match checked_download_size(
+                bytes_downloaded.load(Ordering::SeqCst),
+                chunk.len(),
+                max_bytes,
+                url,
+            ) {
+                Ok(current) => current,
+                Err(error) => {
+                    drop(file);
+                    tokio::fs::remove_file(&temp_path).await.ok();
+                    return Err(error);
+                }
+            };
             if let Err(error) = file.write_all(&chunk).await {
                 // A full disk leaves a useless (and space-hogging) partial
                 // file on an already-full volume; remove it before erroring.
@@ -638,18 +746,20 @@ impl DownloadManager {
                 return Err(error.into());
             }
 
-            let current = bytes_downloaded.fetch_add(chunk.len() as u64, Ordering::SeqCst)
-                + chunk.len() as u64;
+            bytes_downloaded.store(current, Ordering::SeqCst);
 
-            // Throttle progress updates
-            if total_size > 0 {
-                let progress = DownloadProgress {
+            // Emit at most once per whole percentage point. A multi-gigabyte
+            // model otherwise floods the IPC bridge and logs once per network
+            // chunk, which can mean hundreds of thousands of updates.
+            let current_bucket = progress_percent_bucket(current, total_size);
+            if current_bucket.is_some() && current_bucket != last_progress_bucket {
+                last_progress_bucket = current_bucket;
+                progress_callback(DownloadProgress {
                     bytes_downloaded: current,
                     total_bytes: total_size,
                     percentage: (current as f64 / total_size as f64) * 100.0,
                     speed_mbps: 0.0, // simplified
-                };
-                progress_callback(progress);
+                });
             }
         }
 
@@ -733,8 +843,14 @@ impl DownloadManager {
             model.url
         );
 
-        self.download_file_verified(model.url, &destination, model.sha256, _progress_callback)
-            .await?;
+        self.download_file_verified(
+            model.url,
+            &destination,
+            model.sha256,
+            model.max_bytes,
+            _progress_callback,
+        )
+        .await?;
 
         // Verify file size (should be > 5MB)
         let metadata = tokio::fs::metadata(&destination).await?;
@@ -809,6 +925,7 @@ impl DownloadManager {
             SILERO_VAD_ONNX_URL,
             &destination,
             SILERO_VAD_ONNX_SHA256,
+            SILERO_VAD_MAX_BYTES,
             progress_callback,
         )
         .await?;
@@ -1193,6 +1310,7 @@ pub struct WhisperModelInfo {
     pub size_mb: f64,
     pub url: String,
     pub sha256: String,
+    pub max_bytes: u64,
 }
 
 /// Get information about a Whisper model
@@ -1210,6 +1328,7 @@ fn get_whisper_model_info(model_name: &str) -> Option<WhisperModelInfo> {
             size_mb: 75.0,
             url: whisper_url("ggml-tiny.bin"),
             sha256: "be07e048e1e599ad46341c8d2a135645097a538221678b7acdd1b1919c6e1b21".to_string(),
+            max_bytes: 100 * 1024 * 1024,
         },
         WhisperModelInfo {
             name: "tiny.en".to_string(),
@@ -1217,6 +1336,7 @@ fn get_whisper_model_info(model_name: &str) -> Option<WhisperModelInfo> {
             size_mb: 75.0,
             url: whisper_url("ggml-tiny.en.bin"),
             sha256: "921e4cf8686fdd993dcd081a5da5b6c365bfde1162e72b08d75ac75289920b1f".to_string(),
+            max_bytes: 100 * 1024 * 1024,
         },
         WhisperModelInfo {
             name: "base".to_string(),
@@ -1224,6 +1344,7 @@ fn get_whisper_model_info(model_name: &str) -> Option<WhisperModelInfo> {
             size_mb: 142.0,
             url: whisper_url("ggml-base.bin"),
             sha256: "60ed5bc3dd14eea856493d334349b405782ddcaf0028d4b5df4088345fba2efe".to_string(),
+            max_bytes: 200 * 1024 * 1024,
         },
         WhisperModelInfo {
             name: "base.en".to_string(),
@@ -1231,6 +1352,7 @@ fn get_whisper_model_info(model_name: &str) -> Option<WhisperModelInfo> {
             size_mb: 142.0,
             url: whisper_url("ggml-base.en.bin"),
             sha256: "a03779c86df3323075f5e796cb2ce5029f00ec8869eee3fdfb897afe36c6d002".to_string(),
+            max_bytes: 200 * 1024 * 1024,
         },
         WhisperModelInfo {
             name: "small".to_string(),
@@ -1238,6 +1360,7 @@ fn get_whisper_model_info(model_name: &str) -> Option<WhisperModelInfo> {
             size_mb: 466.0,
             url: whisper_url("ggml-small.bin"),
             sha256: "1be3a9b2063867b937e64e2ec7483364a79917e157fa98c5d94b5c1fffea987b".to_string(),
+            max_bytes: 650 * 1024 * 1024,
         },
         WhisperModelInfo {
             name: "small.en".to_string(),
@@ -1245,6 +1368,7 @@ fn get_whisper_model_info(model_name: &str) -> Option<WhisperModelInfo> {
             size_mb: 466.0,
             url: whisper_url("ggml-small.en.bin"),
             sha256: "c6138d6d58ecc8322097e0f987c32f1be8bb0a18532a3f88f734d1bbf9c41e5d".to_string(),
+            max_bytes: 650 * 1024 * 1024,
         },
         WhisperModelInfo {
             name: "medium".to_string(),
@@ -1252,6 +1376,7 @@ fn get_whisper_model_info(model_name: &str) -> Option<WhisperModelInfo> {
             size_mb: 1500.0,
             url: whisper_url("ggml-medium.bin"),
             sha256: "6c14d5adee5f86394037b4e4e8b59f1673b6cee10e3cf0b11bbdbee79c156208".to_string(),
+            max_bytes: 2 * 1024 * 1024 * 1024,
         },
         WhisperModelInfo {
             name: "medium.en".to_string(),
@@ -1259,6 +1384,7 @@ fn get_whisper_model_info(model_name: &str) -> Option<WhisperModelInfo> {
             size_mb: 1500.0,
             url: whisper_url("ggml-medium.en.bin"),
             sha256: "cc37e93478338ec7700281a7ac30a10128929eb8f427dda2e865faa8f6da4356".to_string(),
+            max_bytes: 2 * 1024 * 1024 * 1024,
         },
         WhisperModelInfo {
             name: "large-v3".to_string(),
@@ -1266,6 +1392,7 @@ fn get_whisper_model_info(model_name: &str) -> Option<WhisperModelInfo> {
             size_mb: 2900.0,
             url: whisper_url("ggml-large-v3.bin"),
             sha256: "64d182b440b98d5203c4f9bd541544d84c605196c4f7b845dfa11fb23594d1e2".to_string(),
+            max_bytes: 4 * 1024 * 1024 * 1024,
         },
         WhisperModelInfo {
             name: "large-v3-turbo".to_string(),
@@ -1273,6 +1400,7 @@ fn get_whisper_model_info(model_name: &str) -> Option<WhisperModelInfo> {
             size_mb: 1620.0,
             url: whisper_url("ggml-large-v3-turbo.bin"),
             sha256: "1fc70f774d38eb169993ac391eea357ef47c88757ef72ee5943879b7e8e2bc69".to_string(),
+            max_bytes: 3 * 1024 * 1024 * 1024,
         },
     ];
 
@@ -1390,6 +1518,35 @@ mod tests {
             info.sha256,
             "a03779c86df3323075f5e796cb2ce5029f00ec8869eee3fdfb897afe36c6d002"
         );
+        assert_eq!(info.max_bytes, 200 * 1024 * 1024);
+    }
+
+    #[test]
+    fn omitted_content_length_still_has_an_observed_streaming_ceiling() {
+        assert_eq!(
+            checked_download_size(4, 4, 8, "https://example.invalid/model").unwrap(),
+            8
+        );
+        let error = checked_download_size(8, 1, 8, "https://example.invalid/model")
+            .expect_err("observed bytes beyond the ceiling must fail");
+        assert!(error.to_string().starts_with("SIDECAR_SIZE_LIMIT:"));
+    }
+
+    #[test]
+    fn download_size_accounting_rejects_integer_overflow() {
+        let error = checked_download_size(u64::MAX, 1, u64::MAX, "https://example.invalid/model")
+            .expect_err("overflow must fail closed");
+        assert!(error.to_string().starts_with("SIDECAR_SIZE_LIMIT:"));
+    }
+
+    #[test]
+    fn download_progress_is_bucketed_to_avoid_per_chunk_event_floods() {
+        assert_eq!(progress_percent_bucket(0, 0), None);
+        assert_eq!(progress_percent_bucket(1, 1_000), Some(0));
+        assert_eq!(progress_percent_bucket(9, 1_000), Some(0));
+        assert_eq!(progress_percent_bucket(10, 1_000), Some(1));
+        assert_eq!(progress_percent_bucket(1_000, 1_000), Some(100));
+        assert_eq!(progress_percent_bucket(1_500, 1_000), Some(100));
     }
 
     #[test]

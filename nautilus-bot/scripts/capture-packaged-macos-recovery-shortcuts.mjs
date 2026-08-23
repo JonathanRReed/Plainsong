@@ -38,13 +38,17 @@
  */
 import crypto from "node:crypto";
 import fs from "node:fs";
-import os from "node:os";
 import path from "node:path";
 import { spawn, spawnSync } from "node:child_process";
 import { createInterface } from "node:readline";
+import { createPackagedQaProfile } from "./lib/packaged-qa-profile.mjs";
 
 const repoRoot = path.resolve(import.meta.dirname, "..");
 const args = process.argv.slice(2);
+const qaProfile = createPackagedQaProfile({
+  args,
+  prefix: "plainsong-recovery-shortcuts-qa-",
+});
 
 function valueFor(name, fallback = null) {
   const index = args.indexOf(name);
@@ -67,6 +71,8 @@ const seedTimeoutMs = Number(valueFor("--seed-timeout-ms", "90000"));
 const setupTimeoutMs = Number(valueFor("--setup-timeout-ms", "120000"));
 const stepPollTimeoutMs = Number(valueFor("--step-poll-timeout-ms", "12000"));
 const osascriptTimeoutMs = Number(valueFor("--osascript-timeout-ms", "45000"));
+const speakTimeoutMs = Number(valueFor("--speak-timeout-ms", "30000"));
+const fixtureOutputVolume = Number(valueFor("--fixture-output-volume", "65"));
 const fixtureText =
   valueFor(
     "--fixture-text",
@@ -82,9 +88,9 @@ const sidecarPath = path.join(
 );
 const appExecutablePath = path.join(appPath, "Contents", "MacOS", "Plainsong");
 const asarPath = path.join(appPath, "Contents", "Resources", "app.asar");
-const configDir = path.join(os.homedir(), "Library", "Application Support", "Plainsong");
+const configDir = qaProfile.configDir;
 const settingsPath = path.join(configDir, "settings.json");
-const dbPath = path.join(configDir, "plainsong.db");
+const dbPath = path.join(qaProfile.dataDir, "plainsong.db");
 const dbSidecarPaths = [dbPath, `${dbPath}-wal`, `${dbPath}-shm`];
 const dbBackups = new Map();
 const originalSettingsBytes = fs.existsSync(settingsPath)
@@ -189,6 +195,20 @@ function runCommand(command, commandArgs, options = {}) {
     );
   }
   return result.stdout.trim();
+}
+
+function runCommandAllowFailure(command, commandArgs, options = {}) {
+  const result = spawnSync(command, commandArgs, {
+    cwd: repoRoot,
+    encoding: "utf8",
+    ...options,
+  });
+  return {
+    status: result.status,
+    stdout: String(result.stdout ?? ""),
+    stderr: String(result.stderr ?? "").trim(),
+    error: result.error ? String(result.error.message ?? result.error) : null,
+  };
 }
 
 function runSqlJson(sql) {
@@ -306,6 +326,134 @@ function frontmostAppName() {
     'tell application "System Events" to return name of first application process whose frontmost is true'
   );
   return result.ok ? result.stdout.trim() : null;
+}
+
+function snapshotOutputVolume() {
+  const result = runCommandAllowFailure("osascript", [
+    "-e",
+    "set s to get volume settings",
+    "-e",
+    'return ((output volume of s) as text) & "," & ((output muted of s) as text)',
+  ]);
+  const match = /^(\d+)\s*,\s*(true|false)$/i.exec(result.stdout.trim());
+  return {
+    ok: result.status === 0 && Boolean(match),
+    volume: match ? Number(match[1]) : null,
+    muted: match ? match[2].toLowerCase() === "true" : null,
+    error:
+      result.status === 0 && match
+        ? null
+        : result.stderr || result.stdout || result.error || "unreadable",
+  };
+}
+
+function setFixtureOutputVolume() {
+  const result = runCommandAllowFailure("osascript", [
+    "-e",
+    `set volume output volume ${fixtureOutputVolume} without output muted`,
+  ]);
+  return {
+    ok: result.status === 0,
+    volume: fixtureOutputVolume,
+    muted: false,
+    error: result.status === 0 ? null : result.stderr || result.error || "unknown",
+  };
+}
+
+function restoreOutputVolume(snapshot) {
+  if (!snapshot.ok || snapshot.volume === null || snapshot.muted === null) {
+    return { ok: false, error: "The original speaker state was not readable." };
+  }
+  const muteClause = snapshot.muted ? "with output muted" : "without output muted";
+  const result = runCommandAllowFailure("osascript", [
+    "-e",
+    `set volume output volume ${snapshot.volume} ${muteClause}`,
+  ]);
+  return {
+    ok: result.status === 0,
+    volume: snapshot.volume,
+    muted: snapshot.muted,
+    error: result.status === 0 ? null : result.stderr || result.error || "unknown",
+  };
+}
+
+async function speakFixture(maxMs = speakTimeoutMs) {
+  const startedAt = Date.now();
+  const audioOutput = {
+    original: snapshotOutputVolume(),
+    temporary: null,
+    restored: null,
+  };
+  if (!audioOutput.original.ok) {
+    return {
+      startedAtEpochMs: startedAt,
+      finishedAtEpochMs: Date.now(),
+      timedOut: false,
+      maxMs,
+      code: null,
+      signal: null,
+      error: `Could not read the original speaker state: ${audioOutput.original.error}`,
+      audioOutput,
+    };
+  }
+
+  audioOutput.temporary = setFixtureOutputVolume();
+  if (!audioOutput.temporary.ok) {
+    audioOutput.restored = restoreOutputVolume(audioOutput.original);
+    return {
+      startedAtEpochMs: startedAt,
+      finishedAtEpochMs: Date.now(),
+      timedOut: false,
+      maxMs,
+      code: null,
+      signal: null,
+      error: `Could not make the spoken fixture audible: ${audioOutput.temporary.error}`,
+      audioOutput,
+    };
+  }
+
+  let speechResult;
+  try {
+    const child = spawn("say", [fixtureText], { cwd: repoRoot, stdio: "ignore" });
+    const exited = new Promise((resolve) => {
+      child.on("exit", (code, signal) => resolve({ code, signal, error: null }));
+      child.on("error", (error) =>
+        resolve({ code: null, signal: null, error: error.message })
+      );
+    });
+    const result = await Promise.race([exited, sleep(maxMs).then(() => null)]);
+    if (!result) {
+      child.kill("SIGTERM");
+      speechResult = { timedOut: true, ...(await exited) };
+    } else {
+      speechResult = { timedOut: false, ...result };
+    }
+  } finally {
+    audioOutput.restored = restoreOutputVolume(audioOutput.original);
+  }
+
+  return {
+    startedAtEpochMs: startedAt,
+    finishedAtEpochMs: Date.now(),
+    maxMs,
+    ...speechResult,
+    audioOutput,
+  };
+}
+
+function assertSpeechFixturePlayed(speech) {
+  if (
+    speech.code === 0 &&
+    !speech.timedOut &&
+    !speech.error &&
+    speech.audioOutput?.temporary?.ok &&
+    speech.audioOutput?.restored?.ok
+  ) {
+    return;
+  }
+  blocked(
+    `The spoken seed did not play and restore cleanly: \`say\` exited code=${speech.code}, signal=${speech.signal}, timedOut=${speech.timedOut}, error=${speech.error ?? "none"}, speakerPrepared=${speech.audioOutput?.temporary?.ok ?? false}, speakerRestored=${speech.audioOutput?.restored?.ok ?? false}. No trustworthy spoken seed reached the microphone.`
+  );
 }
 
 function plainsongWindowCount() {
@@ -433,6 +581,7 @@ function launchSidecar() {
   const child = spawn(sidecarPath, [], {
     cwd: repoRoot,
     stdio: ["pipe", "pipe", "pipe"],
+    env: { ...process.env, ...qaProfile.env },
   });
   const childExit = new Promise((resolve) => {
     child.on("exit", (code, signal) => resolve({ code, signal }));
@@ -490,7 +639,7 @@ function launchSidecar() {
     }
     const result = await Promise.race([
       childExit,
-      new Promise((resolve) => setTimeout(() => resolve(null), 3000)),
+      new Promise((resolve) => setTimeout(() => resolve(null), 15000)),
     ]);
     if (!result) {
       child.kill("SIGTERM");
@@ -505,11 +654,12 @@ function launchSidecar() {
 function launchApp() {
   const stderr = [];
   const stdout = [];
-  const child = spawn(appExecutablePath, [], {
+  const child = spawn(appExecutablePath, qaProfile.appArgs, {
     cwd: repoRoot,
     stdio: ["ignore", "pipe", "pipe"],
     env: {
       ...process.env,
+      ...qaProfile.env,
       ELECTRON_ENABLE_LOGGING: "1",
       PLAINSONG_QA_PACKAGED_HOTKEY: "1",
     },
@@ -791,6 +941,8 @@ const artifact = {
   scope: {
     seedAttemptLimit,
     seedTimeoutMs,
+    speakTimeoutMs,
+    fixtureOutputVolume,
     stepPollTimeoutMs,
     pasteStrategyNotAsserted:
       "The paste-last step accepts either the AX-direct insert or the native Cmd+V fallback. Which strategy the sidecar used is not asserted, because there is currently no machine-verified proof the AX-direct path works on this Mac.",
@@ -863,6 +1015,16 @@ function preflight() {
   }
   if (!fixtureText) {
     blocked("The spoken fixture sentence cannot be empty.");
+  }
+  if (!Number.isFinite(speakTimeoutMs) || speakTimeoutMs <= 0) {
+    blocked("--speak-timeout-ms must be a positive number of milliseconds.");
+  }
+  if (
+    !Number.isFinite(fixtureOutputVolume) ||
+    fixtureOutputVolume < 1 ||
+    fixtureOutputVolume > 100
+  ) {
+    blocked("--fixture-output-volume must be a number from 1 through 100.");
   }
   if (
     !fs.existsSync("/System/Applications/TextEdit.app") &&
@@ -943,11 +1105,8 @@ async function seedRecentDictationResult(appRun) {
     pressChord(KEY_CODE_SPACE, ["command down", "shift down"]);
     await sleep(800);
 
-    const sayChild = spawn("say", [fixtureText], { cwd: repoRoot, stdio: "ignore" });
-    record.sayExit = await new Promise((resolve) => {
-      sayChild.on("exit", (code, signal) => resolve({ code, signal }));
-      sayChild.on("error", (error) => resolve({ code: null, signal: null, error: error.message }));
-    });
+    record.sayExit = await speakFixture();
+    assertSpeechFixturePlayed(record.sayExit);
 
     await sleep(recordPadMs);
     pressChord(KEY_CODE_SPACE, ["command down", "shift down"]);

@@ -33,6 +33,22 @@ function fail(message) {
   process.exitCode = 1;
 }
 
+function ensureElectronDistribution() {
+  if (fs.existsSync(chromiumNoticesPath)) return;
+  const installerPath = path.join(electronDirectory, "install.js");
+  if (!fs.existsSync(installerPath)) {
+    throw new Error(`Electron installer not found at ${installerPath}`);
+  }
+  const result = spawnSync(process.execPath, [installerPath], {
+    cwd: appRoot,
+    encoding: "utf8",
+    stdio: "inherit",
+  });
+  if (result.error || result.status !== 0 || !fs.existsSync(chromiumNoticesPath)) {
+    throw new Error("Electron distribution could not be installed for license generation");
+  }
+}
+
 function readRequiredText(filePath, label) {
   if (!fs.existsSync(filePath)) {
     throw new Error(`${label} not found at ${filePath}`);
@@ -507,6 +523,7 @@ function generate() {
 }
 
 try {
+  ensureElectronDistribution();
   if (verifyAppIndex >= 0) {
     const appArgument = args[verifyAppIndex + 1];
     if (!appArgument || appArgument.startsWith("--")) {

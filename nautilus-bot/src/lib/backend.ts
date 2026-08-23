@@ -134,7 +134,17 @@ export async function startDictation(options?: DictationStartOptions): Promise<v
 }
 
 export async function stopDictation(): Promise<string> {
-  return await invoke("stop_dictation");
+  const result = await invoke<unknown>("stop_dictation");
+  if (typeof result === "string") {
+    return result;
+  }
+  if (result && typeof result === "object" && !Array.isArray(result)) {
+    const text = (result as { text?: unknown }).text;
+    if (typeof text === "string") {
+      return text;
+    }
+  }
+  throw new Error("Plainsong returned an invalid dictation stop result.");
 }
 
 export interface DictationReprocessResult {
@@ -243,9 +253,8 @@ export async function startRecording(options: {
   preferredInputDeviceId?: string;
   template?: string;
   meetingNotes?: string;
-  consentPromptShown?: boolean;
 }): Promise<string> {
-  return await invoke("start_recording", { options });
+  return await invoke("begin_meeting_capture", { options });
 }
 
 export interface AudioInputDeviceInfo {
@@ -277,7 +286,7 @@ export async function getMeetingConsentAutomationStatus(): Promise<MeetingConsen
 }
 
 export async function stopRecording(recordingId: string): Promise<void> {
-  await invoke("stop_recording", { recordingId });
+  await invoke("end_meeting_capture", { recordingId });
 }
 
 export async function openRecordingAudio(recordingId: string): Promise<void> {
@@ -1132,6 +1141,16 @@ export async function migrateToEncryptedStorage(password: string): Promise<void>
   await invoke("migrate_to_encrypted_storage", { password });
 }
 
+export interface ApprovedLocationSummary {
+  id: string;
+  label: string;
+  approved: boolean;
+}
+
+export async function selectExportLocation(): Promise<ApprovedLocationSummary | null> {
+  return await invoke("select_export_location");
+}
+
 type CloudProvider = "one_drive" | "google_drive" | "proton_drive" | "i_cloud";
 
 export interface BackupConfig {
@@ -1139,11 +1158,17 @@ export interface BackupConfig {
   intervalHours: number;
   maxBackups: number;
   backupDir: string | null;
+  backupLocationId?: string | null;
+  backupLocationLabel?: string | null;
+  backupLocationApproved?: boolean;
   cloudSync: boolean;
   cloudProvider: CloudProvider | null;
   cloudRemoteName: string | null;
   cloudFolder: string;
   icloudPath: string | null;
+  cloudLocationId?: string | null;
+  cloudLocationLabel?: string | null;
+  cloudLocationApproved?: boolean;
 }
 
 export interface BackupInfo {
@@ -1176,6 +1201,18 @@ export async function getBackupConfig(): Promise<BackupConfig> {
 
 export async function saveBackupConfig(config: BackupConfig): Promise<void> {
   await invoke("save_backup_config", { config });
+}
+
+export async function selectBackupLocation(): Promise<ApprovedLocationSummary | null> {
+  return await invoke("select_backup_location");
+}
+
+export async function selectCloudBackupLocation(request: {
+  provider: CloudProvider;
+  remoteName: string | null;
+  folder: string;
+}): Promise<ApprovedLocationSummary | null> {
+  return await invoke("select_cloud_backup_location", request);
 }
 
 export async function verifyBackupCloudConnection(): Promise<void> {
