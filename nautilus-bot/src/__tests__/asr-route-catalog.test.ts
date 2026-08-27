@@ -283,6 +283,35 @@ describe("asr-route-catalog", () => {
     expect(recommended?.modelId).toBe("parakeet-tdt-0.6b-v3");
   });
 
+  it("resolves the openai_cloud meeting lane to whisper-1 even when gpt-transcribe ranks first", () => {
+    // gpt-transcribe is openai_cloud's dictation default and sorts ahead of
+    // whisper-1 in its model_options() list, but it cannot produce segment
+    // timestamps -- only whisper-1 can (openai_cloud.rs's
+    // uses_verbose_json()). The meeting lane must never resolve openai_cloud
+    // to a model that silently drops timestamps.
+    const openAiCloudMultiModel = {
+      ...providers[3],
+      selectedModelId: "gpt-transcribe",
+      modelOptions: [
+        { id: "gpt-transcribe", label: "gpt-transcribe (recommended)" },
+        { id: "whisper-1", label: "whisper-1" },
+        { id: "gpt-4o-mini-transcribe", label: "gpt-4o-mini-transcribe" },
+        { id: "gpt-4o-transcribe", label: "gpt-4o-transcribe" },
+      ],
+    };
+    const routes = buildAsrRouteCatalog([openAiCloudMultiModel], "prefer_local");
+    const meetingRoutes = routes.filter(
+      (route) => route.providerType === "openai_cloud" && route.laneCompatibility.meeting,
+    );
+
+    expect(meetingRoutes).toHaveLength(1);
+    expect(meetingRoutes[0]?.modelId).toBe("whisper-1");
+
+    const recommended = getRecommendedLaneRoute(routes, "meeting", "best_available");
+    expect(recommended?.providerType).toBe("openai_cloud");
+    expect(recommended?.modelId).toBe("whisper-1");
+  });
+
   it("marks missing cloud credentials as BYOK-required instead of generic failure", () => {
     const routes = buildAsrRouteCatalog(providers, "prefer_local");
     const openAiRoute = routes.find(

@@ -334,7 +334,14 @@ function routeSummary(
       : "Legacy English-only Parakeet export, kept as a short-form dictation fallback.";
   }
   if (providerType === "openai_cloud") {
-    return "Cloud transcription route tuned for higher-quality meeting and dictation output.";
+    // Only whisper-1 requests OpenAI's verbose_json response format
+    // (openai_cloud.rs's uses_verbose_json()), which is what actually
+    // returns segment timestamps -- gpt-transcribe and the gpt-4o-*
+    // transcribe models return a single un-timed block, so they never
+    // appear as meeting routes (see isMeetingEligibleModel).
+    return modelId === "whisper-1"
+      ? "Cloud transcription route with segment timestamps, tuned for meeting and dictation output."
+      : "Cloud transcription route for dictation; no segment timestamps, so it is not offered for meetings.";
   }
   if (providerType === "elevenlabs_scribe") {
     return "Cloud route aimed at premium meeting and transcription quality.";
