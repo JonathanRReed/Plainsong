@@ -32,6 +32,7 @@
     "test:rust": "cargo test --locked --manifest-path rust-sidecar/Cargo.toml --lib --bins",
     "benchmark:latency": "cargo run --release --locked --manifest-path rust-sidecar/Cargo.toml --bin benchmark-latency --",
     "gate:dictation-latency": "node scripts/verify-dictation-latency.mjs --input artifacts/qa/dictation-latency.json",
+    "gate:dictation-latency:e2e": "node scripts/verify-dictation-latency.mjs --input artifacts/qa/dictation-latency-e2e.json",
     "licenses:generate": "node scripts/generate-third-party-notices.mjs",
     "gate:release-credentials:preflight": "node scripts/release-credentials-preflight.mjs",
     "gate:release:dependencies": "node scripts/verify-release-dependency-audit.mjs",
