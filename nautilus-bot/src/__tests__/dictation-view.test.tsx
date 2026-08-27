@@ -1199,13 +1199,25 @@ describe("DictationView modes", () => {
     });
   });
 
+  /** Put the fixture on a multilingual route so the picker has a list at all. */
+  function selectMultilingualRoute() {
+    backendMocks.transcriptionOverrides.defaultProvider = "whisper";
+    backendMocks.transcriptionOverrides.selectedModelId = "large-v3-turbo";
+    backendMocks.transcriptionOverrides.dictationProvider = "whisper";
+    backendMocks.transcriptionOverrides.dictationModelId = "large-v3-turbo";
+  }
+
+  async function pickLanguage(comboboxName: RegExp | string, option: RegExp) {
+    fireEvent.click(await screen.findByRole("combobox", { name: comboboxName }));
+    fireEvent.click(await screen.findByRole("option", { name: option }));
+  }
+
   it("persists the session language separately from flow profiles", async () => {
+    selectMultilingualRoute();
     render(<DictationView />);
 
     await openConfigTab("Capture");
-    fireEvent.change(screen.getByLabelText("Session language"), {
-      target: { value: "es" },
-    });
+    await pickLanguage("Session language", /^Spanish$/);
 
     await waitFor(() => {
       expect(backendMocks.saveSettings).toHaveBeenCalled();
@@ -1217,10 +1229,11 @@ describe("DictationView modes", () => {
   });
 
   it("locks auto dictation to a single active language when the set has one item", async () => {
+    selectMultilingualRoute();
     render(<DictationView />);
 
     await openConfigTab("Capture");
-    fireEvent.click(screen.getByRole("button", { name: "Toggle French active language" }));
+    await pickLanguage(/add a language you speak/i, /^French$/);
     fireEvent.click(screen.getByRole("button", { name: /start dictation/i }));
 
     await waitFor(() => {
@@ -1230,6 +1243,60 @@ describe("DictationView modes", () => {
         })
       );
     });
+  });
+
+  it("offers the whole language set the selected model accepts", async () => {
+    // ux-6: the picker was a hardcoded seven against models that accept ~100.
+    selectMultilingualRoute();
+    render(<DictationView />);
+
+    await openConfigTab("Capture");
+    fireEvent.click(
+      await screen.findByRole("combobox", { name: "Session language" }),
+    );
+
+    const options = await screen.findAllByRole("option");
+    expect(options.length).toBeGreaterThan(50);
+    expect(screen.getByRole("option", { name: /^Auto detect$/ })).toBeInTheDocument();
+    // None of these were reachable from the old seven.
+    for (const language of ["Ukrainian", "Swahili", "Vietnamese", "Cantonese"]) {
+      expect(
+        screen.getByRole("option", { name: new RegExp(`^${language}$`) }),
+      ).toBeInTheDocument();
+    }
+  });
+
+  it("stops at the selected model's boundary instead of the widest list", async () => {
+    // Parakeet v3 covers 25 European languages; Mandarin is not one of them,
+    // and offering it would promise a transcript the model cannot produce.
+    backendMocks.transcriptionOverrides.defaultProvider = "parakeet";
+    backendMocks.transcriptionOverrides.selectedModelId = "parakeet-tdt-0.6b-v3";
+    backendMocks.transcriptionOverrides.dictationProvider = "parakeet";
+    backendMocks.transcriptionOverrides.dictationModelId = "parakeet-tdt-0.6b-v3";
+    render(<DictationView />);
+
+    await openConfigTab("Capture");
+    fireEvent.click(
+      await screen.findByRole("combobox", { name: "Session language" }),
+    );
+
+    expect(screen.getByRole("option", { name: /^Ukrainian$/ })).toBeInTheDocument();
+    expect(screen.queryByRole("option", { name: /^Chinese$/ })).not.toBeInTheDocument();
+    expect(screen.queryByRole("option", { name: /^Hindi$/ })).not.toBeInTheDocument();
+  });
+
+  it("explains an English-only model instead of showing one lonely option", async () => {
+    // The fixture's own route is distil-large-v3.5, which is English-only.
+    render(<DictationView />);
+
+    await openConfigTab("Capture");
+
+    expect(
+      await screen.findByText(/transcribes English only/i),
+    ).toBeInTheDocument();
+    expect(
+      screen.queryByRole("combobox", { name: "Session language" }),
+    ).not.toBeInTheDocument();
   });
 
   it("surfaces a start failure when dictation cannot begin", async () => {
