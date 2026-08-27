@@ -2,14 +2,41 @@
 
 use crate::llm::transport::{
     bounded_body_error_to_llm, classify_http_error, read_error_body, read_json_body,
-    CompletionRequest, CompletionResponse, CompletionTransport, ErrorKind, LlmError, Provider,
-    COMPLETION_BODY_LIMIT, MODEL_LIST_BODY_LIMIT,
+    CompletionRequest, CompletionResponse, CompletionTransport, ErrorKind, LlmError,
+    ModelContextMetadata, Provider, COMPLETION_BODY_LIMIT, MODEL_LIST_BODY_LIMIT,
+    MODEL_METADATA_BODY_LIMIT,
 };
 use anyhow::{Context, Result};
 use async_trait::async_trait;
-use std::time::Duration;
+use std::collections::HashMap;
+use std::sync::Arc;
+use std::time::{Duration, Instant};
+use tokio::sync::RwLock;
 
 const GEMINI_API_URL: &str = "https://generativelanguage.googleapis.com/v1beta";
+const GEMINI_MODEL_METADATA_TIMEOUT: Duration = Duration::from_secs(5);
+const GEMINI_METADATA_TTL: Duration = Duration::from_secs(10 * 60);
+
+#[derive(Debug, Clone, Copy)]
+struct CachedModelContext {
+    metadata: ModelContextMetadata,
+    observed_at: Instant,
+}
+
+/// Pulls `inputTokenLimit` out of a Gemini `models.get` response so callers
+/// can size requests against the model's *real* advertised capacity instead
+/// of the coarse name-pattern fallback in `Provider::model_budget`.
+fn context_metadata_from_model_payload(data: &serde_json::Value) -> ModelContextMetadata {
+    ModelContextMetadata {
+        capacity_tokens: data["inputTokenLimit"]
+            .as_u64()
+            .and_then(|value| usize::try_from(value).ok())
+            .filter(|value| *value > 0),
+        // Gemini has no per-model "configured default" distinct from its
+        // advertised capacity (unlike Ollama's Modelfile `num_ctx`).
+        default_tokens: None,
+    }
+}
 
 fn supports_gemini_generate_content(model: &serde_json::Value) -> bool {
     let is_gemini = model["name"]
@@ -92,6 +119,7 @@ fn parse_completion_response(
 pub struct GeminiClient {
     api_key: Option<String>,
     client: reqwest::Client,
+    metadata_cache: Arc<RwLock<HashMap<String, CachedModelContext>>>,
 }
 
 impl GeminiClient {
@@ -103,7 +131,54 @@ impl GeminiClient {
         Self {
             api_key: api_key.or_else(|| std::env::var("GEMINI_API_KEY").ok()),
             client: reqwest::Client::new(),
+            metadata_cache: Arc::new(RwLock::new(HashMap::new())),
         }
+    }
+
+    async fn cached_model_context(&self, model: &str) -> Option<ModelContextMetadata> {
+        let cache = self.metadata_cache.read().await;
+        cache.get(model).and_then(|entry| {
+            (entry.observed_at.elapsed() <= GEMINI_METADATA_TTL).then_some(entry.metadata)
+        })
+    }
+
+    /// Fetches a single model's metadata via `GET /v1beta/{model}`, which
+    /// returns the same shape as the `/models` list entries (including
+    /// `inputTokenLimit`).
+    async fn probe_model_context(&self, model: &str) -> Result<ModelContextMetadata, LlmError> {
+        let key = self.api_key.as_deref().ok_or_else(|| {
+            LlmError::new(
+                Provider::Gemini,
+                ErrorKind::Configuration,
+                "Gemini API key not configured",
+            )
+        })?;
+        let model_name = if model.starts_with("models/") {
+            model.to_string()
+        } else {
+            format!("models/{}", model)
+        };
+        let response = self
+            .client
+            .get(format!("{}/{}", GEMINI_API_URL, model_name))
+            .header("x-goog-api-key", key)
+            .timeout(GEMINI_MODEL_METADATA_TIMEOUT)
+            .send()
+            .await
+            .map_err(|error| {
+                LlmError::from_reqwest(Provider::Gemini, "Failed to probe model metadata", error)
+            })?;
+        if !response.status().is_success() {
+            let status = response.status();
+            let body = read_error_body(response).await;
+            return Err(classify_http_error(Provider::Gemini, status, body));
+        }
+        let data: serde_json::Value = read_json_body(response, MODEL_METADATA_BODY_LIMIT)
+            .await
+            .map_err(|error| {
+                bounded_body_error_to_llm(Provider::Gemini, "Failed to read model metadata", error)
+            })?;
+        Ok(context_metadata_from_model_payload(&data))
     }
 
     pub async fn list_models(&self) -> Result<Vec<String>> {
@@ -202,6 +277,25 @@ impl CompletionTransport for GeminiClient {
             })?;
         parse_completion_response(&data, &request.model)
     }
+
+    async fn model_context_metadata(&self, model: &str) -> Result<ModelContextMetadata, LlmError> {
+        if let Some(metadata) = self.cached_model_context(model).await {
+            return Ok(metadata);
+        }
+        let metadata = self.probe_model_context(model).await?;
+        self.metadata_cache.write().await.insert(
+            model.to_string(),
+            CachedModelContext {
+                metadata,
+                observed_at: Instant::now(),
+            },
+        );
+        Ok(metadata)
+    }
+
+    async fn invalidate_model_context_metadata(&self, model: &str) {
+        self.metadata_cache.write().await.remove(model);
+    }
 }
 
 impl Default for GeminiClient {
@@ -269,6 +363,30 @@ mod tests {
         assert!(error
             .message
             .contains("Response blocked by safety filters."));
+    }
+
+    #[test]
+    fn model_payload_context_metadata_reads_input_token_limit() {
+        let metadata = context_metadata_from_model_payload(&serde_json::json!({
+            "name": "models/gemini-3.5-flash",
+            "inputTokenLimit": 1_048_576,
+            "outputTokenLimit": 65_536,
+        }));
+        assert_eq!(metadata.capacity_tokens, Some(1_048_576));
+        assert_eq!(metadata.default_tokens, None);
+    }
+
+    #[test]
+    fn model_payload_context_metadata_ignores_missing_or_zero_limit() {
+        assert_eq!(
+            context_metadata_from_model_payload(&serde_json::json!({})).capacity_tokens,
+            None
+        );
+        assert_eq!(
+            context_metadata_from_model_payload(&serde_json::json!({"inputTokenLimit": 0}))
+                .capacity_tokens,
+            None
+        );
     }
 
     #[test]
