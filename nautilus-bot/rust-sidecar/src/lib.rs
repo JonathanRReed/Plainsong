@@ -9167,6 +9167,46 @@ mod tests {
     }
 
     #[test]
+    fn the_stop_capture_tail_is_awaited_before_the_capture_mutex() {
+        // The 120ms capture tail used to be a blocking sleep inside
+        // `stop_dictation`, which ran while the caller held the async
+        // `audio_capture` mutex and parked a tokio worker. It must be awaited
+        // before the lock is taken.
+        let body = owned_stop_dictation_body();
+        let tail = body
+            .find("DICTATION_STOP_CAPTURE_TAIL_MS")
+            .expect("stop must wait the capture tail");
+        let lock = body
+            .find("state.audio_capture.lock().await")
+            .expect("stop must take the capture mutex");
+        assert!(
+            tail < lock,
+            "the capture tail must be awaited before the audio_capture mutex is acquired"
+        );
+        assert!(
+            body[tail..lock].contains("tokio::time::sleep"),
+            "the capture tail must be an async sleep, not a blocking one"
+        );
+    }
+
+    #[test]
+    fn stop_dictation_does_not_block_while_holding_the_capture_mutex() {
+        const AUDIO_SOURCE: &str = include_str!("audio.rs");
+        let start = AUDIO_SOURCE
+            .find("pub fn stop_dictation(&mut self)")
+            .expect("stop_dictation must exist");
+        let body = &AUDIO_SOURCE[start..];
+        let body = body
+            .split_once("\n    pub fn ")
+            .map(|parts| parts.0)
+            .unwrap_or(body);
+        assert!(
+            !body.contains("std::thread::sleep"),
+            "stop_dictation runs under the async audio_capture mutex and must not block"
+        );
+    }
+
+    #[test]
     fn dictation_insertion_never_blocks_the_async_runtime() {
         // `paste_text_systemwide` shells out, waits for app activation, and then
         // polls for the insert -- roughly a second of blocking work. On the stop
@@ -20005,10 +20045,22 @@ async fn stop_dictation_for_sidecar(
         }),
     );
 
-    let audio_bytes = {
+    // Deliberate extra recording so the speaker's final consonant lands (see
+    // `DICTATION_STOP_CAPTURE_TAIL_MS`). It is awaited here, *before* taking the
+    // capture mutex: as a blocking sleep inside `stop_dictation` it held the
+    // async `audio_capture` lock and parked a tokio worker for its whole
+    // duration. Waiting first preserves the ordering the tail depends on --
+    // capture is still live and `is_dictating` is still true.
+    tokio::time::sleep(Duration::from_millis(
+        crate::audio::DICTATION_STOP_CAPTURE_TAIL_MS,
+    ))
+    .await;
+
+    let (audio_bytes, hit_max_duration) = {
         let mut audio = state.audio_capture.lock().await;
+        let hit_max_duration = audio.dictation_hit_max_duration();
         match audio.stop_dictation() {
-            Ok(audio_bytes) => audio_bytes,
+            Ok(audio_bytes) => (audio_bytes, hit_max_duration),
             Err(error) => {
                 return Err(fail_dictation_stop(
                     state,
@@ -20021,6 +20073,14 @@ async fn stop_dictation_for_sidecar(
             }
         }
     };
+    if hit_max_duration {
+        // The session was ended by the length ceiling, not by the user. Say so:
+        // the transcript that follows covers only the audio that fit.
+        warnings.push(format!(
+            "Dictation reached the maximum length of {} minutes and was stopped. Only the audio captured up to that point was transcribed.",
+            crate::audio::AudioCapture::dictation_max_session_seconds() / 60
+        ));
+    }
     let dictation_duration_seconds = match compute_wav_duration_seconds_from_bytes(&audio_bytes) {
         Ok(duration_seconds) => duration_seconds,
         Err(error) => {
