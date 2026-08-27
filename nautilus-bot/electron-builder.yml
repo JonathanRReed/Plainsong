@@ -119,6 +119,22 @@ publish:
   # The repository remains private during the limited beta, so installed apps
   # use a credential-free feed rather than GitHub Releases. This URL must match
   # the public R2 custom domain verified by the release gate before invitations.
+  #
+  # This block bakes exactly ONE feed into the packaged app-update.yml, and the
+  # feed is per-channel: /beta/ carries beta-mac.yml, /stable/ carries
+  # latest-mac.yml (`resolveUpdaterChannel("stable")` is "latest" — there is no
+  # stable-mac.yml). A stable install reading THIS url would have requested
+  # latest-mac.yml out of the beta bucket. The running app therefore calls
+  # autoUpdater.setFeedURL(updaterFeedOptions(channel)) before every check
+  # (electron/updater-channel.ts), and what is written here is only the default
+  # a build falls back to before that runs.
+  #
+  # It stays /beta/ with channel beta because this candidate IS a beta:
+  # `effectiveUpdaterChannel` pins a prerelease build to the beta channel
+  # regardless of the configured setting, so the packaged default and the
+  # runtime resolution agree for every install of this build. Publishing the
+  # first stable release means creating /stable/latest-mac.yml, which
+  # `qa:packaged:macos:public-update-feed` now requires for both channels.
   provider: generic
   url: https://updates.plainsong.jonathanrreed.com/beta/
   channel: beta

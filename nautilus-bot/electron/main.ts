@@ -54,6 +54,7 @@ import {
   macosUpdateRelauncherArgs,
   resolveUpdaterChannel,
   type UpdateChannel,
+  updaterFeedOptions,
   updaterInstallBlockedByActiveMeeting,
   updaterResultHasAvailableUpdate,
 } from "./updater-channel";
@@ -649,7 +650,13 @@ async function checkForUpdatesInElectron(): Promise<UpdateInfoPayload | null> {
   // requesting `stable-mac.yml` 404s with no fallback. See updater-channel.ts.
   autoUpdater.channel = resolveUpdaterChannel(channel);
   autoUpdater.allowPrerelease = channel === "beta";
+  // Set AFTER `channel`: electron-updater's channel setter also sets
+  // allowDowngrade to true.
   autoUpdater.allowDowngrade = allowUpdaterDowngrade(channel);
+  // The packaged app-update.yml can only name one feed, and it names the beta
+  // one. Point the updater at the directory for the channel actually in effect
+  // so a stable install never reads a manifest out of the beta bucket.
+  autoUpdater.setFeedURL(updaterFeedOptions(channel));
 
   const result = await autoUpdater.checkForUpdates();
   if (!updaterResultHasAvailableUpdate(result)) {

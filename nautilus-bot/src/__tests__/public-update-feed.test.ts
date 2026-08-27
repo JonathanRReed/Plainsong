@@ -1,12 +1,21 @@
 import { describe, expect, it } from "vitest";
 import {
+  channelFeedUrl,
+  channelManifestUrl,
   evaluatePublicUpdateFeedEvidence,
   parseMacUpdateManifest,
   parsePackagedUpdateConfig,
   resolveFeedAssetUrl,
+  resolveFeedBaseUrl,
+  UPDATE_CHANNELS,
+  updaterChannelManifestFilename,
   validatePublicFeedUrl,
   type PublicUpdateFeedEvidence,
 } from "../../scripts/lib/public-update-feed.mjs";
+import {
+  updaterChannelManifestFilename as appUpdaterChannelManifestFilename,
+  updaterFeedUrl,
+} from "../../electron/updater-channel";
 
 const VERSION = "0.9.0-beta.2";
 const ZIP_NAME = `Plainsong-${VERSION}-arm64-mac.zip`;
@@ -18,6 +27,19 @@ const MANIFEST_SHA256 = "d".repeat(64);
 function passingEvidence(): PublicUpdateFeedEvidence {
   return {
     feedUrl: "https://updates.plainsong.example/beta/",
+    feedBaseUrl: "https://updates.plainsong.example/",
+    channelManifests: {
+      stable: {
+        url: "https://updates.plainsong.example/stable/latest-mac.yml",
+        status: 200,
+        finalUrl: "https://updates.plainsong.example/stable/latest-mac.yml",
+      },
+      beta: {
+        url: "https://updates.plainsong.example/beta/beta-mac.yml",
+        status: 200,
+        finalUrl: "https://updates.plainsong.example/beta/beta-mac.yml",
+      },
+    },
     requestedManifest: "beta-mac.yml",
     credentialsUsed: false,
     packagedProvider: "generic",
@@ -140,5 +162,106 @@ describe("public update feed evidence", () => {
     expect(result.checks.packagedUsesSingleRangeRequests).toBe(false);
     expect(result.checks.zipSha256MatchesCandidate).toBe(false);
     expect(result.checks.rangeRequestSupported).toBe(false);
+  });
+});
+
+describe("per-channel update feeds", () => {
+  it("gives each channel its own directory", () => {
+    // The packaged app-update.yml can only name one feed. The app derives the
+    // directory from the channel at runtime instead, so a stable install never
+    // reads a manifest out of the beta bucket.
+    const base = "https://updates.plainsong.example/";
+    expect(channelFeedUrl(base, "stable")).toBe(
+      "https://updates.plainsong.example/stable/",
+    );
+    expect(channelFeedUrl(base, "beta")).toBe(
+      "https://updates.plainsong.example/beta/",
+    );
+    // A base that already names a channel must not compound into /beta/stable/.
+    expect(channelFeedUrl("https://updates.plainsong.example/beta/", "stable")).toBe(
+      "https://updates.plainsong.example/stable/",
+    );
+    expect(channelFeedUrl(null, "stable")).toBeNull();
+  });
+
+  it("resolves the manifest electron-updater actually requests", () => {
+    // Stable maps to `latest`, not `stable`: electron-builder publishes no
+    // stable-mac.yml, so requesting one 404s with no fallback.
+    expect(updaterChannelManifestFilename("stable")).toBe("latest-mac.yml");
+    expect(updaterChannelManifestFilename("beta")).toBe("beta-mac.yml");
+    expect(
+      channelManifestUrl("https://updates.plainsong.example/", "stable"),
+    ).toBe("https://updates.plainsong.example/stable/latest-mac.yml");
+    expect(channelManifestUrl("https://updates.plainsong.example/", "beta")).toBe(
+      "https://updates.plainsong.example/beta/beta-mac.yml",
+    );
+  });
+
+  it("mirrors the rule the shipped app uses", () => {
+    // The gate is a .mjs script and cannot import the TypeScript module, so the
+    // duplication is pinned here rather than left to drift.
+    for (const channel of UPDATE_CHANNELS) {
+      expect(updaterChannelManifestFilename(channel, "darwin")).toBe(
+        appUpdaterChannelManifestFilename(channel, "darwin"),
+      );
+      expect(channelFeedUrl("https://updates.plainsong.jonathanrreed.com/", channel)).toBe(
+        updaterFeedUrl(channel),
+      );
+    }
+  });
+
+  it("accepts a feed URL that already names a channel", () => {
+    expect(resolveFeedBaseUrl("https://updates.plainsong.example/beta/")).toBe(
+      "https://updates.plainsong.example/",
+    );
+    expect(resolveFeedBaseUrl("https://updates.plainsong.example/stable/")).toBe(
+      "https://updates.plainsong.example/",
+    );
+    expect(resolveFeedBaseUrl("https://updates.plainsong.example/")).toBe(
+      "https://updates.plainsong.example/",
+    );
+    expect(resolveFeedBaseUrl("http://updates.plainsong.example/beta/")).toBeNull();
+  });
+
+  it("blocks when either channel's manifest is unpublished", () => {
+    // The first stable release would otherwise have shipped with an empty
+    // stable feed and every stable check failing.
+    const evidence = passingEvidence();
+    evidence.channelManifests.stable = {
+      url: "https://updates.plainsong.example/stable/latest-mac.yml",
+      status: 404,
+      finalUrl: null,
+    };
+
+    const result = evaluatePublicUpdateFeedEvidence(evidence);
+    expect(result.pass).toBe(false);
+    expect(result.checks.stableChannelManifestReachable).toBe(false);
+    expect(result.checks.betaChannelManifestReachable).toBe(true);
+  });
+
+  it("blocks when a channel is probed against the wrong directory", () => {
+    const evidence = passingEvidence();
+    // The exact confusion the finding describes: stable's manifest fetched out
+    // of the beta bucket.
+    evidence.channelManifests.stable = {
+      url: "https://updates.plainsong.example/beta/latest-mac.yml",
+      status: 200,
+      finalUrl: "https://updates.plainsong.example/beta/latest-mac.yml",
+    };
+
+    const result = evaluatePublicUpdateFeedEvidence(evidence);
+    expect(result.pass).toBe(false);
+    expect(result.checks.stableChannelManifestReachable).toBe(true);
+    expect(result.checks.stableChannelManifestUsesOwnDirectory).toBe(false);
+  });
+
+  it("blocks when a channel was never probed at all", () => {
+    const evidence = passingEvidence();
+    evidence.channelManifests = {};
+
+    const result = evaluatePublicUpdateFeedEvidence(evidence);
+    expect(result.pass).toBe(false);
+    expect(result.checks.stableChannelManifestReachable).toBe(false);
+    expect(result.checks.betaChannelManifestReachable).toBe(false);
   });
 });

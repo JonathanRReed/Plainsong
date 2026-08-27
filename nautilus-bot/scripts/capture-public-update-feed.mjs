@@ -6,10 +6,13 @@ import path from "node:path";
 
 import { collectReleaseCandidateIdentity } from "./lib/release-candidate-identity.mjs";
 import {
+  channelManifestUrl,
   evaluatePublicUpdateFeedEvidence,
   parseMacUpdateManifest,
   parsePackagedUpdateConfig,
   resolveFeedAssetUrl,
+  resolveFeedBaseUrl,
+  UPDATE_CHANNELS,
   validatePublicFeedUrl,
 } from "./lib/public-update-feed.mjs";
 
@@ -98,6 +101,15 @@ Feed: ${receipt.feedUrl || "missing"}
 Manifest: ${receipt.requestedManifest}
 Candidate version: ${receipt.candidate?.version ?? "missing"}
 Candidate ZIP SHA-256: ${receipt.candidateZipSha256 ?? "missing"}
+
+## Channel manifests
+
+${Object.entries(receipt.channelManifests ?? {})
+  .map(
+    ([channel, probe]) =>
+      `- ${channel}: ${probe.url ?? "unresolved"} → ${probe.status ?? "no response"}`,
+  )
+  .join("\n")}
 
 ## Checks
 
@@ -278,8 +290,52 @@ if (blockmapUrl && candidateBlockmapBytes) {
   }
 }
 
+// Every channel a running app can select resolves its own feed directory at
+// runtime (electron/updater-channel.ts `updaterFeedUrl`). A channel with no
+// published manifest is a channel whose users get
+// ERR_UPDATER_CHANNEL_FILE_NOT_FOUND on every check — which is exactly what
+// stable users would have hit the first time a stable build shipped, because
+// the packaged feed only ever named the beta directory. Probe BOTH, and treat
+// either one 404ing as blocking.
+const feedBaseUrl = resolveFeedBaseUrl(rawFeedUrl);
+const channelManifests = {};
+for (const channel of UPDATE_CHANNELS) {
+  const url = channelManifestUrl(feedBaseUrl, channel);
+  if (!url) {
+    channelManifests[channel] = { url: null, status: null, finalUrl: null };
+    errors.push(`Could not resolve a ${channel} channel manifest URL.`);
+    continue;
+  }
+  try {
+    const probe = await fetchHashed(
+      url,
+      1024 * 1024,
+      { accept: "application/yaml, text/yaml, text/plain" },
+      false,
+    );
+    channelManifests[channel] = {
+      url,
+      status: probe.status,
+      finalUrl: probe.finalUrl,
+    };
+    if (probe.status !== 200) {
+      errors.push(
+        `The ${channel} channel manifest is not published: ${url} returned ${probe.status}.`,
+      );
+    }
+  } catch (error) {
+    channelManifests[channel] = { url, status: null, finalUrl: null };
+    errors.push(
+      `The ${channel} channel manifest request failed (${url}): ` +
+        `${error instanceof Error ? error.message : String(error)}`,
+    );
+  }
+}
+
 const evidence = {
   feedUrl: feedValidation.normalizedUrl ?? rawFeedUrl,
+  feedBaseUrl,
+  channelManifests,
   requestedManifest,
   credentialsUsed: false,
   packagedProvider: packagedUpdateConfig.provider,
@@ -329,6 +385,8 @@ const receipt = {
   channel: "beta",
   requestedManifest,
   feedUrl: evidence.feedUrl,
+  feedBaseUrl,
+  channelManifests,
   manifestVersion: parsedManifest.version,
   candidateZipSha256,
   candidate: {
