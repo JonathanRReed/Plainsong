@@ -17037,6 +17037,10 @@ const AX_ERROR_ATTRIBUTE_UNSUPPORTED: AXError = -25205;
 #[cfg(target_os = "macos")]
 const AX_ERROR_NO_VALUE: AXError = -25212;
 #[cfg(target_os = "macos")]
+const AX_VALUE_CG_POINT_TYPE: u32 = 1;
+#[cfg(target_os = "macos")]
+const AX_VALUE_CG_SIZE_TYPE: u32 = 2;
+#[cfg(target_os = "macos")]
 const AX_VALUE_CF_RANGE_TYPE: u32 = 4;
 
 #[cfg(target_os = "macos")]
@@ -17751,7 +17755,7 @@ fn capture_focused_field_text_via_accessibility(
 }
 
 /// Owning process of an Accessibility element, used as the first and cheapest
-/// half of the focused-field fingerprint.
+/// part of the focused-field fingerprint.
 #[cfg(target_os = "macos")]
 fn ax_element_pid(element: AXUIElementRef) -> Option<i32> {
     let mut pid: i32 = 0;
@@ -17761,6 +17765,66 @@ fn ax_element_pid(element: AXUIElementRef) -> Option<i32> {
     } else {
         None
     }
+}
+
+/// Screen rectangle of an Accessibility element, rounded to whole points.
+///
+/// This is what separates two text fields that a Chromium app describes
+/// identically — see `FocusedFieldFrame`. Both `AXPosition` and `AXSize` have
+/// to decode, because half a rectangle is not an identity.
+#[cfg(target_os = "macos")]
+fn ax_element_frame(
+    element: AXUIElementRef,
+) -> Option<dictation_correction_capture::FocusedFieldFrame> {
+    let position = ax_copy_cg_pair_attribute(element, "AXPosition", AX_VALUE_CG_POINT_TYPE)?;
+    let size = ax_copy_cg_pair_attribute(element, "AXSize", AX_VALUE_CG_SIZE_TYPE)?;
+    Some(dictation_correction_capture::FocusedFieldFrame {
+        x: position.0.round() as i64,
+        y: position.1.round() as i64,
+        width: size.0.round() as i64,
+        height: size.1.round() as i64,
+    })
+}
+
+/// Decodes an `AXValue` that wraps a `CGPoint` or `CGSize` — both are two
+/// `CGFloat`s in a row, so one decoder covers them.
+#[cfg(target_os = "macos")]
+fn ax_copy_cg_pair_attribute(
+    element: AXUIElementRef,
+    attribute: &str,
+    value_type: u32,
+) -> Option<(f64, f64)> {
+    let value = ax_copy_attribute_value(element, attribute).ok().flatten()?;
+    if unsafe { AXValueGetType(value) } != value_type {
+        unsafe { CFRelease(value) };
+        return None;
+    }
+
+    let mut pair: [f64; 2] = [0.0, 0.0];
+    let copied = unsafe {
+        AXValueGetValue(
+            value,
+            value_type,
+            pair.as_mut_ptr() as *mut std::ffi::c_void,
+        ) != 0
+    };
+    unsafe { CFRelease(value) };
+    copied.then_some((pair[0], pair[1]))
+}
+
+/// `AXTitle` and `AXIdentifier` of the window a focused element belongs to.
+/// Cheap, and it separates the same-looking field in two windows of one app.
+#[cfg(target_os = "macos")]
+fn ax_element_window_identity(element: AXUIElementRef) -> (Option<String>, Option<String>) {
+    let Ok(Some(window)) = ax_copy_attribute_value(element, "AXWindow") else {
+        return (None, None);
+    };
+    let title = ax_copy_string_attribute(window, "AXTitle").ok().flatten();
+    let identifier = ax_copy_string_attribute(window, "AXIdentifier")
+        .ok()
+        .flatten();
+    unsafe { CFRelease(window) };
+    (title, identifier)
 }
 
 /// The real Accessibility read behind
@@ -17824,6 +17888,8 @@ impl dictation_correction_capture::FocusedFieldReader for MacosFocusedFieldReade
         let title = ax_copy_string_attribute(focused_element, "AXTitle")
             .ok()
             .flatten();
+        let (window_title, window_identifier) = ax_element_window_identity(focused_element);
+        let frame = ax_element_frame(focused_element);
         let text = ax_copy_string_attribute(focused_element, "AXValue")
             .ok()
             .flatten();
@@ -17840,6 +17906,9 @@ impl dictation_correction_capture::FocusedFieldReader for MacosFocusedFieldReade
                 role,
                 identifier,
                 title,
+                window_title,
+                window_identifier,
+                frame,
                 frontmost_bundle_id: get_frontmost_app_bundle_id(),
                 frontmost_app_name: get_frontmost_app_name(),
             },
@@ -22237,6 +22306,11 @@ async fn stop_dictation_for_sidecar(
                     dictation_correction_capture::capture_insertion_anchor(
                         &MacosFocusedFieldReader,
                         anchor_text.as_str(),
+                        // Re-asked against the app actually in front now. The
+                        // check above used the target recorded when the
+                        // session started, which is still "Slack" even when
+                        // reactivation failed and the text landed here.
+                        &is_self_activation_target,
                     )
                 })
                 .await

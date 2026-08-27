@@ -88,6 +88,26 @@ const MAX_CANDIDATE_CHARS: usize = 48;
 /// a substitution that has nothing to do with what was misheard.
 const MAX_EDIT_DISTANCE_RATIO: f64 = 0.6;
 
+/// Longest a candidate may be when it is written in a script that does not put
+/// spaces between words.
+///
+/// The word bounds above are counted with `split_whitespace`, which is a lie in
+/// Japanese, Chinese, Thai, Lao, Khmer and Burmese: a whole clause arrives as
+/// one "word", so `MAX_CANDIDATE_WORDS` never bites and 48 characters is most
+/// of a sentence. For an unsegmented run the character count is the only
+/// available proxy for length, and eight of them is a term or a name — which is
+/// what "word-level only" is supposed to mean.
+const MAX_UNSEGMENTED_CANDIDATE_CHARS: usize = 8;
+
+/// Shortest run of the insertion that must have survived, verbatim and
+/// contiguous, for the field to count as still holding what Plainsong typed.
+///
+/// Order-preserving overlap alone is too easy to hit by accident: a search box
+/// containing "the report" shares words with half of everything. Two adjacent
+/// words in the same order is a much less likely coincidence, and every real
+/// correction leaves far more than that behind.
+const MIN_INSERTION_REMNANT_RUN_WORDS: usize = 2;
+
 /// The identity of a focused text field, captured without holding on to any
 /// Accessibility pointer.
 ///
@@ -95,6 +115,26 @@ const MAX_EDIT_DISTANCE_RATIO: f64 = 0.6;
 /// retained `AXUIElementRef` would be both unsound to move and stale by the
 /// time it is read. Instead both sides record the same cheap, comparable
 /// facts, and the readback refuses to proceed unless they agree.
+/// Where a focused element sits on screen, in whole points.
+///
+/// This is the discriminator that actually separates *sibling* fields. An
+/// Electron or Chromium app typically publishes no `AXIdentifier` and no
+/// `AXTitle` on its text inputs, so a message composer and a search box in the
+/// same window agree on pid, role, identifier, title, window and application —
+/// everything except where they are. Rounded to points because AX hands back
+/// floats and two reads of a stationary element must compare equal.
+///
+/// A field that moves between the insertion and the readback (the user scrolled
+/// or resized) reads as a different field and the readback is abandoned. That
+/// is the safe direction to be wrong in.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct FocusedFieldFrame {
+    pub x: i64,
+    pub y: i64,
+    pub width: i64,
+    pub height: i64,
+}
+
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct FocusedFieldFingerprint {
     /// Owning process id of the focused element.
@@ -105,6 +145,12 @@ pub struct FocusedFieldFingerprint {
     pub identifier: Option<String>,
     /// `AXTitle` when the app publishes one.
     pub title: Option<String>,
+    /// `AXTitle` of the element's `AXWindow`, when there is one.
+    pub window_title: Option<String>,
+    /// `AXIdentifier` of the element's `AXWindow`, when the app publishes one.
+    pub window_identifier: Option<String>,
+    /// Screen rectangle of the element itself. See `FocusedFieldFrame`.
+    pub frame: Option<FocusedFieldFrame>,
     /// Bundle id of the frontmost application at the time of capture.
     pub frontmost_bundle_id: Option<String>,
     /// Localized name of the frontmost application at the time of capture.
@@ -128,11 +174,27 @@ impl FocusedFieldFingerprint {
     /// stopped publishing one is not the same field as far as this check is
     /// concerned. Erring towards "not the same" costs a suggestion; erring the
     /// other way reads a stranger's field.
+    ///
+    /// None of this is airtight on its own, and it is not asked to be. An app
+    /// that publishes nothing distinguishing leaves two `None`s comparing equal
+    /// — which is why identity is never the last gate. `evaluate_post_insert_readback`
+    /// runs `readback_holds_insertion_remnant` immediately after this and
+    /// refuses to diff a field that does not still visibly hold the text
+    /// Plainsong typed, whatever the fingerprint said.
     pub fn matches_insertion(&self, insertion: &FocusedFieldFingerprint) -> bool {
         self.pid == insertion.pid
+            && self.frame == insertion.frame
             && optional_eq_ignore_case(self.role.as_deref(), insertion.role.as_deref())
             && optional_eq_ignore_case(self.identifier.as_deref(), insertion.identifier.as_deref())
             && optional_eq_ignore_case(self.title.as_deref(), insertion.title.as_deref())
+            && optional_eq_ignore_case(
+                self.window_title.as_deref(),
+                insertion.window_title.as_deref(),
+            )
+            && optional_eq_ignore_case(
+                self.window_identifier.as_deref(),
+                insertion.window_identifier.as_deref(),
+            )
             && optional_eq_ignore_case(
                 self.frontmost_bundle_id.as_deref(),
                 insertion.frontmost_bundle_id.as_deref(),
@@ -192,10 +254,20 @@ pub fn anchor_snapshot_contains_insertion(snapshot_text: &str, inserted_text: &s
 ///
 /// Returns `None` — meaning "do not follow this insertion up" — whenever the
 /// evidence is not there: the read failed, nothing is focused, the field
-/// exposes no text, or the text Plainsong just inserted is not in it.
+/// exposes no text, the text Plainsong just inserted is not in it, or the app
+/// actually in front is Plainsong itself.
+///
+/// `frontmost_is_self` is asked `(app_name, bundle_id)` about the app the
+/// reader observed in front *now*, not the app the dictation was aimed at when
+/// it started. Those differ whenever reactivation quietly failed and the paste
+/// landed back in Plainsong's own window; the label recorded at session start
+/// would still say Slack. Since the readback will only ever proceed against a
+/// fingerprint recorded here, refusing here is enough to keep Plainsong's own
+/// result box out of the other-apps path entirely.
 pub fn capture_insertion_anchor(
     reader: &dyn FocusedFieldReader,
     inserted_text: &str,
+    frontmost_is_self: &dyn Fn(Option<&str>, Option<&str>) -> bool,
 ) -> Option<FocusedFieldFingerprint> {
     let snapshot = match reader.read_focused_field() {
         Ok(Some(snapshot)) => snapshot,
@@ -205,6 +277,13 @@ pub fn capture_insertion_anchor(
             return None;
         }
     };
+
+    if frontmost_is_self(
+        snapshot.fingerprint.frontmost_app_name.as_deref(),
+        snapshot.fingerprint.frontmost_bundle_id.as_deref(),
+    ) {
+        return None;
+    }
 
     if !anchor_snapshot_contains_insertion(&snapshot.text, inserted_text) {
         return None;
@@ -239,9 +318,14 @@ pub enum ReadbackAbort {
     FocusChanged,
     /// The field is far larger than anything Plainsong should be diffing.
     ReadbackTooLarge,
+    /// The field no longer visibly holds what Plainsong typed, so whatever it
+    /// holds is not this insertion — however well the fingerprint matched.
+    InsertionRemnantMissing,
     /// The field still holds exactly what was inserted.
     NoChange,
-    /// The inserted text could not be found in the field with confidence.
+    /// The inserted text could not be found in the field with confidence, or
+    /// could be found in more than one place and Plainsong cannot tell which
+    /// one the user edited.
     SpanNotLocated,
     /// A diff was found, but nothing in it survived the filters.
     NoAcceptableCandidates,
@@ -298,8 +382,15 @@ pub fn should_attempt_readback(request: &PostInsertReadbackRequest) -> Result<()
     Ok(())
 }
 
-/// Runs one post-insert readback end to end: guard, read, verify identity,
-/// locate, diff, filter.
+/// Runs one post-insert readback end to end, in this order and no other:
+/// guard, read, verify identity, **verify the field still holds the
+/// insertion**, locate, diff, filter.
+///
+/// The remnant check sits between identity and the diff deliberately. A
+/// fingerprint can only ever say "this looks like the same element", and on an
+/// app that publishes no identifying attributes on its text inputs it says that
+/// about sibling fields too. Nothing is diffed until the field itself shows
+/// that Plainsong's words are in it.
 ///
 /// The `reader` is the only impure argument; in tests it is a fake, in
 /// production it is the macOS Accessibility implementation in `lib.rs`.
@@ -359,6 +450,13 @@ pub fn derive_readback_candidates(
     }
     if inserted_words.len() > MAX_ALIGNMENT_WORDS || readback_words.len() > MAX_ALIGNMENT_WORDS {
         return Err(ReadbackAbort::ReadbackTooLarge);
+    }
+
+    // Hard prerequisite, ahead of every other judgement about this text: the
+    // field has to still hold the insertion. Whatever the fingerprint agreed
+    // about, a field that does not is not the one Plainsong wrote to.
+    if !readback_holds_insertion_remnant(&inserted_words, &readback_words) {
+        return Err(ReadbackAbort::InsertionRemnantMissing);
     }
 
     let span = locate_inserted_span(&inserted_words, &readback_words)
@@ -421,7 +519,9 @@ fn tokenize_words(value: &str) -> Vec<String> {
 /// on either side extend it back out to the insertion's own length.
 ///
 /// Returns `None` when too few inserted words survive
-/// (`MIN_SPAN_ANCHOR_CONFIDENCE`), which is the "user rewrote it, bail" case.
+/// (`MIN_SPAN_ANCHOR_CONFIDENCE`), which is the "user rewrote it, bail" case,
+/// and also when the insertion could equally be *somewhere else* in the same
+/// field — see `anchor_is_ambiguous`.
 pub fn locate_inserted_span(
     inserted_words: &[String],
     readback_words: &[String],
@@ -431,8 +531,7 @@ pub fn locate_inserted_span(
     }
 
     let matches = longest_common_subsequence_pairs(inserted_words, readback_words);
-    let confidence = matches.len() as f64 / inserted_words.len() as f64;
-    if confidence < MIN_SPAN_ANCHOR_CONFIDENCE {
+    if !meets_anchor_confidence(matches.len(), inserted_words.len()) {
         return None;
     }
 
@@ -446,7 +545,110 @@ pub fn locate_inserted_span(
         return None;
     }
 
-    Some(InsertedSpan { start, end })
+    let span = InsertedSpan { start, end };
+    if anchor_is_ambiguous(inserted_words, readback_words, span) {
+        return None;
+    }
+
+    Some(span)
+}
+
+fn meets_anchor_confidence(matched_words: usize, inserted_words: usize) -> bool {
+    inserted_words > 0
+        && (matched_words as f64 / inserted_words as f64) >= MIN_SPAN_ANCHOR_CONFIDENCE
+}
+
+/// Whether some *other* part of the field would anchor the insertion just as
+/// well as the span that was chosen.
+///
+/// The subsequence match is global and picks the longest run of agreement
+/// anywhere in the field, which is the wrong answer whenever the same phrase
+/// appears twice — a quoted reply, a chat backlog, a signature, a draft pasted
+/// above the one being written. The chosen anchor can then land on the *older*
+/// copy while the user's actual edit is in the newer one, and the diff reports
+/// the difference between two things Plainsong never wrote, in the wrong
+/// direction. That is not hypothetical: inserting "call the vendor tomorrow"
+/// into a field that already quoted "call the vendor tomorow" produced a
+/// suggestion teaching the typo.
+///
+/// So: look at the two regions of the field the span does not cover, and ask
+/// whether either of them, on its own, would have cleared the same confidence
+/// bar. If one would, there is no way to tell which copy the user edited, and
+/// the only honest answer is to queue nothing. The two regions are checked
+/// separately rather than joined so that a match cannot be manufactured out of
+/// the join between them.
+fn anchor_is_ambiguous(
+    inserted_words: &[String],
+    readback_words: &[String],
+    span: InsertedSpan,
+) -> bool {
+    [
+        &readback_words[..span.start],
+        &readback_words[span.end.min(readback_words.len())..],
+    ]
+    .into_iter()
+    .any(|region| {
+        !region.is_empty()
+            && meets_anchor_confidence(
+                longest_common_subsequence_pairs(inserted_words, region).len(),
+                inserted_words.len(),
+            )
+    })
+}
+
+/// Whether the field still visibly holds the text Plainsong typed.
+///
+/// Two independent things have to be true, because either alone is cheap to
+/// satisfy by accident:
+///
+/// - most of the inserted words are still there in order
+///   (`MIN_SPAN_ANCHOR_CONFIDENCE`), and
+/// - at least `MIN_INSERTION_REMNANT_RUN_WORDS` of them survive *adjacent and
+///   in order*, which scattered coincidental overlap does not give you.
+///
+/// This is the gate that stands between a fingerprint collision — two sibling
+/// text fields in one Chromium window that publish nothing to tell them apart —
+/// and diffing a field Plainsong never wrote to.
+pub fn readback_holds_insertion_remnant(
+    inserted_words: &[String],
+    readback_words: &[String],
+) -> bool {
+    if inserted_words.is_empty() || readback_words.is_empty() {
+        return false;
+    }
+    if !meets_anchor_confidence(
+        longest_common_subsequence_pairs(inserted_words, readback_words).len(),
+        inserted_words.len(),
+    ) {
+        return false;
+    }
+
+    let required_run = MIN_INSERTION_REMNANT_RUN_WORDS.min(inserted_words.len());
+    longest_common_contiguous_run(inserted_words, readback_words) >= required_run
+}
+
+/// Longest run of words present in both, adjacent and in order, compared
+/// case-insensitively so a casing fix does not break the run.
+fn longest_common_contiguous_run(left: &[String], right: &[String]) -> usize {
+    if left.is_empty() || right.is_empty() {
+        return 0;
+    }
+
+    let mut previous = vec![0usize; right.len() + 1];
+    let mut current = vec![0usize; right.len() + 1];
+    let mut longest = 0usize;
+    for left_word in left {
+        for (column, right_word) in right.iter().enumerate() {
+            current[column + 1] = if left_word.eq_ignore_ascii_case(right_word) {
+                previous[column] + 1
+            } else {
+                0
+            };
+            longest = longest.max(current[column + 1]);
+        }
+        std::mem::swap(&mut previous, &mut current);
+    }
+    longest
 }
 
 /// Matched `(left_index, right_index)` pairs of a word-level LCS, compared
@@ -554,6 +756,44 @@ fn is_case_only_difference(original: &str, corrected: &str) -> bool {
     original != corrected && original.eq_ignore_ascii_case(corrected)
 }
 
+/// Whether a character belongs to a script that is written without spaces
+/// between words: Han (both common blocks), the Japanese kana, Thai, Lao,
+/// Khmer and Burmese. Hangul is left out on purpose — Korean does space its
+/// eojeol, so the word counts above already mean something there.
+fn is_unsegmented_script_char(ch: char) -> bool {
+    matches!(ch as u32,
+        0x3040..=0x30FF   // Hiragana + Katakana
+        | 0x3400..=0x4DBF // CJK Unified Ideographs Extension A
+        | 0x4E00..=0x9FFF // CJK Unified Ideographs
+        | 0xF900..=0xFAFF // CJK Compatibility Ideographs
+        | 0x0E00..=0x0E7F // Thai
+        | 0x0E80..=0x0EFF // Lao
+        | 0x1000..=0x109F // Myanmar
+        | 0x1780..=0x17FF // Khmer
+    )
+}
+
+/// Whether a phrase is a single unsegmented run that has outgrown what
+/// "word-level" can mean.
+///
+/// Only applies when there is no whitespace to count words by *and* most of the
+/// letters are from a no-space script — a Latin word with one kanji in it keeps
+/// the ordinary 48-character ceiling.
+fn exceeds_unsegmented_length(value: &str) -> bool {
+    if value.split_whitespace().count() > 1 {
+        return false;
+    }
+    let letters = value.chars().filter(|ch| ch.is_alphanumeric()).count();
+    if letters == 0 {
+        return false;
+    }
+    let unsegmented = value
+        .chars()
+        .filter(|ch| is_unsegmented_script_char(*ch))
+        .count();
+    unsegmented * 2 > letters && value.chars().count() > MAX_UNSEGMENTED_CANDIDATE_CHARS
+}
+
 /// Word-level Levenshtein over characters, used only to reject pairs whose two
 /// sides have nothing to do with each other.
 fn edit_distance(left: &str, right: &str) -> usize {
@@ -614,6 +854,13 @@ pub fn candidate_is_acceptable(
     {
         return false;
     }
+    // The word counts above were produced by `split_whitespace`, which reports
+    // "one word" for a whole Japanese, Chinese, Thai, Lao, Khmer or Burmese
+    // clause. Where that is what happened, characters are the only honest
+    // measure of length left.
+    if exceeds_unsegmented_length(original) || exceeds_unsegmented_length(corrected) {
+        return false;
+    }
 
     if is_case_only_difference(original, corrected)
         && !known_dictionary_spoken_forms.contains(&original.to_lowercase())
@@ -667,6 +914,36 @@ mod tests {
             role: Some("AXTextArea".to_string()),
             identifier: Some("message-input".to_string()),
             title: None,
+            window_title: Some("general — Acme".to_string()),
+            window_identifier: None,
+            frame: Some(FocusedFieldFrame {
+                x: 120,
+                y: 880,
+                width: 640,
+                height: 72,
+            }),
+            frontmost_bundle_id: Some("com.tinyspeck.slackmacgap".to_string()),
+            frontmost_app_name: Some("Slack".to_string()),
+        }
+    }
+
+    /// Two text inputs in one Chromium window, as those apps really present
+    /// them: same process, same role, same window, and nothing published on
+    /// either one to tell them apart — only their place on screen.
+    fn anonymous_sibling_field(y: i64) -> FocusedFieldFingerprint {
+        FocusedFieldFingerprint {
+            pid: Some(742),
+            role: Some("AXTextArea".to_string()),
+            identifier: None,
+            title: None,
+            window_title: Some("general — Acme".to_string()),
+            window_identifier: None,
+            frame: Some(FocusedFieldFrame {
+                x: 120,
+                y,
+                width: 640,
+                height: 72,
+            }),
             frontmost_bundle_id: Some("com.tinyspeck.slackmacgap".to_string()),
             frontmost_app_name: Some("Slack".to_string()),
         }
@@ -678,6 +955,17 @@ mod tests {
         fn read_focused_field(&self) -> Result<Option<FocusedFieldSnapshot>, String> {
             self.0.clone()
         }
+    }
+
+    /// Stands in for `is_self_activation_target`, which lives in `lib.rs`.
+    fn frontmost_is_plainsong(name: Option<&str>, bundle_id: Option<&str>) -> bool {
+        name.map(|value| value.eq_ignore_ascii_case("Plainsong"))
+            .unwrap_or(false)
+            || bundle_id == Some("com.plainsong.app")
+    }
+
+    fn never_self(_: Option<&str>, _: Option<&str>) -> bool {
+        false
     }
 
     fn request(inserted: &str) -> PostInsertReadbackRequest {
@@ -1030,8 +1318,179 @@ mod tests {
                 &reader_returning("actually let us talk about this in standup tomorrow"),
                 &request("please review the kubernetes manifest before friday")
             ),
-            ReadbackOutcome::Aborted(ReadbackAbort::SpanNotLocated)
+            ReadbackOutcome::Aborted(ReadbackAbort::InsertionRemnantMissing)
         );
+    }
+
+    // ── Sibling-field collision, and what stops it ──────────────────────────
+
+    #[test]
+    fn aborts_when_a_sibling_field_differs_only_in_where_it_sits() {
+        // Chromium apps publish no identifier and no title on their text
+        // inputs, so the composer and the search box agree on everything the
+        // fingerprint used to carry. Their frames do not.
+        let composer = anonymous_sibling_field(880);
+        let search_box = anonymous_sibling_field(48);
+        assert!(!search_box.matches_insertion(&composer));
+        assert!(composer.matches_insertion(&composer));
+
+        let reader = FakeReader(Ok(Some(FocusedFieldSnapshot {
+            text: "quarterly report".to_string(),
+            fingerprint: search_box,
+        })));
+        let mut request = request("send it to cuban netties");
+        request.insertion_fingerprint = composer;
+
+        assert_eq!(
+            evaluate_post_insert_readback(&reader, &request),
+            ReadbackOutcome::Aborted(ReadbackAbort::FocusChanged)
+        );
+    }
+
+    #[test]
+    fn refuses_to_diff_a_field_that_no_longer_holds_the_insertion_however_well_it_matched() {
+        // The last line of defence, tested with the fingerprint deliberately
+        // made useless: both reads publish nothing distinguishing and agree on
+        // every remaining field, so identity says "same element". The content
+        // is what refuses — and it refuses before anything is diffed.
+        let indistinguishable = FocusedFieldFingerprint {
+            pid: Some(742),
+            role: None,
+            identifier: None,
+            title: None,
+            window_title: None,
+            window_identifier: None,
+            frame: None,
+            frontmost_bundle_id: Some("com.tinyspeck.slackmacgap".to_string()),
+            frontmost_app_name: Some("Slack".to_string()),
+        };
+        let reader = FakeReader(Ok(Some(FocusedFieldSnapshot {
+            text: "quarterly report to the board".to_string(),
+            fingerprint: indistinguishable.clone(),
+        })));
+        let mut request = request("send it to cuban netties");
+        request.insertion_fingerprint = indistinguishable;
+
+        assert_eq!(
+            evaluate_post_insert_readback(&reader, &request),
+            ReadbackOutcome::Aborted(ReadbackAbort::InsertionRemnantMissing)
+        );
+    }
+
+    #[test]
+    fn scattered_word_overlap_is_not_a_surviving_insertion() {
+        // "to" and "it" turn up everywhere; they are not evidence that this is
+        // the field Plainsong wrote to. Two adjacent surviving words are.
+        assert!(!readback_holds_insertion_remnant(
+            &words("send it to cuban netties"),
+            &words("it is over to you now for the netties review"),
+        ));
+        assert!(readback_holds_insertion_remnant(
+            &words("send it to cuban netties"),
+            &words("Hey team send it to kubernetes thanks"),
+        ));
+    }
+
+    // ── Repeated phrases: the same words twice in one field ─────────────────
+
+    #[test]
+    fn refuses_a_correction_when_an_older_copy_of_the_phrase_sits_above_it() {
+        // Reproduction from review. Re-run against this code with the guard
+        // removed, it queues `"tomorrow" -> "tomorow"`: the field already
+        // quoted "call the vendor tomorow", Plainsong inserted "call the
+        // vendor tomorrow" below it, and the user edited the real insertion.
+        // The subsequence match is global, so it anchored on the *quoted* copy
+        // and learned a typo out of text the user never wrote. Two independent
+        // anchors now means no anchor.
+        assert_eq!(
+            derive_readback_candidates(
+                "call the vendor tomorrow",
+                "call the vendor tomorow call the vendor Tuesday",
+                &no_dictionary(),
+            ),
+            Err(ReadbackAbort::SpanNotLocated)
+        );
+    }
+
+    #[test]
+    fn refuses_a_correction_when_an_older_copy_of_the_phrase_sits_below_it() {
+        // The same ambiguity in the other order: Plainsong's insertion is
+        // first and the stale copy is quoted underneath. Without the guard
+        // this queued "vendor" -> "vendors", which happens to be the edit the
+        // user really made — but only by luck of which copy the global match
+        // reached first. Giving up a right answer that was a coin toss is the
+        // price of never queueing the wrong one.
+        assert_eq!(
+            derive_readback_candidates(
+                "call the vendor tomorrow",
+                "call the vendors tomorrow call the vender tomorrow",
+                &no_dictionary(),
+            ),
+            Err(ReadbackAbort::SpanNotLocated)
+        );
+    }
+
+    #[test]
+    fn one_copy_of_the_phrase_still_anchors_normally() {
+        // The guard above must not fire on ordinary surrounding text — the
+        // greeting and the sign-off are not second copies of the insertion.
+        assert_eq!(
+            derive_readback_candidates(
+                "call the vendor tomorrow",
+                "Hey team call the vendors tomorrow thanks",
+                &no_dictionary(),
+            ),
+            Ok(vec![ReadbackCorrectionCandidate {
+                spoken_form: "vendor".to_string(),
+                replacement: "vendors".to_string(),
+            }])
+        );
+    }
+
+    // ── Scripts written without spaces ──────────────────────────────────────
+
+    #[test]
+    fn bounds_a_correction_written_without_word_spaces() {
+        // `split_whitespace` calls a whole Japanese clause one word, so the
+        // word ceiling never bites and 48 characters is most of a sentence.
+        assert!(candidate_is_acceptable(
+            "東京事務所",
+            "東京事務局",
+            &no_dictionary()
+        ));
+        assert!(!candidate_is_acceptable(
+            "東京事務所会議資料原稿案",
+            "東京事務局会議資料原稿案",
+            &no_dictionary(),
+        ));
+        assert!(!candidate_is_acceptable(
+            "ประชุมสำนักงานโตเกียว",
+            "ประชุมสำนักงานเกียวโต",
+            &no_dictionary(),
+        ));
+    }
+
+    #[test]
+    fn an_over_long_unsegmented_span_never_reaches_the_queue() {
+        assert_eq!(
+            derive_readback_candidates(
+                "the 東京事務所会議資料原稿案 report is ready for review",
+                "the 東京事務局会議資料原稿案 report is ready for review",
+                &no_dictionary(),
+            ),
+            Err(ReadbackAbort::NoAcceptableCandidates)
+        );
+    }
+
+    #[test]
+    fn the_character_ceiling_only_tightens_for_scripts_that_need_it() {
+        // A Latin word longer than the unsegmented ceiling keeps the ordinary
+        // 48-character allowance; the tighter rule is not a global one.
+        assert!(candidate_is_acceptable(
+            "kuberentes",
+            "kubernetes",
+            &no_dictionary()
+        ));
     }
 
     #[test]
@@ -1054,6 +1513,7 @@ mod tests {
             capture_insertion_anchor(
                 &reader_returning("Hey team send it to cuban netties thanks"),
                 "send it to cuban netties",
+                &never_self,
             ),
             Some(fingerprint())
         );
@@ -1066,20 +1526,57 @@ mod tests {
         assert!(capture_insertion_anchor(
             &reader_returning("a completely unrelated draft"),
             "send it to cuban netties",
+            &never_self,
         )
         .is_none());
     }
 
     #[test]
     fn refuses_to_anchor_when_nothing_is_readable() {
-        assert!(
-            capture_insertion_anchor(&FakeReader(Ok(None)), "send it to cuban netties").is_none()
-        );
+        assert!(capture_insertion_anchor(
+            &FakeReader(Ok(None)),
+            "send it to cuban netties",
+            &never_self
+        )
+        .is_none());
         assert!(capture_insertion_anchor(
             &FakeReader(Err("Accessibility read failed.".to_string())),
             "send it to cuban netties",
+            &never_self,
         )
         .is_none());
+    }
+
+    #[test]
+    fn refuses_to_anchor_when_the_text_actually_landed_back_in_plainsong() {
+        // The dictation was aimed at Slack and labelled Slack at session
+        // start, but reactivation quietly failed and the paste went into
+        // Plainsong's own result box. The stale label is not evidence; the app
+        // observed in front at the moment of the read is.
+        let landed_in_plainsong = FakeReader(Ok(Some(FocusedFieldSnapshot {
+            text: "send it to cuban netties".to_string(),
+            fingerprint: FocusedFieldFingerprint {
+                frontmost_bundle_id: Some("com.plainsong.app".to_string()),
+                frontmost_app_name: Some("Plainsong".to_string()),
+                ..fingerprint()
+            },
+        })));
+
+        assert!(capture_insertion_anchor(
+            &landed_in_plainsong,
+            "send it to cuban netties",
+            &frontmost_is_plainsong,
+        )
+        .is_none());
+        // The same field, with the same text, is anchored normally when the
+        // app in front is not us — so the refusal is the self check and not
+        // something incidental about the fixture.
+        assert!(capture_insertion_anchor(
+            &landed_in_plainsong,
+            "send it to cuban netties",
+            &never_self,
+        )
+        .is_some());
     }
 
     #[test]
@@ -1213,10 +1710,11 @@ mod tests {
     #[test]
     fn refuses_a_short_insertion_with_too_few_surviving_anchors() {
         // Two words, one of them wrong: nothing distinguishes this from the
-        // user having replaced the whole thing.
+        // user having replaced the whole thing. Nothing of the insertion is
+        // left in the field, so it fails the remnant prerequisite first.
         assert_eq!(
             derive_readback_candidates("cuban netties", "kubernetes", &no_dictionary()),
-            Err(ReadbackAbort::SpanNotLocated)
+            Err(ReadbackAbort::InsertionRemnantMissing)
         );
     }
 

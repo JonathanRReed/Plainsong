@@ -6130,10 +6130,12 @@ export function DictationView() {
                         field it just typed into — only that field, only in the
                         app it inserted into, and only for the 8 seconds after
                         the insert. It compares that text with what it typed, on
-                        this machine; nothing is sent anywhere. Nothing is kept
-                        except the individual word changes you approve here. If
-                        you switch apps or put the cursor in another field,
-                        Plainsong stops and reads nothing.
+                        this machine; nothing is sent anywhere. The only thing
+                        written down is the word-level changes it finds, held
+                        here for your review — never the sentence they came out
+                        of — and anything you don&apos;t approve is deleted
+                        within a week. If you switch apps or put the cursor in
+                        another field, Plainsong stops and reads nothing.
                       </span>
                     </span>
                   </label>

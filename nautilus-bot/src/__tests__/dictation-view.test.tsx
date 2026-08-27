@@ -1397,16 +1397,33 @@ describe("DictationView modes", () => {
     const copy = await screen.findByText(
       /Plainsong re-reads the one field it just typed into/i,
     );
-    // The four promises the copy has to make, in the user's own words.
+    // The promises the copy has to make, in the user's own words.
     expect(copy).toHaveTextContent(/only that field/i);
     expect(copy).toHaveTextContent(/only for the 8 seconds after the insert/i);
     expect(copy).toHaveTextContent(/on this machine; nothing is sent anywhere/i);
     expect(copy).toHaveTextContent(
-      /Nothing is kept except the individual word changes you approve/i,
-    );
-    expect(copy).toHaveTextContent(
       /If you switch apps or put the cursor in another field, Plainsong stops and reads nothing/i,
     );
+  });
+
+  it("does not claim candidates go unwritten until they are approved", async () => {
+    // They are written to the suggestions table the moment a readback
+    // completes — that is what the inbox reads from. The copy has to describe
+    // what is stored, where, and when it goes away, not imply nothing is.
+    render(<DictationView />);
+    await openConfigTab("Corrections");
+
+    const copy = await screen.findByText(
+      /Plainsong re-reads the one field it just typed into/i,
+    );
+    expect(copy).toHaveTextContent(
+      /The only thing written down is the word-level changes it finds, held here for your review/i,
+    );
+    expect(copy).toHaveTextContent(/never the sentence they came out of/i);
+    expect(copy).toHaveTextContent(
+      /anything you don't approve is deleted within a week/i,
+    );
+    expect(copy).not.toHaveTextContent(/Nothing is kept except/i);
   });
 
   it("persists the other-apps setting when it is switched on", async () => {
