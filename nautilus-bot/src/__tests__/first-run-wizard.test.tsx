@@ -518,12 +518,14 @@ describe("FirstRunWizard", () => {
       () => new Promise<void>((resolve) => { resolveDownload = resolve; })
     );
 
-    // Parakeet is the default route (see settings.rs's default_provider
-    // doc); ensureDefaultModelDownloading only auto-downloads on the default
-    // route, so this must match it or the background fetch this test
-    // exercises would never fire.
-    currentSettings.transcription.dictationProvider = "parakeet";
-    currentSettings.transcription.dictationModelId = "parakeet-tdt-0.6b-v3";
+    // whisper/base.en is the default route for every install that predates
+    // the Parakeet default change (i.e. the entire pre-upgrade user base).
+    // ensureDefaultModelDownloading treats it as a default route (alongside
+    // parakeet), so this must still trigger the background fetch this test
+    // exercises rather than being skipped as a "different, previously
+    // configured route".
+    currentSettings.transcription.dictationProvider = "whisper";
+    currentSettings.transcription.dictationModelId = "base.en";
 
     render(<FirstRunWizard mode="dictation" onComplete={vi.fn()} />);
 
@@ -544,11 +546,48 @@ describe("FirstRunWizard", () => {
 
     // The download completing must not roll the hotkey back to the default.
     await waitFor(() => {
+      expect(currentSettings.transcription.dictationModelId).toBe("base.en");
+    });
+    expect(currentSettings.shortcuts.toggleDictation).toBe("Cmd+Shift+J");
+  });
+
+  it("also auto-downloads for a fresh install already on the Parakeet default route", async () => {
+    // Companion to the whisper-route test above: parakeet is the *current*
+    // default (see settings.rs's default_provider doc), so a fresh install
+    // must trigger the same background fetch, using whichever model id the
+    // settings-load effect resolved (parakeet-tdt-0.6b-v3), not a
+    // hardcoded string.
+    const asrBackend = await import("@/lib/backend/asr");
+    const downloadAsrModels = vi.mocked(asrBackend.downloadAsrModels);
+    let resolveDownload: (() => void) | undefined;
+    downloadAsrModels.mockImplementationOnce(
+      () => new Promise<void>((resolve) => { resolveDownload = resolve; })
+    );
+
+    currentSettings.transcription.dictationProvider = "parakeet";
+    currentSettings.transcription.dictationModelId = "parakeet-tdt-0.6b-v3";
+
+    render(<FirstRunWizard mode="dictation" onComplete={vi.fn()} />);
+
+    await clickPrimary(/continue/i); // permissions -> dictation-model
+    await clickPrimary(/continue/i); // -> hotkey, kicks off the background fetch
+
+    await waitFor(() => {
+      expect(downloadAsrModels).toHaveBeenCalledWith(
+        "parakeet",
+        "parakeet-tdt-0.6b-v3",
+      );
+    });
+
+    await act(async () => {
+      resolveDownload?.();
+    });
+
+    await waitFor(() => {
       expect(currentSettings.transcription.dictationModelId).toBe(
         "parakeet-tdt-0.6b-v3",
       );
     });
-    expect(currentSettings.shortcuts.toggleDictation).toBe("Cmd+Shift+J");
   });
 
   it("completes full onboarding only after the explicit model download", async () => {

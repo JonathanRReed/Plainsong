@@ -854,25 +854,32 @@ export function FirstRunWizard({ mode = "full", onComplete }: Props) {
   // consent for a model download.
   //
   // But only do this when the user doesn't already have a different,
-  // previously-configured dictation route (e.g. whisper, distil_whisper,
-  // macos_apple_speech). Someone who opens "Fix dictation setup" for an
-  // unrelated reason (a hotkey conflict, say) and just clicks through this
-  // step must not have their working provider silently downgraded/overwritten
-  // to parakeet. If nothing but the default route was ever configured,
-  // downloading the default model in the background is a safe no-op for
-  // provider selection and is the only way dictation ends up with a
-  // downloaded model at all.
+  // previously-configured dictation route (e.g. distil_whisper,
+  // macos_apple_speech, a cloud provider). Someone who opens "Fix dictation
+  // setup" for an unrelated reason (a hotkey conflict, say) and just clicks
+  // through this step must not have their working provider silently
+  // downgraded/overwritten. Both "parakeet" (the current default) and
+  // "whisper" (the default for every install that predates this default
+  // change -- i.e. the entire pre-upgrade user base) count as "still on a
+  // default route" here, not as a deliberate non-default choice.
   const ensureDefaultModelDownloading = useCallback(() => {
     const existingProvider = initialDictationProviderRef.current;
     const hasExistingNonDefaultRoute =
-      Boolean(existingProvider) && existingProvider !== "parakeet";
+      Boolean(existingProvider) &&
+      existingProvider !== "parakeet" &&
+      existingProvider !== "whisper";
     if (hasExistingNonDefaultRoute) {
       return;
     }
     if (modelState === "idle" || modelState === "error") {
-      void startModelDownload("parakeet-tdt-0.6b-v3");
+      // Already corrected to match the actual configured/default provider
+      // by the settings-load effect above -- parakeet-tdt-0.6b-v3 for a
+      // fresh install, base.en for a pre-upgrade whisper install -- so this
+      // downloads whichever default route the user is really on instead of
+      // assuming parakeet unconditionally.
+      void startModelDownload(selectedModelId);
     }
-  }, [modelState, startModelDownload]);
+  }, [modelState, selectedModelId, startModelDownload]);
 
   const persistDictationStep = useCallback(async () => {
     setSaveBusy(true);
