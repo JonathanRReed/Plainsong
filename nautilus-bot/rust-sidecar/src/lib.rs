@@ -1835,9 +1835,13 @@ async fn summarize_recording_grounded_internal(
             template_id.as_deref().unwrap_or("auto")
         )
     };
+    let meeting_custom_templates = meeting_custom_templates_from_settings(state).await;
     let instruction = llm::resolve_summary_instruction(
         custom_prompt.as_deref(),
-        meeting_template_summary_query(template_id.as_deref()),
+        &resolve_meeting_template_summary_instruction(
+            template_id.as_deref(),
+            &meeting_custom_templates,
+        ),
     );
     let prompt_source = format!(
         "{}:input={}",
@@ -1901,6 +1905,60 @@ fn meeting_template_summary_query(template_id: Option<&str>) -> &'static str {
             "Provide a concise but complete meeting summary with key discussion points, decisions, and concrete outcomes."
         }
     }
+}
+
+/// The user's saved meeting templates ("recipes"), sanitized on every load
+/// and save (see `settings::sanitize_meeting_custom_templates`), so this is
+/// already safe to search by id without re-validating here.
+async fn meeting_custom_templates_from_settings(
+    state: &AppState,
+) -> Vec<settings::MeetingCustomTemplate> {
+    state
+        .settings_manager
+        .lock()
+        .await
+        .settings()
+        .transcription
+        .meeting_custom_templates
+        .clone()
+}
+
+/// Resolve the summary-generation instruction for a meeting's template id,
+/// trying a user-saved custom template before falling back to the built-in
+/// playbook table in `meeting_template_summary_query`.
+///
+/// A template id that resolves to neither -- most often a custom template
+/// the user has since deleted, but equally a stray or corrupted id -- must
+/// never fail the analysis outright; it logs why and falls back to the
+/// default playbook exactly as an unrecognized built-in id already does.
+fn resolve_meeting_template_summary_instruction(
+    template_id: Option<&str>,
+    custom_templates: &[settings::MeetingCustomTemplate],
+) -> String {
+    let Some(id) = template_id else {
+        return meeting_template_summary_query(None).to_string();
+    };
+
+    if let Some(custom) = custom_templates.iter().find(|template| template.id == id) {
+        let prompt = custom.summary_prompt.trim();
+        if !prompt.is_empty() {
+            return prompt.to_string();
+        }
+        tracing::warn!(
+            template_id = id,
+            "custom meeting template has no summary prompt; falling back to the default playbook"
+        );
+        return meeting_template_summary_query(None).to_string();
+    }
+
+    if !settings::BUILTIN_MEETING_TEMPLATE_IDS.contains(&id) {
+        tracing::warn!(
+            template_id = id,
+            "meeting template id matches neither a built-in nor a saved custom template (likely deleted); falling back to the default playbook"
+        );
+    }
+
+    meeting_template_summary_query(template_id).to_string()
 }
 
 fn format_grounded_action_item_for_storage(item: &GroundedActionItem) -> String {
@@ -7804,6 +7862,77 @@ mod tests {
 
     fn meeting_options_from_json(value: serde_json::Value) -> models::RecordingOptions {
         serde_json::from_value(value).expect("deserialize meeting options")
+    }
+
+    fn custom_meeting_template_fixture(
+        id: &str,
+        summary_prompt: &str,
+    ) -> settings::MeetingCustomTemplate {
+        settings::MeetingCustomTemplate {
+            id: id.to_string(),
+            name: format!("Template {id}"),
+            summary_prompt: summary_prompt.to_string(),
+            notes_outline: vec!["Notes".to_string()],
+        }
+    }
+
+    #[test]
+    fn resolve_meeting_template_summary_instruction_prefers_a_matching_custom_template() {
+        let templates = vec![custom_meeting_template_fixture(
+            "custom-1",
+            "Summarize board sentiment, asks, and follow-ups.",
+        )];
+        assert_eq!(
+            resolve_meeting_template_summary_instruction(Some("custom-1"), &templates),
+            "Summarize board sentiment, asks, and follow-ups."
+        );
+    }
+
+    #[test]
+    fn resolve_meeting_template_summary_instruction_still_resolves_builtin_ids() {
+        // A custom list that does not happen to contain the requested id must
+        // not disturb resolution of a built-in one.
+        let templates = vec![custom_meeting_template_fixture(
+            "custom-1",
+            "Custom prompt.",
+        )];
+        assert_eq!(
+            resolve_meeting_template_summary_instruction(Some("standup"), &templates),
+            meeting_template_summary_query(Some("standup")),
+        );
+    }
+
+    #[test]
+    fn resolve_meeting_template_summary_instruction_falls_back_for_a_deleted_custom_template() {
+        // Neither built-in nor present in the (now empty) custom list -- the
+        // shape a meeting's stored template id takes once the user deletes
+        // the custom template it pointed to. Must fall back, never fail.
+        let templates: Vec<settings::MeetingCustomTemplate> = Vec::new();
+        assert_eq!(
+            resolve_meeting_template_summary_instruction(Some("custom-deleted"), &templates),
+            meeting_template_summary_query(None),
+        );
+    }
+
+    #[test]
+    fn resolve_meeting_template_summary_instruction_falls_back_for_a_blank_custom_prompt() {
+        // A custom template that somehow carries an empty prompt (e.g. saved
+        // before the field was required) must not hand the LLM a blank
+        // instruction; the default playbook is the safe fallback.
+        let templates = vec![custom_meeting_template_fixture("custom-1", "   ")];
+        assert_eq!(
+            resolve_meeting_template_summary_instruction(Some("custom-1"), &templates),
+            meeting_template_summary_query(None),
+        );
+    }
+
+    #[test]
+    fn resolve_meeting_template_summary_instruction_handles_no_template_id() {
+        let templates: Vec<settings::MeetingCustomTemplate> = Vec::new();
+        assert_eq!(
+            resolve_meeting_template_summary_instruction(None, &templates),
+            meeting_template_summary_query(None),
+        );
     }
 
     #[test]
@@ -19852,6 +19981,12 @@ async fn save_settings_for_sidecar(
     for mode in &mut settings.transcription.dictation_custom_modes {
         normalize_dictation_custom_mode(mode, &fallback_ai_provider, fallback_ai_model.as_deref());
     }
+    // Same sanitization the load path applies (`normalize_loaded_transcription_settings`
+    // calls the same function) -- a save is just as capable of carrying a
+    // malformed or oversized template as a hand-edited settings.json is.
+    settings.transcription.meeting_custom_templates = settings::sanitize_meeting_custom_templates(
+        std::mem::take(&mut settings.transcription.meeting_custom_templates),
+    );
     settings.transcription.dictation_command_prefix =
         normalize_dictation_command_prefix(&settings.transcription.dictation_command_prefix)
             .to_string();
