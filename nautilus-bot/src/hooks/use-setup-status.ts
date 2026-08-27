@@ -8,8 +8,19 @@ import {
 import {
   getPermissionDiagnostics,
   getSettings,
+  hasProviderSecret,
   type PermissionDiagnostics,
 } from "@/lib/backend/settings";
+import { getOllamaStatus } from "@/lib/backend/ai";
+import { isRemoteAnalysisProvider } from "@/components/models/ai-lanes";
+import {
+  AI_NOTES_PREFERENCE_EVENT,
+  readAiNotesOptOut,
+} from "@/lib/ai-notes-preference";
+import {
+  resolveMeetingNotesRoute,
+  type MeetingNotesRouteAssessment,
+} from "@/features/readiness/meeting-notes-route";
 import {
   getSystemAudioCapability,
   type SystemAudioCapability,
@@ -58,7 +69,19 @@ interface SetupStatusSnapshot {
   dictationBlockers: string[];
   meetingBlockers: string[];
   fullCaptureBlockers: string[];
+  meetingNotesRoute: MeetingNotesRouteAssessment;
   productReadiness: ProductReadinessSnapshot;
+}
+
+/**
+ * What the renderer observed about the meetings AI lane. Kept separate from the
+ * settings-declared provider so an unanswered probe stays `null` instead of
+ * collapsing into "not ready".
+ */
+export interface MeetingNotesRouteProbe {
+  optedOut: boolean;
+  localRuntimeReady: boolean | null;
+  credentialPresent: boolean | null;
 }
 
 interface SetupStatusSourceState {
@@ -234,6 +257,7 @@ export function buildSnapshot(
   sourceState: SetupStatusSourceState = {},
   downloadedModels: DownloadedModelIndex | null = null,
   modelInventoryError: string | null = null,
+  meetingNotesProbe: MeetingNotesRouteProbe | null = null,
 ): SetupStatusSnapshot {
   const dictationRoute = buildRouteStatus(
     "dictation",
@@ -330,6 +354,17 @@ export function buildSnapshot(
       ? "No native or virtual-loopback route was detected for Me + Them capture."
       : null,
   ].filter((value): value is string => Boolean(value));
+  const meetingNotesRoute = resolveMeetingNotesRoute({
+    optedOut: meetingNotesProbe?.optedOut ?? false,
+    provider: settings?.privacy?.meetingsAi?.provider ?? null,
+    remoteProcessingEnabled: settings?.privacy?.remoteProcessingEnabled ?? false,
+    localRuntimeReady: meetingNotesProbe
+      ? meetingNotesProbe.localRuntimeReady
+      : null,
+    credentialPresent: meetingNotesProbe
+      ? meetingNotesProbe.credentialPresent
+      : null,
+  });
   const meetingCaptureMode =
     effectiveSystemAudioAvailable === null
       ? "unknown"
@@ -361,6 +396,8 @@ export function buildSnapshot(
     meetingRouteReady:
       settings && providers.length > 0 ? meetingRoute.ready : null,
     meetingRouteReason: meetingRoute.reason,
+    meetingNotesRoute: meetingNotesRoute.state,
+    meetingNotesRouteReason: meetingNotesRoute.reason,
     systemAudioState: systemAudioCapability
       ? systemAudioCapability.ready &&
         systemAudioCapability.readiness === "ready"
@@ -396,8 +433,37 @@ export function buildSnapshot(
     dictationBlockers,
     meetingBlockers,
     fullCaptureBlockers,
+    meetingNotesRoute,
     productReadiness,
   };
+}
+
+/**
+ * Ask whether the meetings AI lane can actually run: Ollama reachable for the
+ * local route, a stored key for a cloud one. Every probe failure resolves to
+ * `null` — "we did not get an answer" — because claiming a route is broken on a
+ * failed probe is as dishonest as claiming it works.
+ */
+async function probeMeetingNotesRoute(
+  settings: Settings | null,
+): Promise<MeetingNotesRouteProbe> {
+  const optedOut = readAiNotesOptOut();
+  const provider = settings?.privacy?.meetingsAi?.provider?.trim() ?? "";
+  if (!provider) {
+    return { optedOut, localRuntimeReady: null, credentialPresent: null };
+  }
+
+  if (isRemoteAnalysisProvider(provider)) {
+    const credentialPresent = await hasProviderSecret(provider)
+      .then((present) => (typeof present === "boolean" ? present : null))
+      .catch(() => null);
+    return { optedOut, localRuntimeReady: null, credentialPresent };
+  }
+
+  const localRuntimeReady = await getOllamaStatus()
+    .then((ready) => (typeof ready === "boolean" ? ready : null))
+    .catch(() => null);
+  return { optedOut, localRuntimeReady, credentialPresent: null };
 }
 
 export function useSetupStatus() {
@@ -409,6 +475,8 @@ export function useSetupStatus() {
   const [permissions, setPermissions] = useState<PermissionDiagnostics | null>(null);
   const [systemAudioCapability, setSystemAudioCapability] =
     useState<SystemAudioCapability | null>(null);
+  const [meetingNotesProbe, setMeetingNotesProbe] =
+    useState<MeetingNotesRouteProbe | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [observedAt, setObservedAt] = useState(() => Date.now());
@@ -448,12 +516,20 @@ export function useSetupStatus() {
       if (refreshSequence !== refreshSequenceRef.current) {
         return;
       }
+      // The AI-notes probe has to know which provider the lane names before it
+      // can ask the right question, so it runs after settings land rather than
+      // beside them. A probe that throws stays `null` — unknown, not unready.
+      const nextMeetingNotesProbe = await probeMeetingNotesRoute(nextSettings);
+      if (refreshSequence !== refreshSequenceRef.current) {
+        return;
+      }
       setSettings(nextSettings);
       setProviders(nextProviders);
       setDownloadedModels(nextDownloadedModelResult.index);
       setModelInventoryError(nextDownloadedModelResult.error);
       setPermissions(nextPermissions);
       setSystemAudioCapability(nextSystemAudioCapability);
+      setMeetingNotesProbe(nextMeetingNotesProbe);
     } catch (nextError) {
       if (refreshSequence !== refreshSequenceRef.current) {
         return;
@@ -553,10 +629,24 @@ export function useSetupStatus() {
       }
     };
     window.addEventListener("focus", handleWindowFocus);
+    // The AI-notes opt-out is renderer-local, so no backend event announces it.
+    const handleAiNotesPreference = () => {
+      if (!disposed) {
+        void refresh();
+      }
+    };
+    window.addEventListener(
+      AI_NOTES_PREFERENCE_EVENT,
+      handleAiNotesPreference,
+    );
 
     return () => {
       disposed = true;
       window.removeEventListener("focus", handleWindowFocus);
+      window.removeEventListener(
+        AI_NOTES_PREFERENCE_EVENT,
+        handleAiNotesPreference,
+      );
       for (const unlisten of unlisteners) {
         unlisten();
       }
@@ -583,10 +673,12 @@ export function useSetupStatus() {
         },
         downloadedModels,
         modelInventoryError,
+        meetingNotesProbe,
       ),
     [
       downloadedModels,
       error,
+      meetingNotesProbe,
       modelInventoryError,
       loading,
       observedAt,

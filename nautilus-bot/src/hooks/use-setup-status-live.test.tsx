@@ -10,6 +10,8 @@ const liveMocks = vi.hoisted(() => ({
   listDownloadedModels: vi.fn(),
   getPermissionDiagnostics: vi.fn(),
   getSystemAudioCapability: vi.fn(),
+  hasProviderSecret: vi.fn(),
+  getOllamaStatus: vi.fn(),
 }));
 
 vi.mock("@/lib/electron", () => ({
@@ -34,6 +36,11 @@ vi.mock("@/lib/backend/asr", () => ({
 vi.mock("@/lib/backend/settings", () => ({
   getSettings: liveMocks.getSettings,
   getPermissionDiagnostics: liveMocks.getPermissionDiagnostics,
+  hasProviderSecret: liveMocks.hasProviderSecret,
+}));
+
+vi.mock("@/lib/backend/ai", () => ({
+  getOllamaStatus: liveMocks.getOllamaStatus,
 }));
 
 vi.mock("@/lib/backend/recordings", () => ({
@@ -64,6 +71,8 @@ describe("useSetupStatus live refresh", () => {
     liveMocks.listDownloadedModels.mockResolvedValue([]);
     liveMocks.getPermissionDiagnostics.mockResolvedValue(null);
     liveMocks.getSystemAudioCapability.mockResolvedValue(null);
+    liveMocks.hasProviderSecret.mockResolvedValue(false);
+    liveMocks.getOllamaStatus.mockResolvedValue(true);
   });
 
   it("refreshes after settings writes, completed model downloads, and app focus", async () => {

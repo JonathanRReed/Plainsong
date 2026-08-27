@@ -20,7 +20,7 @@ export type SettingsTabId =
   | "ai"
   | "updates";
 
-export type ReadinessDestination = "setup" | "models" | "transcription";
+export type ReadinessDestination = "setup" | "models" | "transcription" | "ai";
 
 interface OpenMainViewDetail {
   view: MainViewId;
@@ -76,7 +76,12 @@ export function requestReadinessDestination(
     return;
   }
 
-  requestSettingsTab(destination === "models" ? "models" : "asr");
+  if (destination === "models") {
+    requestSettingsTab("models");
+    return;
+  }
+
+  requestSettingsTab(destination === "ai" ? "ai" : "asr");
 }
 
 // The meetings view is lazy-loaded, so a request made from another view lands
