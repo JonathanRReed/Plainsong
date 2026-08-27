@@ -298,6 +298,13 @@ export function createDictationShortcutSignalRuntime(deps: {
   };
 
   const handleSignal = async (input: DictationShortcutSignalInput): Promise<void> => {
+    // Captured before any awaiting: the closest this controller can get to
+    // the real stop gesture (hotkey release, hands-free toggle, etc.)
+    // without threading a timestamp through the native shortcut helper's own
+    // event payload. Sent to the sidecar so its dictation timing record can
+    // measure from the actual gesture instead of from whenever its IPC
+    // handler happened to run.
+    const stopGestureEpochMs = Date.now();
     const phase = deps.getPhase();
     const decision = resolveDictationShortcutDecision({ phase, ...input });
     const holdToTalkWithRelease =
@@ -325,7 +332,7 @@ export function createDictationShortcutSignalRuntime(deps: {
             capability: input.capability,
             stopReason: "release",
           });
-          await deps.invoke("stop_dictation", { stopReason: "release" });
+          await deps.invoke("stop_dictation", { stopReason: "release", stopGestureEpochMs });
         }
       }
       return;
@@ -370,7 +377,7 @@ export function createDictationShortcutSignalRuntime(deps: {
           capability: input.capability,
           stopReason: "release",
         });
-        await deps.invoke("stop_dictation", { stopReason: "release" });
+        await deps.invoke("stop_dictation", { stopReason: "release", stopGestureEpochMs });
         return;
       }
       if (holdToTalkWithRelease) {
@@ -390,6 +397,7 @@ export function createDictationShortcutSignalRuntime(deps: {
       });
       await deps.invoke("stop_dictation", {
         stopReason: decision.stopReason ?? "toggle",
+        stopGestureEpochMs,
       });
       return;
     }
