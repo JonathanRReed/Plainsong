@@ -37,3 +37,25 @@ export function resolveWindowUiSettings(
     showRecordingOverlay: ui?.showRecordingPopup !== false,
   };
 }
+
+/**
+ * Whether an overlay of `kind` is allowed to become visible right now.
+ *
+ * The main process already gates its OWN `show-dictation-overlay` /
+ * `show-recording-overlay` window commands on these settings, but
+ * `__window_show__` called `showInactive()` for whatever window sent it, with
+ * no reference to them. That let a renderer put an always-on-top,
+ * visible-on-full-screen window on screen after the user had turned the
+ * overlay off — and, with `__window_set_size__` and
+ * `__window_set_ignore_mouse_events__`, do it at an arbitrary size that
+ * swallows clicks. The main process's own state is the authority; the
+ * renderer's request is a suggestion.
+ */
+export function overlayVisibilityAllowed(
+  kind: "dictation" | "recording",
+  settings: Pick<WindowUiSettings, "showDictationOverlay" | "showRecordingOverlay">,
+): boolean {
+  return kind === "dictation"
+    ? settings.showDictationOverlay
+    : settings.showRecordingOverlay;
+}

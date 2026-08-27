@@ -1,5 +1,6 @@
 import { BrowserWindow } from "electron/main";
 import path from "path";
+import { OVERLAY_BASE_SIZE } from "./overlay-placement";
 
 // Initial bounds are placeholders — the windows are created hidden (show: false)
 // at bootstrap (see prepareOverlayWindows in main.ts, so the first hotkey press
@@ -12,8 +13,8 @@ import path from "path";
 // the whole session, and any focus flicker reads as a wrapper app.
 export function createDictationOverlayWindow(): BrowserWindow {
   return new BrowserWindow({
-    width: 420,
-    height: 120,
+    width: OVERLAY_BASE_SIZE.dictation.width,
+    height: OVERLAY_BASE_SIZE.dictation.height,
     frame: false,
     transparent: true,
     hasShadow: false,
@@ -33,8 +34,8 @@ export function createDictationOverlayWindow(): BrowserWindow {
 
 export function createRecordingOverlayWindow(): BrowserWindow {
   return new BrowserWindow({
-    width: 320,
-    height: 80,
+    width: OVERLAY_BASE_SIZE.recording.width,
+    height: OVERLAY_BASE_SIZE.recording.height,
     frame: false,
     transparent: true,
     hasShadow: false,

@@ -38,6 +38,7 @@ import {
   type ShortcutConflictInfo,
 } from "./shortcut-registration";
 import {
+  clampOverlaySize,
   resolveInitialOverlayAnchor,
   resolveOverlayBounds,
   resolveSavedOverlayAnchor,
@@ -61,7 +62,7 @@ import {
   waitForMacosUpdateStaging,
 } from "./macos-updater-staging";
 import { runExplicitUpdaterInstallFlow } from "./updater-install-flow";
-import { resolveWindowUiSettings } from "./window-ui-settings";
+import { overlayVisibilityAllowed, resolveWindowUiSettings } from "./window-ui-settings";
 import {
   isRendererUrl,
   RENDERER_HOST,
@@ -881,6 +882,9 @@ function positionOverlayOnActiveDisplay(win: BrowserWindow): void {
 // edge stays fixed and the window can never grow past the bottom of the work
 // area. Setting the size alone grows the HUD downward off screen while the user
 // is still speaking.
+// The requested size is clamped to the per-kind maximum FIRST: resolveOverlayBounds
+// only clamps to the work area, which for a renderer asking for 5000x5000 means a
+// full-screen always-on-top window rather than an overlay.
 function resizeOverlayKeepingBottomEdge(
   win: BrowserWindow,
   kind: OverlayKind,
@@ -897,7 +901,7 @@ function resizeOverlayKeepingBottomEdge(
       kind,
       resolveOverlayBounds({
         workArea,
-        size,
+        size: clampOverlaySize(kind, size),
         anchor: { bottom: current.y + current.height, left: current.x },
       }),
     );
@@ -1083,9 +1087,27 @@ async function handleLocalCommand(
     case "__window_hide__":
       senderWindow?.hide();
       return { handled: true, result: null };
-    case "__window_show__":
-      senderWindow?.showInactive();
+    case "__window_show__": {
+      if (!senderWindow) {
+        return { handled: true, result: null };
+      }
+      // An overlay may only put itself on screen while the main process still
+      // believes that overlay is enabled. Honoring the renderer unconditionally
+      // made showInactive() an always-on-top, visible-on-full-screen window the
+      // user had explicitly turned off — see overlayVisibilityAllowed.
+      const overlayKind = getOverlayKind(senderWindow);
+      if (
+        overlayKind &&
+        !overlayVisibilityAllowed(overlayKind, {
+          showDictationOverlay: showDictationOverlayEnabled,
+          showRecordingOverlay: showRecordingOverlayEnabled,
+        })
+      ) {
+        return { handled: true, result: null };
+      }
+      senderWindow.showInactive();
       return { handled: true, result: null };
+    }
     case "__window_start_drag__":
       // Dragging is handled through CSS app-region on Electron.
       return { handled: true, result: null };

@@ -32,6 +32,65 @@ const OVERLAY_BOTTOM_MARGIN: Record<OverlayKind, number> = {
 };
 const OVERLAY_SIDE_MARGIN = 20;
 
+/**
+ * The size each overlay window is created at (see windows.ts). Also the size a
+ * malformed resize request falls back to, so a NaN estimate leaves the pill
+ * looking exactly as it does at rest instead of collapsing or filling the
+ * screen.
+ */
+export const OVERLAY_BASE_SIZE: Record<OverlayKind, OverlaySize> = {
+  dictation: { width: 420, height: 120 },
+  recording: { width: 320, height: 80 },
+};
+
+/**
+ * The largest each overlay may be resized to from the renderer.
+ *
+ * These windows are always-on-top, `visibleOnFullScreen`, frameless and
+ * transparent. `__window_set_size__` used to pass the renderer's numbers to
+ * `resolveOverlayBounds`, which clamps only to the full work area — so a
+ * renderer asking for 5000x5000 got an always-on-top window covering the whole
+ * display. Paired with `__window_set_ignore_mouse_events__ {ignore:false}` and
+ * `__window_show__` that is a full-screen click-capture primitive, built
+ * entirely out of commands the renderer is allowed to send.
+ *
+ * The caps are generous headroom over the base sizes (the HUD grows while a
+ * live partial is transcribed, and the expanded card is taller than the pill),
+ * not tight fits — the point is to bound the window to something that still
+ * reads as an overlay, not to police layout.
+ */
+export const OVERLAY_MAX_SIZE: Record<OverlayKind, OverlaySize> = {
+  dictation: { width: 720, height: 360 },
+  recording: { width: 480, height: 200 },
+};
+
+/** Below this an overlay is invisible but still hit-testable. */
+const OVERLAY_MIN_DIMENSION = 1;
+
+function clampDimension(value: number, fallback: number, max: number): number {
+  if (typeof value !== "number" || !Number.isFinite(value)) {
+    return fallback;
+  }
+  return Math.min(Math.max(Math.round(value), OVERLAY_MIN_DIMENSION), max);
+}
+
+/**
+ * Bound a renderer-requested overlay size to {@link OVERLAY_MAX_SIZE}.
+ *
+ * Non-finite dimensions (NaN, Infinity — both of which pass a `typeof x ===
+ * "number"` guard) fall back to that overlay's base size rather than being
+ * rejected, so a bad estimate mid-sentence resets the pill instead of leaving
+ * it at whatever it last was.
+ */
+export function clampOverlaySize(kind: OverlayKind, size: OverlaySize): OverlaySize {
+  const max = OVERLAY_MAX_SIZE[kind];
+  const base = OVERLAY_BASE_SIZE[kind];
+  return {
+    width: clampDimension(size.width, base.width, max.width),
+    height: clampDimension(size.height, base.height, max.height),
+  };
+}
+
 function clamp(value: number, min: number, max: number): number {
   // `min` wins when the range is inverted (a window wider/taller than the work
   // area); callers clamp the size first so that can't normally happen.
