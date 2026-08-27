@@ -19010,6 +19010,17 @@ async fn save_settings_for_sidecar(
     normalize_platform_optimization(&mut settings.transcription.platform_optimization);
     normalize_contextual_asr_settings(&mut settings.transcription);
 
+    // Validated strictly on save, and only against what the *selected* model can
+    // decode. A language the model cannot handle is refused with a reason rather
+    // than dropped, which is what the old twelve-language allowlist did: it both
+    // discarded languages real models support and accepted ones they do not.
+    settings.transcription.dictation_active_languages =
+        settings::validate_dictation_active_languages(
+            &settings.transcription.dictation_provider,
+            &settings.transcription.dictation_model_id,
+            &settings.transcription.dictation_active_languages,
+        )?;
+
     // Unparseable provider values fall back to whisper.cpp — the same fast
     // default `settings::normalize_transcription_provider_value` uses — so
     // Rust-side fallbacks never steer users onto the slower Distil route.

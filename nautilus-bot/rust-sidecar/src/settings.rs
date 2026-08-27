@@ -703,20 +703,151 @@ fn normalize_dictation_insertion_mode(value: &str) -> String {
     }
 }
 
-fn normalize_dictation_active_languages(languages: &[String]) -> Vec<String> {
-    let mut normalized = Vec::new();
+/// Every language the multilingual Whisper family can transcribe.
+///
+/// Whisper's own published set; the `ModelInfo::languages` shown in the model
+/// picker is a curated "most common" subset for display and is not a statement
+/// of what the model can decode.
+pub const WHISPER_MULTILINGUAL_LANGUAGES: &[&str] = &[
+    "af", "am", "ar", "as", "az", "ba", "be", "bg", "bn", "bo", "br", "bs", "ca", "cs", "cy", "da",
+    "de", "el", "en", "es", "et", "eu", "fa", "fi", "fo", "fr", "gl", "gu", "ha", "haw", "he",
+    "hi", "hr", "ht", "hu", "hy", "id", "is", "it", "ja", "jw", "ka", "kk", "km", "kn", "ko", "la",
+    "lb", "ln", "lo", "lt", "lv", "mg", "mi", "mk", "ml", "mn", "mr", "ms", "mt", "my", "ne", "nl",
+    "nn", "no", "oc", "pa", "pl", "ps", "pt", "ro", "ru", "sa", "sd", "si", "sk", "sl", "sn", "so",
+    "sq", "sr", "su", "sv", "sw", "ta", "te", "tg", "th", "tk", "tl", "tr", "tt", "uk", "ur", "uz",
+    "vi", "yi", "yo", "yue", "zh",
+];
+
+/// The 25 European languages Parakeet TDT v3 documents.
+pub const PARAKEET_V3_LANGUAGES: &[&str] = &[
+    "bg", "cs", "da", "de", "el", "en", "es", "et", "fi", "fr", "hr", "hu", "it", "lt", "lv", "mt",
+    "nl", "pl", "pt", "ro", "ru", "sk", "sl", "sv", "uk",
+];
+
+const ENGLISH_ONLY_LANGUAGES: &[&str] = &["en"];
+
+/// Which languages the *selected* dictation model can actually transcribe.
+///
+/// `None` means the model imposes no set Plainsong can enumerate -- a cloud
+/// endpoint, or a platform recognizer that follows the OS language list -- so
+/// any well-formed tag is accepted rather than guessed at.
+///
+/// This replaces a hardcoded twelve-language allowlist that silently dropped
+/// everything else. It rejected Polish and Turkish on a Whisper large model that
+/// handles both, and it equally accepted languages the selected model could not
+/// decode at all. Driving the check from the model is what makes it correct in
+/// both directions.
+pub fn dictation_supported_languages(
+    provider: &str,
+    model_id: &str,
+) -> Option<&'static [&'static str]> {
+    let model = model_id.trim().to_ascii_lowercase();
+    match provider.trim().to_ascii_lowercase().as_str() {
+        "whisper" | "whisper_candle" => {
+            // The `.en` builds are single-language by construction.
+            if model.contains(".en") || model.ends_with("-en") {
+                Some(ENGLISH_ONLY_LANGUAGES)
+            } else {
+                Some(WHISPER_MULTILINGUAL_LANGUAGES)
+            }
+        }
+        // Distil-Whisper's shipped builds are English-only.
+        "distil_whisper" => Some(ENGLISH_ONLY_LANGUAGES),
+        "parakeet" => {
+            if model.contains("v3") {
+                Some(PARAKEET_V3_LANGUAGES)
+            } else {
+                // The TDT/CTC 110m and v2 builds are English-only.
+                Some(ENGLISH_ONLY_LANGUAGES)
+            }
+        }
+        "moonshine" => Some(ENGLISH_ONLY_LANGUAGES),
+        "qwen3_asr" => Some(WHISPER_MULTILINGUAL_LANGUAGES),
+        // Cloud and platform routes follow their own service/OS language list,
+        // which Plainsong cannot enumerate locally.
+        _ => None,
+    }
+}
+
+/// Whether a string is a plausible BCP-47 primary language subtag.
+///
+/// Deliberately shape-only: the authority on what is *supported* is
+/// `dictation_supported_languages`, and inventing a second opinion here is how
+/// the old allowlist ended up rejecting real languages.
+fn is_language_tag_shaped(value: &str) -> bool {
+    let length = value.len();
+    (2..=8).contains(&length) && value.bytes().all(|byte| byte.is_ascii_lowercase())
+}
+
+/// Strict validation for a user-initiated save.
+///
+/// Returns a clear error naming the languages the selected model cannot handle,
+/// rather than dropping them and leaving the user staring at a picker that
+/// forgot what they chose.
+pub fn validate_dictation_active_languages(
+    provider: &str,
+    model_id: &str,
+    languages: &[String],
+) -> Result<Vec<String>, String> {
+    let supported = dictation_supported_languages(provider, model_id);
+    let mut normalized: Vec<String> = Vec::new();
+    let mut unsupported: Vec<String> = Vec::new();
+
     for language in languages {
         let trimmed = language.trim().to_ascii_lowercase();
-        let canonical = match trimmed.as_str() {
-            "en" | "es" | "fr" | "de" | "it" | "pt" | "ja" | "ko" | "zh" | "ru" | "ar" | "hi" => {
-                Some(trimmed)
+        if trimmed.is_empty() {
+            continue;
+        }
+        if !is_language_tag_shaped(&trimmed) {
+            unsupported.push(trimmed);
+            continue;
+        }
+        if let Some(supported) = supported {
+            if !supported.contains(&trimmed.as_str()) {
+                unsupported.push(trimmed);
+                continue;
             }
-            _ => None,
-        };
-        if let Some(language) = canonical {
-            if !normalized.contains(&language) {
-                normalized.push(language);
+        }
+        if !normalized.contains(&trimmed) {
+            normalized.push(trimmed);
+        }
+    }
+
+    if unsupported.is_empty() {
+        return Ok(normalized);
+    }
+    Err(format!(
+        "The selected dictation model ({}) cannot transcribe: {}. Choose a different model or remove those languages.",
+        model_id.trim(),
+        unsupported.join(", ")
+    ))
+}
+
+/// Lenient normalization for the load path.
+///
+/// Load must not fail: a settings file can legitimately name a language the
+/// *currently* selected model does not handle, because the user switched models
+/// after choosing it. Dropping is right here and wrong on save, which is why the
+/// strict variant above exists separately.
+fn normalize_dictation_active_languages(
+    provider: &str,
+    model_id: &str,
+    languages: &[String],
+) -> Vec<String> {
+    let supported = dictation_supported_languages(provider, model_id);
+    let mut normalized: Vec<String> = Vec::new();
+    for language in languages {
+        let trimmed = language.trim().to_ascii_lowercase();
+        if trimmed.is_empty() || !is_language_tag_shaped(&trimmed) {
+            continue;
+        }
+        if let Some(supported) = supported {
+            if !supported.contains(&trimmed.as_str()) {
+                continue;
             }
+        }
+        if !normalized.contains(&trimmed) {
+            normalized.push(trimmed);
         }
     }
     normalized
@@ -791,8 +922,11 @@ fn normalize_loaded_transcription_settings(transcription: &mut TranscriptionSett
 
     transcription.dictation_keep_warm =
         normalize_dictation_keep_warm(&transcription.dictation_keep_warm);
-    transcription.dictation_active_languages =
-        normalize_dictation_active_languages(&transcription.dictation_active_languages);
+    transcription.dictation_active_languages = normalize_dictation_active_languages(
+        &transcription.dictation_provider,
+        &transcription.dictation_model_id,
+        &transcription.dictation_active_languages,
+    );
 
     for mode in &mut transcription.dictation_custom_modes {
         mode.base_mode_preset = mode.base_mode_preset.clone().and_then(|value| {
@@ -1324,7 +1458,11 @@ impl Default for SettingsManager {
 mod tests {
     use super::{
         dictation_app_category_from_key, dictation_app_category_to_key,
-        migrate_legacy_ai_lane_settings, normalize_audio_input_device_preference,
+        dictation_supported_languages, migrate_legacy_ai_lane_settings,
+        normalize_audio_input_device_preference, validate_dictation_active_languages,
+        ENGLISH_ONLY_LANGUAGES, PARAKEET_V3_LANGUAGES, WHISPER_MULTILINGUAL_LANGUAGES,
+    };
+    use super::{
         normalize_dictation_active_languages, normalize_loaded_privacy_settings,
         normalize_loaded_transcription_settings, resolve_dictation_app_category_with_overrides,
         AiLane, AiLaneSettings, AudioInputDevicePreference, DictationAppCategoryOverride,
@@ -1865,13 +2003,162 @@ mod tests {
 
     #[test]
     fn dictation_active_languages_are_normalized() {
-        let normalized = normalize_dictation_active_languages(&[
-            " EN ".to_string(),
-            "es".to_string(),
-            "ES".to_string(),
-            "bogus".to_string(),
-        ]);
+        let normalized = normalize_dictation_active_languages(
+            "whisper",
+            "large-v3",
+            &[
+                " EN ".to_string(),
+                "es".to_string(),
+                "ES".to_string(),
+                "not-a-language".to_string(),
+            ],
+        );
         assert_eq!(normalized, vec!["en".to_string(), "es".to_string()]);
+    }
+
+    #[test]
+    fn multilingual_whisper_accepts_languages_the_old_allowlist_dropped() {
+        // The hardcoded twelve-language list silently discarded these, on a
+        // model that transcribes every one of them.
+        for language in ["pl", "tr", "uk", "vi", "th", "he", "cs", "ro", "id", "ms"] {
+            let normalized = normalize_dictation_active_languages(
+                "whisper",
+                "large-v3",
+                &[language.to_string()],
+            );
+            assert_eq!(
+                normalized,
+                vec![language.to_string()],
+                "{language} must be accepted on multilingual Whisper"
+            );
+        }
+    }
+
+    #[test]
+    fn whisper_language_coverage_matches_the_published_set() {
+        // ~99 languages, not the curated display subset in the model picker.
+        assert!(
+            WHISPER_MULTILINGUAL_LANGUAGES.len() >= 98,
+            "expected the full Whisper language set, got {}",
+            WHISPER_MULTILINGUAL_LANGUAGES.len()
+        );
+        let mut sorted = WHISPER_MULTILINGUAL_LANGUAGES.to_vec();
+        sorted.sort_unstable();
+        sorted.dedup();
+        assert_eq!(
+            sorted.len(),
+            WHISPER_MULTILINGUAL_LANGUAGES.len(),
+            "the Whisper language set must not contain duplicates"
+        );
+    }
+
+    #[test]
+    fn english_only_models_reject_other_languages() {
+        // `.en` Whisper builds, Distil-Whisper, and Moonshine are single-language
+        // by construction: accepting Spanish there would produce nonsense.
+        for (provider, model) in [
+            ("whisper", "base.en"),
+            ("whisper", "small.en"),
+            ("distil_whisper", "distil-large-v3.5"),
+            ("moonshine", "moonshine-base"),
+        ] {
+            assert_eq!(
+                dictation_supported_languages(provider, model),
+                Some(ENGLISH_ONLY_LANGUAGES),
+                "{provider}/{model} must be English-only"
+            );
+            let error = validate_dictation_active_languages(
+                provider,
+                model,
+                &["en".to_string(), "es".to_string()],
+            )
+            .expect_err("an English-only model must refuse Spanish");
+            assert!(error.contains("es"), "the error must name the language");
+            assert!(error.contains(model), "the error must name the model");
+        }
+    }
+
+    #[test]
+    fn parakeet_v3_accepts_its_documented_european_set_only() {
+        assert_eq!(
+            dictation_supported_languages("parakeet", "parakeet-tdt-0.6b-v3"),
+            Some(PARAKEET_V3_LANGUAGES)
+        );
+        // In its documented set...
+        assert!(validate_dictation_active_languages(
+            "parakeet",
+            "parakeet-tdt-0.6b-v3",
+            &["pl".to_string(), "sv".to_string(), "mt".to_string()],
+        )
+        .is_ok());
+        // ...but Japanese is not, even though Whisper handles it.
+        assert!(validate_dictation_active_languages(
+            "parakeet",
+            "parakeet-tdt-0.6b-v3",
+            &["ja".to_string()],
+        )
+        .is_err());
+
+        // The legacy Parakeet builds are English-only.
+        assert_eq!(
+            dictation_supported_languages("parakeet", "parakeet-tdt-ctc-110m"),
+            Some(ENGLISH_ONLY_LANGUAGES)
+        );
+    }
+
+    #[test]
+    fn cloud_and_platform_routes_impose_no_local_language_list() {
+        // Their language coverage is the service's or the OS's, and guessing at
+        // it locally is how real languages got rejected before.
+        for provider in ["openai_cloud", "groq", "elevenlabs_scribe", "apple_speech"] {
+            assert!(dictation_supported_languages(provider, "any-model").is_none());
+        }
+        assert!(validate_dictation_active_languages(
+            "elevenlabs_scribe",
+            "scribe-v2",
+            &["sw".to_string(), "yo".to_string()],
+        )
+        .is_ok());
+    }
+
+    #[test]
+    fn saving_an_unsupported_language_explains_itself() {
+        let error = validate_dictation_active_languages(
+            "parakeet",
+            "parakeet-tdt-0.6b-v3",
+            &["en".to_string(), "ja".to_string(), "ko".to_string()],
+        )
+        .expect_err("unsupported languages must be refused, not dropped");
+
+        assert!(error.contains("ja") && error.contains("ko"));
+        assert!(
+            error.contains("Choose a different model"),
+            "the error must tell the user what to do: {error}"
+        );
+    }
+
+    #[test]
+    fn loading_settings_drops_rather_than_fails_on_a_model_switch() {
+        // A saved file may legitimately name a language the *currently* selected
+        // model cannot handle, because the user switched models afterwards.
+        // Load must survive that; only save is strict.
+        let normalized = normalize_dictation_active_languages(
+            "parakeet",
+            "parakeet-tdt-0.6b-v3",
+            &["en".to_string(), "ja".to_string()],
+        );
+        assert_eq!(normalized, vec!["en".to_string()]);
+    }
+
+    #[test]
+    fn malformed_language_tags_are_refused_on_save() {
+        for bogus in ["e", "toolongtag", "en-US", "12", "EN!"] {
+            assert!(
+                validate_dictation_active_languages("whisper", "large-v3", &[bogus.to_string()])
+                    .is_err(),
+                "{bogus} must not be accepted as a language tag"
+            );
+        }
     }
 
     #[test]
