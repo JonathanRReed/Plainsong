@@ -48,7 +48,7 @@ export function requestMainView(view: MainViewId) {
 
 let pendingSettingsTab: SettingsTabId | null = null;
 
-function requestSettingsTab(tab: SettingsTabId) {
+export function requestSettingsTab(tab: SettingsTabId) {
   if (typeof window === "undefined") {
     return;
   }

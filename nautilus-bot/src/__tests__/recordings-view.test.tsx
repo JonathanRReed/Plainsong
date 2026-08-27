@@ -275,6 +275,7 @@ vi.mock("@/lib/backend", () => ({
   exportRecordingV2: vi.fn(async () => ({})) as any,
   openExportPath: vi.fn() as any,
   searchTranscripts: vi.fn(async () => []) as any,
+  openPermissionSettings: vi.fn(async () => {}) as any,
 }));
 
 function deferred<T>() {
@@ -2895,6 +2896,81 @@ describe("RecordingsView", () => {
       expect(backend.runDiarization).toHaveBeenCalledWith("r1");
     });
     expect(await screen.findByText("Found 2 speakers.")).toBeInTheDocument();
+  });
+
+  describe("meeting start failures", () => {
+    async function failStartWith(error: unknown) {
+      startMeeting.mockRejectedValueOnce(error);
+      render(<RecordingsView />);
+      fireEvent.click(screen.getByRole("button", { name: "New meeting" }));
+      fireEvent.click(
+        await screen.findByRole("button", { name: "Confirm meeting consent" })
+      );
+      return screen.findByText("This meeting did not start");
+    }
+
+    it("offers one action matched to the typed code", async () => {
+      // ux-9: a system-audio failure used to be answered with microphone
+      // permission advice, because the old code substring-matched "audio".
+      await failStartWith(
+        Object.assign(new Error("no eligible route"), {
+          code: "system_audio_unavailable",
+        })
+      );
+
+      expect(
+        screen.getByText(
+          "System audio is not available, so the other side of the call would not be recorded."
+        )
+      ).toBeInTheDocument();
+      expect(
+        screen.queryByText(/microphone permissions/i)
+      ).not.toBeInTheDocument();
+
+      fireEvent.click(screen.getByRole("button", { name: "Set up system audio" }));
+      await waitFor(() => {
+        expect(backend.openPermissionSettings).toHaveBeenCalledWith(
+          "system_audio"
+        );
+      });
+    });
+
+    it("says one sentence, without a second period bolted on", async () => {
+      await failStartWith(
+        Object.assign(new Error("microphone unavailable"), {
+          code: "mic_permission_denied",
+        })
+      );
+
+      const message = screen.getByText(
+        "Plainsong does not have microphone access, so there is nothing to record."
+      );
+      expect(message.textContent).not.toMatch(/\.\s*\./);
+      expect(
+        screen.getByRole("button", { name: "Open Microphone settings" })
+      ).toBeInTheDocument();
+    });
+
+    it("passes a message through when it already carries its own next step", async () => {
+      const message =
+        "Microphone setup stalled. Plainsong restarted audio capture automatically. Retry in a moment, then reconnect or choose another microphone if it happens again.";
+      await failStartWith(new Error(message));
+
+      expect(screen.getByText(message)).toBeInTheDocument();
+    });
+
+    it("can be dismissed", async () => {
+      await failStartWith(
+        Object.assign(new Error("busy"), { code: "already_recording" })
+      );
+
+      fireEvent.click(screen.getByRole("button", { name: "Dismiss" }));
+      await waitFor(() => {
+        expect(
+          screen.queryByText("This meeting did not start")
+        ).not.toBeInTheDocument();
+      });
+    });
   });
 
   describe("meeting notes failures", () => {

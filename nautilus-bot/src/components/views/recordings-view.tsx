@@ -100,8 +100,14 @@ import {
   OPEN_RECORDING_WORKSPACE_EVENT,
   requestMainView,
   requestReadinessDestination,
+  requestSettingsTab,
   type OpenRecordingWorkspaceDetail,
 } from "@/lib/navigation";
+import {
+  describeMeetingStartFailure,
+  type MeetingStartFailure,
+} from "@/lib/meeting-start-error";
+import { openPermissionSettings } from "@/lib/backend/settings";
 import {
   describeMeetingAnalysis,
   MEETING_ANALYSIS_STATUS_EVENT,
@@ -1114,6 +1120,10 @@ export function RecordingsView() {
   >(
     "all"
   );
+  // Why the last attempt to start a meeting did not. Held on screen rather than
+  // shown as a toast: it carries the one action that resolves it.
+  const [meetingStartFailure, setMeetingStartFailure] =
+    useState<MeetingStartFailure | null>(null);
   const [isBulkReclassifying, setIsBulkReclassifying] = useState(false);
   const [isExportingMeeting, setIsExportingMeeting] = useState(false);
   const [isRefreshingTranscriptPanel, setIsRefreshingTranscriptPanel] =
@@ -2141,6 +2151,7 @@ export function RecordingsView() {
       return;
     }
 
+    setMeetingStartFailure(null);
     try {
       const selectedTemplateId = options.template ?? "auto";
       const shouldSeedTemplateOutline =
@@ -2163,12 +2174,39 @@ export function RecordingsView() {
       }
     } catch (error) {
       console.error("Failed to start recording:", error);
-      toast(
-        error instanceof Error ? error.message : "Failed to start recording",
-        "error"
-      );
+      const failure = describeMeetingStartFailure(error);
+      setMeetingStartFailure(failure);
+      toast(failure.message, "error");
     } finally {
       setShowConsent(false);
+    }
+  };
+
+  /**
+   * The one action a start failure offers. Each code resolves to exactly one
+   * button; the old code appended advice to the message instead, which is how a
+   * system-audio failure came to carry microphone-permission guidance.
+   */
+  const runMeetingStartAction = (failure: MeetingStartFailure) => {
+    switch (failure.action.id) {
+      case "open_microphone_settings":
+        void openPermissionSettings("microphone");
+        return;
+      case "open_system_audio_settings":
+        void openPermissionSettings("system_audio");
+        return;
+      case "open_audio_input_settings":
+        requestReadinessDestination("transcription");
+        return;
+      case "open_storage_settings":
+        requestSettingsTab("storage");
+        return;
+      case "retry":
+        setMeetingStartFailure(null);
+        setShowConsent(true);
+        return;
+      case "none":
+        setMeetingStartFailure(null);
     }
   };
 
@@ -5370,6 +5408,36 @@ export function RecordingsView() {
 
       <ScrollArea className="flex-1">
         <div className="p-6">
+          {meetingStartFailure ? (
+            <StatusBanner
+              className="mb-4"
+              title="This meeting did not start"
+              message={meetingStartFailure.message}
+              actions={
+                <>
+                  {meetingStartFailure.action.label ? (
+                    <Button
+                      size="sm"
+                      variant="outline"
+                      onClick={() =>
+                        runMeetingStartAction(meetingStartFailure)
+                      }
+                    >
+                      {meetingStartFailure.action.label}
+                    </Button>
+                  ) : null}
+                  <Button
+                    size="sm"
+                    variant="ghost"
+                    onClick={() => setMeetingStartFailure(null)}
+                  >
+                    Dismiss
+                  </Button>
+                </>
+              }
+            />
+          ) : null}
+
           {meetingsReadiness.state !== "ready" ? (
             <div
               role={

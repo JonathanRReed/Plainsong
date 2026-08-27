@@ -19,7 +19,10 @@ import {
   stopRecording,
 } from "@/lib/backend/recordings";
 import { logger } from "@/lib/logger";
-import { formatMeetingStartError } from "@/lib/meeting-start-error";
+import {
+  describeMeetingStartFailure,
+  MeetingStartError,
+} from "@/lib/meeting-start-error";
 import type { DictationStateChangedEvent as SharedDictationStateChangedEvent } from "@/features/dictation/runtime";
 import {
   INITIAL_MEETING_LIFECYCLE_STATE,
@@ -197,7 +200,9 @@ export function RecordingProvider({ children }: { children: ReactNode }) {
         return recordingId;
       } catch (error) {
         console.error("Failed to start meeting:", error);
-        throw new Error(formatMeetingStartError(error));
+        // Rethrown as the typed failure so the view can offer the one action
+        // that matches the code, not just print the sentence.
+        throw new MeetingStartError(describeMeetingStartFailure(error));
       }
     },
     [startTimer]
