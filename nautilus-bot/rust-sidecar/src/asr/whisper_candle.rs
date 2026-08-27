@@ -163,7 +163,10 @@ impl WhisperCandleProvider {
         WHISPER_CANDLE_REQUIRED_FILES
             .iter()
             .all(|(file_name, sha256)| {
-                crate::download::is_model_artifact_trusted(&self.model_dir.join(file_name), sha256)
+                crate::download::is_model_artifact_trusted(
+                    &self.model_dir.join(file_name),
+                    Some(sha256),
+                )
             })
     }
 
@@ -539,7 +542,7 @@ impl AsrProvider for WhisperCandleProvider {
                 .download_verified_model_asset(
                     &url,
                     &destination,
-                    sha256,
+                    Some(sha256),
                     whisper_candle_artifact_max_bytes(file_name),
                     move |p| {
                         cb((i as f32 / n_files + p.percentage as f32 / 100.0 / n_files) * 100.0);
