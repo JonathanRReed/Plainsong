@@ -118,6 +118,8 @@ import {
   type MeetingAnalysisStatusEvent,
 } from "@/lib/meeting-analysis-status";
 import { StatusBanner } from "@/components/ui/status-banner";
+import { CalendarMeetingCue } from "@/components/meetings/calendar-meeting-cue";
+import type { CalendarCapturePrefill } from "@/lib/calendar-events";
 import {
   canRecheckMeetingAudio,
   describeCaptureDegradation,
@@ -974,6 +976,10 @@ export function RecordingsView() {
     Record<string, Recording["status"]>
   >({});
   const [showConsent, setShowConsent] = useState(false);
+  // Set only by the calendar affordance, consumed by the start that follows it.
+  // A ref rather than state because nothing renders from it: it is read once,
+  // after the meeting exists, to give the recording the event's name.
+  const pendingCalendarPrefill = useRef<CalendarCapturePrefill | null>(null);
   const [showRecordingDetail, setShowRecordingDetail] = useState(false);
   // Opening a meeting and coming back are navigations between two pages that
   // never coexist. Each page's h1 takes focus on arrival; otherwise focus is
@@ -2148,7 +2154,7 @@ export function RecordingsView() {
       });
   };
 
-  const openMeetingCapture = () => {
+  const openMeetingCapture = (calendarPrefill?: CalendarCapturePrefill) => {
     if (!captureIsReady) {
       const cause = meetingCaptureReadiness.cause;
       toast(
@@ -2160,6 +2166,10 @@ export function RecordingsView() {
       }
       return;
     }
+    // Starting from the calendar lands on the same consent step as "New
+    // meeting", template picker and all. The event supplies the name; every
+    // other decision about the meeting stays where the reader expects it.
+    pendingCalendarPrefill.current = calendarPrefill ?? null;
     setShowConsent(true);
   };
 
@@ -2200,6 +2210,22 @@ export function RecordingsView() {
         setLiveMeetingSystemAudio(options.systemAudio);
         setLiveMeetingConsentShown(true);
         lastSavedLiveMeetingNotesRef.current = seededNotes;
+        // Name the recording after the calendar event that started it.
+        //
+        // Renaming after the fact rather than passing a title through
+        // `start_recording` keeps this inside the renderer, and it composes
+        // with auto-naming exactly as it should: the sidecar's
+        // `auto_name_meeting_recording` only overwrites a PLACEHOLDER title,
+        // so an event's name survives the analysis pass. A failure here loses
+        // the name and nothing else, which is why it does not fail the start.
+        const prefill = pendingCalendarPrefill.current;
+        if (prefill) {
+          try {
+            await renameRecording(startedId, prefill.title);
+          } catch (error) {
+            console.error("Failed to apply the calendar meeting title:", error);
+          }
+        }
         void refetch();
       }
     } catch (error) {
@@ -5578,7 +5604,8 @@ export function RecordingsView() {
         </div>
       ) : (
         <>
-      <div className="p-6 border-b flex items-center justify-between">
+      <div className="border-b">
+      <div className="p-6 pb-4 flex items-center justify-between">
         <div>
           <p className="rubric mb-1.5">MEETINGS</p>
           <h1
@@ -5605,7 +5632,7 @@ export function RecordingsView() {
           ) : (
             <Button
               variant="active"
-              onClick={openMeetingCapture}
+              onClick={() => openMeetingCapture()}
               disabled={!captureIsReady}
             >
               <Mic2 className="h-4 w-4 mr-2" />
@@ -5613,6 +5640,17 @@ export function RecordingsView() {
             </Button>
           )}
         </div>
+      </div>
+        {/* The calendar affordance, and nothing else this file has to know
+            about. It renders one line at most and usually nothing: the
+            component decides, from a permission state this view never reads,
+            whether there is anything honest to say. Readiness is deliberately
+            not involved — a Mac with no calendar access records meetings
+            exactly as well as one with it. */}
+        <CalendarMeetingCue
+          captureInProgress={isRecording}
+          onStartCapture={(prefill) => openMeetingCapture(prefill)}
+        />
       </div>
 
       <ScrollArea className="flex-1">
@@ -6198,7 +6236,7 @@ export function RecordingsView() {
                   : "Try a different search, or a different status."}
               </p>
               {meetings.length === 0 && (
-                <Button className="mt-4" variant="active" onClick={openMeetingCapture}>
+                <Button className="mt-4" variant="active" onClick={() => openMeetingCapture()}>
                   <Mic2 data-icon="inline-start" />
                   Start a meeting
                 </Button>

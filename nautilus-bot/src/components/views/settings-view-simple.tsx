@@ -19,6 +19,7 @@ import { listen } from "@/lib/electron";
 import { Button } from "@/components/ui/button";
 import { Switch } from "@/components/ui/switch";
 import { SettingsSwitch } from "@/components/ui/settings-control";
+import { CalendarSettingsSection } from "@/components/meetings/calendar-settings-section";
 import { Input } from "@/components/ui/input";
 import { Textarea } from "@/components/ui/textarea";
 import { Label } from "@/components/ui/label";
@@ -3759,6 +3760,14 @@ export function SettingsView() {
                         })
                       }
                     />
+
+                    {/* Renders nothing until macOS has granted calendar
+                        access — including its own heading and rule, so an
+                        unconnected calendar leaves no empty section behind.
+                        The ask lives on the Meetings view, next to the thing
+                        it improves; this is only where a granted calendar gets
+                        narrowed or switched back off. */}
+                    <CalendarSettingsSection />
 
                     <div className="pt-4 border-t space-y-4">
                       <div className="space-y-1">
