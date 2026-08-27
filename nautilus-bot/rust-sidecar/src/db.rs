@@ -17,7 +17,9 @@ use crate::store::{
 };
 use anyhow::{Context, Result};
 use chrono::Utc;
-use rusqlite::{params, params_from_iter, types::Value, Connection, TransactionBehavior};
+use rusqlite::{
+    params, params_from_iter, types::Value, Connection, OptionalExtension, TransactionBehavior,
+};
 use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -30,6 +32,21 @@ pub struct SpeakerAliasUpsert {
     pub name: Option<String>,
     pub color: Option<String>,
     pub sample_count: i64,
+}
+
+/// How complete one meeting's stored transcript actually is.
+///
+/// Kept out of [`Recording`] on purpose: this is storage-policy evidence, not
+/// renderer-facing content, and the only thing that reads it is the set of
+/// sweeps that would otherwise delete the audio holding the missing minutes.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MeetingTranscriptCompletion {
+    pub complete: bool,
+    /// Why the transcript is incomplete, as reported by chunked transcription.
+    pub degraded_reason: Option<String>,
+    /// When the user accepted losing the audio anyway. Never implies the
+    /// transcript became complete.
+    pub acknowledged_at: Option<String>,
 }
 
 const SENSITIVE_AUDIT_DETAIL_KEYS: [&str; 4] = [
@@ -1623,6 +1640,34 @@ impl Database {
         self.ensure_table_column("recordings", "consent_notice_surface", "TEXT")?;
         self.ensure_table_column("recordings", "consent_notice_message", "TEXT")?;
         self.ensure_table_column("recordings", "consent_notice_updated_at", "TEXT")?;
+
+        // Chunked meeting transcription survives per-chunk ASR failures and
+        // still returns a transcript, so "completed" alone never meant "the
+        // whole meeting was transcribed". That distinction only lived in an
+        // in-memory `fallback_reason` and an emitted event, which is not
+        // something a storage sweep running hours later can consult — so the
+        // transcript-only sweep happily deleted the audio of meetings the code
+        // already knew were partially transcribed. It is a column now.
+        //
+        // Defaulting to 1 is the honest choice for rows written before this
+        // existed: they were completed by the same code path and nothing
+        // recorded a degradation, so treating them as suspect would refuse
+        // retention on an entire back catalogue with no evidence.
+        self.ensure_table_column(
+            "recordings",
+            "transcript_complete",
+            "INTEGER NOT NULL DEFAULT 1",
+        )?;
+        self.ensure_table_column("recordings", "transcript_degraded_reason", "TEXT")?;
+        // Set when the user has been told the transcript is incomplete and
+        // chose to let storage policy delete the audio anyway. Deliberately
+        // separate from `transcript_complete`: acknowledging is a decision
+        // about deletion, not a claim that the missing words came back.
+        self.ensure_table_column(
+            "recordings",
+            "transcript_incomplete_acknowledged_at",
+            "TEXT",
+        )?;
 
         Ok(())
     }
@@ -3381,6 +3426,130 @@ impl Database {
             params![status, Utc::now().to_rfc3339(), recording_id],
         )?;
         Ok(())
+    }
+
+    /// Commit a meeting's terminal status and how complete its transcript is,
+    /// in one transaction.
+    ///
+    /// These two facts have to land together. Writing the status first and the
+    /// completeness afterwards leaves a window in which the meeting reads as a
+    /// clean "completed" — and the transcript-only storage sweep, which runs off
+    /// exactly that status, would delete the source audio of a meeting whose
+    /// transcript is missing whole chunks.
+    ///
+    /// A complete transcript also clears any prior acknowledgement: a successful
+    /// re-transcription means there is nothing left to acknowledge.
+    pub fn complete_recording_with_transcript_state(
+        &mut self,
+        recording_id: &str,
+        status: &str,
+        transcript_complete: bool,
+        degraded_reason: Option<&str>,
+    ) -> Result<()> {
+        let now = Utc::now().to_rfc3339();
+        let tx = self
+            .conn
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let updated = tx.execute(
+            "UPDATE recordings
+             SET status = ?1,
+                 transcript_complete = ?2,
+                 transcript_degraded_reason = ?3,
+                 transcript_incomplete_acknowledged_at =
+                     CASE WHEN ?2 = 1 THEN NULL ELSE transcript_incomplete_acknowledged_at END,
+                 updated_at = ?4
+             WHERE id = ?5",
+            params![
+                status,
+                i64::from(transcript_complete),
+                degraded_reason,
+                &now,
+                recording_id
+            ],
+        )?;
+        if updated != 1 {
+            anyhow::bail!("Recording '{}' was not found", recording_id);
+        }
+        tx.commit()?;
+        Ok(())
+    }
+
+    /// Whether a meeting's transcript is known incomplete, and the reason.
+    ///
+    /// `None` when the recording does not exist.
+    pub fn get_transcript_completion(
+        &self,
+        recording_id: &str,
+    ) -> Result<Option<MeetingTranscriptCompletion>> {
+        let mut statement = self.conn.prepare(
+            "SELECT transcript_complete, transcript_degraded_reason,
+                    transcript_incomplete_acknowledged_at
+             FROM recordings WHERE id = ?1",
+        )?;
+        let mut rows = statement.query(params![recording_id])?;
+        let Some(row) = rows.next()? else {
+            return Ok(None);
+        };
+        Ok(Some(MeetingTranscriptCompletion {
+            complete: row.get::<_, i64>(0)? != 0,
+            degraded_reason: row.get::<_, Option<String>>(1)?,
+            acknowledged_at: row.get::<_, Option<String>>(2)?,
+        }))
+    }
+
+    /// Meetings whose transcript is known incomplete and whose audio the user
+    /// has not agreed to lose.
+    ///
+    /// This is the set every audio-deleting storage sweep has to skip: for these
+    /// recordings the saved audio is the only complete record of the meeting.
+    pub fn recording_ids_with_unacknowledged_incomplete_transcripts(&self) -> Result<Vec<String>> {
+        let mut statement = self.conn.prepare(
+            "SELECT id FROM recordings
+             WHERE transcript_complete = 0
+               AND transcript_incomplete_acknowledged_at IS NULL",
+        )?;
+        let rows = statement.query_map([], |row| row.get::<_, String>(0))?;
+        Ok(rows.collect::<std::result::Result<Vec<_>, _>>()?)
+    }
+
+    /// Record that the user accepted losing the audio of an incomplete meeting.
+    ///
+    /// Returns the degraded reason they were acknowledging, or an error when the
+    /// meeting's transcript is not actually flagged incomplete — acknowledging
+    /// something that is not true must not be silently accepted.
+    pub fn acknowledge_incomplete_transcript(
+        &mut self,
+        recording_id: &str,
+    ) -> Result<Option<String>> {
+        let now = Utc::now().to_rfc3339();
+        let tx = self
+            .conn
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let state: Option<(i64, Option<String>)> = tx
+            .query_row(
+                "SELECT transcript_complete, transcript_degraded_reason
+                 FROM recordings WHERE id = ?1",
+                params![recording_id],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .optional()?;
+        let Some((complete, reason)) = state else {
+            anyhow::bail!("Recording '{}' was not found", recording_id);
+        };
+        if complete != 0 {
+            anyhow::bail!(
+                "Recording '{}' does not have an incomplete transcript to acknowledge",
+                recording_id
+            );
+        }
+        tx.execute(
+            "UPDATE recordings
+             SET transcript_incomplete_acknowledged_at = ?1, updated_at = ?1
+             WHERE id = ?2",
+            params![&now, recording_id],
+        )?;
+        tx.commit()?;
+        Ok(reason)
     }
 
     pub fn update_recording_duration(
@@ -5997,6 +6166,81 @@ mod tests {
         );
 
         let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn degraded_transcripts_are_durable_and_hold_audio_back_until_acknowledged() {
+        let mut db = in_memory_db();
+        db.create_recording(&sample_recording("degraded", "inbox"))
+            .unwrap();
+        db.create_recording(&sample_recording("clean", "inbox"))
+            .unwrap();
+
+        // Rows written before this column existed must not be treated as
+        // suspect: nothing recorded a degradation for them.
+        assert_eq!(
+            db.get_transcript_completion("clean").unwrap(),
+            Some(MeetingTranscriptCompletion {
+                complete: true,
+                degraded_reason: None,
+                acknowledged_at: None,
+            })
+        );
+
+        db.complete_recording_with_transcript_state(
+            "degraded",
+            "completed",
+            false,
+            Some("chunk 41 of 60 failed"),
+        )
+        .unwrap();
+        db.complete_recording_with_transcript_state("clean", "completed", true, None)
+            .unwrap();
+
+        assert_eq!(
+            db.get_recording("degraded").unwrap().unwrap().status,
+            "completed",
+            "a degraded transcript is still a completed meeting"
+        );
+        assert_eq!(
+            db.recording_ids_with_unacknowledged_incomplete_transcripts()
+                .unwrap(),
+            vec!["degraded".to_string()]
+        );
+
+        assert_eq!(
+            db.acknowledge_incomplete_transcript("degraded").unwrap(),
+            Some("chunk 41 of 60 failed".to_string())
+        );
+        assert!(db
+            .recording_ids_with_unacknowledged_incomplete_transcripts()
+            .unwrap()
+            .is_empty());
+        let acknowledged = db.get_transcript_completion("degraded").unwrap().unwrap();
+        assert!(
+            !acknowledged.complete,
+            "acknowledging the loss must not claim the transcript became complete"
+        );
+        assert_eq!(
+            acknowledged.degraded_reason.as_deref(),
+            Some("chunk 41 of 60 failed")
+        );
+        assert!(acknowledged.acknowledged_at.is_some());
+
+        // Acknowledging something that is not true is refused.
+        assert!(db.acknowledge_incomplete_transcript("clean").is_err());
+
+        // A clean re-transcription clears both the flag and the acknowledgement.
+        db.complete_recording_with_transcript_state("degraded", "completed", true, None)
+            .unwrap();
+        assert_eq!(
+            db.get_transcript_completion("degraded").unwrap(),
+            Some(MeetingTranscriptCompletion {
+                complete: true,
+                degraded_reason: None,
+                acknowledged_at: None,
+            })
+        );
     }
 
     #[test]

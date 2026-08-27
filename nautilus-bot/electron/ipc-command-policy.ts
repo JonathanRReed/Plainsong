@@ -15,6 +15,7 @@ const ANALYSIS_COMMANDS = new Set<string>([
 ]);
 
 const FAST_COMMANDS = new Set<string>([
+  "acknowledge_incomplete_transcript",
   "cancel_analysis_run",
   "check_for_updates",
   "check_system_audio_availability",

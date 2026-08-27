@@ -57,6 +57,7 @@ const ALLOWED_RENDERER_COMMANDS = new Set<string>([
   "__window_set_size__",
   "__window_show__",
   "__window_start_drag__",
+  "acknowledge_incomplete_transcript",
   "analyze_recording",
   "analyze_recordings",
   "apply_global_shortcuts_now",

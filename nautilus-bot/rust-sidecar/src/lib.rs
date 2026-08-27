@@ -8233,28 +8233,74 @@ mod tests {
         recording.audio_path = "/tmp/r1.wav".to_string();
         recording.status = "processing".to_string();
         let active = HashSet::new();
+        let complete = HashSet::new();
 
         assert!(!meeting_transcript_only_cleanup_candidate(
-            &recording, None, &active
+            &recording, None, &active, &complete
         ));
         assert!(!meeting_retention_cleanup_candidate(
-            &recording, cutoff, None, &active
+            &recording, cutoff, None, &active, &complete
         ));
 
         recording.status = "completed".to_string();
         assert!(meeting_transcript_only_cleanup_candidate(
-            &recording, None, &active
+            &recording, None, &active, &complete
         ));
         assert!(meeting_retention_cleanup_candidate(
-            &recording, cutoff, None, &active
+            &recording, cutoff, None, &active, &complete
         ));
 
         let active = HashSet::from([recording.id.clone()]);
         assert!(!meeting_transcript_only_cleanup_candidate(
-            &recording, None, &active
+            &recording, None, &active, &complete
         ));
         assert!(!meeting_retention_cleanup_candidate(
-            &recording, cutoff, None, &active
+            &recording, cutoff, None, &active, &complete
+        ));
+    }
+
+    #[test]
+    fn no_audio_deleting_sweep_touches_a_meeting_with_an_incomplete_transcript() {
+        let created_at = chrono::Utc::now() - chrono::Duration::days(365);
+        let cutoff = chrono::Utc::now();
+        let mut recording = sample_recording("r1", "Meeting", created_at, None, None);
+        recording.audio_path = "/tmp/r1.wav".to_string();
+        recording.status = "completed".to_string();
+        let active = HashSet::new();
+        let incomplete = HashSet::from([recording.id.clone()]);
+
+        // The regression: chunked transcription survives per-chunk ASR failures
+        // and still marks the meeting completed, so "completed" was enough to
+        // delete the audio that held the missing minutes.
+        assert!(!meeting_transcript_only_cleanup_candidate(
+            &recording,
+            None,
+            &active,
+            &incomplete
+        ));
+        assert!(!meeting_retention_cleanup_candidate(
+            &recording,
+            cutoff,
+            None,
+            &active,
+            &incomplete
+        ));
+
+        // Acknowledging (or a clean re-transcription) drops it from the set and
+        // storage policy applies again.
+        let acknowledged = HashSet::new();
+        assert!(meeting_transcript_only_cleanup_candidate(
+            &recording,
+            None,
+            &active,
+            &acknowledged
+        ));
+        assert!(meeting_retention_cleanup_candidate(
+            &recording,
+            cutoff,
+            None,
+            &active,
+            &acknowledged
         ));
     }
 
@@ -12334,16 +12380,33 @@ async fn enforce_dictation_retention_policy(
     Ok((deleted_recordings, deleted_audio_files))
 }
 
+/// Meetings whose saved audio is the only complete record of what was said.
+///
+/// `transcribe_recording_in_chunks` survives per-chunk ASR failures and returns
+/// a transcript anyway, so a meeting can reach "completed" with minutes of it
+/// missing. Deleting the audio of one of those turns a transient cloud-ASR
+/// failure at minute 100 into permanent loss, so every audio-deleting sweep
+/// checks this set first and leaves those meetings alone until they are
+/// re-transcribed cleanly or the user explicitly accepts the loss.
+fn meeting_audio_is_the_only_complete_record(
+    recording_id: &str,
+    incomplete_transcripts: &HashSet<String>,
+) -> bool {
+    incomplete_transcripts.contains(recording_id)
+}
+
 fn meeting_retention_cleanup_candidate(
     recording: &models::Recording,
     cutoff: chrono::DateTime<chrono::Utc>,
     recording_id_filter: Option<&str>,
     active_postprocessing: &HashSet<String>,
+    incomplete_transcripts: &HashSet<String>,
 ) -> bool {
     recording.source_type == "meeting"
         && matches!(recording.status.as_str(), "completed" | "error")
         && recording.created_at <= cutoff
         && !active_postprocessing.contains(&recording.id)
+        && !meeting_audio_is_the_only_complete_record(&recording.id, incomplete_transcripts)
         && recording_id_filter
             .map(|recording_id| recording.id == recording_id)
             .unwrap_or(true)
@@ -12353,14 +12416,32 @@ fn meeting_transcript_only_cleanup_candidate(
     recording: &models::Recording,
     recording_id_filter: Option<&str>,
     active_postprocessing: &HashSet<String>,
+    incomplete_transcripts: &HashSet<String>,
 ) -> bool {
     recording.source_type == "meeting"
         && recording.status == "completed"
         && !recording.audio_path.trim().is_empty()
         && !active_postprocessing.contains(&recording.id)
+        && !meeting_audio_is_the_only_complete_record(&recording.id, incomplete_transcripts)
         && recording_id_filter
             .map(|recording_id| recording.id == recording_id)
             .unwrap_or(true)
+}
+
+/// Load the meetings whose transcript is known incomplete and unacknowledged.
+///
+/// Fails closed: if the set cannot be read, every sweep that consults it is
+/// refused rather than run against an empty set, because an empty set here
+/// means "delete everything eligible".
+async fn unacknowledged_incomplete_transcript_ids(
+    state: &AppState,
+) -> Result<HashSet<String>, String> {
+    let db = state.db.lock().await;
+    db.recording_ids_with_unacknowledged_incomplete_transcripts()
+        .map(|ids| ids.into_iter().collect())
+        .map_err(|error| {
+            format!("Failed to load incomplete meeting transcripts before deleting audio: {error}")
+        })
 }
 
 async fn enforce_meeting_retention_policy(
@@ -12396,19 +12477,49 @@ async fn enforce_meeting_retention_policy(
         })?
     };
     let active_postprocessing = active_meeting_audio_postprocessing_ids(state);
+    let incomplete_transcripts = unacknowledged_incomplete_transcript_ids(state).await?;
 
     let mut deleted_recordings = 0usize;
     let mut deleted_audio_files = 0usize;
     let mut audio_only_clears = 0usize;
+    let mut kept_incomplete_transcripts = 0usize;
 
-    for recording in recordings.into_iter().filter(|recording| {
-        meeting_retention_cleanup_candidate(
-            recording,
+    // Everything the retention window itself makes due, before completeness is
+    // considered — so the "kept because incomplete" count below is exactly the
+    // meetings retention would otherwise have deleted, not every row scanned.
+    let no_incomplete_transcripts = HashSet::new();
+    let due = recordings
+        .into_iter()
+        .filter(|recording| {
+            meeting_retention_cleanup_candidate(
+                recording,
+                cutoff,
+                recording_id_filter,
+                &active_postprocessing,
+                &no_incomplete_transcripts,
+            )
+        })
+        .collect::<Vec<_>>();
+
+    for recording in due {
+        // Both delete modes remove the audio, so both have to respect the
+        // meetings whose audio is the only complete record. Retention that
+        // silently destroys the one artifact holding the missing minutes is not
+        // the retention the user asked for.
+        if !meeting_retention_cleanup_candidate(
+            &recording,
             cutoff,
             recording_id_filter,
             &active_postprocessing,
-        )
-    }) {
+            &incomplete_transcripts,
+        ) {
+            kept_incomplete_transcripts += 1;
+            tracing::warn!(
+                "Keeping meeting '{}' past retention: its transcript is incomplete and the loss has not been acknowledged",
+                recording.id
+            );
+            continue;
+        }
         if delete_mode == "audio_and_transcript" {
             let bundle = {
                 let db = state.db.lock().await;
@@ -12469,7 +12580,11 @@ async fn enforce_meeting_retention_policy(
         }
     }
 
-    if deleted_recordings > 0 || deleted_audio_files > 0 || audio_only_clears > 0 {
+    if deleted_recordings > 0
+        || deleted_audio_files > 0
+        || audio_only_clears > 0
+        || kept_incomplete_transcripts > 0
+    {
         let details = serde_json::json!({
             "reason": reason,
             "preset": normalize_meeting_retention_preset(&preset),
@@ -12478,6 +12593,7 @@ async fn enforce_meeting_retention_policy(
             "deleted_recordings": deleted_recordings,
             "deleted_audio_files": deleted_audio_files,
             "audio_paths_cleared": audio_only_clears,
+            "kept_incomplete_transcripts": kept_incomplete_transcripts,
         });
         let mut db = state.db.lock().await;
         if let Err(error) = db.log_audit_event("meeting_retention_cleanup", Some(details), "info") {
@@ -12495,6 +12611,7 @@ async fn enforce_meeting_retention_policy(
                 "deletedRecordings": deleted_recordings,
                 "deletedAudioFiles": deleted_audio_files,
                 "audioPathsCleared": audio_only_clears,
+                "keptIncompleteTranscripts": kept_incomplete_transcripts,
             }),
         );
     }
@@ -12532,17 +12649,43 @@ async fn apply_meeting_transcript_only_storage_policy(
         })?
     };
     let active_postprocessing = active_meeting_audio_postprocessing_ids(state);
+    let incomplete_transcripts = unacknowledged_incomplete_transcript_ids(state).await?;
 
     let mut deleted_audio_files = 0usize;
     let mut audio_paths_cleared = 0usize;
+    let mut kept_incomplete_transcripts = 0usize;
 
-    for recording in recordings.into_iter().filter(|recording| {
-        meeting_transcript_only_cleanup_candidate(
-            recording,
+    let no_incomplete_transcripts = HashSet::new();
+    let eligible = recordings
+        .into_iter()
+        .filter(|recording| {
+            meeting_transcript_only_cleanup_candidate(
+                recording,
+                recording_id_filter,
+                &active_postprocessing,
+                &no_incomplete_transcripts,
+            )
+        })
+        .collect::<Vec<_>>();
+
+    for recording in eligible {
+        // The meeting is "completed", but chunked transcription survives
+        // per-chunk ASR failures, so completed does not mean fully transcribed.
+        // Deleting the source audio here is what turned a transient cloud-ASR
+        // failure at minute 100 into permanent loss.
+        if !meeting_transcript_only_cleanup_candidate(
+            &recording,
             recording_id_filter,
             &active_postprocessing,
-        )
-    }) {
+            &incomplete_transcripts,
+        ) {
+            kept_incomplete_transcripts += 1;
+            tracing::warn!(
+                "Keeping meeting '{}' audio under transcript-only storage: its transcript is incomplete and the loss has not been acknowledged",
+                recording.id
+            );
+            continue;
+        }
         let has_transcript = {
             let db = state.db.lock().await;
             db.get_transcript(&recording.id)
@@ -12580,12 +12723,13 @@ async fn apply_meeting_transcript_only_storage_policy(
         }
     }
 
-    if deleted_audio_files > 0 || audio_paths_cleared > 0 {
+    if deleted_audio_files > 0 || audio_paths_cleared > 0 || kept_incomplete_transcripts > 0 {
         let details = serde_json::json!({
             "reason": reason,
             "storage_mode": normalize_meeting_audio_storage_mode(&storage_mode),
             "deleted_audio_files": deleted_audio_files,
             "audio_paths_cleared": audio_paths_cleared,
+            "kept_incomplete_transcripts": kept_incomplete_transcripts,
         });
         let mut db = state.db.lock().await;
         if let Err(error) = db.log_audit_event(
@@ -12608,6 +12752,7 @@ async fn apply_meeting_transcript_only_storage_policy(
                 "storageMode": normalize_meeting_audio_storage_mode(&storage_mode),
                 "deletedAudioFiles": deleted_audio_files,
                 "audioPathsCleared": audio_paths_cleared,
+                "keptIncompleteTranscripts": kept_incomplete_transcripts,
             }),
         );
     }
@@ -22317,8 +22462,18 @@ async fn run_meeting_transcription_pipeline(
             let transcript_persisted = persistence_result.is_ok();
             let completion_result = match persistence_result {
                 Ok(()) => {
+                    // Status and completeness are written together on purpose.
+                    // Any window where this reads as a plain "completed" is a
+                    // window in which the transcript-only storage sweep can
+                    // delete the audio of a meeting the code already knows was
+                    // only partially transcribed.
                     let mut db = state_clone.db.lock().await;
-                    match db.update_recording_status(&recording_id_clone, "completed") {
+                    match db.complete_recording_with_transcript_state(
+                        &recording_id_clone,
+                        "completed",
+                        degraded_reason.is_none(),
+                        degraded_reason.as_deref(),
+                    ) {
                         Ok(()) => Ok(()),
                         Err(error) => {
                             let _ = db.update_recording_status(&recording_id_clone, "error");
@@ -22932,6 +23087,45 @@ pub async fn dispatch_command(
                 serde_json::from_value(params["recordingId"].clone()).map_err(|e| e.to_string())?;
             stop_recording_for_sidecar(state, handle, recording_id).await?;
             Ok(serde_json::Value::Null)
+        }
+        "acknowledge_incomplete_transcript" => {
+            // Storage policy holds a meeting's audio back while its transcript
+            // is known incomplete, because that audio is the only complete
+            // record of what was said. This is the user saying they understand
+            // that and want the policy applied anyway. It never claims the
+            // transcript became complete — re-transcribing is what does that.
+            let recording_id: String =
+                serde_json::from_value(params["recordingId"].clone()).map_err(|e| e.to_string())?;
+            let reason = {
+                let mut db = state.db.lock().await;
+                let reason = db
+                    .acknowledge_incomplete_transcript(&recording_id)
+                    .map_err(|error| error.to_string())?;
+                let _ = db.log_audit_event(
+                    "meeting_incomplete_transcript_acknowledged",
+                    Some(serde_json::json!({
+                        "recording_id": &recording_id,
+                        "reason": &reason,
+                    })),
+                    "warning",
+                );
+                reason
+            };
+            handle.emit_event(
+                "recording-status-changed",
+                serde_json::json!({
+                    "recordingId": &recording_id,
+                    "status": "completed",
+                    "degraded": true,
+                    "message": reason,
+                    "updatedAt": chrono::Utc::now().to_rfc3339(),
+                }),
+            );
+            Ok(serde_json::json!({
+                "recordingId": &recording_id,
+                "acknowledged": true,
+                "reason": reason,
+            }))
         }
         "revalidate_recording_audio" => {
             let recording_id: String =
