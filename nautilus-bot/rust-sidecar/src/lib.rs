@@ -1269,7 +1269,7 @@ async fn smoke_test_cursor_insert_impl(
     let target = (get_frontmost_app_name(), None);
 
     let outcome = paste_text_systemwide(
-        state,
+        &state.accessibility_trust_observed,
         &sample,
         true,
         target.0.as_deref(),
@@ -3368,7 +3368,7 @@ async fn transform_selected_text_impl(
 
         let paste_outcome = match transform_target.scope {
             SelectedTextTransformTargetScope::Selection => paste_text_systemwide(
-                state,
+                &state.accessibility_trust_observed,
                 transform.output_text.as_str(),
                 true,
                 target.0.as_deref(),
@@ -9163,6 +9163,46 @@ mod tests {
             body.matches("DICTATION_FORMAT_TIMEOUT,").count(),
             provider_calls,
             "every pre-insert LLM call must be wrapped in DICTATION_FORMAT_TIMEOUT"
+        );
+    }
+
+    #[test]
+    fn dictation_insertion_never_blocks_the_async_runtime() {
+        // `paste_text_systemwide` shells out, waits for app activation, and then
+        // polls for the insert -- roughly a second of blocking work. On the stop
+        // path that ran inline on a tokio worker. It must stay dispatched to the
+        // blocking pool. The macOS insertion body cannot execute under `cargo
+        // test` on CI hosts without an accessibility grant, hence the source
+        // check.
+        let body = owned_stop_dictation_body();
+        let call = body
+            .find("paste_text_systemwide(")
+            .expect("dictation stop must contain the delivery path");
+        let dispatch = body
+            .find("tokio::task::spawn_blocking(")
+            .expect("dictation stop must dispatch insertion to the blocking pool");
+        assert!(
+            dispatch < call,
+            "systemwide insertion must be wrapped in spawn_blocking, not awaited inline"
+        );
+    }
+
+    #[test]
+    fn paste_text_systemwide_takes_no_borrow_of_app_state() {
+        // Taking `&AppState` is what forced insertion to run inline: the borrow
+        // could not cross into `spawn_blocking`. Keep the narrowed parameter so
+        // the blocking dispatch above stays possible.
+        const SOURCE: &str = include_str!("lib.rs");
+        let signature = SOURCE
+            .split_once("\nfn paste_text_systemwide(")
+            .expect("paste_text_systemwide must exist")
+            .1
+            .split_once(')')
+            .expect("signature must close")
+            .0;
+        assert!(
+            !signature.contains("&AppState"),
+            "paste_text_systemwide must not borrow AppState: {signature}"
         );
     }
 
@@ -16822,7 +16862,6 @@ fn send_native_copy_key(
 
 #[cfg(target_os = "macos")]
 fn send_meeting_consent_notice_via_zoom(
-    state: &AppState,
     target: &PendingDictationTarget,
     notice_text: &str,
 ) -> Result<(), String> {
@@ -16855,7 +16894,6 @@ fn send_meeting_consent_notice_via_zoom(
     )
     .or_else(|_| {
         dispatch_paste_from_clipboard(
-            state,
             notice_text,
             false,
             target.app_name.as_deref(),
@@ -16933,7 +16971,7 @@ fn send_meeting_consent_notice_internal(state: &AppState) -> MeetingConsentNotic
     }
 
     let send_result = match surface.as_str() {
-        "zoom" => send_meeting_consent_notice_via_zoom(state, &target, &notice_text),
+        "zoom" => send_meeting_consent_notice_via_zoom(&target, &notice_text),
         "google_meet" => send_meeting_consent_notice_via_google_meet(&target, &notice_text),
         _ => Err("Unsupported meeting surface.".to_string()),
     };
@@ -17032,13 +17070,11 @@ fn schedule_clipboard_restore(previous: String, inserted_text: String) {
 
 #[cfg(target_os = "macos")]
 fn dispatch_paste_from_clipboard(
-    state: &AppState,
     text: &str,
     keep_text_in_clipboard: bool,
     target_app: Option<&str>,
     target_app_bundle_id: Option<&str>,
 ) -> Result<CursorInsertStrategy, String> {
-    let _ = state;
     let previous_clipboard = read_clipboard_text().ok();
     copy_to_clipboard(text)
         .map_err(|error| format!("Failed to stage clipboard paste: {}", error))?;
@@ -17226,7 +17262,6 @@ fn capture_application_context_text(target_app: Option<&str>) -> Result<Option<S
 
 #[cfg(target_os = "windows")]
 fn dispatch_paste_from_clipboard(
-    _state: &AppState,
     _text: &str,
     _keep_text_in_clipboard: bool,
     target_app: Option<&str>,
@@ -17249,7 +17284,6 @@ fn dispatch_paste_from_clipboard(
 
 #[cfg(not(any(target_os = "macos", target_os = "windows")))]
 fn dispatch_paste_from_clipboard(
-    _state: &AppState,
     _text: &str,
     _keep_text_in_clipboard: bool,
     _target_app: Option<&str>,
@@ -17310,8 +17344,12 @@ fn mark_accessibility_insert_observed(observed: &AtomicBool) {
     observed.store(true, Ordering::Relaxed);
 }
 
+/// Blocking, and deliberately so: it shells out, waits on app activation, and
+/// polls for the insert to land. It takes the one `AppState` flag it actually
+/// touches rather than the whole struct so callers on the async runtime can hand
+/// it to `spawn_blocking` without borrowing state across the await.
 fn paste_text_systemwide(
-    state: &AppState,
+    accessibility_trust_observed: &Arc<AtomicBool>,
     text: &str,
     keep_text_in_clipboard: bool,
     target_app: Option<&str>,
@@ -17330,7 +17368,7 @@ fn paste_text_systemwide(
 
         match insert_text_via_accessibility(text, target_app, target_app_bundle_id) {
             Ok(()) => {
-                mark_accessibility_insert_observed(&state.accessibility_trust_observed);
+                mark_accessibility_insert_observed(accessibility_trust_observed);
                 let copied = if keep_text_in_clipboard {
                     match copy_to_clipboard(text) {
                         Ok(()) => true,
@@ -17364,7 +17402,6 @@ fn paste_text_systemwide(
         }
 
         match dispatch_paste_from_clipboard(
-            state,
             text,
             keep_text_in_clipboard,
             target_app,
@@ -17451,7 +17488,6 @@ fn paste_text_systemwide(
         tracing::info!("Text copied to clipboard successfully");
 
         let paste_dispatch = dispatch_paste_from_clipboard(
-            state,
             text,
             keep_text_in_clipboard,
             target_app,
@@ -19818,7 +19854,7 @@ fn reuse_recent_dictation_result(
 
     let (target_app, target_app_bundle_id) = resolve_recent_dictation_repaste_target();
     let outcome = paste_text_systemwide(
-        state,
+        &state.accessibility_trust_observed,
         &result.text,
         true,
         target_app.as_deref(),
@@ -20551,13 +20587,55 @@ async fn stop_dictation_for_sidecar(
                             },
                         }
                     }
-                    DictationInsertionMode::Auto => paste_text_systemwide(
-                        state,
-                        final_text.as_str(),
-                        tracker_copy_to_clipboard(state).await,
-                        app_target.as_deref(),
-                        app_bundle_id.as_deref(),
-                    ),
+                    DictationInsertionMode::Auto => {
+                        // Insertion shells out to `open`, waits for the target
+                        // app to come forward, then polls for the paste to land
+                        // -- close to a second of blocking work on the hottest
+                        // dictation path. Running it inline stalled a tokio
+                        // worker for that whole window. Hoist the few reads it
+                        // needs, then hand the blocking body to the blocking
+                        // pool, matching how `get_frontmost_app_name` is already
+                        // dispatched.
+                        let keep_text_in_clipboard = tracker_copy_to_clipboard(state).await;
+                        let accessibility_trust_observed =
+                            Arc::clone(&state.accessibility_trust_observed);
+                        let insert_text = final_text.clone();
+                        let insert_app_target = app_target.clone();
+                        let insert_app_bundle_id = app_bundle_id.clone();
+                        match tokio::task::spawn_blocking(move || {
+                            paste_text_systemwide(
+                                &accessibility_trust_observed,
+                                insert_text.as_str(),
+                                keep_text_in_clipboard,
+                                insert_app_target.as_deref(),
+                                insert_app_bundle_id.as_deref(),
+                            )
+                        })
+                        .await
+                        {
+                            Ok(outcome) => outcome,
+                            Err(join_error) => {
+                                // A panic inside insertion must not be reported
+                                // as a successful insert; the transcript is
+                                // already durably committed above.
+                                tracing::error!(
+                                    "Dictation insertion task failed to complete: {}",
+                                    join_error
+                                );
+                                PasteOutcome {
+                                    pasted: false,
+                                    copied: false,
+                                    direct_accessibility: false,
+                                    confirmed: false,
+                                    successful_strategy: None,
+                                    error: Some(
+                                        "Text insertion did not complete. The transcript was saved."
+                                            .to_string(),
+                                    ),
+                                }
+                            }
+                        }
+                    }
                 };
             insert_latency_ms = Some(
                 insert_started_at
