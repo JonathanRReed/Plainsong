@@ -1094,11 +1094,11 @@ pub(crate) fn sanitize_meeting_custom_templates(
 
         template
             .name
-            .truncate_to_char_boundary(MAX_MEETING_TEMPLATE_NAME_LEN);
+            .truncate_to_char_count(MAX_MEETING_TEMPLATE_NAME_LEN);
         template.summary_prompt = template.summary_prompt.trim().to_string();
         template
             .summary_prompt
-            .truncate_to_char_boundary(MAX_MEETING_TEMPLATE_PROMPT_LEN);
+            .truncate_to_char_count(MAX_MEETING_TEMPLATE_PROMPT_LEN);
 
         template.notes_outline = template
             .notes_outline
@@ -1107,7 +1107,7 @@ pub(crate) fn sanitize_meeting_custom_templates(
             .filter(|section| !section.is_empty())
             .take(MAX_MEETING_TEMPLATE_OUTLINE_SECTIONS)
             .map(|mut section| {
-                section.truncate_to_char_boundary(MAX_MEETING_TEMPLATE_OUTLINE_SECTION_LEN);
+                section.truncate_to_char_count(MAX_MEETING_TEMPLATE_OUTLINE_SECTION_LEN);
                 section
             })
             .collect();
@@ -1121,23 +1121,23 @@ pub(crate) fn sanitize_meeting_custom_templates(
     sanitized
 }
 
-/// `String::truncate` panics on a non-char boundary; saved settings are user
-/// text, so a multi-byte character sitting exactly on the cut point is a real
-/// possibility, not a hypothetical.
-trait TruncateToCharBoundary {
-    fn truncate_to_char_boundary(&mut self, max_len: usize);
+/// Caps by *character* count, not byte length. The renderer's editor dialog
+/// enforces the same ceilings with a plain HTML `maxLength`, which counts
+/// UTF-16 code units -- for any non-ASCII text (accented names, CJK, emoji
+/// within the BMP, etc.) a byte-length cap would truncate far short of what
+/// the client already accepted, silently discarding content the user was
+/// told fit. Counting characters here is what keeps the two ceilings in
+/// agreement.
+trait TruncateToCharCount {
+    fn truncate_to_char_count(&mut self, max_chars: usize);
 }
 
-impl TruncateToCharBoundary for String {
-    fn truncate_to_char_boundary(&mut self, max_len: usize) {
-        if self.len() <= max_len {
+impl TruncateToCharCount for String {
+    fn truncate_to_char_count(&mut self, max_chars: usize) {
+        if self.chars().count() <= max_chars {
             return;
         }
-        let mut boundary = max_len;
-        while boundary > 0 && !self.is_char_boundary(boundary) {
-            boundary -= 1;
-        }
-        self.truncate(boundary);
+        *self = self.chars().take(max_chars).collect();
     }
 }
 
@@ -2360,6 +2360,33 @@ mod tests {
             .collect();
         let sanitized = sanitize_meeting_custom_templates(too_many);
         assert_eq!(sanitized.len(), MAX_MEETING_CUSTOM_TEMPLATES);
+    }
+
+    #[test]
+    fn meeting_custom_templates_cap_by_character_count_not_byte_length() {
+        // Every character here is 3 bytes in UTF-8 ("日" U+65E5). The
+        // renderer's editor enforces the same ceiling with a plain
+        // `maxLength`, which counts characters (UTF-16 code units), not
+        // bytes -- a byte-length cap here would truncate this name to far
+        // fewer characters than the client already accepted as valid,
+        // silently discarding content the user was told fit.
+        let non_ascii_name: String = "日".repeat(100);
+        assert_eq!(non_ascii_name.chars().count(), 100);
+        assert_eq!(non_ascii_name.len(), 300, "sanity: 3 bytes per character");
+
+        let sanitized = sanitize_meeting_custom_templates(vec![MeetingCustomTemplate {
+            id: "custom-non-ascii".to_string(),
+            name: non_ascii_name,
+            summary_prompt: String::new(),
+            notes_outline: Vec::new(),
+        }]);
+
+        assert_eq!(sanitized.len(), 1);
+        assert_eq!(
+            sanitized[0].name.chars().count(),
+            MAX_MEETING_TEMPLATE_NAME_LEN,
+            "capped by character count, matching the client's maxLength"
+        );
     }
 
     #[test]

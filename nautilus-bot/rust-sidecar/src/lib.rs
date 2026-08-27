@@ -1939,6 +1939,17 @@ fn resolve_meeting_template_summary_instruction(
         return meeting_template_summary_query(None).to_string();
     };
 
+    // Built-in ids resolve through the fixed playbook table first.
+    // `sanitize_meeting_custom_templates` already refuses to save a custom
+    // entry carrying a built-in id, so in practice this check never has
+    // anything to catch -- but resolving built-in-first here too makes that
+    // guard belt-and-braces rather than the only thing standing between a
+    // drifted or corrupted custom id and shadowing a built-in in analysis
+    // while the picker still shows the built-in's name.
+    if settings::BUILTIN_MEETING_TEMPLATE_IDS.contains(&id) {
+        return meeting_template_summary_query(Some(id)).to_string();
+    }
+
     if let Some(custom) = custom_templates.iter().find(|template| template.id == id) {
         let prompt = custom.summary_prompt.trim();
         if !prompt.is_empty() {
@@ -1951,14 +1962,11 @@ fn resolve_meeting_template_summary_instruction(
         return meeting_template_summary_query(None).to_string();
     }
 
-    if !settings::BUILTIN_MEETING_TEMPLATE_IDS.contains(&id) {
-        tracing::warn!(
-            template_id = id,
-            "meeting template id matches neither a built-in nor a saved custom template (likely deleted); falling back to the default playbook"
-        );
-    }
-
-    meeting_template_summary_query(template_id).to_string()
+    tracing::warn!(
+        template_id = id,
+        "meeting template id matches neither a built-in nor a saved custom template (likely deleted); falling back to the default playbook"
+    );
+    meeting_template_summary_query(None).to_string()
 }
 
 fn format_grounded_action_item_for_storage(item: &GroundedActionItem) -> String {
@@ -7923,6 +7931,23 @@ mod tests {
         assert_eq!(
             resolve_meeting_template_summary_instruction(Some("custom-1"), &templates),
             meeting_template_summary_query(None),
+        );
+    }
+
+    #[test]
+    fn resolve_meeting_template_summary_instruction_resolves_builtin_first() {
+        // Sanitization already refuses to save a custom entry carrying a
+        // built-in id, but this resolver must not depend on that guard alone
+        // -- an id list that drifted or a slice that bypassed sanitization
+        // (as this test constructs directly) must still resolve the
+        // built-in, never a same-named custom entry.
+        let templates = vec![custom_meeting_template_fixture(
+            "standup",
+            "An impostor summary prompt.",
+        )];
+        assert_eq!(
+            resolve_meeting_template_summary_instruction(Some("standup"), &templates),
+            meeting_template_summary_query(Some("standup")),
         );
     }
 
