@@ -16,7 +16,10 @@ const productName = packageJson.productName ?? "Plainsong";
 const version = packageJson.version;
 const arch = process.argv.includes("--x64") ? "x64" : "arm64";
 
-const releaseDir = join(repoRoot, "release");
+// PLAINSONG_RELEASE_DIR exists for the banner test: pointing it at an empty
+// directory proves the warning prints on the real path without this script
+// ever building (or overwriting) a DMG in a checkout that has one.
+const releaseDir = process.env.PLAINSONG_RELEASE_DIR ?? join(repoRoot, "release");
 const appPath = join(releaseDir, `mac-${arch}`, `${productName}.app`);
 const dmgPath = join(releaseDir, `${productName}-${version}-${arch}.dmg`);
 

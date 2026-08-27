@@ -1,5 +1,6 @@
 import { spawnSync } from "node:child_process";
-import { readFileSync } from "node:fs";
+import { mkdtempSync, readFileSync } from "node:fs";
+import os from "node:os";
 import path from "node:path";
 import { describe, expect, it } from "vitest";
 import { encodeBundleBuildVersion } from "../../scripts/lib/bundle-build-version.mjs";
@@ -110,14 +111,24 @@ describe("scripts/build-dmg.mjs", () => {
   it("says at runtime that its output must not be distributed", () => {
     // The comment at the top of the file existed and the beta.2 DMG still went
     // out unnotarized. Whoever runs the script reads its OUTPUT.
+    //
+    // PLAINSONG_RELEASE_DIR points at an empty directory so the script exits
+    // on the missing app right after the banner: on a machine whose real
+    // release/ holds a built app, this test must never start (or overwrite)
+    // an actual DMG build.
+    const emptyReleaseDir = mkdtempSync(path.join(os.tmpdir(), "plainsong-banner-test-"));
     const result = spawnSync(
       process.execPath,
       [path.join(repoRoot, "scripts/build-dmg.mjs")],
-      { cwd: repoRoot, encoding: "utf8" },
+      {
+        cwd: repoRoot,
+        encoding: "utf8",
+        env: { ...process.env, PLAINSONG_RELEASE_DIR: emptyReleaseDir },
+      },
     );
 
-    // No built app is present in a test checkout, so it exits on that — after
-    // printing the banner, which is the point.
+    // The app cannot exist in the empty override dir, so the script exits on
+    // that — after printing the banner, which is the point.
     const stderr = result.stderr ?? "";
     expect(stderr).toContain("NOT A RELEASE ARTIFACT");
     expect(stderr).toContain("DO NOT DISTRIBUTE");
