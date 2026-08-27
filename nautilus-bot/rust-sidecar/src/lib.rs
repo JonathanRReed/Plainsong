@@ -8,7 +8,8 @@ mod db;
 mod diarization;
 mod dictation_dictionary_csv;
 pub mod dictation_parity;
-mod dictation_pipeline;
+pub mod dictation_pipeline;
+pub mod dictation_timing;
 mod download;
 mod events;
 mod export;
@@ -200,7 +201,17 @@ const DICTATION_IDLE_RESET_ERROR_MS: u64 = 9000;
 /// Cap on how long any pre-insert LLM pass may delay insertion. The local
 /// pipeline output is already a good result, so on timeout we insert that
 /// rather than making the user wait on a slow or stuck model.
-const DICTATION_FORMAT_TIMEOUT: Duration = Duration::from_secs(6);
+///
+/// Was 6s. The Wave 3 audit measured this app had never recorded end-to-end
+/// (key-release-to-glyph) latency at all -- only ASR decode time -- while
+/// competing dictation tools land the *entire* pipeline, insertion included,
+/// in 130-700ms. Six seconds of silent waiting in front of insertion was
+/// never a real budget, just whatever felt "safe" before anyone measured
+/// anything. 2.5s is still generous next to that competitor bar, and still
+/// falls back to the already-good local pipeline output on timeout (see
+/// `resolve_dictation_format_attempt` in `dictation_timing.rs` and its call
+/// sites below) rather than losing the dictation.
+const DICTATION_FORMAT_TIMEOUT: Duration = Duration::from_millis(2_500);
 const MAX_BENCHMARK_AUDIO_BYTES: usize = 6 * 1024 * 1024;
 /// Shown when a pre-insert LLM pass could not run. The user still gets their
 /// words — the locally formatted text — so this is a warning, not an error.
@@ -211,6 +222,107 @@ const DICTATION_FORMAT_FAILED_WARNING: &str =
     "AI formatting could not run, so the text was left unformatted.";
 const DICTATION_FORMAT_TIMEOUT_WARNING: &str =
     "AI formatting took too long, so the text was left unformatted.";
+
+#[cfg(test)]
+mod dictation_format_timeout_tests {
+    use super::*;
+
+    // These exercise the exact mechanism `stop_dictation_for_sidecar` uses at
+    // both of its pre-insert LLM call sites --
+    // `tokio::time::timeout(DICTATION_FORMAT_TIMEOUT, future)` racing a real
+    // (short, real-wall-clock) future -- rather than mocking the whole
+    // function. They use a much shorter timeout than the real constant so the
+    // suite doesn't wait 2.5s; the mechanism under test is identical either
+    // way.
+
+    #[test]
+    fn format_timeout_is_2500ms_generous_next_to_the_130_700ms_competitor_bar() {
+        // Regression guard: this was 6s. See the constant's doc comment for
+        // why 2.5s is still a deliberately generous cap, not a tight one.
+        assert_eq!(DICTATION_FORMAT_TIMEOUT, Duration::from_millis(2_500));
+    }
+
+    #[tokio::test]
+    async fn a_slow_pass_times_out_and_falls_back_to_local_text_not_empty() {
+        let local_pipeline_text = "the meeting is at three".to_string();
+        let slow_pass = async {
+            tokio::time::sleep(Duration::from_millis(200)).await;
+            Ok::<String, String>("llm output that never arrives in time".to_string())
+        };
+
+        let raced = tokio::time::timeout(Duration::from_millis(5), slow_pass).await;
+        let attempt = match raced {
+            Ok(Ok(text)) => crate::dictation_timing::DictationFormatAttempt::Applied(text),
+            Ok(Err(_)) => crate::dictation_timing::DictationFormatAttempt::Failed,
+            Err(_) => crate::dictation_timing::DictationFormatAttempt::TimedOut,
+        };
+        let fallback = crate::dictation_timing::resolve_dictation_format_attempt(
+            attempt,
+            &local_pipeline_text,
+        );
+
+        assert_eq!(
+            fallback.format_outcome,
+            crate::dictation_timing::DictationFormatOutcome::TimedOut
+        );
+        assert_eq!(fallback.final_text, local_pipeline_text);
+        assert!(!fallback.final_text.is_empty());
+        assert!(fallback.warn_timed_out);
+        assert!(!fallback.warn_failed);
+    }
+
+    #[tokio::test]
+    async fn a_failing_pass_falls_back_to_local_text_not_empty() {
+        let local_pipeline_text = "ship it tomorrow".to_string();
+        let failing_pass = async { Err::<String, String>("provider rejected the request".into()) };
+
+        let raced = tokio::time::timeout(Duration::from_millis(50), failing_pass).await;
+        let attempt = match raced {
+            Ok(Ok(text)) => crate::dictation_timing::DictationFormatAttempt::Applied(text),
+            Ok(Err(_)) => crate::dictation_timing::DictationFormatAttempt::Failed,
+            Err(_) => crate::dictation_timing::DictationFormatAttempt::TimedOut,
+        };
+        let fallback = crate::dictation_timing::resolve_dictation_format_attempt(
+            attempt,
+            &local_pipeline_text,
+        );
+
+        assert_eq!(
+            fallback.format_outcome,
+            crate::dictation_timing::DictationFormatOutcome::Failed
+        );
+        assert_eq!(fallback.final_text, local_pipeline_text);
+        assert!(!fallback.final_text.is_empty());
+        assert!(fallback.warn_failed);
+        assert!(!fallback.warn_timed_out);
+    }
+
+    #[tokio::test]
+    async fn a_pass_that_returns_in_time_is_applied_verbatim() {
+        let local_pipeline_text = "ship it tomorrow".to_string();
+        let fast_pass = async { Ok::<String, String>("Ship it tomorrow.".to_string()) };
+
+        let raced = tokio::time::timeout(Duration::from_millis(50), fast_pass).await;
+        let attempt = match raced {
+            Ok(Ok(text)) => crate::dictation_timing::DictationFormatAttempt::Applied(text),
+            Ok(Err(_)) => crate::dictation_timing::DictationFormatAttempt::Failed,
+            Err(_) => crate::dictation_timing::DictationFormatAttempt::TimedOut,
+        };
+        let fallback = crate::dictation_timing::resolve_dictation_format_attempt(
+            attempt,
+            &local_pipeline_text,
+        );
+
+        assert_eq!(
+            fallback.format_outcome,
+            crate::dictation_timing::DictationFormatOutcome::Applied
+        );
+        assert_eq!(fallback.final_text, "Ship it tomorrow.");
+        assert!(!fallback.warn_timed_out);
+        assert!(!fallback.warn_failed);
+    }
+}
+
 #[cfg(target_os = "macos")]
 const HOTKEY_TARGET_MAX_AGE_MS: i64 = 5_000;
 #[cfg(target_os = "macos")]
@@ -5297,6 +5409,7 @@ fn build_dictation_text_ready_payload(
     resolved_hosting: Option<&str>,
     provider_model_label: Option<&str>,
     warnings: &[String],
+    timing: crate::dictation_timing::DictationTimingRecord,
 ) -> DictationTextReadyEvent {
     let has_fallback_reason = result
         .fallback_reason
@@ -5352,6 +5465,7 @@ fn build_dictation_text_ready_payload(
         resolved_hosting: resolved_hosting.map(str::to_string),
         provider_model_label: provider_model_label.map(str::to_string),
         warnings: warnings.to_vec(),
+        timing,
     }
 }
 
@@ -8245,6 +8359,22 @@ mod tests {
                 serde_json::to_value(payload).expect("serialize test event"),
             ));
         }
+    }
+
+    fn sample_dictation_timing_record_for_tests() -> crate::dictation_timing::DictationTimingRecord
+    {
+        crate::dictation_timing::assemble_dictation_timing_record(
+            crate::dictation_timing::DictationTimingInputs {
+                stop_signal_received_at_epoch_ms: 1_000,
+                audio_finalized_ms: Some(15),
+                asr_complete_ms: Some(180),
+                format_complete_ms: Some(185),
+                format_outcome: crate::dictation_timing::DictationFormatOutcome::Applied,
+                insertion_dispatched_ms: Some(200),
+                insertion_confirmed_ms: Some(224),
+                insertion_confirmed: true,
+            },
+        )
     }
 
     fn snippet(
@@ -11357,6 +11487,7 @@ mod tests {
             Some("local"),
             Some("distil-large-v3.5"),
             &["AI formatting could not run.".to_string()],
+            sample_dictation_timing_record_for_tests(),
         );
         let payload = serde_json::to_value(payload).expect("payload should serialize");
 
@@ -11453,6 +11584,7 @@ mod tests {
             Some("local"),
             Some("Distil Whisper large-v3.5"),
             &[],
+            sample_dictation_timing_record_for_tests(),
         );
         let payload = serde_json::to_value(payload).expect("payload should serialize");
 
@@ -21357,6 +21489,10 @@ async fn stop_dictation_for_sidecar(
         tracker.stop_requested_at = Some(std::time::Instant::now());
         active
     };
+    // Wall-clock zero point for the whole `DictationTimingRecord` below: every
+    // stage after this is reported as milliseconds elapsed since the stop
+    // signal (hotkey release, VAD auto-stop, manual stop, or popup stop).
+    let stop_signal_received_at_epoch_ms = chrono::Utc::now().timestamp_millis();
     let dictation_options = state.dictation_start_options.lock().await.clone();
     let settings_snapshot = {
         let sm = state.settings_manager.lock().await;
@@ -21466,6 +21602,12 @@ async fn stop_dictation_for_sidecar(
                 .await);
             }
         }
+    };
+    let audio_finalized_ms = {
+        let tracker = state.dictation_session_tracker.lock().await;
+        tracker
+            .stop_requested_at
+            .map(|stopped_at| stopped_at.elapsed().as_millis().min(u128::from(u64::MAX)) as u64)
     };
     if hit_max_duration {
         // The session was ended by the length ceiling, not by the user. Say so:
@@ -21629,6 +21771,10 @@ async fn stop_dictation_for_sidecar(
     let mut recent_insert_reused = false;
     let mut pipeline_stage_keys: Vec<String> = Vec::new();
     let mut undo_previous_insert = false;
+    // Timing-record fields for the format/cleanup stage. Stays
+    // `NotApplicable` unless the pipeline below actually reaches formatting
+    // (an empty transcript or a consumed command skips it entirely).
+    let mut format_outcome = crate::dictation_timing::DictationFormatOutcome::NotApplicable;
 
     if settings_snapshot
         .transcription
@@ -21739,6 +21885,16 @@ async fn stop_dictation_for_sidecar(
         undo_previous_insert = pipeline_result.undo_previous_insert;
     }
 
+    // Baseline for the format/cleanup stage: reached, and the local pipeline
+    // pass above already ran (it runs unconditionally whenever there is no
+    // command to service). The match below only ever narrows this further
+    // -- to `Skipped` when a mode has no local equivalent and LLM formatting
+    // is off, or to `TimedOut`/`Failed` when an LLM pass was attempted and
+    // didn't return cleanly.
+    if !final_text.is_empty() && command_applied.is_none() {
+        format_outcome = crate::dictation_timing::DictationFormatOutcome::Applied;
+    }
+
     if !final_text.is_empty() && command_applied.is_none() {
         match effective_mode.as_str() {
             // Same gate and the same insertion-delay cap as the Smart Format
@@ -21761,15 +21917,9 @@ async fn stop_dictation_for_sidecar(
                         ),
                     )
                     .await;
-                    match transform {
+                    let attempt = match transform {
                         Ok(Ok((output, _, _))) => {
-                            final_text =
-                                sanitize_dictation_output(output.trim(), final_text.as_str())
-                                    .trim()
-                                    .to_string();
-                            prompt_source = Some(resolved_prompt_source);
-                            prompt_preview = truncate_for_audit_preview(Some(prompt.as_str()), 180);
-                            pipeline_stage_keys.push("mode_transform".to_string());
+                            crate::dictation_timing::DictationFormatAttempt::Applied(output)
                         }
                         Ok(Err(error)) => {
                             // Keep the local pipeline output verbatim: it is
@@ -21779,19 +21929,50 @@ async fn stop_dictation_for_sidecar(
                                 effective_mode,
                                 error
                             );
-                            warnings.push(DICTATION_FORMAT_FAILED_WARNING.to_string());
-                            pipeline_stage_keys.push("mode_transform_fallback".to_string());
+                            crate::dictation_timing::DictationFormatAttempt::Failed
                         }
                         Err(_) => {
                             tracing::warn!(
-                                "Dictation mode transform for '{}' timed out after {}s, keeping local pipeline output",
+                                "Dictation mode transform for '{}' timed out after {}ms, keeping local pipeline output",
                                 effective_mode,
-                                DICTATION_FORMAT_TIMEOUT.as_secs()
+                                DICTATION_FORMAT_TIMEOUT.as_millis()
                             );
-                            warnings.push(DICTATION_FORMAT_TIMEOUT_WARNING.to_string());
+                            crate::dictation_timing::DictationFormatAttempt::TimedOut
+                        }
+                    };
+                    let fallback = crate::dictation_timing::resolve_dictation_format_attempt(
+                        attempt,
+                        final_text.as_str(),
+                    );
+                    format_outcome = fallback.format_outcome;
+                    match format_outcome {
+                        crate::dictation_timing::DictationFormatOutcome::Applied => {
+                            final_text = sanitize_dictation_output(
+                                fallback.final_text.trim(),
+                                final_text.as_str(),
+                            )
+                            .trim()
+                            .to_string();
+                            prompt_source = Some(resolved_prompt_source);
+                            prompt_preview = truncate_for_audit_preview(Some(prompt.as_str()), 180);
+                            pipeline_stage_keys.push("mode_transform".to_string());
+                        }
+                        _ => {
+                            final_text = fallback.final_text;
+                            if fallback.warn_failed {
+                                warnings.push(DICTATION_FORMAT_FAILED_WARNING.to_string());
+                            }
+                            if fallback.warn_timed_out {
+                                warnings.push(DICTATION_FORMAT_TIMEOUT_WARNING.to_string());
+                            }
                             pipeline_stage_keys.push("mode_transform_fallback".to_string());
                         }
                     }
+                } else {
+                    // No local equivalent exists for "rewrite this as an
+                    // email" -- the stage was reached but had nothing to run,
+                    // because Smart Format / AI formatting is off.
+                    format_outcome = crate::dictation_timing::DictationFormatOutcome::Skipped;
                 }
             }
             "notes" => {
@@ -21800,6 +21981,7 @@ async fn stop_dictation_for_sidecar(
                     final_text = bulletized;
                     pipeline_stage_keys.push("mode_transform".to_string());
                 }
+                format_outcome = crate::dictation_timing::DictationFormatOutcome::Applied;
             }
             _ => {
                 if dictation_llm_formatting_enabled(&settings_snapshot, &dictation_options) {
@@ -21812,12 +21994,38 @@ async fn stop_dictation_for_sidecar(
                         ),
                     )
                     .await;
-                    match formatting {
+                    let attempt = match formatting {
                         Ok(Ok(output)) => {
-                            final_text =
-                                sanitize_dictation_output(output.trim(), final_text.as_str())
-                                    .trim()
-                                    .to_string();
+                            crate::dictation_timing::DictationFormatAttempt::Applied(output)
+                        }
+                        Ok(Err(error)) => {
+                            tracing::warn!(
+                                "LLM dictation formatting failed, keeping local pipeline output: {}",
+                                error
+                            );
+                            crate::dictation_timing::DictationFormatAttempt::Failed
+                        }
+                        Err(_) => {
+                            tracing::warn!(
+                                "LLM dictation formatting timed out after {}ms, keeping local pipeline output",
+                                DICTATION_FORMAT_TIMEOUT.as_millis()
+                            );
+                            crate::dictation_timing::DictationFormatAttempt::TimedOut
+                        }
+                    };
+                    let fallback = crate::dictation_timing::resolve_dictation_format_attempt(
+                        attempt,
+                        final_text.as_str(),
+                    );
+                    format_outcome = fallback.format_outcome;
+                    match format_outcome {
+                        crate::dictation_timing::DictationFormatOutcome::Applied => {
+                            final_text = sanitize_dictation_output(
+                                fallback.final_text.trim(),
+                                final_text.as_str(),
+                            )
+                            .trim()
+                            .to_string();
                             let (resolved_prompt_source, resolved_prompt_preview) =
                                 resolve_dictation_format_prompt_metadata(&settings_snapshot);
                             prompt_source = resolved_prompt_source;
@@ -21831,25 +22039,28 @@ async fn stop_dictation_for_sidecar(
                             }
                             formatting_applied = true;
                         }
-                        Ok(Err(error)) => {
-                            tracing::warn!(
-                                "LLM dictation formatting failed, keeping local pipeline output: {}",
-                                error
-                            );
-                            warnings.push(DICTATION_FORMAT_FAILED_WARNING.to_string());
-                        }
-                        Err(_) => {
-                            tracing::warn!(
-                                "LLM dictation formatting timed out after {}s, keeping local pipeline output",
-                                DICTATION_FORMAT_TIMEOUT.as_secs()
-                            );
-                            warnings.push(DICTATION_FORMAT_TIMEOUT_WARNING.to_string());
+                        _ => {
+                            final_text = fallback.final_text;
+                            if fallback.warn_failed {
+                                warnings.push(DICTATION_FORMAT_FAILED_WARNING.to_string());
+                            }
+                            if fallback.warn_timed_out {
+                                warnings.push(DICTATION_FORMAT_TIMEOUT_WARNING.to_string());
+                            }
                         }
                     }
                 }
+                // else: LLM formatting is off. The local pipeline's smart-
+                // format pass already ran above; baseline `Applied` stands.
             }
         }
     }
+    let format_complete_ms = {
+        let tracker = state.dictation_session_tracker.lock().await;
+        tracker
+            .stop_requested_at
+            .map(|stopped_at| stopped_at.elapsed().as_millis().min(u128::from(u64::MAX)) as u64)
+    };
 
     final_text = sanitize_dictation_output(final_text.as_str(), raw_transcribed_text.as_str())
         .trim()
@@ -21991,6 +22202,12 @@ async fn stop_dictation_for_sidecar(
     let mut actual_insertion_mode = requested_insertion_mode.clone();
     let mut outcome = "ready".to_string();
     let mut undo_performed = false;
+    // Timing-record fields for the insertion stage. Stay `None` unless text
+    // insertion is actually dispatched below (preview-only delivery and an
+    // undo-only command never reach it).
+    let mut insertion_dispatched_ms: Option<u64> = None;
+    let mut insertion_confirmed_ms: Option<u64> = None;
+    let mut insertion_confirmed_flag = false;
 
     if preview_only {
         actual_insertion_mode = "preview".to_string();
@@ -22020,6 +22237,12 @@ async fn stop_dictation_for_sidecar(
 
         if !final_text.is_empty() {
             let insert_started_at = std::time::Instant::now();
+            insertion_dispatched_ms = {
+                let tracker = state.dictation_session_tracker.lock().await;
+                tracker.stop_requested_at.map(|stopped_at| {
+                    stopped_at.elapsed().as_millis().min(u128::from(u64::MAX)) as u64
+                })
+            };
             let paste_outcome =
                 match DictationInsertionMode::from_settings_value(&requested_insertion_mode) {
                     DictationInsertionMode::ClipboardOnly => {
@@ -22098,6 +22321,13 @@ async fn stop_dictation_for_sidecar(
                     .as_millis()
                     .min(u128::from(u64::MAX)) as u64,
             );
+            insertion_confirmed_ms = {
+                let tracker = state.dictation_session_tracker.lock().await;
+                tracker.stop_requested_at.map(|stopped_at| {
+                    stopped_at.elapsed().as_millis().min(u128::from(u64::MAX)) as u64
+                })
+            };
+            insertion_confirmed_flag = paste_outcome.confirmed;
             pasted = paste_outcome.pasted;
             copied = paste_outcome.copied;
             if paste_error.is_none() {
@@ -22164,6 +22394,27 @@ async fn stop_dictation_for_sidecar(
             end_to_end_ms,
         )
     };
+    // The Wave 3 timing record: key-release-to-glyph, not just ASR decode
+    // time. Additive on the completion event below and logged once here --
+    // plain Instants already captured above, no new syscalls, dropped on the
+    // floor if nothing reads it.
+    let dictation_timing_record = crate::dictation_timing::assemble_dictation_timing_record(
+        crate::dictation_timing::DictationTimingInputs {
+            stop_signal_received_at_epoch_ms,
+            audio_finalized_ms,
+            asr_complete_ms: final_transcript_latency_ms,
+            format_complete_ms,
+            format_outcome,
+            insertion_dispatched_ms,
+            insertion_confirmed_ms,
+            insertion_confirmed: insertion_confirmed_flag,
+        },
+    );
+    tracing::info!(
+        "dictation {} timing: {}",
+        session_id,
+        crate::dictation_timing::format_dictation_timing_summary(&dictation_timing_record)
+    );
     let fallback_message = build_provider_fallback_message(
         transcription_result.requested_provider,
         transcription_result.actual_provider,
@@ -22247,6 +22498,7 @@ async fn stop_dictation_for_sidecar(
             "end_to_end_ms": end_to_end_ms,
             "outcome": outcome,
             "warnings": warnings,
+            "timing": dictation_timing_record,
         }));
         let _ = db.log_audit_event("dictation_completed", Some(audit_details), "info");
     }
@@ -22325,6 +22577,7 @@ async fn stop_dictation_for_sidecar(
         dictation_options.resolved_hosting.as_deref(),
         dictation_options.provider_model_label.as_deref(),
         &warnings,
+        dictation_timing_record,
     );
     let mut payload_value = match serde_json::to_value(payload) {
         Ok(value) => value,
