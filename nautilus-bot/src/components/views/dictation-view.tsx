@@ -10,6 +10,7 @@ import {
   deleteDictationDictionaryEntry,
   exportDictationDictionaryCsv,
   importDictationDictionaryCsv,
+  EXTERNAL_APP_CORRECTION_SOURCE,
   listDictationCorrectionSuggestions,
   queueDictationCorrectionSuggestion,
   approveDictationCorrectionSuggestion,
@@ -88,7 +89,7 @@ import {
   requestReadinessDestination,
 } from "@/lib/navigation";
 import { sanitizeUserFacingDictationMessage } from "@/lib/dictation-ui-message";
-import { invoke } from "@/lib/electron";
+import { invoke, listen } from "@/lib/electron";
 import { speakTextAloud, stopSpeakingText } from "@/lib/text-to-speech";
 import { useToast } from "@/components/toast";
 import { Button } from "@/components/ui/button";
@@ -183,10 +184,128 @@ type CorrectionSuggestionGroup = {
   spokenForm: string;
   replacement: string;
   appTarget: string | null;
+  source: string | null;
   updatedAt: string;
   sampleOriginalText: string;
   sampleCorrectedText: string;
 };
+
+/**
+ * Where the one-time card offering "learn from corrections in other apps" is
+ * remembered once the user has closed it. Per-machine, like the coach steps
+ * above it — this is a "you have seen this" marker, not a preference, and the
+ * preference itself lives in settings.
+ */
+const EXTERNAL_CORRECTION_CARD_STORAGE_KEY =
+  "plainsong-external-correction-card-dismissed";
+
+/**
+ * How many dictations someone has to have finished before Plainsong mentions
+ * the feature at all. Offering it on day one would be asking permission to read
+ * other apps' text from someone with no reason yet to want it; by five they
+ * have seen the app get a word wrong somewhere and fixed it themselves.
+ */
+const EXTERNAL_CORRECTION_CARD_MIN_DICTATIONS = 5;
+
+/**
+ * Whether to show the one-time card. Every condition has to hold: it never
+ * appears once the feature is on (there is nothing left to offer), never
+ * appears again after it is closed, and never appears before the user has done
+ * enough dictating for it to mean anything. There is no second showing and no
+ * nagging — closing it is final.
+ */
+function shouldShowExternalCorrectionCard(input: {
+  featureEnabled: boolean;
+  dismissed: boolean;
+  totalDictations: number;
+}): boolean {
+  return (
+    !input.featureEnabled &&
+    !input.dismissed &&
+    input.totalDictations >= EXTERNAL_CORRECTION_CARD_MIN_DICTATIONS
+  );
+}
+
+/**
+ * One queued correction, in either section of the inbox.
+ *
+ * The "Heard"/"Corrected" panels only appear when the stored sample says
+ * something the headline does not. Readback suggestions store only the words
+ * that changed — the sentence they came out of is never written down — so for
+ * those the panels would just repeat the line above them.
+ */
+function CorrectionSuggestionRow({
+  group,
+  busy,
+  onApprove,
+  onDismiss,
+}: {
+  group: CorrectionSuggestionGroup;
+  busy: boolean;
+  onApprove: (suggestionIds: string[]) => void | Promise<void>;
+  onDismiss: (suggestionIds: string[]) => void | Promise<void>;
+}) {
+  const hasSampleContext =
+    group.sampleOriginalText.trim() !== group.spokenForm.trim() ||
+    group.sampleCorrectedText.trim() !== group.replacement.trim();
+
+  return (
+    <div className="rounded-md border bg-background px-3 py-3">
+      <div className="flex flex-wrap items-start justify-between gap-3">
+        <div className="space-y-1">
+          <p className="text-sm font-medium">
+            {group.spokenForm} {"->"} {group.replacement}
+          </p>
+          <p className="text-sm text-muted-foreground">
+            {group.appTarget
+              ? `${
+                  group.source === EXTERNAL_APP_CORRECTION_SOURCE
+                    ? "Corrected in"
+                    : "Seen in"
+                } ${group.appTarget}`
+              : "Seen anywhere"}
+            {" · "}
+            {new Date(group.updatedAt).toLocaleString()}
+            {group.suggestionIds.length > 1
+              ? ` · ${group.suggestionIds.length} similar edits`
+              : ""}
+          </p>
+        </div>
+        <div className="flex gap-2">
+          <Button
+            type="button"
+            size="sm"
+            disabled={busy}
+            onClick={() => void onApprove(group.suggestionIds)}
+          >
+            {group.suggestionIds.length > 1 ? "Approve all" : "Approve"}
+          </Button>
+          <Button
+            type="button"
+            size="sm"
+            variant="outline"
+            disabled={busy}
+            onClick={() => void onDismiss(group.suggestionIds)}
+          >
+            {group.suggestionIds.length > 1 ? "Dismiss all" : "Dismiss"}
+          </Button>
+        </div>
+      </div>
+      {hasSampleContext && (
+        <div className="mt-2 grid gap-2 md:grid-cols-2">
+          <div className="rounded-md bg-muted/40 px-2 py-2">
+            <p className="rubric-muted">Heard</p>
+            <p className="mt-1 text-sm">{group.sampleOriginalText}</p>
+          </div>
+          <div className="rounded-md bg-muted/40 px-2 py-2">
+            <p className="rubric-muted">Corrected</p>
+            <p className="mt-1 text-sm">{group.sampleCorrectedText}</p>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
 
 type DictationCustomModeDraft = {
   name: string;
@@ -785,6 +904,14 @@ export function DictationView() {
   const [dictationAutoLearnCorrections, setDictationAutoLearnCorrections] =
     useState(true);
   const [
+    dictationLearnFromExternalCorrections,
+    setDictationLearnFromExternalCorrections,
+  ] = useState(false);
+  const [
+    externalCorrectionCardDismissed,
+    setExternalCorrectionCardDismissed,
+  ] = useState(true);
+  const [
     dictationCategoryFormattingEnabled,
     setDictationCategoryFormattingEnabled,
   ] = useState(true);
@@ -1160,6 +1287,11 @@ export function DictationView() {
         suggestion.spokenForm.trim().toLowerCase(),
         suggestion.replacement.trim(),
         suggestion.appTarget?.trim().toLowerCase() ?? "",
+        // Kept in the key so an edit made inside Plainsong and the same edit
+        // read back out of Slack stay two separate rows: they are shown in
+        // different sections and say different things about where the text
+        // came from.
+        suggestion.source ?? "",
       ].join("::");
       const existing = groups.get(key);
       if (existing) {
@@ -1179,6 +1311,7 @@ export function DictationView() {
           spokenForm: suggestion.spokenForm,
           replacement: suggestion.replacement,
           appTarget: suggestion.appTarget,
+          source: suggestion.source ?? null,
           updatedAt: suggestion.updatedAt,
           sampleOriginalText: suggestion.originalText,
           sampleCorrectedText: suggestion.correctedText,
@@ -1192,6 +1325,30 @@ export function DictationView() {
         new Date(left.updatedAt).getTime(),
     );
   }, [dictationCorrectionSuggestions]);
+
+  // Two lists, not one. A suggestion read back out of another app is a
+  // different kind of thing from one the user typed in Plainsong's own result
+  // box — it carries a claim about text that was on screen somewhere else — so
+  // it gets its own section, its own explanation, and its own approval.
+  const externalCorrectionSuggestionGroups = useMemo(
+    () =>
+      groupedCorrectionSuggestions.filter(
+        (group) => group.source === EXTERNAL_APP_CORRECTION_SOURCE,
+      ),
+    [groupedCorrectionSuggestions],
+  );
+  const inAppCorrectionSuggestionGroups = useMemo(
+    () =>
+      groupedCorrectionSuggestions.filter(
+        (group) => group.source !== EXTERNAL_APP_CORRECTION_SOURCE,
+      ),
+    [groupedCorrectionSuggestions],
+  );
+  const showExternalCorrectionCard = shouldShowExternalCorrectionCard({
+    featureEnabled: dictationLearnFromExternalCorrections,
+    dismissed: externalCorrectionCardDismissed,
+    totalDictations: dictationInsights?.totalDictations ?? 0,
+  });
 
   // Sourced entirely from the existing listDictationDictionaryEntries data
   // (DictationDictionaryEntry already carries createdAt/updatedAt from the
@@ -1681,6 +1838,12 @@ export function DictationView() {
         setDictationAutoLearnCorrections(
           settings.transcription.dictationAutoLearnCorrections ?? true,
         );
+        // Defaults to off, and a settings file that predates the setting must
+        // read as off too — this is the switch that lets Plainsong look at
+        // another app's text.
+        setDictationLearnFromExternalCorrections(
+          settings.transcription.dictationLearnFromExternalCorrections ?? false,
+        );
         setDictationSilenceTimeoutSeconds(
           settings.transcription.dictationSilenceTimeoutSeconds ?? 0,
         );
@@ -1744,6 +1907,76 @@ export function DictationView() {
     };
   }, []);
 
+  // Starts at "dismissed" so the card cannot flash on screen for a frame before
+  // storage is read; a machine that has never seen it flips to false here.
+  useEffect(() => {
+    try {
+      const storage = getSafeLocalStorage();
+      if (!storage) {
+        return;
+      }
+      setExternalCorrectionCardDismissed(
+        storage.getItem(EXTERNAL_CORRECTION_CARD_STORAGE_KEY) === "true",
+      );
+    } catch (error) {
+      console.warn(
+        "Failed to restore the external-correction card state:",
+        error,
+      );
+    }
+  }, []);
+
+  const dismissExternalCorrectionCard = () => {
+    setExternalCorrectionCardDismissed(true);
+    try {
+      getSafeLocalStorage()?.setItem(
+        EXTERNAL_CORRECTION_CARD_STORAGE_KEY,
+        "true",
+      );
+    } catch (error) {
+      console.warn(
+        "Failed to persist the external-correction card state:",
+        error,
+      );
+    }
+  };
+
+  // The sidecar queues readback suggestions on its own timer, seconds after an
+  // insert, so the inbox has to be told rather than polled.
+  useEffect(() => {
+    let disposed = false;
+    let unlisten: (() => void) | undefined;
+
+    void listen("dictation-correction-suggestions-changed", () => {
+      if (disposed) {
+        return;
+      }
+      void listDictationCorrectionSuggestions()
+        .then((suggestions) => {
+          if (!disposed) {
+            setDictationCorrectionSuggestions(suggestions);
+          }
+        })
+        .catch((error) => {
+          console.warn(
+            "Failed to refresh dictation correction suggestions:",
+            error,
+          );
+        });
+    }).then((dispose) => {
+      if (disposed) {
+        dispose();
+        return;
+      }
+      unlisten = dispose;
+    });
+
+    return () => {
+      disposed = true;
+      unlisten?.();
+    };
+  }, []);
+
   useEffect(() => {
     let mounted = true;
     void listDictationSnippets()
@@ -1799,6 +2032,7 @@ export function DictationView() {
       activeLanguages: string[];
       snippetsEnabled: boolean;
       autoLearnCorrections: boolean;
+      learnFromExternalCorrections: boolean;
       silenceTimeoutSeconds: number;
       retentionPreset: "immediate" | "24h" | "72h" | "never" | "custom";
       retentionCustomHours: number;
@@ -1841,6 +2075,9 @@ export function DictationView() {
           : dictationActiveLanguages;
       const nextAutoLearnCorrections =
         updates.autoLearnCorrections ?? dictationAutoLearnCorrections;
+      const nextLearnFromExternalCorrections =
+        updates.learnFromExternalCorrections ??
+        dictationLearnFromExternalCorrections;
       const nextSilenceTimeoutSeconds = normalizeDictationSilenceTimeoutSeconds(
         updates.silenceTimeoutSeconds ?? dictationSilenceTimeoutSeconds,
       );
@@ -1888,6 +2125,8 @@ export function DictationView() {
         updates.snippetsEnabled ?? dictationSnippetsEnabled;
       settings.transcription.dictationAutoLearnCorrections =
         nextAutoLearnCorrections;
+      settings.transcription.dictationLearnFromExternalCorrections =
+        nextLearnFromExternalCorrections;
       settings.transcription.dictationSilenceTimeoutSeconds =
         nextSilenceTimeoutSeconds;
       settings.transcription.dictationRetentionPreset =
@@ -5720,12 +5959,52 @@ export function DictationView() {
               </TabsContent>
 
               <TabsContent value="corrections" className="mt-4 space-y-4">
+                {showExternalCorrectionCard && (
+                  <div className="rounded-md border bg-muted/20 px-3 py-3 space-y-2">
+                    <h3 className="section-heading">
+                      Corrections you make elsewhere
+                    </h3>
+                    <p className="text-sm text-muted-foreground">
+                      You fix Plainsong&apos;s mistakes where the text lands —
+                      in Slack, in mail, in your editor — and it never finds
+                      out. It can watch for that, but only if you ask it to: it
+                      would re-read the one field it just typed into, for a few
+                      seconds after the insert, and show you the word changes to
+                      approve. Off unless you turn it on.
+                    </p>
+                    <div className="flex flex-wrap gap-2">
+                      <Button
+                        type="button"
+                        size="sm"
+                        variant="outline"
+                        onClick={() => {
+                          setDictationLearnFromExternalCorrections(true);
+                          dismissExternalCorrectionCard();
+                          void persistDictationPreferences({
+                            learnFromExternalCorrections: true,
+                          });
+                        }}
+                      >
+                        Turn it on
+                      </Button>
+                      <Button
+                        type="button"
+                        size="sm"
+                        variant="ghost"
+                        onClick={dismissExternalCorrectionCard}
+                      >
+                        Not now
+                      </Button>
+                    </div>
+                  </div>
+                )}
+
                 <div className="flex flex-wrap items-start justify-between gap-3">
                   <div className="min-w-0">
                     <h3 className="section-heading">Correction inbox</h3>
                     <p className="text-sm text-muted-foreground">
-                      Edits Plainsong noticed you making. Approving one adds it
-                      to the dictionary.
+                      Edits you made to a result inside Plainsong. Approving one
+                      adds it to the dictionary.
                     </p>
                   </div>
                   <div className="flex flex-wrap items-center gap-2">
@@ -5744,9 +6023,13 @@ export function DictationView() {
                       Auto-learn corrections
                     </label>
                     <span className="text-sm text-muted-foreground">
-                      {dictationCorrectionSuggestions.length} pending
+                      {inAppCorrectionSuggestionGroups.reduce(
+                        (total, group) => total + group.suggestionIds.length,
+                        0,
+                      )}{" "}
+                      pending
                     </span>
-                    {groupedCorrectionSuggestions.length > 1 && (
+                    {inAppCorrectionSuggestionGroups.length > 1 && (
                       <>
                         <Button
                           type="button"
@@ -5755,7 +6038,7 @@ export function DictationView() {
                           disabled={correctionInboxBusy}
                           onClick={() =>
                             void handleApproveCorrectionSuggestionGroup(
-                              groupedCorrectionSuggestions.flatMap(
+                              inAppCorrectionSuggestionGroups.flatMap(
                                 (group) => group.suggestionIds,
                               ),
                             )
@@ -5770,7 +6053,7 @@ export function DictationView() {
                           disabled={correctionInboxBusy}
                           onClick={() =>
                             void handleRejectCorrectionSuggestionGroup(
-                              groupedCorrectionSuggestions.flatMap(
+                              inAppCorrectionSuggestionGroups.flatMap(
                                 (group) => group.suggestionIds,
                               ),
                             )
@@ -5783,76 +6066,16 @@ export function DictationView() {
                   </div>
                 </div>
 
-                {groupedCorrectionSuggestions.length > 0 ? (
+                {inAppCorrectionSuggestionGroups.length > 0 ? (
                   <div className="space-y-2">
-                    {groupedCorrectionSuggestions.map((group) => (
-                      <div
+                    {inAppCorrectionSuggestionGroups.map((group) => (
+                      <CorrectionSuggestionRow
                         key={group.key}
-                        className="rounded-md border bg-background px-3 py-3"
-                      >
-                        <div className="flex flex-wrap items-start justify-between gap-3">
-                          <div className="space-y-1">
-                            <p className="text-sm font-medium">
-                              {group.spokenForm} {"->"} {group.replacement}
-                            </p>
-                            <p className="text-sm text-muted-foreground">
-                              {group.appTarget
-                                ? `Seen in ${group.appTarget}`
-                                : "Seen anywhere"}
-                              {" · "}
-                              {new Date(group.updatedAt).toLocaleString()}
-                              {group.suggestionIds.length > 1
-                                ? ` · ${group.suggestionIds.length} similar edits`
-                                : ""}
-                            </p>
-                          </div>
-                          <div className="flex gap-2">
-                            <Button
-                              type="button"
-                              size="sm"
-                              disabled={correctionInboxBusy}
-                              onClick={() =>
-                                void handleApproveCorrectionSuggestionGroup(
-                                  group.suggestionIds,
-                                )
-                              }
-                            >
-                              {group.suggestionIds.length > 1
-                                ? "Approve all"
-                                : "Approve"}
-                            </Button>
-                            <Button
-                              type="button"
-                              size="sm"
-                              variant="outline"
-                              disabled={correctionInboxBusy}
-                              onClick={() =>
-                                void handleRejectCorrectionSuggestionGroup(
-                                  group.suggestionIds,
-                                )
-                              }
-                            >
-                              {group.suggestionIds.length > 1
-                                ? "Dismiss all"
-                                : "Dismiss"}
-                            </Button>
-                          </div>
-                        </div>
-                        <div className="mt-2 grid gap-2 md:grid-cols-2">
-                          <div className="rounded-md bg-muted/40 px-2 py-2">
-                            <p className="rubric-muted">Heard</p>
-                            <p className="mt-1 text-sm">
-                              {group.sampleOriginalText}
-                            </p>
-                          </div>
-                          <div className="rounded-md bg-muted/40 px-2 py-2">
-                            <p className="rubric-muted">Corrected</p>
-                            <p className="mt-1 text-sm">
-                              {group.sampleCorrectedText}
-                            </p>
-                          </div>
-                        </div>
-                      </div>
+                        group={group}
+                        busy={correctionInboxBusy}
+                        onApprove={handleApproveCorrectionSuggestionGroup}
+                        onDismiss={handleRejectCorrectionSuggestionGroup}
+                      />
                     ))}
                   </div>
                 ) : (
@@ -5861,6 +6084,80 @@ export function DictationView() {
                     review.
                   </p>
                 )}
+
+                <div className="space-y-3 border-t pt-4">
+                  <div className="flex flex-wrap items-start justify-between gap-3">
+                    <div className="min-w-0">
+                      <h3 className="section-heading">
+                        Suggested from other apps
+                      </h3>
+                      <p className="text-sm text-muted-foreground">
+                        Word changes Plainsong saw you make where it inserted.
+                        Approving one adds it to the dictionary; dismissing
+                        drops it. Anything left unreviewed for a week expires on
+                        its own.
+                      </p>
+                    </div>
+                    <span className="text-sm text-muted-foreground">
+                      {externalCorrectionSuggestionGroups.reduce(
+                        (total, group) => total + group.suggestionIds.length,
+                        0,
+                      )}{" "}
+                      pending
+                    </span>
+                  </div>
+
+                  <label className="flex items-start gap-2 text-sm">
+                    <input
+                      type="checkbox"
+                      className="mt-1"
+                      checked={dictationLearnFromExternalCorrections}
+                      onChange={(event) => {
+                        const next = event.target.checked;
+                        setDictationLearnFromExternalCorrections(next);
+                        dismissExternalCorrectionCard();
+                        void persistDictationPreferences({
+                          learnFromExternalCorrections: next,
+                        });
+                      }}
+                    />
+                    <span>
+                      <span className="font-medium">
+                        Learn from corrections you make in other apps
+                      </span>
+                      <span className="mt-1 block text-sm text-muted-foreground">
+                        Off by default. With it on, Plainsong re-reads the one
+                        field it just typed into — only that field, only in the
+                        app it inserted into, and only for the 8 seconds after
+                        the insert. It compares that text with what it typed, on
+                        this machine; nothing is sent anywhere. Nothing is kept
+                        except the individual word changes you approve here. If
+                        you switch apps or put the cursor in another field,
+                        Plainsong stops and reads nothing.
+                      </span>
+                    </span>
+                  </label>
+
+                  {externalCorrectionSuggestionGroups.length > 0 ? (
+                    <div className="space-y-2">
+                      {externalCorrectionSuggestionGroups.map((group) => (
+                        <CorrectionSuggestionRow
+                          key={group.key}
+                          group={group}
+                          busy={correctionInboxBusy}
+                          onApprove={handleApproveCorrectionSuggestionGroup}
+                          onDismiss={handleRejectCorrectionSuggestionGroup}
+                        />
+                      ))}
+                    </div>
+                  ) : (
+                    <p className="text-sm text-muted-foreground">
+                      {dictationLearnFromExternalCorrections
+                        ? "Nothing yet. Fix a word right after Plainsong types it somewhere, and the change shows up here to approve."
+                        : "Nothing here while this is off — Plainsong is not reading any other app's text."}
+                    </p>
+                  )}
+                </div>
 
                 <div className="space-y-2 border-t pt-4">
                   <h3 className="section-heading">Fixing what you just said</h3>

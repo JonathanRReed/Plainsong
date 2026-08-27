@@ -593,6 +593,14 @@ export interface DictationDictionaryCsvImportResult {
   errors: string[];
 }
 
+/**
+ * How Plainsong came to know about a queued correction. Mirrors
+ * `CORRECTION_SUGGESTION_SOURCE_EXTERNAL_APP` in `rust-sidecar/src/models.rs`;
+ * `null` means the user retyped the result inside Plainsong, which is also what
+ * every row written before the distinction existed reads as.
+ */
+export const EXTERNAL_APP_CORRECTION_SOURCE = "external_app_readback";
+
 export interface DictationCorrectionSuggestion {
   id: string;
   originalText: string;
@@ -600,6 +608,7 @@ export interface DictationCorrectionSuggestion {
   spokenForm: string;
   replacement: string;
   appTarget: string | null;
+  source?: string | null;
   createdAt: string;
   updatedAt: string;
 }

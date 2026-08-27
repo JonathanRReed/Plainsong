@@ -24,6 +24,32 @@ const speechSynthesisMock = {
 /** jsdom ships no clipboard; the latest-result card writes to it. */
 const clipboardWriteText = vi.fn(async () => {});
 
+/**
+ * This jsdom setup ships no `window.localStorage` either, and the view remembers
+ * its one-time cards there. A real in-memory store (rather than spies) is what
+ * lets a test assert the part that matters: that a card closed once stays closed
+ * the next time the view is mounted.
+ */
+const localStorageStub = (() => {
+  const entries = new Map<string, string>();
+  return {
+    getItem: (key: string) => entries.get(key) ?? null,
+    setItem: (key: string, value: string) => {
+      entries.set(key, String(value));
+    },
+    removeItem: (key: string) => {
+      entries.delete(key);
+    },
+    clear: () => {
+      entries.clear();
+    },
+  };
+})();
+Object.defineProperty(window, "localStorage", {
+  configurable: true,
+  value: localStorageStub,
+});
+
 const toast = vi.fn();
 const readinessContext = vi.hoisted(() => ({
   refresh: vi.fn(async () => {}),
@@ -258,6 +284,7 @@ vi.mock("@/lib/backend/asr", () => ({
 }));
 
 vi.mock("@/lib/backend/dictation", () => ({
+  EXTERNAL_APP_CORRECTION_SOURCE: "external_app_readback",
   getDictationHistoryDetails: vi.fn(async () => null),
   getDictationInsights: vi.fn(async () => ({
     totalDictations: 3,
@@ -363,6 +390,9 @@ function createSavedDictation(overrides: Partial<Recording> = {}): Recording {
 describe("DictationView modes", () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    // Every test starts on a machine that has never seen this view before —
+    // the one-time cards below are remembered in localStorage.
+    window.localStorage.clear();
     backendMocks.eventListeners.clear();
     backendMocks.asrProviders = backendMocks.buildAsrProviders();
     backendMocks.recordings = [];
@@ -1214,6 +1244,309 @@ describe("DictationView modes", () => {
       expect(backend.approveDictationCorrectionSuggestion).toHaveBeenCalledWith("suggestion-1");
       expect(backend.rejectDictationCorrectionSuggestion).toHaveBeenCalledWith("suggestion-2");
     });
+  });
+
+  // ── ux-8: corrections made where the text actually landed ────────────────
+  //
+  // "Learns automatically from your corrections" only ever fired when the user
+  // retyped inside Plainsong's own result box. These cover the other half: what
+  // the sidecar reads back out of Slack/Gmail/an editor shows up in its own
+  // section, says which app it came from, and is never applied without a click.
+
+  /** One suggestion the sidecar read back out of another app's field. */
+  function externalSuggestion(overrides: Record<string, unknown> = {}) {
+    return {
+      id: "external-1",
+      originalText: "cuban netties",
+      correctedText: "kubernetes",
+      spokenForm: "cuban netties",
+      replacement: "kubernetes",
+      appTarget: "Slack",
+      source: "external_app_readback",
+      createdAt: new Date("2026-03-14T10:00:00Z").toISOString(),
+      updatedAt: new Date("2026-03-14T10:00:00Z").toISOString(),
+      ...overrides,
+    };
+  }
+
+  /** The section a suggestion has to be inside, not merely somewhere on screen. */
+  function externalSuggestionsSection() {
+    const heading = screen.getByText("Suggested from other apps");
+    const section = heading.closest("div.border-t");
+    if (!section) {
+      throw new Error("The other-apps section has no container to scope to.");
+    }
+    return within(section as HTMLElement);
+  }
+
+  it("shows a correction read back from another app in its own section, naming the app", async () => {
+    const backend = await import("@/lib/backend/dictation");
+    vi.mocked(backend.listDictationCorrectionSuggestions).mockResolvedValueOnce([
+      externalSuggestion(),
+    ]);
+
+    render(<DictationView />);
+    await openConfigTab("Corrections");
+
+    const section = externalSuggestionsSection();
+    expect(
+      await section.findByText(/cuban netties -> kubernetes/i),
+    ).toBeInTheDocument();
+    expect(section.getByText(/Corrected in Slack/i)).toBeInTheDocument();
+  });
+
+  it("keeps corrections made inside Plainsong out of the other-apps section", async () => {
+    const backend = await import("@/lib/backend/dictation");
+    vi.mocked(backend.listDictationCorrectionSuggestions).mockResolvedValueOnce([
+      externalSuggestion(),
+      {
+        id: "in-app-1",
+        originalText: "jon will join",
+        correctedText: "John will join",
+        spokenForm: "jon",
+        replacement: "John",
+        appTarget: "Slack",
+        source: null,
+        createdAt: new Date("2026-03-14T09:00:00Z").toISOString(),
+        updatedAt: new Date("2026-03-14T09:00:00Z").toISOString(),
+      },
+    ]);
+
+    render(<DictationView />);
+    await openConfigTab("Corrections");
+
+    const section = externalSuggestionsSection();
+    expect(
+      await section.findByText(/cuban netties -> kubernetes/i),
+    ).toBeInTheDocument();
+    expect(section.queryByText(/jon -> John/i)).not.toBeInTheDocument();
+    // The in-app edit is still in the inbox above, unchanged.
+    expect(screen.getByText(/jon -> John/i)).toBeInTheDocument();
+  });
+
+  it("adds a correction read back from another app to the dictionary only when approved", async () => {
+    const backend = await import("@/lib/backend/dictation");
+    vi.mocked(backend.listDictationCorrectionSuggestions).mockResolvedValueOnce([
+      externalSuggestion(),
+    ]);
+
+    render(<DictationView />);
+    await openConfigTab("Corrections");
+
+    const section = externalSuggestionsSection();
+    await section.findByText(/cuban netties -> kubernetes/i);
+    // Nothing has been learned from merely showing it.
+    expect(backend.approveDictationCorrectionSuggestion).not.toHaveBeenCalled();
+
+    fireEvent.click(section.getByRole("button", { name: "Approve" }));
+
+    await waitFor(() => {
+      expect(backend.approveDictationCorrectionSuggestion).toHaveBeenCalledWith(
+        "external-1",
+      );
+    });
+  });
+
+  it("drops a correction read back from another app when it is dismissed", async () => {
+    const backend = await import("@/lib/backend/dictation");
+    vi.mocked(backend.listDictationCorrectionSuggestions).mockResolvedValueOnce([
+      externalSuggestion(),
+    ]);
+
+    render(<DictationView />);
+    await openConfigTab("Corrections");
+
+    const section = externalSuggestionsSection();
+    await section.findByText(/cuban netties -> kubernetes/i);
+    fireEvent.click(section.getByRole("button", { name: "Dismiss" }));
+
+    await waitFor(() => {
+      expect(backend.rejectDictationCorrectionSuggestion).toHaveBeenCalledWith(
+        "external-1",
+      );
+    });
+    await waitFor(() => {
+      expect(
+        externalSuggestionsSection().queryByText(
+          /cuban netties -> kubernetes/i,
+        ),
+      ).not.toBeInTheDocument();
+    });
+    expect(backend.approveDictationCorrectionSuggestion).not.toHaveBeenCalled();
+  });
+
+  it("states plainly that nothing is being read while the setting is off", async () => {
+    render(<DictationView />);
+    await openConfigTab("Corrections");
+
+    const toggle = await screen.findByRole("checkbox", {
+      name: /Learn from corrections you make in other apps/i,
+    });
+    expect(toggle).not.toBeChecked();
+    expect(
+      externalSuggestionsSection().getByText(
+        /Plainsong is not reading any other app's text/i,
+      ),
+    ).toBeInTheDocument();
+  });
+
+  it("says exactly what turning the setting on lets Plainsong read", async () => {
+    render(<DictationView />);
+    await openConfigTab("Corrections");
+
+    const copy = await screen.findByText(
+      /Plainsong re-reads the one field it just typed into/i,
+    );
+    // The four promises the copy has to make, in the user's own words.
+    expect(copy).toHaveTextContent(/only that field/i);
+    expect(copy).toHaveTextContent(/only for the 8 seconds after the insert/i);
+    expect(copy).toHaveTextContent(/on this machine; nothing is sent anywhere/i);
+    expect(copy).toHaveTextContent(
+      /Nothing is kept except the individual word changes you approve/i,
+    );
+    expect(copy).toHaveTextContent(
+      /If you switch apps or put the cursor in another field, Plainsong stops and reads nothing/i,
+    );
+  });
+
+  it("persists the other-apps setting when it is switched on", async () => {
+    render(<DictationView />);
+    await openConfigTab("Corrections");
+
+    fireEvent.click(
+      await screen.findByRole("checkbox", {
+        name: /Learn from corrections you make in other apps/i,
+      }),
+    );
+
+    await waitFor(() => {
+      const calls = backendMocks.saveSettings.mock.calls as unknown as Array<
+        [{ transcription: { dictationLearnFromExternalCorrections?: boolean } }]
+      >;
+      const saved = calls[calls.length - 1]?.[0];
+      expect(saved?.transcription.dictationLearnFromExternalCorrections).toBe(
+        true,
+      );
+    });
+  });
+
+  it("does not raise the other-apps card before the habit is there", async () => {
+    // The default fixture has three dictations behind it.
+    render(<DictationView />);
+    await openConfigTab("Corrections");
+
+    await screen.findByText("Correction inbox");
+    expect(
+      screen.queryByText("Corrections you make elsewhere"),
+    ).not.toBeInTheDocument();
+  });
+
+  /** Put enough dictations behind the fixture for the card to be offered. */
+  async function withEnoughDictationsForTheCard() {
+    const backend = await import("@/lib/backend/dictation");
+    vi.mocked(backend.getDictationInsights).mockResolvedValueOnce({
+      totalDictations: 12,
+      dictatedWords: 900,
+      averageWordsPerDictation: 75,
+      activeDays: 6,
+      lastSevenDaysDictations: 9,
+      commandsUsed: 2,
+      backtracksUsed: 1,
+      snippetsTriggered: 3,
+      topAppTarget: "Slack",
+      topAppTargetCount: 7,
+    });
+  }
+
+  it("raises the other-apps card once, and never again after it is closed", async () => {
+    await withEnoughDictationsForTheCard();
+    const first = render(<DictationView />);
+    await openConfigTab("Corrections");
+
+    expect(
+      await screen.findByText("Corrections you make elsewhere"),
+    ).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "Not now" }));
+    expect(
+      screen.queryByText("Corrections you make elsewhere"),
+    ).not.toBeInTheDocument();
+    // Closing it must not turn anything on.
+    expect(backendMocks.saveSettings).not.toHaveBeenCalled();
+    first.unmount();
+
+    await withEnoughDictationsForTheCard();
+    render(<DictationView />);
+    await openConfigTab("Corrections");
+    await screen.findByText("Correction inbox");
+    expect(
+      screen.queryByText("Corrections you make elsewhere"),
+    ).not.toBeInTheDocument();
+  });
+
+  it("turns the setting on from the card and stops offering it", async () => {
+    await withEnoughDictationsForTheCard();
+    render(<DictationView />);
+    await openConfigTab("Corrections");
+
+    fireEvent.click(
+      await screen.findByRole("button", { name: "Turn it on" }),
+    );
+
+    await waitFor(() => {
+      const calls = backendMocks.saveSettings.mock.calls as unknown as Array<
+        [{ transcription: { dictationLearnFromExternalCorrections?: boolean } }]
+      >;
+      const saved = calls[calls.length - 1]?.[0];
+      expect(saved?.transcription.dictationLearnFromExternalCorrections).toBe(
+        true,
+      );
+    });
+    expect(
+      screen.queryByText("Corrections you make elsewhere"),
+    ).not.toBeInTheDocument();
+  });
+
+  it("never raises the other-apps card when the setting is already on", async () => {
+    backendMocks.transcriptionOverrides.dictationLearnFromExternalCorrections =
+      true;
+    await withEnoughDictationsForTheCard();
+
+    render(<DictationView />);
+    await openConfigTab("Corrections");
+
+    await screen.findByText("Correction inbox");
+    expect(
+      screen.queryByText("Corrections you make elsewhere"),
+    ).not.toBeInTheDocument();
+    expect(
+      await screen.findByRole("checkbox", {
+        name: /Learn from corrections you make in other apps/i,
+      }),
+    ).toBeChecked();
+  });
+
+  it("refreshes the inbox when the sidecar queues a readback suggestion", async () => {
+    const backend = await import("@/lib/backend/dictation");
+    render(<DictationView />);
+    await openConfigTab("Corrections");
+    await screen.findByText("Correction inbox");
+
+    vi.mocked(backend.listDictationCorrectionSuggestions).mockResolvedValueOnce([
+      externalSuggestion(),
+    ]);
+    const handler = backendMocks.eventListeners.get(
+      "dictation-correction-suggestions-changed",
+    );
+    expect(handler).toBeTypeOf("function");
+    await act(async () => {
+      handler?.({ payload: { queued: 1, appTarget: "Slack" } });
+    });
+
+    expect(
+      await externalSuggestionsSection().findByText(
+        /cuban netties -> kubernetes/i,
+      ),
+    ).toBeInTheDocument();
   });
 
   /** Put the fixture on a multilingual route so the picker has a list at all. */

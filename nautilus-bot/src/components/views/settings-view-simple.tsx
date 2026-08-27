@@ -2160,8 +2160,8 @@ export function SettingsView() {
 
             <SettingsSwitch
               className="py-0"
-              label="Learn from your corrections"
-              description="When you fix a word or short phrase after dictating, remember it for next time."
+              label="Learn from corrections you make in Plainsong"
+              description="When you fix a word or short phrase in a result here, remember it for next time."
               checked={
                 settings.transcription.dictationAutoLearnCorrections ?? true
               }
@@ -2171,6 +2171,25 @@ export function SettingsView() {
                   transcription: {
                     ...settings.transcription,
                     dictationAutoLearnCorrections: checked,
+                  },
+                })
+              }
+            />
+
+            <SettingsSwitch
+              className="py-0"
+              label="Learn from corrections you make in other apps"
+              description="Off by default. Plainsong re-reads the one field it just typed into, only in that app, only for the 8 seconds after the insert. It compares that text with what it typed, on this machine. Nothing is kept except the word changes you approve in Dictation > Corrections."
+              checked={
+                settings.transcription
+                  .dictationLearnFromExternalCorrections ?? false
+              }
+              onCheckedChange={(checked) =>
+                void updateSettings({
+                  ...settings,
+                  transcription: {
+                    ...settings.transcription,
+                    dictationLearnFromExternalCorrections: checked,
                   },
                 })
               }
