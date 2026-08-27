@@ -1,5 +1,9 @@
 # Dependencies
-node_modules/
+# No trailing slash: that form matches directories ONLY, so a `node_modules`
+# SYMLINK — which is how a git worktree gets pointed at the main checkout's
+# install — is not ignored, shows up as an untracked path, and can be swept
+# into a commit by `git add -A`. It has been, once, to the tune of ~13k files.
+node_modules
 npm-debug.log*
 yarn-debug.log*
 yarn-error.log*

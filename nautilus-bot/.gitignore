@@ -1,5 +1,7 @@
 # Dependencies
-node_modules/
+# No trailing slash — see the note in the repository-root .gitignore: the
+# directory-only form let a `node_modules` symlink into a commit.
+node_modules
 .pnp
 .pnp.js
 
