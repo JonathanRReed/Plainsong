@@ -62,6 +62,11 @@ import {
   waitForMacosUpdateStaging,
 } from "./macos-updater-staging";
 import { runExplicitUpdaterInstallFlow } from "./updater-install-flow";
+import {
+  macAppSignatureIsUpdatable,
+  parseCodesignTeamIdentifier,
+  PLAINSONG_RELEASE_TEAM_ID,
+} from "./macos-code-signature";
 import { overlayVisibilityAllowed, resolveWindowUiSettings } from "./window-ui-settings";
 import {
   clampWindowSizeToWorkArea,
@@ -582,21 +587,48 @@ function configureAutoUpdater(updater: AppUpdater): void {
 // releases are a supported configuration (no Developer ID secrets in CI). An
 // ad-hoc signature (what electron-builder applies on arm64 when no identity is
 // available) cannot be updated either, so it counts as unsigned here.
+//
+// `codesign -dv` only DISPLAYS a signature and exits 0 for a broken or foreign
+// one, so it was never evidence of anything: verify the seal, then require the
+// team identifier to be ours. See macos-code-signature.ts.
 let codeSignatureCheck: Promise<boolean> | null = null;
 
-function isMacAppCodeSigned(): Promise<boolean> {
+function runCodesign(args: string[]): Promise<{ ok: boolean; output: string }> {
+  return new Promise((resolve) => {
+    // `codesign` writes its display output to stderr, so both streams matter.
+    execFile("/usr/bin/codesign", args, (error, stdout, stderr) => {
+      resolve({ ok: !error, output: `${stdout}\n${stderr}` });
+    });
+  });
+}
+
+function isMacAppUpdatable(): Promise<boolean> {
   if (process.platform !== "darwin" || !app.isPackaged) {
     return Promise.resolve(true);
   }
 
   if (!codeSignatureCheck) {
-    codeSignatureCheck = new Promise((resolve) => {
-      const bundlePath = path.resolve(app.getPath("exe"), "..", "..", "..");
-      execFile("codesign", ["-dv", "--verbose=2", bundlePath], (error, stdout, stderr) => {
-        const output = `${stdout}\n${stderr}`;
-        resolve(!error && !output.includes("Signature=adhoc"));
+    const bundlePath = path.resolve(app.getPath("exe"), "..", "..", "..");
+    // `--deep` walks every nested helper, which takes a moment on an Electron
+    // bundle. It runs at most once per process and only on the update path.
+    codeSignatureCheck = (async () => {
+      const [verification, display] = await Promise.all([
+        runCodesign(["--verify", "--strict", "--deep", bundlePath]),
+        runCodesign(["-dv", "--verbose=4", bundlePath]),
+      ]);
+      const updatable = macAppSignatureIsUpdatable({
+        verified: verification.ok,
+        displayOutput: display.output,
       });
-    });
+      if (!updatable) {
+        console.warn("[updater] refusing to treat this bundle as updatable", {
+          verified: verification.ok,
+          teamIdentifier: parseCodesignTeamIdentifier(display.output),
+          expectedTeamIdentifier: PLAINSONG_RELEASE_TEAM_ID,
+        });
+      }
+      return updatable;
+    })();
   }
 
   return codeSignatureCheck;
@@ -609,7 +641,7 @@ async function checkForUpdatesInElectron(): Promise<UpdateInfoPayload | null> {
     throw new Error(error);
   }
 
-  updateInstallBlockedReason = (await isMacAppCodeSigned()) ? undefined : "unsigned";
+  updateInstallBlockedReason = (await isMacAppUpdatable()) ? undefined : "unsigned";
 
   const configuredChannel = await getUpdateChannelFromSidecar();
   const channel = effectiveUpdaterChannel(configuredChannel, app.getVersion());
@@ -654,9 +686,10 @@ async function installUpdateInElectron(): Promise<void> {
     throw new Error(error);
   }
 
-  if (!(await isMacAppCodeSigned())) {
+  if (!(await isMacAppUpdatable())) {
     const error =
-      "This build is not code-signed, so the updater cannot install updates. " +
+      "This build's code signature is not a verified Plainsong release, so the " +
+      "updater cannot install updates. " +
       "Download the new version from GitHub Releases instead.";
     setUpdateStatus({
       status: "error",
