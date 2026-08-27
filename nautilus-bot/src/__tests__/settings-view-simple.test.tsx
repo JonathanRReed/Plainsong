@@ -424,7 +424,11 @@ describe("SettingsView performance behavior", () => {
       "Smart Format",
       "Spoken commands",
       "Snippets",
-      "Learn from your corrections",
+      // Two correction-learning switches, named for where each one looks.
+      // The old single "Learn from your corrections" claimed both and only
+      // ever did the first.
+      "Learn from corrections you make in Plainsong",
+      "Learn from corrections you make in other apps",
       "Name meetings for me",
       "Also copy dictated text to the clipboard",
       "Skip silence",

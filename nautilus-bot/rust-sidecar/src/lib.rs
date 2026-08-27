@@ -6,6 +6,7 @@ mod backup;
 mod crypto;
 mod db;
 mod diarization;
+pub mod dictation_correction_capture;
 mod dictation_dictionary_csv;
 pub mod dictation_parity;
 mod dictation_pipeline;
@@ -17036,6 +17037,10 @@ const AX_ERROR_ATTRIBUTE_UNSUPPORTED: AXError = -25205;
 #[cfg(target_os = "macos")]
 const AX_ERROR_NO_VALUE: AXError = -25212;
 #[cfg(target_os = "macos")]
+const AX_VALUE_CG_POINT_TYPE: u32 = 1;
+#[cfg(target_os = "macos")]
+const AX_VALUE_CG_SIZE_TYPE: u32 = 2;
+#[cfg(target_os = "macos")]
 const AX_VALUE_CF_RANGE_TYPE: u32 = 4;
 
 #[cfg(target_os = "macos")]
@@ -17071,6 +17076,7 @@ unsafe extern "C" {
         attribute: CFStringRef,
         settable: *mut Boolean,
     ) -> AXError;
+    fn AXUIElementGetPid(element: AXUIElementRef, pid: *mut i32) -> AXError;
     fn AXValueCreate(the_type: u32, value_ptr: *const std::ffi::c_void) -> CFTypeRef;
     fn AXValueGetType(value: CFTypeRef) -> u32;
     fn AXValueGetValue(
@@ -17252,7 +17258,10 @@ fn installed_nautilus_app_bundle_path() -> Option<PathBuf> {
     path.exists().then_some(path)
 }
 
-#[cfg(target_os = "macos")]
+/// Whether an insertion target is Plainsong itself. Used by the macOS
+/// reactivation path (never bring ourselves forward) and by post-insert
+/// correction capture (a result edited in Plainsong's own box is the in-app
+/// learning path's business, not the other-apps readback's).
 fn is_self_activation_target(app_name: Option<&str>, app_bundle_id: Option<&str>) -> bool {
     let name_matches = app_name
         .map(str::trim)
@@ -17743,6 +17752,182 @@ fn capture_focused_field_text_via_accessibility(
     Ok(current_value
         .map(|value| value.trim().to_string())
         .filter(|value| !value.is_empty()))
+}
+
+/// Owning process of an Accessibility element, used as the first and cheapest
+/// part of the focused-field fingerprint.
+#[cfg(target_os = "macos")]
+fn ax_element_pid(element: AXUIElementRef) -> Option<i32> {
+    let mut pid: i32 = 0;
+    let error = unsafe { AXUIElementGetPid(element, &mut pid) };
+    if error == AX_ERROR_SUCCESS && pid > 0 {
+        Some(pid)
+    } else {
+        None
+    }
+}
+
+/// Screen rectangle of an Accessibility element, rounded to whole points.
+///
+/// This is what separates two text fields that a Chromium app describes
+/// identically — see `FocusedFieldFrame`. Both `AXPosition` and `AXSize` have
+/// to decode, because half a rectangle is not an identity.
+#[cfg(target_os = "macos")]
+fn ax_element_frame(
+    element: AXUIElementRef,
+) -> Option<dictation_correction_capture::FocusedFieldFrame> {
+    let position = ax_copy_cg_pair_attribute(element, "AXPosition", AX_VALUE_CG_POINT_TYPE)?;
+    let size = ax_copy_cg_pair_attribute(element, "AXSize", AX_VALUE_CG_SIZE_TYPE)?;
+    Some(dictation_correction_capture::FocusedFieldFrame {
+        x: position.0.round() as i64,
+        y: position.1.round() as i64,
+        width: size.0.round() as i64,
+        height: size.1.round() as i64,
+    })
+}
+
+/// Decodes an `AXValue` that wraps a `CGPoint` or `CGSize` — both are two
+/// `CGFloat`s in a row, so one decoder covers them.
+#[cfg(target_os = "macos")]
+fn ax_copy_cg_pair_attribute(
+    element: AXUIElementRef,
+    attribute: &str,
+    value_type: u32,
+) -> Option<(f64, f64)> {
+    let value = ax_copy_attribute_value(element, attribute).ok().flatten()?;
+    if unsafe { AXValueGetType(value) } != value_type {
+        unsafe { CFRelease(value) };
+        return None;
+    }
+
+    let mut pair: [f64; 2] = [0.0, 0.0];
+    let copied = unsafe {
+        AXValueGetValue(
+            value,
+            value_type,
+            pair.as_mut_ptr() as *mut std::ffi::c_void,
+        ) != 0
+    };
+    unsafe { CFRelease(value) };
+    copied.then_some((pair[0], pair[1]))
+}
+
+/// `AXTitle` and `AXIdentifier` of the window a focused element belongs to.
+/// Cheap, and it separates the same-looking field in two windows of one app.
+#[cfg(target_os = "macos")]
+fn ax_element_window_identity(element: AXUIElementRef) -> (Option<String>, Option<String>) {
+    let Ok(Some(window)) = ax_copy_attribute_value(element, "AXWindow") else {
+        return (None, None);
+    };
+    let title = ax_copy_string_attribute(window, "AXTitle").ok().flatten();
+    let identifier = ax_copy_string_attribute(window, "AXIdentifier")
+        .ok()
+        .flatten();
+    unsafe { CFRelease(window) };
+    (title, identifier)
+}
+
+/// The real Accessibility read behind
+/// `dictation_correction_capture::FocusedFieldReader`.
+///
+/// This is the only part of post-insert correction capture that cannot be
+/// exercised by `cargo test`: it needs a granted Accessibility permission, a
+/// window server session and a real focused field, none of which exist on CI.
+/// Everything it feeds — the anchor check, the identity comparison, the span
+/// location, the word alignment, every filter — is pure and tested against a
+/// fake reader in `dictation_correction_capture`.
+///
+/// Deliberately *unlike* every other insertion-path helper in this file, it
+/// does not call `reactivate_target_application` and does not sleep. It reads
+/// whatever happens to be focused at this instant and reports who owns it; the
+/// caller decides whether that is the same field it wrote into. Bringing an app
+/// forward in order to read it would be both a focus theft and a way of
+/// manufacturing the agreement the identity check is supposed to test for.
+#[cfg(target_os = "macos")]
+struct MacosFocusedFieldReader;
+
+#[cfg(target_os = "macos")]
+impl dictation_correction_capture::FocusedFieldReader for MacosFocusedFieldReader {
+    fn read_focused_field(
+        &self,
+    ) -> Result<Option<dictation_correction_capture::FocusedFieldSnapshot>, String> {
+        if !check_accessibility_permission() {
+            return Ok(None);
+        }
+
+        let system_wide = unsafe { AXUIElementCreateSystemWide() };
+        if system_wide.is_null() {
+            return Ok(None);
+        }
+        let focused_element = match ax_copy_attribute_value(system_wide, "AXFocusedUIElement") {
+            Ok(Some(value)) => value,
+            Ok(None) => {
+                unsafe { CFRelease(system_wide) };
+                return Ok(None);
+            }
+            // Same reading as `copy_focused_accessibility_element`: no
+            // reachable focus target is "nothing to read", not a failure.
+            Err(error) if is_ax_cannot_complete_error(&error) => {
+                unsafe { CFRelease(system_wide) };
+                return Ok(None);
+            }
+            Err(error) => {
+                unsafe { CFRelease(system_wide) };
+                return Err(error);
+            }
+        };
+        unsafe { CFRelease(system_wide) };
+
+        let pid = ax_element_pid(focused_element);
+        let role = ax_copy_string_attribute(focused_element, "AXRole")
+            .ok()
+            .flatten();
+        let identifier = ax_copy_string_attribute(focused_element, "AXIdentifier")
+            .ok()
+            .flatten();
+        let title = ax_copy_string_attribute(focused_element, "AXTitle")
+            .ok()
+            .flatten();
+        let (window_title, window_identifier) = ax_element_window_identity(focused_element);
+        let frame = ax_element_frame(focused_element);
+        let text = ax_copy_string_attribute(focused_element, "AXValue")
+            .ok()
+            .flatten();
+        unsafe { CFRelease(focused_element) };
+
+        let Some(text) = text else {
+            return Ok(None);
+        };
+
+        Ok(Some(dictation_correction_capture::FocusedFieldSnapshot {
+            text,
+            fingerprint: dictation_correction_capture::FocusedFieldFingerprint {
+                pid,
+                role,
+                identifier,
+                title,
+                window_title,
+                window_identifier,
+                frame,
+                frontmost_bundle_id: get_frontmost_app_bundle_id(),
+                frontmost_app_name: get_frontmost_app_name(),
+            },
+        }))
+    }
+}
+
+/// Stand-in on platforms with no Accessibility text read. Reports "nothing
+/// focused", which every caller already treats as a silent abort.
+#[cfg(not(target_os = "macos"))]
+struct MacosFocusedFieldReader;
+
+#[cfg(not(target_os = "macos"))]
+impl dictation_correction_capture::FocusedFieldReader for MacosFocusedFieldReader {
+    fn read_focused_field(
+        &self,
+    ) -> Result<Option<dictation_correction_capture::FocusedFieldSnapshot>, String> {
+        Ok(None)
+    }
 }
 
 /// Replaces the entire text value of the system-wide focused element with
@@ -21985,6 +22170,9 @@ async fn stop_dictation_for_sidecar(
     }
 
     let mut insert_latency_ms: Option<u64> = None;
+    let mut post_insert_focus_anchor: Option<
+        dictation_correction_capture::FocusedFieldFingerprint,
+    > = None;
     let mut pasted = false;
     let mut copied = false;
     let mut paste_error: Option<String> = None;
@@ -22102,6 +22290,37 @@ async fn stop_dictation_for_sidecar(
             copied = paste_outcome.copied;
             if paste_error.is_none() {
                 paste_error = paste_outcome.error;
+            }
+            // Anchor the insertion to the field it landed in, while the field
+            // is still the one on screen. Gated on the setting, so with the
+            // feature off Plainsong never reads a destination field at all —
+            // not even this once.
+            if pasted
+                && settings_snapshot
+                    .transcription
+                    .dictation_learn_from_external_corrections
+                && !is_self_activation_target(app_target.as_deref(), app_bundle_id.as_deref())
+            {
+                let anchor_text = final_text.clone();
+                post_insert_focus_anchor = tokio::task::spawn_blocking(move || {
+                    dictation_correction_capture::capture_insertion_anchor(
+                        &MacosFocusedFieldReader,
+                        anchor_text.as_str(),
+                        // Re-asked against the app actually in front now. The
+                        // check above used the target recorded when the
+                        // session started, which is still "Slack" even when
+                        // reactivation failed and the text landed here.
+                        &is_self_activation_target,
+                    )
+                })
+                .await
+                .unwrap_or_else(|join_error| {
+                    tracing::warn!(
+                        "Post-insert correction anchor did not complete: {}",
+                        join_error
+                    );
+                    None
+                });
             }
             outcome = if pasted {
                 if undo_performed {
@@ -22263,6 +22482,17 @@ async fn stop_dictation_for_sidecar(
         } else if undo_performed {
             *recent_delivery_slot = None;
         }
+    }
+
+    if let Some(anchor) = post_insert_focus_anchor {
+        schedule_post_insert_correction_readback(
+            state,
+            handle,
+            final_text.clone(),
+            app_target.clone(),
+            anchor,
+            now,
+        );
     }
 
     reset_dictation_session_runtime(
@@ -22472,6 +22702,151 @@ fn schedule_dictation_overlay_idle_reset(
             }),
         );
         idle_handle.window_command("hide-dictation-overlay", &serde_json::Value::Null);
+    });
+}
+
+/// Follow one insertion up: a few seconds later, look once at the field it
+/// landed in and see whether the user fixed a word there.
+///
+/// Only ever reached when `capture_insertion_anchor` already found the inserted
+/// text sitting in that field, which itself only runs when the user turned the
+/// setting on. Detached so the stop handler returns immediately, and written so
+/// that every way this can go wrong is a silent no-op:
+///
+/// - the setting was turned off during the wait → nothing read;
+/// - a newer dictation was delivered → nothing read (the anchor describes a
+///   field the user has already moved on from);
+/// - the frontmost app, the owning process or the focused element changed →
+///   read, then discarded without being diffed;
+/// - the field is empty, unreadable, unchanged, or no longer recognisably holds
+///   the insertion → discarded.
+///
+/// What it produces, at most, is queued suggestions. Nothing on this path can
+/// change the dictionary; only the user approving a suggestion does that.
+fn schedule_post_insert_correction_readback(
+    state: &AppState,
+    handle: &crate::sidecar_handle::SidecarHandle,
+    inserted_text: String,
+    app_target: Option<String>,
+    anchor: dictation_correction_capture::FocusedFieldFingerprint,
+    delivered_at: chrono::DateTime<chrono::Utc>,
+) {
+    let db = Arc::clone(&state.db);
+    let settings_manager = Arc::clone(&state.settings_manager);
+    let recent_delivery = Arc::clone(&state.recent_dictation_delivery);
+    let readback_handle = handle.clone();
+
+    tokio::spawn(async move {
+        tokio::time::sleep(std::time::Duration::from_secs(
+            dictation_correction_capture::POST_INSERT_READBACK_WINDOW_SECS.max(0) as u64,
+        ))
+        .await;
+
+        // Re-read the setting rather than trusting the value from insertion
+        // time: the user may have turned it off in the seconds since, and the
+        // answer to "may Plainsong read that field" has to be the current one.
+        let enabled = {
+            let manager = settings_manager.lock().await;
+            manager
+                .settings()
+                .transcription
+                .dictation_learn_from_external_corrections
+        };
+
+        let delivery_is_current = recent_delivery
+            .lock()
+            .await
+            .as_ref()
+            .map(|delivery| delivery.delivered_at == delivered_at)
+            .unwrap_or(false);
+
+        let known_dictionary_spoken_forms = {
+            let db = db.lock().await;
+            db.list_dictation_dictionary_entries()
+                .map(|entries| {
+                    entries
+                        .into_iter()
+                        .map(|entry| entry.spoken_form.to_lowercase())
+                        .collect::<HashSet<_>>()
+                })
+                .unwrap_or_default()
+        };
+
+        let request = dictation_correction_capture::PostInsertReadbackRequest {
+            enabled,
+            inserted_text,
+            insertion_fingerprint: anchor,
+            elapsed_secs: chrono::Utc::now()
+                .signed_duration_since(delivered_at)
+                .num_seconds(),
+            delivery_is_current,
+            known_dictionary_spoken_forms,
+        };
+
+        let outcome = match tokio::task::spawn_blocking(move || {
+            dictation_correction_capture::evaluate_post_insert_readback(
+                &MacosFocusedFieldReader,
+                &request,
+            )
+        })
+        .await
+        {
+            Ok(outcome) => outcome,
+            Err(join_error) => {
+                tracing::warn!(
+                    "Post-insert correction readback did not complete: {}",
+                    join_error
+                );
+                return;
+            }
+        };
+
+        let candidates = match outcome {
+            dictation_correction_capture::ReadbackOutcome::Candidates(candidates) => candidates,
+            dictation_correction_capture::ReadbackOutcome::Aborted(abort) => {
+                // Debug, not warn: every abort here is the feature working.
+                tracing::debug!("Post-insert correction readback stopped: {:?}", abort);
+                return;
+            }
+        };
+
+        let mut queued = 0usize;
+        {
+            let mut db = db.lock().await;
+            for candidate in &candidates {
+                match db.upsert_dictation_correction_suggestion(
+                    candidate.spoken_form.as_str(),
+                    candidate.replacement.as_str(),
+                    candidate.spoken_form.as_str(),
+                    candidate.replacement.as_str(),
+                    app_target.as_deref(),
+                    Some(models::CORRECTION_SUGGESTION_SOURCE_EXTERNAL_APP),
+                ) {
+                    Ok(_) => queued += 1,
+                    Err(error) => {
+                        tracing::warn!("Queuing a correction suggestion failed: {}", error);
+                    }
+                }
+            }
+            if let Err(error) = db.prune_dictation_correction_suggestions(
+                chrono::Utc::now(),
+                dictation_correction_capture::CORRECTION_SUGGESTION_MAX_AGE_DAYS,
+                dictation_correction_capture::CORRECTION_SUGGESTION_QUEUE_CAP,
+            ) {
+                tracing::warn!("Pruning stale correction suggestions failed: {}", error);
+            }
+        }
+
+        if queued > 0 {
+            readback_handle.emit_event(
+                "dictation-correction-suggestions-changed",
+                serde_json::json!({
+                    "queued": queued,
+                    "appTarget": app_target,
+                    "source": models::CORRECTION_SUGGESTION_SOURCE_EXTERNAL_APP,
+                }),
+            );
+        }
     });
 }
 
@@ -26495,7 +26870,17 @@ pub async fn dispatch_command(
             serde_json::to_value(result).map_err(|e| e.to_string())
         }
         "list_dictation_correction_suggestions" => {
-            let db = state.db.lock().await;
+            let mut db = state.db.lock().await;
+            // Expiry and the cap are enforced on read: the inbox is the only
+            // place these rows are ever looked at, so this is the moment a
+            // suggestion nobody reviewed within the week stops existing.
+            if let Err(error) = db.prune_dictation_correction_suggestions(
+                chrono::Utc::now(),
+                dictation_correction_capture::CORRECTION_SUGGESTION_MAX_AGE_DAYS,
+                dictation_correction_capture::CORRECTION_SUGGESTION_QUEUE_CAP,
+            ) {
+                tracing::warn!("Pruning stale correction suggestions failed: {}", error);
+            }
             let result = db
                 .list_dictation_correction_suggestions()
                 .map_err(|e| e.to_string())?;
@@ -26526,6 +26911,9 @@ pub async fn dispatch_command(
                     candidate.spoken_form.as_str(),
                     candidate.replacement.as_str(),
                     request.app_target.as_deref(),
+                    // This arm is the in-app path: the user retyped the result
+                    // inside Plainsong. Nothing was read out of another app.
+                    None,
                 )
                 .map_err(|e| e.to_string())?;
             serde_json::to_value(models::QueueDictationCorrectionSuggestionResult {

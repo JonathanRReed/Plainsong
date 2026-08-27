@@ -171,6 +171,15 @@ pub struct TranscriptionSettings {
     pub dictation_snippets_enabled: bool,
     /// Dictation: learn safe confirmed text corrections into the dictionary automatically.
     pub dictation_auto_learn_corrections: bool,
+    /// Dictation: after inserting into another app, read that one field back
+    /// briefly to notice corrections the user made there.
+    ///
+    /// Off by default and deliberately not covered by any "turn everything on"
+    /// preset: this is the only dictation setting that reads text back out of
+    /// another application, so it stays an explicit choice the user makes once,
+    /// having read what it does. See `dictation_correction_capture` for the
+    /// window, the abort conditions and the filters.
+    pub dictation_learn_from_external_corrections: bool,
     /// Custom system prompt for Smart Format
     pub dictation_custom_prompt: Option<String>,
     /// Custom system prompt for Meeting Summaries
@@ -314,6 +323,7 @@ impl Default for TranscriptionSettings {
             dictation_active_languages: Vec::new(),
             dictation_snippets_enabled: true,
             dictation_auto_learn_corrections: true,
+            dictation_learn_from_external_corrections: false,
             dictation_custom_prompt: None,
             meeting_custom_prompt: None,
             meeting_auto_name_enabled: true,
@@ -2005,6 +2015,23 @@ mod tests {
         assert_eq!(settings.transcription.dictation_insertion_mode, "auto");
         assert!(settings.transcription.dictation_snippets_enabled);
         assert!(settings.transcription.dictation_auto_learn_corrections);
+    }
+
+    #[test]
+    fn reading_other_apps_fields_back_is_off_until_the_user_asks_for_it() {
+        // Both a fresh install and a settings file written before this
+        // setting existed must land on "off". Serde fills a missing field
+        // from `Default`, so these two assertions are the same guarantee
+        // seen from the two directions users actually arrive from.
+        assert!(
+            !Settings::default()
+                .transcription
+                .dictation_learn_from_external_corrections
+        );
+
+        let upgraded: TranscriptionSettings =
+            serde_json::from_str("{}").expect("transcription settings should deserialize");
+        assert!(!upgraded.dictation_learn_from_external_corrections);
     }
 
     #[test]

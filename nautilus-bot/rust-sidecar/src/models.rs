@@ -540,9 +540,21 @@ pub struct DictationCorrectionSuggestion {
     pub spoken_form: String,
     pub replacement: String,
     pub app_target: Option<String>,
+    /// How Plainsong came to know about this correction: `in_app_edit` (the
+    /// user retyped the result inside Plainsong) or `external_app_readback`
+    /// (Plainsong read the destination field back after inserting into it).
+    /// `None` on rows written before the distinction existed, which were all
+    /// in-app edits. The renderer keeps the two apart because the second kind
+    /// carries text that came out of another application.
+    #[serde(default)]
+    pub source: Option<String>,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
 }
+
+/// `DictationCorrectionSuggestion::source` for a correction Plainsong read back
+/// out of the app it inserted into.
+pub const CORRECTION_SUGGESTION_SOURCE_EXTERNAL_APP: &str = "external_app_readback";
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
