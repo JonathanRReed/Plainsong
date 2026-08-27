@@ -1337,6 +1337,10 @@ async function handleLocalCommand(
       }
       const route = event.senderFrame?.url ?? senderWindow.webContents.getURL();
       const grant = captureAdmission.consume(senderWindow.id, route);
+      // Registering the nonce is what makes the sidecar's admission check
+      // real: from the first registered nonce onward it refuses any proof it
+      // did not mint here, single-use, within the TTL.
+      await ipcBridge.invoke("register_capture_admission", { nonce: grant.nonce });
       const payload = (args ?? {}) as { options?: unknown };
       const suppliedOptions =
         payload.options && typeof payload.options === "object"

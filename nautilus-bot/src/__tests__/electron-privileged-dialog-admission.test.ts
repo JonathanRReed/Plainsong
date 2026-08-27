@@ -67,6 +67,19 @@ describe("privileged native dialog admission", () => {
     );
   });
 
+  it("registers the capture nonce with the sidecar before starting a meeting", () => {
+    // The sidecar's admission registry enforces from the first registered
+    // nonce onward; skipping this call leaves its check permanently decorative.
+    const handler = localCommandHandler();
+    const capture = caseBody(handler, "begin_meeting_capture", "end_meeting_capture");
+    const consumeAt = capture.indexOf("captureAdmission.consume(");
+    const registerAt = capture.indexOf('invoke("register_capture_admission"');
+    const startAt = capture.indexOf('invoke("start_recording"');
+    expect(consumeAt).toBeGreaterThanOrEqual(0);
+    expect(registerAt).toBeGreaterThan(consumeAt);
+    expect(startAt).toBeGreaterThan(registerAt);
+  });
+
   it("rejects a stale, reused, cross-window or cross-route gesture", () => {
     // The same single-use, route-bound, time-bounded grant meeting capture
     // relies on, now also standing between a renderer and a native modal.

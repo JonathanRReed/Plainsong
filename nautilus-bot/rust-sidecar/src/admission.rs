@@ -124,6 +124,7 @@ fn classify_command(command: &str) -> CommandClass {
         | "ask_memory"
         | "extract_action_items"
         | "extract_action_items_grounded"
+        | "retry_meeting_analysis"
         | "summarize_recording"
         | "summarize_recording_grounded" => CommandClass::Analysis,
         "create_backup_default"
@@ -423,6 +424,28 @@ mod tests {
             )
             .expect("different model can use the second slot");
         drop(first);
+    }
+
+    #[test]
+    fn a_manual_retry_is_admitted_as_analysis_work() {
+        // A retry that raced the automatic post-stop pass must share the
+        // analysis semaphore and the per-recording duplicate key, or two full
+        // LLM passes run and last-write-wins on the results.
+        let admission = AdmissionController::default();
+        let _first = admission
+            .admit(
+                "retry_meeting_analysis",
+                &serde_json::json!({"recordingId": "recording-1"}),
+            )
+            .expect("first retry");
+        let error = admission
+            .admit(
+                "retry_meeting_analysis",
+                &serde_json::json!({"recordingId": "recording-1"}),
+            )
+            .err()
+            .expect("concurrent retry for the same recording must be rejected");
+        assert!(error.starts_with("SIDECAR_DUPLICATE:"));
     }
 
     #[test]
