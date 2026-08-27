@@ -41,6 +41,9 @@ export function StatusBanner({
   return (
     <Card
       role={role ?? (tone === "rust" ? "alert" : "status")}
+      // Names the region for assistive technology, and lets a page carrying
+      // several of these be told apart.
+      aria-label={title}
       className={cn(
         tone === "rust"
           ? "border-rust/40 bg-rust/5"

@@ -22,6 +22,12 @@ import {
   type MeetingNotesRouteAssessment,
 } from "@/features/readiness/meeting-notes-route";
 import {
+  describeSidecarLoss,
+  parseSidecarRuntimeEvent,
+  SIDECAR_RUNTIME_EVENT,
+  type SidecarLossNotice,
+} from "@/lib/sidecar-runtime";
+import {
   getSystemAudioCapability,
   type SystemAudioCapability,
 } from "@/lib/backend/recordings";
@@ -477,6 +483,12 @@ export function useSetupStatus() {
     useState<SystemAudioCapability | null>(null);
   const [meetingNotesProbe, setMeetingNotesProbe] =
     useState<MeetingNotesRouteProbe | null>(null);
+  // Engine loss, held until it recovers or the reader dismisses it. Both
+  // primary views render this; before, it existed only as a raw log line on
+  // the Setup view, which nobody is looking at while they dictate.
+  const [engineNotice, setEngineNotice] = useState<SidecarLossNotice | null>(
+    null,
+  );
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [observedAt, setObservedAt] = useState(() => Date.now());
@@ -601,23 +613,29 @@ export function useSetupStatus() {
         console.warn("Failed to subscribe to readiness invalidation:", nextError);
       });
 
-    void listen<{ ready?: boolean; reason?: string }>(
-      "sidecar-runtime-changed",
-      (event) => {
-        if (disposed) return;
-        if (event.payload?.ready === false) {
-          refreshSequenceRef.current += 1;
-          setLoading(false);
-          setError(
-            event.payload.reason ??
-              "The local audio engine stopped. Plainsong is reconnecting.",
-          );
-          setObservedAt(Date.now());
-          return;
+    void listen(SIDECAR_RUNTIME_EVENT, (event) => {
+      if (disposed) return;
+      const runtime = parseSidecarRuntimeEvent(event.payload);
+      if (!runtime) {
+        return;
+      }
+      if (!runtime.ready) {
+        // The bridge's own wording ("Sidecar process exited (code=1,
+        // signal=null)") stays in the log and out of the interface.
+        if (runtime.detail) {
+          console.warn("[sidecar] runtime lost:", runtime.detail);
         }
-        void refresh();
-      },
-    )
+        const notice = describeSidecarLoss(runtime.reason);
+        refreshSequenceRef.current += 1;
+        setLoading(false);
+        setEngineNotice(notice);
+        setError(`${notice.title}. ${notice.message}`);
+        setObservedAt(Date.now());
+        return;
+      }
+      setEngineNotice(null);
+      void refresh();
+    })
       .then(retainUnlistener)
       .catch((nextError) => {
         console.warn("Failed to subscribe to sidecar readiness:", nextError);
@@ -689,10 +707,14 @@ export function useSetupStatus() {
     ]
   );
 
+  const dismissEngineNotice = useCallback(() => setEngineNotice(null), []);
+
   return {
     ...snapshot,
     loading,
     error,
+    engineNotice,
+    dismissEngineNotice,
     refresh,
   };
 }

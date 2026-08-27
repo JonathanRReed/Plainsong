@@ -27,6 +27,12 @@ const clipboardWriteText = vi.fn(async () => {});
 const toast = vi.fn();
 const readinessContext = vi.hoisted(() => ({
   refresh: vi.fn(async () => {}),
+  engineNotice: null as {
+    title: string;
+    message: string;
+    recovering: boolean;
+  } | null,
+  dismissEngineNotice: vi.fn(),
   productReadiness: {
     evidenceObservedAt: 1,
     dictation: { domain: "dictation", state: "ready", cause: null },
@@ -355,6 +361,7 @@ describe("DictationView modes", () => {
     backendMocks.eventListeners.clear();
     backendMocks.asrProviders = backendMocks.buildAsrProviders();
     backendMocks.recordings = [];
+    readinessContext.engineNotice = null;
     readinessContext.productReadiness = {
       evidenceObservedAt: 1,
       dictation: { domain: "dictation", state: "ready", cause: null },
@@ -1211,6 +1218,29 @@ describe("DictationView modes", () => {
     fireEvent.click(await screen.findByRole("combobox", { name: comboboxName }));
     fireEvent.click(await screen.findByRole("option", { name: option }));
   }
+
+  it("tells the reader in plain words when the transcription engine is lost", async () => {
+    // ux-10: engine loss reached users as "Sidecar process exited (code=…,
+    // signal=…)", and only on the Setup view — never here, where they dictate.
+    readinessContext.engineNotice = {
+      title: "The local transcription engine stopped",
+      message: "Plainsong is restarting it now.",
+      recovering: true,
+    };
+
+    render(<DictationView />);
+
+    expect(
+      await screen.findByText("The local transcription engine stopped"),
+    ).toBeInTheDocument();
+    expect(screen.queryByText(/code=/)).not.toBeInTheDocument();
+
+    const banner = screen.getByRole("status", {
+      name: "The local transcription engine stopped",
+    });
+    fireEvent.click(within(banner).getByRole("button", { name: "Dismiss" }));
+    expect(readinessContext.dismissEngineNotice).toHaveBeenCalled();
+  });
 
   it("persists the session language separately from flow profiles", async () => {
     selectMultilingualRoute();

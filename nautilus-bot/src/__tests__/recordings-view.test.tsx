@@ -18,6 +18,12 @@ const toast = vi.fn();
 const startMeeting = vi.fn();
 const stopMeeting = vi.fn();
 const readinessContext = vi.hoisted(() => ({
+  engineNotice: null as {
+    title: string;
+    message: string;
+    recovering: boolean;
+  } | null,
+  dismissEngineNotice: vi.fn(),
   productReadiness: {
     evidenceObservedAt: 1,
     dictation: { domain: "dictation", state: "ready", cause: null },
@@ -325,6 +331,7 @@ describe("RecordingsView", () => {
     recordingsLoading = false;
     recordingsHaveLoaded = true;
     recordingsError = null;
+    readinessContext.engineNotice = null;
     readinessContext.productReadiness = {
       evidenceObservedAt: 1,
       dictation: { domain: "dictation", state: "ready", cause: null },
@@ -2896,6 +2903,29 @@ describe("RecordingsView", () => {
       expect(backend.runDiarization).toHaveBeenCalledWith("r1");
     });
     expect(await screen.findByText("Found 2 speakers.")).toBeInTheDocument();
+  });
+
+  it("tells the reader in plain words when the transcription engine is lost", async () => {
+    // ux-10: this used to be a raw "Sidecar process exited (code=…, signal=…)"
+    // line, and only on the Setup view nobody is looking at.
+    readinessContext.engineNotice = {
+      title: "The local transcription engine stopped",
+      message: "Plainsong is restarting it now.",
+      recovering: true,
+    };
+
+    render(<RecordingsView />);
+
+    expect(
+      await screen.findByText("The local transcription engine stopped")
+    ).toBeInTheDocument();
+    expect(screen.queryByText(/code=/)).not.toBeInTheDocument();
+
+    const banner = screen.getByRole("status", {
+      name: "The local transcription engine stopped",
+    });
+    fireEvent.click(within(banner).getByRole("button", { name: "Dismiss" }));
+    expect(readinessContext.dismissEngineNotice).toHaveBeenCalled();
   });
 
   describe("meeting start failures", () => {

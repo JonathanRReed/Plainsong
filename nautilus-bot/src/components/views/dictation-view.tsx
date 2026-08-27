@@ -57,6 +57,7 @@ import {
   type DictationRoutePreference,
 } from "@/lib/asr-capabilities";
 import { SearchableSelect } from "@/components/ui/searchable-select";
+import { StatusBanner } from "@/components/ui/status-banner";
 import { formatAppliedDictationCommandLabel } from "@/lib/dictation-command-labels";
 import {
   INSERTION_MODE_LABELS,
@@ -652,6 +653,8 @@ function getDictationPhaseSummary(
 export function DictationView() {
   const {
     productReadiness,
+    engineNotice,
+    dismissEngineNotice,
     refresh: refreshProductReadiness,
   } = useProductReadinessStatus();
   const dictationReadiness = selectReadinessForSurface(
@@ -3290,6 +3293,27 @@ export function DictationView() {
 
       <ScrollArea className="flex-1">
         <div className="p-6 max-w-4xl mx-auto space-y-6">
+          {/* Engine loss, said in plain words on the surface the reader is
+              actually on. It used to appear only as the bridge's own log line
+              on the buried Setup view. */}
+          {engineNotice ? (
+            <StatusBanner
+              tone={engineNotice.recovering ? "muted" : "rust"}
+              role={engineNotice.recovering ? "status" : "alert"}
+              title={engineNotice.title}
+              message={engineNotice.message}
+              actions={
+                <Button
+                  size="sm"
+                  variant="ghost"
+                  onClick={() => dismissEngineNotice?.()}
+                >
+                  Dismiss
+                </Button>
+              }
+            />
+          ) : null}
+
           <DictationCaptureHero
             phase={dictationPhase}
             phaseTitle={dictationPhaseSummary.title}

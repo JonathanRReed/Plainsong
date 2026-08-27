@@ -140,10 +140,21 @@ describe("useSetupStatus live refresh", () => {
 
     await act(async () => {
       liveMocks.listeners.get("sidecar-runtime-changed")?.({
-        payload: { ready: false, reason: "Audio engine restarted" },
+        payload: {
+          ready: false,
+          reason: "crash",
+          message: "Sidecar process exited (code=1, signal=null)",
+        },
       });
     });
-    expect(result.current.error).toBe("Audio engine restarted");
+    // The bridge's own log line never reaches the reader.
+    expect(result.current.error).not.toContain("code=1");
+    expect(result.current.error).toContain(
+      "The local transcription engine stopped",
+    );
+    expect(result.current.engineNotice?.title).toBe(
+      "The local transcription engine stopped",
+    );
     expect(result.current.productReadiness.dictation.state).toBe("blocked");
     expect(result.current.productReadiness.meetings.state).toBe("blocked");
 
@@ -155,7 +166,54 @@ describe("useSetupStatus live refresh", () => {
     await waitFor(() => {
       expect(liveMocks.getSettings).toHaveBeenCalledTimes(2);
       expect(result.current.error).toBeNull();
+      expect(result.current.engineNotice).toBeNull();
     });
+  });
+
+  it("keeps a lost engine legible when the bridge sends no typed reason", async () => {
+    const { result } = renderHook(() => useSetupStatus());
+
+    await waitFor(() => {
+      expect(result.current.loading).toBe(false);
+    });
+
+    // A build predating the typed contract still puts a sentence in `reason`.
+    await act(async () => {
+      liveMocks.listeners.get("sidecar-runtime-changed")?.({
+        payload: {
+          ready: false,
+          reason: "Sidecar process exited (code=1, signal=null)",
+        },
+      });
+    });
+
+    expect(result.current.engineNotice?.title).toBe(
+      "The local transcription engine stopped",
+    );
+    expect(result.current.error).not.toContain("signal=null");
+  });
+
+  it("lets the reader dismiss the engine notice without pretending it recovered", async () => {
+    const { result } = renderHook(() => useSetupStatus());
+
+    await waitFor(() => {
+      expect(result.current.loading).toBe(false);
+    });
+
+    await act(async () => {
+      liveMocks.listeners.get("sidecar-runtime-changed")?.({
+        payload: { ready: false, reason: "spawn_failed" },
+      });
+    });
+    expect(result.current.engineNotice?.recovering).toBe(false);
+
+    await act(async () => {
+      result.current.dismissEngineNotice();
+    });
+
+    expect(result.current.engineNotice).toBeNull();
+    // Dismissing the banner does not make readiness claim the engine is back.
+    expect(result.current.productReadiness.dictation.state).toBe("blocked");
   });
 
   it("does not let a slower older refresh overwrite newer readiness data", async () => {

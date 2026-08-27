@@ -928,7 +928,8 @@ function buildRelationshipRecallPrompts(args: {
 }
 
 export function RecordingsView() {
-  const { productReadiness } = useProductReadinessStatus();
+  const { productReadiness, engineNotice, dismissEngineNotice } =
+    useProductReadinessStatus();
   const meetingsReadiness = selectReadinessForSurface(
     productReadiness,
     "meetings",
@@ -5408,6 +5409,27 @@ export function RecordingsView() {
 
       <ScrollArea className="flex-1">
         <div className="p-6">
+          {/* Engine loss, said in plain words on the surface the reader is
+              actually on. It used to appear only as the bridge's own log line
+              on the buried Setup view. */}
+          {engineNotice ? (
+            <StatusBanner
+              tone={engineNotice.recovering ? "muted" : "rust"}
+              role={engineNotice.recovering ? "status" : "alert"}
+              title={engineNotice.title}
+              message={engineNotice.message}
+              actions={
+                <Button
+                  size="sm"
+                  variant="ghost"
+                  onClick={() => dismissEngineNotice?.()}
+                >
+                  Dismiss
+                </Button>
+              }
+            />
+          ) : null}
+
           {meetingStartFailure ? (
             <StatusBanner
               className="mb-4"
