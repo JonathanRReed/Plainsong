@@ -220,6 +220,12 @@ pub struct TranscriptionSettings {
     /// User-defined per-app category overrides, checked before the built-in
     /// bundle-id/name classifier. First match wins.
     pub dictation_app_category_overrides: Vec<DictationAppCategoryOverride>,
+    /// User-saved meeting templates ("recipes"), alongside the built-in set
+    /// in `meeting-templates.ts`. Mirrors `dictation_custom_modes` -- same
+    /// storage shape, same load/save sanitization discipline -- because a
+    /// meeting template is a name plus a couple of prompts, exactly like a
+    /// dictation mode is a name plus a prompt.
+    pub meeting_custom_templates: Vec<MeetingCustomTemplate>,
 }
 
 /// A user-defined override that pins a destination app (matched by substring,
@@ -232,6 +238,22 @@ pub struct DictationAppCategoryOverride {
     pub app_matcher: String,
     pub category: String,
     pub enabled: bool,
+}
+
+/// A user-saved meeting template ("recipe"): a name plus the two prompts a
+/// built-in `MeetingTemplateOption` carries in `meeting-templates.ts` --
+/// the summary instruction handed to the analysis pass, and the notes
+/// outline seeded into a fresh meeting's notes. Unlike a built-in, this has
+/// no fixed `value` enum member -- `id` is a generated string, checked
+/// against the built-in id list at sanitization time so a custom template
+/// can never shadow one.
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(default, rename_all = "camelCase")]
+pub struct MeetingCustomTemplate {
+    pub id: String,
+    pub name: String,
+    pub summary_prompt: String,
+    pub notes_outline: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -335,6 +357,7 @@ impl Default for TranscriptionSettings {
             platform_optimization: PlatformOptimizationSettings::default(),
             dictation_category_formatting_enabled: true,
             dictation_app_category_overrides: Vec::new(),
+            meeting_custom_templates: Vec::new(),
         }
     }
 }
@@ -992,6 +1015,130 @@ fn normalize_loaded_transcription_settings(transcription: &mut TranscriptionSett
         "best_available" => "best_available".to_string(),
         _ => "prefer_local".to_string(),
     };
+
+    // Loaded straight from disk, so a hand-edited or pre-upgrade settings.json
+    // gets the same treatment `save_settings` gives a fresh write -- see
+    // `sanitize_meeting_custom_templates` for why.
+    transcription.meeting_custom_templates = sanitize_meeting_custom_templates(std::mem::take(
+        &mut transcription.meeting_custom_templates,
+    ));
+}
+
+/// Ids of the built-in `MEETING_TEMPLATES` entries in
+/// `src/lib/meeting-templates.ts`. A custom template can never take one of
+/// these ids -- if it did, it would silently replace a built-in everywhere
+/// the built-in is resolved by id (the picker, the analysis pass, note
+/// parsing), which is a much stranger failure than just refusing the save.
+pub(crate) const BUILTIN_MEETING_TEMPLATE_IDS: &[&str] = &[
+    "auto",
+    "1on1",
+    "standup",
+    "sales",
+    "interview",
+    "brainstorm",
+    "coaching",
+    "doctor",
+    "legal",
+    "research",
+    "personal_admin",
+];
+
+/// A saved template list beyond this is almost certainly a bug (a sync loop,
+/// a corrupted file) rather than a user with 50 genuine playbooks.
+const MAX_MEETING_CUSTOM_TEMPLATES: usize = 50;
+/// Generous for a template name, which is meant to read as a short label in
+/// a picker list.
+const MAX_MEETING_TEMPLATE_NAME_LEN: usize = 80;
+/// The summary prompt is handed to the analysis LLM verbatim (see
+/// `resolve_meeting_template_summary_instruction` in `lib.rs`), so it gets
+/// the same generous ceiling as the existing free-text custom prompt fields.
+const MAX_MEETING_TEMPLATE_PROMPT_LEN: usize = 4000;
+/// A notes outline is a handful of section headings, not a document.
+const MAX_MEETING_TEMPLATE_OUTLINE_SECTIONS: usize = 12;
+const MAX_MEETING_TEMPLATE_OUTLINE_SECTION_LEN: usize = 80;
+
+/// Sanitize a saved (or about-to-be-saved) meeting template list, mirroring
+/// the discipline `normalize_dictation_custom_mode` applies to dictation
+/// modes: trim and cap every free-text field, and never let a malformed or
+/// oversized entry -- however it got there -- reach either the renderer's
+/// picker or the analysis pass.
+///
+/// Called on both load (`normalize_loaded_transcription_settings`) and save
+/// (`update_settings` in `lib.rs`), so a template that fails one of these
+/// checks is dropped once and stays dropped rather than round-tripping back
+/// in from whichever path didn't just sanitize it.
+pub(crate) fn sanitize_meeting_custom_templates(
+    templates: Vec<MeetingCustomTemplate>,
+) -> Vec<MeetingCustomTemplate> {
+    let mut seen_ids = std::collections::HashSet::new();
+    let mut sanitized = Vec::new();
+
+    for mut template in templates {
+        template.id = template.id.trim().to_string();
+        template.name = template.name.trim().to_string();
+
+        // Malformed: no identity, no label, or an id that collides with a
+        // built-in template -- any of these would make the entry unusable or
+        // dangerous to resolve by id, so it is dropped rather than repaired.
+        if template.id.is_empty()
+            || template.name.is_empty()
+            || BUILTIN_MEETING_TEMPLATE_IDS.contains(&template.id.as_str())
+        {
+            continue;
+        }
+        // First occurrence wins; a duplicate id is as unresolvable as a
+        // missing one, so keeping only one copy is the safe choice.
+        if !seen_ids.insert(template.id.clone()) {
+            continue;
+        }
+
+        template
+            .name
+            .truncate_to_char_boundary(MAX_MEETING_TEMPLATE_NAME_LEN);
+        template.summary_prompt = template.summary_prompt.trim().to_string();
+        template
+            .summary_prompt
+            .truncate_to_char_boundary(MAX_MEETING_TEMPLATE_PROMPT_LEN);
+
+        template.notes_outline = template
+            .notes_outline
+            .into_iter()
+            .map(|section| section.trim().to_string())
+            .filter(|section| !section.is_empty())
+            .take(MAX_MEETING_TEMPLATE_OUTLINE_SECTIONS)
+            .map(|mut section| {
+                section.truncate_to_char_boundary(MAX_MEETING_TEMPLATE_OUTLINE_SECTION_LEN);
+                section
+            })
+            .collect();
+
+        sanitized.push(template);
+        if sanitized.len() >= MAX_MEETING_CUSTOM_TEMPLATES {
+            break;
+        }
+    }
+
+    sanitized
+}
+
+/// `String::truncate` panics on a non-char boundary; saved settings are user
+/// text, so a multi-byte character sitting exactly on the cut point is a real
+/// possibility, not a hypothetical.
+trait TruncateToCharBoundary {
+    fn truncate_to_char_boundary(&mut self, max_len: usize);
+}
+
+impl TruncateToCharBoundary for String {
+    fn truncate_to_char_boundary(&mut self, max_len: usize) {
+        if self.len() <= max_len {
+            return;
+        }
+        let mut boundary = max_len;
+        while boundary > 0 && !self.is_char_boundary(boundary) {
+            boundary -= 1;
+        }
+        self.truncate(boundary);
+    }
 }
 
 fn normalize_ai_lane_settings(lane: &mut AiLaneSettings) {
@@ -1471,10 +1618,12 @@ mod tests {
     use super::{
         normalize_dictation_active_languages, normalize_loaded_privacy_settings,
         normalize_loaded_transcription_settings, normalize_transcription_model_id,
-        resolve_dictation_app_category_with_overrides, AiLane, AiLaneSettings,
-        AudioInputDevicePreference, DictationAppCategoryOverride, DictationCustomMode,
-        PlatformOptimizationSettings, PrivacySettings, Settings, SettingsManager,
-        TranscriptionSettings,
+        resolve_dictation_app_category_with_overrides, sanitize_meeting_custom_templates, AiLane,
+        AiLaneSettings, AudioInputDevicePreference, DictationAppCategoryOverride,
+        DictationCustomMode, MeetingCustomTemplate, PlatformOptimizationSettings, PrivacySettings,
+        Settings, SettingsManager, TranscriptionSettings, MAX_MEETING_CUSTOM_TEMPLATES,
+        MAX_MEETING_TEMPLATE_NAME_LEN, MAX_MEETING_TEMPLATE_OUTLINE_SECTIONS,
+        MAX_MEETING_TEMPLATE_OUTLINE_SECTION_LEN, MAX_MEETING_TEMPLATE_PROMPT_LEN,
     };
     use crate::text::format::DictationAppCategory;
     use std::fs;
@@ -2101,6 +2250,116 @@ mod tests {
             modes[3].insertion_mode, "auto",
             "a profile written before the field existed has no value to keep"
         );
+    }
+
+    #[test]
+    fn meeting_custom_templates_round_trip_through_load_normalization() {
+        // A well-formed template, loaded from a settings.json that a previous
+        // save already sanitized, must survive `get_settings` unchanged --
+        // the same round-trip guarantee `dictation_custom_modes` gets.
+        let mut transcription = TranscriptionSettings {
+            meeting_custom_templates: vec![MeetingCustomTemplate {
+                id: "custom-1".to_string(),
+                name: "Board Update".to_string(),
+                summary_prompt: "Summarize board sentiment, asks, and follow-ups.".to_string(),
+                notes_outline: vec!["Sentiment".to_string(), "Asks".to_string()],
+            }],
+            ..Default::default()
+        };
+
+        normalize_loaded_transcription_settings(&mut transcription);
+
+        assert_eq!(transcription.meeting_custom_templates.len(), 1);
+        let template = &transcription.meeting_custom_templates[0];
+        assert_eq!(template.id, "custom-1");
+        assert_eq!(template.name, "Board Update");
+        assert_eq!(
+            template.summary_prompt,
+            "Summarize board sentiment, asks, and follow-ups."
+        );
+        assert_eq!(template.notes_outline, vec!["Sentiment", "Asks"]);
+    }
+
+    #[test]
+    fn meeting_custom_templates_drop_malformed_entries() {
+        let sanitized = sanitize_meeting_custom_templates(vec![
+            // No id: unresolvable by any picker or analysis lookup.
+            MeetingCustomTemplate {
+                id: String::new(),
+                name: "No id".to_string(),
+                ..Default::default()
+            },
+            // No name: nothing to show in a picker.
+            MeetingCustomTemplate {
+                id: "custom-blank-name".to_string(),
+                name: "   ".to_string(),
+                ..Default::default()
+            },
+            // Collides with a built-in id -- would shadow "standup" everywhere
+            // templates are resolved by id.
+            MeetingCustomTemplate {
+                id: "standup".to_string(),
+                name: "Impostor Standup".to_string(),
+                ..Default::default()
+            },
+            // A genuinely valid entry, to prove the sweep is selective.
+            MeetingCustomTemplate {
+                id: "custom-valid".to_string(),
+                name: "Valid Template".to_string(),
+                summary_prompt: "Summarize this.".to_string(),
+                notes_outline: vec!["Notes".to_string()],
+            },
+            // Duplicate id of the valid entry above: first occurrence wins.
+            MeetingCustomTemplate {
+                id: "custom-valid".to_string(),
+                name: "Duplicate Id".to_string(),
+                ..Default::default()
+            },
+        ]);
+
+        assert_eq!(
+            sanitized.len(),
+            1,
+            "only the one well-formed entry survives"
+        );
+        assert_eq!(sanitized[0].id, "custom-valid");
+        assert_eq!(sanitized[0].name, "Valid Template");
+    }
+
+    #[test]
+    fn meeting_custom_templates_cap_lengths_and_count() {
+        let oversized_name = "n".repeat(500);
+        let oversized_prompt = "p".repeat(10_000);
+        let sanitized = sanitize_meeting_custom_templates(vec![MeetingCustomTemplate {
+            id: "custom-oversized".to_string(),
+            name: oversized_name.clone(),
+            summary_prompt: oversized_prompt.clone(),
+            notes_outline: (0..30)
+                .map(|index| format!("Section {index}: {}", "x".repeat(200)))
+                .collect(),
+        }]);
+
+        assert_eq!(sanitized.len(), 1);
+        let template = &sanitized[0];
+        assert!(template.name.len() <= MAX_MEETING_TEMPLATE_NAME_LEN);
+        assert!(template.summary_prompt.len() <= MAX_MEETING_TEMPLATE_PROMPT_LEN);
+        assert!(template.notes_outline.len() <= MAX_MEETING_TEMPLATE_OUTLINE_SECTIONS);
+        for section in &template.notes_outline {
+            assert!(section.len() <= MAX_MEETING_TEMPLATE_OUTLINE_SECTION_LEN);
+        }
+
+        // Whole-list cap: a settings file with more templates than any user
+        // plausibly created (a sync bug, a corrupted file) is truncated
+        // rather than trusted wholesale.
+        let too_many: Vec<MeetingCustomTemplate> = (0..(MAX_MEETING_CUSTOM_TEMPLATES + 10))
+            .map(|index| MeetingCustomTemplate {
+                id: format!("custom-{index}"),
+                name: format!("Template {index}"),
+                ..Default::default()
+            })
+            .collect();
+        let sanitized = sanitize_meeting_custom_templates(too_many);
+        assert_eq!(sanitized.len(), MAX_MEETING_CUSTOM_TEMPLATES);
     }
 
     #[test]
