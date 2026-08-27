@@ -150,8 +150,11 @@ impl Provider {
     /// - OpenAi: `gpt-4o-mini` is superseded; `gpt-5.6-luna` is the current
     ///   cost-optimized tier
     ///   (https://developers.openai.com/api/docs/models).
-    /// - Gemini: `gemini-2.0-flash` was shut down by Google; `gemini-3.5-flash-lite`
-    ///   is the current fastest/cheapest model
+    /// - Gemini: `gemini-2.0-flash` was shut down by Google; `gemini-3.7-flash`
+    ///   is the current flagship Flash model ($0.75/$3.75 per Mtok) and the
+    ///   right quality tradeoff for meeting summarization on a BYOK app --
+    ///   `gemini-3.5-flash-lite` is cheaper/faster but a lower-quality choice
+    ///   for this workload (product decision, verified live)
     ///   (https://ai.google.dev/gemini-api/docs/models).
     /// - DeepSeek: `deepseek-chat` was retired 2026-07-24 and no longer
     ///   resolves; `deepseek-v4-flash` is its documented non-thinking-mode
@@ -161,7 +164,7 @@ impl Provider {
             Self::Ollama => "qwen3.5:4b",
             Self::OpenAi => "gpt-5.6-luna",
             Self::Anthropic => "claude-opus-5",
-            Self::Gemini => "gemini-3.5-flash-lite",
+            Self::Gemini => "gemini-3.7-flash",
             Self::DeepSeek => "deepseek-v4-flash",
             Self::OllamaCloud => "qwen3.5:4b",
         }
@@ -773,7 +776,7 @@ mod tests {
         assert_eq!(Provider::Ollama.default_model(), "qwen3.5:4b");
         assert_eq!(Provider::OllamaCloud.default_model(), "qwen3.5:4b");
         assert_eq!(Provider::OpenAi.default_model(), "gpt-5.6-luna");
-        assert_eq!(Provider::Gemini.default_model(), "gemini-3.5-flash-lite");
+        assert_eq!(Provider::Gemini.default_model(), "gemini-3.7-flash");
         assert_eq!(Provider::DeepSeek.default_model(), "deepseek-v4-flash");
     }
 
