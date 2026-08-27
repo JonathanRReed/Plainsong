@@ -14724,7 +14724,10 @@ fn normalize_platform_engine_id(value: &str) -> Option<&'static str> {
     match value.trim() {
         "provider_default" => Some("provider_default"),
         "macos_apple_speech" => Some("macos_apple_speech"),
-        "macos_mlx_sidecar" => Some("macos_mlx_sidecar"),
+        // macos_mlx_sidecar was a stub engine with no production runtime
+        // behind it (see `asr::platform::mlx_sidecar`) and has been retired;
+        // rejecting it here drops it from `manual_engine_priority` on load
+        // the same way other retired engine ids are dropped.
         "windows_foundry_local" => Some("windows_foundry_local"),
         "windows_sdk_dictation" => Some("windows_sdk_dictation"),
         _ => None,
