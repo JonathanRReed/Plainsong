@@ -42,7 +42,9 @@ never in source, logs, shell history, or release artifacts.
 - Speech helper entitlements:
   `rust-sidecar/native/macos_speech_helper.entitlements.plist`
 - Signing dispatch: `scripts/sign-macos.mjs` — the source of truth for which
-  binary gets which entitlements file (see "Per-binary entitlements" below)
+  binary gets which entitlements file (see "Per-binary entitlements" below) —
+  except the GPU/Renderer/Plugin helpers, which take `entitlementsInherit`
+  from `electron-builder.yml`
 - Rust sidecar: `rust-sidecar/target/release/plainsong-sidecar`
 - Shortcut helper: `dist-native/plainsong-native-shortcut-helper`
 - Output directory: `release/`
@@ -59,7 +61,7 @@ its own file:
 
 | Binary | Entitlements file | Holds |
 | --- | --- | --- |
-| `Plainsong.app` (main) | `entitlements.mac.plist` | JIT, unsigned executable memory, microphone, audio input, Apple Events automation (scoped to `com.apple.systempreferences` and `com.apple.finder`) |
+| `Plainsong.app` (main) | `entitlements.mac.plist` | JIT, unsigned executable memory, microphone, audio input, blanket Apple Events automation, plus an (inert, unsandboxed) `temporary-exception` list naming `com.apple.systempreferences` and `com.apple.finder` |
 | `Plainsong Helper (GPU).app`, `(Renderer).app`, `(Plugin).app` | `entitlements.mac.inherit.plist` | JIT, unsigned executable memory, `inherit` only — no device, no Apple Events, no disabled library validation |
 | `Plainsong Helper.app` (generic — hosts Chromium's utility processes, including the audio service the Settings microphone test uses via `getUserMedia`) | `entitlements.mac.helper.plist` | the inherit set plus `device.audio-input` and `device.microphone` — nothing else |
 | `sidecar/plainsong-sidecar` | `entitlements.mac.sidecar.plist` | none (empty `<dict/>`) |
