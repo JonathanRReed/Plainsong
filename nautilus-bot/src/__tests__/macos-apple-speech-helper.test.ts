@@ -6,6 +6,19 @@ import { describe, expect, it } from "vitest";
 
 const repoRoot = path.resolve(import.meta.dirname, "../..");
 
+/**
+ * The entitlement keys a plist actually grants, in file order.
+ *
+ * Read from the `<key>` elements rather than by matching raw text: these files
+ * carry XML comments explaining what was removed and why, and the words in
+ * those comments are exactly the ones a raw-text assertion looks for.
+ */
+function entitlementKeys(relativePath: string): string[] {
+  const source = fs.readFileSync(path.join(repoRoot, relativePath), "utf8");
+  const withoutComments = source.replace(/<!--[\s\S]*?-->/g, "");
+  return [...withoutComments.matchAll(/<key>([^<]+)<\/key>/g)].map((entry) => entry[1]);
+}
+
 describe("macOS Apple Speech helper contract", () => {
   it("passes source, on-device, entitlement, and packaging checks", () => {
     const output = execFileSync(
@@ -96,6 +109,83 @@ describe("macOS Apple Speech helper contract", () => {
       /microphone|audio-input|apple-events|allow-jit|allow-unsigned-executable-memory|disable-library-validation|speech-recognition/,
     );
   });
+
+  it("gives the GPU, Renderer and Plugin helpers only what Chromium needs", () => {
+    // These three were signed with a copy of the main app's entitlements, so
+    // they shipped with the microphone, unscoped Apple Events, and disabled
+    // library validation. The Renderer never opens the device itself
+    // (getUserMedia is brokered by the audio service), and no child process
+    // drives another application.
+    expect(entitlementKeys("build-resources/entitlements.mac.inherit.plist")).toEqual([
+      "com.apple.security.cs.allow-jit",
+      "com.apple.security.cs.allow-unsigned-executable-memory",
+      "com.apple.security.inherit",
+    ]);
+  });
+
+  it("keeps audio on the generic helper alone, and routes it there by shape", () => {
+    // Chromium's audio service runs in the generic "<Product> Helper", and the
+    // Settings microphone test reaches it through getUserMedia. Removing audio
+    // from every helper at once would break that.
+    const signScript = fs.readFileSync(
+      path.join(repoRoot, "scripts/sign-macos.mjs"),
+      "utf8",
+    );
+
+    expect(entitlementKeys("build-resources/entitlements.mac.helper.plist")).toEqual([
+      "com.apple.security.cs.allow-jit",
+      "com.apple.security.cs.allow-unsigned-executable-memory",
+      "com.apple.security.inherit",
+      "com.apple.security.device.audio-input",
+      "com.apple.security.device.microphone",
+    ]);
+    expect(signScript).toContain("entitlements.mac.helper.plist");
+    // Matched by shape, not by the literal product name.
+    expect(signScript).toContain("genericHelperPattern");
+    expect(signScript).not.toContain('"Plainsong Helper"');
+  });
+
+  it("routes only the generic helper to the audio policy", () => {
+    const signScriptUrl = pathToFileURL(
+      path.join(repoRoot, "scripts/sign-macos.mjs"),
+    ).href;
+    const output = execFileSync(
+      process.execPath,
+      [
+        "--input-type=module",
+        "--eval",
+        `
+          const { optionsForSignedFile } = await import(${JSON.stringify(signScriptUrl)});
+          const inherited = () => ({ entitlements: "inherit.plist", marker: "inherited" });
+          const pick = (name) => optionsForSignedFile("/tmp/Frameworks/" + name, inherited);
+          console.log(JSON.stringify({
+            generic: pick("Plainsong Helper"),
+            genericBundle: pick("Plainsong Helper.app"),
+            gpu: pick("Plainsong Helper (GPU)"),
+            renderer: pick("Plainsong Helper (Renderer)"),
+            plugin: pick("Plainsong Helper (Plugin)"),
+          }));
+        `,
+      ],
+      { cwd: repoRoot, encoding: "utf8" },
+    );
+    const selected = JSON.parse(output) as Record<
+      string,
+      { entitlements: string; marker: string }
+    >;
+    const helperPolicy = path.join(
+      repoRoot,
+      "build-resources/entitlements.mac.helper.plist",
+    );
+
+    expect(selected.generic.entitlements).toBe(helperPolicy);
+    expect(selected.genericBundle.entitlements).toBe(helperPolicy);
+    // The three suffixed helpers keep whatever electron-builder inherited them,
+    // which is entitlements.mac.inherit.plist.
+    expect(selected.gpu.entitlements).toBe("inherit.plist");
+    expect(selected.renderer.entitlements).toBe("inherit.plist");
+    expect(selected.plugin.entitlements).toBe("inherit.plist");
+  }, 15_000);
 
   it("selects dedicated native-helper entitlements by basename", () => {
     const signScriptUrl = pathToFileURL(

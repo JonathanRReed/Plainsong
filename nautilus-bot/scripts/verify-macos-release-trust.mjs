@@ -40,8 +40,54 @@ const candidateIdentity = collectReleaseCandidateIdentity({
   appPath,
 });
 
+/**
+ * The Electron child-process bundles, keyed by the entitlement policy each one
+ * is signed with.
+ *
+ * `electron` is the generic "<Product> Helper", which hosts Chromium's utility
+ * processes including the audio service; scripts/sign-macos.mjs gives it
+ * entitlements.mac.helper.plist, which is the inherit set plus audio. The other
+ * three carry entitlements.mac.inherit.plist and must hold no device or
+ * automation authority at all.
+ */
+const ELECTRON_HELPER_SUFFIXES = {
+  electronHelper: "",
+  electronHelperGpu: " (GPU)",
+  electronHelperRenderer: " (Renderer)",
+  electronHelperPlugin: " (Plugin)",
+};
+
+/** The three helpers with no legitimate use for the device or Apple Events. */
+const RESTRICTED_ELECTRON_HELPERS = [
+  "electronHelperGpu",
+  "electronHelperRenderer",
+  "electronHelperPlugin",
+];
+
+function electronHelperPaths(bundlePath) {
+  const productName = path.basename(bundlePath, ".app");
+  return Object.fromEntries(
+    Object.entries(ELECTRON_HELPER_SUFFIXES).map(([key, suffix]) => {
+      const helperName = `${productName} Helper${suffix}`;
+      return [
+        key,
+        path.join(
+          bundlePath,
+          "Contents",
+          "Frameworks",
+          `${helperName}.app`,
+          "Contents",
+          "MacOS",
+          helperName,
+        ),
+      ];
+    }),
+  );
+}
+
 function appBundlePaths(bundlePath) {
   return {
+    ...electronHelperPaths(bundlePath),
     app: bundlePath,
     mainExecutable: path.join(bundlePath, "Contents", "MacOS", "Plainsong"),
     sidecar: path.join(
@@ -140,6 +186,30 @@ const FORBIDDEN_SHORTCUT_HELPER_ENTITLEMENTS = [
   SPEECH_RECOGNITION_ENTITLEMENT,
 ];
 
+// The GPU, Renderer and Plugin helpers need JIT, writable-executable memory and
+// `inherit` — and nothing else. They shipped with the microphone, unscoped Apple
+// Events and disabled library validation because they were signed with a copy of
+// the main app's entitlements; none of the three ever opens a device or drives
+// another application.
+const FORBIDDEN_RESTRICTED_HELPER_ENTITLEMENTS = [
+  "com.apple.security.device.audio-input",
+  "com.apple.security.device.microphone",
+  "com.apple.security.automation.apple-events",
+  "com.apple.security.temporary-exception.apple-events",
+  "com.apple.security.cs.disable-library-validation",
+  SPEECH_RECOGNITION_ENTITLEMENT,
+];
+
+// The generic helper keeps audio (Chromium's audio service runs there, and the
+// Settings microphone test reaches it through getUserMedia) but has no more
+// business with Apple Events or unsigned libraries than the other three.
+const FORBIDDEN_GENERIC_HELPER_ENTITLEMENTS = [
+  "com.apple.security.automation.apple-events",
+  "com.apple.security.temporary-exception.apple-events",
+  "com.apple.security.cs.disable-library-validation",
+  SPEECH_RECOGNITION_ENTITLEMENT,
+];
+
 function entitlementDetails(targetPath) {
   const result = run("/usr/bin/codesign", [
     "-d",
@@ -157,13 +227,26 @@ function entitlementDetails(targetPath) {
   const forbiddenSidecarEntitlements = FORBIDDEN_SIDECAR_ENTITLEMENTS.filter(
     (entitlement) => result.output.includes(entitlement),
   );
+  const forbiddenRestrictedHelperEntitlements =
+    FORBIDDEN_RESTRICTED_HELPER_ENTITLEMENTS.filter((entitlement) =>
+      result.output.includes(entitlement),
+    );
+  const forbiddenGenericHelperEntitlements =
+    FORBIDDEN_GENERIC_HELPER_ENTITLEMENTS.filter((entitlement) =>
+      result.output.includes(entitlement),
+    );
   return {
     ...result,
     hasSpeechRecognition:
       result.ok && result.output.includes(SPEECH_RECOGNITION_ENTITLEMENT),
+    hasLibraryValidationDisabled: result.output.includes(
+      "com.apple.security.cs.disable-library-validation",
+    ),
     forbiddenInheritedEntitlements,
     forbiddenSidecarEntitlements,
     forbiddenShortcutHelperEntitlements,
+    forbiddenRestrictedHelperEntitlements,
+    forbiddenGenericHelperEntitlements,
   };
 }
 
@@ -203,10 +286,15 @@ function entitlementDiagnostic(result) {
   return {
     ...commandDiagnostic(result),
     hasSpeechRecognition: result.hasSpeechRecognition,
+    hasLibraryValidationDisabled: result.hasLibraryValidationDisabled,
     forbiddenInheritedEntitlements: result.forbiddenInheritedEntitlements,
     forbiddenSidecarEntitlements: result.forbiddenSidecarEntitlements,
     forbiddenShortcutHelperEntitlements:
       result.forbiddenShortcutHelperEntitlements,
+    forbiddenRestrictedHelperEntitlements:
+      result.forbiddenRestrictedHelperEntitlements,
+    forbiddenGenericHelperEntitlements:
+      result.forbiddenGenericHelperEntitlements,
   };
 }
 
@@ -306,6 +394,12 @@ function inspectAppBundle(bundlePath) {
     sidecar: isExecutable(paths.sidecar),
     shortcutHelper: isExecutable(paths.shortcutHelper),
     speechHelper: isExecutable(paths.speechHelper),
+    ...Object.fromEntries(
+      Object.keys(ELECTRON_HELPER_SUFFIXES).map((key) => [
+        key,
+        isExecutable(paths[key]),
+      ]),
+    ),
   };
   const signatures = {
     app: run("/usr/bin/codesign", [
@@ -345,6 +439,12 @@ function inspectAppBundle(bundlePath) {
     sidecar: entitlementDetails(paths.sidecar),
     shortcutHelper: entitlementDetails(paths.shortcutHelper),
     speechHelper: entitlementDetails(paths.speechHelper),
+    ...Object.fromEntries(
+      Object.keys(ELECTRON_HELPER_SUFFIXES).map((key) => [
+        key,
+        entitlementDetails(paths[key]),
+      ]),
+    ),
   };
   const architectures = {
     app: architectureDetails(paths.mainExecutable),
@@ -402,6 +502,30 @@ function checksForAppBundle(inspection) {
     speechHelperHasSecureTimestamp: signing.speechHelper.secureTimestamp,
     appHasNoSpeechEntitlement:
       entitlements.app.ok && !entitlements.app.hasSpeechRecognition,
+
+    // Every Electron child bundle must exist where sign-macos.mjs expects it —
+    // a productName change that moved these would otherwise leave their
+    // entitlement checks silently unenforced.
+    ...Object.fromEntries(
+      Object.keys(ELECTRON_HELPER_SUFFIXES).map((key) => [
+        `${key}Present`,
+        presence[key],
+      ]),
+    ),
+    // The GPU, Renderer and Plugin helpers hold no device or automation
+    // authority and cannot load unsigned libraries.
+    ...Object.fromEntries(
+      RESTRICTED_ELECTRON_HELPERS.map((key) => [
+        `${key}HasNoDeviceOrAutomationPrivileges`,
+        entitlements[key].ok &&
+          entitlements[key].forbiddenRestrictedHelperEntitlements.length === 0,
+      ]),
+    ),
+    // The generic helper keeps audio (Chromium's audio service runs there) but
+    // nothing else the other three gave up.
+    electronHelperHasNoAutomationPrivileges:
+      entitlements.electronHelper.ok &&
+      entitlements.electronHelper.forbiddenGenericHelperEntitlements.length === 0,
     sidecarHasNoSpeechEntitlement:
       entitlements.sidecar.ok && !entitlements.sidecar.hasSpeechRecognition,
     sidecarHasNoForbiddenPrivileges:
@@ -485,6 +609,12 @@ function diagnosticsForAppBundle(inspection) {
     ),
     speechHelperEntitlements: entitlementDiagnostic(
       inspection.entitlements.speechHelper,
+    ),
+    ...Object.fromEntries(
+      Object.keys(ELECTRON_HELPER_SUFFIXES).map((key) => [
+        `${key}Entitlements`,
+        entitlementDiagnostic(inspection.entitlements[key]),
+      ]),
     ),
     appArchitecture: architectureDiagnostic(inspection.architectures.app),
     sidecarArchitecture: architectureDiagnostic(inspection.architectures.sidecar),
