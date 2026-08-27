@@ -13,51 +13,57 @@ export const BETA_REFERENCE_BUDGETS = Object.freeze({
 });
 
 /**
- * Thresholds for the `metricScope: "end_to_end"` receipt (Wave 3): the full
- * post-capture pipeline, not just ASR decode.
+ * Thresholds for the `metricScope: "asr_and_local_format_only"` receipt
+ * (Wave 3), applied ONLY to the receipt's `primary` fixture -- a single
+ * short utterance, the regime the audit's 130-700ms competitor bar is
+ * actually about. `secondaryLongForm` (a ~44s clip, kept for comparison) is
+ * validated structurally but never threshold-gated: ASR decode time scales
+ * with audio length, so a long clip's pipeline time is dominated by that
+ * scaling, not by anything a latency budget should police.
  *
- * `formatOffP50Ms: 500` is the number the Wave 3 audit asked for directly:
- * competing dictation tools land the entire pipeline in 130-700ms, and this
- * app had never measured its own end-to-end number at all.
+ * IMPORTANT SCOPE NOTE, repeated here because it changes what these numbers
+ * mean: this receipt's clock starts at `transcribe_bytes` with audio already
+ * in memory. It does NOT include the stop gesture (hotkey release), the
+ * Electron-to-sidecar IPC hop, audio finalization, the real (not mocked)
+ * insertion path, or the 120ms `DICTATION_STOP_CAPTURE_TAIL_MS` wait the
+ * real stop handler awaits before its own clock starts (`captureTailExcludedMs`
+ * on the receipt). None of that is a small slice: the capture tail alone is
+ * 120ms, and none of it is measured anywhere else in an automated way yet
+ * either -- the runtime `DictationTimingRecord` (dictation_timing.rs)
+ * captures the real, full-session number per live dictation instead, logged
+ * but not currently receipted. Do not read a pass here as "the user feels
+ * this fast"; read it as "ASR plus the local pipeline stayed within budget,"
+ * a real and useful thing to gate, just a narrower one than "end to end."
  *
- * A real local run on the reference machine (Apple M4 Pro, 10 runs, whisper
- * base.en against `scripts/fixtures/real-speech-44s.wav` — see
- * `artifacts/qa/dictation-latency-e2e.json`, committed alongside this gate)
- * measured format-off at P50 491ms / P95 500ms, and format-on (local
- * smart-format only; see below) at P50 495ms / P95 506ms. That number is
- * almost entirely ASR decode time for this 44-second fixture — the local
- * pipeline and mocked insertion each add low-single-digit milliseconds at
- * most (see the receipt's `stageBreakdownMs`).
+ * Real local measurement (Apple M4 Pro, 10 runs, whisper base.en,
+ * `scripts/fixtures/local-quality-gate.wav`, ~5.3s of speech -- see the
+ * benchmark output in the PR/commit that introduced this threshold since the
+ * receipt itself is gitignored and never committed):
+ *   formatOff: P50 91ms / P95 128ms
+ *   formatOn (local smart-format only, see below): P50 96ms / P95 131ms
  *
- * That P50 measurement (491ms) leaves only ~9ms of headroom under the 500ms
- * bar the audit fixed. This is a real, known risk, not an oversight: a
- * slower reference Mac (the hardware gate only requires Apple silicon with
- * 16GiB+ RAM, not a specific chip) or a noisier run could push P50 past
- * 500ms on an otherwise-healthy build. The threshold is kept at the audit's
- * literal number rather than loosened, so a real regression is never
- * masked; if this gate starts flaking on slower reference hardware, the fix
- * is a shorter/more-typical fixture (44s of continuous speech is longer than
- * a typical dictation utterance) rather than a wider budget.
- *
- * `formatOffP95Ms: 900` gives ~1.8x headroom over the measured 500ms P95 for
- * a cold cache or a noisy-neighbor run, without masking a real regression.
- * `formatOnP50Ms` / `formatOnP95Ms` are "generous but bounded" per the spec:
- * format-on here only adds the local (non-LLM) smart-format pass (see
- * `build_end_to_end_report`'s doc comment in `benchmark-latency.rs` for why
- * the LLM-backed Smart Format pass isn't driven from this benchmark), so it
- * tracks format-off closely (495/506ms measured); the wider budget
- * (700/1200ms, ~1.4x/2.4x headroom) leaves room for that pass without hiding
- * a real regression.
+ * Thresholds below give roughly 2.7-3x headroom over those measurements --
+ * enough to absorb a slower reference Mac (the hardware gate only requires
+ * Apple silicon with 16GiB+ RAM, not a specific chip) or a noisy run,
+ * without inflating the bar so far that it stops catching real regressions.
+ * `formatOnP50Ms`/`formatOnP95Ms` get a little more room than formatOff's
+ * per the "generous but bounded" brief, since format-on adds a real (if
+ * small) local-formatting cost on top: format-on measures only the
+ * deterministic local smart-formatting pass (`text::format`), not the
+ * optional LLM-backed Smart Format pass, which calls a live model/provider
+ * behind `dictation_format_timeout` (`lib.rs`) and cannot be driven safely
+ * or deterministically from a headless benchmark -- its real timing and
+ * timeout rate are captured by the runtime timing record instead.
  *
  * Tightening any of these later should cite a fresh local measurement, the
  * same way this one does.
  */
-export const END_TO_END_BUDGETS = Object.freeze({
+export const PIPELINE_BUDGETS = Object.freeze({
   minimumSamples: 5,
-  formatOffP50Ms: 500,
-  formatOffP95Ms: 900,
-  formatOnP50Ms: 700,
-  formatOnP95Ms: 1_200,
+  formatOffP50Ms: 250,
+  formatOffP95Ms: 350,
+  formatOnP50Ms: 300,
+  formatOnP95Ms: 400,
   minimumMemoryBytes: 16 * 1024 * 1024 * 1024,
 });
 
@@ -81,7 +87,7 @@ function checkReferenceHardware(report, failures, requireReferenceHardware) {
   if (hardware.os !== "macos") failures.push("reference hardware must run macOS");
   if (hardware.arch !== "aarch64") failures.push("reference hardware must be Apple silicon");
   const minimumMemoryBytes =
-    END_TO_END_BUDGETS.minimumMemoryBytes ?? BETA_REFERENCE_BUDGETS.minimumMemoryBytes;
+    PIPELINE_BUDGETS.minimumMemoryBytes ?? BETA_REFERENCE_BUDGETS.minimumMemoryBytes;
   if (!finiteNumber(hardware.memoryBytes) || hardware.memoryBytes < minimumMemoryBytes) {
     failures.push("reference hardware must report at least 16 GiB memory");
   }
@@ -199,22 +205,21 @@ function verifyProviderTranscriptionOnlyReport(report, { requireReferenceHardwar
   return { pass: failures.length === 0, failures, budgets: BETA_REFERENCE_BUDGETS };
 }
 
-function verifyFormatVariant(report, failures, variantKey, p50Budget, p95Budget, expectedCount) {
-  const variant = report?.[variantKey];
+function verifyFormatVariant(prefix, variant, failures, p50Budget, p95Budget, expectedCount) {
   if (!variant || typeof variant !== "object") {
-    failures.push(`${variantKey} is required`);
+    failures.push(`${prefix} is required`);
     return;
   }
 
   if (!Array.isArray(variant.measurementsMs)) {
-    failures.push(`${variantKey}.measurementsMs must be an array`);
+    failures.push(`${prefix}.measurementsMs must be an array`);
   } else {
     if (finiteNumber(expectedCount) && variant.measurementsMs.length !== expectedCount) {
-      failures.push(`${variantKey}.measurementsMs length must match sampleCount`);
+      failures.push(`${prefix}.measurementsMs length must match sampleCount`);
     }
     variant.measurementsMs.forEach((measurement, index) => {
       if (!finiteNumber(measurement) || measurement < 0) {
-        failures.push(`${variantKey}.measurementsMs[${index}] must be a finite, non-negative number`);
+        failures.push(`${prefix}.measurementsMs[${index}] must be a finite, non-negative number`);
       }
     });
 
@@ -223,63 +228,118 @@ function verifyFormatVariant(report, failures, variantKey, p50Budget, p95Budget,
     );
     if (variant.measurementsMs.length > 0 && allValid) {
       for (const [field, percentile] of [
-        ["endToEndMsP50", 50],
-        ["endToEndMsP95", 95],
+        ["pipelineMsP50", 50],
+        ["pipelineMsP95", 95],
       ]) {
         const expected = nearestRankPercentile(variant.measurementsMs, percentile);
         if (variant?.[field] !== expected) {
           failures.push(
-            `${variantKey}.${field} must match the nearest-rank P${percentile} of ${variantKey}.measurementsMs (${expected}ms)`,
+            `${prefix}.${field} must match the nearest-rank P${percentile} of ${prefix}.measurementsMs (${expected}ms)`,
           );
         }
       }
     }
   }
 
-  if (!finiteNumber(variant.endToEndMsP50)) {
-    failures.push(`${variantKey}.endToEndMsP50 must be a finite number`);
-  } else if (variant.endToEndMsP50 < 0) {
-    failures.push(`${variantKey}.endToEndMsP50 must be non-negative`);
-  } else if (variant.endToEndMsP50 > p50Budget) {
-    failures.push(`${variantKey}.endToEndMsP50 ${variant.endToEndMsP50}ms exceeds ${p50Budget}ms`);
-  }
-
-  if (!finiteNumber(variant.endToEndMsP95)) {
-    failures.push(`${variantKey}.endToEndMsP95 must be a finite number`);
-  } else if (variant.endToEndMsP95 < 0) {
-    failures.push(`${variantKey}.endToEndMsP95 must be non-negative`);
-  } else if (variant.endToEndMsP95 > p95Budget) {
-    failures.push(`${variantKey}.endToEndMsP95 ${variant.endToEndMsP95}ms exceeds ${p95Budget}ms`);
-  }
+  const checkBudget = (field, budget) => {
+    if (budget === null) return; // informational only (secondaryLongForm): no ceiling enforced
+    if (!finiteNumber(variant?.[field])) {
+      failures.push(`${prefix}.${field} must be a finite number`);
+    } else if (variant[field] < 0) {
+      failures.push(`${prefix}.${field} must be non-negative`);
+    } else if (variant[field] > budget) {
+      failures.push(`${prefix}.${field} ${variant[field]}ms exceeds ${budget}ms`);
+    }
+  };
+  checkBudget("pipelineMsP50", p50Budget);
+  checkBudget("pipelineMsP95", p95Budget);
 }
 
-function verifyStageBreakdown(report, failures, expectedCount) {
-  const breakdown = report?.stageBreakdownMs;
+function verifyStageBreakdown(prefix, breakdown, failures, expectedCount) {
   if (!breakdown || typeof breakdown !== "object") {
-    failures.push("stageBreakdownMs is required");
+    failures.push(`${prefix}.stageBreakdownMs is required`);
     return;
   }
   for (const stage of ["asr", "formatOff", "formatOn", "insertionMockOff", "insertionMockOn"]) {
     const stats = breakdown[stage];
     if (!stats || typeof stats !== "object") {
-      failures.push(`stageBreakdownMs.${stage} is required`);
+      failures.push(`${prefix}.stageBreakdownMs.${stage} is required`);
       continue;
     }
     if (!Array.isArray(stats.measurementsMs)) {
-      failures.push(`stageBreakdownMs.${stage}.measurementsMs must be an array`);
+      failures.push(`${prefix}.stageBreakdownMs.${stage}.measurementsMs must be an array`);
     } else if (finiteNumber(expectedCount) && stats.measurementsMs.length !== expectedCount) {
-      failures.push(`stageBreakdownMs.${stage}.measurementsMs length must match sampleCount`);
+      failures.push(`${prefix}.stageBreakdownMs.${stage}.measurementsMs length must match sampleCount`);
     }
     if (!finiteNumber(stats.p50) || stats.p50 < 0) {
-      failures.push(`stageBreakdownMs.${stage}.p50 must be a finite, non-negative number`);
+      failures.push(`${prefix}.stageBreakdownMs.${stage}.p50 must be a finite, non-negative number`);
     }
     if (!finiteNumber(stats.p95) || stats.p95 < 0) {
-      failures.push(`stageBreakdownMs.${stage}.p95 must be a finite, non-negative number`);
+      failures.push(`${prefix}.stageBreakdownMs.${stage}.p95 must be a finite, non-negative number`);
     }
   }
 }
 
-function verifyEndToEndReport(report, { requireReferenceHardware }) {
+/**
+ * Any insertion stage reporting P95 0ms is, by construction, a mock or a
+ * stub -- real system insertion (a paste dispatch, an Accessibility write, a
+ * clipboard copy shelling out to `pbcopy`) never costs literally zero
+ * milliseconds. A receipt in that shape must say so plainly in
+ * `insertionStrategy`, so a reader can never mistake a near-instant mock for
+ * a real, fast insertion measurement.
+ */
+function verifyInsertionStrategyHonesty(prefix, fixtureReport, insertionStrategy, failures) {
+  const breakdown = fixtureReport?.stageBreakdownMs;
+  const zeroP95 =
+    finiteNumber(breakdown?.insertionMockOff?.p95) && breakdown.insertionMockOff.p95 === 0
+      ? "insertionMockOff"
+      : finiteNumber(breakdown?.insertionMockOn?.p95) && breakdown.insertionMockOn.p95 === 0
+        ? "insertionMockOn"
+        : null;
+  if (zeroP95 && !/mock/i.test(String(insertionStrategy ?? ""))) {
+    failures.push(
+      `${prefix}.stageBreakdownMs.${zeroP95}.p95 is 0ms, which is only plausible for a mock -- insertionStrategy must say so (match /mock/i)`,
+    );
+  }
+}
+
+function verifyFixtureReport(prefix, fixtureReport, failures, budgets) {
+  if (!fixtureReport || typeof fixtureReport !== "object") {
+    failures.push(`${prefix} is required`);
+    return;
+  }
+  if (!finiteNumber(fixtureReport.sampleCount)) {
+    failures.push(`${prefix}.sampleCount must be a finite number`);
+  } else if (fixtureReport.sampleCount < PIPELINE_BUDGETS.minimumSamples) {
+    failures.push(`${prefix}.sampleCount must be at least ${PIPELINE_BUDGETS.minimumSamples}`);
+  }
+  const expectedCount = finiteNumber(fixtureReport.sampleCount) ? fixtureReport.sampleCount : undefined;
+
+  // `budgets` is `null` for a fixture that is reported but never
+  // threshold-gated (secondaryLongForm): each variant still gets shape and
+  // percentile-consistency checks, just no ceiling.
+  verifyFormatVariant(
+    `${prefix}.formatOff`,
+    fixtureReport.formatOff,
+    failures,
+    budgets?.formatOffP50Ms ?? null,
+    budgets?.formatOffP95Ms ?? null,
+    expectedCount,
+  );
+  verifyFormatVariant(
+    `${prefix}.formatOn`,
+    fixtureReport.formatOn,
+    failures,
+    budgets?.formatOnP50Ms ?? null,
+    budgets?.formatOnP95Ms ?? null,
+    expectedCount,
+  );
+  verifyStageBreakdown(prefix, fixtureReport.stageBreakdownMs, failures, expectedCount);
+
+  requireNonEmptyStrings(fixtureReport, failures, ["fixture", "fixtureSha256"]);
+}
+
+function verifyPipelineReport(report, { requireReferenceHardware }) {
   const failures = [];
   const requireEqual = (field, expected) => {
     if (report?.[field] !== expected) {
@@ -289,60 +349,56 @@ function verifyEndToEndReport(report, { requireReferenceHardware }) {
 
   requireEqual("schemaVersion", 1);
   requireEqual("thresholdProfile", "beta-reference-v1");
-  requireEqual("metricScope", "end_to_end");
+  requireEqual("metricScope", "asr_and_local_format_only");
   requireEqual("warmState", "warm");
+  requireEqual("insertionMocked", true);
 
-  if (!finiteNumber(report?.sampleCount)) {
-    failures.push("sampleCount must be a finite number");
-  } else if (report.sampleCount < END_TO_END_BUDGETS.minimumSamples) {
-    failures.push(`sampleCount must be at least ${END_TO_END_BUDGETS.minimumSamples}`);
-  }
-
-  const expectedCount = finiteNumber(report?.sampleCount) ? report.sampleCount : undefined;
-  verifyFormatVariant(
-    report,
-    failures,
-    "formatOff",
-    END_TO_END_BUDGETS.formatOffP50Ms,
-    END_TO_END_BUDGETS.formatOffP95Ms,
-    expectedCount,
-  );
-  verifyFormatVariant(
-    report,
-    failures,
-    "formatOn",
-    END_TO_END_BUDGETS.formatOnP50Ms,
-    END_TO_END_BUDGETS.formatOnP95Ms,
-    expectedCount,
-  );
-  verifyStageBreakdown(report, failures, expectedCount);
+  verifyFixtureReport("primary", report?.primary, failures, PIPELINE_BUDGETS);
+  // secondaryLongForm is structurally validated but never threshold-gated:
+  // ASR decode time scales with audio length, so its pipeline time is
+  // dominated by that scaling, not by anything a latency budget should
+  // police. `null` means "check the field exists and is sane, enforce no
+  // ceiling."
+  verifyFixtureReport("secondaryLongForm", report?.secondaryLongForm, failures, null);
 
   if (typeof report?.insertionStrategy !== "string" || !report.insertionStrategy.trim()) {
     failures.push("insertionStrategy is required (this receipt mocks insertion; say how)");
   }
+  if (typeof report?.formatOnScopeNote !== "string" || !report.formatOnScopeNote.trim()) {
+    failures.push(
+      "formatOnScopeNote is required (formatOn measures only the local pass; say so explicitly)",
+    );
+  }
+  if (!finiteNumber(report?.captureTailExcludedMs) || report.captureTailExcludedMs < 0) {
+    failures.push("captureTailExcludedMs must be a finite, non-negative number");
+  }
+  if (typeof report?.percentileBasis !== "string" || !report.percentileBasis.trim()) {
+    failures.push("percentileBasis is required");
+  }
+
+  verifyInsertionStrategyHonesty("primary", report?.primary, report?.insertionStrategy, failures);
+  verifyInsertionStrategyHonesty("secondaryLongForm", report?.secondaryLongForm, report?.insertionStrategy, failures);
 
   checkReferenceHardware(report, failures, requireReferenceHardware);
   requireNonEmptyStrings(report, failures, [
     "generatedAt",
     "provider",
     "model",
-    "fixture",
-    "fixtureSha256",
     "hostApplication",
   ]);
 
-  return { pass: failures.length === 0, failures, budgets: END_TO_END_BUDGETS };
+  return { pass: failures.length === 0, failures, budgets: PIPELINE_BUDGETS };
 }
 
-const KNOWN_METRIC_SCOPES = new Set(["provider_transcription_only", "end_to_end"]);
+const KNOWN_METRIC_SCOPES = new Set(["provider_transcription_only", "asr_and_local_format_only"]);
 
 export function verifyDictationLatencyReport(
   report,
   { requireReferenceHardware = true } = {},
 ) {
   const metricScope = report?.metricScope;
-  if (metricScope === "end_to_end") {
-    return verifyEndToEndReport(report, { requireReferenceHardware });
+  if (metricScope === "asr_and_local_format_only") {
+    return verifyPipelineReport(report, { requireReferenceHardware });
   }
   if (metricScope === "provider_transcription_only") {
     return verifyProviderTranscriptionOnlyReport(report, { requireReferenceHardware });

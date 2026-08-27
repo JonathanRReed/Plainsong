@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
   BETA_REFERENCE_BUDGETS,
-  END_TO_END_BUDGETS,
+  PIPELINE_BUDGETS,
   verifyDictationLatencyReport,
 } from "../../scripts/verify-dictation-latency.mjs";
 
@@ -23,7 +23,7 @@ function validReport(overrides: Record<string, unknown> = {}) {
     },
     provider: "whisper",
     model: "base.en",
-    fixture: "/tmp/fixture.wav",
+    fixture: "scripts/fixtures/local-quality-gate.wav",
     fixtureSha256: "a".repeat(64),
     fixtureBytes: 42,
     audioSeconds: 5.3,
@@ -38,13 +38,70 @@ function validReport(overrides: Record<string, unknown> = {}) {
   };
 }
 
-function validEndToEndReport(overrides: Record<string, unknown> = {}) {
+function validFixtureReport(overrides: Record<string, unknown> = {}) {
+  return {
+    fixture: "scripts/fixtures/local-quality-gate.wav",
+    fixtureSha256: "a".repeat(64),
+    fixtureBytes: 42,
+    audioSeconds: 5.32,
+    runs: 5,
+    sampleCount: 5,
+    stageBreakdownMs: {
+      asr: { measurementsMs: [85, 90, 95, 100, 105], p50: 95, p95: 105 },
+      formatOff: { measurementsMs: [0, 0, 0, 0, 0], p50: 0, p95: 0 },
+      formatOn: { measurementsMs: [3, 3, 3, 3, 3], p50: 3, p95: 3 },
+      insertionMockOff: { measurementsMs: [0, 0, 0, 0, 0], p50: 0, p95: 0 },
+      insertionMockOn: { measurementsMs: [0, 0, 0, 0, 0], p50: 0, p95: 0 },
+    },
+    formatOff: {
+      measurementsMs: [85, 90, 95, 100, 105],
+      pipelineMsP50: 95,
+      pipelineMsP95: 105,
+    },
+    formatOn: {
+      measurementsMs: [88, 93, 98, 103, 108],
+      pipelineMsP50: 98,
+      pipelineMsP95: 108,
+    },
+    ...overrides,
+  };
+}
+
+function validSecondaryLongFormReport(overrides: Record<string, unknown> = {}) {
+  // Deliberately shaped like the real 44s fixture: numbers that would fail
+  // primary's budget outright, proving secondaryLongForm is reported but
+  // never threshold-gated.
+  return validFixtureReport({
+    fixture: "scripts/fixtures/real-speech-44s.wav",
+    audioSeconds: 43.97,
+    stageBreakdownMs: {
+      asr: { measurementsMs: [480, 485, 490, 495, 500], p50: 490, p95: 500 },
+      formatOff: { measurementsMs: [0, 0, 0, 0, 0], p50: 0, p95: 0 },
+      formatOn: { measurementsMs: [3, 3, 3, 3, 3], p50: 3, p95: 3 },
+      insertionMockOff: { measurementsMs: [0, 0, 0, 0, 0], p50: 0, p95: 0 },
+      insertionMockOn: { measurementsMs: [0, 0, 0, 0, 0], p50: 0, p95: 0 },
+    },
+    formatOff: {
+      measurementsMs: [480, 485, 490, 495, 500],
+      pipelineMsP50: 490,
+      pipelineMsP95: 500,
+    },
+    formatOn: {
+      measurementsMs: [483, 488, 493, 498, 503],
+      pipelineMsP50: 493,
+      pipelineMsP95: 503,
+    },
+    ...overrides,
+  });
+}
+
+function validPipelineReport(overrides: Record<string, unknown> = {}) {
   return {
     schemaVersion: 1,
     benchmarkVersion: "0.9.0-beta.2",
     generatedAt: "2026-08-27T12:00:00Z",
     thresholdProfile: "beta-reference-v1",
-    metricScope: "end_to_end",
+    metricScope: "asr_and_local_format_only",
     hostApplication: "benchmark-cli",
     warmState: "warm",
     hardware: {
@@ -56,32 +113,15 @@ function validEndToEndReport(overrides: Record<string, unknown> = {}) {
     },
     provider: "whisper",
     model: "base.en",
-    fixture: "/tmp/fixture.wav",
-    fixtureSha256: "a".repeat(64),
-    fixtureBytes: 42,
-    audioSeconds: 5.3,
-    runs: 5,
-    sampleCount: 5,
+    percentileBasis: "5 repeats of one fixture",
+    insertionMocked: true,
     insertionStrategy: "mocked-in-memory-copy",
     insertionStrategyNote: "mock note",
     formatOnScopeNote: "scope note",
-    stageBreakdownMs: {
-      asr: { measurementsMs: [80, 85, 90, 95, 100], p50: 90, p95: 100 },
-      formatOff: { measurementsMs: [0, 0, 1, 0, 1], p50: 1, p95: 1 },
-      formatOn: { measurementsMs: [1, 1, 2, 1, 2], p50: 2, p95: 2 },
-      insertionMockOff: { measurementsMs: [0, 0, 0, 0, 1], p50: 0, p95: 1 },
-      insertionMockOn: { measurementsMs: [0, 0, 0, 0, 1], p50: 0, p95: 1 },
-    },
-    formatOff: {
-      measurementsMs: [81, 86, 92, 96, 102],
-      endToEndMsP50: 92,
-      endToEndMsP95: 102,
-    },
-    formatOn: {
-      measurementsMs: [83, 88, 95, 99, 106],
-      endToEndMsP50: 95,
-      endToEndMsP95: 106,
-    },
+    captureTailExcludedMs: 120,
+    captureTailExcludedNote: "tail note",
+    primary: validFixtureReport(),
+    secondaryLongForm: validSecondaryLongFormReport(),
     ...overrides,
   };
 }
@@ -186,25 +226,32 @@ describe("dictation latency beta gate", () => {
     const unknown = verifyDictationLatencyReport(validReport({ metricScope: "made_up_scope" }));
     expect(unknown.pass).toBe(false);
     expect(unknown.failures.join(" ")).toContain("made_up_scope");
+
+    // The pre-Wave-3 "end_to_end" name was renamed for honesty and never had
+    // a committed receipt to stay compatible with -- it must not be silently
+    // accepted as an alias.
+    const stale = verifyDictationLatencyReport(validReport({ metricScope: "end_to_end" }));
+    expect(stale.pass).toBe(false);
+    expect(stale.failures.join(" ")).toContain("end_to_end");
   });
 });
 
-describe("dictation latency end-to-end gate (Wave 3)", () => {
-  it("publishes explicit, documented end-to-end budgets", () => {
-    expect(END_TO_END_BUDGETS).toMatchObject({
+describe("dictation latency pipeline gate (Wave 3, asr_and_local_format_only)", () => {
+  it("publishes explicit, documented pipeline budgets with real headroom", () => {
+    expect(PIPELINE_BUDGETS).toMatchObject({
       minimumSamples: 5,
-      formatOffP50Ms: 500,
+      formatOffP50Ms: 250,
+      formatOffP95Ms: 350,
+      formatOnP50Ms: 300,
+      formatOnP95Ms: 400,
     });
-    // format-off must stay under the 500ms bar the audit measured competing
-    // tools against; format-on is allowed a generous but still-bounded
-    // premium on top of it.
-    expect(END_TO_END_BUDGETS.formatOffP95Ms).toBeGreaterThan(END_TO_END_BUDGETS.formatOffP50Ms);
-    expect(END_TO_END_BUDGETS.formatOnP50Ms).toBeGreaterThanOrEqual(END_TO_END_BUDGETS.formatOffP50Ms);
-    expect(END_TO_END_BUDGETS.formatOnP95Ms).toBeGreaterThan(END_TO_END_BUDGETS.formatOnP50Ms);
+    expect(PIPELINE_BUDGETS.formatOffP95Ms).toBeGreaterThan(PIPELINE_BUDGETS.formatOffP50Ms);
+    expect(PIPELINE_BUDGETS.formatOnP50Ms).toBeGreaterThanOrEqual(PIPELINE_BUDGETS.formatOffP50Ms);
+    expect(PIPELINE_BUDGETS.formatOnP95Ms).toBeGreaterThan(PIPELINE_BUDGETS.formatOnP50Ms);
   });
 
-  it("accepts a complete, in-budget end-to-end report", () => {
-    expect(verifyDictationLatencyReport(validEndToEndReport())).toMatchObject({
+  it("accepts a complete, in-budget pipeline report", () => {
+    expect(verifyDictationLatencyReport(validPipelineReport())).toMatchObject({
       pass: true,
       failures: [],
     });
@@ -226,7 +273,7 @@ describe("dictation latency end-to-end gate (Wave 3)", () => {
         },
         provider: "whisper",
         model: "base.en",
-        fixture: "/tmp/fixture.wav",
+        fixture: "scripts/fixtures/local-quality-gate.wav",
         fixtureSha256: "a".repeat(64),
         hostApplication: "benchmark-cli",
         generatedAt: "2026-08-27T12:00:00Z",
@@ -240,99 +287,131 @@ describe("dictation latency end-to-end gate (Wave 3)", () => {
     ).toMatchObject({ pass: true, failures: [] });
   });
 
-  it("rejects format-off end-to-end regressions past the 500ms/900ms bars", () => {
+  it("rejects primary format-off regressions past its budget", () => {
     const result = verifyDictationLatencyReport(
-      validEndToEndReport({
-        formatOff: {
-          measurementsMs: [501, 600, 700, 800, 950],
-          endToEndMsP50: 700,
-          endToEndMsP95: 950,
-        },
+      validPipelineReport({
+        primary: validFixtureReport({
+          formatOff: {
+            measurementsMs: [251, 260, 270, 280, 360],
+            pipelineMsP50: 270,
+            pipelineMsP95: 360,
+          },
+        }),
       }),
     );
     expect(result.pass).toBe(false);
     expect(result.failures.join(" ")).toContain(
-      `formatOff.endToEndMsP50 700ms exceeds ${END_TO_END_BUDGETS.formatOffP50Ms}ms`,
+      `primary.formatOff.pipelineMsP50 270ms exceeds ${PIPELINE_BUDGETS.formatOffP50Ms}ms`,
     );
     expect(result.failures.join(" ")).toContain(
-      `formatOff.endToEndMsP95 950ms exceeds ${END_TO_END_BUDGETS.formatOffP95Ms}ms`,
+      `primary.formatOff.pipelineMsP95 360ms exceeds ${PIPELINE_BUDGETS.formatOffP95Ms}ms`,
     );
   });
 
-  it("rejects format-on end-to-end regressions past its generous-but-bounded bars", () => {
+  it("rejects primary format-on regressions past its generous-but-bounded budget", () => {
     const result = verifyDictationLatencyReport(
-      validEndToEndReport({
-        formatOn: {
-          measurementsMs: [701, 800, 900, 1_100, 1_300],
-          endToEndMsP50: 900,
-          endToEndMsP95: 1_300,
-        },
+      validPipelineReport({
+        primary: validFixtureReport({
+          formatOn: {
+            measurementsMs: [301, 310, 320, 330, 410],
+            pipelineMsP50: 320,
+            pipelineMsP95: 410,
+          },
+        }),
       }),
     );
     expect(result.pass).toBe(false);
     expect(result.failures.join(" ")).toContain(
-      `formatOn.endToEndMsP50 900ms exceeds ${END_TO_END_BUDGETS.formatOnP50Ms}ms`,
+      `primary.formatOn.pipelineMsP50 320ms exceeds ${PIPELINE_BUDGETS.formatOnP50Ms}ms`,
     );
     expect(result.failures.join(" ")).toContain(
-      `formatOn.endToEndMsP95 1300ms exceeds ${END_TO_END_BUDGETS.formatOnP95Ms}ms`,
+      `primary.formatOn.pipelineMsP95 410ms exceeds ${PIPELINE_BUDGETS.formatOnP95Ms}ms`,
     );
   });
 
-  it("rejects a sample count below the floor", () => {
+  it("never gates secondaryLongForm against primary's thresholds", () => {
+    // validPipelineReport()'s default secondaryLongForm already carries
+    // ~490-503ms numbers, which would fail primary's 250/350/300/400ms
+    // budgets outright if gated. It must still pass, because long-form is
+    // informational only.
+    const result = verifyDictationLatencyReport(validPipelineReport());
+    expect(result.pass).toBe(true);
+    expect(result.failures).not.toContain(
+      expect.stringContaining("secondaryLongForm.formatOff.pipelineMsP50"),
+    );
+  });
+
+  it("rejects a sample count below the floor on either fixture", () => {
     const result = verifyDictationLatencyReport(
-      validEndToEndReport({
-        sampleCount: 4,
-        formatOff: {
-          measurementsMs: [81, 86, 92, 96],
-          endToEndMsP50: 89,
-          endToEndMsP95: 96,
-        },
-        formatOn: {
-          measurementsMs: [83, 88, 95, 99],
-          endToEndMsP50: 91,
-          endToEndMsP95: 99,
-        },
+      validPipelineReport({
+        primary: validFixtureReport({
+          sampleCount: 4,
+          formatOff: { measurementsMs: [85, 90, 95, 100], pipelineMsP50: 93, pipelineMsP95: 100 },
+          formatOn: { measurementsMs: [88, 93, 98, 103], pipelineMsP50: 96, pipelineMsP95: 103 },
+        }),
       }),
     );
     expect(result.pass).toBe(false);
     expect(result.failures.join(" ")).toContain(
-      `sampleCount must be at least ${END_TO_END_BUDGETS.minimumSamples}`,
+      `primary.sampleCount must be at least ${PIPELINE_BUDGETS.minimumSamples}`,
     );
   });
 
-  it("rejects a missing formatOn/formatOff section", () => {
-    const missingFormatOn = validEndToEndReport();
-    delete (missingFormatOn as Record<string, unknown>).formatOn;
+  it("rejects a missing primary or secondaryLongForm section", () => {
+    const missingPrimary = validPipelineReport();
+    delete (missingPrimary as Record<string, unknown>).primary;
+    const primaryResult = verifyDictationLatencyReport(missingPrimary);
+    expect(primaryResult.pass).toBe(false);
+    expect(primaryResult.failures).toContain("primary is required");
+
+    const missingSecondary = validPipelineReport();
+    delete (missingSecondary as Record<string, unknown>).secondaryLongForm;
+    const secondaryResult = verifyDictationLatencyReport(missingSecondary);
+    expect(secondaryResult.pass).toBe(false);
+    expect(secondaryResult.failures).toContain("secondaryLongForm is required");
+  });
+
+  it("rejects a missing formatOn/formatOff section on primary", () => {
+    const missingFormatOn = validPipelineReport({
+      primary: (() => {
+        const fixture = validFixtureReport() as Record<string, unknown>;
+        delete fixture.formatOn;
+        return fixture;
+      })(),
+    });
     const result = verifyDictationLatencyReport(missingFormatOn);
     expect(result.pass).toBe(false);
-    expect(result.failures).toContain("formatOn is required");
+    expect(result.failures).toContain("primary.formatOn is required");
   });
 
   it("rejects a stage breakdown missing a stage or reporting mismatched sample counts", () => {
-    const missingStage = validEndToEndReport();
-    const breakdown = { ...(missingStage as Record<string, any>).stageBreakdownMs };
+    const breakdown = { ...validFixtureReport().stageBreakdownMs } as Record<string, unknown>;
     delete breakdown.insertionMockOn;
-    const result = verifyDictationLatencyReport({ ...missingStage, stageBreakdownMs: breakdown });
-    expect(result.pass).toBe(false);
-    expect(result.failures).toContain("stageBreakdownMs.insertionMockOn is required");
+    const missingStageResult = verifyDictationLatencyReport(
+      validPipelineReport({ primary: validFixtureReport({ stageBreakdownMs: breakdown }) }),
+    );
+    expect(missingStageResult.pass).toBe(false);
+    expect(missingStageResult.failures).toContain("primary.stageBreakdownMs.insertionMockOn is required");
 
     const mismatched = verifyDictationLatencyReport(
-      validEndToEndReport({
-        stageBreakdownMs: {
-          ...validEndToEndReport().stageBreakdownMs,
-          asr: { measurementsMs: [80, 85, 90], p50: 85, p95: 90 },
-        },
+      validPipelineReport({
+        primary: validFixtureReport({
+          stageBreakdownMs: {
+            ...validFixtureReport().stageBreakdownMs,
+            asr: { measurementsMs: [85, 90, 95], p50: 90, p95: 95 },
+          },
+        }),
       }),
     );
     expect(mismatched.pass).toBe(false);
     expect(mismatched.failures).toContain(
-      "stageBreakdownMs.asr.measurementsMs length must match sampleCount",
+      "primary.stageBreakdownMs.asr.measurementsMs length must match sampleCount",
     );
   });
 
   it("requires a non-empty insertionStrategy label since insertion is mocked", () => {
     const result = verifyDictationLatencyReport(
-      validEndToEndReport({ insertionStrategy: "" }),
+      validPipelineReport({ insertionStrategy: "" }),
     );
     expect(result.pass).toBe(false);
     expect(result.failures).toContain(
@@ -340,24 +419,69 @@ describe("dictation latency end-to-end gate (Wave 3)", () => {
     );
   });
 
-  it("rejects negative and non-numeric end-to-end measurements", () => {
+  it("requires a non-empty formatOnScopeNote", () => {
     const result = verifyDictationLatencyReport(
-      validEndToEndReport({
-        formatOff: {
-          measurementsMs: [81, "bad", 92, null, 102],
-          endToEndMsP50: 92,
-          endToEndMsP95: 102,
-        },
+      validPipelineReport({ formatOnScopeNote: "" }),
+    );
+    expect(result.pass).toBe(false);
+    expect(result.failures).toContain(
+      "formatOnScopeNote is required (formatOn measures only the local pass; say so explicitly)",
+    );
+  });
+
+  it("requires captureTailExcludedMs and percentileBasis", () => {
+    const missingTail = verifyDictationLatencyReport(
+      validPipelineReport({ captureTailExcludedMs: undefined }),
+    );
+    expect(missingTail.pass).toBe(false);
+    expect(missingTail.failures).toContain("captureTailExcludedMs must be a finite, non-negative number");
+
+    const missingBasis = verifyDictationLatencyReport(
+      validPipelineReport({ percentileBasis: "" }),
+    );
+    expect(missingBasis.pass).toBe(false);
+    expect(missingBasis.failures).toContain("percentileBasis is required");
+  });
+
+  it("requires insertionMocked to be exactly true", () => {
+    const result = verifyDictationLatencyReport(
+      validPipelineReport({ insertionMocked: false }),
+    );
+    expect(result.pass).toBe(false);
+    expect(result.failures).toContain("insertionMocked must be true");
+  });
+
+  it("requires insertionStrategy to admit it is a mock whenever an insertion stage measures 0ms P95", () => {
+    // validFixtureReport()'s insertion stages are always 0ms/0ms (a real
+    // mock's honest floor) -- claiming a non-mock strategy over that shape
+    // must fail.
+    const result = verifyDictationLatencyReport(
+      validPipelineReport({ insertionStrategy: "native-accessibility-write" }),
+    );
+    expect(result.pass).toBe(false);
+    expect(result.failures.join(" ")).toContain("only plausible for a mock");
+  });
+
+  it("rejects negative and non-numeric pipeline measurements", () => {
+    const result = verifyDictationLatencyReport(
+      validPipelineReport({
+        primary: validFixtureReport({
+          formatOff: {
+            measurementsMs: [85, "bad", 95, null, 105],
+            pipelineMsP50: 95,
+            pipelineMsP95: 105,
+          },
+        }),
       }),
     );
     expect(result.pass).toBe(false);
-    expect(result.failures.join(" ")).toContain("formatOff.measurementsMs[1]");
-    expect(result.failures.join(" ")).toContain("formatOff.measurementsMs[3]");
+    expect(result.failures.join(" ")).toContain("primary.formatOff.measurementsMs[1]");
+    expect(result.failures.join(" ")).toContain("primary.formatOff.measurementsMs[3]");
   });
 
   it("requires the supported Apple silicon reference tier by default", () => {
     const result = verifyDictationLatencyReport(
-      validEndToEndReport({
+      validPipelineReport({
         hardware: {
           os: "linux",
           arch: "x86_64",
@@ -372,7 +496,7 @@ describe("dictation latency end-to-end gate (Wave 3)", () => {
 
   it("allows non-reference hardware when explicitly requested", () => {
     const result = verifyDictationLatencyReport(
-      validEndToEndReport({
+      validPipelineReport({
         hardware: { os: "linux", arch: "x86_64", memoryBytes: 8 * 1024 * 1024 * 1024 },
       }),
       { requireReferenceHardware: false },

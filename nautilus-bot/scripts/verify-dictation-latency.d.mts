@@ -7,7 +7,7 @@ export interface ProviderTranscriptionOnlyBudgets {
   minimumMemoryBytes: number;
 }
 
-export interface EndToEndBudgets {
+export interface PipelineBudgets {
   minimumSamples: number;
   formatOffP50Ms: number;
   formatOffP95Ms: number;
@@ -24,11 +24,11 @@ export interface DictationLatencyVerificationResult {
    * report's `metricScope` was missing or unrecognized (verification fails
    * before any budget applies).
    */
-  budgets: Readonly<ProviderTranscriptionOnlyBudgets> | Readonly<EndToEndBudgets> | null;
+  budgets: Readonly<ProviderTranscriptionOnlyBudgets> | Readonly<PipelineBudgets> | null;
 }
 
 export const BETA_REFERENCE_BUDGETS: Readonly<ProviderTranscriptionOnlyBudgets>;
-export const END_TO_END_BUDGETS: Readonly<EndToEndBudgets>;
+export const PIPELINE_BUDGETS: Readonly<PipelineBudgets>;
 
 export function verifyDictationLatencyReport(
   report: unknown,
