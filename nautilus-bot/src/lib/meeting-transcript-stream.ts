@@ -36,8 +36,19 @@ export interface RecordingTranscriptionStreamEvent {
 export interface MeetingAudioSourceWarningEvent {
   recordingId: string;
   source: "mic" | "system" | string;
+  /**
+   * `silence` from the dropout watchdog, `capture_failed` when a source's
+   * stream died and is being rebuilt, or a `SystemAudioFailureKind` from the
+   * system-audio status emitter (see `emit_system_audio_status` in
+   * rust-sidecar/src/audio/system_capture.rs). They are not the same event and
+   * must not be described in the same words.
+   */
   reason: string;
   silentSeconds?: number;
+  /** The sidecar's own account of the failure, when it has one. */
+  detail?: string;
+  /** True when the route came back on its own; then this is not a warning. */
+  recovered?: boolean;
 }
 
 export interface TranscriptStreamLine {
@@ -123,15 +134,47 @@ export interface AudioSourceWarningDescriptor {
 }
 
 /**
- * Describe a capture source that has gone quiet mid-meeting.
+ * Describe what happened to a capture source mid-meeting.
  *
  * The user has to learn this while the meeting is still running — after the
  * fact the missing half of the conversation cannot be recovered.
+ *
+ * The copy branches on `reason` because the events are different in kind. A
+ * source whose stream *failed* is not a source that went quiet: telling someone
+ * whose microphone stream died to "check the device is unmuted" sends them to
+ * look at a mute button that was never the problem, while Plainsong is already
+ * rebuilding the stream. A recovered route is not a warning at all.
  */
 export function describeAudioSourceWarning(
   warning: MeetingAudioSourceWarningEvent
 ): AudioSourceWarningDescriptor {
   const sourceLabel = warning.source === "system" ? "System audio" : "Microphone";
+
+  if (warning.recovered) {
+    return {
+      title: `${sourceLabel} is recording again`,
+      message: `${sourceLabel} dropped out and has been restored. Anything it missed while it was down is not in the recording.`,
+    };
+  }
+
+  if (warning.reason === "capture_failed") {
+    return {
+      title: `${sourceLabel} capture failed`,
+      message: `The ${sourceLabel.toLowerCase()} stream stopped and Plainsong is rebuilding it. Nothing from that source is being recorded until it comes back.`,
+    };
+  }
+
+  if (warning.reason !== "silence") {
+    // A `SystemAudioFailureKind` — a route problem, not a quiet device. Pass
+    // the sidecar's own account through rather than inventing device advice.
+    return {
+      title: `${sourceLabel} is not being recorded`,
+      message:
+        warning.detail?.trim() ||
+        `Plainsong lost the ${sourceLabel.toLowerCase()} route. Nothing from that source is being recorded.`,
+    };
+  }
+
   const silentSeconds = Math.max(0, Math.round(warning.silentSeconds ?? 0));
   const duration = silentSeconds ? ` for ${silentSeconds}s` : "";
   return {

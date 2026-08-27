@@ -15,7 +15,7 @@ import {
   isRemoteAnalysisProvider,
   type AiLaneKey,
 } from "@/components/models/ai-lanes";
-import { invoke, listen } from "@/lib/electron";
+import { listen } from "@/lib/electron";
 import { Button } from "@/components/ui/button";
 import { Switch } from "@/components/ui/switch";
 import { SettingsSwitch } from "@/components/ui/settings-control";
@@ -3734,14 +3734,16 @@ export function SettingsView() {
                       label="Keep running after close"
                       description="Closing the window leaves Plainsong running in the menu bar, so shortcuts and recording keep working."
                       checked={settings.ui.minimizeToTray}
+                      // The setting travels on `settings-changed`, which the
+                      // main process already listens for. The extra
+                      // `app:set_minimize_to_tray` call this used to make lost
+                      // its handler and could only ever reject into an empty
+                      // catch.
                       onCheckedChange={(checked) => {
                         void updateSettings({
                           ...settings,
                           ui: { ...settings.ui, minimizeToTray: checked },
                         });
-                        void invoke("app:set_minimize_to_tray", {
-                          enabled: checked,
-                        }).catch(() => {});
                       }}
                     />
 
