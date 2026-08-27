@@ -18,22 +18,37 @@ export const BETA_REFERENCE_BUDGETS = Object.freeze({
  *
  * `formatOffP50Ms: 500` is the number the Wave 3 audit asked for directly:
  * competing dictation tools land the entire pipeline in 130-700ms, and this
- * app had never measured its own end-to-end number at all. 500ms keeps
- * format-off (no formatting stage in the way) comfortably inside that bar.
+ * app had never measured its own end-to-end number at all.
  *
- * The rest were set from a real local run on the reference machine (see
+ * A real local run on the reference machine (Apple M4 Pro, 10 runs, whisper
+ * base.en against `scripts/fixtures/real-speech-44s.wav` — see
  * `artifacts/qa/dictation-latency-e2e.json`, committed alongside this gate)
- * with deliberate headroom on top of what was actually measured, since a CI
- * runner or a slower Mac will have more scheduling jitter than a quiet
- * developer machine:
- *   - `formatOffP95Ms: 900` — roughly 2x the measured P95, covering a cold
- *     cache or a noisy-neighbor run without masking a real regression.
- *   - `formatOnP50Ms` / `formatOnP95Ms` are "generous but bounded" per the
- *     spec: format-on only adds the local (non-LLM) smart-format pass in
- *     this benchmark (see `build_end_to_end_report`'s doc comment in
- *     `benchmark-latency.rs` for why the LLM-backed Smart Format pass isn't
- *     driven here), so it should track format-off closely; the wider budget
- *     leaves room for that pass without hiding a real regression.
+ * measured format-off at P50 491ms / P95 500ms, and format-on (local
+ * smart-format only; see below) at P50 495ms / P95 506ms. That number is
+ * almost entirely ASR decode time for this 44-second fixture — the local
+ * pipeline and mocked insertion each add low-single-digit milliseconds at
+ * most (see the receipt's `stageBreakdownMs`).
+ *
+ * That P50 measurement (491ms) leaves only ~9ms of headroom under the 500ms
+ * bar the audit fixed. This is a real, known risk, not an oversight: a
+ * slower reference Mac (the hardware gate only requires Apple silicon with
+ * 16GiB+ RAM, not a specific chip) or a noisier run could push P50 past
+ * 500ms on an otherwise-healthy build. The threshold is kept at the audit's
+ * literal number rather than loosened, so a real regression is never
+ * masked; if this gate starts flaking on slower reference hardware, the fix
+ * is a shorter/more-typical fixture (44s of continuous speech is longer than
+ * a typical dictation utterance) rather than a wider budget.
+ *
+ * `formatOffP95Ms: 900` gives ~1.8x headroom over the measured 500ms P95 for
+ * a cold cache or a noisy-neighbor run, without masking a real regression.
+ * `formatOnP50Ms` / `formatOnP95Ms` are "generous but bounded" per the spec:
+ * format-on here only adds the local (non-LLM) smart-format pass (see
+ * `build_end_to_end_report`'s doc comment in `benchmark-latency.rs` for why
+ * the LLM-backed Smart Format pass isn't driven from this benchmark), so it
+ * tracks format-off closely (495/506ms measured); the wider budget
+ * (700/1200ms, ~1.4x/2.4x headroom) leaves room for that pass without hiding
+ * a real regression.
+ *
  * Tightening any of these later should cite a fresh local measurement, the
  * same way this one does.
  */

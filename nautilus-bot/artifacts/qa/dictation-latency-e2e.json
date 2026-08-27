@@ -1,0 +1,141 @@
+{
+  "audioSeconds": 43.97,
+  "benchmarkVersion": "0.9.0-beta.2",
+  "fixture": "/Users/jonathanreed/Downloads/Plainsong/.claude/worktrees/agent-adff9cd7604d3ce82/nautilus-bot/scripts/fixtures/real-speech-44s.wav",
+  "fixtureBytes": 1410978,
+  "fixtureSha256": "bcece745def9fbaa90b4f650de7affc800243e1ae62a291cac134f7e41ab5af4",
+  "formatOff": {
+    "endToEndMsP50": 491,
+    "endToEndMsP95": 500,
+    "measurementsMs": [
+      500,
+      491,
+      489,
+      494,
+      490,
+      493,
+      498,
+      491,
+      493,
+      478
+    ]
+  },
+  "formatOn": {
+    "endToEndMsP50": 495,
+    "endToEndMsP95": 506,
+    "measurementsMs": [
+      506,
+      495,
+      492,
+      497,
+      493,
+      497,
+      501,
+      494,
+      496,
+      481
+    ]
+  },
+  "formatOnScopeNote": "\"formatOn\" measures the deterministic local smart-formatting pass (text::format), not the optional LLM-based Smart Format pass. That pass calls a live model/provider behind DICTATION_FORMAT_TIMEOUT and cannot be driven safely or deterministically from a headless benchmark; its real timing and timeout rate are captured by the runtime dictation timing record on every live dictation.",
+  "generatedAt": "2026-08-27T22:32:56.246924+00:00",
+  "hardware": {
+    "arch": "aarch64",
+    "cpuModel": "Apple M4 Pro",
+    "logicalCpus": 14,
+    "memoryBytes": 25769803776,
+    "os": "macos"
+  },
+  "hostApplication": "benchmark-cli",
+  "insertionStrategy": "mocked-in-memory-copy",
+  "insertionStrategyNote": "Real system insertion needs a focused GUI target and, for auto mode, macOS Accessibility permission -- neither available in an automated benchmark, and copying to the real system clipboard on every run would also clobber the operator's own clipboard. This measures a same-shape in-memory copy instead (see MockInsertionSink). Real insertion latency is captured in production by the runtime dictation timing record (dictation_timing.rs) and logged on every live dictation.",
+  "metricScope": "end_to_end",
+  "model": "base.en",
+  "provider": "whisper",
+  "runs": 10,
+  "sampleCount": 10,
+  "schemaVersion": 1,
+  "stageBreakdownMs": {
+    "asr": {
+      "measurementsMs": [
+        500,
+        491,
+        489,
+        494,
+        490,
+        493,
+        498,
+        491,
+        493,
+        478
+      ],
+      "p50": 491,
+      "p95": 500
+    },
+    "formatOff": {
+      "measurementsMs": [
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0
+      ],
+      "p50": 0,
+      "p95": 0
+    },
+    "formatOn": {
+      "measurementsMs": [
+        6,
+        4,
+        3,
+        3,
+        3,
+        4,
+        3,
+        3,
+        3,
+        3
+      ],
+      "p50": 3,
+      "p95": 6
+    },
+    "insertionMockOff": {
+      "measurementsMs": [
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0
+      ],
+      "p50": 0,
+      "p95": 0
+    },
+    "insertionMockOn": {
+      "measurementsMs": [
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0
+      ],
+      "p50": 0,
+      "p95": 0
+    }
+  },
+  "thresholdProfile": "beta-reference-v1",
+  "warmState": "warm"
+}
