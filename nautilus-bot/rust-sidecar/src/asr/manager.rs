@@ -354,7 +354,8 @@ impl AsrManager {
             | AsrProviderType::DistilWhisper
             | AsrProviderType::Moonshine
             // Both Parakeet routes are native ONNX and hold cached sessions.
-            | AsrProviderType::Parakeet => true,
+            | AsrProviderType::Parakeet
+            | AsrProviderType::Qwen3Asr => true,
             _ => false,
         }
     }
@@ -387,6 +388,9 @@ impl AsrManager {
             }
             AsrProviderType::Parakeet => {
                 super::parakeet::clear_cached_session();
+            }
+            AsrProviderType::Qwen3Asr => {
+                super::qwen3_asr::clear_cached_runtime(&self.models_dir.join("qwen3_asr"));
             }
             _ => {}
         }
@@ -471,9 +475,12 @@ impl AsrManager {
     }
 
     /// Whether the provider has active transcription inference in this build.
+    ///
+    /// Qwen3-ASR's autoregressive decoder loop with KV cache threading is
+    /// implemented but not yet validated with real audio. It is gated out of
+    /// active transcription until end-to-end testing confirms correct output.
     pub fn is_provider_transcription_enabled(provider_type: AsrProviderType) -> bool {
-        let _ = provider_type;
-        true
+        !matches!(provider_type, AsrProviderType::Qwen3Asr)
     }
 
     /// Get the default provider
@@ -1171,13 +1178,35 @@ impl AsrManager {
         diagnostics
     }
 
+    async fn resolve_download_model_id(
+        &self,
+        provider_type: AsrProviderType,
+        requested_model_id: Option<&str>,
+    ) -> Result<String> {
+        let model_id = match requested_model_id {
+            Some(value) => Self::normalize_model_id(provider_type, value),
+            None => self.provider_model_id(provider_type).await,
+        };
+        if !provider_type
+            .model_options()
+            .iter()
+            .any(|option| option.id == model_id)
+        {
+            anyhow::bail!("Model '{model_id}' is not available for {provider_type:?}");
+        }
+        Ok(model_id)
+    }
+
     /// Download models for a provider
     pub async fn download_models(
         &self,
         provider_type: AsrProviderType,
+        requested_model_id: Option<&str>,
         progress_cb: Box<dyn Fn(f32) + Send + Sync>,
     ) -> Result<()> {
-        let selected_model = self.provider_model_id(provider_type).await;
+        let selected_model = self
+            .resolve_download_model_id(provider_type, requested_model_id)
+            .await?;
         let optimization = self.platform_optimization().await;
         let mlx_accelerated_providers = self.mlx_accelerated_providers().await;
         let effective = Self::effective_provider_selection(
@@ -1689,6 +1718,28 @@ fn runtime_diagnostics_for_provider(
                 },
             }
         }
+        AsrProviderType::Qwen3Asr => {
+            let model_dir = models_root.join("qwen3_asr");
+            let model_ready = is_valid_onnx_artifact(&model_dir.join("encoder.int4.onnx"))
+                && is_valid_onnx_artifact(&model_dir.join("decoder_init.int4.onnx"))
+                && is_valid_onnx_artifact(&model_dir.join("decoder_step.int4.onnx"))
+                && is_valid_json_artifact(&model_dir.join("config.json"), 64)
+                && is_valid_json_artifact(&model_dir.join("tokenizer.json"), 1024);
+            let missing_files = missing_or_invalid_qwen3_asr_files(model_dir.as_path());
+            runtime_native_model(
+                provider_available,
+                model_dir,
+                model_ready,
+                &missing_files,
+                MissingModelCopy {
+                    message:
+                        "Qwen3-ASR ONNX model not downloaded. Download encoder + decoder + embed_tokens assets first.",
+                    setup_action: "Re-download Qwen3-ASR ONNX assets in Settings -> ASR Models.",
+                },
+                "Qwen3-ASR native ONNX inference ready.",
+                last_error,
+            )
+        }
     }
 }
 
@@ -1760,6 +1811,32 @@ fn missing_or_invalid_moonshine_files(model_dir: &Path) -> Vec<String> {
     }
     if !is_valid_onnx_artifact(&model_dir.join("decoder_model_merged.onnx")) {
         missing.push("decoder_model_merged.onnx (valid ONNX model)".to_string());
+    }
+    if !is_valid_json_artifact(&model_dir.join("tokenizer.json"), 1024) {
+        missing.push("tokenizer.json (valid tokenizer)".to_string());
+    }
+    missing
+}
+
+fn missing_or_invalid_qwen3_asr_files(model_dir: &Path) -> Vec<String> {
+    let mut missing = Vec::new();
+    if !is_valid_onnx_artifact(&model_dir.join("encoder.int4.onnx")) {
+        missing.push("encoder.int4.onnx (valid ONNX model)".to_string());
+    }
+    if !is_valid_onnx_artifact(&model_dir.join("decoder_init.int4.onnx")) {
+        missing.push("decoder_init.int4.onnx (valid ONNX model)".to_string());
+    }
+    if !is_valid_onnx_artifact(&model_dir.join("decoder_step.int4.onnx")) {
+        missing.push("decoder_step.int4.onnx (valid ONNX model)".to_string());
+    }
+    if !std::path::Path::new(&model_dir.join("decoder_weights.int4.data")).exists() {
+        missing.push("decoder_weights.int4.data (shared decoder weights)".to_string());
+    }
+    if !std::path::Path::new(&model_dir.join("embed_tokens.bin")).exists() {
+        missing.push("embed_tokens.bin (token embedding cache)".to_string());
+    }
+    if !is_valid_json_artifact(&model_dir.join("config.json"), 64) {
+        missing.push("config.json (valid model config)".to_string());
     }
     if !is_valid_json_artifact(&model_dir.join("tokenizer.json"), 1024) {
         missing.push("tokenizer.json (valid tokenizer)".to_string());
@@ -2173,6 +2250,8 @@ mod tests {
             recognizer_available: true,
             message: "synthetic single-probe readiness".to_string(),
             setup_action: None,
+            speech_analyzer_available: false,
+            operating_system_version: None,
         };
         let runtime = runtime_diagnostics_for_provider(
             AsrProviderType::MacosAppleSpeech,
@@ -2266,6 +2345,62 @@ mod tests {
             .await
             .expect_err("Apple Speech must never run for meetings");
         assert!(error.to_string().contains("dictation-only"));
+    }
+
+    #[tokio::test]
+    async fn requested_download_model_overrides_provider_state() {
+        let manager = AsrManager::new();
+        manager
+            .set_provider_model_id(AsrProviderType::Whisper, "base.en".to_string())
+            .await;
+
+        assert_eq!(
+            manager
+                .resolve_download_model_id(AsrProviderType::Whisper, Some("large-v3-turbo"))
+                .await
+                .expect("requested model should resolve"),
+            "large-v3-turbo"
+        );
+    }
+
+    #[tokio::test]
+    async fn download_model_falls_back_to_provider_state_for_legacy_callers() {
+        let manager = AsrManager::new();
+        manager
+            .set_provider_model_id(AsrProviderType::Whisper, "small.en".to_string())
+            .await;
+
+        assert_eq!(
+            manager
+                .resolve_download_model_id(AsrProviderType::Whisper, None)
+                .await
+                .expect("selected model should resolve"),
+            "small.en"
+        );
+    }
+
+    #[tokio::test]
+    async fn download_model_normalizes_legacy_parakeet_ids() {
+        let manager = AsrManager::new();
+
+        assert_eq!(
+            manager
+                .resolve_download_model_id(AsrProviderType::Parakeet, Some("parakeet-ctc-0.6b"),)
+                .await
+                .expect("legacy Parakeet model should resolve"),
+            "parakeet-tdt-0.6b-v3"
+        );
+    }
+
+    #[tokio::test]
+    async fn download_model_rejects_unknown_provider_model_pair() {
+        let manager = AsrManager::new();
+        let error = manager
+            .resolve_download_model_id(AsrProviderType::Whisper, Some("not-a-whisper-model"))
+            .await
+            .expect_err("unknown model should be rejected");
+
+        assert!(error.to_string().contains("not available"));
     }
 
     #[tokio::test]

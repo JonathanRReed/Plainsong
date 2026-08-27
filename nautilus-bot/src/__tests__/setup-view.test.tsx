@@ -125,8 +125,8 @@ const setupStatusMock = vi.hoisted(() => ({
         license: "NVIDIA",
         sourceUrl: "https://example.com/parakeet",
       },
-      selectedModelId: "parakeet-ctc-0.6b",
-      modelOptions: [{ id: "parakeet-ctc-0.6b", label: "CTC 0.6B" }],
+      selectedModelId: "parakeet-tdt-0.6b-v3",
+      modelOptions: [{ id: "parakeet-tdt-0.6b-v3", label: "TDT 0.6B v3" }],
       downloadStatus: "NotDownloaded",
       runtimeStatus: "missing_model",
       runtimeMessage: "Parakeet model not downloaded.",
@@ -442,7 +442,10 @@ describe("SetupView", () => {
     fireEvent.click(screen.getAllByRole("button", { name: "Download" })[0]);
 
     await waitFor(() => {
-      expect(backendMocks.downloadAsrModels).toHaveBeenCalledWith("parakeet");
+      expect(backendMocks.downloadAsrModels).toHaveBeenCalledWith(
+        "parakeet",
+        "parakeet-tdt-0.6b-v3"
+      );
       expect(backendMocks.refreshAsrRuntimeProbes).toHaveBeenCalled();
       expect(setupStatusMock.refresh).toHaveBeenCalled();
     });

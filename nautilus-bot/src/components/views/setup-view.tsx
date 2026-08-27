@@ -687,7 +687,10 @@ export function SetupView() {
                               size="sm"
                               onClick={() =>
                                 void runAction(downloadKey, async () => {
-                                  await downloadAsrModels(provider.providerType);
+                                  await downloadAsrModels(
+                                    provider.providerType,
+                                    provider.selectedModelId
+                                  );
                                   await refreshAsrRuntimeProbes();
                                 })
                               }

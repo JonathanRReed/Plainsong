@@ -27,6 +27,7 @@ const ASR_PROVIDER_TYPE_FLAGS = {
   openai_cloud: true,
   groq: true,
   cohere_transcribe: true,
+  qwen3_asr: true,
 } satisfies Record<AsrProviderType, true>;
 
 export const ASR_PROVIDER_TYPES = Object.keys(
@@ -49,6 +50,7 @@ const DOWNLOADABLE_PROVIDER_SET = new Set<AsrProviderType>([
   "whisper_candle",
   "distil_whisper",
   "moonshine",
+  "qwen3_asr",
 ]);
 
 const MEETING_GRADE_PROVIDER_SET = new Set<AsrProviderType>([
@@ -58,6 +60,7 @@ const MEETING_GRADE_PROVIDER_SET = new Set<AsrProviderType>([
   "openai_cloud",
   "elevenlabs_scribe",
   "cohere_transcribe",
+  "qwen3_asr",
 ]);
 
 const DICTATION_ONLY_PROVIDER_SET = new Set<AsrProviderType>([
@@ -123,6 +126,11 @@ export function isMeetingEligibleModel(providerType: AsrProviderType, modelId: s
     case "elevenlabs_scribe":
     case "cohere_transcribe":
       return true;
+    case "qwen3_asr":
+      // Qwen3-ASR is an encoder-decoder model capable of long-form transcription.
+      // Mark as experimental — the decoder loop is implemented but not yet
+      // validated with real audio, and transcription is gated off until tested.
+      return normalizedModelId.startsWith("qwen3-asr");
     default:
       return false;
   }
@@ -442,6 +450,22 @@ const ASR_MODEL_CAPABILITIES_WITHOUT_LANGUAGE_EVIDENCE: readonly Omit<
     pauseBehavior: "encoder_decoder",
     tradeoff: "tuned for short utterances; longer recordings drift.",
   },
+  {
+    providerType: "qwen3_asr",
+    modelId: "qwen3-asr-0.6b",
+    // 30 languages + 22 Chinese dialects per the Qwen3-ASR technical report.
+    languages: {
+      englishOnly: false,
+      count: 52,
+      label: "30 languages + 22 Chinese dialects",
+    },
+    // Total across all 7 files: ~2,020,098,572 bytes ≈ 1927 MiB.
+    sizeMib: 1927,
+    tier: "more",
+    pauseBehavior: "encoder_decoder",
+    tradeoff:
+      "experimental — the autoregressive decoder loop with KV cache threading is implemented but not yet validated with real audio. The ~1.9 GiB download is gated from active transcription until tested.",
+  },
 ];
 
 const LANGUAGE_EVIDENCE_BY_ROUTE = new Map<
@@ -460,6 +484,13 @@ const LANGUAGE_EVIDENCE_BY_ROUTE = new Map<
     {
       basis: "upstream_listed",
       verifiedLanguages: ["English"],
+    },
+  ],
+  [
+    "qwen3_asr:qwen3-asr-0.6b",
+    {
+      basis: "upstream_listed",
+      verifiedLanguages: [],
     },
   ],
 ]);

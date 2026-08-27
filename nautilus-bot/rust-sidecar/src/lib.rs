@@ -15,6 +15,7 @@ mod export;
 mod llm;
 mod models;
 mod operation_coordinator;
+mod ort_utils;
 mod paths;
 mod recording_audio;
 mod remote_processing;
@@ -1196,6 +1197,7 @@ fn diarization_model_path(model_id: &str) -> Option<std::path::PathBuf> {
         "ecapa_tdnn_speaker" => Some(models_dir.join("ecapa_tdnn_speaker.onnx")),
         "resnet34_speaker" => Some(models_dir.join("resnet34_speaker.onnx")),
         "campplus_speaker" => Some(models_dir.join("campplus_speaker.onnx")),
+        "eres2netv2_speaker" => Some(models_dir.join("eres2netv2_speaker.onnx")),
         _ => None,
     }
 }
@@ -1224,6 +1226,14 @@ fn list_diarization_models() -> Vec<DiarizationModelOption> {
             description: "Highest accuracy, best for challenging audio conditions (~35 MB)",
             installed: diarization_model_path("campplus_speaker")
                 .map(|p| download::is_diarization_model_artifact_trusted("campplus_speaker", &p))
+                .unwrap_or(false),
+        },
+        DiarizationModelOption {
+            id: "eres2netv2_speaker",
+            label: "ERes2NetV2 (int8)",
+            description: "Modern int8-quantized embedder, 192-dim, compact (~28 MB)",
+            installed: diarization_model_path("eres2netv2_speaker")
+                .map(|p| download::is_diarization_model_artifact_trusted("eres2netv2_speaker", &p))
                 .unwrap_or(false),
         },
     ]
@@ -2711,6 +2721,14 @@ async fn ensure_asr_route_ready(
     {
         return Err(
             "Moonshine native ONNX inference is not launch-ready in this build. Choose a stable local dictation route such as Whisper, MLX Audio, or Apple Native Speech."
+                .to_string(),
+        );
+    }
+    if provider_type == asr::AsrProviderType::Qwen3Asr
+        && effective_provider == asr::AsrProviderType::Qwen3Asr
+    {
+        return Err(
+            "Qwen3-ASR is not launch-ready in this build (decoder implemented but not yet validated with real audio). Choose a stable local route such as Parakeet, Whisper, or Apple Native Speech."
                 .to_string(),
         );
     }
@@ -9033,6 +9051,13 @@ mod tests {
     }
 
     #[test]
+    fn successful_accessibility_insert_marks_session_trust() {
+        let observed = AtomicBool::new(false);
+        mark_accessibility_insert_observed(&observed);
+        assert!(observed.load(Ordering::Relaxed));
+    }
+
+    #[test]
     fn paste_success_reports_clipboard_state_after_the_restore() {
         // `copied` is what the UI turns into "...and copied to the clipboard".
         // A successful paste with "keep text in clipboard" off schedules the
@@ -11556,6 +11581,7 @@ fn dictation_provider_uses_local_model(provider: asr::AsrProviderType) -> bool {
             | asr::AsrProviderType::DistilWhisper
             | asr::AsrProviderType::Moonshine
             | asr::AsrProviderType::Parakeet
+            | asr::AsrProviderType::Qwen3Asr
     )
 }
 
@@ -13732,6 +13758,7 @@ fn asr_provider_to_settings_value(provider: asr::AsrProviderType) -> &'static st
         asr::AsrProviderType::OpenAiCloud => "openai_cloud",
         asr::AsrProviderType::Groq => "groq",
         asr::AsrProviderType::CohereTranscribe => "cohere_transcribe",
+        asr::AsrProviderType::Qwen3Asr => "qwen3_asr",
     }
 }
 
@@ -13748,6 +13775,7 @@ fn asr_provider_from_settings_value(value: &str) -> Option<asr::AsrProviderType>
         "openai_cloud" => Some(asr::AsrProviderType::OpenAiCloud),
         "groq" => Some(asr::AsrProviderType::Groq),
         "cohere_transcribe" => Some(asr::AsrProviderType::CohereTranscribe),
+        "qwen3_asr" => Some(asr::AsrProviderType::Qwen3Asr),
         _ => None,
     }
 }
@@ -13868,6 +13896,7 @@ fn meeting_provider_is_supported(provider: asr::AsrProviderType) -> bool {
             | asr::AsrProviderType::OpenAiCloud
             | asr::AsrProviderType::Groq
             | asr::AsrProviderType::CohereTranscribe
+            | asr::AsrProviderType::Qwen3Asr
     )
 }
 
@@ -13909,7 +13938,7 @@ fn ensure_meeting_route_supported(
     }
 
     Err(format!(
-        "Meetings require a meeting-grade ASR route. '{}' with model '{}' is dictation-only or unsupported for meetings. Choose Distil Whisper, Parakeet, ElevenLabs, OpenAI, Groq, or Cohere in Settings -> ASR / Providers.",
+        "Meetings require a meeting-grade ASR route. '{}' with model '{}' is dictation-only or unsupported for meetings. Choose Distil Whisper, Parakeet, Qwen3-ASR, ElevenLabs, OpenAI, Groq, or Cohere in Settings -> ASR / Providers.",
         provider.display_name(),
         model_id
     ))
@@ -17101,6 +17130,10 @@ fn capture_dictation_context_text(
     }
 }
 
+fn mark_accessibility_insert_observed(observed: &AtomicBool) {
+    observed.store(true, Ordering::Relaxed);
+}
+
 fn paste_text_systemwide(
     state: &AppState,
     text: &str,
@@ -17121,6 +17154,7 @@ fn paste_text_systemwide(
 
         match insert_text_via_accessibility(text, target_app, target_app_bundle_id) {
             Ok(()) => {
+                mark_accessibility_insert_observed(&state.accessibility_trust_observed);
                 let copied = if keep_text_in_clipboard {
                     match copy_to_clipboard(text) {
                         Ok(()) => true,
@@ -17921,6 +17955,7 @@ pub async fn build_app_state() -> Result<AppState, String> {
         .join("models");
     let mut model_integrity_artifacts = download::managed_model_integrity_artifacts(&models_root);
     model_integrity_artifacts.extend(asr::model_integrity_artifacts(&models_root));
+    model_integrity_artifacts.extend(text::recasepunct::model_integrity_artifacts(&models_root));
     let integrity_migration =
         download::migrate_legacy_model_integrity_receipts(&model_integrity_artifacts).await;
     if integrity_migration.migrated_count > 0 {
@@ -23373,6 +23408,10 @@ pub async fn dispatch_command(
             let provider_type: asr::AsrProviderType =
                 serde_json::from_value(params["providerType"].clone())
                     .map_err(|e| e.to_string())?;
+            let model_id = params
+                .get("modelId")
+                .and_then(serde_json::Value::as_str)
+                .map(str::to_string);
             let handle_clone = handle.clone();
             let cb: Box<dyn Fn(f32) + Send + Sync> = Box::new(move |progress| {
                 handle_clone.emit_event(
@@ -23382,7 +23421,7 @@ pub async fn dispatch_command(
             });
             state
                 .asr_manager
-                .download_models(provider_type, cb)
+                .download_models(provider_type, model_id.as_deref(), cb)
                 .await
                 .map_err(|e| e.to_string())?;
             Ok(serde_json::Value::Null)
@@ -23748,11 +23787,21 @@ pub async fn dispatch_command(
             };
             let resolved =
                 resolve_recording_audio_bundle_for_runtime(state.as_ref(), &recording_id).await?;
-            let diarization = diarization::run_diarization(&resolved.primary)
+            let diarization_model_id = state
+                .settings_manager
+                .lock()
                 .await
-                .map_err(|e| e.to_string())?;
+                .settings()
+                .transcription
+                .diarization_model_id
+                .clone()
+                .unwrap_or_else(|| "ecapa_tdnn_speaker".to_string());
+            let diarization =
+                diarization::run_diarization_with_model(&resolved.primary, &diarization_model_id)
+                    .await
+                    .map_err(|e| e.to_string())?;
 
-            let engine = diarization::DiarizationEngine::new();
+            let engine = diarization::DiarizationEngine::with_model(&diarization_model_id);
             engine.merge_with_transcript(&diarization, &mut transcript.segments);
             let inferred_aliases = infer_speaker_aliases_from_segments(&transcript.segments);
             let alias_updates = diarization

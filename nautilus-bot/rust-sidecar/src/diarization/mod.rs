@@ -56,12 +56,22 @@ pub enum DiarizationMethod {
 /// Speaker diarization engine
 pub struct DiarizationEngine {
     speakers: HashMap<String, Speaker>,
+    model_id: String,
 }
 
 impl DiarizationEngine {
     pub fn new() -> Self {
         Self {
             speakers: HashMap::new(),
+            model_id: "ecapa_tdnn_speaker".to_string(),
+        }
+    }
+
+    /// Create an engine that uses a specific diarization model.
+    pub fn with_model(model_id: &str) -> Self {
+        Self {
+            speakers: HashMap::new(),
+            model_id: model_id.to_string(),
         }
     }
 
@@ -107,7 +117,7 @@ impl DiarizationEngine {
             });
         }
 
-        let extractor = embedder::SpeakerEmbeddingExtractor::new()
+        let extractor = embedder::SpeakerEmbeddingExtractor::with_model(&self.model_id)
             .context("Failed to create embedding extractor")?;
 
         #[cfg(feature = "diarization")]
@@ -316,6 +326,14 @@ impl Default for DiarizationEngine {
 
 /// Run diarization with strict real-model requirement.
 pub async fn run_diarization(audio_path: &Path) -> Result<DiarizationResult> {
+    run_diarization_with_model(audio_path, "ecapa_tdnn_speaker").await
+}
+
+/// Run diarization with a specific speaker embedding model.
+pub async fn run_diarization_with_model(
+    audio_path: &Path,
+    model_id: &str,
+) -> Result<DiarizationResult> {
     if !DiarizationEngine::is_real_available() {
         return Err(anyhow::anyhow!(
             "Real diarization model is not available. Install/configure diarization models first."
@@ -323,7 +341,7 @@ pub async fn run_diarization(audio_path: &Path) -> Result<DiarizationResult> {
     }
 
     let duration = get_audio_duration(audio_path).await?;
-    let mut engine = DiarizationEngine::new();
+    let mut engine = DiarizationEngine::with_model(model_id);
     engine.diarize(audio_path, duration).await
 }
 
@@ -377,11 +395,20 @@ mod tests {
     }
 
     #[test]
-    fn test_single_linkage_allows_transitive_merge() {
+    fn test_ahc_centroid_linkage_prevents_transitive_merge() {
         use ndarray::array;
 
-        // A-B and B-C are close, while A-C is far.
-        // True single-linkage should still merge A/B/C into one speaker cluster.
+        // A-B and B-C are close (~0.2 cosine distance), while A-C is far (0.72).
+        // Single-linkage (connected-components) would chain-merge A/B/C into
+        // one cluster via the transitive link through B. AHC centroid linkage
+        // should NOT: it merges the single closest pair, then the centroid of
+        // that pair is too far from the third embedding for a further merge.
+        // This is the key improvement over single-linkage — it prevents
+        // speaker over-merging through acoustic similarity chains.
+        //
+        // Due to f32 precision, d(B,C) ≈ 0.19999993 is slightly less than
+        // d(A,B) ≈ 0.19999998, so B and C merge first. After merging, the
+        // centroid of {B,C} is ~0.43 from A — well above the 0.25 threshold.
         let embeddings = vec![
             (0.0, 2.0, array![1.0, 0.0, 0.0]),
             (2.0, 4.0, array![0.8, 0.6, 0.0]),
@@ -393,16 +420,23 @@ mod tests {
         let labels = clusterer.cluster(&embeddings);
 
         assert_eq!(labels.len(), 4);
-        assert_eq!(labels[0], labels[1]);
+        // B and C merge (closest pair, dist ≈ 0.2 ≤ 0.25)
         assert_eq!(labels[1], labels[2]);
+        // A does NOT merge with {B,C} (centroid distance ≈ 0.43 > 0.25)
+        assert_ne!(labels[0], labels[1]);
+        // D is its own cluster
         assert_ne!(labels[0], labels[3]);
+        assert_ne!(labels[1], labels[3]);
+        // 3 distinct speakers (A, {B,C}, D)
+        let unique: std::collections::HashSet<_> = labels.iter().copied().collect();
+        assert_eq!(unique.len(), 3);
     }
 
-    fn reference_single_linkage(
+    fn reference_ahc_centroid_linkage(
         embeddings: &[(f64, f64, ndarray::Array1<f32>)],
         threshold: f32,
     ) -> Vec<usize> {
-        fn distance(left: &ndarray::Array1<f32>, right: &ndarray::Array1<f32>) -> f32 {
+        fn cosine_distance(left: &ndarray::Array1<f32>, right: &ndarray::Array1<f32>) -> f32 {
             let dot = left
                 .iter()
                 .zip(right.iter())
@@ -410,51 +444,91 @@ mod tests {
                 .sum::<f32>();
             let left_norm = left.iter().map(|value| value * value).sum::<f32>().sqrt();
             let right_norm = right.iter().map(|value| value * value).sum::<f32>().sqrt();
-            1.0 - dot / (left_norm * right_norm)
+            if left_norm == 0.0 || right_norm == 0.0 {
+                return 1.0;
+            }
+            (1.0 - dot / (left_norm * right_norm)).max(0.0)
         }
 
-        let mut clusters: Vec<Vec<usize>> =
-            (0..embeddings.len()).map(|index| vec![index]).collect();
-        loop {
-            let mut closest = None;
-            let mut closest_distance = f32::INFINITY;
-            for left in 0..clusters.len() {
-                for right in (left + 1)..clusters.len() {
-                    let linkage = clusters[left]
-                        .iter()
-                        .flat_map(|left_index| {
-                            clusters[right].iter().map(move |right_index| {
-                                distance(&embeddings[*left_index].2, &embeddings[*right_index].2)
-                            })
-                        })
-                        .fold(f32::INFINITY, f32::min);
-                    if linkage < closest_distance {
-                        closest_distance = linkage;
-                        closest = Some((left, right));
+        let n = embeddings.len();
+        let mut clusters: Vec<Vec<usize>> = (0..n).map(|index| vec![index]).collect();
+        let mut centroids: Vec<ndarray::Array1<f32>> =
+            embeddings.iter().map(|(_, _, e)| e.clone()).collect();
+        let mut active = vec![true; n];
+        let mut num_active = n;
+
+        while num_active > 1 {
+            let mut min_dist = f32::INFINITY;
+            let mut merge_i = 0;
+            let mut merge_j = 0;
+            for i in 0..n {
+                if !active[i] {
+                    continue;
+                }
+                for j in (i + 1)..n {
+                    if !active[j] {
+                        continue;
+                    }
+                    let d = cosine_distance(&centroids[i], &centroids[j]);
+                    if d < min_dist {
+                        min_dist = d;
+                        merge_i = i;
+                        merge_j = j;
                     }
                 }
             }
-            let Some((left, right)) = closest else {
-                break;
-            };
-            if closest_distance > threshold {
+            if min_dist > threshold {
                 break;
             }
-            let merged = clusters.remove(right);
-            clusters[left].extend(merged);
+            let moved = std::mem::take(&mut clusters[merge_j]);
+            clusters[merge_i].extend(moved);
+            active[merge_j] = false;
+            num_active -= 1;
+
+            // Recompute centroid
+            let len = centroids[merge_i].len();
+            let mut new_centroid = vec![0.0f32; len];
+            for &member in &clusters[merge_i] {
+                for (k, &val) in embeddings[member].2.iter().enumerate() {
+                    new_centroid[k] += val;
+                }
+            }
+            let norm: f32 = new_centroid.iter().map(|x| x * x).sum::<f32>().sqrt();
+            if norm > 1e-6 {
+                for val in &mut new_centroid {
+                    *val /= norm;
+                }
+            }
+            centroids[merge_i] = ndarray::Array1::from(new_centroid);
         }
 
-        let mut labels = vec![0; embeddings.len()];
-        for (label, members) in clusters.iter().enumerate() {
-            for member in members {
-                labels[*member] = label;
+        // Build embedding → cluster mapping and assign labels by first occurrence
+        let mut emb_to_cluster = vec![0usize; n];
+        for (idx, members) in clusters.iter().enumerate() {
+            if active[idx] {
+                for &m in members {
+                    emb_to_cluster[m] = idx;
+                }
             }
+        }
+        let mut labels = vec![0; n];
+        let mut label_map: std::collections::HashMap<usize, usize> =
+            std::collections::HashMap::new();
+        let mut next_label = 0;
+        for i in 0..n {
+            let cluster = emb_to_cluster[i];
+            let label = *label_map.entry(cluster).or_insert_with(|| {
+                let l = next_label;
+                next_label += 1;
+                l
+            });
+            labels[i] = label;
         }
         labels
     }
 
     #[test]
-    fn union_find_clustering_matches_single_linkage_and_is_deterministic() {
+    fn ahc_clustering_matches_reference_and_is_deterministic() {
         use ndarray::array;
 
         let embeddings = vec![
@@ -465,12 +539,15 @@ mod tests {
             (8.0, 10.0, array![0.08, 0.92, 0.0]),
         ];
         let threshold = 0.25;
-        let expected = reference_single_linkage(&embeddings, threshold);
+        let expected = reference_ahc_centroid_linkage(&embeddings, threshold);
         let clusterer = EmbeddingClusterer::new().with_threshold(threshold);
 
         for _ in 0..10 {
             assert_eq!(clusterer.cluster(&embeddings), expected);
         }
+        // AHC centroid linkage produces the same result as single-linkage
+        // for this case because the close pairs (0,2) and (1,4) are
+        // well-separated and merge independently.
         assert_eq!(expected, vec![0, 1, 0, 2, 1]);
     }
 

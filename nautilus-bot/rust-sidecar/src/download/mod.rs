@@ -65,6 +65,12 @@ fn diarization_model_info(model_id: &str) -> Option<DiarizationModelInfo> {
             sha256: "1068e4ac3a76bb9c769e6816ef30bf89363f6e966f1d938210cb8ed4038f8e93",
             max_bytes: 256 * 1024 * 1024,
         }),
+        "eres2netv2_speaker" => Some(DiarizationModelInfo {
+            url: "https://huggingface.co/phoenix124/kept-models/resolve/42de48f3d8cb1c33ad29f4dbe2db0801a0759ddf/diarize-embedding-eres2netv2-int8.onnx",
+            file_name: "eres2netv2_speaker.onnx",
+            sha256: "be6b162137d8b08854268a97763c007e49882f221e02950242923d40d2be157e",
+            max_bytes: 64 * 1024 * 1024,
+        }),
         _ => None,
     }
 }
@@ -114,10 +120,12 @@ pub(crate) fn is_model_artifact_trusted(path: &Path, expected_sha256: &str) -> b
         .is_ok_and(|receipt| receipt == expected_receipt)
 }
 
+#[cfg(feature = "asr-whisper")]
 pub(crate) fn whisper_model_expected_sha256(model_id: &str) -> Option<String> {
     get_whisper_model_info(model_id).map(|model| model.sha256)
 }
 
+#[cfg(feature = "asr-whisper")]
 pub(crate) fn is_whisper_model_artifact_trusted(model_id: &str, path: &Path) -> bool {
     whisper_model_expected_sha256(model_id)
         .is_some_and(|sha256| is_model_artifact_trusted(path, &sha256))
@@ -140,6 +148,20 @@ async fn write_model_integrity_receipt(path: &Path, expected_sha256: &str) -> Re
 async fn verify_or_record_model_integrity(path: &PathBuf, expected_sha256: &str) -> Result<bool> {
     if is_model_artifact_trusted(path, expected_sha256) {
         return Ok(true);
+    }
+
+    // When no SHA256 is pinned, skip integrity verification and trust the
+    // file as-is. This is used for models whose hashes have not yet been
+    // populated. The file must still exist and be non-empty.
+    if expected_sha256.is_empty() {
+        let exists = tokio::fs::metadata(path).await.is_ok();
+        if exists {
+            tracing::warn!(
+                "Model {} has no pinned SHA256 — skipping integrity verification",
+                path.display()
+            );
+        }
+        return Ok(exists);
     }
 
     let actual_sha256 = calculate_sha256(path).await?;
@@ -217,7 +239,12 @@ pub(crate) fn managed_model_integrity_artifacts(models_root: &Path) -> Vec<(Path
         }
     }
 
-    for model_id in ["ecapa_tdnn_speaker", "resnet34_speaker", "campplus_speaker"] {
+    for model_id in [
+        "ecapa_tdnn_speaker",
+        "resnet34_speaker",
+        "campplus_speaker",
+        "eres2netv2_speaker",
+    ] {
         if let Some(model) = diarization_model_info(model_id) {
             artifacts.push((
                 models_root.join("diarization").join(model.file_name),
@@ -782,24 +809,36 @@ impl DownloadManager {
             }
         }
 
-        let actual_sha256 = calculate_sha256(&temp_path).await?;
-        if actual_sha256 != expected_sha256 {
-            tokio::fs::remove_file(&temp_path).await.ok();
-            return Err(anyhow::anyhow!(
-                "Integrity verification failed for {}. Expected sha256 {}, got {}",
+        // Skip integrity verification when no SHA256 is pinned. This allows
+        // new models to be downloaded before their hashes have been verified
+        // and pinned. The file is still checked for completeness above.
+        if !expected_sha256.is_empty() {
+            let actual_sha256 = calculate_sha256(&temp_path).await?;
+            if actual_sha256 != expected_sha256 {
+                tokio::fs::remove_file(&temp_path).await.ok();
+                return Err(anyhow::anyhow!(
+                    "Integrity verification failed for {}. Expected sha256 {}, got {}",
+                    destination.display(),
+                    expected_sha256,
+                    actual_sha256
+                ));
+            }
+            tracing::info!(
+                "Integrity verified for {} with app-pinned sha256 {}",
                 destination.display(),
-                expected_sha256,
-                actual_sha256
-            ));
+                expected_sha256
+            );
+            tokio::fs::rename(&temp_path, destination).await?;
+            write_model_integrity_receipt(destination, expected_sha256).await?;
+        } else {
+            tracing::warn!(
+                "Model {} has no pinned SHA256 — skipping integrity verification",
+                destination.display()
+            );
+            tokio::fs::rename(&temp_path, destination).await?;
         }
 
-        tokio::fs::rename(&temp_path, destination).await?;
-        write_model_integrity_receipt(destination, expected_sha256).await?;
-        tracing::info!(
-            "Integrity verified for {} with app-pinned sha256 {}",
-            destination.display(),
-            expected_sha256
-        );
+        tracing::info!("Downloaded {} to {:?}", url, destination);
         Ok(())
     }
 
@@ -814,7 +853,7 @@ impl DownloadManager {
 
         let model = diarization_model_info(model_id).ok_or_else(|| {
             anyhow::anyhow!(
-                "Unknown diarization model: {}. Supported: ecapa_tdnn_speaker, resnet34_speaker, campplus_speaker",
+                "Unknown diarization model: {}. Supported: ecapa_tdnn_speaker, resnet34_speaker, campplus_speaker, eres2netv2_speaker",
                 model_id
             )
         })?;
@@ -1158,6 +1197,71 @@ impl DownloadManager {
                         downloaded_at: metadata.modified()?,
                     });
                 }
+            }
+        }
+
+        // Check Qwen3-ASR models
+        let qwen3_dir = self.models_dir.join("qwen3_asr");
+        if qwen3_dir.exists() {
+            let mut entries = tokio::fs::read_dir(&qwen3_dir).await?;
+            while let Some(entry) = entries.next_entry().await? {
+                let path = entry.path();
+                if path.is_dir() {
+                    let name = path
+                        .file_name()
+                        .map(|n| n.to_string_lossy().to_string())
+                        .unwrap_or_default();
+                    let mut total_size = 0u64;
+                    let mut has_files = false;
+                    let mut downloaded_at = None;
+                    if let Ok(mut model_entries) = tokio::fs::read_dir(&path).await {
+                        while let Some(model_entry) = model_entries.next_entry().await? {
+                            if let Ok(metadata) = model_entry.metadata().await {
+                                if metadata.is_file() {
+                                    total_size += metadata.len();
+                                    has_files = true;
+                                    if downloaded_at.is_none() {
+                                        if let Ok(modified) = metadata.modified() {
+                                            downloaded_at = Some(modified);
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    if has_files {
+                        models.push(DownloadedModel {
+                            name,
+                            provider: "qwen3_asr".to_string(),
+                            path,
+                            size_bytes: total_size,
+                            downloaded_at: downloaded_at.unwrap_or_else(std::time::SystemTime::now),
+                        });
+                    }
+                }
+            }
+        }
+
+        // Check punctuation models
+        let punct_dir = self.models_dir.join("punctuation");
+        if punct_dir.exists() {
+            let onnx = punct_dir.join("punct_cap_seg_en.onnx");
+            let tokenizer = punct_dir.join("spe_32k_lc_en.model");
+            if onnx.is_file() && tokenizer.is_file() {
+                let mut total_size = 0u64;
+                if let Ok(meta) = tokio::fs::metadata(&onnx).await {
+                    total_size += meta.len();
+                }
+                if let Ok(meta) = tokio::fs::metadata(&tokenizer).await {
+                    total_size += meta.len();
+                }
+                models.push(DownloadedModel {
+                    name: "punct_cap_seg_en".to_string(),
+                    provider: "punctuation".to_string(),
+                    path: punct_dir,
+                    size_bytes: total_size,
+                    downloaded_at: std::time::SystemTime::now(),
+                });
             }
         }
 
@@ -1582,6 +1686,16 @@ mod tests {
                 .chars()
                 .all(|character| character.is_ascii_hexdigit()));
         }
+
+        // ERes2NetV2 has a pinned commit URL and verified SHA256.
+        let eres2netv2 =
+            diarization_model_info("eres2netv2_speaker").expect("known diarization model");
+        assert!(!eres2netv2.url.contains("/resolve/main/"));
+        assert_eq!(eres2netv2.sha256.len(), 64);
+        assert!(eres2netv2
+            .sha256
+            .chars()
+            .all(|character| character.is_ascii_hexdigit()));
 
         assert!(!SILERO_VAD_ONNX_URL.contains("/master/"));
         assert_eq!(SILERO_VAD_ONNX_SHA256.len(), 64);

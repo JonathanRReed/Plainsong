@@ -84,6 +84,11 @@ export interface TranscriptionSettings {
   // could only ever describe a route that did not exist. The Rust side still
   // accepts the keys for now, so old settings files load without error.
   enableDiarization: boolean;
+  /// Selected diarization speaker embedding model. Defaults to
+  /// `ecapa_tdnn_speaker` when unset (the Rust side applies the same
+  /// default). When set, the diarization engine uses this model for
+  /// speaker embedding extraction.
+  diarizationModelId?: string;
   language: string | null;
   silenceSkipEnabled: boolean;
   dictationCopyToClipboard?: boolean;

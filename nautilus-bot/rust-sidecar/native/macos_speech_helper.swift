@@ -35,6 +35,8 @@ private struct ProbePayload: Encodable {
   let localeSupported: Bool
   let onDeviceAvailable: Bool
   let recognizerAvailable: Bool
+  let speechAnalyzerAvailable: Bool
+  let operatingSystemVersion: String
 }
 
 private struct TranscriptPayload: Encodable {
@@ -136,6 +138,17 @@ private func capabilityProbe(
   let recognizer = localeSupported ? SFSpeechRecognizer(locale: locale) : nil
   let authorization = authorizationFields(authorizationStatus)
 
+  // SpeechAnalyzer (the modern replacement for SFSpeechRecognizer) requires
+  // macOS 26 / iOS 26. Use `if #available` for the runtime check since it
+  // is the canonical Swift API and correctly handles SDK/deployment-target
+  // edge cases that a raw major-version comparison can miss.
+  let osVersion = ProcessInfo.processInfo.operatingSystemVersion
+  let osVersionString = "\(osVersion.majorVersion).\(osVersion.minorVersion).\(osVersion.patchVersion)"
+  var speechAnalyzerAvailable = false
+  if #available(macOS 26, *) {
+    speechAnalyzerAvailable = true
+  }
+
   return ProbePayload(
     protocolVersion: protocolVersion,
     type: "probe",
@@ -144,7 +157,9 @@ private func capabilityProbe(
     locale: normalizedRequested,
     localeSupported: localeSupported && recognizer != nil,
     onDeviceAvailable: recognizer?.supportsOnDeviceRecognition ?? false,
-    recognizerAvailable: recognizer?.isAvailable ?? false
+    recognizerAvailable: recognizer?.isAvailable ?? false,
+    speechAnalyzerAvailable: speechAnalyzerAvailable,
+    operatingSystemVersion: osVersionString
   )
 }
 

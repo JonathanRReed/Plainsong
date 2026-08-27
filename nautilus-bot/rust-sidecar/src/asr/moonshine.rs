@@ -61,17 +61,12 @@ struct MoonshineRuntime {
 
 #[cfg(feature = "asr-parakeet")]
 fn load_runtime(model_dir: &Path) -> Result<MoonshineRuntime> {
-    use ort::session::Session;
     use tokenizers::Tokenizer;
 
-    let encoder = Session::builder()
-        .context("Failed to create Moonshine encoder builder")?
-        .commit_from_file(model_dir.join(MOONSHINE_LOCAL_ENCODER))
+    let encoder = crate::ort_utils::build_session(&model_dir.join(MOONSHINE_LOCAL_ENCODER))
         .context("Failed to load Moonshine encoder ONNX")?;
 
-    let decoder = Session::builder()
-        .context("Failed to create Moonshine decoder builder")?
-        .commit_from_file(model_dir.join(MOONSHINE_LOCAL_DECODER))
+    let decoder = crate::ort_utils::build_session(&model_dir.join(MOONSHINE_LOCAL_DECODER))
         .context("Failed to load Moonshine decoder ONNX")?;
 
     let tokenizer = Tokenizer::from_file(model_dir.join(MOONSHINE_LOCAL_TOKENIZER))

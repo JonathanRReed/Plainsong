@@ -68,7 +68,7 @@ pub const SILERO_VAD_MODEL_SAMPLE_RATE: u32 = 16_000;
 /// Backing inference implementation, swappable so unit tests can exercise
 /// the chunk-buffering / state-plumbing logic without loading a real ONNX
 /// model file (mirrors how `parakeet.rs` / `moonshine.rs` feature-gate their
-/// real `ort::Session`-based inference behind `#[cfg(feature = "asr-parakeet")]`
+/// real `ort::Session`-based inference behind `#[cfg(any(feature = "asr-parakeet", feature = "diarization"))]`
 /// and are otherwise untestable in CI without a downloaded model; here we
 /// additionally expose a trait seam so the surrounding stateful logic --
 /// the part most likely to have an off-by-one bug -- is covered without ort
@@ -85,29 +85,21 @@ trait SileroVadBackend: Send {
 /// session-creation pattern as `ParakeetProvider`/`MoonshineProvider`
 /// (`Session::builder()...commit_from_file`, `ort::inputs!`, `.run`,
 /// `try_extract_array::<f32>()`).
-#[cfg(feature = "asr-parakeet")]
+#[cfg(any(feature = "asr-parakeet", feature = "diarization"))]
 struct OrtSileroVadBackend {
     session: ort::session::Session,
 }
 
-#[cfg(feature = "asr-parakeet")]
+#[cfg(any(feature = "asr-parakeet", feature = "diarization"))]
 impl OrtSileroVadBackend {
     fn load(onnx_path: &std::path::Path) -> Result<Self> {
-        use ort::session::builder::GraphOptimizationLevel;
-        use ort::session::Session;
-
-        let session = Session::builder()
-            .context("Failed to create Silero VAD ONNX session builder")?
-            .with_optimization_level(GraphOptimizationLevel::Level3)
-            .map_err(|error| anyhow::anyhow!("Failed to set Silero VAD opt level: {error}"))?
-            .commit_from_file(onnx_path)
+        let session = crate::ort_utils::build_session(onnx_path)
             .context("Failed to load Silero VAD ONNX model")?;
-
         Ok(Self { session })
     }
 }
 
-#[cfg(feature = "asr-parakeet")]
+#[cfg(any(feature = "asr-parakeet", feature = "diarization"))]
 impl SileroVadBackend for OrtSileroVadBackend {
     fn infer(&mut self, input: &[f32], state_in: &[f32]) -> Result<(f32, Vec<f32>)> {
         use ndarray::{Array, IxDyn};
@@ -194,16 +186,16 @@ pub struct SileroVadDetector {
 impl SileroVadDetector {
     /// Load the Silero VAD ONNX model from `onnx_path` and initialize a
     /// fresh (zeroed) recurrent state, ready to process a new audio stream.
-    #[cfg(feature = "asr-parakeet")]
+    #[cfg(any(feature = "asr-parakeet", feature = "diarization"))]
     pub fn load(onnx_path: &std::path::Path) -> Result<Self> {
         let backend = OrtSileroVadBackend::load(onnx_path)?;
         Ok(Self::from_backend(Box::new(backend)))
     }
 
-    #[cfg(not(feature = "asr-parakeet"))]
+    #[cfg(not(any(feature = "asr-parakeet", feature = "diarization")))]
     pub fn load(_onnx_path: &std::path::Path) -> Result<Self> {
         Err(anyhow::anyhow!(
-            "Silero VAD support is not compiled in. Rebuild with the `asr-parakeet` feature."
+            "Silero VAD support is not compiled in. Rebuild with the `asr-parakeet` or `diarization` feature."
         ))
     }
 
@@ -731,7 +723,7 @@ pub fn build_vad_gate(
                     // on every session forever. Only when ort support is
                     // compiled in -- otherwise the load error just means
                     // "feature missing", not "file corrupt".
-                    #[cfg(feature = "asr-parakeet")]
+                    #[cfg(any(feature = "asr-parakeet", feature = "diarization"))]
                     {
                         let quarantine_path = path.with_extension("onnx.corrupt");
                         match std::fs::rename(path, &quarantine_path) {
@@ -1039,7 +1031,7 @@ mod gate_tests {
         assert_eq!(gate.backend_name(), "energy_threshold");
     }
 
-    #[cfg(feature = "asr-parakeet")]
+    #[cfg(any(feature = "asr-parakeet", feature = "diarization"))]
     #[test]
     fn build_vad_gate_falls_back_when_silero_model_file_is_corrupt() {
         // A file exists at the path but isn't a valid ONNX model (simulates a
@@ -1265,7 +1257,7 @@ mod gate_tests {
     /// ```
     #[test]
     #[ignore = "needs the real silero_vad.onnx; set PLAINSONG_SILERO_VAD_MODEL_PATH and pass --ignored"]
-    #[cfg(feature = "asr-parakeet")]
+    #[cfg(any(feature = "asr-parakeet", feature = "diarization"))]
     fn silero_real_model_smoke() {
         let model_path = std::env::var_os("PLAINSONG_SILERO_VAD_MODEL_PATH")
             .map(std::path::PathBuf::from)

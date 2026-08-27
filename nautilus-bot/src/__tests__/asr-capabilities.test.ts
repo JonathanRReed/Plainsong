@@ -14,7 +14,7 @@ import {
 
 describe("ASR capability mappings", () => {
   it("recognises only the engines this build can still run", () => {
-    expect(ASR_PROVIDER_TYPES).toHaveLength(11);
+    expect(ASR_PROVIDER_TYPES).toHaveLength(12);
     expect(isKnownAsrProvider("whisper")).toBe(true);
     expect(isKnownAsrProvider("parakeet")).toBe(true);
     expect(isKnownAsrProvider("macos_apple_speech")).toBe(true);
@@ -173,5 +173,20 @@ describe("ASR model capability metadata", () => {
     expect(getAsrModelCapability("openai_cloud", "gpt-4o-transcribe")).toBeNull();
     expect(describeAsrModel("openai_cloud", "gpt-4o-transcribe")).toBeNull();
     expect(describeAsrModel("whisper", "not-a-real-model")).toBeNull();
+  });
+
+  it("carries Qwen3-ASR metadata with the correct download size and language coverage", () => {
+    const cap = getAsrModelCapability("qwen3_asr", "qwen3-asr-0.6b");
+    expect(cap).not.toBeNull();
+    expect(cap?.languages.englishOnly).toBe(false);
+    expect(cap?.languages.count).toBe(52);
+    expect(cap?.sizeMib).toBe(1927);
+    expect(cap?.pauseBehavior).toBe("encoder_decoder");
+    expect(cap?.tier).toBe("more");
+  });
+
+  it("treats Qwen3-ASR as meeting-eligible to match the Rust side", () => {
+    expect(isMeetingEligibleProvider("qwen3_asr")).toBe(true);
+    expect(isSharedMeetingCompatible("qwen3_asr", "qwen3-asr-0.6b")).toBe(true);
   });
 });

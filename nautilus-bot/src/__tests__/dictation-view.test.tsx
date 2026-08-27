@@ -1240,7 +1240,10 @@ describe("DictationView modes", () => {
     );
 
     await waitFor(() => {
-      expect(backendMocks.downloadAsrModels).toHaveBeenCalledWith("moonshine");
+      expect(backendMocks.downloadAsrModels).toHaveBeenCalledWith(
+        "moonshine",
+        "moonshine-base"
+      );
     });
     await waitFor(() => {
       expect(screen.queryByText("Dictation has no model yet")).not.toBeInTheDocument();

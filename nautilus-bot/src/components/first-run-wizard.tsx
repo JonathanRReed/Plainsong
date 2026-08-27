@@ -53,6 +53,7 @@ import { Input } from "@/components/ui/input";
 import { Progress } from "@/components/ui/progress";
 import type { AsrProviderInfo, AsrProviderType } from "@/types";
 import { MEETING_ONBOARDING_STORAGE_KEY, type OnboardingMode } from "@/lib/onboarding";
+import { findConflictingShortcuts } from "../../electron/shortcut-registration";
 
 type Props = {
   mode?: OnboardingMode;
@@ -201,6 +202,27 @@ const HOTKEY_MODE_LABELS: Record<"hold_to_talk" | "toggle" | "hands_free", { nam
   hold_to_talk: { name: "Hold to talk", hint: "hold the shortcut to record, release to stop" },
   hands_free: { name: "Hands-free", hint: "starts automatically when you speak, stops on silence" },
 };
+
+export function dictationShortcutConflictMessage(
+  shortcuts: Parameters<typeof findConflictingShortcuts>[0],
+  shortcutValue: string
+): string | null {
+  const toggleDictation = normalizeShortcut(shortcutValue);
+  const conflict = findConflictingShortcuts({
+    ...shortcuts,
+    toggleDictation,
+  }).find(
+    (item) =>
+      item.field === "toggleDictation" ||
+      item.conflictsWithField === "toggleDictation"
+  );
+  if (!conflict) {
+    return null;
+  }
+  const owner =
+    conflict.field === "toggleDictation" ? conflict.conflictsWith : conflict.label;
+  return `${toggleDictation} conflicts with ${owner}. Choose a different dictation shortcut.`;
+}
 
 function formatShortcutFromKeyboardEvent(event: KeyboardEvent<HTMLInputElement>) {
   const parts: string[] = [];
@@ -778,7 +800,7 @@ export function FirstRunWizard({ mode = "full", onComplete }: Props) {
     setDownloadPercent(0);
     downloadingProviderTypeRef.current = option.providerType;
     try {
-      await downloadAsrModels(option.providerType);
+      await downloadAsrModels(option.providerType, option.id);
       if (!mountedRef.current) {
         return false;
       }
@@ -847,7 +869,15 @@ export function FirstRunWizard({ mode = "full", onComplete }: Props) {
     setSaveErrorContext(null);
     try {
       const settings = await getSettings();
-      settings.shortcuts.toggleDictation = normalizeShortcut(shortcutValue);
+      const toggleDictation = normalizeShortcut(shortcutValue);
+      const conflictMessage = dictationShortcutConflictMessage(
+        settings.shortcuts,
+        toggleDictation
+      );
+      if (conflictMessage) {
+        throw new Error(conflictMessage);
+      }
+      settings.shortcuts.toggleDictation = toggleDictation;
       settings.shortcuts.toggleDictationAlternates = [];
       settings.transcription.dictationAutoRequestPermissions = autoRequestPermissions;
       await saveSettings(settings);
@@ -930,7 +960,7 @@ export function FirstRunWizard({ mode = "full", onComplete }: Props) {
       }
 
       meetingDownloadingProviderTypeRef.current = route.providerType;
-      await downloadAsrModels(route.providerType);
+      await downloadAsrModels(route.providerType, route.modelId);
       if (!mountedRef.current) {
         return false;
       }

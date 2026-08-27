@@ -78,8 +78,10 @@ import {
   downloadSileroVadModel,
   getAsrProviders,
   isDiarizationModelAvailable,
+  listDiarizationModels,
   refreshAsrRuntimeProbes,
   isSileroVadModelDownloaded,
+  type DiarizationModelOption,
 } from "@/lib/backend/asr";
 import {
   getSystemAudioCapability,
@@ -529,6 +531,9 @@ export function SettingsView() {
   const [ollamaCloudModels, setOllamaCloudModels] = useState<string[]>([]);
   const [diarizationAvailable, setDiarizationAvailable] = useState(false);
   const [diarizationDownloading, setDiarizationDownloading] = useState(false);
+  const [diarizationModels, setDiarizationModels] = useState<
+    DiarizationModelOption[]
+  >([]);
   const [sileroVadAvailable, setSileroVadAvailable] = useState(false);
   const [sileroVadDownloading, setSileroVadDownloading] = useState(false);
   const [micTestActive, setMicTestActive] = useState(false);
@@ -1290,12 +1295,19 @@ export function SettingsView() {
   useEffect(() => {
     let mounted = true;
     const load = async () => {
-      const avail = await withSettingsSectionTimeout(
-        "Diarization availability",
-        isDiarizationModelAvailable(),
-      );
+      const [avail, models] = await Promise.all([
+        withSettingsSectionTimeout(
+          "Diarization availability",
+          isDiarizationModelAvailable(),
+        ),
+        withSettingsSectionTimeout(
+          "Diarization model list",
+          listDiarizationModels(),
+        ).catch(() => [] as DiarizationModelOption[]),
+      ]);
       if (!mounted) return;
       setDiarizationAvailable(avail);
+      setDiarizationModels(models);
     };
     load();
     return () => {
@@ -3481,8 +3493,13 @@ export function SettingsView() {
                           onClick={async () => {
                             setDiarizationDownloading(true);
                             try {
-                              await downloadDiarizationModel();
+                              const modelId =
+                                settings.transcription.diarizationModelId;
+                              await downloadDiarizationModel(modelId);
                               setDiarizationAvailable(true);
+                              // Refresh model list to show installed status
+                              const models = await listDiarizationModels();
+                              setDiarizationModels(models);
                               updateSettings({
                                 ...settings,
                                 transcription: {
@@ -3513,6 +3530,58 @@ export function SettingsView() {
                         </Button>
                       )}
                     </div>
+
+                    {diarizationAvailable &&
+                    settings.transcription.enableDiarization &&
+                    diarizationModels.length > 0 ? (
+                      <div className="space-y-2">
+                        <Label htmlFor="diarization-model">
+                          Speaker separation model
+                        </Label>
+                        <select
+                          id="diarization-model"
+                          className="w-full rounded-md border bg-background px-3 py-2 text-sm"
+                          value={
+                            settings.transcription.diarizationModelId ??
+                            "ecapa_tdnn_speaker"
+                          }
+                          onChange={(e: ChangeEvent<HTMLSelectElement>) =>
+                            void updateSettings({
+                              ...settings,
+                              transcription: {
+                                ...settings.transcription,
+                                diarizationModelId: e.target.value,
+                              },
+                            })
+                          }
+                        >
+                          {diarizationModels.map((model) => (
+                            <option key={model.id} value={model.id}>
+                              {model.label}
+                              {model.installed ? "" : " (not downloaded)"} —{" "}
+                              {model.description}
+                            </option>
+                          ))}
+                        </select>
+                        {(() => {
+                          const selectedModel = diarizationModels.find(
+                            (m) =>
+                              m.id ===
+                              (settings.transcription.diarizationModelId ??
+                                "ecapa_tdnn_speaker"),
+                          );
+                          if (selectedModel && !selectedModel.installed) {
+                            return (
+                              <p className="text-xs text-muted-foreground">
+                                The selected model is not downloaded. Click
+                                "Download Model" above to fetch it.
+                              </p>
+                            );
+                          }
+                          return null;
+                        })()}
+                      </div>
+                    ) : null}
 
                     <div className="space-y-2">
                       <Label htmlFor="transcription-language">Transcription language</Label>

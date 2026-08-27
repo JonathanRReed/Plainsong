@@ -126,6 +126,27 @@ function routeHosting(providerType: AsrProviderType): AsrRouteHosting {
   return providerHostingPreference(providerType) === "cloud" ? "cloud" : "local";
 }
 
+/// Builds the human-readable readiness detail string for a route.
+///
+/// For Apple Speech, this appends a note about the SpeechAnalyzer API
+/// (macOS 26+) when it is available, so the route catalog surfaces the
+/// newer streaming-capable framework to the UI.
+function buildReadinessDetail(provider: RouteSelectableProvider): string | null {
+  const base = provider.platformReadiness?.message ?? null;
+  if (
+    provider.providerType === "macos_apple_speech" &&
+    provider.platformReadiness?.speechAnalyzerAvailable
+  ) {
+    const analyzerNote = `SpeechAnalyzer API available${
+      provider.platformReadiness.operatingSystemVersion
+        ? ` (macOS ${provider.platformReadiness.operatingSystemVersion})`
+        : ""
+    }`;
+    return base ? `${base}. ${analyzerNote}` : analyzerNote;
+  }
+  return base;
+}
+
 function routeReadiness(
   provider: RouteSelectableProvider,
   hosting: AsrRouteHosting,
@@ -271,6 +292,7 @@ function isExperimentalRoute(providerType: AsrProviderType, modelId: string) {
   const normalized = modelId.trim().toLowerCase();
   return (
     providerType === "whisper_candle" ||
+    providerType === "qwen3_asr" ||
     normalized.includes("experimental") ||
     normalized === "parakeet-tdt-ctc-110m"
   );
@@ -458,7 +480,7 @@ export function buildAsrRouteCatalog(
         laneCompatibility: routeLaneCompatibility(provider.providerType, option.id),
         hosting,
         readiness,
-        readinessDetail: provider.platformReadiness?.message ?? null,
+        readinessDetail: buildReadinessDetail(provider),
         selectable:
           provider.providerType !== "macos_apple_speech" || readiness === "ready",
         downloadable: isDownloadableProvider(provider.providerType),

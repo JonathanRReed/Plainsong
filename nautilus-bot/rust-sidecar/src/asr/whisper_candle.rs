@@ -58,14 +58,35 @@ struct WhisperCandleRuntime {
     model: candle_transformers::models::whisper::model::Whisper,
 }
 
+/// Select the best available Candle compute device: Metal GPU on macOS
+/// (when compiled with the `candle-metal` feature), CPU everywhere else.
+/// Falls back to CPU if Metal initialization fails for any reason.
+#[cfg(feature = "asr-canary")]
+fn select_best_device() -> candle_core::Device {
+    #[cfg(feature = "candle-metal")]
+    {
+        match candle_core::Device::new_metal(0) {
+            Ok(device) => {
+                tracing::info!("Candle using Metal GPU device");
+                return device;
+            }
+            Err(error) => {
+                tracing::warn!("Candle Metal GPU init failed, falling back to CPU: {error}");
+            }
+        }
+    }
+    tracing::info!("Candle using CPU device");
+    candle_core::Device::Cpu
+}
+
 #[cfg(feature = "asr-canary")]
 fn load_runtime(model_dir: &Path) -> Result<WhisperCandleRuntime> {
-    use candle_core::{DType, Device};
+    use candle_core::DType;
     use candle_nn::VarBuilder;
     use candle_transformers::models::whisper::{model::Whisper, Config};
     use tokenizers::Tokenizer;
 
-    let device = Device::Cpu;
+    let device = select_best_device();
     let cfg_text = std::fs::read_to_string(model_dir.join("config.json"))
         .context("Failed to read Whisper Candle config.json")?;
     let config: Config =

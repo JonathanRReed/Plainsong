@@ -10,7 +10,13 @@ pub mod parakeet;
 #[cfg(feature = "asr-parakeet")]
 pub mod parakeet_tdt;
 pub mod platform;
+pub mod qwen3_asr;
+#[cfg(feature = "asr-whisper")]
 pub mod whisper;
+#[cfg(not(feature = "asr-whisper"))]
+pub mod whisper_stub;
+#[cfg(not(feature = "asr-whisper"))]
+pub use whisper_stub as whisper;
 pub mod whisper_candle;
 pub mod windows_sdk_dictation_provider;
 
@@ -51,6 +57,7 @@ pub(crate) fn model_integrity_artifacts(models_root: &Path) -> Vec<(PathBuf, Str
     artifacts.extend(moonshine::model_integrity_artifacts(models_root));
     artifacts.extend(parakeet::model_integrity_artifacts(models_root));
     artifacts.extend(whisper_candle::model_integrity_artifacts(models_root));
+    artifacts.extend(qwen3_asr::model_integrity_artifacts(models_root));
     artifacts
 }
 
@@ -166,6 +173,7 @@ pub enum AsrProviderType {
     OpenAiCloud,
     Groq,
     CohereTranscribe,
+    Qwen3Asr,
 }
 
 impl AsrProviderType {
@@ -182,6 +190,7 @@ impl AsrProviderType {
             AsrProviderType::OpenAiCloud,
             AsrProviderType::Groq,
             AsrProviderType::CohereTranscribe,
+            AsrProviderType::Qwen3Asr,
         ]
     }
 
@@ -198,6 +207,7 @@ impl AsrProviderType {
             AsrProviderType::OpenAiCloud => "OpenAI Whisper (Cloud)",
             AsrProviderType::Groq => "Groq Whisper (Cloud)",
             AsrProviderType::CohereTranscribe => "Cohere Transcribe",
+            AsrProviderType::Qwen3Asr => "Qwen3-ASR (Local)",
         }
     }
 
@@ -214,6 +224,7 @@ impl AsrProviderType {
             AsrProviderType::OpenAiCloud => "whisper-1",
             AsrProviderType::Groq => "whisper-large-v3-turbo",
             AsrProviderType::CohereTranscribe => "cohere-transcribe-03-2026",
+            AsrProviderType::Qwen3Asr => "qwen3-asr-0.6b",
         }
     }
 
@@ -230,7 +241,8 @@ impl AsrProviderType {
             | AsrProviderType::DistilWhisper
             | AsrProviderType::MacosAppleSpeech
             | AsrProviderType::Moonshine
-            | AsrProviderType::WindowsSdkDictation => None,
+            | AsrProviderType::WindowsSdkDictation
+            | AsrProviderType::Qwen3Asr => None,
         }
     }
 
@@ -356,6 +368,10 @@ impl AsrProviderType {
                 id: "cohere-transcribe-03-2026".to_string(),
                 label: "Cohere Transcribe (03-2026)".to_string(),
             }],
+            AsrProviderType::Qwen3Asr => vec![ModelOption {
+                id: "qwen3-asr-0.6b".to_string(),
+                label: "Qwen3-ASR 0.6B int4 (multilingual, fast)".to_string(),
+            }],
         }
     }
 }
@@ -398,6 +414,9 @@ impl AsrProviderFactory {
             AsrProviderType::Groq => Box::new(groq::GroqProvider::new(selected_model_id)),
             AsrProviderType::CohereTranscribe => {
                 Box::new(cohere::CohereTranscribeProvider::new(selected_model_id))
+            }
+            AsrProviderType::Qwen3Asr => {
+                Box::new(qwen3_asr::Qwen3AsrProvider::new(selected_model_id))
             }
         }
     }

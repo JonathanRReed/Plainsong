@@ -177,6 +177,7 @@ impl MelSpectrogram {
     ///
     /// Applies: `log10 → clamp(max-8) → (x+4)/4` as per OpenAI Whisper.
     /// Use this for Whisper-based models (Whisper Candle, DistilWhisper).
+    #[cfg(any(feature = "asr-canary", feature = "asr-whisper", test))]
     pub fn compute_whisper_normalized(&self, samples: &[f32]) -> Vec<Vec<f32>> {
         let raw = self.compute(samples);
         if raw.is_empty() || raw[0].is_empty() {
@@ -319,6 +320,109 @@ fn bit_reverse(mut x: usize, bits: usize) -> usize {
     result
 }
 
+// ---------------------------------------------------------------------------
+// Shared utilities: ln-based mel filterbank (Qwen3-ASR, diarization)
+// ---------------------------------------------------------------------------
+//
+// The `MelSpectrogram` struct above uses a `log10`-based mel scale (HTK
+// convention). Qwen3-ASR and the diarization embedder both use an
+// `ln`-based mel scale instead. This shared function avoids duplicating
+// the filterbank construction in two modules.
+
+/// Create a mel filterbank using the natural-log mel scale.
+///
+/// Returns `Vec<Vec<f64>>` of shape `[num_mel_bins][n_fft/2+1]`.
+///
+/// This is the shared implementation used by Qwen3-ASR and the diarization
+/// embedder. It differs from [`compute_mel_filters`] in two ways:
+/// - Uses `ln` instead of `log10` for the Hz↔Mel conversion
+/// - Returns `f64` weights (callers apply them to `f64` power spectra)
+pub fn create_mel_filterbank_ln(
+    fft_size: usize,
+    sample_rate: f32,
+    num_mel_bins: usize,
+    fmin: f32,
+    fmax: f32,
+) -> Vec<Vec<f64>> {
+    let hz_to_mel = |hz: f32| 2595.0 * (1.0 + hz / 700.0).ln();
+    let mel_to_hz = |mel: f32| 700.0 * ((mel / 2595.0).exp() - 1.0);
+
+    let mel_low = hz_to_mel(fmin);
+    let mel_high = hz_to_mel(fmax);
+
+    let mel_points: Vec<f32> = (0..=num_mel_bins + 1)
+        .map(|i| mel_low + (mel_high - mel_low) * i as f32 / (num_mel_bins + 1) as f32)
+        .collect();
+
+    let hz_points: Vec<f32> = mel_points.iter().map(|m| mel_to_hz(*m)).collect();
+    let bin_points: Vec<f32> = hz_points
+        .iter()
+        .map(|hz| (fft_size as f32 + 1.0) * hz / sample_rate)
+        .collect();
+
+    let num_bins = fft_size / 2 + 1;
+    let mut filterbank = vec![vec![0.0f64; num_bins]; num_mel_bins];
+
+    for mel_idx in 0..num_mel_bins {
+        let left = bin_points[mel_idx];
+        let center = bin_points[mel_idx + 1];
+        let right = bin_points[mel_idx + 2];
+
+        for (bin_idx, filterbank_row) in filterbank[mel_idx].iter_mut().enumerate() {
+            let bin = bin_idx as f32;
+            if bin >= left && bin < center && center > left {
+                *filterbank_row = ((bin - left) / (center - left)) as f64;
+            } else if bin >= center && bin <= right && right > center {
+                *filterbank_row = ((right - bin) / (right - center)) as f64;
+            }
+        }
+    }
+
+    filterbank
+}
+
+// ---------------------------------------------------------------------------
+// f16 → f32 conversion (Qwen3-ASR embed_tokens.bin)
+// ---------------------------------------------------------------------------
+//
+// Qwen3-ASR ships `embed_tokens.bin` as raw float16 bytes. The `half` crate
+// is not a dependency, so we decode manually. This is the only place that
+// needs it, but exposing it here keeps the bit-twiddling out of the ASR
+// module proper.
+
+/// Convert a 16-bit float (IEEE 754 binary16) bit pattern to `f32`.
+///
+/// Handles signed zeros, subnormals, infinities, and NaNs.
+pub fn f16_bits_to_f32(bits: u16) -> f32 {
+    let sign = (bits >> 15) & 1;
+    let exponent = (bits >> 10) & 0x1f;
+    let mantissa = bits & 0x3ff;
+
+    if exponent == 0 {
+        if mantissa == 0 {
+            // Signed zero
+            f32::from_bits((sign as u32) << 31)
+        } else {
+            // Subnormal: normalize
+            let val = (mantissa as f32) / 1024.0f32 * 2f32.powi(-14);
+            if sign == 1 {
+                -val
+            } else {
+                val
+            }
+        }
+    } else if exponent == 0x1f {
+        // Inf or NaN
+        let payload = if mantissa == 0 { 0 } else { 0x400000 };
+        f32::from_bits(((sign as u32) << 31) | 0x7f800000 | payload)
+    } else {
+        // Normalized
+        let exp = exponent as i32 - 15 + 127;
+        let bits32 = ((sign as u32) << 31) | ((exp as u32) << 23) | ((mantissa as u32) << 13);
+        f32::from_bits(bits32)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -382,5 +486,32 @@ mod tests {
             "DC magnitude mismatch: {}",
             mag_dc
         );
+    }
+
+    #[test]
+    fn test_mel_filterbank_ln_shape_and_symmetry() {
+        let bank = create_mel_filterbank_ln(512, 16000.0, 80, 0.0, 8000.0);
+        assert_eq!(bank.len(), 80);
+        assert_eq!(bank[0].len(), 257); // 512/2 + 1
+                                        // Each filter should have at least some non-zero weights
+        for row in &bank {
+            assert!(row.iter().any(|&w| w > 0.0));
+        }
+    }
+
+    #[test]
+    fn test_f16_bits_to_f32_known_values() {
+        // 1.0 in f16 = 0x3C00
+        assert!((f16_bits_to_f32(0x3C00) - 1.0).abs() < 1e-6);
+        // 0.0 in f16 = 0x0000
+        assert_eq!(f16_bits_to_f32(0x0000), 0.0);
+        // -1.0 in f16 = 0xBC00
+        assert!((f16_bits_to_f32(0xBC00) - (-1.0)).abs() < 1e-6);
+        // 2.0 in f16 = 0x4000
+        assert!((f16_bits_to_f32(0x4000) - 2.0).abs() < 1e-6);
+        // Infinity = 0x7C00
+        assert!(f16_bits_to_f32(0x7C00).is_infinite());
+        // NaN = 0x7E00
+        assert!(f16_bits_to_f32(0x7E00).is_nan());
     }
 }

@@ -2,11 +2,28 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
   createDictationShortcutSignalRuntime,
   DICTATION_HOLD_WATCHDOG_MS,
+  dictationShortcutFailureMessage,
   resolveDictationShortcutBehavior,
   resolveDictationShortcutCapability,
   resolveDictationShortcutDecision,
   shouldHandleDictationShortcutSource,
 } from "../../electron/dictation-shortcut-controller";
+
+describe("dictationShortcutFailureMessage", () => {
+  it("preserves actionable sidecar errors", () => {
+    expect(dictationShortcutFailureMessage(new Error("Download base.en before dictating."))).toBe(
+      "Download base.en before dictating.",
+    );
+  });
+
+  it("falls back when the rejection has no message", () => {
+    for (const error of [null, {}]) {
+      expect(dictationShortcutFailureMessage(error)).toBe(
+        "Dictation could not start. Open Plainsong to check setup.",
+      );
+    }
+  });
+});
 
 describe("resolveDictationShortcutBehavior", () => {
   it("prefers hands-free when enabled", () => {

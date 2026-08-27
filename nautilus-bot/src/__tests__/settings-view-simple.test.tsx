@@ -230,6 +230,20 @@ vi.mock("@/lib/backend", () => ({
   downloadWhisperModel: vi.fn(async () => { }),
   isDiarizationModelAvailable: vi.fn(async () => true),
   downloadDiarizationModel: vi.fn(async () => {}),
+  listDiarizationModels: vi.fn(async () => [
+    {
+      id: "ecapa_tdnn_speaker",
+      label: "ECAPA-TDNN 512",
+      description: "Fast and accurate, recommended for most use cases (~25 MB)",
+      installed: true,
+    },
+    {
+      id: "eres2netv2_speaker",
+      label: "ERes2NetV2 (int8)",
+      description: "Modern int8-quantized embedder, 192-dim, compact (~28 MB)",
+      installed: false,
+    },
+  ]),
   isSileroVadModelDownloaded: vi.fn(async () => false),
   downloadSileroVadModel: vi.fn(async () => {}),
   migrateToEncryptedStorage: vi.fn(),

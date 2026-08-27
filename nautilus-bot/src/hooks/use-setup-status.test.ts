@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { buildSnapshot } from "@/hooks/use-setup-status";
+import { buildDownloadedModelIndex } from "@/components/models/downloaded-models";
 import type { PermissionDiagnostics } from "@/lib/backend/settings";
 import type { AsrProviderInfo } from "@/types";
 import type { Settings } from "@/types/settings";
@@ -375,6 +376,64 @@ describe("buildSnapshot", () => {
     expect(snapshot.dictationReady).toBe(false);
     expect(snapshot.productReadiness.dictation.state).toBe("blocked");
     expect(snapshot.dictationRoute.reason).toContain("is not available");
+  });
+
+  it("uses the exact downloaded model when provider state points at another variant", () => {
+    const settings = createSettings("clipboard_only");
+    settings.transcription.dictationProvider = "whisper";
+    settings.transcription.dictationModelId = "small.en";
+    const provider = {
+      providerType: "whisper",
+      name: "Whisper",
+      inferenceEnabled: true,
+      runtimeStatus: "missing_model",
+      runtimeMessage: "The selected provider model is missing.",
+      selectedModelId: "base.en",
+      modelOptions: [
+        { id: "base.en", label: "Base English" },
+        { id: "small.en", label: "Small English" },
+      ],
+    } as AsrProviderInfo;
+    const downloadedModels = buildDownloadedModelIndex([
+      {
+        name: "ggml-small.en.bin",
+        provider: "whisper",
+        path: "/models/whisper/ggml-small.en.bin",
+        sizeBytes: 1,
+      },
+    ]);
+
+    const snapshot = buildSnapshot(
+      settings,
+      [provider, createProviders()[1]],
+      createPermissions(),
+      false,
+      null,
+      null,
+      {},
+      downloadedModels,
+    );
+
+    expect(snapshot.dictationReady).toBe(true);
+    expect(snapshot.dictationRoute.reason).toBeNull();
+  });
+
+  it("fails closed when the exact model inventory cannot be inspected", () => {
+    const snapshot = buildSnapshot(
+      createSettings("clipboard_only"),
+      createProviders(),
+      createPermissions(),
+      false,
+      null,
+      null,
+      {},
+      null,
+      "Model inventory unavailable.",
+    );
+
+    expect(snapshot.dictationReady).toBe(false);
+    expect(snapshot.meetingReady).toBe(false);
+    expect(snapshot.dictationRoute.reason).toBe("Model inventory unavailable.");
   });
 
   it("does not treat a meeting provider as ready for a different active model", () => {

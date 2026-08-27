@@ -9,11 +9,22 @@ vi.mock("@/lib/electron", () => ({
   listen: vi.fn(),
 }));
 
-import { stopDictation } from "@/lib/backend";
+import { downloadAsrModels, stopDictation } from "@/lib/backend";
 
 describe("dictation backend wire contract", () => {
   beforeEach(() => {
     vi.clearAllMocks();
+  });
+
+  it("sends the exact requested model with a download", async () => {
+    electronMocks.invoke.mockResolvedValue(undefined);
+
+    await downloadAsrModels("whisper", "small.en");
+
+    expect(electronMocks.invoke).toHaveBeenCalledWith("download_asr_models", {
+      providerType: "whisper",
+      modelId: "small.en",
+    });
   });
 
   it("normalizes the sidecar stop response to transcript text", async () => {

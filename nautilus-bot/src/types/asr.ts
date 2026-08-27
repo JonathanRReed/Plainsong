@@ -23,6 +23,10 @@ export interface AppleSpeechReadiness {
   recognizerAvailable: boolean;
   message: string;
   setupAction?: string | null;
+  /** Whether the new SpeechAnalyzer API (macOS 26+) is available. */
+  speechAnalyzerAvailable: boolean;
+  /** The OS version string reported by the helper (e.g. "26.0.0"). */
+  operatingSystemVersion?: string | null;
 }
 
 export interface AsrProviderInfo {
@@ -122,7 +126,8 @@ export type AsrProviderType =
   | "elevenlabs_scribe"
   | "openai_cloud"
   | "groq"
-  | "cohere_transcribe";
+  | "cohere_transcribe"
+  | "qwen3_asr";
 
 // LLM Types
 export interface LlmAnalysisResult {

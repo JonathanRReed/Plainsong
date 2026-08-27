@@ -7,10 +7,11 @@ export {
   getSpeakers,
   isDiarizationModelAvailable,
   isSileroVadModelDownloaded,
+  listDiarizationModels,
   listDownloadedModels,
   refreshAsrRuntimeProbes,
   renameSpeaker,
   repairLocalModelCache,
   runDiarization,
 } from "../backend";
-export type { DownloadedModelFile } from "../backend";
+export type { DiarizationModelOption, DownloadedModelFile } from "../backend";

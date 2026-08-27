@@ -7,6 +7,7 @@ const liveMocks = vi.hoisted(() => ({
   listeners: new Map<string, (event: { payload: unknown }) => void>(),
   getSettings: vi.fn(),
   getAsrProviders: vi.fn(),
+  listDownloadedModels: vi.fn(),
   getPermissionDiagnostics: vi.fn(),
   getSystemAudioCapability: vi.fn(),
 }));
@@ -27,6 +28,7 @@ vi.mock("@/lib/electron", () => ({
 
 vi.mock("@/lib/backend/asr", () => ({
   getAsrProviders: liveMocks.getAsrProviders,
+  listDownloadedModels: liveMocks.listDownloadedModels,
 }));
 
 vi.mock("@/lib/backend/settings", () => ({
@@ -59,6 +61,7 @@ describe("useSetupStatus live refresh", () => {
     liveMocks.listeners.clear();
     liveMocks.getSettings.mockResolvedValue(settings());
     liveMocks.getAsrProviders.mockResolvedValue([]);
+    liveMocks.listDownloadedModels.mockResolvedValue([]);
     liveMocks.getPermissionDiagnostics.mockResolvedValue(null);
     liveMocks.getSystemAudioCapability.mockResolvedValue(null);
   });

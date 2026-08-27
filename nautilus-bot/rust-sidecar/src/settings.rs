@@ -123,6 +123,9 @@ pub struct TranscriptionSettings {
     pub meeting_mlx_enabled: bool,
     /// Enable speaker diarization
     pub enable_diarization: bool,
+    /// Selected diarization speaker embedding model ID. Defaults to
+    /// `ecapa_tdnn_speaker` when unset.
+    pub diarization_model_id: Option<String>,
     /// Language (auto-detect if None)
     pub language: Option<String>,
     /// Skip silence segments during transcription.
@@ -278,6 +281,7 @@ impl Default for TranscriptionSettings {
             dictation_mlx_enabled: false,
             meeting_mlx_enabled: false,
             enable_diarization: true,
+            diarization_model_id: None,
             language: None,
             silence_skip_enabled: false,
             // Off by default: the paste path stages the dictated text on the
@@ -618,6 +622,7 @@ fn normalize_transcription_provider_value(provider: &str) -> String {
         "openai_cloud" => "openai_cloud".to_string(),
         "groq" => "groq".to_string(),
         "cohere_transcribe" => "cohere_transcribe".to_string(),
+        "qwen3_asr" => "qwen3_asr".to_string(),
         _ => "whisper".to_string(),
     }
 }
@@ -660,6 +665,10 @@ fn normalize_transcription_model_id(provider: &str, model_id: &str) -> String {
         },
         "cohere_transcribe" => match model_id.trim() {
             "" => "cohere-transcribe-03-2026".to_string(),
+            value => value.to_string(),
+        },
+        "qwen3_asr" => match model_id.trim() {
+            "" | "qwen3-asr-0.6b" => "qwen3-asr-0.6b".to_string(),
             value => value.to_string(),
         },
         _ => "base.en".to_string(),
@@ -1066,7 +1075,9 @@ const REMOVED_SETTINGS_KEYS: &[(&str, &str)] = &[
     ("transcription", "intelligentPunctuation"),
     ("transcription", "numSpeakers"),
     ("transcription", "speakerNamingMethod"),
-    ("transcription", "diarizationModelId"),
+    // `diarizationModelId` was previously removed but has been re-added
+    // as a valid field for the diarization model picker. It is no longer
+    // in the removed-keys list.
     ("transcription", "saveRawTranscript"),
     ("ui", "windowPosition"),
     ("ui", "windowSize"),
@@ -1356,6 +1367,26 @@ mod tests {
         normalize_loaded_transcription_settings(&mut retired_model);
         assert_eq!(retired_model.dictation_provider, "parakeet");
         assert_eq!(retired_model.dictation_model_id, "parakeet-tdt-0.6b-v3");
+    }
+
+    #[test]
+    fn qwen3_asr_provider_and_model_survive_settings_reload() {
+        let mut settings = TranscriptionSettings {
+            default_provider: "qwen3_asr".to_string(),
+            dictation_provider: "qwen3_asr".to_string(),
+            meeting_provider: "qwen3_asr".to_string(),
+            selected_model_id: "qwen3-asr-0.6b".to_string(),
+            dictation_model_id: "qwen3-asr-0.6b".to_string(),
+            meeting_model_id: "qwen3-asr-0.6b".to_string(),
+            ..Default::default()
+        };
+        normalize_loaded_transcription_settings(&mut settings);
+        assert_eq!(settings.default_provider, "qwen3_asr");
+        assert_eq!(settings.dictation_provider, "qwen3_asr");
+        assert_eq!(settings.meeting_provider, "qwen3_asr");
+        assert_eq!(settings.selected_model_id, "qwen3-asr-0.6b");
+        assert_eq!(settings.dictation_model_id, "qwen3-asr-0.6b");
+        assert_eq!(settings.meeting_model_id, "qwen3-asr-0.6b");
     }
 
     #[test]

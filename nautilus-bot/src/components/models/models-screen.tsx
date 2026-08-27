@@ -355,7 +355,7 @@ export function ModelsScreen({
       setBusyRouteId(route.routeId);
       setActionError(null);
       try {
-        await downloadAsrModels(route.providerType);
+        await downloadAsrModels(route.providerType, route.modelId);
         await Promise.all([refresh(), refreshProductReadiness()]);
       } catch (error) {
         setActionError(

@@ -351,7 +351,9 @@ if (!sourceOnly) {
     typeof probe.authorization !== "string" ||
     typeof probe.locale !== "string" ||
     typeof probe.locale_supported !== "boolean" ||
-    typeof probe.on_device_available !== "boolean"
+    typeof probe.on_device_available !== "boolean" ||
+    typeof probe.speech_analyzer_available !== "boolean" ||
+    typeof probe.operating_system_version !== "string"
   ) {
     fail(`helper --probe does not match the Rust contract: ${JSON.stringify(probe)}`);
   }

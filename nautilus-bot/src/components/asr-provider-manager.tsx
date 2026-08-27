@@ -1,6 +1,7 @@
 import { useState, useEffect, useMemo, useRef } from "react";
 import { cn } from "@/lib/utils";
 import { normalizeDownloadStatus } from "@/lib/download-status";
+import { formatModelSize, getAsrModelCapability } from "@/lib/asr-capabilities";
 import { getProviderSelectionStatus } from "@/lib/asr-provider-selection";
 import {
   mergeSelectionStateUpdate,
@@ -742,6 +743,14 @@ export function AsrProviderManager({ className }: AsrProviderManagerProps) {
     const normalizedStatus = normalizeDownloadStatus(provider.downloadStatus);
     const activeProgress = downloadProgress[provider.providerType];
 
+    // Determine if this is a large download (>500 MiB) to show a wider bar.
+    const cap = getAsrModelCapability(
+      provider.providerType,
+      provider.selectedModelId,
+    );
+    const isLargeDownload = cap !== null && cap.sizeMib > 500;
+    const progressWidth = isLargeDownload ? "w-32" : "w-20";
+
     // Show progress bar if we have active progress and not yet fully downloaded/updated
     if (
       activeProgress !== undefined &&
@@ -749,7 +758,7 @@ export function AsrProviderManager({ className }: AsrProviderManagerProps) {
     ) {
       return (
         <div className="flex items-center gap-2">
-          <Progress value={activeProgress} className="w-20 h-2" />
+          <Progress value={activeProgress} className={`${progressWidth} h-2`} />
           <span className="text-xs text-muted-foreground">
             {activeProgress.toFixed(0)}%
           </span>
@@ -777,7 +786,7 @@ export function AsrProviderManager({ className }: AsrProviderManagerProps) {
         const progress = normalizedStatus.progress ?? 0;
         return (
           <div className="flex items-center gap-2">
-            <Progress value={progress} className="w-20 h-2" />
+            <Progress value={progress} className={`${progressWidth} h-2`} />
             <span className="text-xs text-muted-foreground">
               {progress.toFixed(0)}%
             </span>
@@ -814,6 +823,8 @@ export function AsrProviderManager({ className }: AsrProviderManagerProps) {
         return "Grant Plainsong Speech Recognition access in macOS System Settings > Privacy & Security > Speech Recognition";
       case "moonshine":
         return "Use the Download button to fetch the selected Moonshine bundle. Tiny is the smallest edge model; Base is the default stable option.";
+      case "qwen3_asr":
+        return "Use the Download button to fetch the Qwen3-ASR 0.6B model (~1.9 GiB, 7 files). The autoregressive decoder with KV cache threading is implemented but not yet validated with real audio — transcription is gated off until end-to-end testing.";
       case "windows_sdk_dictation":
         return "Use a Windows x86_64 build with Windows speech recognition components available, or pick another ASR provider";
       case "elevenlabs_scribe":
@@ -1135,6 +1146,16 @@ export function AsrProviderManager({ className }: AsrProviderManagerProps) {
               {appleSpeechReadiness.setupAction ? (
                 <p className="mt-1 text-xs text-muted-foreground">
                   {appleSpeechReadiness.setupAction}
+                </p>
+              ) : null}
+              {appleSpeechReadiness.speechAnalyzerAvailable ? (
+                <p className="mt-1 text-xs text-muted-foreground">
+                  SpeechAnalyzer API detected
+                  {appleSpeechReadiness.operatingSystemVersion
+                    ? ` (macOS ${appleSpeechReadiness.operatingSystemVersion})`
+                    : ""}
+                  . The newer streaming-capable Speech framework route is
+                  available on this device.
                 </p>
               ) : null}
             </div>
@@ -1590,7 +1611,15 @@ export function AsrProviderManager({ className }: AsrProviderManagerProps) {
                       disabled={isLoading}
                     >
                       <Download className="h-4 w-4 mr-2" />
-                      Download
+                      {(() => {
+                        const cap = getAsrModelCapability(
+                          provider.providerType,
+                          provider.selectedModelId,
+                        );
+                        return cap
+                          ? `Download (${formatModelSize(cap.sizeMib)})`
+                          : "Download";
+                      })()}
                     </Button>
                   ) : null}
                   {selection.reason === "runtime_unavailable" ? (

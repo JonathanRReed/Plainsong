@@ -46,12 +46,18 @@ ort = { version = "2.0.0-rc.13", optional = true }
 ndarray = { version = "0.17", optional = true }
 
 # Candle for HuggingFace models (Canary, etc.)
+# The `metal` feature is gated behind the `candle-metal` Cargo feature so that
+# non-macOS builds are not broken by Metal-only dependencies. On macOS, enable
+# `candle-metal` to route Candle inference through the GPU.
 candle-core = { version = "0.10", optional = true }
 candle-nn = { version = "0.10", optional = true }
 candle-transformers = { version = "0.10", optional = true }
 
 # Tokenizers for HuggingFace models
 tokenizers = { version = "0.23", optional = true }
+
+# SentencePiece tokenizer for the punctuation/casing model (pure Rust, no C++ dep)
+sentencepiece-rs = { version = "0.2", optional = true }
 
 # Audio preprocessing. Not optional: the mixed ("Me + Them") capture path
 # resamples whichever of the mic/loopback devices is running at the lower rate
@@ -101,9 +107,9 @@ default = ["asr-all", "sqlcipher", "whisper-gpu"]
 
 # ASR Provider Features
 asr-whisper = ["whisper-rs", "download-manager"]
-asr-parakeet = ["ort", "ndarray", "download-manager", "audio-processing"]
+asr-parakeet = ["ort", "ndarray", "download-manager", "audio-processing", "rustfft", "tokenizers"]
 asr-canary = ["candle-core", "candle-nn", "candle-transformers", "tokenizers", "download-manager", "audio-processing"]
-asr-all = ["asr-whisper", "asr-parakeet", "asr-canary", "diarization"]
+asr-all = ["asr-whisper", "asr-parakeet", "asr-canary", "diarization", "text-recasepunct"]
 
 # Whisper GPU acceleration (Metal — macOS only). No CUDA feature is wired;
 # non-macOS builds must use --no-default-features and re-enable
@@ -125,6 +131,21 @@ asr-all = ["asr-whisper", "asr-parakeet", "asr-canary", "diarization"]
 # M4 Pro with base.en: 66ms p50 at 1s of audio, 101ms at 5.3s, 569ms at 44s.
 whisper-gpu = ["whisper-rs?/metal"]
 
+# Candle Metal GPU acceleration (macOS only). Routes Candle-based models
+# (Whisper Large V3 Turbo, Distil Whisper) through the Metal backend instead
+# of CPU F32. Without this, Candle falls back to CPU which is multi-second
+# for large models. Note: candle-nn MUST also get the `metal` feature —
+# without it, the Metal rms-norm kernel isn't compiled and inference crashes.
+candle-metal = ["candle-core/metal", "candle-nn/metal", "candle-transformers/metal"]
+
+# ONNX Runtime CoreML Execution Provider (macOS only). Enables CoreML EP for
+# ONNX-based models (Silero VAD, Wespeaker diarization, Moonshine) on Apple
+# Silicon, routing eligible ops to the Neural Engine/GPU. CoreML is NOT
+# enabled for Parakeet (known to be unstable for transducer models). The EP
+# gracefully falls back to CPU if the prebuilt ONNX Runtime binary does not
+# include CoreML support or if CoreML initialization fails.
+ort-coreml = ["ort/coreml"]
+
 # SQLCipher for encrypted SQLite (optional, requires OpenSSL)
 sqlcipher = ["rusqlite/sqlcipher", "libsqlite3-sys/bundled-sqlcipher"]
 
@@ -137,6 +158,9 @@ desktop-shell = []
 
 # Speaker diarization (requires ONNX runtime)
 diarization = ["ort", "ndarray", "rustfft"]
+
+# ML-based punctuation/casing restoration (requires ONNX runtime + SentencePiece)
+text-recasepunct = ["ort", "ndarray", "sentencepiece-rs", "download-manager"]
 
 [patch.crates-io]
 # CPAL 0.18.1's macOS loopback implementation links the macOS 14.2 process-tap

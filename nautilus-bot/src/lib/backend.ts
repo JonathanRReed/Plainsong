@@ -706,8 +706,11 @@ export async function getAsrProviderInventory(): Promise<AsrProviderInventory[]>
   return await invoke("get_asr_provider_inventory");
 }
 
-export async function downloadAsrModels(providerType: AsrProviderType): Promise<void> {
-  await invoke("download_asr_models", { providerType });
+export async function downloadAsrModels(
+  providerType: AsrProviderType,
+  modelId: string
+): Promise<void> {
+  await invoke("download_asr_models", { providerType, modelId });
 }
 
 interface LocalModelRepairReport {
@@ -1036,6 +1039,17 @@ interface DiarizationResult {
 // Diarization APIs
 export async function runDiarization(recordingId: string): Promise<DiarizationResult> {
   return await invoke("run_diarization", { recordingId });
+}
+
+export interface DiarizationModelOption {
+  id: string;
+  label: string;
+  description: string;
+  installed: boolean;
+}
+
+export async function listDiarizationModels(): Promise<DiarizationModelOption[]> {
+  return await invoke("list_diarization_models");
 }
 
 export async function isDiarizationModelAvailable(modelId?: string): Promise<boolean> {

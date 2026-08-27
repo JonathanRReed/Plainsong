@@ -12,7 +12,7 @@ use ndarray::Array1;
 use ndarray::{ArrayViewD, IxDyn};
 #[cfg(feature = "diarization")]
 use ort::{
-    session::{builder::GraphOptimizationLevel, Session, SessionOutputs},
+    session::{Session, SessionOutputs},
     value::{Tensor, ValueType},
 };
 #[cfg(feature = "diarization")]
@@ -52,6 +52,7 @@ impl SpeakerEmbeddingExtractor {
             "ecapa_tdnn_speaker" => "ecapa_tdnn_speaker.onnx",
             "resnet34_speaker" => "resnet34_speaker.onnx",
             "campplus_speaker" => "campplus_speaker.onnx",
+            "eres2netv2_speaker" => "eres2netv2_speaker.onnx",
             _ => "ecapa_tdnn_speaker.onnx", // Default fallback
         };
 
@@ -160,20 +161,11 @@ fn load_embedding_session(model_path: &Path) -> Result<Session> {
 
     tracing::debug!("Loading diarization model from: {}", model_path.display());
 
-    let session = Session::builder()
-        .context("Failed to create ONNX session builder")?
-        .with_optimization_level(GraphOptimizationLevel::Level3)
-        .map_err(|error| anyhow!("Failed to configure ONNX optimization level: {}", error))?
-        .with_intra_threads(1)
-        .map_err(|error| anyhow!("Failed to configure ONNX intra-op threads: {}", error))?
-        .commit_from_file(model_path)
-        .map_err(|error| {
-            anyhow!(
-                "Failed to load diarization model from {}: {}",
-                model_path.display(),
-                error
-            )
-        })?;
+    let session = crate::ort_utils::build_session_with(model_path, |builder| {
+        builder
+            .with_intra_threads(1)
+            .map_err(|error| anyhow!("Failed to configure ONNX intra-op threads: {}", error))
+    })?;
 
     // Log model input/output info
     tracing::debug!(
@@ -362,49 +354,17 @@ fn compute_fbank_features(
     Ok(all_features)
 }
 
-/// Create Mel filterbank matrix
+/// Create Mel filterbank matrix using the shared ln-based filterbank.
+/// Diarization uses fmin=20 Hz, fmax=Nyquist (sample_rate/2).
 #[cfg(feature = "diarization")]
 fn create_mel_filterbank(fft_size: usize, sample_rate: f32, num_mel_bins: usize) -> Vec<Vec<f64>> {
-    let low_freq = 20.0f32;
-    let high_freq = sample_rate / 2.0;
-
-    // Convert frequency to Mel scale
-    let hz_to_mel = |hz: f32| 2595.0 * (1.0 + hz / 700.0).ln();
-    let mel_to_hz = |mel: f32| 700.0 * ((mel / 2595.0).exp() - 1.0);
-
-    let mel_low = hz_to_mel(low_freq);
-    let mel_high = hz_to_mel(high_freq);
-
-    // Create equally spaced Mel points
-    let mel_points: Vec<f32> = (0..=num_mel_bins + 1)
-        .map(|i| mel_low + (mel_high - mel_low) * i as f32 / (num_mel_bins + 1) as f32)
-        .collect();
-
-    let hz_points: Vec<f32> = mel_points.iter().map(|m| mel_to_hz(*m)).collect();
-    let bin_points: Vec<f32> = hz_points
-        .iter()
-        .map(|hz| (fft_size as f32 + 1.0) * hz / sample_rate)
-        .collect();
-
-    let num_bins = fft_size / 2 + 1;
-    let mut filterbank = vec![vec![0.0f64; num_bins]; num_mel_bins];
-
-    for mel_idx in 0..num_mel_bins {
-        let left = bin_points[mel_idx];
-        let center = bin_points[mel_idx + 1];
-        let right = bin_points[mel_idx + 2];
-
-        for bin_idx in 0..num_bins {
-            let bin = bin_idx as f32;
-            if bin >= left && bin < center && center > left {
-                filterbank[mel_idx][bin_idx] = ((bin - left) / (center - left)) as f64;
-            } else if bin >= center && bin <= right && right > center {
-                filterbank[mel_idx][bin_idx] = ((right - bin) / (right - center)) as f64;
-            }
-        }
-    }
-
-    filterbank
+    crate::audio::mel::create_mel_filterbank_ln(
+        fft_size,
+        sample_rate,
+        num_mel_bins,
+        20.0,
+        sample_rate / 2.0,
+    )
 }
 
 #[cfg(feature = "diarization")]
@@ -520,8 +480,13 @@ fn finalize_embedding(array: ArrayViewD<'_, f32>) -> Result<Array1<f32>> {
 pub struct SpeakerEmbeddingExtractor;
 
 #[cfg(not(feature = "diarization"))]
+#[allow(dead_code)]
 impl SpeakerEmbeddingExtractor {
     pub fn new() -> Result<Self> {
+        Ok(Self)
+    }
+
+    pub fn with_model(_model_id: &str) -> Result<Self> {
         Ok(Self)
     }
 
@@ -567,11 +532,20 @@ impl EmbeddingClusterer {
         self
     }
 
-    /// Cluster embeddings as connected components under the fixed cosine-distance
-    /// threshold. This is equivalent to single linkage, but computes each pair
-    /// distance exactly once instead of repeatedly rescanning cluster members.
+    /// Cluster embeddings using agglomerative hierarchical clustering (AHC)
+    /// with centroid linkage under the fixed cosine-distance threshold.
     ///
-    /// Returns contiguous speaker assignments labeled by first occurrence.
+    /// Unlike single-linkage (connected-components), AHC merges clusters based
+    /// on the distance between their **centroids** rather than the minimum
+    /// pairwise distance between members. This makes it more robust to
+    /// "chaining" — the tendency of single-linkage to over-merge speakers
+    /// through a transitive chain of acoustically similar but distinct voices.
+    ///
+    /// This mirrors the approach used by pyannote.audio 3.1 (the industry
+    /// standard for embedding-based diarization), which uses agglomerative
+    /// clustering with centroid linkage.
+    ///
+    /// Returns speaker assignments labeled by first occurrence.
     pub fn cluster(&self, embeddings: &[(f64, f64, Array1<f32>)]) -> Vec<usize> {
         if embeddings.is_empty() {
             return Vec::new();
@@ -581,19 +555,13 @@ impl EmbeddingClusterer {
             return vec![0];
         }
 
-        tracing::debug!(
-            "Clustering {} embeddings with threshold {}",
-            embeddings.len(),
-            self.threshold
-        );
-
         let n = embeddings.len();
-        let mut components = UnionFind::new(n);
+
+        // Collect pairwise distance statistics for debugging.
         let mut min_d = f32::INFINITY;
         let mut max_d = 0.0f32;
         let mut sum_d = 0.0f32;
         let mut count = 0usize;
-
         for i in 0..n {
             for j in (i + 1)..n {
                 let distance = cosine_distance(&embeddings[i].2, &embeddings[j].2);
@@ -601,36 +569,101 @@ impl EmbeddingClusterer {
                 max_d = max_d.max(distance);
                 sum_d += distance;
                 count += 1;
-                if distance <= self.threshold {
-                    components.union(i, j);
+            }
+        }
+        let avg_d = sum_d / count as f32;
+        tracing::debug!(
+            "Clustering {} embeddings with threshold {} (AHC centroid linkage). \
+             Distance stats: min={:.4}, max={:.4}, avg={:.4}",
+            n,
+            self.threshold,
+            min_d,
+            max_d,
+            avg_d
+        );
+
+        // Each embedding starts as its own cluster.
+        let mut cluster_members: Vec<Vec<usize>> = (0..n).map(|i| vec![i]).collect();
+        let mut cluster_centroids: Vec<Array1<f32>> =
+            embeddings.iter().map(|(_, _, e)| e.clone()).collect();
+        let mut active = vec![true; n];
+        let mut num_active = n;
+
+        // Agglomerative merge loop: repeatedly find the closest pair of active
+        // clusters and merge them if their centroid distance is within threshold.
+        while num_active > 1 {
+            let mut min_dist = f32::INFINITY;
+            let mut merge_i = 0;
+            let mut merge_j = 0;
+
+            for i in 0..n {
+                if !active[i] {
+                    continue;
+                }
+                for j in (i + 1)..n {
+                    if !active[j] {
+                        continue;
+                    }
+                    let d = cosine_distance(&cluster_centroids[i], &cluster_centroids[j]);
+                    if d < min_dist {
+                        min_dist = d;
+                        merge_i = i;
+                        merge_j = j;
+                    }
+                }
+            }
+
+            if min_dist > self.threshold {
+                break;
+            }
+
+            // Merge cluster j into cluster i.
+            let moved = std::mem::take(&mut cluster_members[merge_j]);
+            cluster_members[merge_i].extend(moved);
+            active[merge_j] = false;
+            num_active -= 1;
+
+            // Recompute the centroid of the merged cluster as the
+            // L2-normalized mean of all member embeddings.
+            let embedding_len = cluster_centroids[merge_i].len();
+            let mut new_centroid = vec![0.0f32; embedding_len];
+            for &member_idx in &cluster_members[merge_i] {
+                for (k, &val) in embeddings[member_idx].2.iter().enumerate() {
+                    new_centroid[k] += val;
+                }
+            }
+            let norm: f32 = new_centroid.iter().map(|x| x * x).sum::<f32>().sqrt();
+            if norm > 1e-6 {
+                for val in &mut new_centroid {
+                    *val /= norm;
+                }
+            }
+            cluster_centroids[merge_i] = Array1::from(new_centroid);
+        }
+
+        // Build embedding_index → cluster_index mapping, then assign labels
+        // by first occurrence so labels are contiguous starting at 0.
+        let mut embedding_to_cluster = vec![0usize; n];
+        for (cluster_idx, members) in cluster_members.iter().enumerate() {
+            if active[cluster_idx] {
+                for &member in members {
+                    embedding_to_cluster[member] = cluster_idx;
                 }
             }
         }
 
-        let avg_d = sum_d / count as f32;
-        tracing::debug!(
-            "Distance stats: min={:.4}, max={:.4}, avg={:.4}, threshold={:.4}",
-            min_d,
-            max_d,
-            avg_d,
-            self.threshold
-        );
-
-        let mut root_labels = vec![None; n];
         let mut labels = vec![0usize; n];
-        let mut next_label = 0usize;
-        for index in 0..n {
-            let root = components.find(index);
-            let label = match root_labels[root] {
-                Some(label) => label,
-                None => {
-                    let label = next_label;
-                    next_label += 1;
-                    root_labels[root] = Some(label);
-                    label
-                }
-            };
-            labels[index] = label;
+        let mut label_map: std::collections::HashMap<usize, usize> =
+            std::collections::HashMap::new();
+        let mut next_label = 0;
+        for i in 0..n {
+            let cluster = embedding_to_cluster[i];
+            let label = *label_map.entry(cluster).or_insert_with(|| {
+                let l = next_label;
+                next_label += 1;
+                l
+            });
+            labels[i] = label;
         }
 
         labels
@@ -666,51 +699,6 @@ impl EmbeddingClusterer {
         }
 
         smoothed
-    }
-}
-
-struct UnionFind {
-    parent: Vec<usize>,
-    size: Vec<usize>,
-}
-
-impl UnionFind {
-    fn new(len: usize) -> Self {
-        Self {
-            parent: (0..len).collect(),
-            size: vec![1; len],
-        }
-    }
-
-    fn find(&mut self, index: usize) -> usize {
-        let mut root = index;
-        while self.parent[root] != root {
-            root = self.parent[root];
-        }
-
-        let mut current = index;
-        while self.parent[current] != current {
-            let next = self.parent[current];
-            self.parent[current] = root;
-            current = next;
-        }
-        root
-    }
-
-    fn union(&mut self, left: usize, right: usize) {
-        let mut left_root = self.find(left);
-        let mut right_root = self.find(right);
-        if left_root == right_root {
-            return;
-        }
-
-        if self.size[left_root] < self.size[right_root]
-            || (self.size[left_root] == self.size[right_root] && left_root > right_root)
-        {
-            std::mem::swap(&mut left_root, &mut right_root);
-        }
-        self.parent[right_root] = left_root;
-        self.size[left_root] += self.size[right_root];
     }
 }
 

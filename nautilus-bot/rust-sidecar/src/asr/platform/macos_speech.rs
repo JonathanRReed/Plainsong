@@ -68,6 +68,12 @@ pub struct AppleSpeechReadiness {
     pub recognizer_available: bool,
     pub message: String,
     pub setup_action: Option<String>,
+    /// Whether the new SpeechAnalyzer API (macOS 26+) is available.
+    #[serde(default)]
+    pub speech_analyzer_available: bool,
+    /// The OS version string reported by the helper (e.g. "26.0.0").
+    #[serde(default)]
+    pub operating_system_version: Option<String>,
 }
 
 #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
@@ -104,6 +110,10 @@ struct HelperProbePayload {
     locale_supported: bool,
     on_device_available: bool,
     recognizer_available: bool,
+    #[serde(default)]
+    speech_analyzer_available: bool,
+    #[serde(default)]
+    operating_system_version: Option<String>,
 }
 
 #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
@@ -333,6 +343,8 @@ fn readiness_from_probe(payload: &HelperProbePayload) -> AppleSpeechReadiness {
         recognizer_available: payload.recognizer_available,
         message,
         setup_action,
+        speech_analyzer_available: payload.speech_analyzer_available,
+        operating_system_version: payload.operating_system_version.clone(),
     }
 }
 
@@ -367,6 +379,8 @@ fn readiness_from_probe_error(error: &anyhow::Error) -> AppleSpeechReadiness {
         } else {
             "Re-check Apple Speech readiness or choose another dictation provider.".to_string()
         }),
+        speech_analyzer_available: false,
+        operating_system_version: None,
     }
 }
 
@@ -450,6 +464,8 @@ pub fn readiness() -> AppleSpeechReadiness {
         recognizer_available: false,
         message: "Apple Speech dictation requires macOS on Apple Silicon.".to_string(),
         setup_action: Some("Choose a dictation provider supported on this platform.".to_string()),
+        speech_analyzer_available: false,
+        operating_system_version: None,
     }
 }
 
@@ -1257,6 +1273,8 @@ mod tests {
             locale_supported: true,
             on_device_available: true,
             recognizer_available: true,
+            speech_analyzer_available: false,
+            operating_system_version: None,
         };
         assert_eq!(
             map_authorization_status_payload(&payload("authorized", 3)),
@@ -1300,6 +1318,8 @@ mod tests {
             locale_supported,
             on_device_available,
             recognizer_available,
+            speech_analyzer_available: false,
+            operating_system_version: None,
         };
 
         for (probe, expected) in [
@@ -1385,6 +1405,24 @@ mod tests {
         assert_eq!(probe.authorization, "not_determined");
         assert!(probe.locale_supported);
         assert!(probe.on_device_available);
+    }
+
+    #[test]
+    fn probe_contract_includes_speech_analyzer_fields_when_present() {
+        let json = br#"{"authorization":"authorized","authorization_code":3,"locale":"en_US","locale_supported":true,"on_device_available":true,"protocol_version":1,"recognizer_available":true,"speech_analyzer_available":true,"operating_system_version":"26.0.0","type":"probe"}"#;
+        let probe: HelperProbePayload =
+            parse_single_payload(json, "probe").expect("probe should match Rust contract");
+        assert!(probe.speech_analyzer_available);
+        assert_eq!(probe.operating_system_version.as_deref(), Some("26.0.0"));
+    }
+
+    #[test]
+    fn probe_contract_defaults_speech_analyzer_fields_when_absent() {
+        let json = br#"{"authorization":"authorized","authorization_code":3,"locale":"en_US","locale_supported":true,"on_device_available":true,"protocol_version":1,"recognizer_available":true,"type":"probe"}"#;
+        let probe: HelperProbePayload =
+            parse_single_payload(json, "probe").expect("probe should match Rust contract");
+        assert!(!probe.speech_analyzer_available);
+        assert!(probe.operating_system_version.is_none());
     }
 
     #[cfg(all(target_os = "macos", target_arch = "aarch64"))]

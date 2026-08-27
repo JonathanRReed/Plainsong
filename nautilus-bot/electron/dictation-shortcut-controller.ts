@@ -35,6 +35,16 @@ function isIdleLikePhase(phase: DictationShortcutPhase): boolean {
   return phase === "idle" || phase === "done" || phase === "error";
 }
 
+export function dictationShortcutFailureMessage(error: unknown): string {
+  const message =
+    error instanceof Error
+      ? error.message.trim()
+      : typeof error === "string"
+        ? error.trim()
+        : "";
+  return message || "Dictation could not start. Open Plainsong to check setup.";
+}
+
 // Escape is the user's way out of a session that is still running, so it has
 // to cover every phase between the start ack and a terminal phase — not just
 // "recording". "primed" is the window where the start was acked but the

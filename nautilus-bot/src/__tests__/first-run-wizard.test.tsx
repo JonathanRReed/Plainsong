@@ -1,6 +1,9 @@
 import { act, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import { FirstRunWizard } from "@/components/first-run-wizard";
+import {
+  dictationShortcutConflictMessage,
+  FirstRunWizard,
+} from "@/components/first-run-wizard";
 import { MEETING_ONBOARDING_STORAGE_KEY } from "@/lib/onboarding";
 import { listen } from "@/lib/electron";
 import type { AsrProviderInfo } from "@/types";
@@ -233,6 +236,35 @@ async function clickPrimary(label: RegExp) {
   });
 }
 
+describe("dictationShortcutConflictMessage", () => {
+  it("blocks a dictation shortcut that disables another configured action", () => {
+    expect(
+      dictationShortcutConflictMessage(
+        {
+          toggleDictation: "Cmd+Shift+Space",
+          openWindow: "Cmd+Shift+P",
+          repasteLastDictation: "Cmd+Ctrl+V",
+          recopyLastDictation: "Cmd+Ctrl+C",
+        },
+        "Cmd+Shift+P"
+      )
+    ).toContain("conflicts with Open window");
+  });
+
+  it("accepts a distinct dictation shortcut", () => {
+    expect(
+      dictationShortcutConflictMessage(
+        {
+          openWindow: "Cmd+Shift+P",
+          repasteLastDictation: "Cmd+Ctrl+V",
+          recopyLastDictation: "Cmd+Ctrl+C",
+        },
+        "Cmd+Shift+Space"
+      )
+    ).toBeNull();
+  });
+});
+
 describe("FirstRunWizard", () => {
   beforeEach(() => {
     currentSettings = createSettings();
@@ -444,7 +476,7 @@ describe("FirstRunWizard", () => {
     fireEvent.click(
       await screen.findByRole("button", { name: /download and continue/i })
     );
-    expect(downloadAsrModels).toHaveBeenCalledWith("whisper");
+    expect(downloadAsrModels).toHaveBeenCalledWith("whisper", "base.en");
     expect(
       screen.getByRole("heading", { name: /dictation model/i })
     ).toBeInTheDocument();
@@ -547,7 +579,7 @@ describe("FirstRunWizard", () => {
     });
 
     expect(currentSettings.shortcuts.toggleDictation).toBe("Cmd+Shift+Space");
-    expect(downloadAsrModels).toHaveBeenCalledWith("whisper");
+    expect(downloadAsrModels).toHaveBeenCalledWith("whisper", "base.en");
     expect(currentSettings.transcription.dictationProvider).toBe("whisper");
     expect(currentSettings.transcription.dictationModelId).toBe("base.en");
     // The wizard's hotkey step only manages the shortcut key, not the
@@ -594,7 +626,10 @@ describe("FirstRunWizard", () => {
 
     await clickPrimary(/download meeting model/i);
 
-    expect(downloadAsrModels).toHaveBeenCalledWith("distil_whisper");
+    expect(downloadAsrModels).toHaveBeenCalledWith(
+      "distil_whisper",
+      "distil-large-v3"
+    );
     expect(
       await screen.findByRole("heading", { name: /^ready$/i })
     ).toBeInTheDocument();

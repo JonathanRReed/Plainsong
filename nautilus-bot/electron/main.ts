@@ -20,6 +20,7 @@ import { pathToFileURL } from "url";
 import { autoUpdater, type AppUpdater } from "electron-updater";
 import {
   createDictationShortcutSignalRuntime,
+  dictationShortcutFailureMessage,
   resolveDictationShortcutBehavior,
   resolveDictationShortcutCapability,
   shouldHandleDictationShortcutSource,
@@ -145,6 +146,7 @@ if (isDev) {
 let mainWindow: BrowserWindow | null = null;
 let ipcBridge: IpcBridge | null = null;
 let dictationPhase = "idle";
+let dictationShortcutFailureResetTimer: ReturnType<typeof setTimeout> | null = null;
 const captureAdmission = new CaptureAdmissionController();
 // Session id from the most recent `dictation-state-changed` event, used to
 // drop stale VAD `silence_stop` signals emitted for an earlier session.
@@ -166,6 +168,7 @@ let showRecordingOverlayEnabled = true;
 let isQuitting = false;
 let forcedQuitTimer: ReturnType<typeof setTimeout> | null = null;
 const FORCED_QUIT_TIMEOUT_MS = 5_000;
+const DICTATION_SHORTCUT_FAILURE_VISIBLE_MS = 8_000;
 let nativeShortcutController: NativeShortcutController | null = null;
 let nativeShortcutAvailable = false;
 let appliedNativeShortcutConfig: string | null = null;
@@ -1288,6 +1291,41 @@ async function handleDictationShortcutSignal(
   await dictationShortcutSignalRuntime.handleSignal({ behavior, capability, signal });
 }
 
+function scheduleDictationErrorReset(): void {
+  if (dictationShortcutFailureResetTimer) {
+    clearTimeout(dictationShortcutFailureResetTimer);
+  }
+  dictationShortcutFailureResetTimer = setTimeout(() => {
+    dictationShortcutFailureResetTimer = null;
+    if (dictationPhase !== "error") {
+      return;
+    }
+    dictationPhase = "idle";
+    dictationShortcutSignalRuntime.onPhase("idle");
+    broadcastRendererEvent("dictation-state-changed", { phase: "idle" });
+    BrowserWindow.getAllWindows()
+      .filter((window) => getOverlayKind(window) === "dictation")
+      .forEach((window) => window.hide());
+    refreshTray();
+  }, DICTATION_SHORTCUT_FAILURE_VISIBLE_MS);
+}
+
+function surfaceDictationShortcutFailure(source: string, error: unknown): void {
+  console.error(`[shortcuts] ${source} failed`, error);
+  const payload = {
+    phase: "error",
+    message: dictationShortcutFailureMessage(error),
+  };
+  dictationPhase = "error";
+  dictationShortcutSignalRuntime.onPhase("error");
+  refreshTray();
+  if (showDictationOverlayEnabled) {
+    showOverlayWindow(getOrCreateOverlayWindow("dictation"));
+  }
+  broadcastRendererEvent("dictation-state-changed", payload);
+  scheduleDictationErrorReset();
+}
+
 /**
  * Handle a `dictation-vad-signal` event from the sidecar. Two distinct signals share
  * this event name (see rust-sidecar/src/audio.rs):
@@ -1434,7 +1472,7 @@ function startNativeShortcutControllerIfNeeded(settings: AppSettings): void {
     shortcut: settings.shortcuts?.toggleDictation,
     onEvent: (event) => {
       void handleNativeDictationShortcutEvent(latestShortcutSettings, event).catch((error) => {
-        console.error("[shortcuts] native dictation shortcut failed", error);
+        surfaceDictationShortcutFailure("native dictation shortcut", error);
       });
     },
     onUnavailable: (status) => {
@@ -1506,7 +1544,7 @@ async function applyElectronGlobalShortcuts(reason: string): Promise<void> {
   if (dictationShortcut) {
     const registered = globalShortcut.register(dictationShortcut, () => {
       void handleDictationGlobalShortcut(settings).catch((error) => {
-        console.error("[shortcuts] dictation shortcut failed", error);
+        surfaceDictationShortcutFailure("dictation shortcut", error);
       });
     });
 
@@ -2082,7 +2120,12 @@ async function bootstrap() {
       "phase" in payload &&
       typeof (payload as { phase?: unknown }).phase === "string"
     ) {
-      dictationPhase = (payload as { phase: string }).phase;
+      const nextPhase = (payload as { phase: string }).phase;
+      if (dictationShortcutFailureResetTimer) {
+        clearTimeout(dictationShortcutFailureResetTimer);
+        dictationShortcutFailureResetTimer = null;
+      }
+      dictationPhase = nextPhase;
       refreshTray();
       const sessionId = (payload as { sessionId?: unknown }).sessionId;
       if (typeof sessionId === "number") {
@@ -2092,6 +2135,9 @@ async function bootstrap() {
       // it is cleared as soon as the guarded session leaves "primed"/
       // "recording" through any path (VAD auto-stop, overlay stop, Escape).
       dictationShortcutSignalRuntime.onPhase(dictationPhase);
+      if (dictationPhase === "error") {
+        scheduleDictationErrorReset();
+      }
     }
 
     if (eventName === "dictation-text-ready") {
@@ -2106,7 +2152,7 @@ async function bootstrap() {
 
     if (eventName === "dictation-vad-signal") {
       void handleDictationVadSignal(payload).catch((error) => {
-        console.error("[dictation] vad auto-stop signal failed", error);
+        surfaceDictationShortcutFailure("dictation voice activation", error);
       });
     }
 

@@ -145,6 +145,8 @@ function appleProvider(status: AppleSpeechReadinessStatus): AsrProviderInfo {
       recognizerAvailable: status !== "recognizer_unavailable",
       message: `Apple Speech status: ${status}`,
       setupAction: ready ? null : "Fix Apple Speech setup.",
+      speechAnalyzerAvailable: false,
+      operatingSystemVersion: null,
     },
   };
 }
@@ -280,5 +282,21 @@ describe("asr-route-catalog", () => {
     expect(route.selectable).toBe(true);
     expect(route.action).toBeNull();
     expect(route.hosting).toBe("platform");
+  });
+
+  it("surfaces SpeechAnalyzer availability in the readiness detail for macOS 26+", () => {
+    const provider = appleProvider("ready");
+    provider.platformReadiness!.speechAnalyzerAvailable = true;
+    provider.platformReadiness!.operatingSystemVersion = "26.0.0";
+    const route = buildAsrRouteCatalog([provider], "prefer_local")[0];
+
+    expect(route.readinessDetail).toContain("SpeechAnalyzer API available");
+    expect(route.readinessDetail).toContain("macOS 26.0.0");
+  });
+
+  it("omits SpeechAnalyzer detail when the API is not available", () => {
+    const route = buildAsrRouteCatalog([appleProvider("ready")], "prefer_local")[0];
+
+    expect(route.readinessDetail).not.toContain("SpeechAnalyzer");
   });
 });

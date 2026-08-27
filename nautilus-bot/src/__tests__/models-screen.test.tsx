@@ -27,8 +27,8 @@ vi.mock("@/features/readiness/product-readiness-context", () => ({
 vi.mock("@/lib/backend/asr", () => ({
   getAsrProviderInventory: () => getAsrProviderInventoryMock(),
   listDownloadedModels: () => listDownloadedModelsMock(),
-  downloadAsrModels: (providerType: string) =>
-    downloadAsrModelsMock(providerType),
+  downloadAsrModels: (providerType: string, modelId: string) =>
+    downloadAsrModelsMock(providerType, modelId),
 }));
 
 vi.mock("@/lib/electron", () => ({
@@ -429,7 +429,10 @@ describe("Models screen", () => {
     // The action the brief requires, and it actually downloads.
     fireEvent.click(within(dictation).getByRole("button", { name: "Download" }));
     await waitFor(() => {
-      expect(downloadAsrModelsMock).toHaveBeenCalledWith("parakeet");
+      expect(downloadAsrModelsMock).toHaveBeenCalledWith(
+        "parakeet",
+        "parakeet-tdt-ctc-110m"
+      );
     });
 
     // The other half of the same contradiction: the meeting lane's model is
@@ -461,7 +464,10 @@ describe("Models screen", () => {
     fireEvent.click(within(meetingsRow).getByRole("button", { name: "Download" }));
 
     await waitFor(() => {
-      expect(downloadAsrModelsMock).toHaveBeenCalledWith("parakeet");
+      expect(downloadAsrModelsMock).toHaveBeenCalledWith(
+        "parakeet",
+        "parakeet-tdt-0.6b-v3"
+      );
     });
   });
 

@@ -1,5 +1,10 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { getAsrProviders } from "@/lib/backend/asr";
+import { getAsrProviders, listDownloadedModels } from "@/lib/backend/asr";
+import {
+  buildDownloadedModelIndex,
+  isModelOnDisk,
+  type DownloadedModelIndex,
+} from "@/components/models/downloaded-models";
 import {
   getPermissionDiagnostics,
   getSettings,
@@ -10,6 +15,7 @@ import {
   type SystemAudioCapability,
 } from "@/lib/backend/recordings";
 import {
+  isDownloadableProvider,
   isMeetingEligibleProvider,
   isMeetingEligibleModel,
   providerHostingPreference,
@@ -104,7 +110,9 @@ function buildRouteStatus(
   kind: "dictation" | "meeting",
   settings: Settings | null,
   providers: AsrProviderInfo[],
-  permissions: PermissionDiagnostics | null
+  permissions: PermissionDiagnostics | null,
+  downloadedModels: DownloadedModelIndex | null,
+  modelInventoryError: string | null
 ): SetupRouteStatus {
   const { providerType, modelId } = resolveSharedSelection(settings, kind);
   const provider =
@@ -128,11 +136,25 @@ function buildRouteStatus(
   const selectedModelMatches = Boolean(
     modelId && provider.selectedModelId === modelId,
   );
+  const modelOnDisk = modelId
+    ? isModelOnDisk(downloadedModels, provider.providerType, modelId)
+    : null;
+  const modelInventoryBlocked = Boolean(
+    modelId &&
+      isDownloadableProvider(provider.providerType) &&
+      modelOnDisk === null &&
+      modelInventoryError
+  );
+  const exactModelReady = modelOnDisk ?? selectedModelMatches;
+  const runtimeReady =
+    provider.runtimeStatus === "ready" ||
+    (modelOnDisk === true && provider.runtimeStatus === "missing_model");
   const baseReady = Boolean(
     provider.inferenceEnabled &&
-      provider.runtimeStatus === "ready" &&
+      runtimeReady &&
       modelIsKnown &&
-      selectedModelMatches,
+      exactModelReady &&
+      !modelInventoryBlocked,
   );
 
   if (
@@ -192,9 +214,13 @@ function buildRouteStatus(
         ? `Choose a ${kind} model for ${provider.name}.`
         : !modelIsKnown
           ? `${modelId} is not available for ${provider.name}. Choose or download a model.`
-          : !selectedModelMatches
-            ? `${provider.name} has not confirmed ${modelId} as its active model.`
-            : provider.runtimeMessage ?? `${provider.name} is not ready yet.`,
+          : modelInventoryBlocked
+            ? modelInventoryError ?? "Could not inspect downloaded transcription models."
+            : modelOnDisk === false
+              ? `${modelId} is not downloaded for ${provider.name}.`
+              : !exactModelReady
+                ? `${provider.name} has not confirmed ${modelId} as its active model.`
+                : provider.runtimeMessage ?? `${provider.name} is not ready yet.`,
   };
 }
 
@@ -206,9 +232,25 @@ export function buildSnapshot(
   loopbackDevice: string | null,
   systemAudioCapability: SystemAudioCapability | null = null,
   sourceState: SetupStatusSourceState = {},
+  downloadedModels: DownloadedModelIndex | null = null,
+  modelInventoryError: string | null = null,
 ): SetupStatusSnapshot {
-  const dictationRoute = buildRouteStatus("dictation", settings, providers, permissions);
-  const meetingRoute = buildRouteStatus("meeting", settings, providers, permissions);
+  const dictationRoute = buildRouteStatus(
+    "dictation",
+    settings,
+    providers,
+    permissions,
+    downloadedModels,
+    modelInventoryError
+  );
+  const meetingRoute = buildRouteStatus(
+    "meeting",
+    settings,
+    providers,
+    permissions,
+    downloadedModels,
+    modelInventoryError
+  );
   const effectiveSystemAudioAvailable = systemAudioCapability
     ? systemAudioCapability.backend !== "none"
     : systemAudioAvailable;
@@ -361,6 +403,9 @@ export function buildSnapshot(
 export function useSetupStatus() {
   const [settings, setSettings] = useState<Settings | null>(null);
   const [providers, setProviders] = useState<AsrProviderInfo[]>([]);
+  const [downloadedModels, setDownloadedModels] =
+    useState<DownloadedModelIndex | null>(null);
+  const [modelInventoryError, setModelInventoryError] = useState<string | null>(null);
   const [permissions, setPermissions] = useState<PermissionDiagnostics | null>(null);
   const [systemAudioCapability, setSystemAudioCapability] =
     useState<SystemAudioCapability | null>(null);
@@ -378,11 +423,24 @@ export function useSetupStatus() {
       const [
         nextSettings,
         nextProviders,
+        nextDownloadedModelResult,
         nextPermissions,
         nextSystemAudioCapability,
       ] = await Promise.all([
         getSettings(),
         getAsrProviders(),
+        listDownloadedModels()
+          .then((files) => ({
+            index: buildDownloadedModelIndex(files),
+            error: null,
+          }))
+          .catch((nextError) => ({
+            index: null,
+            error:
+              nextError instanceof Error && nextError.message.trim()
+                ? nextError.message
+                : "Could not inspect downloaded transcription models.",
+          })),
         getPermissionDiagnostics().catch(() => null),
         getSystemAudioCapability().catch(() => null),
       ]);
@@ -392,6 +450,8 @@ export function useSetupStatus() {
       }
       setSettings(nextSettings);
       setProviders(nextProviders);
+      setDownloadedModels(nextDownloadedModelResult.index);
+      setModelInventoryError(nextDownloadedModelResult.error);
       setPermissions(nextPermissions);
       setSystemAudioCapability(nextSystemAudioCapability);
     } catch (nextError) {
@@ -521,9 +581,13 @@ export function useSetupStatus() {
           settingsLoaded: settings !== null,
           providersLoaded: !loading && error === null,
         },
+        downloadedModels,
+        modelInventoryError,
       ),
     [
+      downloadedModels,
       error,
+      modelInventoryError,
       loading,
       observedAt,
       permissions,

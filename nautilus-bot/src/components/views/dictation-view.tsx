@@ -196,6 +196,7 @@ type DictationCustomModeDraft = {
 type DictationRouteReadiness = {
   status: "missing" | "downloading";
   providerType: AsrProviderType;
+  modelId: string;
   providerLabel: string;
   routeLabel: string;
 };
@@ -204,13 +205,12 @@ type DictationRouteReadiness = {
  * Reports when the route dictation would actually resolve to has no model on
  * disk yet.
  *
- * This is the quietest failure in the app. `start_dictation` returns an error
- * out of `resolve_ready_dictation_selection` before it emits a single
- * `dictation-state-changed` event, and the hotkey owners only log — so a user
- * who never downloaded a model presses the shortcut and gets nothing at all,
- * with nothing anywhere saying why. A brand-new install ships no model (the
- * packaged extraResources carry the sidecar, not weights), so this is the
- * normal first-run state, not an exotic one.
+ * `start_dictation` returns an error out of `resolve_ready_dictation_selection`
+ * before the sidecar emits `dictation-state-changed`. Electron mirrors that
+ * failure into the error HUD, while this view offers the proactive download
+ * action. A brand-new install ships no model (the packaged extraResources carry
+ * the sidecar, not weights), so this is the normal first-run state, not an
+ * exotic one.
  */
 function resolveDictationRouteReadiness(
   settings: Settings,
@@ -257,6 +257,7 @@ function resolveDictationRouteReadiness(
   return {
     status: downloadKind === "downloading" ? "downloading" : "missing",
     providerType,
+    modelId,
     providerLabel: provider.name,
     routeLabel: modelLabel ? `${provider.name} · ${modelLabel}` : provider.name,
   };
@@ -1516,7 +1517,10 @@ export function DictationView() {
     setRouteDownloadBusy(true);
     setRouteDownloadError(null);
     try {
-      await downloadAsrModels(dictationRouteReadiness.providerType);
+      await downloadAsrModels(
+        dictationRouteReadiness.providerType,
+        dictationRouteReadiness.modelId
+      );
       await Promise.all([
         refreshDictationRouteReadiness(),
         refreshProductReadiness(),
