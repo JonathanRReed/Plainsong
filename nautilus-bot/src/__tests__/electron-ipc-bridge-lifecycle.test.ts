@@ -380,28 +380,77 @@ describe("IpcBridge crash-loop containment", () => {
   });
 });
 
+/**
+ * A real IpcMainInvokeEvent from a top-level frame: `senderFrame` IS
+ * `sender.mainFrame`. Anything that does not satisfy that identity is a
+ * subframe (or a shape the bridge does not recognize) and must be refused.
+ */
+function topLevelFrameEvent(url: string) {
+  const mainFrame = { url };
+  return { sender: { mainFrame }, senderFrame: mainFrame };
+}
+
+function subFrameEvent(mainFrameUrl: string, subFrameUrl: string) {
+  return {
+    sender: { mainFrame: { url: mainFrameUrl } },
+    senderFrame: { url: subFrameUrl },
+  };
+}
+
 describe("IpcBridge sender validation", () => {
   beforeEach(() => {
     vi.clearAllMocks();
   });
 
-  it("rejects commands from a frame main does not recognize", async () => {
-    // The allowlist decides *what* may be asked for; this decides *who* may
-    // ask. Without it, any frame carrying our preload reaches the sidecar.
-    const consoleWarn = vi.spyOn(console, "warn").mockImplementation(() => {});
+  async function bridgeHandler(child = fakeChildProcess()) {
     const { IpcBridge } = await import("../../electron/ipc-bridge");
-    const bridge = new IpcBridge("/tmp/plainsong-sidecar", (() =>
-      fakeChildProcess()) as never);
+    const bridge = new IpcBridge("/tmp/plainsong-sidecar", (() => child) as never);
     bridge.onValidateSender((url) => url.startsWith("plainsong://bundle/"));
     bridge.start();
-
     const handler = mocks.handle.mock.calls.find(
       ([channel]) => channel === "sidecar:invoke",
     )?.[1] as (event: unknown, command: string, args?: unknown) => Promise<unknown>;
     expect(handler).toBeTruthy();
+    return { bridge, child, handler };
+  }
+
+  it("rejects commands from a frame main does not recognize", async () => {
+    // The allowlist decides *what* may be asked for; this decides *who* may
+    // ask. Without it, any frame carrying our preload reaches the sidecar.
+    const consoleWarn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const { handler } = await bridgeHandler();
 
     await expect(
-      handler({ senderFrame: { url: "https://evil.example/x" } }, "get_settings", {}),
+      handler(topLevelFrameEvent("https://evil.example/x"), "get_settings", {}),
+    ).rejects.toThrow(/untrusted sender/i);
+
+    consoleWarn.mockRestore();
+  });
+
+  it("rejects a subframe even when its own URL passes the origin check", async () => {
+    // A subframe carries the same preload and the same window.electronAPI, so
+    // validating its URL alone was not enough: the top-level frame is the one
+    // that has to be asking.
+    const consoleWarn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const { handler } = await bridgeHandler();
+
+    await expect(
+      handler(
+        subFrameEvent(
+          "plainsong://bundle/index.html",
+          "plainsong://bundle/index.html",
+        ),
+        "get_settings",
+        {},
+      ),
+    ).rejects.toThrow(/untrusted sender/i);
+
+    await expect(
+      handler(
+        subFrameEvent("plainsong://bundle/index.html", "https://evil.example/x"),
+        "get_settings",
+        {},
+      ),
     ).rejects.toThrow(/untrusted sender/i);
 
     consoleWarn.mockRestore();
@@ -409,17 +458,31 @@ describe("IpcBridge sender validation", () => {
 
   it("rejects a command whose sender frame reports no URL", async () => {
     const consoleWarn = vi.spyOn(console, "warn").mockImplementation(() => {});
-    const { IpcBridge } = await import("../../electron/ipc-bridge");
-    const bridge = new IpcBridge("/tmp/plainsong-sidecar", (() =>
-      fakeChildProcess()) as never);
-    bridge.onValidateSender((url) => url.startsWith("plainsong://bundle/"));
-    bridge.start();
+    const { handler } = await bridgeHandler();
 
-    const handler = mocks.handle.mock.calls.find(
-      ([channel]) => channel === "sidecar:invoke",
-    )?.[1] as (event: unknown, command: string, args?: unknown) => Promise<unknown>;
+    await expect(
+      handler({ sender: { mainFrame: undefined }, senderFrame: undefined }, "get_settings", {}),
+    ).rejects.toThrow(/untrusted sender/i);
+    await expect(
+      handler(topLevelFrameEvent(""), "get_settings", {}),
+    ).rejects.toThrow(/untrusted sender/i);
 
-    await expect(handler({ senderFrame: undefined }, "get_settings", {})).rejects.toThrow(
+    consoleWarn.mockRestore();
+  });
+
+  it("rejects a command whose frame was disposed mid-call", async () => {
+    const consoleWarn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const { handler } = await bridgeHandler();
+    const disposed = {
+      get sender(): never {
+        throw new Error("Object has been destroyed");
+      },
+      get senderFrame(): never {
+        throw new Error("Object has been destroyed");
+      },
+    };
+
+    await expect(handler(disposed, "get_settings", {})).rejects.toThrow(
       /untrusted sender/i,
     );
 
@@ -428,21 +491,14 @@ describe("IpcBridge sender validation", () => {
 
   it("allows the packaged renderer origin through", async () => {
     const child = fakeChildProcess();
-    const { IpcBridge } = await import("../../electron/ipc-bridge");
-    const bridge = new IpcBridge("/tmp/plainsong-sidecar", (() => child) as never);
-    bridge.onValidateSender((url) => url.startsWith("plainsong://bundle/"));
-    bridge.start();
+    const { handler } = await bridgeHandler(child);
     replyToSidecarRequests(child, (request) =>
       request.method === "get_settings" ? { result: { ok: true } } : null,
     );
 
-    const handler = mocks.handle.mock.calls.find(
-      ([channel]) => channel === "sidecar:invoke",
-    )?.[1] as (event: unknown, command: string, args?: unknown) => Promise<unknown>;
-
     await expect(
       handler(
-        { senderFrame: { url: "plainsong://bundle/index.html" } },
+        topLevelFrameEvent("plainsong://bundle/index.html"),
         "get_settings",
         {},
       ),

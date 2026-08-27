@@ -64,6 +64,34 @@ function writeFakeElectronFramework(appPath: string, wire: string) {
   writeFileSync(path.join(frameworkDir, "Electron Framework"), binary);
 }
 
+/**
+ * The four Electron child bundles, which the gate now inspects individually:
+ * the generic helper (Chromium's utility processes, audio service included) and
+ * the GPU, Renderer and Plugin helpers, which must hold no device or automation
+ * authority at all.
+ */
+const ELECTRON_HELPER_SUFFIXES = ["", " (GPU)", " (Renderer)", " (Plugin)"];
+
+function writeFakeElectronHelpers(appPath: string) {
+  const productName = path.basename(appPath, ".app");
+  return ELECTRON_HELPER_SUFFIXES.map((suffix) => {
+    const helperName = `${productName} Helper${suffix}`;
+    const helperMacosDir = path.join(
+      appPath,
+      "Contents",
+      "Frameworks",
+      `${helperName}.app`,
+      "Contents",
+      "MacOS",
+    );
+    mkdirSync(helperMacosDir, { recursive: true });
+    const executable = path.join(helperMacosDir, helperName);
+    writeFileSync(executable, "", "utf8");
+    chmodSync(executable, 0o755);
+    return executable;
+  });
+}
+
 function createFakeMacosApp(
   tempRoot: string,
   {
@@ -86,6 +114,7 @@ function createFakeMacosApp(
   mkdirSync(shortcutHelperDir, { recursive: true });
 
   writeFakeElectronFramework(appPath, fuseWire);
+  const electronHelpers = writeFakeElectronHelpers(appPath);
 
   // The gate also inspects the disk image and archive the user downloads, not
   // just the bundle inside them.
@@ -116,6 +145,7 @@ function createFakeMacosApp(
   return {
     appPath,
     dmgPath,
+    electronHelpers,
     helperExecutable,
     mainExecutable,
     sidecarExecutable,
@@ -262,6 +292,34 @@ childProcess.spawnSync = function mockedSpawnSync(command, args = []) {
         isSidecar && process.env.SIDECAR_ENTITLEMENT
           ? "<key>" + process.env.SIDECAR_ENTITLEMENT + "</key><true/>"
           : "";
+      // The four Electron child bundles. The generic helper legitimately keeps
+      // audio; GPU/Renderer/Plugin get the narrow inherit set. Either can be
+      // given an extra privilege through the environment to exercise a failure.
+      const helperMatch = basename.match(/^Plainsong Helper(?: \((\w+)\))?$/);
+      const isGenericHelper = Boolean(helperMatch && !helperMatch[1]);
+      const isRestrictedHelper = Boolean(helperMatch && helperMatch[1]);
+      const helperBaseline = helperMatch
+        ? [
+            "<key>com.apple.security.cs.allow-jit</key><true/>",
+            "<key>com.apple.security.cs.allow-unsigned-executable-memory</key><true/>",
+            "<key>com.apple.security.inherit</key><true/>",
+            isGenericHelper
+              ? "<key>com.apple.security.device.audio-input</key><true/>\n<key>com.apple.security.device.microphone</key><true/>"
+              : "",
+          ].join("\n")
+        : "";
+      const restrictedHelperPrivilege =
+        isRestrictedHelper && process.env.RESTRICTED_HELPER_ENTITLEMENT
+          ? "<key>" + process.env.RESTRICTED_HELPER_ENTITLEMENT + "</key><true/>"
+          : "";
+      const genericHelperPrivilege =
+        isGenericHelper && process.env.GENERIC_HELPER_ENTITLEMENT
+          ? "<key>" + process.env.GENERIC_HELPER_ENTITLEMENT + "</key><true/>"
+          : "";
+      const appPrivilege =
+        basename === "Plainsong.app" && process.env.APP_ENTITLEMENT
+          ? "<key>" + process.env.APP_ENTITLEMENT + "</key><true/>"
+          : "";
       return commandResult(
         0,
         [
@@ -271,6 +329,10 @@ childProcess.spawnSync = function mockedSpawnSync(command, args = []) {
           unrelatedSpeechPrivilege,
           shortcutPrivilege,
           sidecarPrivilege,
+          helperBaseline,
+          restrictedHelperPrivilege,
+          genericHelperPrivilege,
+          appPrivilege,
           "</dict></plist>",
           "",
         ].join("\n"),
@@ -338,6 +400,7 @@ function runTrustScript(
   shortcutHelperEntitlement = "",
   sidecarEntitlement = "",
   releaseDir: string | null = null,
+  helperEntitlements: { restricted?: string; generic?: string; app?: string } = {},
 ) {
   const outPath = path.join(tempRoot, "artifacts", "qa", "macos", `${mode}-trust.json`);
   const markdownPath = path.join(tempRoot, "artifacts", "qa", "macos", `${mode}-trust.md`);
@@ -356,6 +419,9 @@ function runTrustScript(
     MOCK_ZIP_APP_PATH: appPath,
     SHORTCUT_HELPER_ENTITLEMENT: shortcutHelperEntitlement,
     SIDECAR_ENTITLEMENT: sidecarEntitlement,
+    RESTRICTED_HELPER_ENTITLEMENT: helperEntitlements.restricted ?? "",
+    GENERIC_HELPER_ENTITLEMENT: helperEntitlements.generic ?? "",
+    APP_ENTITLEMENT: helperEntitlements.app ?? "",
     SPOOFED_PATH_TRACE_LOG: spoofedPathTracePath,
     SPEECH_HELPER_ENTITLEMENTS: speechHelperEntitlements,
     TRUST_SPCTL_RESULT: mode,
@@ -405,7 +471,10 @@ function runTrustScript(
   };
 }
 
-describe("verify-macos-release-trust.mjs", () => {
+// Every case here spawns the gate as a real Node process against a fabricated
+// app bundle, and the gate now inspects the four Electron child bundles as well.
+// The default 5s per test is not enough for that under parallel load.
+describe("verify-macos-release-trust.mjs", { timeout: 30_000 }, () => {
   it("resolves DMG and ZIP artifacts only from the requested release directory", () => {
     const { tempRoot, tempScript } = createTempRepo(
       "verify-macos-release-trust.mjs",
@@ -602,6 +671,25 @@ describe("verify-macos-release-trust.mjs", () => {
       expect(artifact.checks.zipFuseAsarIntegrityEnabled).toBe(true);
       expect(artifact.checks.zipFuseOnlyLoadAppFromAsarEnabled).toBe(true);
       expect(artifact.checks.zipFuseFileProtocolPrivilegesDisabled).toBe(true);
+      expect(artifact.checks.appHasLibraryValidationEnabled).toBe(true);
+      expect(artifact.checks.zipAppHasLibraryValidationEnabled).toBe(true);
+      expect(artifact.checks.electronHelperPresent).toBe(true);
+      expect(artifact.checks.electronHelperGpuPresent).toBe(true);
+      expect(artifact.checks.electronHelperRendererPresent).toBe(true);
+      expect(artifact.checks.electronHelperPluginPresent).toBe(true);
+      expect(
+        artifact.checks.electronHelperGpuHasNoDeviceOrAutomationPrivileges,
+      ).toBe(true);
+      expect(
+        artifact.checks.electronHelperRendererHasNoDeviceOrAutomationPrivileges,
+      ).toBe(true);
+      expect(
+        artifact.checks.electronHelperPluginHasNoDeviceOrAutomationPrivileges,
+      ).toBe(true);
+      expect(artifact.checks.electronHelperHasNoAutomationPrivileges).toBe(true);
+      expect(artifact.checks.zipElectronHelperRendererHasNoDeviceOrAutomationPrivileges).toBe(
+        true,
+      );
       expect(artifact.checks.zipTicketStapled).toBeUndefined();
       if (artifact.status) {
         expect(artifact.status).toMatch(/PASS|READY/);
@@ -818,6 +906,172 @@ describe("verify-macos-release-trust.mjs", () => {
       rmSync(tempRoot, { recursive: true, force: true });
     }
   }, 15_000);
+
+  it.each([
+    "com.apple.security.device.audio-input",
+    "com.apple.security.device.microphone",
+    "com.apple.security.automation.apple-events",
+    "com.apple.security.temporary-exception.apple-events",
+    "com.apple.security.cs.disable-library-validation",
+    "com.apple.security.personal-information.speech-recognition",
+  ])(
+    "fails closed when the GPU/Renderer/Plugin helpers receive %s",
+    (forbiddenEntitlement) => {
+      // These three shipped with the microphone, unscoped Apple Events and
+      // disabled library validation because they were signed with a copy of the
+      // main app's entitlements. None of them opens a device or drives another
+      // application.
+      const { tempRoot, tempScript } = createTempRepo(
+        "verify-macos-release-trust.mjs",
+      );
+      try {
+        const { appPath } = createFakeMacosApp(tempRoot);
+        const { outPath, result } = runTrustScript(
+          tempScript,
+          tempRoot,
+          appPath,
+          "accept",
+          "AJ9VWBRNZN",
+          "mock-apple-tools",
+          "minimal",
+          "",
+          "",
+          null,
+          { restricted: forbiddenEntitlement },
+        );
+
+        expect(result.status).not.toBe(0);
+        const artifact = JSON.parse(readFileSync(outPath, "utf8")) as {
+          checks: Record<string, boolean>;
+          pass: boolean;
+        };
+        expect(artifact.pass).toBe(false);
+        for (const helper of ["Gpu", "Renderer", "Plugin"]) {
+          expect(
+            artifact.checks[
+              `electronHelper${helper}HasNoDeviceOrAutomationPrivileges`
+            ],
+          ).toBe(false);
+          expect(
+            artifact.checks[
+              `zipElectronHelper${helper}HasNoDeviceOrAutomationPrivileges`
+            ],
+          ).toBe(false);
+        }
+        // The generic helper is unaffected: it is signed with its own policy.
+        expect(artifact.checks.electronHelperHasNoAutomationPrivileges).toBe(true);
+      } finally {
+        rmSync(tempRoot, { recursive: true, force: true });
+      }
+    },
+    20_000,
+  );
+
+  it.each([
+    "com.apple.security.automation.apple-events",
+    "com.apple.security.cs.disable-library-validation",
+  ])(
+    "fails closed when the generic Electron helper receives %s",
+    (forbiddenEntitlement) => {
+      const { tempRoot, tempScript } = createTempRepo(
+        "verify-macos-release-trust.mjs",
+      );
+      try {
+        const { appPath } = createFakeMacosApp(tempRoot);
+        const { outPath, result } = runTrustScript(
+          tempScript,
+          tempRoot,
+          appPath,
+          "accept",
+          "AJ9VWBRNZN",
+          "mock-apple-tools",
+          "minimal",
+          "",
+          "",
+          null,
+          { generic: forbiddenEntitlement },
+        );
+
+        expect(result.status).not.toBe(0);
+        const artifact = JSON.parse(readFileSync(outPath, "utf8")) as {
+          checks: Record<string, boolean>;
+          pass: boolean;
+        };
+        expect(artifact.pass).toBe(false);
+        expect(artifact.checks.electronHelperHasNoAutomationPrivileges).toBe(false);
+        // Audio on the generic helper is expected, not a failure: Chromium's
+        // audio service runs there and the Settings microphone test reaches it.
+        expect(
+          artifact.checks.electronHelperGpuHasNoDeviceOrAutomationPrivileges,
+        ).toBe(true);
+      } finally {
+        rmSync(tempRoot, { recursive: true, force: true });
+      }
+    },
+  );
+
+  it("fails closed when the app disables library validation", () => {
+    // This bundle holds the microphone, Apple Events and the Accessibility
+    // grant that lets Plainsong inject keystrokes anywhere. Library validation
+    // is what stops that signature also being a loader for someone else's
+    // dylib, and notarization cannot be retracted once it has shipped.
+    const { tempRoot, tempScript } = createTempRepo("verify-macos-release-trust.mjs");
+    try {
+      const { appPath } = createFakeMacosApp(tempRoot);
+      const { outPath, result } = runTrustScript(
+        tempScript,
+        tempRoot,
+        appPath,
+        "accept",
+        "AJ9VWBRNZN",
+        "mock-apple-tools",
+        "minimal",
+        "",
+        "",
+        null,
+        { app: "com.apple.security.cs.disable-library-validation" },
+      );
+
+      expect(result.status).not.toBe(0);
+      const artifact = JSON.parse(readFileSync(outPath, "utf8")) as {
+        checks: Record<string, boolean>;
+        pass: boolean;
+      };
+      expect(artifact.pass).toBe(false);
+      expect(artifact.checks.appHasLibraryValidationEnabled).toBe(false);
+      expect(artifact.checks.zipAppHasLibraryValidationEnabled).toBe(false);
+      // Signing is untouched, so this really is the entitlement failing it.
+      expect(artifact.checks.appSignatureValid).toBe(true);
+      expect(artifact.checks.appUsesDeveloperId).toBe(true);
+    } finally {
+      rmSync(tempRoot, { recursive: true, force: true });
+    }
+  });
+
+  it("fails closed when an Electron helper bundle is missing entirely", () => {
+    // A productName change would move these paths; without a presence check the
+    // entitlement checks above would go quietly unenforced.
+    const { tempRoot, tempScript } = createTempRepo("verify-macos-release-trust.mjs");
+    try {
+      const { appPath } = createFakeMacosApp(tempRoot);
+      rmSync(
+        path.join(appPath, "Contents", "Frameworks", "Plainsong Helper (GPU).app"),
+        { recursive: true, force: true },
+      );
+      const { outPath, result } = runTrustScript(tempScript, tempRoot, appPath, "accept");
+
+      expect(result.status).not.toBe(0);
+      const artifact = JSON.parse(readFileSync(outPath, "utf8")) as {
+        checks: Record<string, boolean>;
+        pass: boolean;
+      };
+      expect(artifact.pass).toBe(false);
+      expect(artifact.checks.electronHelperGpuPresent).toBe(false);
+      expect(artifact.checks.electronHelperRendererPresent).toBe(true);
+    } finally {
+      rmSync(tempRoot, { recursive: true, force: true });
+    }
+  });
 
   it("fails closed when Gatekeeper rejects the app bundle", () => {
     const { tempRoot, tempScript } = createTempRepo("verify-macos-release-trust.mjs");

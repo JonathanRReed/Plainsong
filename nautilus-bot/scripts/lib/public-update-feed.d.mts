@@ -11,8 +11,20 @@ export type PublicFeedUrlValidation = {
   reason: string | null;
 };
 
+export type UpdateChannelName = "stable" | "beta";
+
+export type ChannelManifestProbe = {
+  url: string | null;
+  status: number | null;
+  finalUrl: string | null;
+};
+
 export type PublicUpdateFeedEvidence = {
   feedUrl: string;
+  /** The feed origin+path with any trailing channel segment removed. */
+  feedBaseUrl: string | null;
+  /** One reachability probe per channel a running app can select. */
+  channelManifests: Partial<Record<UpdateChannelName, ChannelManifestProbe>>;
   requestedManifest: string;
   credentialsUsed: boolean;
   packagedProvider: string | null;
@@ -63,6 +75,21 @@ export function resolveFeedAssetUrl(
   assetName: string | null,
 ): string | null;
 export function validatePublicFeedUrl(rawUrl: string): PublicFeedUrlValidation;
+export const UPDATE_CHANNELS: UpdateChannelName[];
+export function updaterChannelManifestFilename(
+  channel: UpdateChannelName,
+  platform?: string,
+): string;
+export function channelFeedUrl(
+  baseUrl: string | null,
+  channel: UpdateChannelName,
+): string | null;
+export function channelManifestUrl(
+  baseUrl: string | null,
+  channel: UpdateChannelName,
+  platform?: string,
+): string | null;
+export function resolveFeedBaseUrl(feedUrl: string): string | null;
 export function evaluatePublicUpdateFeedEvidence(
   evidence: PublicUpdateFeedEvidence,
 ): {
