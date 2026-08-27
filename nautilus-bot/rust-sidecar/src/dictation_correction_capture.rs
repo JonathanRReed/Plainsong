@@ -108,6 +108,15 @@ const MAX_UNSEGMENTED_CANDIDATE_CHARS: usize = 8;
 /// correction leaves far more than that behind.
 const MIN_INSERTION_REMNANT_RUN_WORDS: usize = 2;
 
+/// How many of the insertion's own words, adjacent and in order, have to turn
+/// up twice in the field before Plainsong calls the anchor ambiguous.
+///
+/// Same number as the remnant run above and for the same reason — two adjacent
+/// words in the same order is the smallest thing in this module that is
+/// evidence rather than coincidence — but a separate constant, because the two
+/// rules answer different questions and could want to diverge.
+const MIN_AMBIGUOUS_REPEAT_RUN_WORDS: usize = 2;
+
 /// The identity of a focused text field, captured without holding on to any
 /// Accessibility pointer.
 ///
@@ -571,17 +580,35 @@ fn meets_anchor_confidence(matched_words: usize, inserted_words: usize) -> bool 
 /// into a field that already quoted "call the vendor tomorow" produced a
 /// suggestion teaching the typo.
 ///
-/// So: look at the two regions of the field the span does not cover, and ask
-/// whether either of them, on its own, would have cleared the same confidence
-/// bar. If one would, there is no way to tell which copy the user edited, and
-/// the only honest answer is to queue nothing. The two regions are checked
-/// separately rather than joined so that a match cannot be manufactured out of
-/// the join between them.
+/// Two questions are asked, because a repeat can hide from either one alone.
+///
+/// **Does the field say my words twice?** — `insertion_repeats_inside_readback`,
+/// which looks at the whole field and cares nothing for where the span landed.
+/// This is the one that catches a repeat the span has *swallowed*. The span
+/// extends past its matched words by however many inserted words went
+/// unmatched at each end, and that extension is clamped to the field's edges;
+/// when it reaches an edge, the leftover region on that side is empty and a
+/// region-based check has nothing left to look at. Reviewers found exactly
+/// that: inserting "alpha bravo charlie delta" into a field reading
+/// "alpha bravo zulu yankee alpha bravo charlie delka" produced a span
+/// covering the entire field and a queued `delta -> delka` — a typo learned
+/// off a stray earlier copy of "alpha bravo".
+///
+/// **Would some other part of the field anchor just as well?** — the region
+/// test below. A second occurrence can clear the confidence bar on scattered,
+/// non-adjacent words that the first question never sees, so it stays.
+///
+/// The two regions are checked separately rather than joined so that a match
+/// cannot be manufactured out of the join between them.
 fn anchor_is_ambiguous(
     inserted_words: &[String],
     readback_words: &[String],
     span: InsertedSpan,
 ) -> bool {
+    if insertion_repeats_inside_readback(inserted_words, readback_words) {
+        return true;
+    }
+
     [
         &readback_words[..span.start],
         &readback_words[span.end.min(readback_words.len())..],
@@ -594,6 +621,51 @@ fn anchor_is_ambiguous(
                 inserted_words.len(),
             )
     })
+}
+
+/// Whether any `MIN_AMBIGUOUS_REPEAT_RUN_WORDS` adjacent words of the insertion
+/// occur at two places in the field that do not overlap.
+///
+/// Deliberately position-blind. The bug this closes was that every earlier
+/// check reasoned about *where* the span was, and a span pinned to a field
+/// boundary leaves nowhere to look; asking about the field as a whole cannot be
+/// dodged by a span that grew to cover everything. Occurrences are taken
+/// greedily left to right, so the first one found is the earliest possible and
+/// any later non-overlapping hit is a genuine second copy.
+///
+/// This is deliberately quick to trigger. An insertion that contains a phrase
+/// the surrounding text also uses — or that repeats a phrase itself — will stop
+/// producing suggestions in that field. That is a suggestion not made, which
+/// costs the user nothing; the alternative is a suggestion built out of two
+/// different pieces of text, which teaches the dictionary something nobody
+/// said.
+fn insertion_repeats_inside_readback(inserted_words: &[String], readback_words: &[String]) -> bool {
+    let run = MIN_AMBIGUOUS_REPEAT_RUN_WORDS;
+    if run == 0 || inserted_words.len() < run || readback_words.len() < run * 2 {
+        return false;
+    }
+
+    for window in inserted_words.windows(run) {
+        let mut first_occurrence_end: Option<usize> = None;
+        for (start, candidate) in readback_words.windows(run).enumerate() {
+            if !window
+                .iter()
+                .zip(candidate)
+                .all(|(left, right)| left.eq_ignore_ascii_case(right))
+            {
+                continue;
+            }
+            match first_occurrence_end {
+                // Overlaps the copy already counted, so it is the same words
+                // seen again at a shifted offset, not a second copy.
+                Some(end) if start < end => continue,
+                Some(_) => return true,
+                None => first_occurrence_end = Some(start + run),
+            }
+        }
+    }
+
+    false
 }
 
 /// Whether the field still visibly holds the text Plainsong typed.
@@ -1428,6 +1500,100 @@ mod tests {
             ),
             Err(ReadbackAbort::SpanNotLocated)
         );
+    }
+
+    #[test]
+    fn refuses_a_repeat_the_span_swallowed_at_the_end_of_the_field() {
+        // Reviewer's construction. The span extends past its last matched word
+        // by the inserted words left unmatched, hits the end of the field, and
+        // ends up covering all eight words — so both leftover regions are
+        // empty and the region test had nothing to inspect. Run with the guard
+        // removed this queues `delta -> delka`, a typo taken off the earlier
+        // stray "alpha bravo" rather than off anything Plainsong wrote.
+        assert_eq!(
+            derive_readback_candidates(
+                "alpha bravo charlie delta",
+                "alpha bravo zulu yankee alpha bravo charlie delka",
+                &no_dictionary(),
+            ),
+            Err(ReadbackAbort::SpanNotLocated)
+        );
+    }
+
+    #[test]
+    fn refuses_a_repeat_the_span_swallowed_at_the_start_of_the_field() {
+        // The mirror: the leading extension is clamped at index 0, so the
+        // prefix region is empty instead of the suffix one. Same blind spot,
+        // other edge.
+        assert_eq!(
+            derive_readback_candidates(
+                "alpha bravo charlie delta",
+                "delka alpha bravo yankee zulu alpha bravo charlie",
+                &no_dictionary(),
+            ),
+            Err(ReadbackAbort::SpanNotLocated)
+        );
+    }
+
+    #[test]
+    fn refuses_a_partial_repeat_the_confidence_bar_was_too_high_to_see() {
+        // Neither swallowed nor whole: the second copy sits outside the span
+        // but carries only two of the four inserted words, so it never cleared
+        // the confidence bar the region test applies. It is still enough for
+        // the alignment to have stitched across, and it too queued
+        // `delta -> delka` before this guard.
+        assert_eq!(
+            derive_readback_candidates(
+                "alpha bravo charlie delta",
+                "alpha bravo charlie delka yankee zulu alpha bravo",
+                &no_dictionary(),
+            ),
+            Err(ReadbackAbort::SpanNotLocated)
+        );
+    }
+
+    #[test]
+    fn a_long_single_occurrence_correction_against_a_field_edge_still_anchors() {
+        // The guard must not fire just because a span reaches a boundary. Here
+        // the insertion starts at the very first word of the field and its
+        // correction is at the very last, so both extensions clamp — but the
+        // field says these words once, so there is nothing ambiguous about it.
+        assert_eq!(
+            derive_readback_candidates(
+                "please review the quarterly infrastructure budget kuberentes",
+                "please review the quarterly infrastructure budget kubernetes",
+                &no_dictionary(),
+            ),
+            Ok(vec![ReadbackCorrectionCandidate {
+                spoken_form: "kuberentes".to_string(),
+                replacement: "kubernetes".to_string(),
+            }])
+        );
+    }
+
+    #[test]
+    fn a_phrase_the_field_uses_once_is_not_a_repeat() {
+        assert!(!insertion_repeats_inside_readback(
+            &words("call the vendor tomorrow"),
+            &words("Hey team call the vendors tomorrow thanks"),
+        ));
+        // Two words adjacent and in order, twice over, in a field long enough
+        // to hold both.
+        assert!(insertion_repeats_inside_readback(
+            &words("call the vendor tomorrow"),
+            &words("call the vendor tomorow call the vendor Tuesday"),
+        ));
+    }
+
+    #[test]
+    fn overlapping_hits_on_the_same_words_are_one_occurrence() {
+        // "alpha alpha alpha" contains the pair "alpha alpha" starting at both
+        // index 0 and index 1, but that is one stretch of text seen twice at a
+        // shifted offset, not two copies of it.
+        assert!(!insertion_repeats_inside_readback(
+            &words("alpha alpha charlie"),
+            &words("alpha alpha alpha charlie"),
+        ));
     }
 
     #[test]
