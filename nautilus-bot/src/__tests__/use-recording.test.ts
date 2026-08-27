@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import { formatMeetingStartError } from "@/lib/meeting-start-error";
 import {
   INITIAL_MEETING_LIFECYCLE_STATE,
+  meetingCaptureRestarted,
   reduceMeetingLifecycleState,
 } from "@/features/meetings/runtime";
 
@@ -105,5 +106,78 @@ describe("meeting lifecycle reconciliation", () => {
         recordingId: "meeting-1",
       }),
     ).toMatchObject({ phase: "processing", recordingId: "meeting-1" });
+  });
+
+  it("carries a mid-meeting warning without disturbing the live capture", () => {
+    const live = reduceMeetingLifecycleState(INITIAL_MEETING_LIFECYCLE_STATE, {
+      phase: "recording",
+      recordingId: "meeting-1",
+      startedAtMs: 100,
+      systemAudioActive: true,
+      consentPromptShown: true,
+    });
+
+    // The sidecar re-emits `recording` with only a message when a WAV writer
+    // dies or the disk starts filling.
+    const warned = reduceMeetingLifecycleState(live, {
+      phase: "recording",
+      recordingId: "meeting-1",
+      message: "This disk is nearly full (120 MB free).",
+    });
+
+    expect(warned).toMatchObject({
+      phase: "recording",
+      recordingId: "meeting-1",
+      message: "This disk is nearly full (120 MB free).",
+      startedAtMs: 100,
+      systemAudioActive: true,
+      consentPromptShown: true,
+    });
+  });
+});
+
+describe("meetingCaptureRestarted", () => {
+  const live = {
+    ...INITIAL_MEETING_LIFECYCLE_STATE,
+    phase: "recording" as const,
+    recordingId: "meeting-1",
+    startedAtMs: 100,
+  };
+
+  it("is true when a meeting actually enters capture", () => {
+    expect(
+      meetingCaptureRestarted(INITIAL_MEETING_LIFECYCLE_STATE, live),
+    ).toBe(true);
+    expect(
+      meetingCaptureRestarted(
+        { ...INITIAL_MEETING_LIFECYCLE_STATE, phase: "preparing" },
+        live,
+      ),
+    ).toBe(true);
+  });
+
+  it("is false for a repeated recording event on the same meeting", () => {
+    // The regression this guards: consumers reset the transcript preview, the
+    // lost-audio counter, the visible source warning and the elapsed timer when
+    // capture starts. A warning that rides in on a `recording` event would
+    // erase the very warning it came to deliver.
+    const warned = reduceMeetingLifecycleState(live, {
+      phase: "recording",
+      recordingId: "meeting-1",
+      message: "Plainsong stopped being able to save this meeting's audio.",
+    });
+
+    expect(meetingCaptureRestarted(live, warned)).toBe(false);
+  });
+
+  it("is true when a different meeting takes over", () => {
+    const other = { ...live, recordingId: "meeting-2" };
+    expect(meetingCaptureRestarted(live, other)).toBe(true);
+  });
+
+  it("is false for every phase that is not capture", () => {
+    for (const phase of ["stopping", "processing", "ready", "error"] as const) {
+      expect(meetingCaptureRestarted(live, { ...live, phase })).toBe(false);
+    }
   });
 });

@@ -98,3 +98,30 @@ export function reduceMeetingLifecycleState(
 export function meetingPhaseIsCapturing(phase: MeetingLifecyclePhase): boolean {
   return phase === "recording";
 }
+
+/**
+ * Whether this reduction actually *entered* live capture, as opposed to
+ * re-asserting a phase the meeting was already in.
+ *
+ * The sidecar re-emits `recording` mid-meeting to carry an advisory message — a
+ * WAV writer that died, a disk about to fill. Those events are not a new
+ * capture, and treating them as one is destructive: consumers clear the
+ * transcript preview, the lost-audio counter, the visible source warning and
+ * the elapsed timer when capture starts, so a warning arriving on a
+ * `recording` event would wipe the very warning it came to deliver (and reset
+ * the meeting clock to zero).
+ *
+ * A different `recordingId` still counts as entering capture: that is a
+ * genuinely different meeting and its predecessor's preview must not linger.
+ */
+export function meetingCaptureRestarted(
+  previous: MeetingLifecycleState,
+  next: MeetingLifecycleState,
+): boolean {
+  if (next.phase !== "recording") {
+    return false;
+  }
+  return (
+    previous.phase !== "recording" || previous.recordingId !== next.recordingId
+  );
+}
