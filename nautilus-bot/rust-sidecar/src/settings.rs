@@ -659,7 +659,10 @@ fn normalize_transcription_model_id(provider: &str, model_id: &str) -> String {
             value => value.to_string(),
         },
         "openai_cloud" => match model_id.trim() {
-            "" => "whisper-1".to_string(),
+            // Must track asr/mod.rs's AsrProviderType::OpenAiCloud::default_model_id()
+            // and openai_cloud.rs's sanitize_openai_asr_model_id() empty-case default,
+            // or this normalizer and those two disagree about the actual default.
+            "" => "gpt-transcribe".to_string(),
             value => value.to_string(),
         },
         "groq" => match model_id.trim() {
@@ -1460,6 +1463,53 @@ mod tests {
                     option.id
                 );
             }
+        }
+    }
+
+    #[test]
+    fn every_provider_empty_string_default_matches_its_asr_provider_type_default() {
+        // Regression coverage for the openai_cloud drift this guards against:
+        // settings.rs's normalize_transcription_model_id(provider, "") used to
+        // disagree with AsrProviderType::default_model_id() (asr/mod.rs) and
+        // the provider's own sanitizer default (e.g. openai_cloud.rs's
+        // sanitize_openai_asr_model_id empty-case arm) about what an
+        // unset/empty model id actually resolves to. All three must always
+        // name the same model, or a user with no explicit model id ends up on
+        // a different one every time settings.json is normalized.
+        let providers: &[(&str, crate::asr::AsrProviderType)] = &[
+            ("whisper", crate::asr::AsrProviderType::Whisper),
+            ("parakeet", crate::asr::AsrProviderType::Parakeet),
+            ("whisper_candle", crate::asr::AsrProviderType::WhisperCandle),
+            ("distil_whisper", crate::asr::AsrProviderType::DistilWhisper),
+            (
+                "macos_apple_speech",
+                crate::asr::AsrProviderType::MacosAppleSpeech,
+            ),
+            ("moonshine", crate::asr::AsrProviderType::Moonshine),
+            (
+                "windows_sdk_dictation",
+                crate::asr::AsrProviderType::WindowsSdkDictation,
+            ),
+            (
+                "elevenlabs_scribe",
+                crate::asr::AsrProviderType::ElevenLabsScribe,
+            ),
+            ("openai_cloud", crate::asr::AsrProviderType::OpenAiCloud),
+            ("groq", crate::asr::AsrProviderType::Groq),
+            (
+                "cohere_transcribe",
+                crate::asr::AsrProviderType::CohereTranscribe,
+            ),
+            ("qwen3_asr", crate::asr::AsrProviderType::Qwen3Asr),
+        ];
+
+        for (key, provider_type) in providers {
+            assert_eq!(
+                normalize_transcription_model_id(key, ""),
+                provider_type.default_model_id(),
+                "provider '{key}': normalize_transcription_model_id(_, \"\") disagrees with \
+                 AsrProviderType::default_model_id()",
+            );
         }
     }
 
