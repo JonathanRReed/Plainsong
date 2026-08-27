@@ -1163,12 +1163,18 @@ export function DictationView() {
       .slice(0, 8);
   }, [dictationDictionaryEntries]);
 
+  /**
+   * Which built-in mode a set of controls adds up to.
+   *
+   * Clipboard behaviour is not part of the comparison: it is the reader's own
+   * setting, kept across profile changes, so including it would report a
+   * plainly-General setup as "custom" purely because copying is on.
+   */
   const inferModePreset = (values: {
     profile: "normal_speed" | "power_rewrite";
     insertionMode: DictationInsertionMode;
     contextSource: DictationContextSource;
     saveToInbox: boolean;
-    copyToClipboard: boolean;
     commandModeEnabled: boolean;
   }): DictationModePreset => {
     const matched = DICTATION_MODE_DEFINITIONS.find((definition) => {
@@ -1178,7 +1184,6 @@ export function DictationView() {
         definition.insertionMode === values.insertionMode &&
         definition.contextSource === values.contextSource &&
         definition.saveToInbox === values.saveToInbox &&
-        definition.copyToClipboard === values.copyToClipboard &&
         definition.commandModeEnabled === values.commandModeEnabled
       );
     });
@@ -1566,7 +1571,6 @@ export function DictationView() {
             insertionMode: nextInsertionMode,
             contextSource: nextContextSource,
             saveToInbox: nextSaveToInbox,
-            copyToClipboard: nextCopyToClipboard,
             commandModeEnabled: nextCommandModeEnabled,
           });
         setSaveToInbox(nextSaveToInbox);
@@ -1804,7 +1808,6 @@ export function DictationView() {
           insertionMode: nextInsertionMode,
           contextSource: nextContextSource,
           saveToInbox: nextSaveToInbox,
-          copyToClipboard: nextCopyToClipboard,
           commandModeEnabled: nextCommandModeEnabled,
         });
 
@@ -1886,8 +1889,6 @@ export function DictationView() {
     const nextContextSource =
       definition.contextSource ?? dictationContextSource;
     const nextSaveToInbox = definition.saveToInbox ?? saveToInbox;
-    const nextCopyToClipboard =
-      definition.copyToClipboard ?? dictationCopyToClipboard;
     const nextCommandModeEnabled =
       definition.commandModeEnabled ?? dictationCommandModeEnabled;
 
@@ -1895,9 +1896,11 @@ export function DictationView() {
     setDictationInsertionMode(nextInsertionMode);
     setDictationContextSource(nextContextSource);
     setSaveToInbox(nextSaveToInbox);
-    setDictationCopyToClipboard(nextCopyToClipboard);
     setDictationCommandModeEnabled(nextCommandModeEnabled);
 
+    // Clipboard behaviour is deliberately not written here. Picking a profile
+    // must never replace what is on the reader's clipboard from then on; that
+    // is its own toggle, and it keeps whatever value it already had.
     void persistDictationPreferences({
       modePreset: modeId,
       selectedCustomModeId: null,
@@ -1905,7 +1908,6 @@ export function DictationView() {
       insertionMode: nextInsertionMode,
       contextSource: nextContextSource,
       saveToInbox: nextSaveToInbox,
-      copyToClipboard: nextCopyToClipboard,
       commandModeEnabled: nextCommandModeEnabled,
     });
   };
@@ -1925,7 +1927,6 @@ export function DictationView() {
       insertionMode: overrides.insertionMode ?? dictationInsertionMode,
       contextSource: overrides.contextSource ?? dictationContextSource,
       saveToInbox: overrides.saveToInbox ?? saveToInbox,
-      copyToClipboard: overrides.copyToClipboard ?? dictationCopyToClipboard,
       commandModeEnabled:
         overrides.commandModeEnabled ?? dictationCommandModeEnabled,
     });
@@ -3856,6 +3857,32 @@ export function DictationView() {
                         {item.value}
                       </span>
                     ))}
+                  </div>
+
+                  {/* Copying to the clipboard changes something outside
+                      Plainsong and cannot be undone, so it is asked for
+                      plainly here instead of riding along with a profile. */}
+                  <div className="flex items-center justify-between gap-4 rounded-md border border-border/60 bg-background/75 p-4">
+                    <div className="space-y-0.5">
+                      <p className="text-sm font-medium" id="dictation-clipboard-label">
+                        Also copy every dictation to the clipboard
+                      </p>
+                      <p className="text-sm text-muted-foreground">
+                        Off by default. Turning it on replaces whatever is on
+                        your clipboard each time you dictate — Plainsong does
+                        not put the previous contents back.
+                      </p>
+                    </div>
+                    <Switch
+                      aria-labelledby="dictation-clipboard-label"
+                      checked={dictationCopyToClipboard}
+                      onCheckedChange={(checked) => {
+                        setDictationCopyToClipboard(checked);
+                        void persistDictationPreferences({
+                          copyToClipboard: checked,
+                        });
+                      }}
+                    />
                   </div>
                 </div>
 

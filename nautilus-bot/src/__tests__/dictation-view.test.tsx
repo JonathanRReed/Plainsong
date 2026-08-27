@@ -81,7 +81,9 @@ const backendMocks = vi.hoisted(() => ({
     silenceSkipEnabled: false,
     dictationPushToTalk: false,
     dictationHandsFreeEnabled: false,
-    dictationCopyToClipboard: true,
+    // The sidecar's own default, and the one the fixture must carry: turning
+    // it on replaces the reader's clipboard on every dictation.
+    dictationCopyToClipboard: false,
     dictationCommandModeEnabled: true,
     dictationCommandPrefix: "command",
     dictationInsertionMode: "auto" as const,
@@ -717,8 +719,62 @@ describe("DictationView modes", () => {
     expect(latestSettings.transcription.dictationInsertionMode).toBe("auto");
     expect(latestSettings.transcription.dictationContextSource).toBe("none");
     expect(latestSettings.transcription.dictationSaveToInbox).toBe(false);
-    expect(latestSettings.transcription.dictationCopyToClipboard).toBe(true);
+    // ux-5: picking any profile used to write `true` here, permanently
+    // replacing the reader's clipboard on every dictation from then on.
+    expect(latestSettings.transcription.dictationCopyToClipboard).toBe(false);
     expect(latestSettings.transcription.dictationCommandModeEnabled).toBe(false);
+  });
+
+  it("never turns clipboard copying on just because a profile was picked", async () => {
+    render(<DictationView />);
+
+    await openConfigTab("Profiles");
+    for (const name of [
+      "Profile: General",
+      "Profile: Writing",
+      "Profile: Notes",
+      "Profile: Meeting Follow-up",
+      "Profile: Coding",
+      "Profile: Quiet",
+    ]) {
+      fireEvent.click(screen.getByRole("button", { name }));
+    }
+
+    await waitFor(() => {
+      expect(backendMocks.saveSettings).toHaveBeenCalled();
+    });
+    const saveCalls = backendMocks.saveSettings.mock.calls as unknown as Array<
+      [any]
+    >;
+    for (const [settings] of saveCalls) {
+      expect(settings.transcription.dictationCopyToClipboard).toBe(false);
+    }
+  });
+
+  it("makes clipboard copying an explicit choice that admits what it costs", async () => {
+    render(<DictationView />);
+
+    await openConfigTab("Profiles");
+    const toggle = await screen.findByRole("switch", {
+      name: /also copy every dictation to the clipboard/i,
+    });
+    expect(toggle).not.toBeChecked();
+    expect(
+      screen.getByText(/does not put the previous contents back/i),
+    ).toBeInTheDocument();
+
+    fireEvent.click(toggle);
+
+    await waitFor(() => {
+      expect(backendMocks.saveSettings).toHaveBeenCalled();
+    });
+    const saveCalls = backendMocks.saveSettings.mock.calls as unknown as Array<
+      [any]
+    >;
+    expect(
+      saveCalls[saveCalls.length - 1]![0].transcription
+        .dictationCopyToClipboard,
+    ).toBe(true);
   });
 
   it("saves the current setup as a reusable custom mode", async () => {

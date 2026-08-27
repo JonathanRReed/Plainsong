@@ -12,6 +12,16 @@ import type {
 /** A built-in mode, minus the escape hatch that has no defaults of its own. */
 export type DictationBaseModePreset = Exclude<DictationModePreset, "custom">;
 
+/**
+ * A built-in mode, and everything it decides for you.
+ *
+ * `copyToClipboard` is deliberately absent. Every one of these modes used to
+ * declare it `true`, so clicking any profile tile silently replaced the
+ * reader's clipboard on every dictation from then on — a destructive change to
+ * something outside the app, made without being asked. The sidecar's default is
+ * `false` by design; picking a mode now leaves whatever the reader chose alone,
+ * and the clipboard is an explicit toggle of its own.
+ */
 export type DictationModeDefinition = {
   id: DictationModePreset;
   label: string;
@@ -21,7 +31,6 @@ export type DictationModeDefinition = {
   insertionMode?: DictationInsertionMode;
   contextSource?: DictationContextSource;
   saveToInbox?: boolean;
-  copyToClipboard?: boolean;
   commandModeEnabled?: boolean;
 };
 
@@ -109,7 +118,7 @@ export const RECOMMENDED_APP_STYLES: RecommendedAppStyle[] = [
     insertionMode: "auto",
     contextSource: "application_context",
     saveToInbox: false,
-    copyToClipboard: true,
+    copyToClipboard: false,
     commandModeEnabled: true,
     activationAppMatcher: "Slack",
     livePreviewEnabled: true,
@@ -127,7 +136,7 @@ export const RECOMMENDED_APP_STYLES: RecommendedAppStyle[] = [
     insertionMode: "auto",
     contextSource: "selected_text",
     saveToInbox: true,
-    copyToClipboard: true,
+    copyToClipboard: false,
     commandModeEnabled: true,
     activationDomainMatcher: "gmail.com",
     livePreviewEnabled: true,
@@ -145,7 +154,7 @@ export const RECOMMENDED_APP_STYLES: RecommendedAppStyle[] = [
     insertionMode: "auto",
     contextSource: "application_context",
     saveToInbox: true,
-    copyToClipboard: true,
+    copyToClipboard: false,
     commandModeEnabled: true,
     activationDomainMatcher: "docs.google.com",
     livePreviewEnabled: true,
@@ -163,7 +172,7 @@ export const RECOMMENDED_APP_STYLES: RecommendedAppStyle[] = [
     insertionMode: "auto",
     contextSource: "application_context",
     saveToInbox: true,
-    copyToClipboard: true,
+    copyToClipboard: false,
     commandModeEnabled: true,
     activationAppMatcher: "Notion",
     livePreviewEnabled: true,
@@ -181,7 +190,7 @@ export const RECOMMENDED_APP_STYLES: RecommendedAppStyle[] = [
     insertionMode: "auto",
     contextSource: "selected_text",
     saveToInbox: true,
-    copyToClipboard: true,
+    copyToClipboard: false,
     commandModeEnabled: true,
     activationDomainMatcher: "linear.app",
     livePreviewEnabled: true,
@@ -199,7 +208,7 @@ export const RECOMMENDED_APP_STYLES: RecommendedAppStyle[] = [
     insertionMode: "auto",
     contextSource: "selected_text",
     saveToInbox: true,
-    copyToClipboard: true,
+    copyToClipboard: false,
     commandModeEnabled: true,
     activationAppMatcher: "Cursor",
     livePreviewEnabled: true,
@@ -217,7 +226,7 @@ export const RECOMMENDED_APP_STYLES: RecommendedAppStyle[] = [
     insertionMode: "auto",
     contextSource: "none",
     saveToInbox: true,
-    copyToClipboard: true,
+    copyToClipboard: false,
     commandModeEnabled: true,
     livePreviewEnabled: true,
   },
@@ -232,7 +241,6 @@ export const DICTATION_MODE_DEFINITIONS: DictationModeDefinition[] = [
     insertionMode: "auto",
     contextSource: "none",
     saveToInbox: true,
-    copyToClipboard: true,
     commandModeEnabled: true,
   },
   {
@@ -244,7 +252,6 @@ export const DICTATION_MODE_DEFINITIONS: DictationModeDefinition[] = [
     insertionMode: "auto",
     contextSource: "none",
     saveToInbox: false,
-    copyToClipboard: true,
     commandModeEnabled: false,
   },
   {
@@ -256,7 +263,6 @@ export const DICTATION_MODE_DEFINITIONS: DictationModeDefinition[] = [
     insertionMode: "auto",
     contextSource: "selected_text",
     saveToInbox: true,
-    copyToClipboard: true,
     commandModeEnabled: true,
   },
   {
@@ -267,7 +273,6 @@ export const DICTATION_MODE_DEFINITIONS: DictationModeDefinition[] = [
     insertionMode: "auto",
     contextSource: "none",
     saveToInbox: true,
-    copyToClipboard: true,
     commandModeEnabled: true,
   },
   {
@@ -278,7 +283,6 @@ export const DICTATION_MODE_DEFINITIONS: DictationModeDefinition[] = [
     insertionMode: "clipboard_only",
     contextSource: "clipboard",
     saveToInbox: true,
-    copyToClipboard: true,
     commandModeEnabled: true,
   },
   {
