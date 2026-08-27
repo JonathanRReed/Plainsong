@@ -6,21 +6,31 @@
 //! faster than real time). It requires the chosen model to be downloaded.
 //!
 //! Usage:
-//!   benchmark-latency [--wav <path>] [--provider <name>] [--model <id>] [--runs N] [--out <path>]
+//!   benchmark-latency [--wav <path>] [--provider <name>] [--model <id>] [--runs N] [--out <path>] [--out-e2e <path>]
 //!
 //! Defaults: the bundled fixture, provider `whisper`, model `base.en`, 5 runs.
 //! Output: a JSON line on stdout plus a human-readable summary on stderr.
+//!
+//! Every run also drives the full post-ASR pipeline (dictionary/snippet/local
+//! smart-format, with Smart Format on AND off, then a mocked insertion) and
+//! writes a second, `metricScope: "end_to_end"` receipt to `--out-e2e`. See
+//! `build_end_to_end_report` for exactly what "format on" and "mock
+//! insertion" do and don't cover.
 
 use plainsong_lib::asr::{AsrProviderFactory, AsrProviderType};
+use plainsong_lib::dictation_pipeline::{apply_dictation_pipeline, DictationPipelineInput};
+use plainsong_lib::text::format::DictationAppCategory;
 use sha2::{Digest, Sha256};
 use std::path::{Path, PathBuf};
-use std::time::Instant;
+use std::sync::Mutex;
+use std::time::{Duration, Instant};
 
 const DEFAULT_WAV: &str = "scripts/fixtures/real-speech-44s.wav";
 const DEFAULT_PROVIDER: &str = "whisper";
 const DEFAULT_RUNS: usize = 5;
 const MAX_RUNS: usize = 100;
 const DEFAULT_REPORT_PATH: &str = "artifacts/qa/dictation-latency.json";
+const DEFAULT_REPORT_PATH_E2E: &str = "artifacts/qa/dictation-latency-e2e.json";
 const HELP_TEXT: &str = "\
 Measure real Plainsong transcription latency with a downloaded ASR model.
 
@@ -33,11 +43,16 @@ Options:
                       distil_whisper, or macos_apple_speech [default: whisper]
   --model <ID>        Model ID for the selected provider [default: provider default]
   --runs <1..100>     Timed transcription runs after one warm-up [default: 5]
-  --out <PATH>        JSON report path [default: artifacts/qa/dictation-latency.json]
+  --out <PATH>        provider_transcription_only JSON report path
+                      [default: artifacts/qa/dictation-latency.json]
+  --out-e2e <PATH>    end_to_end JSON report path (full pipeline: ASR, local
+                      format on/off, mocked insertion)
+                      [default: artifacts/qa/dictation-latency-e2e.json]
   -h, --help          Print this help without loading a model
 
 Output:
-  One JSON object on stdout. Progress and the human summary are written to stderr.";
+  Two JSON objects on stdout (provider-only, then end-to-end), one per line.
+  Progress and the human summary are written to stderr.";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct BenchmarkArgs {
@@ -47,6 +62,7 @@ struct BenchmarkArgs {
     model: String,
     runs: usize,
     report_path: PathBuf,
+    report_path_e2e: PathBuf,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -95,6 +111,7 @@ fn parse_args(args: &[String]) -> Result<ParseOutcome, String> {
     let mut model = None;
     let mut runs = None;
     let mut report_path = None;
+    let mut report_path_e2e = None;
     let mut index = 0;
 
     while index < args.len() {
@@ -118,6 +135,10 @@ fn parse_args(args: &[String]) -> Result<ParseOutcome, String> {
             "--out" => {
                 let value = next_value(args, &mut index, "--out")?;
                 set_once(&mut report_path, value, "--out")?;
+            }
+            "--out-e2e" => {
+                let value = next_value(args, &mut index, "--out-e2e")?;
+                set_once(&mut report_path_e2e, value, "--out-e2e")?;
             }
             "--" => {}
             unknown => {
@@ -174,6 +195,9 @@ fn parse_args(args: &[String]) -> Result<ParseOutcome, String> {
         model,
         runs,
         report_path: PathBuf::from(report_path.unwrap_or_else(|| DEFAULT_REPORT_PATH.to_string())),
+        report_path_e2e: PathBuf::from(
+            report_path_e2e.unwrap_or_else(|| DEFAULT_REPORT_PATH_E2E.to_string()),
+        ),
     }))
 }
 
@@ -220,32 +244,10 @@ struct BenchmarkReportInput<'a> {
     transcript: &'a str,
 }
 
-fn build_report(input: BenchmarkReportInput<'_>) -> serde_json::Value {
-    let p50 = percentile(input.wall_ms.to_vec(), 50.0);
-    let p95 = percentile(input.wall_ms.to_vec(), 95.0);
-    let p50_seconds = p50 as f64 / 1000.0;
-    let real_time_factor = if input.audio_seconds > 0.0 {
-        p50_seconds / input.audio_seconds
-    } else {
-        0.0
-    };
-    let realtime_speedup = if p50_seconds > 0.0 {
-        input.audio_seconds / p50_seconds
-    } else {
-        0.0
-    };
-    let transcript_sample: String = input.transcript.chars().take(160).collect();
-    let transcript_tail_sample: String = input
-        .transcript
-        .chars()
-        .rev()
-        .take(160)
-        .collect::<Vec<_>>()
-        .into_iter()
-        .rev()
-        .collect();
-    let transcript_character_count = input.transcript.chars().count();
-    let transcript_word_count = input.transcript.split_whitespace().count();
+/// Shared `hardware` block for both receipts (`provider_transcription_only`
+/// and `end_to_end`) so the two are directly comparable and the reference-
+/// hardware checks in `verify-dictation-latency.mjs` apply identically.
+fn hardware_context() -> serde_json::Value {
     let logical_cpus = std::thread::available_parallelism()
         .map(|value| value.get())
         .unwrap_or(1);
@@ -276,6 +278,42 @@ fn build_report(input: BenchmarkReportInput<'_>) -> serde_json::Value {
     };
 
     serde_json::json!({
+        "os": std::env::consts::OS,
+        "arch": std::env::consts::ARCH,
+        "logicalCpus": logical_cpus,
+        "cpuModel": cpu_model,
+        "memoryBytes": memory_bytes,
+    })
+}
+
+fn build_report(input: BenchmarkReportInput<'_>) -> serde_json::Value {
+    let p50 = percentile(input.wall_ms.to_vec(), 50.0);
+    let p95 = percentile(input.wall_ms.to_vec(), 95.0);
+    let p50_seconds = p50 as f64 / 1000.0;
+    let real_time_factor = if input.audio_seconds > 0.0 {
+        p50_seconds / input.audio_seconds
+    } else {
+        0.0
+    };
+    let realtime_speedup = if p50_seconds > 0.0 {
+        input.audio_seconds / p50_seconds
+    } else {
+        0.0
+    };
+    let transcript_sample: String = input.transcript.chars().take(160).collect();
+    let transcript_tail_sample: String = input
+        .transcript
+        .chars()
+        .rev()
+        .take(160)
+        .collect::<Vec<_>>()
+        .into_iter()
+        .rev()
+        .collect();
+    let transcript_character_count = input.transcript.chars().count();
+    let transcript_word_count = input.transcript.split_whitespace().count();
+
+    serde_json::json!({
         "schemaVersion": 1,
         "benchmarkVersion": env!("CARGO_PKG_VERSION"),
         "generatedAt": chrono::Utc::now().to_rfc3339(),
@@ -283,13 +321,7 @@ fn build_report(input: BenchmarkReportInput<'_>) -> serde_json::Value {
         "metricScope": "provider_transcription_only",
         "hostApplication": "benchmark-cli",
         "warmState": "warm",
-        "hardware": {
-            "os": std::env::consts::OS,
-            "arch": std::env::consts::ARCH,
-            "logicalCpus": logical_cpus,
-            "cpuModel": cpu_model,
-            "memoryBytes": memory_bytes,
-        },
+        "hardware": hardware_context(),
         "provider": input.provider,
         "model": input.model,
         "fixture": input.fixture,
@@ -310,6 +342,167 @@ fn build_report(input: BenchmarkReportInput<'_>) -> serde_json::Value {
         "transcriptWordCount": transcript_word_count,
         "transcriptSample": transcript_sample,
         "transcriptTailSample": transcript_tail_sample,
+    })
+}
+
+/// Stands in for the real insertion path (a native paste/Accessibility write,
+/// or a clipboard copy) in the end-to-end benchmark below.
+///
+/// Real insertion needs a live, focused GUI target and, for the `auto` mode,
+/// macOS Accessibility permission -- neither available in an automated
+/// benchmark, and copying to the *real* system clipboard on every run would
+/// also clobber whatever the operator had copied. This measures a real (not
+/// invented) elapsed time for an operation of comparable shape -- an
+/// exclusive lock plus a full copy of the delivered text into memory --
+/// while staying entirely side-effect free. It is a floor, not a ceiling:
+/// actual insertion latency is measured in production by the runtime timing
+/// record (`dictation_timing.rs`) and logged on every live dictation via
+/// `tracing::info!("dictation {} timing: ...")`.
+struct MockInsertionSink {
+    buffer: Mutex<String>,
+}
+
+impl MockInsertionSink {
+    fn new() -> Self {
+        Self {
+            buffer: Mutex::new(String::new()),
+        }
+    }
+
+    fn insert(&self, text: &str) -> Duration {
+        let start = Instant::now();
+        let mut guard = self
+            .buffer
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        *guard = text.to_string();
+        drop(guard);
+        start.elapsed()
+    }
+}
+
+/// One run's worth of stage timings feeding the end-to-end receipt. ASR runs
+/// once per sample (format on/off share the same transcript, matching
+/// reality: ASR happens regardless of the Smart Format setting).
+struct StageSample {
+    asr_ms: u64,
+    format_off_ms: u64,
+    format_on_ms: u64,
+    insertion_off_ms: u64,
+    insertion_on_ms: u64,
+}
+
+impl StageSample {
+    fn total_off_ms(&self) -> u64 {
+        self.asr_ms + self.format_off_ms + self.insertion_off_ms
+    }
+
+    fn total_on_ms(&self) -> u64 {
+        self.asr_ms + self.format_on_ms + self.insertion_on_ms
+    }
+}
+
+fn stage_stats(values: &[u64]) -> serde_json::Value {
+    serde_json::json!({
+        "measurementsMs": values,
+        "p50": percentile(values.to_vec(), 50.0),
+        "p95": percentile(values.to_vec(), 95.0),
+    })
+}
+
+struct EndToEndReportInput<'a> {
+    provider: &'a str,
+    model: &'a str,
+    fixture: &'a str,
+    fixture_sha256: &'a str,
+    fixture_bytes: usize,
+    audio_seconds: f64,
+    samples: &'a [StageSample],
+}
+
+/// Build the `metricScope: "end_to_end"` receipt: the full post-capture
+/// pipeline (ASR, then the local dictionary/snippet/smart-format pass with
+/// Smart Format on and off, then a mocked insertion), reported as P50/P95
+/// totals for each of `formatOff`/`formatOn` plus a per-stage breakdown.
+///
+/// Two scoping notes, also embedded in the receipt so a reader never has to
+/// find this comment:
+///
+/// - `formatOn` measures the deterministic *local* smart-formatting pass
+///   (`text::format`), not the optional LLM-based Smart Format pass that
+///   sits behind `DICTATION_FORMAT_TIMEOUT` in `lib.rs`. That pass calls a
+///   live model/provider and cannot be driven safely, deterministically, or
+///   offline from a headless benchmark. Its real timing and timeout rate are
+///   measured in production by the runtime `DictationTimingRecord` on every
+///   live dictation instead.
+/// - Insertion is mocked (see `MockInsertionSink`) for the same reason: no
+///   live GUI target or Accessibility permission in an automated benchmark.
+fn build_end_to_end_report(input: EndToEndReportInput<'_>) -> serde_json::Value {
+    let asr_ms: Vec<u64> = input.samples.iter().map(|sample| sample.asr_ms).collect();
+    let format_off_ms: Vec<u64> = input
+        .samples
+        .iter()
+        .map(|sample| sample.format_off_ms)
+        .collect();
+    let format_on_ms: Vec<u64> = input
+        .samples
+        .iter()
+        .map(|sample| sample.format_on_ms)
+        .collect();
+    let insertion_off_ms: Vec<u64> = input
+        .samples
+        .iter()
+        .map(|sample| sample.insertion_off_ms)
+        .collect();
+    let insertion_on_ms: Vec<u64> = input
+        .samples
+        .iter()
+        .map(|sample| sample.insertion_on_ms)
+        .collect();
+    let total_off_ms: Vec<u64> = input
+        .samples
+        .iter()
+        .map(StageSample::total_off_ms)
+        .collect();
+    let total_on_ms: Vec<u64> = input.samples.iter().map(StageSample::total_on_ms).collect();
+
+    serde_json::json!({
+        "schemaVersion": 1,
+        "benchmarkVersion": env!("CARGO_PKG_VERSION"),
+        "generatedAt": chrono::Utc::now().to_rfc3339(),
+        "thresholdProfile": "beta-reference-v1",
+        "metricScope": "end_to_end",
+        "hostApplication": "benchmark-cli",
+        "warmState": "warm",
+        "hardware": hardware_context(),
+        "provider": input.provider,
+        "model": input.model,
+        "fixture": input.fixture,
+        "fixtureSha256": input.fixture_sha256,
+        "fixtureBytes": input.fixture_bytes,
+        "audioSeconds": round_two(input.audio_seconds),
+        "runs": input.samples.len(),
+        "sampleCount": input.samples.len(),
+        "insertionStrategy": "mocked-in-memory-copy",
+        "insertionStrategyNote": "Real system insertion needs a focused GUI target and, for auto mode, macOS Accessibility permission -- neither available in an automated benchmark, and copying to the real system clipboard on every run would also clobber the operator's own clipboard. This measures a same-shape in-memory copy instead (see MockInsertionSink). Real insertion latency is captured in production by the runtime dictation timing record (dictation_timing.rs) and logged on every live dictation.",
+        "formatOnScopeNote": "\"formatOn\" measures the deterministic local smart-formatting pass (text::format), not the optional LLM-based Smart Format pass. That pass calls a live model/provider behind DICTATION_FORMAT_TIMEOUT and cannot be driven safely or deterministically from a headless benchmark; its real timing and timeout rate are captured by the runtime dictation timing record on every live dictation.",
+        "stageBreakdownMs": {
+            "asr": stage_stats(&asr_ms),
+            "formatOff": stage_stats(&format_off_ms),
+            "formatOn": stage_stats(&format_on_ms),
+            "insertionMockOff": stage_stats(&insertion_off_ms),
+            "insertionMockOn": stage_stats(&insertion_on_ms),
+        },
+        "formatOff": {
+            "measurementsMs": total_off_ms,
+            "endToEndMsP50": percentile(total_off_ms.clone(), 50.0),
+            "endToEndMsP95": percentile(total_off_ms.clone(), 95.0),
+        },
+        "formatOn": {
+            "measurementsMs": total_on_ms,
+            "endToEndMsP50": percentile(total_on_ms.clone(), 50.0),
+            "endToEndMsP95": percentile(total_on_ms.clone(), 95.0),
+        },
     })
 }
 
@@ -386,20 +579,67 @@ fn main() {
             std::process::exit(1);
         }
 
+        let mock_insertion = MockInsertionSink::new();
         let mut wall_ms: Vec<u64> = Vec::with_capacity(args.runs);
+        let mut stage_samples: Vec<StageSample> = Vec::with_capacity(args.runs);
         let mut last_text = String::new();
         for run_index in 1..=args.runs {
             let start = Instant::now();
-            match provider.transcribe_bytes(&audio_bytes).await {
+            let (text, asr_ms) = match provider.transcribe_bytes(&audio_bytes).await {
                 Ok(result) => {
-                    wall_ms.push(start.elapsed().as_millis() as u64);
-                    last_text = result.text;
+                    let asr_ms = start.elapsed().as_millis() as u64;
+                    wall_ms.push(asr_ms);
+                    last_text = result.text.clone();
+                    (result.text, asr_ms)
                 }
                 Err(e) => {
                     eprintln!("Transcription run {run_index}/{} failed: {e}", args.runs);
                     std::process::exit(1);
                 }
-            }
+            };
+
+            // Full post-ASR pipeline, Smart Format off then on, sharing the
+            // one ASR result above -- matching reality: ASR runs once
+            // regardless of the Smart Format setting. See
+            // `build_end_to_end_report` for what "format on" does and does
+            // not cover.
+            let format_off_started = Instant::now();
+            let format_off = apply_dictation_pipeline(DictationPipelineInput {
+                text: text.as_str(),
+                dictionary_entries: &[],
+                snippets: &[],
+                app_target: None,
+                mode_preset: "voice",
+                smart_formatting_enabled: false,
+                recent_inserted_text: None,
+                destination_category: DictationAppCategory::Other,
+            });
+            let format_off_ms = format_off_started.elapsed().as_millis() as u64;
+
+            let format_on_started = Instant::now();
+            let format_on = apply_dictation_pipeline(DictationPipelineInput {
+                text: text.as_str(),
+                dictionary_entries: &[],
+                snippets: &[],
+                app_target: None,
+                mode_preset: "voice",
+                smart_formatting_enabled: true,
+                recent_inserted_text: None,
+                destination_category: DictationAppCategory::Other,
+            });
+            let format_on_ms = format_on_started.elapsed().as_millis() as u64;
+
+            let insertion_off_ms =
+                mock_insertion.insert(format_off.text.as_str()).as_millis() as u64;
+            let insertion_on_ms = mock_insertion.insert(format_on.text.as_str()).as_millis() as u64;
+
+            stage_samples.push(StageSample {
+                asr_ms,
+                format_off_ms,
+                format_on_ms,
+                insertion_off_ms,
+                insertion_on_ms,
+            });
         }
 
         let p50 = percentile(wall_ms.clone(), 50.0);
@@ -444,6 +684,60 @@ fn main() {
             "p50 {p50}ms, p95 {p95}ms, {speedup:.1}x real-time for \
              {audio_seconds:.1}s of audio."
         );
+
+        let e2e_report = build_end_to_end_report(EndToEndReportInput {
+            provider: &args.provider_name,
+            model: &args.model,
+            fixture: &fixture,
+            fixture_sha256: &fixture_sha256,
+            fixture_bytes: audio_bytes.len(),
+            audio_seconds,
+            samples: &stage_samples,
+        });
+        let e2e_report_json = serde_json::to_string(&e2e_report).unwrap();
+        if let Some(parent) = args.report_path_e2e.parent() {
+            if let Err(error) = std::fs::create_dir_all(parent) {
+                eprintln!("Failed to create end-to-end latency report directory: {error}");
+                std::process::exit(1);
+            }
+        }
+        if let Err(error) = std::fs::write(
+            &args.report_path_e2e,
+            serde_json::to_string_pretty(&e2e_report).unwrap() + "\n",
+        ) {
+            eprintln!(
+                "Failed to write end-to-end latency report '{}': {error}",
+                args.report_path_e2e.display()
+            );
+            std::process::exit(1);
+        }
+        println!("{e2e_report_json}");
+        eprintln!(
+            "end-to-end: format-off p50 {}ms / p95 {}ms, format-on p50 {}ms / p95 {}ms.",
+            percentile(
+                stage_samples
+                    .iter()
+                    .map(StageSample::total_off_ms)
+                    .collect(),
+                50.0
+            ),
+            percentile(
+                stage_samples
+                    .iter()
+                    .map(StageSample::total_off_ms)
+                    .collect(),
+                95.0
+            ),
+            percentile(
+                stage_samples.iter().map(StageSample::total_on_ms).collect(),
+                50.0
+            ),
+            percentile(
+                stage_samples.iter().map(StageSample::total_on_ms).collect(),
+                95.0
+            ),
+        );
+
         use std::io::Write;
         let _ = std::io::stdout().flush();
         let _ = std::io::stderr().flush();
@@ -586,5 +880,171 @@ mod tests {
         assert_eq!(report["transcriptWordCount"], 2);
         assert_eq!(report["transcriptSample"], "spoken fixture");
         assert_eq!(report["transcriptTailSample"], "spoken fixture");
+    }
+
+    #[test]
+    fn e2e_report_path_defaults_alongside_the_provider_only_path() {
+        let args =
+            match parse_args(&strings(&["--wav", "Cargo.toml"])).expect("parse benchmark args") {
+                ParseOutcome::Run(args) => args,
+                ParseOutcome::Help => panic!("expected runnable benchmark args"),
+            };
+
+        assert_eq!(
+            args.report_path,
+            PathBuf::from("artifacts/qa/dictation-latency.json")
+        );
+        assert_eq!(
+            args.report_path_e2e,
+            PathBuf::from("artifacts/qa/dictation-latency-e2e.json")
+        );
+    }
+
+    #[test]
+    fn e2e_report_path_can_be_overridden_independently_of_out() {
+        let args = match parse_args(&strings(&[
+            "--wav",
+            "Cargo.toml",
+            "--out",
+            "/tmp/provider-only.json",
+            "--out-e2e",
+            "/tmp/end-to-end.json",
+        ]))
+        .expect("parse benchmark args")
+        {
+            ParseOutcome::Run(args) => args,
+            ParseOutcome::Help => panic!("expected runnable benchmark args"),
+        };
+
+        assert_eq!(args.report_path, PathBuf::from("/tmp/provider-only.json"));
+        assert_eq!(args.report_path_e2e, PathBuf::from("/tmp/end-to-end.json"));
+    }
+
+    #[test]
+    fn e2e_report_path_may_only_be_specified_once() {
+        let error = parse_args(&strings(&[
+            "--out-e2e",
+            "/tmp/first.json",
+            "--out-e2e",
+            "/tmp/second.json",
+        ]))
+        .unwrap_err();
+
+        assert!(
+            error.contains("--out-e2e may only be specified once"),
+            "{error}"
+        );
+    }
+
+    fn stage_sample(
+        asr_ms: u64,
+        format_off_ms: u64,
+        format_on_ms: u64,
+        insertion_off_ms: u64,
+        insertion_on_ms: u64,
+    ) -> StageSample {
+        StageSample {
+            asr_ms,
+            format_off_ms,
+            format_on_ms,
+            insertion_off_ms,
+            insertion_on_ms,
+        }
+    }
+
+    #[test]
+    fn stage_sample_totals_sum_asr_format_and_insertion() {
+        let sample = stage_sample(90, 2, 5, 1, 1);
+        assert_eq!(sample.total_off_ms(), 93);
+        assert_eq!(sample.total_on_ms(), 96);
+    }
+
+    #[test]
+    fn end_to_end_report_has_the_scope_and_stage_breakdown_the_gate_expects() {
+        let samples = vec![
+            stage_sample(80, 1, 3, 1, 1),
+            stage_sample(90, 2, 4, 1, 1),
+            stage_sample(100, 1, 3, 1, 2),
+        ];
+        let report = build_end_to_end_report(EndToEndReportInput {
+            provider: "whisper",
+            model: "base.en",
+            fixture: "/tmp/fixture.wav",
+            fixture_sha256: "abc123",
+            fixture_bytes: 42,
+            audio_seconds: 2.5,
+            samples: &samples,
+        });
+
+        assert_eq!(report["schemaVersion"], 1);
+        assert_eq!(report["thresholdProfile"], "beta-reference-v1");
+        assert_eq!(report["metricScope"], "end_to_end");
+        assert_eq!(report["warmState"], "warm");
+        assert_eq!(report["provider"], "whisper");
+        assert_eq!(report["model"], "base.en");
+        assert_eq!(report["fixtureSha256"], "abc123");
+        assert_eq!(report["runs"], 3);
+        assert_eq!(report["sampleCount"], 3);
+        assert_eq!(report["insertionStrategy"], "mocked-in-memory-copy");
+        assert!(report["insertionStrategyNote"]
+            .as_str()
+            .unwrap()
+            .contains("Accessibility"));
+        assert!(report["formatOnScopeNote"]
+            .as_str()
+            .unwrap()
+            .contains("DICTATION_FORMAT_TIMEOUT"));
+
+        let total_off: Vec<u64> = samples.iter().map(StageSample::total_off_ms).collect();
+        let total_on: Vec<u64> = samples.iter().map(StageSample::total_on_ms).collect();
+        assert_eq!(
+            report["formatOff"]["endToEndMsP50"],
+            percentile(total_off.clone(), 50.0)
+        );
+        assert_eq!(
+            report["formatOff"]["endToEndMsP95"],
+            percentile(total_off, 95.0)
+        );
+        assert_eq!(
+            report["formatOn"]["endToEndMsP50"],
+            percentile(total_on.clone(), 50.0)
+        );
+        assert_eq!(
+            report["formatOn"]["endToEndMsP95"],
+            percentile(total_on, 95.0)
+        );
+
+        for stage in [
+            "asr",
+            "formatOff",
+            "formatOn",
+            "insertionMockOff",
+            "insertionMockOn",
+        ] {
+            assert!(
+                report["stageBreakdownMs"][stage]["p50"].is_u64(),
+                "missing stage breakdown for {stage}"
+            );
+            assert!(
+                report["stageBreakdownMs"][stage]["measurementsMs"]
+                    .as_array()
+                    .is_some_and(|values| values.len() == 3),
+                "stage {stage} should keep one measurement per run"
+            );
+        }
+    }
+
+    #[test]
+    fn mock_insertion_sink_is_side_effect_free_and_measures_real_elapsed_time() {
+        let sink = MockInsertionSink::new();
+        // Must not touch the real system clipboard: running this test (or
+        // the benchmark) repeatedly must never depend on, or clobber,
+        // whatever the operator has actually copied.
+        let elapsed_short = sink.insert("hi");
+        let elapsed_long = sink.insert(&"a".repeat(10_000));
+        // Both are real (not fabricated) measurements of the same operation;
+        // neither should ever be absurdly large.
+        assert!(elapsed_short.as_millis() < 50);
+        assert!(elapsed_long.as_millis() < 50);
     }
 }
