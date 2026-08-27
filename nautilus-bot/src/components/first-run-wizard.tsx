@@ -77,9 +77,12 @@ type ScratchDictationState =
   | "complete"
   | "error";
 
-// Ordered so the fast local default (whisper.cpp base.en -- see
-// settings.rs's default_provider/default_model_id) is first and pre-selected.
-// Model weights are downloaded on demand; none ship inside the app bundle.
+// Ordered so the recommended default (Parakeet TDT 0.6B v3 -- see
+// settings.rs's default_provider/default_model_id) is first and
+// pre-selected. Whisper base.en mis-transcribes words it hasn't seen before
+// -- including "Plainsong" itself, per this repo's own benchmark -- so it is
+// offered as the small-download alternative, not the default. Model weights
+// are downloaded on demand; none ship inside the app bundle.
 const POWER_MODEL_OPTIONS: Array<{
   id: string;
   providerType: AsrProviderType;
@@ -89,12 +92,19 @@ const POWER_MODEL_OPTIONS: Array<{
   recommended?: boolean;
 }> = [
   {
+    id: "parakeet-tdt-0.6b-v3",
+    providerType: "parakeet",
+    label: "Parakeet TDT 0.6B v3",
+    size: "640 MB",
+    desc: "Recommended default — more accurate transcription, works for meetings too",
+    recommended: true,
+  },
+  {
     id: "base.en",
     providerType: "whisper",
     label: "Whisper base.en",
     size: "142 MB",
-    desc: "Fast local default — downloaded on demand",
-    recommended: true,
+    desc: "Smaller download (142 MB vs. 640 MB), but less accurate on unfamiliar words",
   },
   {
     id: "distil-large-v3.5",
@@ -109,13 +119,6 @@ const POWER_MODEL_OPTIONS: Array<{
     label: "Moonshine Base",
     size: "246 MB",
     desc: "Lightweight alternative for lower-end machines",
-  },
-  {
-    id: "parakeet-tdt-0.6b-v3",
-    providerType: "parakeet",
-    label: "Parakeet TDT 0.6B v3",
-    size: "640 MB",
-    desc: "Fast local long-form route for meetings and multilingual dictation",
   },
 ];
 
@@ -373,6 +376,13 @@ export function FirstRunWizard({ mode = "full", onComplete }: Props) {
   const [modelState, setModelState] = useState<"idle" | "downloading" | "done" | "error">("idle");
   const [modelError, setModelError] = useState<string | null>(null);
   const [modelSkipped, setModelSkipped] = useState(false);
+  // Placeholder only, corrected by the settings-load effect below before any
+  // download can actually fire (see the dictationProvider branches there).
+  // Kept as "base.en" rather than the new "parakeet-tdt-0.6b-v3" default so
+  // a settings.json that already names a non-default provider (e.g. an
+  // existing whisper/base.en setup) is never at risk of racing a real click
+  // against the correction effect and downloading the wrong model; the
+  // fresh-install case corrects to Parakeet the same way.
   const [selectedModelId, setSelectedModelId] = useState("base.en");
   const [downloadPercent, setDownloadPercent] = useState<number | null>(null);
   const downloadingProviderTypeRef = useRef<AsrProviderType | null>(null);
@@ -844,22 +854,23 @@ export function FirstRunWizard({ mode = "full", onComplete }: Props) {
   // consent for a model download.
   //
   // But only do this when the user doesn't already have a different,
-  // previously-configured dictation route (e.g. parakeet, distil_whisper,
+  // previously-configured dictation route (e.g. whisper, distil_whisper,
   // macos_apple_speech). Someone who opens "Fix dictation setup" for an
   // unrelated reason (a hotkey conflict, say) and just clicks through this
   // step must not have their working provider silently downgraded/overwritten
-  // to whisper/base.en. If nothing but the default route was ever configured,
-  // downloading base.en in the background is a safe no-op for
+  // to parakeet. If nothing but the default route was ever configured,
+  // downloading the default model in the background is a safe no-op for
   // provider selection and is the only way dictation ends up with a
   // downloaded model at all.
   const ensureDefaultModelDownloading = useCallback(() => {
     const existingProvider = initialDictationProviderRef.current;
-    const hasExistingNonDefaultRoute = Boolean(existingProvider) && existingProvider !== "whisper";
+    const hasExistingNonDefaultRoute =
+      Boolean(existingProvider) && existingProvider !== "parakeet";
     if (hasExistingNonDefaultRoute) {
       return;
     }
     if (modelState === "idle" || modelState === "error") {
-      void startModelDownload("base.en");
+      void startModelDownload("parakeet-tdt-0.6b-v3");
     }
   }, [modelState, startModelDownload]);
 
@@ -1198,7 +1209,7 @@ export function FirstRunWizard({ mode = "full", onComplete }: Props) {
             modelState={modelState}
             modelError={modelError}
             modelPercent={downloadPercent}
-            onDownloadModel={() => void startModelDownload("base.en")}
+            onDownloadModel={() => void startModelDownload("parakeet-tdt-0.6b-v3")}
             scratchState={scratchState}
             scratchText={scratchText}
             scratchError={scratchError}
@@ -1232,7 +1243,7 @@ export function FirstRunWizard({ mode = "full", onComplete }: Props) {
             modelState={modelState}
             modelError={modelError}
             modelSkipped={modelSkipped}
-            onRetryModel={() => void startModelDownload("base.en")}
+            onRetryModel={() => void startModelDownload("parakeet-tdt-0.6b-v3")}
             microphoneReady={
               perms?.microphonePermissionReady ?? perms?.microphoneReady
             }
@@ -1495,9 +1506,10 @@ function TryDictationStep({
               <Download className="h-4 w-4" />
             </span>
             <div>
-              <p className="text-sm font-medium">Fast local model</p>
+              <p className="text-sm font-medium">Recommended local model</p>
               <p className="text-sm text-muted-foreground">
-                Whisper base.en is a 142 MB download. You can choose a larger model later.
+                Parakeet TDT 0.6B v3 is a 640 MB download. A smaller 142 MB option is
+                available later, with less accuracy on unfamiliar words.
               </p>
             </div>
           </div>
@@ -1752,7 +1764,7 @@ function ReadyStep({
         }
       : modelState === "downloading"
         ? {
-            detail: "Downloading Whisper base.en in the background.",
+            detail: "Downloading Parakeet TDT 0.6B v3 in the background.",
             tone: "progress" as const,
           }
         : modelState === "error"
@@ -1766,7 +1778,7 @@ function ReadyStep({
             }
           : modelState === "done"
             ? {
-                detail: "Whisper base.en is ready for your first dictation.",
+                detail: "Parakeet TDT 0.6B v3 is ready for your first dictation.",
                 tone: "ready" as const,
               }
             : {
@@ -2085,8 +2097,10 @@ function DictationModelStep({
   return (
     <div className="space-y-4">
       <p className="text-sm text-muted-foreground">
-        Choose the local model Plainsong will use for dictation. Whisper base.en is the fast
-        default and downloads on demand; the larger choices trade space and time for accuracy.
+        Choose the local model Plainsong will use for dictation. Parakeet TDT 0.6B v3 is the
+        recommended default and downloads on demand; Whisper base.en is a smaller download with
+        less accuracy on unfamiliar words, and the larger choices trade space and time for
+        accuracy.
       </p>
 
       <div className="space-y-2">

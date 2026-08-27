@@ -262,17 +262,20 @@ pub struct DictationCustomMode {
 impl Default for TranscriptionSettings {
     fn default() -> Self {
         Self {
-            // Default to whisper.cpp (Metal/CoreML-accelerated on Apple Silicon)
-            // with the small, fast base.en model. The previous default routed
-            // through a 756M Candle model on CPU in F32 — multi-second latency
-            // on the dictation hot path. whisper.cpp base.en is the fast,
-            // production-quality default; larger/multilingual models are one
-            // setting away.
-            default_provider: "whisper".to_string(),
-            selected_model_id: "base.en".to_string(),
+            // Default to Parakeet TDT 0.6B v3, already fully integrated and
+            // used as the recommended meeting-lane route. This repo's own
+            // benchmark shows whisper.cpp base.en mis-transcribing words it
+            // hasn't seen before -- including "Plainsong" itself -- so it is
+            // offered as the small-download alternative (142 MB vs
+            // Parakeet's 640 MB) rather than the out-of-the-box default.
+            // (An earlier default routed through a 756M Candle model on CPU
+            // in F32 -- multi-second latency on the dictation hot path --
+            // which whisper.cpp base.en replaced before this change.)
+            default_provider: "parakeet".to_string(),
+            selected_model_id: "parakeet-tdt-0.6b-v3".to_string(),
             use_shared_asr_selection: true,
-            dictation_provider: "whisper".to_string(),
-            dictation_model_id: "base.en".to_string(),
+            dictation_provider: "parakeet".to_string(),
+            dictation_model_id: "parakeet-tdt-0.6b-v3".to_string(),
             meeting_provider: "whisper".to_string(),
             meeting_model_id: "base.en".to_string(),
             meeting_route_policy: "prefer_local".to_string(),
@@ -1326,10 +1329,11 @@ mod tests {
         dictation_app_category_from_key, dictation_app_category_to_key,
         migrate_legacy_ai_lane_settings, normalize_audio_input_device_preference,
         normalize_dictation_active_languages, normalize_loaded_privacy_settings,
-        normalize_loaded_transcription_settings, resolve_dictation_app_category_with_overrides,
-        AiLane, AiLaneSettings, AudioInputDevicePreference, DictationAppCategoryOverride,
-        DictationCustomMode, PlatformOptimizationSettings, PrivacySettings, Settings,
-        SettingsManager, TranscriptionSettings,
+        normalize_loaded_transcription_settings, normalize_transcription_model_id,
+        resolve_dictation_app_category_with_overrides, AiLane, AiLaneSettings,
+        AudioInputDevicePreference, DictationAppCategoryOverride, DictationCustomMode,
+        PlatformOptimizationSettings, PrivacySettings, Settings, SettingsManager,
+        TranscriptionSettings,
     };
     use crate::text::format::DictationAppCategory;
     use std::fs;
@@ -1409,6 +1413,54 @@ mod tests {
             transcription.provider_model_ids.get("cohere_transcribe"),
             Some(&"cohere-transcribe-03-2026".to_string())
         );
+    }
+
+    #[test]
+    fn every_provider_model_option_survives_normalization_unchanged() {
+        // Regression coverage for the scribe_v2_realtime three-way disagreement:
+        // the picker offered it labeled "recommended", the provider accepted
+        // it, and this same normalizer silently rewrote it to scribe_v2 on
+        // every launch -- so a user's explicit choice never stuck. Every id a
+        // provider's own ModelOption list offers must be a fixed point of
+        // `normalize_transcription_model_id`, or the picker is lying about
+        // what happens when you pick it.
+        let providers: &[(&str, crate::asr::AsrProviderType)] = &[
+            ("whisper", crate::asr::AsrProviderType::Whisper),
+            ("parakeet", crate::asr::AsrProviderType::Parakeet),
+            ("whisper_candle", crate::asr::AsrProviderType::WhisperCandle),
+            ("distil_whisper", crate::asr::AsrProviderType::DistilWhisper),
+            (
+                "macos_apple_speech",
+                crate::asr::AsrProviderType::MacosAppleSpeech,
+            ),
+            ("moonshine", crate::asr::AsrProviderType::Moonshine),
+            (
+                "windows_sdk_dictation",
+                crate::asr::AsrProviderType::WindowsSdkDictation,
+            ),
+            (
+                "elevenlabs_scribe",
+                crate::asr::AsrProviderType::ElevenLabsScribe,
+            ),
+            ("openai_cloud", crate::asr::AsrProviderType::OpenAiCloud),
+            ("groq", crate::asr::AsrProviderType::Groq),
+            (
+                "cohere_transcribe",
+                crate::asr::AsrProviderType::CohereTranscribe,
+            ),
+            ("qwen3_asr", crate::asr::AsrProviderType::Qwen3Asr),
+        ];
+
+        for (key, provider_type) in providers {
+            for option in provider_type.model_options() {
+                assert_eq!(
+                    normalize_transcription_model_id(key, &option.id),
+                    option.id,
+                    "provider '{key}' offers model option '{}' that normalization rewrites to something else",
+                    option.id
+                );
+            }
+        }
     }
 
     #[test]
@@ -1758,7 +1810,7 @@ mod tests {
     fn dictation_command_defaults_are_stable() {
         let settings = Settings::default();
         assert!(settings.transcription.use_shared_asr_selection);
-        assert_eq!(settings.transcription.dictation_provider, "whisper");
+        assert_eq!(settings.transcription.dictation_provider, "parakeet");
         assert_eq!(settings.transcription.meeting_provider, "whisper");
         assert!(settings.transcription.dictation_command_mode_enabled);
         assert_eq!(settings.transcription.dictation_command_prefix, "command");

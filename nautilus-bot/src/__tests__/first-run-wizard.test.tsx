@@ -294,7 +294,7 @@ describe("FirstRunWizard", () => {
     expect(
       screen.getByRole("button", { name: /download and continue/i })
     ).toBeInTheDocument();
-    expect(screen.getByText(/downloaded on demand/i)).toBeInTheDocument();
+    expect(screen.getByText(/downloads on demand/i)).toBeInTheDocument();
     expect(screen.getByText("2.8 GiB")).toBeInTheDocument();
     expect(screen.queryByText(/already ships with/i)).not.toBeInTheDocument();
   });
@@ -518,8 +518,12 @@ describe("FirstRunWizard", () => {
       () => new Promise<void>((resolve) => { resolveDownload = resolve; })
     );
 
-    currentSettings.transcription.dictationProvider = "whisper";
-    currentSettings.transcription.dictationModelId = "base.en";
+    // Parakeet is the default route (see settings.rs's default_provider
+    // doc); ensureDefaultModelDownloading only auto-downloads on the default
+    // route, so this must match it or the background fetch this test
+    // exercises would never fire.
+    currentSettings.transcription.dictationProvider = "parakeet";
+    currentSettings.transcription.dictationModelId = "parakeet-tdt-0.6b-v3";
 
     render(<FirstRunWizard mode="dictation" onComplete={vi.fn()} />);
 
@@ -540,7 +544,9 @@ describe("FirstRunWizard", () => {
 
     // The download completing must not roll the hotkey back to the default.
     await waitFor(() => {
-      expect(currentSettings.transcription.dictationModelId).toBe("base.en");
+      expect(currentSettings.transcription.dictationModelId).toBe(
+        "parakeet-tdt-0.6b-v3",
+      );
     });
     expect(currentSettings.shortcuts.toggleDictation).toBe("Cmd+Shift+J");
   });
@@ -556,6 +562,13 @@ describe("FirstRunWizard", () => {
     render(<FirstRunWizard onComplete={onComplete} />);
 
     await clickPrimary(/download and continue/i);
+    // The download-and-continue click kicks off an async model download
+    // before the step advances; wait for that transition to actually land
+    // (mirroring the explicit wait other tests in this file use for the same
+    // step) instead of racing the next click against it.
+    expect(
+      await screen.findByRole("heading", { name: /try dictation here/i }),
+    ).toBeInTheDocument();
     await clickPrimary(/^continue$/i);
     await clickPrimary(/^continue$/i);
     expect(

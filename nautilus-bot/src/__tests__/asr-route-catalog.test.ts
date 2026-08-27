@@ -192,11 +192,13 @@ describe("asr-route-catalog", () => {
     expect(recommended?.modelId).toBe("moonshine-base");
   });
 
-  it("recommends whisper.cpp base.en over distil_whisper for dictation when no platform-native engine is ready", () => {
+  it("recommends whisper.cpp base.en over distil_whisper for dictation when neither Parakeet nor a platform-native engine is ready", () => {
     // Regression test: distil_whisper used to outrank whisper in
     // DICTATION_PROVIDER_ORDER, steering the "Recommended" badge onto the
-    // slower route even though settings.rs's documented default is
-    // whisper.cpp base.en.
+    // slower route. Parakeet TDT 0.6B v3 is now settings.rs's documented
+    // dictation default and ranks ahead of both (see the dedicated Parakeet
+    // vs. Whisper ordering test below); this test only checks the remaining
+    // whisper-vs-distil_whisper ordering among the routes it does not cover.
     const whisperAndDistilProviders: AsrProviderInfo[] = [
       {
         providerType: "whisper",
@@ -227,6 +229,43 @@ describe("asr-route-catalog", () => {
 
     expect(recommended?.providerType).toBe("whisper");
     expect(recommended?.modelId).toBe("base.en");
+  });
+
+  it("recommends Parakeet over whisper.cpp base.en for dictation when both are ready", () => {
+    // Parakeet TDT 0.6B v3 is settings.rs's documented dictation default;
+    // whisper.cpp base.en mis-transcribes words it hasn't seen before
+    // (including "Plainsong" itself, per this repo's own benchmark) and is
+    // offered as the smaller-download alternative, not the recommendation.
+    const whisperAndParakeetProviders: AsrProviderInfo[] = [
+      {
+        providerType: "whisper",
+        name: "Whisper",
+        description: "Flexible local route",
+        isAvailable: true,
+        inferenceEnabled: true,
+        modelInfo: {
+          name: "Whisper",
+          version: "base.en",
+          sizeMb: 150,
+          parameters: "74M",
+          languages: ["en"],
+          license: "MIT",
+          sourceUrl: "https://example.com/whisper",
+        },
+        selectedModelId: "base.en",
+        modelOptions: [{ id: "base.en", label: "base.en" }],
+        downloadStatus: "Downloaded",
+        runtimeStatus: "ready",
+        runtimeDetails: {},
+      },
+      providers[2], // parakeet, also ready
+    ];
+
+    const routes = buildAsrRouteCatalog(whisperAndParakeetProviders, "prefer_local");
+    const recommended = getRecommendedLaneRoute(routes, "dictation", "prefer_local");
+
+    expect(recommended?.providerType).toBe("parakeet");
+    expect(recommended?.modelId).toBe("parakeet-tdt-0.6b-v3");
   });
 
   it("recommends Parakeet before Distil Whisper for local meetings", () => {
