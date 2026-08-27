@@ -6,21 +6,51 @@
 //! faster than real time). It requires the chosen model to be downloaded.
 //!
 //! Usage:
-//!   benchmark-latency [--wav <path>] [--provider <name>] [--model <id>] [--runs N] [--out <path>]
+//!   benchmark-latency [--wav <path>] [--secondary-wav <path>] [--provider <name>] [--model <id>] [--runs N] [--out <path>] [--out-e2e <path>]
 //!
-//! Defaults: the bundled fixture, provider `whisper`, model `base.en`, 5 runs.
-//! Output: a JSON line on stdout plus a human-readable summary on stderr.
+//! Defaults: `--wav` is the short-utterance reference fixture
+//! (`scripts/fixtures/local-quality-gate.wav`, ~5.3s), `--secondary-wav` is a
+//! long-form fixture (`scripts/fixtures/real-speech-44s.wav`, ~44s) kept for
+//! comparison. Provider `whisper`, model `base.en`, 5 runs.
+//! Output: two JSON lines on stdout plus a human-readable summary on stderr.
+//!
+//! Every run of the primary AND secondary fixture also drives the full
+//! post-ASR pipeline (dictionary/snippet/local smart-format, with Smart
+//! Format on AND off, then a mocked insertion) and writes a second,
+//! `metricScope: "asr_and_local_format_only"` receipt to `--out-e2e`. See
+//! `build_pipeline_report` for exactly what that scope name promises -- and,
+//! as importantly, what it does not: no key-release, no IPC hop, no
+//! `DICTATION_STOP_CAPTURE_TAIL_MS` wait, no real insertion, no LLM pass.
 
 use plainsong_lib::asr::{AsrProviderFactory, AsrProviderType};
+use plainsong_lib::dictation_pipeline::{apply_dictation_pipeline, DictationPipelineInput};
+use plainsong_lib::text::format::DictationAppCategory;
 use sha2::{Digest, Sha256};
 use std::path::{Path, PathBuf};
-use std::time::Instant;
+use std::sync::Mutex;
+use std::time::{Duration, Instant};
 
-const DEFAULT_WAV: &str = "scripts/fixtures/real-speech-44s.wav";
+const DEFAULT_WAV: &str = "scripts/fixtures/local-quality-gate.wav";
+const DEFAULT_SECONDARY_WAV: &str = "scripts/fixtures/real-speech-44s.wav";
 const DEFAULT_PROVIDER: &str = "whisper";
 const DEFAULT_RUNS: usize = 5;
 const MAX_RUNS: usize = 100;
 const DEFAULT_REPORT_PATH: &str = "artifacts/qa/dictation-latency.json";
+const DEFAULT_REPORT_PATH_E2E: &str = "artifacts/qa/dictation-latency-e2e.json";
+
+/// Mirrors `audio::DICTATION_STOP_CAPTURE_TAIL_MS` (`pub(crate)`, so not
+/// reachable from this external bin) -- the deliberate sleep
+/// `stop_dictation_for_sidecar` awaits, before this benchmark's clock or any
+/// other stage timer starts, so a speaker's final consonant lands in the
+/// captured audio. Neither this benchmark nor the runtime
+/// `DictationTimingRecord`'s "audio finalized" stage includes it, because
+/// both start their own clocks strictly after it. It is real, user-felt
+/// latency the receipt below would otherwise silently omit, so it is
+/// reported explicitly instead. A `lib.rs` test
+/// (`benchmark_capture_tail_constant_matches_the_documented_value`) pins the
+/// real constant so this copy cannot silently drift.
+const CAPTURE_TAIL_EXCLUDED_MS: u64 = 120;
+
 const HELP_TEXT: &str = "\
 Measure real Plainsong transcription latency with a downloaded ASR model.
 
@@ -28,25 +58,40 @@ Usage:
   benchmark-latency [OPTIONS]
 
 Options:
-  --wav <PATH>        Spoken WAV fixture [default: scripts/fixtures/real-speech-44s.wav]
-  --provider <NAME>   whisper, parakeet, moonshine, whisper_candle,
-                      distil_whisper, or macos_apple_speech [default: whisper]
-  --model <ID>        Model ID for the selected provider [default: provider default]
-  --runs <1..100>     Timed transcription runs after one warm-up [default: 5]
-  --out <PATH>        JSON report path [default: artifacts/qa/dictation-latency.json]
-  -h, --help          Print this help without loading a model
+  --wav <PATH>          Primary (short-utterance) WAV fixture
+                        [default: scripts/fixtures/local-quality-gate.wav]
+  --secondary-wav <PATH> Secondary long-form WAV fixture, reported alongside
+                        the primary but not gated against its thresholds
+                        [default: scripts/fixtures/real-speech-44s.wav]
+  --provider <NAME>     whisper, parakeet, moonshine, whisper_candle,
+                        distil_whisper, or macos_apple_speech [default: whisper]
+  --model <ID>          Model ID for the selected provider [default: provider default]
+  --runs <1..100>       Timed transcription runs after one warm-up [default: 5]
+  --out <PATH>          provider_transcription_only JSON report path
+                        (primary fixture only)
+                        [default: artifacts/qa/dictation-latency.json]
+  --out-e2e <PATH>      asr_and_local_format_only JSON report path (primary +
+                        secondary fixtures, local format on/off, mocked
+                        insertion)
+                        [default: artifacts/qa/dictation-latency-e2e.json]
+  -h, --help            Print this help without loading a model
 
 Output:
-  One JSON object on stdout. Progress and the human summary are written to stderr.";
+  Two JSON objects on stdout (provider-only, then pipeline), one per line.
+  Progress and the human summary are written to stderr. Neither receipt is
+  committed to source control -- see artifacts/qa/'s intentionally blanket
+  .gitignore and attach receipts to release evidence by hand instead.";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct BenchmarkArgs {
     wav: PathBuf,
+    secondary_wav: PathBuf,
     provider_name: String,
     provider_type: AsrProviderType,
     model: String,
     runs: usize,
     report_path: PathBuf,
+    report_path_e2e: PathBuf,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -85,16 +130,37 @@ fn provider_from_str(value: &str) -> Option<AsrProviderType> {
     })
 }
 
+fn existing_wav_path(raw: Option<String>, default: &str) -> Result<PathBuf, String> {
+    // Deliberately NOT canonicalized to an absolute path: the receipt embeds
+    // this string verbatim as `fixture`, and an absolute path ties the
+    // receipt to one machine's directory layout. Both defaults are already
+    // repo-relative (this binary is meant to be run from the `nautilus-bot`
+    // root, matching `bun run benchmark:latency`); an operator-supplied path
+    // is used exactly as given.
+    let path = PathBuf::from(raw.unwrap_or_else(|| default.to_string()));
+    let metadata = std::fs::metadata(&path)
+        .map_err(|_| format!("WAV fixture does not exist: {}", path.display()))?;
+    if !metadata.is_file() {
+        return Err(format!(
+            "WAV fixture is not a regular file: {}",
+            path.display()
+        ));
+    }
+    Ok(path)
+}
+
 fn parse_args(args: &[String]) -> Result<ParseOutcome, String> {
     if args.iter().any(|arg| arg == "--help" || arg == "-h") {
         return Ok(ParseOutcome::Help);
     }
 
     let mut wav = None;
+    let mut secondary_wav = None;
     let mut provider_name = None;
     let mut model = None;
     let mut runs = None;
     let mut report_path = None;
+    let mut report_path_e2e = None;
     let mut index = 0;
 
     while index < args.len() {
@@ -102,6 +168,10 @@ fn parse_args(args: &[String]) -> Result<ParseOutcome, String> {
             "--wav" => {
                 let value = next_value(args, &mut index, "--wav")?;
                 set_once(&mut wav, value, "--wav")?;
+            }
+            "--secondary-wav" => {
+                let value = next_value(args, &mut index, "--secondary-wav")?;
+                set_once(&mut secondary_wav, value, "--secondary-wav")?;
             }
             "--provider" => {
                 let value = next_value(args, &mut index, "--provider")?;
@@ -118,6 +188,10 @@ fn parse_args(args: &[String]) -> Result<ParseOutcome, String> {
             "--out" => {
                 let value = next_value(args, &mut index, "--out")?;
                 set_once(&mut report_path, value, "--out")?;
+            }
+            "--out-e2e" => {
+                let value = next_value(args, &mut index, "--out-e2e")?;
+                set_once(&mut report_path_e2e, value, "--out-e2e")?;
             }
             "--" => {}
             unknown => {
@@ -157,23 +231,20 @@ fn parse_args(args: &[String]) -> Result<ParseOutcome, String> {
         None => DEFAULT_RUNS,
     };
 
-    let wav = PathBuf::from(wav.unwrap_or_else(|| DEFAULT_WAV.to_string()));
-    let metadata = std::fs::metadata(&wav)
-        .map_err(|_| format!("WAV fixture does not exist: {}", wav.display()))?;
-    if !metadata.is_file() {
-        return Err(format!(
-            "WAV fixture is not a regular file: {}",
-            wav.display()
-        ));
-    }
+    let wav = existing_wav_path(wav, DEFAULT_WAV)?;
+    let secondary_wav = existing_wav_path(secondary_wav, DEFAULT_SECONDARY_WAV)?;
 
     Ok(ParseOutcome::Run(BenchmarkArgs {
         wav,
+        secondary_wav,
         provider_name,
         provider_type,
         model,
         runs,
         report_path: PathBuf::from(report_path.unwrap_or_else(|| DEFAULT_REPORT_PATH.to_string())),
+        report_path_e2e: PathBuf::from(
+            report_path_e2e.unwrap_or_else(|| DEFAULT_REPORT_PATH_E2E.to_string()),
+        ),
     }))
 }
 
@@ -220,32 +291,11 @@ struct BenchmarkReportInput<'a> {
     transcript: &'a str,
 }
 
-fn build_report(input: BenchmarkReportInput<'_>) -> serde_json::Value {
-    let p50 = percentile(input.wall_ms.to_vec(), 50.0);
-    let p95 = percentile(input.wall_ms.to_vec(), 95.0);
-    let p50_seconds = p50 as f64 / 1000.0;
-    let real_time_factor = if input.audio_seconds > 0.0 {
-        p50_seconds / input.audio_seconds
-    } else {
-        0.0
-    };
-    let realtime_speedup = if p50_seconds > 0.0 {
-        input.audio_seconds / p50_seconds
-    } else {
-        0.0
-    };
-    let transcript_sample: String = input.transcript.chars().take(160).collect();
-    let transcript_tail_sample: String = input
-        .transcript
-        .chars()
-        .rev()
-        .take(160)
-        .collect::<Vec<_>>()
-        .into_iter()
-        .rev()
-        .collect();
-    let transcript_character_count = input.transcript.chars().count();
-    let transcript_word_count = input.transcript.split_whitespace().count();
+/// Shared `hardware` block for both receipts (`provider_transcription_only`
+/// and `asr_and_local_format_only`) so the two are directly comparable and
+/// the reference-hardware checks in `verify-dictation-latency.mjs` apply
+/// identically.
+fn hardware_context() -> serde_json::Value {
     let logical_cpus = std::thread::available_parallelism()
         .map(|value| value.get())
         .unwrap_or(1);
@@ -276,6 +326,42 @@ fn build_report(input: BenchmarkReportInput<'_>) -> serde_json::Value {
     };
 
     serde_json::json!({
+        "os": std::env::consts::OS,
+        "arch": std::env::consts::ARCH,
+        "logicalCpus": logical_cpus,
+        "cpuModel": cpu_model,
+        "memoryBytes": memory_bytes,
+    })
+}
+
+fn build_report(input: BenchmarkReportInput<'_>) -> serde_json::Value {
+    let p50 = percentile(input.wall_ms.to_vec(), 50.0);
+    let p95 = percentile(input.wall_ms.to_vec(), 95.0);
+    let p50_seconds = p50 as f64 / 1000.0;
+    let real_time_factor = if input.audio_seconds > 0.0 {
+        p50_seconds / input.audio_seconds
+    } else {
+        0.0
+    };
+    let realtime_speedup = if p50_seconds > 0.0 {
+        input.audio_seconds / p50_seconds
+    } else {
+        0.0
+    };
+    let transcript_sample: String = input.transcript.chars().take(160).collect();
+    let transcript_tail_sample: String = input
+        .transcript
+        .chars()
+        .rev()
+        .take(160)
+        .collect::<Vec<_>>()
+        .into_iter()
+        .rev()
+        .collect();
+    let transcript_character_count = input.transcript.chars().count();
+    let transcript_word_count = input.transcript.split_whitespace().count();
+
+    serde_json::json!({
         "schemaVersion": 1,
         "benchmarkVersion": env!("CARGO_PKG_VERSION"),
         "generatedAt": chrono::Utc::now().to_rfc3339(),
@@ -283,13 +369,7 @@ fn build_report(input: BenchmarkReportInput<'_>) -> serde_json::Value {
         "metricScope": "provider_transcription_only",
         "hostApplication": "benchmark-cli",
         "warmState": "warm",
-        "hardware": {
-            "os": std::env::consts::OS,
-            "arch": std::env::consts::ARCH,
-            "logicalCpus": logical_cpus,
-            "cpuModel": cpu_model,
-            "memoryBytes": memory_bytes,
-        },
+        "hardware": hardware_context(),
         "provider": input.provider,
         "model": input.model,
         "fixture": input.fixture,
@@ -313,6 +393,309 @@ fn build_report(input: BenchmarkReportInput<'_>) -> serde_json::Value {
     })
 }
 
+/// Stands in for the real insertion path (a native paste/Accessibility write,
+/// or a clipboard copy) in the pipeline benchmark below.
+///
+/// Real insertion needs a live, focused GUI target and, for the `auto` mode,
+/// macOS Accessibility permission -- neither available in an automated
+/// benchmark, and copying to the *real* system clipboard on every run would
+/// also clobber whatever the operator had copied. This measures a real (not
+/// invented) elapsed time for an operation of comparable shape -- an
+/// exclusive lock plus a full copy of the delivered text into memory --
+/// while staying entirely side-effect free. It is a floor, not a ceiling:
+/// actual insertion latency is measured in production by the runtime timing
+/// record (`dictation_timing.rs`) and logged on every live dictation via
+/// `tracing::info!("dictation {} timing: ...")`.
+struct MockInsertionSink {
+    buffer: Mutex<String>,
+}
+
+impl MockInsertionSink {
+    fn new() -> Self {
+        Self {
+            buffer: Mutex::new(String::new()),
+        }
+    }
+
+    fn insert(&self, text: &str) -> Duration {
+        let start = Instant::now();
+        let mut guard = self
+            .buffer
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        *guard = text.to_string();
+        drop(guard);
+        start.elapsed()
+    }
+
+    /// Test-only readback proving `insert` actually does the work it claims,
+    /// rather than a stub that would also satisfy a pure timing assertion.
+    #[cfg(test)]
+    fn contents(&self) -> String {
+        self.buffer
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone()
+    }
+}
+
+/// One run's worth of stage timings feeding the pipeline receipt. ASR runs
+/// once per sample (format on/off share the same transcript, matching
+/// reality: ASR happens regardless of the Smart Format setting).
+struct StageSample {
+    asr_ms: u64,
+    format_off_ms: u64,
+    format_on_ms: u64,
+    insertion_off_ms: u64,
+    insertion_on_ms: u64,
+}
+
+impl StageSample {
+    fn total_off_ms(&self) -> u64 {
+        self.asr_ms + self.format_off_ms + self.insertion_off_ms
+    }
+
+    fn total_on_ms(&self) -> u64 {
+        self.asr_ms + self.format_on_ms + self.insertion_on_ms
+    }
+}
+
+fn stage_stats(values: &[u64]) -> serde_json::Value {
+    serde_json::json!({
+        "measurementsMs": values,
+        "p50": percentile(values.to_vec(), 50.0),
+        "p95": percentile(values.to_vec(), 95.0),
+    })
+}
+
+struct FixtureBenchmarkResult {
+    fixture: String,
+    fixture_sha256: String,
+    fixture_bytes: usize,
+    audio_seconds: f64,
+    asr_wall_ms: Vec<u64>,
+    last_transcript: String,
+    samples: Vec<StageSample>,
+}
+
+/// Run the ASR-plus-local-pipeline-plus-mocked-insertion loop for one WAV
+/// fixture against an already-prepared (prewarmed) `provider`. Called once
+/// per fixture; the caller prewarms and warms up the provider exactly once
+/// regardless of how many fixtures follow.
+async fn run_fixture_benchmark(
+    provider: &dyn plainsong_lib::asr::AsrProvider,
+    mock_insertion: &MockInsertionSink,
+    wav_path: &Path,
+    runs: usize,
+) -> Result<FixtureBenchmarkResult, String> {
+    let audio_bytes = std::fs::read(wav_path)
+        .map_err(|e| format!("Failed to read WAV '{}': {e}", wav_path.display()))?;
+    let audio_seconds = wav_duration_seconds(wav_path)?;
+    let fixture_sha256 = hex::encode(Sha256::digest(&audio_bytes));
+    // Repo-relative, not canonicalized: see `existing_wav_path`'s doc comment
+    // for why an absolute path does not belong in a committed-evidence-style
+    // receipt.
+    let fixture = wav_path.display().to_string();
+
+    let mut asr_wall_ms: Vec<u64> = Vec::with_capacity(runs);
+    let mut samples: Vec<StageSample> = Vec::with_capacity(runs);
+    let mut last_transcript = String::new();
+
+    for run_index in 1..=runs {
+        let start = Instant::now();
+        let (text, asr_ms) = match provider.transcribe_bytes(&audio_bytes).await {
+            Ok(result) => {
+                let asr_ms = start.elapsed().as_millis() as u64;
+                asr_wall_ms.push(asr_ms);
+                last_transcript = result.text.clone();
+                (result.text, asr_ms)
+            }
+            Err(e) => {
+                return Err(format!(
+                    "Transcription run {run_index}/{runs} on '{}' failed: {e}",
+                    wav_path.display()
+                ));
+            }
+        };
+
+        // Full post-ASR pipeline, Smart Format off then on, sharing the one
+        // ASR result above -- matching reality: ASR runs once regardless of
+        // the Smart Format setting. See `build_pipeline_report` for what
+        // "format on" does and does not cover.
+        let format_off_started = Instant::now();
+        let format_off = apply_dictation_pipeline(DictationPipelineInput {
+            text: text.as_str(),
+            dictionary_entries: &[],
+            snippets: &[],
+            app_target: None,
+            mode_preset: "voice",
+            smart_formatting_enabled: false,
+            recent_inserted_text: None,
+            destination_category: DictationAppCategory::Other,
+        });
+        let format_off_ms = format_off_started.elapsed().as_millis() as u64;
+
+        let format_on_started = Instant::now();
+        let format_on = apply_dictation_pipeline(DictationPipelineInput {
+            text: text.as_str(),
+            dictionary_entries: &[],
+            snippets: &[],
+            app_target: None,
+            mode_preset: "voice",
+            smart_formatting_enabled: true,
+            recent_inserted_text: None,
+            destination_category: DictationAppCategory::Other,
+        });
+        let format_on_ms = format_on_started.elapsed().as_millis() as u64;
+
+        let insertion_off_ms = mock_insertion.insert(format_off.text.as_str()).as_millis() as u64;
+        let insertion_on_ms = mock_insertion.insert(format_on.text.as_str()).as_millis() as u64;
+
+        samples.push(StageSample {
+            asr_ms,
+            format_off_ms,
+            format_on_ms,
+            insertion_off_ms,
+            insertion_on_ms,
+        });
+    }
+
+    Ok(FixtureBenchmarkResult {
+        fixture,
+        fixture_sha256,
+        fixture_bytes: audio_bytes.len(),
+        audio_seconds,
+        asr_wall_ms,
+        last_transcript,
+        samples,
+    })
+}
+
+fn fixture_report(result: &FixtureBenchmarkResult) -> serde_json::Value {
+    let asr_ms: Vec<u64> = result.samples.iter().map(|sample| sample.asr_ms).collect();
+    let format_off_ms: Vec<u64> = result
+        .samples
+        .iter()
+        .map(|sample| sample.format_off_ms)
+        .collect();
+    let format_on_ms: Vec<u64> = result
+        .samples
+        .iter()
+        .map(|sample| sample.format_on_ms)
+        .collect();
+    let insertion_off_ms: Vec<u64> = result
+        .samples
+        .iter()
+        .map(|sample| sample.insertion_off_ms)
+        .collect();
+    let insertion_on_ms: Vec<u64> = result
+        .samples
+        .iter()
+        .map(|sample| sample.insertion_on_ms)
+        .collect();
+    let total_off_ms: Vec<u64> = result
+        .samples
+        .iter()
+        .map(StageSample::total_off_ms)
+        .collect();
+    let total_on_ms: Vec<u64> = result
+        .samples
+        .iter()
+        .map(StageSample::total_on_ms)
+        .collect();
+
+    serde_json::json!({
+        "fixture": result.fixture,
+        "fixtureSha256": result.fixture_sha256,
+        "fixtureBytes": result.fixture_bytes,
+        "audioSeconds": round_two(result.audio_seconds),
+        "runs": result.samples.len(),
+        "sampleCount": result.samples.len(),
+        "stageBreakdownMs": {
+            "asr": stage_stats(&asr_ms),
+            "formatOff": stage_stats(&format_off_ms),
+            "formatOn": stage_stats(&format_on_ms),
+            "insertionMockOff": stage_stats(&insertion_off_ms),
+            "insertionMockOn": stage_stats(&insertion_on_ms),
+        },
+        "formatOff": {
+            "measurementsMs": total_off_ms,
+            "pipelineMsP50": percentile(total_off_ms.clone(), 50.0),
+            "pipelineMsP95": percentile(total_off_ms.clone(), 95.0),
+        },
+        "formatOn": {
+            "measurementsMs": total_on_ms,
+            "pipelineMsP50": percentile(total_on_ms.clone(), 50.0),
+            "pipelineMsP95": percentile(total_on_ms.clone(), 95.0),
+        },
+    })
+}
+
+struct PipelineReportInput<'a> {
+    provider: &'a str,
+    model: &'a str,
+    runs: usize,
+    primary: &'a FixtureBenchmarkResult,
+    secondary: &'a FixtureBenchmarkResult,
+}
+
+/// Build the `metricScope: "asr_and_local_format_only"` receipt.
+///
+/// The name is deliberately narrower than "end to end," which this measures
+/// only a slice of. What it does NOT cover, all excluded on purpose and all
+/// documented in the receipt itself so a reader never has to find this
+/// comment:
+///
+/// - The stop *gesture* (hotkey release) and the Electron-to-sidecar IPC hop
+///   before `stop_dictation_for_sidecar` even starts its own clock. Compare
+///   against the runtime `DictationTimingRecord` in production for that
+///   number, which is real but per-session, not a controlled benchmark.
+/// - `DICTATION_STOP_CAPTURE_TAIL_MS` (`captureTailExcludedMs` below): a
+///   deliberate 120ms sleep the real stop handler awaits, before its own
+///   clock starts, so a speaker's final consonant lands in the capture.
+/// - Real insertion: mocked (see `MockInsertionSink`) because a headless
+///   benchmark has no live GUI target or Accessibility permission, and must
+///   not touch the operator's real system clipboard.
+/// - The optional LLM-backed Smart Format pass: `formatOn` here measures
+///   only the deterministic *local* smart-formatting pass (`text::format`).
+///   The LLM pass sits behind `dictation_format_timeout` in `lib.rs`, calls a
+///   live model/provider, and cannot be driven safely, deterministically, or
+///   offline from a headless benchmark; its real timing and timeout rate are
+///   captured by the runtime `DictationTimingRecord` on every live dictation
+///   instead.
+///
+/// Primary numbers (and the only ones any gate threshold applies to) come
+/// from a short, single-utterance fixture -- the regime the audit's
+/// 130-700ms competitor bar is actually about. The `real-speech-44s.wav`
+/// long-form fixture is retained as `secondaryLongForm`, informational only:
+/// ASR decode time scales with audio length, so a 44s clip's pipeline time
+/// is dominated by that scaling, not by anything this benchmark is meant to
+/// gate.
+fn build_pipeline_report(input: PipelineReportInput<'_>) -> serde_json::Value {
+    serde_json::json!({
+        "schemaVersion": 1,
+        "benchmarkVersion": env!("CARGO_PKG_VERSION"),
+        "generatedAt": chrono::Utc::now().to_rfc3339(),
+        "thresholdProfile": "beta-reference-v1",
+        "metricScope": "asr_and_local_format_only",
+        "hostApplication": "benchmark-cli",
+        "warmState": "warm",
+        "hardware": hardware_context(),
+        "provider": input.provider,
+        "model": input.model,
+        "percentileBasis": format!("{} repeats of one fixture", input.runs),
+        "insertionMocked": true,
+        "insertionStrategy": "mocked-in-memory-copy",
+        "insertionStrategyNote": "Real system insertion needs a focused GUI target and, for auto mode, macOS Accessibility permission -- neither available in an automated benchmark, and copying to the real system clipboard on every run would also clobber the operator's own clipboard. This measures a same-shape in-memory copy instead (see MockInsertionSink). Real insertion latency is captured in production by the runtime dictation timing record (dictation_timing.rs) and logged on every live dictation.",
+        "formatOnScopeNote": "\"formatOn\" measures the deterministic local smart-formatting pass (text::format), not the optional LLM-based Smart Format pass. That pass calls a live model/provider behind dictation_format_timeout (lib.rs) and cannot be driven safely or deterministically from a headless benchmark; its real timing and timeout rate are captured by the runtime dictation timing record on every live dictation.",
+        "captureTailExcludedMs": CAPTURE_TAIL_EXCLUDED_MS,
+        "captureTailExcludedNote": "The real stop handler (stop_dictation_for_sidecar) awaits a deliberate DICTATION_STOP_CAPTURE_TAIL_MS sleep, so a speaker's final consonant lands in the capture, before its own clock -- and this benchmark's -- ever starts. That wait is real, user-felt latency this receipt does not include.",
+        "zeroPointScopeNote": "This receipt's clock starts at transcribe_bytes with audio already in memory. It does not include the stop gesture (hotkey release), the Electron-to-sidecar IPC hop, or audio finalization -- see the runtime DictationTimingRecord (dictation_timing.rs) for those, measured per live session rather than as a controlled benchmark.",
+        "primary": fixture_report(input.primary),
+        "secondaryLongForm": fixture_report(input.secondary),
+    })
+}
+
 fn main() {
     let raw_args: Vec<String> = std::env::args().skip(1).collect();
     let args = match parse_args(&raw_args) {
@@ -327,35 +710,17 @@ fn main() {
         }
     };
 
-    let audio_bytes = match std::fs::read(&args.wav) {
-        Ok(bytes) => bytes,
-        Err(e) => {
-            eprintln!("Failed to read WAV '{}': {e}", args.wav.display());
-            std::process::exit(2);
-        }
-    };
-    let audio_seconds = match wav_duration_seconds(&args.wav) {
-        Ok(duration) => duration,
-        Err(error) => {
-            eprintln!("{error}");
-            std::process::exit(2);
-        }
-    };
-    let fixture_sha256 = hex::encode(Sha256::digest(&audio_bytes));
-    let fixture = args
-        .wav
-        .canonicalize()
-        .unwrap_or_else(|_| args.wav.clone())
-        .display()
-        .to_string();
-
     let runtime = tokio::runtime::Runtime::new().expect("tokio runtime");
     runtime.block_on(async move {
         let provider = AsrProviderFactory::create_with_model(args.provider_type, Some(&args.model));
 
         eprintln!(
-            "Benchmarking {}/{} on {} ({audio_seconds:.1}s audio), {} runs...",
-            args.provider_name, args.model, fixture, args.runs
+            "Benchmarking {}/{} -- primary {} + secondary {}, {} runs each...",
+            args.provider_name,
+            args.model,
+            args.wav.display(),
+            args.secondary_wav.display(),
+            args.runs
         );
 
         // Measure cold model preparation separately. Timed samples below are
@@ -371,11 +736,18 @@ fn main() {
         }
         let cold_model_preparation_ms = cold_prepare_started.elapsed().as_millis() as u64;
 
-        // One functional inference warm-up catches a model that loads but
-        // cannot decode the fixture. It is also reported, but not included in
-        // the percentile sample.
+        // One functional inference warm-up (against the primary fixture)
+        // catches a model that loads but cannot decode audio. It is also
+        // reported, but not included in either fixture's percentile sample.
+        let warmup_audio = match std::fs::read(&args.wav) {
+            Ok(bytes) => bytes,
+            Err(e) => {
+                eprintln!("Failed to read WAV '{}': {e}", args.wav.display());
+                std::process::exit(2);
+            }
+        };
         let warmup_started = Instant::now();
-        let warmup_result = provider.transcribe_bytes(&audio_bytes).await;
+        let warmup_result = provider.transcribe_bytes(&warmup_audio).await;
         let warmup_inference_ms = warmup_started.elapsed().as_millis() as u64;
         if let Err(e) = warmup_result {
             eprintln!(
@@ -386,26 +758,41 @@ fn main() {
             std::process::exit(1);
         }
 
-        let mut wall_ms: Vec<u64> = Vec::with_capacity(args.runs);
-        let mut last_text = String::new();
-        for run_index in 1..=args.runs {
-            let start = Instant::now();
-            match provider.transcribe_bytes(&audio_bytes).await {
-                Ok(result) => {
-                    wall_ms.push(start.elapsed().as_millis() as u64);
-                    last_text = result.text;
-                }
-                Err(e) => {
-                    eprintln!("Transcription run {run_index}/{} failed: {e}", args.runs);
-                    std::process::exit(1);
-                }
-            }
-        }
+        let mock_insertion = MockInsertionSink::new();
 
-        let p50 = percentile(wall_ms.clone(), 50.0);
-        let p95 = percentile(wall_ms.clone(), 95.0);
+        let primary = match run_fixture_benchmark(
+            provider.as_ref(),
+            &mock_insertion,
+            &args.wav,
+            args.runs,
+        )
+        .await
+        {
+            Ok(result) => result,
+            Err(error) => {
+                eprintln!("{error}");
+                std::process::exit(1);
+            }
+        };
+        let secondary = match run_fixture_benchmark(
+            provider.as_ref(),
+            &mock_insertion,
+            &args.secondary_wav,
+            args.runs,
+        )
+        .await
+        {
+            Ok(result) => result,
+            Err(error) => {
+                eprintln!("{error}");
+                std::process::exit(1);
+            }
+        };
+
+        let p50 = percentile(primary.asr_wall_ms.clone(), 50.0);
+        let p95 = percentile(primary.asr_wall_ms.clone(), 95.0);
         let speedup = if p50 > 0 {
-            audio_seconds / (p50 as f64 / 1000.0)
+            primary.audio_seconds / (p50 as f64 / 1000.0)
         } else {
             0.0
         };
@@ -413,14 +800,14 @@ fn main() {
         let report = build_report(BenchmarkReportInput {
             provider: &args.provider_name,
             model: &args.model,
-            fixture: &fixture,
-            fixture_sha256: &fixture_sha256,
-            fixture_bytes: audio_bytes.len(),
-            audio_seconds,
+            fixture: &primary.fixture,
+            fixture_sha256: &primary.fixture_sha256,
+            fixture_bytes: primary.fixture_bytes,
+            audio_seconds: primary.audio_seconds,
             cold_model_preparation_ms,
             warmup_inference_ms,
-            wall_ms: &wall_ms,
-            transcript: &last_text,
+            wall_ms: &primary.asr_wall_ms,
+            transcript: &primary.last_transcript,
         });
         let report_json = serde_json::to_string(&report).unwrap();
         if let Some(parent) = args.report_path.parent() {
@@ -441,9 +828,56 @@ fn main() {
         }
         println!("{report_json}");
         eprintln!(
-            "p50 {p50}ms, p95 {p95}ms, {speedup:.1}x real-time for \
-             {audio_seconds:.1}s of audio."
+            "provider-only (primary fixture): p50 {p50}ms, p95 {p95}ms, {speedup:.1}x real-time \
+             for {:.1}s of audio.",
+            primary.audio_seconds
         );
+
+        let pipeline_report = build_pipeline_report(PipelineReportInput {
+            provider: &args.provider_name,
+            model: &args.model,
+            runs: args.runs,
+            primary: &primary,
+            secondary: &secondary,
+        });
+        let pipeline_report_json = serde_json::to_string(&pipeline_report).unwrap();
+        if let Some(parent) = args.report_path_e2e.parent() {
+            if let Err(error) = std::fs::create_dir_all(parent) {
+                eprintln!("Failed to create pipeline latency report directory: {error}");
+                std::process::exit(1);
+            }
+        }
+        if let Err(error) = std::fs::write(
+            &args.report_path_e2e,
+            serde_json::to_string_pretty(&pipeline_report).unwrap() + "\n",
+        ) {
+            eprintln!(
+                "Failed to write pipeline latency report '{}': {error}",
+                args.report_path_e2e.display()
+            );
+            std::process::exit(1);
+        }
+        println!("{pipeline_report_json}");
+        eprintln!(
+            "pipeline (primary): format-off p50 {}ms / p95 {}ms, format-on p50 {}ms / p95 {}ms.",
+            percentile(primary.samples.iter().map(StageSample::total_off_ms).collect(), 50.0),
+            percentile(primary.samples.iter().map(StageSample::total_off_ms).collect(), 95.0),
+            percentile(primary.samples.iter().map(StageSample::total_on_ms).collect(), 50.0),
+            percentile(primary.samples.iter().map(StageSample::total_on_ms).collect(), 95.0),
+        );
+        eprintln!(
+            "pipeline (secondary, informational only): format-off p50 {}ms / p95 {}ms, format-on p50 {}ms / p95 {}ms.",
+            percentile(secondary.samples.iter().map(StageSample::total_off_ms).collect(), 50.0),
+            percentile(secondary.samples.iter().map(StageSample::total_off_ms).collect(), 95.0),
+            percentile(secondary.samples.iter().map(StageSample::total_on_ms).collect(), 50.0),
+            percentile(secondary.samples.iter().map(StageSample::total_on_ms).collect(), 95.0),
+        );
+        eprintln!(
+            "note: this benchmark's clock excludes the stop gesture, the Electron-to-sidecar IPC \
+             hop, the {CAPTURE_TAIL_EXCLUDED_MS}ms DICTATION_STOP_CAPTURE_TAIL_MS wait, real \
+             insertion, and any LLM formatting pass. See the receipt's own scope notes."
+        );
+
         use std::io::Write;
         let _ = std::io::stdout().flush();
         let _ = std::io::stderr().flush();
@@ -513,9 +947,46 @@ mod tests {
     }
 
     #[test]
+    fn missing_secondary_fixture_is_also_rejected_up_front() {
+        let error = parse_args(&strings(&[
+            "--secondary-wav",
+            "/definitely/missing/plainsong-secondary.wav",
+        ]))
+        .unwrap_err();
+        assert!(error.contains("WAV fixture does not exist"), "{error}");
+    }
+
+    #[test]
+    fn fixture_paths_default_to_repo_relative_short_and_long_form() {
+        // Checks the DEFAULT_* constants directly rather than round-tripping
+        // through `parse_args` with no `--wav`/`--secondary-wav` override:
+        // `cargo test` runs this binary's tests with the crate root
+        // (`rust-sidecar/`) as the working directory, not the repo root
+        // (`nautilus-bot/`) the defaults are relative to, so the defaults
+        // would never resolve here regardless of whether they're correct.
+        // `cargo run` (how `bun run benchmark:latency` actually invokes this
+        // binary) preserves the caller's cwd instead, which is why the
+        // defaults are written relative to the repo root in the first place.
+        assert_eq!(
+            DEFAULT_WAV, "scripts/fixtures/local-quality-gate.wav",
+            "primary fixture must be the short-utterance reference regime"
+        );
+        assert_eq!(
+            DEFAULT_SECONDARY_WAV,
+            "scripts/fixtures/real-speech-44s.wav"
+        );
+        assert!(
+            !PathBuf::from(DEFAULT_WAV).is_absolute(),
+            "default fixture paths must stay repo-relative, not canonicalized"
+        );
+    }
+
+    #[test]
     fn report_path_can_be_overridden_without_touching_the_canonical_receipt() {
         let args = match parse_args(&strings(&[
             "--wav",
+            "Cargo.toml",
+            "--secondary-wav",
             "Cargo.toml",
             "--out",
             "/tmp/plainsong-parakeet-comparison.json",
@@ -553,7 +1024,7 @@ mod tests {
         let report = build_report(BenchmarkReportInput {
             provider: "whisper",
             model: "base.en",
-            fixture: "/tmp/fixture.wav",
+            fixture: "scripts/fixtures/fixture.wav",
             fixture_sha256: "abc123",
             fixture_bytes: 42,
             audio_seconds: 2.5,
@@ -565,7 +1036,7 @@ mod tests {
 
         assert_eq!(report["provider"], "whisper");
         assert_eq!(report["model"], "base.en");
-        assert_eq!(report["fixture"], "/tmp/fixture.wav");
+        assert_eq!(report["fixture"], "scripts/fixtures/fixture.wav");
         assert_eq!(report["fixtureSha256"], "abc123");
         assert_eq!(report["fixtureBytes"], 42);
         assert_eq!(report["audioSeconds"], 2.5);
@@ -586,5 +1057,235 @@ mod tests {
         assert_eq!(report["transcriptWordCount"], 2);
         assert_eq!(report["transcriptSample"], "spoken fixture");
         assert_eq!(report["transcriptTailSample"], "spoken fixture");
+    }
+
+    #[test]
+    fn e2e_report_path_defaults_alongside_the_provider_only_path() {
+        // Fixture existence is irrelevant to this assertion; override both
+        // with a file that actually exists relative to `cargo test`'s
+        // working directory (the crate root) so only report-path defaulting
+        // is under test. See `fixture_paths_default_to_repo_relative_short_and_long_form`
+        // for why the real fixture defaults can't be exercised this way.
+        let args = match parse_args(&strings(&[
+            "--wav",
+            "Cargo.toml",
+            "--secondary-wav",
+            "Cargo.toml",
+        ]))
+        .expect("parse benchmark args")
+        {
+            ParseOutcome::Run(args) => args,
+            ParseOutcome::Help => panic!("expected runnable benchmark args"),
+        };
+
+        assert_eq!(
+            args.report_path,
+            PathBuf::from("artifacts/qa/dictation-latency.json")
+        );
+        assert_eq!(
+            args.report_path_e2e,
+            PathBuf::from("artifacts/qa/dictation-latency-e2e.json")
+        );
+    }
+
+    #[test]
+    fn e2e_report_path_can_be_overridden_independently_of_out() {
+        let args = match parse_args(&strings(&[
+            "--wav",
+            "Cargo.toml",
+            "--secondary-wav",
+            "Cargo.toml",
+            "--out",
+            "/tmp/provider-only.json",
+            "--out-e2e",
+            "/tmp/end-to-end.json",
+        ]))
+        .expect("parse benchmark args")
+        {
+            ParseOutcome::Run(args) => args,
+            ParseOutcome::Help => panic!("expected runnable benchmark args"),
+        };
+
+        assert_eq!(args.report_path, PathBuf::from("/tmp/provider-only.json"));
+        assert_eq!(args.report_path_e2e, PathBuf::from("/tmp/end-to-end.json"));
+    }
+
+    #[test]
+    fn e2e_report_path_may_only_be_specified_once() {
+        let error = parse_args(&strings(&[
+            "--out-e2e",
+            "/tmp/first.json",
+            "--out-e2e",
+            "/tmp/second.json",
+        ]))
+        .unwrap_err();
+
+        assert!(
+            error.contains("--out-e2e may only be specified once"),
+            "{error}"
+        );
+    }
+
+    fn stage_sample(
+        asr_ms: u64,
+        format_off_ms: u64,
+        format_on_ms: u64,
+        insertion_off_ms: u64,
+        insertion_on_ms: u64,
+    ) -> StageSample {
+        StageSample {
+            asr_ms,
+            format_off_ms,
+            format_on_ms,
+            insertion_off_ms,
+            insertion_on_ms,
+        }
+    }
+
+    fn fixture_result(fixture: &str, samples: Vec<StageSample>) -> FixtureBenchmarkResult {
+        let asr_wall_ms = samples.iter().map(|sample| sample.asr_ms).collect();
+        FixtureBenchmarkResult {
+            fixture: fixture.to_string(),
+            fixture_sha256: "abc123".to_string(),
+            fixture_bytes: 42,
+            audio_seconds: 2.5,
+            asr_wall_ms,
+            last_transcript: "spoken fixture".to_string(),
+            samples,
+        }
+    }
+
+    #[test]
+    fn stage_sample_totals_sum_asr_format_and_insertion() {
+        let sample = stage_sample(90, 2, 5, 1, 1);
+        assert_eq!(sample.total_off_ms(), 93);
+        assert_eq!(sample.total_on_ms(), 96);
+    }
+
+    #[test]
+    fn pipeline_report_has_the_scope_and_stage_breakdown_the_gate_expects() {
+        let primary = fixture_result(
+            "scripts/fixtures/local-quality-gate.wav",
+            vec![
+                stage_sample(80, 1, 3, 1, 1),
+                stage_sample(90, 2, 4, 1, 1),
+                stage_sample(100, 1, 3, 1, 2),
+            ],
+        );
+        let secondary = fixture_result(
+            "scripts/fixtures/real-speech-44s.wav",
+            vec![
+                stage_sample(480, 1, 3, 1, 1),
+                stage_sample(490, 2, 4, 1, 1),
+                stage_sample(500, 1, 3, 1, 2),
+            ],
+        );
+        let report = build_pipeline_report(PipelineReportInput {
+            provider: "whisper",
+            model: "base.en",
+            runs: 3,
+            primary: &primary,
+            secondary: &secondary,
+        });
+
+        assert_eq!(report["schemaVersion"], 1);
+        assert_eq!(report["thresholdProfile"], "beta-reference-v1");
+        assert_eq!(report["metricScope"], "asr_and_local_format_only");
+        assert_eq!(report["warmState"], "warm");
+        assert_eq!(report["provider"], "whisper");
+        assert_eq!(report["model"], "base.en");
+        assert_eq!(report["percentileBasis"], "3 repeats of one fixture");
+        assert_eq!(report["insertionMocked"], true);
+        assert_eq!(report["insertionStrategy"], "mocked-in-memory-copy");
+        assert_eq!(report["captureTailExcludedMs"], 120);
+        assert!(report["insertionStrategyNote"]
+            .as_str()
+            .unwrap()
+            .contains("Accessibility"));
+        assert!(report["formatOnScopeNote"]
+            .as_str()
+            .unwrap()
+            .contains("dictation_format_timeout"));
+        assert!(report["captureTailExcludedNote"]
+            .as_str()
+            .unwrap()
+            .contains("DICTATION_STOP_CAPTURE_TAIL_MS"));
+
+        // Hard-coded expected values (computed by hand from the sample list
+        // above), not the same `percentile` call the report itself uses --
+        // a self-referential comparison would pass even if the report fed
+        // percentile() the wrong vector entirely.
+        //   primary total_off = [82, 93, 102] -> P50 93, P95 102
+        //   primary total_on  = [84, 95, 105] -> P50 95, P95 105
+        assert_eq!(
+            report["primary"]["fixture"],
+            "scripts/fixtures/local-quality-gate.wav"
+        );
+        assert_eq!(report["primary"]["formatOff"]["pipelineMsP50"], 93);
+        assert_eq!(report["primary"]["formatOff"]["pipelineMsP95"], 102);
+        assert_eq!(report["primary"]["formatOn"]["pipelineMsP50"], 95);
+        assert_eq!(report["primary"]["formatOn"]["pipelineMsP95"], 105);
+        //   secondary total_off = [482, 493, 502] -> P50 493, P95 502
+        //   secondary total_on  = [484, 495, 505] -> P50 495, P95 505
+        assert_eq!(
+            report["secondaryLongForm"]["fixture"],
+            "scripts/fixtures/real-speech-44s.wav"
+        );
+        assert_eq!(
+            report["secondaryLongForm"]["formatOff"]["pipelineMsP50"],
+            493
+        );
+        assert_eq!(
+            report["secondaryLongForm"]["formatOff"]["pipelineMsP95"],
+            502
+        );
+        assert_eq!(
+            report["secondaryLongForm"]["formatOn"]["pipelineMsP50"],
+            495
+        );
+        assert_eq!(
+            report["secondaryLongForm"]["formatOn"]["pipelineMsP95"],
+            505
+        );
+
+        for stage in [
+            "asr",
+            "formatOff",
+            "formatOn",
+            "insertionMockOff",
+            "insertionMockOn",
+        ] {
+            assert!(
+                report["primary"]["stageBreakdownMs"][stage]["p50"].is_u64(),
+                "missing stage breakdown for {stage}"
+            );
+            assert!(
+                report["primary"]["stageBreakdownMs"][stage]["measurementsMs"]
+                    .as_array()
+                    .is_some_and(|values| values.len() == 3),
+                "stage {stage} should keep one measurement per run"
+            );
+        }
+    }
+
+    #[test]
+    fn mock_insertion_sink_actually_stores_what_it_is_given() {
+        let sink = MockInsertionSink::new();
+        // Must not touch the real system clipboard: running this test (or
+        // the benchmark) repeatedly must never depend on, or clobber,
+        // whatever the operator has actually copied.
+        let short_text = "hi";
+        let long_text = "a".repeat(10_000);
+
+        let elapsed_short = sink.insert(short_text);
+        // A stub that never touches the buffer would still pass a bare
+        // "< 50ms" timing assertion; reading the content back is what
+        // proves `insert` did real, correct work.
+        assert_eq!(sink.contents(), short_text);
+        assert!(elapsed_short.as_millis() < 50);
+
+        let elapsed_long = sink.insert(&long_text);
+        assert_eq!(sink.contents(), long_text);
+        assert!(elapsed_long.as_millis() < 50);
     }
 }

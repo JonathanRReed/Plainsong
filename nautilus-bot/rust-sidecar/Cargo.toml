@@ -111,6 +111,14 @@ objc2-speech = "0.3.2"
 objc2-app-kit = { version = "0.3.2", features = ["NSWorkspace", "NSRunningApplication"] }
 objc2-foundation = { version = "0.3.2", features = ["NSString"] }
 
+[dev-dependencies]
+# Only "test-util" beyond what [dependencies] already enables via "full":
+# `tokio::time::pause`/`#[tokio::test(start_paused = true)]` for deterministic
+# timeout tests that don't race a real sleep against the wall clock. Cargo
+# unions features across dependency kinds for test/bench builds only, so this
+# never ships in the release binary.
+tokio = { version = "1", features = ["test-util"] }
+
 [features]
 default = ["asr-all", "sqlcipher", "whisper-gpu"]
 

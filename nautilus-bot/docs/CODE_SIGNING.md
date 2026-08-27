@@ -187,6 +187,20 @@ spctl --assess --type execute --verbose=4 \
 For a launchable build, stapler must validate successfully and `spctl` must
 report `accepted` with `source=Notarized Developer ID`.
 
+Dictation latency is not covered by the trust/size gates above and needs its
+own measurement per candidate: run `bun run sidecar:build:release` then `bun
+run benchmark:latency -- --provider whisper --model base.en --runs 10`,
+followed by `bun run gate:dictation-latency` and `bun run
+gate:dictation-latency:e2e`. This writes `artifacts/qa/dictation-latency.json`
+(ASR decode only) and `artifacts/qa/dictation-latency-e2e.json` (`metricScope:
+"asr_and_local_format_only"` -- ASR plus the local formatting pipeline plus a
+mocked insertion stage; see the receipt's own `insertionStrategyNote` and
+`formatOnScopeNote` for exactly what that scope does and doesn't cover). Both
+receipts are gitignored by design (`artifacts/` is never committed) and must
+stay that way — attach them to the release evidence bundle by hand alongside
+the other `artifacts/qa/` receipts referenced above, the same way a stale or
+missing receipt is a launch blocker.
+
 ## Embedded executable scope
 
 The packaged application contains three important native executables under
