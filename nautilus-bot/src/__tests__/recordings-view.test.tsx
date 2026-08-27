@@ -3003,6 +3003,146 @@ describe("RecordingsView", () => {
     });
   });
 
+  describe("meeting recovery", () => {
+    const user = () => userEvent.setup();
+
+    async function openDegradedMeeting(extra: Record<string, unknown>) {
+      recordings = [{ ...recordings[0], ...extra } as Recording];
+      backend.getRecording.mockResolvedValue({
+        ...recordings[0],
+        summary: "",
+        actionItems: [],
+      });
+      render(<RecordingsView />);
+      await user().click(screen.getByText("Weekly sync"));
+      return screen.findByText("The record");
+    }
+
+    it("renders the capture caveat on the meeting record", async () => {
+      await openDegradedMeeting({
+        captureDegradedSummary: "System audio recorded nothing for 240s.",
+      });
+
+      expect(
+        await screen.findByText(/System audio recorded nothing for 240s\./)
+      ).toBeInTheDocument();
+      expect(
+        screen.getByText("Some of this meeting was not captured")
+      ).toBeInTheDocument();
+    });
+
+    it("states an incomplete transcript honestly and offers both ways out", async () => {
+      await openDegradedMeeting({
+        transcriptComplete: false,
+        transcriptDegradedReason: "2 of 10 chunk(s) failed.",
+      });
+
+      expect(
+        await screen.findByText(
+          "Transcript incomplete — audio kept for re-transcription"
+        )
+      ).toBeInTheDocument();
+      expect(
+        screen.getByRole("button", { name: /^Re-transcribe$/ })
+      ).toBeInTheDocument();
+      expect(
+        screen.getByRole("button", { name: /accept losing the audio/i })
+      ).toBeInTheDocument();
+    });
+
+    it("asks before acknowledging, and says what acknowledging costs", async () => {
+      await openDegradedMeeting({
+        transcriptComplete: false,
+        transcriptDegradedReason: "2 of 10 chunk(s) failed.",
+      });
+
+      fireEvent.click(
+        screen.getByRole("button", { name: /accept losing the audio/i })
+      );
+
+      expect(
+        await screen.findByText(/storage cleanup delete that audio/i)
+      ).toBeInTheDocument();
+      expect(backend.acknowledgeIncompleteTranscript).not.toHaveBeenCalled();
+
+      fireEvent.click(
+        within(screen.getByRole("dialog")).getByRole("button", {
+          name: /accept losing the audio/i,
+        })
+      );
+
+      await waitFor(() => {
+        expect(backend.acknowledgeIncompleteTranscript).toHaveBeenCalledWith(
+          "r1"
+        );
+      });
+    });
+
+    it("re-checks the saved audio and reports what it found", async () => {
+      backend.revalidateRecordingAudio.mockResolvedValueOnce({
+        recordingId: "r1",
+        recoverable: true,
+        message:
+          "Saved meeting audio was re-checked and is intact. Re-transcribe this meeting to finish it.",
+        assets: [{ role: "primary", lifecycle: "ready", error: null }],
+      });
+      await openDegradedMeeting({ status: "error" });
+
+      fireEvent.pointerDown(
+        screen.getByRole("button", { name: "Meeting options" }),
+        { button: 0 }
+      );
+      fireEvent.click(
+        await screen.findByRole("menuitem", { name: /re-check audio/i })
+      );
+
+      await waitFor(() => {
+        expect(backend.revalidateRecordingAudio).toHaveBeenCalledWith("r1");
+      });
+      expect(
+        await screen.findByText(/re-checked and is intact/i)
+      ).toBeInTheDocument();
+    });
+
+    it("does not claim a repair when the re-check fails", async () => {
+      backend.revalidateRecordingAudio.mockRejectedValueOnce(
+        new Error("Recording storage is busy.")
+      );
+      await openDegradedMeeting({ status: "error" });
+
+      fireEvent.pointerDown(
+        screen.getByRole("button", { name: "Meeting options" }),
+        { button: 0 }
+      );
+      fireEvent.click(
+        await screen.findByRole("menuitem", { name: /re-check audio/i })
+      );
+
+      expect(
+        await screen.findByText("Saved audio could not be fully read")
+      ).toBeInTheDocument();
+      expect(
+        screen.getByText("Recording storage is busy.")
+      ).toBeInTheDocument();
+    });
+
+    it("offers no recovery affordances for a healthy meeting", async () => {
+      await openDegradedMeeting({});
+
+      expect(
+        screen.queryByText(/transcript incomplete/i)
+      ).not.toBeInTheDocument();
+      fireEvent.pointerDown(
+        screen.getByRole("button", { name: "Meeting options" }),
+        { button: 0 }
+      );
+      await screen.findByRole("menuitem", { name: /move to dictation/i });
+      expect(
+        screen.queryByRole("menuitem", { name: /re-check audio/i })
+      ).not.toBeInTheDocument();
+    });
+  });
+
   describe("meeting notes failures", () => {
     it("shows a stored analysis failure on the list row with a retry", async () => {
       // The finding: a meeting whose summary, action items and title all failed

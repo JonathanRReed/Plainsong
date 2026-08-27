@@ -43,9 +43,11 @@ import {
   getRecording,
   openRecordingAudio,
   renameRecording,
+  acknowledgeIncompleteTranscript,
   retranscribeRecording,
   retryMeetingAnalysis,
   retryMeetingAutoName,
+  revalidateRecordingAudio,
   setRecordingSourceType,
   updateMeetingChatMessages,
   updateRecordingAnalysis,
@@ -116,6 +118,12 @@ import {
   type MeetingAnalysisStatusEvent,
 } from "@/lib/meeting-analysis-status";
 import { StatusBanner } from "@/components/ui/status-banner";
+import {
+  canRecheckMeetingAudio,
+  describeCaptureDegradation,
+  describeIncompleteTranscript,
+  readMeetingIntegrity,
+} from "@/lib/meeting-recovery";
 import { actionItemsToMarkdownList } from "@/lib/markdown";
 import { DocumentField } from "@/components/views/meetings/document-field";
 import { AudioIssueBanner } from "@/components/views/meetings/audio-issue-banner";
@@ -1121,6 +1129,17 @@ export function RecordingsView() {
   >(
     "all"
   );
+  // What the last audio re-check found, and whether an acknowledgement is
+  // waiting on a confirmation. Both are per-meeting and cleared on navigation.
+  const [audioRecheckResult, setAudioRecheckResult] = useState<{
+    recordingId: string;
+    recoverable: boolean;
+    message: string;
+  } | null>(null);
+  const [isRecheckingAudio, setIsRecheckingAudio] = useState(false);
+  const [pendingAcknowledgement, setPendingAcknowledgement] =
+    useState<Recording | null>(null);
+  const [isAcknowledging, setIsAcknowledging] = useState(false);
   // Why the last attempt to start a meeting did not. Held on screen rather than
   // shown as a toast: it carries the one action that resolves it.
   const [meetingStartFailure, setMeetingStartFailure] =
@@ -3529,6 +3548,94 @@ export function RecordingsView() {
   );
 
   const selectedAnalysisNotice = meetingAnalysisNotice(selectedRecording);
+  const selectedMeetingIntegrity = readMeetingIntegrity(selectedRecording);
+  const selectedIncompleteTranscript = describeIncompleteTranscript(
+    selectedMeetingIntegrity,
+  );
+  const selectedCaptureDegradation = describeCaptureDegradation(
+    selectedMeetingIntegrity,
+  );
+  const canRecheckSelectedAudio = canRecheckMeetingAudio(
+    selectedRecording,
+    selectedMeetingIntegrity,
+  );
+
+  /**
+   * Re-read the saved audio and repair the lifecycle rows describing it.
+   *
+   * A stop-time failure can condemn audio that is perfectly intact, and every
+   * runtime resolver refuses anything not marked `ready`. Before this the only
+   * escape was relaunching the app and hoping the startup reconcile covered it.
+   * The meeting's own status is left alone by the sidecar: this is evidence
+   * about files, not about whether it was transcribed.
+   */
+  const handleRecheckMeetingAudio = async (recordingIdToCheck: string) => {
+    setIsRecheckingAudio(true);
+    setAudioRecheckResult(null);
+    try {
+      const report = await revalidateRecordingAudio(recordingIdToCheck);
+      setAudioRecheckResult({
+        recordingId: recordingIdToCheck,
+        recoverable: Boolean(report?.recoverable),
+        message:
+          report?.message ??
+          (report?.recoverable
+            ? "The saved audio was re-checked and is intact."
+            : "The saved audio was re-checked and some of it could not be read."),
+      });
+      await refetch();
+      if (selectedRecording?.id === recordingIdToCheck) {
+        await refreshSelectedRecording(recordingIdToCheck);
+      }
+    } catch (error) {
+      const message =
+        error instanceof Error
+          ? error.message
+          : "Plainsong could not re-check this meeting's audio.";
+      setAudioRecheckResult({
+        recordingId: recordingIdToCheck,
+        recoverable: false,
+        message,
+      });
+      toast(message, "error");
+    } finally {
+      setIsRecheckingAudio(false);
+    }
+  };
+
+  /**
+   * Record that the reader accepts losing this meeting's audio.
+   *
+   * Storage policy holds the audio of an incomplete meeting back precisely
+   * because it is the only complete record of what was said. This releases it,
+   * and never claims the transcript became complete.
+   */
+  const handleAcknowledgeIncompleteTranscript = async (
+    recordingIdToAcknowledge: string,
+  ) => {
+    setIsAcknowledging(true);
+    try {
+      await acknowledgeIncompleteTranscript(recordingIdToAcknowledge);
+      setPendingAcknowledgement(null);
+      await refetch();
+      if (selectedRecording?.id === recordingIdToAcknowledge) {
+        await refreshSelectedRecording(recordingIdToAcknowledge);
+      }
+      toast(
+        "Noted. This meeting's audio is no longer held back from cleanup.",
+        "success",
+      );
+    } catch (error) {
+      toast(
+        error instanceof Error
+          ? error.message
+          : "Plainsong could not record that acknowledgement.",
+        "error",
+      );
+    } finally {
+      setIsAcknowledging(false);
+    }
+  };
 
   const handleRetryMeetingAnalysis = async (recordingIdToRetry: string) => {
     setAnalysisStatusByRecording((current) => ({
@@ -3742,6 +3849,19 @@ export function RecordingsView() {
                           : "Re-transcribe from audio"}
                       </DropdownMenuItem>
                     )}
+                    {canRecheckSelectedAudio && !isLiveSelectedMeeting && (
+                      <DropdownMenuItem
+                        disabled={isRecheckingAudio}
+                        onClick={() => {
+                          if (selectedRecording) {
+                            void handleRecheckMeetingAudio(selectedRecording.id);
+                          }
+                        }}
+                      >
+                        <FileAudio className="mr-2 h-4 w-4" />
+                        Re-check audio
+                      </DropdownMenuItem>
+                    )}
                     <DropdownMenuSeparator />
                     <DropdownMenuItem
                       onClick={() => {
@@ -3838,6 +3958,84 @@ export function RecordingsView() {
               </p>
             ) : null}
           </div>
+
+          {/* What the capture actually got. Rendered before anything derived
+              from the transcript, because it is the reason the transcript is
+              short. */}
+          {selectedCaptureDegradation ? (
+            <div className="shrink-0 px-6 pt-4">
+              <StatusBanner
+                tone="muted"
+                title={selectedCaptureDegradation.title}
+                message={selectedCaptureDegradation.message}
+              />
+            </div>
+          ) : null}
+
+          {/* A transcript the sidecar knows is incomplete, and the reason its
+              audio is still on disk. Both were reachable only programmatically
+              before this. */}
+          {selectedIncompleteTranscript && selectedRecording ? (
+            <div className="shrink-0 px-6 pt-4">
+              <StatusBanner
+                title={selectedIncompleteTranscript.title}
+                message={selectedIncompleteTranscript.message}
+                actions={
+                  <>
+                    {canRetranscribeRecording(selectedRecording) ? (
+                      <Button
+                        size="sm"
+                        variant="outline"
+                        onClick={() =>
+                          void handleRetranscribeRecording(selectedRecording.id)
+                        }
+                      >
+                        <RefreshCw className="mr-2 h-4 w-4" />
+                        Re-transcribe
+                      </Button>
+                    ) : null}
+                    {selectedIncompleteTranscript.audioHeld ? (
+                      <Button
+                        size="sm"
+                        variant="ghost"
+                        onClick={() =>
+                          setPendingAcknowledgement(selectedRecording)
+                        }
+                      >
+                        Accept losing the audio
+                      </Button>
+                    ) : null}
+                  </>
+                }
+              />
+            </div>
+          ) : null}
+
+          {/* What the last re-check found. The sidecar leaves the meeting's
+              own status alone, so this says what happened to the files. */}
+          {audioRecheckResult &&
+          audioRecheckResult.recordingId === selectedRecording?.id ? (
+            <div className="shrink-0 px-6 pt-4">
+              <StatusBanner
+                tone={audioRecheckResult.recoverable ? "muted" : "rust"}
+                title={
+                  audioRecheckResult.recoverable
+                    ? "Saved audio re-checked"
+                    : "Saved audio could not be fully read"
+                }
+                message={audioRecheckResult.message}
+                actions={
+                  <Button
+                    size="sm"
+                    variant="ghost"
+                    onClick={() => setAudioRecheckResult(null)}
+                  >
+                    Dismiss
+                  </Button>
+                }
+              />
+            </div>
+          ) : null}
 
           {/* Meeting notes that were never written. The list says the same
               thing; a reader who opened the meeting to look for the summary
@@ -6080,6 +6278,21 @@ export function RecordingsView() {
                                   : "Re-transcribe from audio"}
                               </DropdownMenuItem>
                             )}
+                            {canRecheckMeetingAudio(
+                              recording,
+                              readMeetingIntegrity(recording),
+                            ) && !isLiveRow && (
+                              <DropdownMenuItem
+                                disabled={isRecheckingAudio}
+                                onClick={(e) => {
+                                  e.stopPropagation();
+                                  void handleRecheckMeetingAudio(recording.id);
+                                }}
+                              >
+                                <FileAudio className="h-4 w-4 mr-2" />
+                                Re-check audio
+                              </DropdownMenuItem>
+                            )}
                             <DropdownMenuSeparator />
                             <DropdownMenuItem
                               onClick={async (e) => {
@@ -6197,6 +6410,53 @@ export function RecordingsView() {
             >
               <RefreshCw className="mr-2 h-4 w-4" />
               Replace and regenerate
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      {/* Acknowledging is the reader agreeing to lose something. The audio of
+          an incomplete meeting is the only complete record of it, so the cost
+          is stated before the button, never after. */}
+      <Dialog
+        open={pendingAcknowledgement !== null}
+        onOpenChange={(open) => {
+          if (!open) setPendingAcknowledgement(null);
+        }}
+      >
+        <DialogContent>
+          <DialogHeader>
+            <DialogTitle>Accept losing this meeting&apos;s audio?</DialogTitle>
+            <DialogDescription>
+              Part of this transcript is missing, and the saved audio is the
+              only complete record of what was said. Accepting this lets
+              Plainsong&apos;s storage cleanup delete that audio, after which
+              the meeting cannot be transcribed again. The transcript stays
+              exactly as it is — still incomplete.
+            </DialogDescription>
+          </DialogHeader>
+          <DialogFooter>
+            <Button
+              variant="outline"
+              onClick={() => setPendingAcknowledgement(null)}
+            >
+              Keep the audio
+            </Button>
+            <Button
+              variant="destructive"
+              disabled={isAcknowledging}
+              onClick={() => {
+                if (pendingAcknowledgement) {
+                  void handleAcknowledgeIncompleteTranscript(
+                    pendingAcknowledgement.id,
+                  );
+                }
+              }}
+            >
+              {isAcknowledging ? (
+                <Loader2 className="mr-2 h-4 w-4 animate-spin" />
+              ) : null}
+              Accept losing the audio
             </Button>
           </DialogFooter>
         </DialogContent>
