@@ -502,6 +502,12 @@ function checksForAppBundle(inspection) {
     speechHelperHasSecureTimestamp: signing.speechHelper.secureTimestamp,
     appHasNoSpeechEntitlement:
       entitlements.app.ok && !entitlements.app.hasSpeechRecognition,
+    // The app bundle holds the microphone, Apple Events and the Accessibility
+    // grant that lets it inject keystrokes anywhere. Library validation is the
+    // thing that stops that signature also being a loader for someone else's
+    // dylib, and notarization cannot be retracted once it has shipped.
+    appHasLibraryValidationEnabled:
+      entitlements.app.ok && !entitlements.app.hasLibraryValidationDisabled,
 
     // Every Electron child bundle must exist where sign-macos.mjs expects it —
     // a productName change that moved these would otherwise leave their

@@ -316,6 +316,10 @@ childProcess.spawnSync = function mockedSpawnSync(command, args = []) {
         isGenericHelper && process.env.GENERIC_HELPER_ENTITLEMENT
           ? "<key>" + process.env.GENERIC_HELPER_ENTITLEMENT + "</key><true/>"
           : "";
+      const appPrivilege =
+        basename === "Plainsong.app" && process.env.APP_ENTITLEMENT
+          ? "<key>" + process.env.APP_ENTITLEMENT + "</key><true/>"
+          : "";
       return commandResult(
         0,
         [
@@ -328,6 +332,7 @@ childProcess.spawnSync = function mockedSpawnSync(command, args = []) {
           helperBaseline,
           restrictedHelperPrivilege,
           genericHelperPrivilege,
+          appPrivilege,
           "</dict></plist>",
           "",
         ].join("\n"),
@@ -395,7 +400,7 @@ function runTrustScript(
   shortcutHelperEntitlement = "",
   sidecarEntitlement = "",
   releaseDir: string | null = null,
-  helperEntitlements: { restricted?: string; generic?: string } = {},
+  helperEntitlements: { restricted?: string; generic?: string; app?: string } = {},
 ) {
   const outPath = path.join(tempRoot, "artifacts", "qa", "macos", `${mode}-trust.json`);
   const markdownPath = path.join(tempRoot, "artifacts", "qa", "macos", `${mode}-trust.md`);
@@ -416,6 +421,7 @@ function runTrustScript(
     SIDECAR_ENTITLEMENT: sidecarEntitlement,
     RESTRICTED_HELPER_ENTITLEMENT: helperEntitlements.restricted ?? "",
     GENERIC_HELPER_ENTITLEMENT: helperEntitlements.generic ?? "",
+    APP_ENTITLEMENT: helperEntitlements.app ?? "",
     SPOOFED_PATH_TRACE_LOG: spoofedPathTracePath,
     SPEECH_HELPER_ENTITLEMENTS: speechHelperEntitlements,
     TRUST_SPCTL_RESULT: mode,
@@ -665,6 +671,8 @@ describe("verify-macos-release-trust.mjs", { timeout: 30_000 }, () => {
       expect(artifact.checks.zipFuseAsarIntegrityEnabled).toBe(true);
       expect(artifact.checks.zipFuseOnlyLoadAppFromAsarEnabled).toBe(true);
       expect(artifact.checks.zipFuseFileProtocolPrivilegesDisabled).toBe(true);
+      expect(artifact.checks.appHasLibraryValidationEnabled).toBe(true);
+      expect(artifact.checks.zipAppHasLibraryValidationEnabled).toBe(true);
       expect(artifact.checks.electronHelperPresent).toBe(true);
       expect(artifact.checks.electronHelperGpuPresent).toBe(true);
       expect(artifact.checks.electronHelperRendererPresent).toBe(true);
@@ -1001,6 +1009,44 @@ describe("verify-macos-release-trust.mjs", { timeout: 30_000 }, () => {
       }
     },
   );
+
+  it("fails closed when the app disables library validation", () => {
+    // This bundle holds the microphone, Apple Events and the Accessibility
+    // grant that lets Plainsong inject keystrokes anywhere. Library validation
+    // is what stops that signature also being a loader for someone else's
+    // dylib, and notarization cannot be retracted once it has shipped.
+    const { tempRoot, tempScript } = createTempRepo("verify-macos-release-trust.mjs");
+    try {
+      const { appPath } = createFakeMacosApp(tempRoot);
+      const { outPath, result } = runTrustScript(
+        tempScript,
+        tempRoot,
+        appPath,
+        "accept",
+        "AJ9VWBRNZN",
+        "mock-apple-tools",
+        "minimal",
+        "",
+        "",
+        null,
+        { app: "com.apple.security.cs.disable-library-validation" },
+      );
+
+      expect(result.status).not.toBe(0);
+      const artifact = JSON.parse(readFileSync(outPath, "utf8")) as {
+        checks: Record<string, boolean>;
+        pass: boolean;
+      };
+      expect(artifact.pass).toBe(false);
+      expect(artifact.checks.appHasLibraryValidationEnabled).toBe(false);
+      expect(artifact.checks.zipAppHasLibraryValidationEnabled).toBe(false);
+      // Signing is untouched, so this really is the entitlement failing it.
+      expect(artifact.checks.appSignatureValid).toBe(true);
+      expect(artifact.checks.appUsesDeveloperId).toBe(true);
+    } finally {
+      rmSync(tempRoot, { recursive: true, force: true });
+    }
+  });
 
   it("fails closed when an Electron helper bundle is missing entirely", () => {
     // A productName change would move these paths; without a presence check the

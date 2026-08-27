@@ -97,6 +97,11 @@ describe("macOS Apple Speech helper contract", () => {
     expect(appEntitlements).not.toContain(
       "com.apple.security.personal-information.speech-recognition",
     );
+    // The main process loads no unsigned native code, and this bundle is the one
+    // holding the microphone, Apple Events and the Accessibility grant.
+    expect(entitlementKeys("build-resources/entitlements.mac.plist")).not.toContain(
+      "com.apple.security.cs.disable-library-validation",
+    );
     expect(inheritedEntitlements).not.toContain(
       "com.apple.security.personal-information.speech-recognition",
     );
