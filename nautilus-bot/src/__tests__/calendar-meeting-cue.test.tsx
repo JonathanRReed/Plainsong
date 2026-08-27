@@ -2,10 +2,14 @@ import { render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { CalendarMeetingCue } from "@/components/meetings/calendar-meeting-cue";
-import type { CalendarSnapshot } from "@/lib/calendar-events";
+import {
+  calendarEventDismissalKey,
+  type CalendarSnapshot,
+} from "@/lib/calendar-events";
 import {
   CALENDAR_DISCONNECTED_STORAGE_KEY,
   CALENDAR_IGNORED_STORAGE_KEY,
+  readDismissedCalendarEventKeys,
 } from "@/lib/calendar-preferences";
 
 const getCalendarSnapshot = vi.fn();
@@ -204,16 +208,55 @@ describe("CalendarMeetingCue offer", () => {
     });
   });
 
-  it("stays dismissed once waved away", async () => {
-    getCalendarSnapshot.mockResolvedValue(snapshot({ events: [upcomingEvent()] }));
+  it("stays dismissed while the snapshot keeps returning the event", async () => {
+    // The mock never stops offering the event, so the suppression can only be
+    // coming from the dismissal — this is the in-session half of "stays gone
+    // across a re-poll".
+    const event = upcomingEvent();
+    getCalendarSnapshot.mockResolvedValue(snapshot({ events: [event] }));
 
-    render(<CalendarMeetingCue captureInProgress={false} onStartCapture={vi.fn()} />);
+    const { container } = render(
+      <CalendarMeetingCue captureInProgress={false} onStartCapture={vi.fn()} />,
+    );
     await screen.findByText("Design review");
     await userEvent.click(screen.getByRole("button", { name: "Dismiss" }));
 
+    await waitFor(() => expect(container).toBeEmptyDOMElement());
+
+    // And the durable half: what a remount or a restart would read back. A
+    // single (non-recurring) event stays dismissed because its one occurrence
+    // key is on the list.
+    expect(readDismissedCalendarEventKeys()).toEqual([
+      calendarEventDismissalKey(event),
+    ]);
+  });
+
+  it("dismisses the occurrence, not the whole repeating series", async () => {
+    // EventKit hands every occurrence of a repeating event the same
+    // `eventIdentifier`. Storing the bare id would turn "not this standup"
+    // into "never show this standup again"; the stored key must carry the
+    // start time so next week's occurrence is untouched.
+    const today = upcomingEvent({ id: "weekly-standup", title: "Standup" });
+    const nextWeek = {
+      ...today,
+      startsAt: new Date(NOW + 7 * 24 * 3_600_000).toISOString(),
+      endsAt: new Date(NOW + 7 * 24 * 3_600_000 + 15 * 60_000).toISOString(),
+    };
+    getCalendarSnapshot.mockResolvedValue(snapshot({ events: [today, nextWeek] }));
+
+    render(<CalendarMeetingCue captureInProgress={false} onStartCapture={vi.fn()} />);
+    await screen.findByText("Standup");
+    await userEvent.click(screen.getByRole("button", { name: "Dismiss" }));
+
     await waitFor(() =>
-      expect(screen.queryByText("Design review")).not.toBeInTheDocument(),
+      expect(screen.queryByText("Standup")).not.toBeInTheDocument(),
     );
+
+    const dismissed = readDismissedCalendarEventKeys();
+    expect(dismissed).toEqual([calendarEventDismissalKey(today)]);
+    // The bug this exists for: neither the bare identifier nor next week's key.
+    expect(dismissed).not.toContain("weekly-standup");
+    expect(dismissed).not.toContain(calendarEventDismissalKey(nextWeek));
   });
 
   it("says nothing about a calendar the reader switched off", async () => {

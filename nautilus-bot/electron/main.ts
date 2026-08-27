@@ -1267,6 +1267,15 @@ async function handleLocalCommand(
       // that helper falls back to the Accessibility pane for a section it does
       // not know, and sending someone looking for the Calendars switch to the
       // Accessibility list is worse than offering no button at all.
+      //
+      // Gated like the dialogs above it, and for the same reason. This does not
+      // open a modal, but it does yank System Settings to the foreground, and
+      // an ungated version could be driven from a hidden overlay to do that
+      // repeatedly — the unprompted-native-surface failure Wave 1 closed for
+      // the folder pickers. It is also the only direct `shell.openExternal`
+      // call outside the vetted https egress path (external-url-policy.ts), so
+      // it needs to be provably reachable by a person and nothing else.
+      requireMainWindowGesture("Opening calendar privacy settings");
       if (process.platform !== "darwin") {
         return { handled: true, result: false };
       }

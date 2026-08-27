@@ -15,9 +15,14 @@
  * off in System Settings, and the card says so.
  */
 
+import { calendarEventDismissalKey } from "@/lib/calendar-events";
+
 export const CALENDAR_DISCONNECTED_STORAGE_KEY = "plainsong_calendar_disconnected";
 export const CALENDAR_IGNORED_STORAGE_KEY = "plainsong_calendar_ignored_ids";
-const CALENDAR_DISMISSED_STORAGE_KEY = "plainsong_calendar_dismissed_ids";
+// Values are occurrence keys (identifier + start), not bare identifiers — see
+// `calendarEventDismissalKey`. The name says so, because the two are the same
+// shape and a mismatched pair would silently stop suppressing anything.
+const CALENDAR_DISMISSED_STORAGE_KEY = "plainsong_calendar_dismissed_keys";
 export const CALENDAR_PREFERENCE_EVENT = "plainsong-calendar-preference";
 
 /** Bounded so a long-running session cannot grow the dismissal list forever. */
@@ -93,19 +98,31 @@ export function setCalendarIgnored(calendarId: string, ignored: boolean): void {
 }
 
 /**
- * Events the reader waved away.
+ * Occurrences the reader waved away.
  *
- * Per-event rather than per-session: dismissing "Standup" should not also hide
- * the client call an hour later, and it should stay dismissed across a restart
- * that happens during the meeting.
+ * Per-occurrence, not per-event: dismissing "Standup" should not also hide the
+ * client call an hour later, and — because EventKit can hand every occurrence
+ * of a repeating meeting the same `eventIdentifier` — it must not hide next
+ * Tuesday's standup either. `calendarEventDismissalKey` is what makes the
+ * difference between "not this one" and "never again"; storing the bare id
+ * would quietly mean the second.
+ *
+ * It does stay dismissed across a restart, which is the point: closing the app
+ * mid-meeting should not bring the cue back for the meeting you are in.
  */
-export function readDismissedCalendarEventIds(): string[] {
+export function readDismissedCalendarEventKeys(): string[] {
   return readIdList(CALENDAR_DISMISSED_STORAGE_KEY);
 }
 
-export function dismissCalendarEvent(eventId: string): void {
-  const current = readDismissedCalendarEventIds().filter((id) => id !== eventId);
-  current.push(eventId);
+export function dismissCalendarEvent(event: {
+  id: string;
+  startsAt: string;
+}): void {
+  const key = calendarEventDismissalKey(event);
+  const current = readDismissedCalendarEventKeys().filter(
+    (existing) => existing !== key,
+  );
+  current.push(key);
   writeRaw(
     CALENDAR_DISMISSED_STORAGE_KEY,
     JSON.stringify(current.slice(-MAX_DISMISSED_EVENTS)),

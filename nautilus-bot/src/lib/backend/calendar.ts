@@ -55,6 +55,20 @@ export async function requestCalendarAccess(): Promise<CalendarSnapshot> {
   return normalizeSnapshot(await invoke("request_calendar_access"));
 }
 
+/**
+ * Bring System Settings to the Calendars pane. Call this ONLY from a click
+ * handler: the main process requires a fresh user gesture, and rejects without
+ * one.
+ *
+ * The rejection is swallowed here rather than at each call site. There is
+ * nothing useful to tell the reader — the button is right in front of them and
+ * clicking it again works — and the alternative is an unhandled rejection from
+ * every `void openCalendarPrivacySettings()`.
+ */
 export async function openCalendarPrivacySettings(): Promise<void> {
-  await invoke("open_calendar_privacy_settings");
+  try {
+    await invoke("open_calendar_privacy_settings");
+  } catch (error) {
+    console.warn("Could not open the calendar privacy settings:", error);
+  }
 }

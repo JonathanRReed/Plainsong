@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
   buildCalendarCapturePrefill,
+  calendarEventDismissalKey,
   calendarPermissionView,
   CALENDAR_PREFILL_TITLE_MAX_LENGTH,
   describeCalendarLead,
@@ -102,9 +103,80 @@ describe("selectNextCalendarEvent", () => {
       selectNextCalendarEvent([holidays, dismissed, wanted], {
         now: NOW,
         ignoredCalendarIds: ["holidays"],
-        dismissedEventIds: ["dismissed"],
+        dismissedEventKeys: [calendarEventDismissalKey(dismissed)],
       })?.id,
     ).toBe("wanted");
+  });
+
+  it("dismisses one occurrence of a repeating meeting, not the series", () => {
+    // EventKit hands every occurrence of a repeating event the same
+    // `eventIdentifier`. Keying dismissals on the id alone turned "not this
+    // standup" into "never show this standup again" — the reader waves away
+    // today's and silently loses every future one.
+    const today = event({
+      id: "weekly-standup",
+      startsAt: new Date(NOW + 5 * 60_000).toISOString(),
+      endsAt: new Date(NOW + 20 * 60_000).toISOString(),
+    });
+    const nextWeek = {
+      ...today,
+      startsAt: new Date(NOW + 7 * 24 * 3_600_000).toISOString(),
+      endsAt: new Date(NOW + 7 * 24 * 3_600_000 + 15 * 60_000).toISOString(),
+    };
+    expect(nextWeek.id).toBe(today.id);
+
+    const dismissedKeys = [calendarEventDismissalKey(today)];
+
+    expect(
+      selectNextCalendarEvent([today, nextWeek], {
+        now: NOW,
+        dismissedEventKeys: dismissedKeys,
+      }),
+    ).toBeNull();
+
+    // A week later, the same series is offered again — the dismissal was for
+    // one occurrence, and that occurrence is over.
+    const nextWeekNow = Date.parse(nextWeek.startsAt) - 5 * 60_000;
+    expect(
+      selectNextCalendarEvent([today, nextWeek], {
+        now: nextWeekNow,
+        dismissedEventKeys: dismissedKeys,
+      })?.startsAt,
+    ).toBe(nextWeek.startsAt);
+  });
+
+  it("keeps a dismissed single event dismissed", () => {
+    // The other half of the same rule: composing the key must not make a
+    // one-off dismissal forgetful.
+    const once = event({ id: "one-off" });
+
+    expect(
+      selectNextCalendarEvent([once], {
+        now: NOW,
+        dismissedEventKeys: [calendarEventDismissalKey(once)],
+      }),
+    ).toBeNull();
+  });
+});
+
+describe("calendarEventDismissalKey", () => {
+  it("separates two occurrences that share an identifier", () => {
+    const base = { id: "weekly-standup", startsAt: "2026-08-27T15:00:00Z" };
+    const next = { id: "weekly-standup", startsAt: "2026-09-03T15:00:00Z" };
+
+    expect(calendarEventDismissalKey(base)).not.toBe(
+      calendarEventDismissalKey(next),
+    );
+  });
+
+  it("is stable for the same occurrence across reads", () => {
+    // The key is stored and compared across polls and restarts, so it has to
+    // be a pure function of the two fields and nothing else.
+    const occurrence = { id: "weekly-standup", startsAt: "2026-08-27T15:00:00Z" };
+
+    expect(calendarEventDismissalKey(occurrence)).toBe(
+      calendarEventDismissalKey({ ...occurrence }),
+    );
   });
 
   it("breaks ties on title so the offer does not flip between refreshes", () => {

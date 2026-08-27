@@ -16,7 +16,7 @@ import {
   CALENDAR_PREFERENCE_EVENT,
   dismissCalendarEvent,
   readCalendarDisconnected,
-  readDismissedCalendarEventIds,
+  readDismissedCalendarEventKeys,
   readIgnoredCalendarIds,
 } from "@/lib/calendar-preferences";
 
@@ -46,7 +46,11 @@ export interface CalendarEventsState {
   requesting: boolean;
   /** MUST be called from a user gesture; it is the only prompting path. */
   connect: () => Promise<void>;
-  dismiss: (eventId: string) => void;
+  /**
+   * Takes the event, not its id: the dismissal is per OCCURRENCE, and the
+   * start time is the half that separates today's standup from next week's.
+   */
+  dismiss: (event: { id: string; startsAt: string }) => void;
   refresh: () => Promise<void>;
 }
 
@@ -61,14 +65,14 @@ export function useCalendarEvents(options?: {
   const [preferences, setPreferences] = useState(() => ({
     disconnected: readCalendarDisconnected(),
     ignoredCalendarIds: readIgnoredCalendarIds(),
-    dismissedEventIds: readDismissedCalendarEventIds(),
+    dismissedEventKeys: readDismissedCalendarEventKeys(),
   }));
 
   const reloadPreferences = useCallback(() => {
     setPreferences({
       disconnected: readCalendarDisconnected(),
       ignoredCalendarIds: readIgnoredCalendarIds(),
-      dismissedEventIds: readDismissedCalendarEventIds(),
+      dismissedEventKeys: readDismissedCalendarEventKeys(),
     });
   }, []);
 
@@ -124,12 +128,12 @@ export function useCalendarEvents(options?: {
         : selectNextCalendarEvent(snapshot.events, {
             now,
             ignoredCalendarIds: preferences.ignoredCalendarIds,
-            dismissedEventIds: preferences.dismissedEventIds,
+            dismissedEventKeys: preferences.dismissedEventKeys,
           }),
     [
       now,
       preferences.disconnected,
-      preferences.dismissedEventIds,
+      preferences.dismissedEventKeys,
       preferences.ignoredCalendarIds,
       snapshot.events,
     ],
@@ -157,8 +161,8 @@ export function useCalendarEvents(options?: {
         setRequesting(false);
       }
     },
-    dismiss: (eventId: string) => {
-      dismissCalendarEvent(eventId);
+    dismiss: (event: { id: string; startsAt: string }) => {
+      dismissCalendarEvent(event);
       reloadPreferences();
     },
     refresh: () => load(true),

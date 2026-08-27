@@ -95,13 +95,33 @@ const CALENDAR_IN_PROGRESS_GRACE_MS = 10 * 60_000;
 export interface CalendarSelectionOptions {
   now: number;
   ignoredCalendarIds?: readonly string[];
-  dismissedEventIds?: readonly string[];
+  dismissedEventKeys?: readonly string[];
   lookaheadMs?: number;
   inProgressGraceMs?: number;
 }
 
 function startTime(event: CalendarEventSummary): number {
   return Date.parse(event.startsAt);
+}
+
+/**
+ * What "this event was dismissed" is stored under.
+ *
+ * NOT the bare `id`. EventKit's `eventIdentifier` is per-event, not per
+ * occurrence, so every Tuesday of a weekly standup can come back carrying the
+ * same identifier. Keying dismissals on the identifier alone would turn "not
+ * this one, thanks" into "never show this meeting again" — the reader would
+ * wave away today's standup and silently lose the cue for every future one.
+ *
+ * The start time is what separates one occurrence from the next, so the key is
+ * always both. The helper's payload keeps the raw identifier, which is still
+ * the right thing for React keys and for de-duplication within a snapshot.
+ */
+export function calendarEventDismissalKey(event: {
+  id: string;
+  startsAt: string;
+}): string {
+  return `${event.id}@${event.startsAt}`;
 }
 
 /**
@@ -119,7 +139,9 @@ function calendarEventIsOfferable(
   if (event.isAllDay) return false;
   if (!event.title.trim()) return false;
   if (options.ignoredCalendarIds?.includes(event.calendarId)) return false;
-  if (options.dismissedEventIds?.includes(event.id)) return false;
+  if (options.dismissedEventKeys?.includes(calendarEventDismissalKey(event))) {
+    return false;
+  }
 
   const start = startTime(event);
   const end = Date.parse(event.endsAt);

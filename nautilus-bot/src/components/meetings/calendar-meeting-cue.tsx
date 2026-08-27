@@ -177,7 +177,9 @@ export function CalendarMeetingCue({
         <Button
           size="sm"
           variant="ghost"
-          onClick={() => calendar.dismiss(event.id)}
+          // The whole event, so the dismissal is scoped to this occurrence:
+          // waving away today's standup must not silence next Tuesday's.
+          onClick={() => calendar.dismiss(event)}
         >
           Dismiss
         </Button>
