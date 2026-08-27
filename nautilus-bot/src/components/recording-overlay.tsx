@@ -9,15 +9,28 @@ import {
   type SystemAudioCapability,
 } from "@/lib/backend/recordings";
 import { MEETING_CONSENT_NOTICE_TEXT } from "@/lib/meeting-consent";
-import { getMeetingTemplateOption, MEETING_TEMPLATES } from "@/lib/meeting-templates";
+import {
+  getAllMeetingTemplateOptions,
+  getMeetingTemplateOption,
+  type CustomMeetingTemplate,
+} from "@/lib/meeting-templates";
 
 interface ConsentDialogProps {
   open: boolean;
   onOpenChange: (open: boolean) => void;
   onStart: (options: { mic: boolean; systemAudio: boolean; template?: string }) => Promise<void> | void;
+  /** The user's saved templates, listed alongside the built-ins below and
+   * labeled as theirs. Optional so every other caller (and the mocked
+   * version in recordings-view.test.tsx) keeps working unchanged. */
+  customTemplates?: CustomMeetingTemplate[];
 }
 
-export function ConsentDialog({ open, onOpenChange, onStart }: ConsentDialogProps) {
+export function ConsentDialog({
+  open,
+  onOpenChange,
+  onStart,
+  customTemplates = [],
+}: ConsentDialogProps) {
   const [captureMode, setCaptureMode] = useState<"mic_only" | "me_them">("mic_only");
   const [template, setTemplate] = useState("auto");
   const [systemAudioCapability, setSystemAudioCapability] =
@@ -36,7 +49,8 @@ export function ConsentDialog({ open, onOpenChange, onStart }: ConsentDialogProp
   const isStartingRef = useRef(false);
   const captureModeTouchedRef = useRef(false);
   const returnFocusRef = useRef<HTMLElement | null>(null);
-  const selectedTemplate = getMeetingTemplateOption(template);
+  const templateOptions = getAllMeetingTemplateOptions(customTemplates);
+  const selectedTemplate = getMeetingTemplateOption(template, customTemplates);
 
   useEffect(() => {
     if (!open) {
@@ -258,7 +272,7 @@ export function ConsentDialog({ open, onOpenChange, onStart }: ConsentDialogProp
           <div>
             <p className="rubric mb-2">Meeting Type</p>
             <div className="grid grid-cols-3 gap-1.5">
-              {MEETING_TEMPLATES.map((t) => (
+              {templateOptions.map((t) => (
                 <button
                   key={t.value}
                   type="button"
@@ -271,7 +285,14 @@ export function ConsentDialog({ open, onOpenChange, onStart }: ConsentDialogProp
                       : "bg-background border-border hover:bg-muted"
                   }`}
                 >
-                  <div className="font-medium">{t.label}</div>
+                  <div className="font-medium">
+                    {t.label}
+                    {t.isCustom ? (
+                      <span className="ml-1.5 rounded-full border border-border bg-muted px-1.5 py-0.5 align-middle font-mono text-[9px] font-medium uppercase tracking-wide text-muted-foreground">
+                        Yours
+                      </span>
+                    ) : null}
+                  </div>
                 </button>
               ))}
             </div>

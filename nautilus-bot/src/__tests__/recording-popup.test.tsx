@@ -46,6 +46,9 @@ const popupMocks = vi.hoisted(() => {
       void recordingId;
       void meetingNotes;
     }),
+    getSettings: vi.fn(async () => ({
+      transcription: { meetingCustomTemplates: [] },
+    })),
     windowHandle: {
       setSize: vi.fn(async () => {}),
       show: vi.fn(async () => {}),
@@ -78,6 +81,7 @@ vi.mock("@/lib/backend", () => ({
   getWaveformData: popupMocks.getWaveformData,
   stopRecording: popupMocks.stopRecording,
   updateRecordingNotes: popupMocks.updateRecordingNotes,
+  getSettings: popupMocks.getSettings,
 }));
 
 describe("RecordingPopup", () => {
@@ -89,6 +93,7 @@ describe("RecordingPopup", () => {
     popupMocks.stopRecording.mockReset();
     popupMocks.stopRecording.mockResolvedValue(undefined);
     popupMocks.updateRecordingNotes.mockClear();
+    popupMocks.getSettings.mockClear();
     popupMocks.windowHandle.setSize.mockClear();
     popupMocks.windowHandle.show.mockClear();
     popupMocks.windowHandle.hide.mockClear();

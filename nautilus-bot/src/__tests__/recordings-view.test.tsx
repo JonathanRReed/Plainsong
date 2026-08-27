@@ -254,6 +254,15 @@ vi.mock("@/components/ai-analysis-panel", () => ({
   ),
 }));
 
+const customMeetingTemplatesState = vi.hoisted(() => ({
+  templates: [] as Array<{
+    id: string;
+    name: string;
+    summaryPrompt: string;
+    notesOutline: string[];
+  }>,
+}));
+
 vi.mock("@/lib/backend", () => ({
   getRecording: vi.fn(async () => ({})) as any,
   getRecordingWaveform: vi.fn() as any,
@@ -287,6 +296,13 @@ vi.mock("@/lib/backend", () => ({
   openExportPath: vi.fn() as any,
   searchTranscripts: vi.fn(async () => []) as any,
   openPermissionSettings: vi.fn(async () => {}) as any,
+  getSettings: vi.fn(async () => ({
+    transcription: { meetingCustomTemplates: customMeetingTemplatesState.templates },
+  })) as any,
+  saveSettings: vi.fn(async (settings: any) => {
+    customMeetingTemplatesState.templates =
+      settings.transcription.meetingCustomTemplates ?? [];
+  }) as any,
 }));
 
 function deferred<T>() {
@@ -303,6 +319,7 @@ describe("RecordingsView", () => {
   beforeEach(() => {
     vi.clearAllMocks();
     eventListeners.clear();
+    customMeetingTemplatesState.templates = [];
     transcriptViewerProps.current = null;
     speechSynthesisMock.speak.mockClear();
     speechSynthesisMock.cancel.mockClear();
@@ -1126,6 +1143,140 @@ describe("RecordingsView", () => {
     });
     expect(screen.getByLabelText("Done notes")).toHaveValue("");
     expect(screen.getByLabelText("Blockers notes")).toHaveValue("");
+  });
+
+  describe("user-defined meeting templates", () => {
+    it("lists a saved custom template in the playbook picker, labeled as the user's own", async () => {
+      customMeetingTemplatesState.templates = [
+        {
+          id: "custom-board-update",
+          name: "Board Update",
+          summaryPrompt: "Summarize board sentiment, asks, and follow-ups.",
+          notesOutline: ["Sentiment", "Asks"],
+        },
+      ];
+
+      render(<RecordingsView />);
+
+      fireEvent.click(screen.getByText("Weekly sync"));
+      await screen.findByRole("group", { name: "Meeting notes" });
+
+      const picker = screen.getByLabelText("Playbook") as HTMLSelectElement;
+      expect(
+        within(picker).getByRole("option", { name: "Board Update" })
+      ).toBeInTheDocument();
+
+      fireEvent.pointerDown(
+        screen.getByRole("button", { name: "Regenerate summary with a different playbook" }),
+        { button: 0 }
+      );
+      expect(
+        await screen.findByRole("menuitem", { name: "Board Update (yours)" })
+      ).toBeInTheDocument();
+    });
+
+    it("saves the current playbook as a new custom template from the meeting workspace", async () => {
+      render(<RecordingsView />);
+
+      fireEvent.click(screen.getByText("Weekly sync"));
+      await screen.findByRole("group", { name: "Meeting notes" });
+
+      fireEvent.click(screen.getByRole("button", { name: "Save as a template" }));
+      const dialog = await screen.findByRole("dialog", { name: "Save as a template" });
+
+      fireEvent.change(within(dialog).getByLabelText("Name"), {
+        target: { value: "Weekly Recipe" },
+      });
+      fireEvent.click(within(dialog).getByRole("button", { name: "Save template" }));
+
+      await waitFor(() => {
+        expect(backend.saveSettings).toHaveBeenCalled();
+      });
+      expect(customMeetingTemplatesState.templates).toHaveLength(1);
+      expect(customMeetingTemplatesState.templates[0]).toMatchObject({
+        name: "Weekly Recipe",
+        // Seeded from the currently active ("auto") playbook.
+        notesOutline: ["Goals", "Key discussion points", "Decisions", "Follow-ups"],
+      });
+      expect(
+        within(screen.getByLabelText("Playbook") as HTMLSelectElement).getByRole("option", {
+          name: "Weekly Recipe",
+        })
+      ).toBeInTheDocument();
+    });
+
+    it("edits and deletes a saved custom template from the manage dialog", async () => {
+      customMeetingTemplatesState.templates = [
+        {
+          id: "custom-board-update",
+          name: "Board Update",
+          summaryPrompt: "Summarize board sentiment, asks, and follow-ups.",
+          notesOutline: ["Sentiment", "Asks"],
+        },
+      ];
+
+      render(<RecordingsView />);
+
+      fireEvent.click(screen.getByText("Weekly sync"));
+      await screen.findByRole("group", { name: "Meeting notes" });
+
+      fireEvent.click(screen.getByRole("button", { name: "Manage templates" }));
+      const manageDialog = await screen.findByRole("dialog", {
+        name: "Your meeting templates",
+      });
+      fireEvent.click(within(manageDialog).getByRole("button", { name: "Edit Board Update" }));
+
+      const editDialog = await screen.findByRole("dialog", { name: "Edit template" });
+      fireEvent.change(within(editDialog).getByLabelText("Name"), {
+        target: { value: "Board Update v2" },
+      });
+      fireEvent.click(within(editDialog).getByRole("button", { name: "Save changes" }));
+
+      await waitFor(() => {
+        expect(customMeetingTemplatesState.templates[0]?.name).toBe("Board Update v2");
+      });
+
+      fireEvent.click(screen.getByRole("button", { name: "Manage templates" }));
+      const reopenedManageDialog = await screen.findByRole("dialog", {
+        name: "Your meeting templates",
+      });
+      fireEvent.click(
+        within(reopenedManageDialog).getByRole("button", { name: "Delete Board Update v2" })
+      );
+
+      await waitFor(() => {
+        expect(customMeetingTemplatesState.templates).toHaveLength(0);
+      });
+    });
+
+    it("does not break a past meeting's display after its custom template is deleted", async () => {
+      customMeetingTemplatesState.templates = [
+        {
+          id: "custom-deleted-later",
+          name: "Retiring Soon",
+          summaryPrompt: "Summarize this.",
+          notesOutline: ["Notes"],
+        },
+      ];
+      backend.getRecording.mockResolvedValue({
+        ...recordings[0],
+        meetingTemplateId: "custom-deleted-later",
+      });
+
+      render(<RecordingsView />);
+      fireEvent.click(screen.getByText("Weekly sync"));
+      await screen.findByRole("group", { name: "Meeting notes" });
+      expect(screen.getByLabelText("Playbook")).toHaveValue("custom-deleted-later");
+
+      // Deleted out from under the open meeting.
+      customMeetingTemplatesState.templates = [];
+      fireEvent.click(screen.getByRole("button", { name: "Manage templates" }));
+      fireEvent.click(screen.getByRole("button", { name: "Close" }));
+
+      // The meeting keeps displaying -- no crash, and the picker falls back
+      // to a resolvable value instead of showing a phantom selection.
+      expect(screen.getByRole("group", { name: "Meeting notes" })).toBeInTheDocument();
+    });
   });
 
   it("keeps the meeting's working groups without the workflow narration", async () => {

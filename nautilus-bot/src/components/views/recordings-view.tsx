@@ -71,9 +71,18 @@ import type {
 } from "@/types";
 import {
   buildMeetingTemplateOutline,
+  getAllMeetingTemplateOptions,
   getMeetingTemplateOption,
+  MAX_CUSTOM_MEETING_TEMPLATES,
   MEETING_TEMPLATES,
+  type CustomMeetingTemplate,
 } from "@/lib/meeting-templates";
+import { getSettings, saveSettings } from "@/lib/backend/settings";
+import {
+  MeetingTemplateEditorDialog,
+  type MeetingTemplateDraft,
+} from "@/components/views/meetings/template-editor-dialog";
+import { MeetingTemplateManagerDialog } from "@/components/views/meetings/template-manager-dialog";
 import {
   getNextMeetingSectionTitle,
   parseMeetingNoteSections,
@@ -1027,6 +1036,23 @@ export function RecordingsView() {
   const [meetingNotesSaveStatus, setMeetingNotesSaveStatus] =
     useState<MeetingNotesSaveStatus | null>(null);
   const [meetingTemplateId, setMeetingTemplateId] = useState("auto");
+  // The user's saved meeting templates (audit finding ux-12 — user-defined
+  // recipes alongside the 11 built-ins). Loaded once on mount and kept in
+  // sync with every save this view makes, the same pattern dictation-view.tsx
+  // uses for `dictationCustomModes`.
+  const [customMeetingTemplates, setCustomMeetingTemplates] = useState<
+    CustomMeetingTemplate[]
+  >([]);
+  const [templateEditorOpen, setTemplateEditorOpen] = useState(false);
+  // null while creating a new template; the template being edited otherwise.
+  const [templateEditorTarget, setTemplateEditorTarget] =
+    useState<CustomMeetingTemplate | null>(null);
+  const [templateEditorSeed, setTemplateEditorSeed] = useState<{
+    name: string;
+    summaryPrompt: string;
+    notesOutline: string[];
+  } | null>(null);
+  const [templateManagerOpen, setTemplateManagerOpen] = useState(false);
   const [meetingSummary, setMeetingSummary] = useState("");
   const [meetingActionItemsText, setMeetingActionItemsText] = useState("");
   const [enhancedMeetingNotesDraft, setEnhancedMeetingNotesDraft] =
@@ -1205,6 +1231,85 @@ export function RecordingsView() {
       }
     },
   });
+
+  useEffect(() => {
+    let mounted = true;
+    void getSettings()
+      .then((settings) => {
+        if (mounted) {
+          setCustomMeetingTemplates(settings.transcription.meetingCustomTemplates ?? []);
+        }
+      })
+      .catch((error) => {
+        console.warn("Failed to load meeting templates:", error);
+      });
+    return () => {
+      mounted = false;
+    };
+  }, []);
+
+  /** Read-modify-write settings.transcription.meetingCustomTemplates, the
+   * same pattern dictation-view.tsx's `persistDictationPreferences` uses for
+   * `dictationCustomModes` -- riding the existing settings surface needs no
+   * new IPC command. */
+  const persistCustomMeetingTemplates = async (next: CustomMeetingTemplate[]) => {
+    try {
+      const settings = await getSettings();
+      settings.transcription.meetingCustomTemplates = next;
+      await saveSettings(settings);
+      setCustomMeetingTemplates(next);
+      return true;
+    } catch (error) {
+      console.warn("Failed to save meeting templates:", error);
+      toast("Couldn't save meeting templates — the change may not stick.", "error");
+      return false;
+    }
+  };
+
+  const handleSaveNewMeetingTemplate = async (draft: MeetingTemplateDraft) => {
+    if (customMeetingTemplates.length >= MAX_CUSTOM_MEETING_TEMPLATES) {
+      toast(`You can save up to ${MAX_CUSTOM_MEETING_TEMPLATES} templates.`, "error");
+      return;
+    }
+    const id = `custom-${
+      typeof crypto !== "undefined" && "randomUUID" in crypto
+        ? crypto.randomUUID()
+        : `${Date.now()}-${Math.random().toString(36).slice(2)}`
+    }`;
+    const created = await persistCustomMeetingTemplates([
+      ...customMeetingTemplates,
+      { id, ...draft },
+    ]);
+    if (created) {
+      toast("Template saved.", "success");
+    }
+  };
+
+  const handleUpdateMeetingTemplate = async (
+    id: string,
+    draft: MeetingTemplateDraft
+  ) => {
+    const updated = await persistCustomMeetingTemplates(
+      customMeetingTemplates.map((template) =>
+        template.id === id ? { ...template, ...draft } : template
+      )
+    );
+    if (updated) {
+      toast("Template updated.", "success");
+    }
+  };
+
+  const handleDeleteMeetingTemplate = async (template: CustomMeetingTemplate) => {
+    // Past meetings keep their stored template id regardless -- the picker
+    // and the analysis pass both fall back to the default template for an id
+    // that no longer resolves, so a deletion here cannot break their display.
+    const deleted = await persistCustomMeetingTemplates(
+      customMeetingTemplates.filter((existing) => existing.id !== template.id)
+    );
+    if (deleted) {
+      toast(`Deleted "${template.name}".`, "success");
+    }
+  };
 
   useEffect(() => {
     if (!selectedRecording?.id) {
@@ -2187,7 +2292,7 @@ export function RecordingsView() {
       const shouldSeedTemplateOutline =
         !liveMeetingNotes.trim() && typeof options.template === "string";
       const seededNotes = shouldSeedTemplateOutline
-        ? buildMeetingTemplateOutline(options.template)
+        ? buildMeetingTemplateOutline(options.template, customMeetingTemplates)
         : liveMeetingNotes;
       const startedId = await startMeeting({
         ...options,
@@ -2259,7 +2364,7 @@ export function RecordingsView() {
   };
 
   const handleApplyTemplateOutline = () => {
-    const outline = buildMeetingTemplateOutline(meetingTemplateId);
+    const outline = buildMeetingTemplateOutline(meetingTemplateId, customMeetingTemplates);
     setMeetingNotes((current) => {
       const trimmedCurrent = current.trim();
       if (!trimmedCurrent) {
@@ -3167,16 +3272,16 @@ export function RecordingsView() {
     };
   }, [meetings]);
   const selectedTemplateOption = useMemo(
-    () => getMeetingTemplateOption(meetingTemplateId),
-    [meetingTemplateId]
+    () => getMeetingTemplateOption(meetingTemplateId, customMeetingTemplates),
+    [meetingTemplateId, customMeetingTemplates]
   );
   const liveMeetingTemplateOption = useMemo(
-    () => getMeetingTemplateOption(liveMeetingTemplateId),
-    [liveMeetingTemplateId]
+    () => getMeetingTemplateOption(liveMeetingTemplateId, customMeetingTemplates),
+    [liveMeetingTemplateId, customMeetingTemplates]
   );
   const meetingNoteSections = useMemo(
-    () => parseMeetingNoteSections(meetingNotes, meetingTemplateId),
-    [meetingNotes, meetingTemplateId]
+    () => parseMeetingNoteSections(meetingNotes, meetingTemplateId, customMeetingTemplates),
+    [meetingNotes, meetingTemplateId, customMeetingTemplates]
   );
   const activeMeetingCaptureMode = useMemo(
     () =>
@@ -3441,9 +3546,9 @@ export function RecordingsView() {
   ) => {
     setMeetingNotes((current) => {
       const nextSections = updater(
-        parseMeetingNoteSections(current, meetingTemplateId)
+        parseMeetingNoteSections(current, meetingTemplateId, customMeetingTemplates)
       );
-      return serializeMeetingNoteSections(nextSections);
+      return serializeMeetingNoteSections(nextSections, customMeetingTemplates);
     });
   };
 
@@ -4208,18 +4313,22 @@ export function RecordingsView() {
                                       </Button>
                                     </DropdownMenuTrigger>
                                     <DropdownMenuContent align="end" className="max-h-72 overflow-y-auto">
-                                      {MEETING_TEMPLATES.map((template) => (
-                                        <DropdownMenuItem
-                                          key={template.value}
-                                          onClick={() =>
-                                            requestRegeneration("summary", template.value)
-                                          }
-                                        >
-                                          {template.value === meetingTemplateId
-                                            ? `${template.label} (current)`
-                                            : template.label}
-                                        </DropdownMenuItem>
-                                      ))}
+                                      {getAllMeetingTemplateOptions(customMeetingTemplates).map(
+                                        (template) => (
+                                          <DropdownMenuItem
+                                            key={template.value}
+                                            onClick={() =>
+                                              requestRegeneration("summary", template.value)
+                                            }
+                                          >
+                                            {template.label}
+                                            {template.isCustom ? " (yours)" : ""}
+                                            {template.value === meetingTemplateId
+                                              ? " (current)"
+                                              : ""}
+                                          </DropdownMenuItem>
+                                        )
+                                      )}
                                     </DropdownMenuContent>
                                   </DropdownMenu>
                                   <Button
@@ -4491,11 +4600,22 @@ export function RecordingsView() {
                               onChange={(event) => setMeetingTemplateId(event.target.value)}
                               className="h-9 rounded-md border bg-background px-3 text-sm"
                             >
-                              {MEETING_TEMPLATES.map((template) => (
-                                <option key={template.value} value={template.value}>
-                                  {template.label}
-                                </option>
-                              ))}
+                              <optgroup label="Built-in">
+                                {MEETING_TEMPLATES.map((template) => (
+                                  <option key={template.value} value={template.value}>
+                                    {template.label}
+                                  </option>
+                                ))}
+                              </optgroup>
+                              {customMeetingTemplates.length > 0 ? (
+                                <optgroup label="Your templates">
+                                  {customMeetingTemplates.map((template) => (
+                                    <option key={template.id} value={template.id}>
+                                      {template.name}
+                                    </option>
+                                  ))}
+                                </optgroup>
+                              ) : null}
                             </select>
                             <Button
                               type="button"
@@ -4504,6 +4624,30 @@ export function RecordingsView() {
                               onClick={handleApplyTemplateOutline}
                             >
                               Add its headings to my notes
+                            </Button>
+                            <Button
+                              type="button"
+                              size="sm"
+                              variant="outline"
+                              onClick={() => {
+                                setTemplateEditorTarget(null);
+                                setTemplateEditorSeed({
+                                  name: "",
+                                  summaryPrompt: selectedTemplateOption.summaryPrompt,
+                                  notesOutline: selectedTemplateOption.notesOutline,
+                                });
+                                setTemplateEditorOpen(true);
+                              }}
+                            >
+                              Save as a template
+                            </Button>
+                            <Button
+                              type="button"
+                              size="sm"
+                              variant="outline"
+                              onClick={() => setTemplateManagerOpen(true)}
+                            >
+                              Manage templates
                             </Button>
                             {selectedMeetingConsent.needsManualNotice ? (
                               <Button
@@ -6417,6 +6561,40 @@ export function RecordingsView() {
         open={showConsent}
         onOpenChange={setShowConsent}
         onStart={handleStartRecording}
+        customTemplates={customMeetingTemplates}
+      />
+
+      {templateEditorSeed ? (
+        <MeetingTemplateEditorDialog
+          open={templateEditorOpen}
+          onOpenChange={setTemplateEditorOpen}
+          mode={templateEditorTarget ? "edit" : "create"}
+          seed={templateEditorSeed}
+          onSave={async (draft) => {
+            if (templateEditorTarget) {
+              await handleUpdateMeetingTemplate(templateEditorTarget.id, draft);
+            } else {
+              await handleSaveNewMeetingTemplate(draft);
+            }
+          }}
+        />
+      ) : null}
+
+      <MeetingTemplateManagerDialog
+        open={templateManagerOpen}
+        onOpenChange={setTemplateManagerOpen}
+        templates={customMeetingTemplates}
+        onEdit={(template) => {
+          setTemplateEditorTarget(template);
+          setTemplateEditorSeed({
+            name: template.name,
+            summaryPrompt: template.summaryPrompt,
+            notesOutline: template.notesOutline,
+          });
+          setTemplateManagerOpen(false);
+          setTemplateEditorOpen(true);
+        }}
+        onDelete={(template) => void handleDeleteMeetingTemplate(template)}
       />
 
       {/* Regenerating overwrites in place, so text Plainsong did not write in

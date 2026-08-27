@@ -32,7 +32,11 @@ import {
   type MeetingAudioSourceWarningEvent,
   type RecordingTranscriptionStreamEvent,
 } from "@/lib/meeting-transcript-stream";
-import { getMeetingTemplateOption } from "@/lib/meeting-templates";
+import {
+  getMeetingTemplateOption,
+  type CustomMeetingTemplate,
+} from "@/lib/meeting-templates";
+import { getSettings } from "@/lib/backend/settings";
 import { rebaseMeetingNotes } from "@/lib/meeting-notes";
 import { AudioWaveform } from "@/components/ui/audio-waveform";
 import {
@@ -78,6 +82,12 @@ export function RecordingPopup() {
     null,
   );
   const [copiedNotice, setCopiedNotice] = useState(false);
+  // Loaded once so a meeting tagged with a user-saved template still shows
+  // its real name here instead of falling back to "Auto" (see
+  // `getMeetingTemplateOption`'s custom-template lookup).
+  const [customMeetingTemplates, setCustomMeetingTemplates] = useState<
+    CustomMeetingTemplate[]
+  >([]);
   const [transcriptCommitted, setTranscriptCommitted] = useState(false);
   const recordingIdRef = useRef<string | null>(null);
   const lifecycleRef = useRef<MeetingLifecycleState>(
@@ -88,6 +98,24 @@ export function RecordingPopup() {
   useEffect(() => {
     recordingIdRef.current = recordingId;
   }, [recordingId]);
+
+  useEffect(() => {
+    let mounted = true;
+    void getSettings()
+      .then((settings) => {
+        if (mounted) {
+          setCustomMeetingTemplates(
+            settings.transcription.meetingCustomTemplates ?? [],
+          );
+        }
+      })
+      .catch((error) => {
+        console.warn("Failed to load custom meeting templates:", error);
+      });
+    return () => {
+      mounted = false;
+    };
+  }, []);
 
   useEffect(() => {
     let unlisten: (() => void) | undefined;
@@ -323,6 +351,7 @@ export function RecordingPopup() {
 
         const template = getMeetingTemplateOption(
           recording.meetingTemplateId ?? "auto",
+          customMeetingTemplates,
         );
         setMeetingTemplateLabel(template.label);
         setMeetingTemplateDescription(template.description);
@@ -342,7 +371,7 @@ export function RecordingPopup() {
     return () => {
       cancelled = true;
     };
-  }, [recordingId]);
+  }, [recordingId, customMeetingTemplates]);
 
   useEffect(() => {
     if (!recordingId) {
