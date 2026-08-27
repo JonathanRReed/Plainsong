@@ -44,6 +44,7 @@ import {
   openRecordingAudio,
   renameRecording,
   retranscribeRecording,
+  retryMeetingAnalysis,
   retryMeetingAutoName,
   setRecordingSourceType,
   updateMeetingChatMessages,
@@ -101,6 +102,14 @@ import {
   requestReadinessDestination,
   type OpenRecordingWorkspaceDetail,
 } from "@/lib/navigation";
+import {
+  describeMeetingAnalysis,
+  MEETING_ANALYSIS_STATUS_EVENT,
+  parseMeetingAnalysisStatus,
+  readStoredAnalysisFailure,
+  type MeetingAnalysisStatusEvent,
+} from "@/lib/meeting-analysis-status";
+import { StatusBanner } from "@/components/ui/status-banner";
 import { actionItemsToMarkdownList } from "@/lib/markdown";
 import { DocumentField } from "@/components/views/meetings/document-field";
 import { AudioIssueBanner } from "@/components/views/meetings/audio-issue-banner";
@@ -1032,6 +1041,12 @@ export function RecordingsView() {
   const [analysisFailureByTarget, setAnalysisFailureByTarget] = useState<
     Partial<Record<string, RecordingAnalysisFailedEvent>>
   >({});
+  // Whole-meeting analysis state, keyed by meeting, so a row in the list can
+  // move while a different meeting is open. Separate from the per-target map
+  // above, which only describes the one meeting on screen.
+  const [analysisStatusByRecording, setAnalysisStatusByRecording] = useState<
+    Record<string, { phase: MeetingAnalysisStatusEvent["phase"]; error: string | null }>
+  >({});
   const [activeSpeechTarget, setActiveSpeechTarget] = useState<string | null>(null);
   const meetingChatRequestGuard = useScopedRequestGuard<string | null>();
   const meetingSummaryRequestGuard = useScopedRequestGuard<string | null>();
@@ -1220,6 +1235,50 @@ export function RecordingsView() {
       unlistenFailure?.();
     };
   }, [selectedRecording?.id]);
+
+  // Whole-meeting analysis status, listened for at the view level rather than
+  // per open meeting: the failure this surfaces is normally discovered later,
+  // from the list, not while the meeting is on screen.
+  useEffect(() => {
+    let disposed = false;
+    let unlisten: (() => void) | undefined;
+
+    void listen(MEETING_ANALYSIS_STATUS_EVENT, (event) => {
+      const payload = parseMeetingAnalysisStatus(event.payload);
+      if (!payload) {
+        return;
+      }
+      setAnalysisStatusByRecording((current) => ({
+        ...current,
+        [payload.recordingId]: {
+          phase: payload.phase,
+          error: payload.error ?? null,
+        },
+      }));
+      if (payload.phase === "completed") {
+        // The stored failure is cleared on the sidecar side; re-read the
+        // records so the list stops carrying a failure that is over.
+        void refetch();
+      }
+    })
+      .then((next) => {
+        if (disposed) {
+          next();
+          return;
+        }
+        unlisten = next;
+      })
+      .catch((error) => {
+        // A build whose sidecar half has not landed simply never reports; the
+        // stored failure field still drives the banner.
+        console.warn("Failed to subscribe to meeting analysis status:", error);
+      });
+
+    return () => {
+      disposed = true;
+      unlisten?.();
+    };
+  }, [refetch]);
 
   useEffect(() => {
     meetingNotesRef.current = meetingNotes;
@@ -3410,6 +3469,60 @@ export function RecordingsView() {
     setPendingRetranscribe(recording);
   };
 
+  /**
+   * Read the one true state of a meeting's notes: what is happening now if
+   * anything is, otherwise what the record itself remembers about the last
+   * attempt. Returns null when there is nothing to say.
+   */
+  const meetingAnalysisNotice = useCallback(
+    (recording: Recording | null | undefined) => {
+      if (!recording) {
+        return null;
+      }
+      const live = analysisStatusByRecording[recording.id];
+      return describeMeetingAnalysis({
+        storedFailure: readStoredAnalysisFailure(recording),
+        livePhase: live?.phase ?? null,
+        liveError: live?.error ?? null,
+      });
+    },
+    [analysisStatusByRecording],
+  );
+
+  const selectedAnalysisNotice = meetingAnalysisNotice(selectedRecording);
+
+  const handleRetryMeetingAnalysis = async (recordingIdToRetry: string) => {
+    setAnalysisStatusByRecording((current) => ({
+      ...current,
+      [recordingIdToRetry]: { phase: "running", error: null },
+    }));
+    try {
+      await retryMeetingAnalysis(recordingIdToRetry);
+      // Whether the command returns on start or on finish is the sidecar's
+      // business. Drop the local override and let the events plus the stored
+      // field say what actually happened.
+      setAnalysisStatusByRecording((current) => {
+        const next = { ...current };
+        delete next[recordingIdToRetry];
+        return next;
+      });
+      await refetch();
+      if (selectedRecording?.id === recordingIdToRetry) {
+        await refreshSelectedRecording(recordingIdToRetry);
+      }
+    } catch (error) {
+      const message =
+        error instanceof Error
+          ? error.message
+          : "Couldn't start the meeting notes again.";
+      setAnalysisStatusByRecording((current) => ({
+        ...current,
+        [recordingIdToRetry]: { phase: "failed", error: message },
+      }));
+      toast(message, "error");
+    }
+  };
+
   const handleMarkAsDictation = async (recordingIdToUpdate: string) => {
     try {
       await setRecordingSourceType(recordingIdToUpdate, "dictation");
@@ -3686,6 +3799,33 @@ export function RecordingsView() {
               </p>
             ) : null}
           </div>
+
+          {/* Meeting notes that were never written. The list says the same
+              thing; a reader who opened the meeting to look for the summary
+              needs to be told here, where the summary is missing. */}
+          {selectedAnalysisNotice ? (
+            <div className="shrink-0 px-6 pt-4">
+              <StatusBanner
+                tone={selectedAnalysisNotice.busy ? "muted" : "rust"}
+                title={selectedAnalysisNotice.title}
+                message={selectedAnalysisNotice.message}
+                actions={
+                  selectedAnalysisNotice.retryable && selectedRecording ? (
+                    <Button
+                      size="sm"
+                      variant="outline"
+                      onClick={() =>
+                        void handleRetryMeetingAnalysis(selectedRecording.id)
+                      }
+                    >
+                      <RefreshCw className="mr-2 h-4 w-4" />
+                      Retry notes
+                    </Button>
+                  ) : null
+                }
+              />
+            </div>
+          ) : null}
 
           {/* The same failure surface the list carries. Without it here, Play
               audio in the header above could fail with nothing on screen but a
@@ -5743,6 +5883,7 @@ export function RecordingsView() {
               {filteredMeetings.map((recording) => {
                 const isLiveRow = recording.id === recordingId && isRecording;
                 const statusBand = recordingStatusBand(recording.status, isLiveRow);
+                const analysisNotice = meetingAnalysisNotice(recording);
                 return (
                 <Card
                   key={recording.id}
@@ -5879,6 +6020,47 @@ export function RecordingsView() {
                         </DropdownMenu>
                       </div>
                     </div>
+
+                    {/* A meeting whose notes failed used to look identical to
+                        one that never asked for any. The row says so, and
+                        carries the way back. */}
+                    {analysisNotice ? (
+                      <div
+                        className="mt-3 flex flex-wrap items-center justify-between gap-2 border-t border-border/60 pt-3"
+                        role={analysisNotice.busy ? "status" : "alert"}
+                      >
+                        <div className="min-w-0">
+                          <p
+                            className={`text-sm font-medium ${
+                              analysisNotice.busy ? "text-foreground" : "text-rust"
+                            }`}
+                          >
+                            {analysisNotice.title}
+                          </p>
+                          <p className="text-sm text-muted-foreground">
+                            {analysisNotice.message}
+                          </p>
+                        </div>
+                        {analysisNotice.retryable ? (
+                          <Button
+                            size="sm"
+                            variant="outline"
+                            onClick={(event) => {
+                              event.stopPropagation();
+                              void handleRetryMeetingAnalysis(recording.id);
+                            }}
+                          >
+                            <RefreshCw className="mr-2 h-4 w-4" />
+                            Retry notes
+                          </Button>
+                        ) : (
+                          <Loader2
+                            className="h-4 w-4 animate-spin text-muted-foreground"
+                            aria-hidden="true"
+                          />
+                        )}
+                      </div>
+                    ) : null}
                   </CardContent>
                 </Card>
                 );

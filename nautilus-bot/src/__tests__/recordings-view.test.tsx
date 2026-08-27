@@ -255,7 +255,10 @@ vi.mock("@/lib/backend", () => ({
   deleteRecording: vi.fn() as any,
   renameRecording: vi.fn() as any,
   retranscribeRecording: vi.fn() as any,
+  retryMeetingAnalysis: vi.fn(async () => {}) as any,
   retryMeetingAutoName: vi.fn() as any,
+  revalidateRecordingAudio: vi.fn(async () => ({})) as any,
+  acknowledgeIncompleteTranscript: vi.fn(async () => ({})) as any,
   setRecordingSourceType: vi.fn() as any,
   isDiarizationModelAvailable: vi.fn(async () => false) as any,
   getMeetingChatMessages: vi.fn(async () => []) as any,
@@ -291,10 +294,12 @@ describe("RecordingsView", () => {
     transcriptViewerProps.current = null;
     speechSynthesisMock.speak.mockClear();
     speechSynthesisMock.cancel.mockClear();
-    Object.assign(navigator, {
-      clipboard: {
-        writeText: vi.fn(async () => {}),
-      },
+    // `userEvent.setup()` installs a getter-only clipboard stub on the shared
+    // navigator, so a plain assignment throws once any earlier test has used
+    // it. Redefining the property works either way.
+    Object.defineProperty(navigator, "clipboard", {
+      configurable: true,
+      value: { writeText: vi.fn(async () => {}) },
     });
     Object.assign(globalThis, {
       speechSynthesis: speechSynthesisMock,
@@ -2890,5 +2895,148 @@ describe("RecordingsView", () => {
       expect(backend.runDiarization).toHaveBeenCalledWith("r1");
     });
     expect(await screen.findByText("Found 2 speakers.")).toBeInTheDocument();
+  });
+
+  describe("meeting notes failures", () => {
+    it("shows a stored analysis failure on the list row with a retry", async () => {
+      // The finding: a meeting whose summary, action items and title all failed
+      // looked exactly like one that had never asked for any.
+      recordings = [
+        {
+          ...recordings[0],
+          analysisError: "Ollama is not running on this machine.",
+        } as Recording,
+      ];
+
+      render(<RecordingsView />);
+
+      expect(
+        await screen.findByText("Meeting notes were not written")
+      ).toBeInTheDocument();
+      expect(
+        screen.getByText("Ollama is not running on this machine.")
+      ).toBeInTheDocument();
+
+      fireEvent.click(screen.getByRole("button", { name: /retry notes/i }));
+
+      await waitFor(() => {
+        expect(backend.retryMeetingAnalysis).toHaveBeenCalledWith("r1");
+      });
+    });
+
+    it("says nothing when the sidecar has no analysis-failure field", async () => {
+      render(<RecordingsView />);
+
+      await screen.findByText("Weekly sync");
+      expect(
+        screen.queryByText("Meeting notes were not written")
+      ).not.toBeInTheDocument();
+      expect(
+        screen.queryByRole("button", { name: /retry notes/i })
+      ).not.toBeInTheDocument();
+    });
+
+    it("follows the live meeting-analysis status through a retry", async () => {
+      recordings = [
+        {
+          ...recordings[0],
+          analysisError: "The analysis provider timed out.",
+        } as Recording,
+      ];
+
+      render(<RecordingsView />);
+      await screen.findByText("Meeting notes were not written");
+
+      await act(async () => {
+        eventListeners.get("meeting-analysis-status")?.({
+          payload: { recordingId: "r1", phase: "running" },
+        });
+      });
+
+      expect(
+        await screen.findByText("Writing meeting notes")
+      ).toBeInTheDocument();
+      expect(
+        screen.queryByRole("button", { name: /retry notes/i })
+      ).not.toBeInTheDocument();
+
+      await act(async () => {
+        eventListeners.get("meeting-analysis-status")?.({
+          payload: {
+            recordingId: "r1",
+            phase: "failed",
+            error: "Ollama refused the connection.",
+          },
+        });
+      });
+
+      expect(
+        await screen.findByText("Ollama refused the connection.")
+      ).toBeInTheDocument();
+
+      await act(async () => {
+        eventListeners.get("meeting-analysis-status")?.({
+          payload: { recordingId: "r1", phase: "completed" },
+        });
+      });
+
+      await waitFor(() => {
+        expect(
+          screen.queryByText("Meeting notes were not written")
+        ).not.toBeInTheDocument();
+      });
+      expect(refetchRecordings).toHaveBeenCalled();
+    });
+
+    it("keeps the failure visible when the retry itself cannot start", async () => {
+      recordings = [
+        {
+          ...recordings[0],
+          analysisError: "The analysis provider timed out.",
+        } as Recording,
+      ];
+      backend.retryMeetingAnalysis.mockRejectedValueOnce(
+        new Error("No AI route is configured.")
+      );
+
+      render(<RecordingsView />);
+      fireEvent.click(await screen.findByRole("button", { name: /retry notes/i }));
+
+      await waitFor(() => {
+        expect(toast).toHaveBeenCalledWith("No AI route is configured.", "error");
+      });
+      expect(
+        await screen.findByText("No AI route is configured.")
+      ).toBeInTheDocument();
+      expect(
+        screen.getByRole("button", { name: /retry notes/i })
+      ).toBeInTheDocument();
+    });
+
+    it("repeats the failure inside the meeting, where the summary is missing", async () => {
+      const user = userEvent.setup();
+      recordings = [
+        {
+          ...recordings[0],
+          analysisError: "The analysis provider timed out.",
+        } as Recording,
+      ];
+      backend.getRecording.mockResolvedValue({
+        ...recordings[0],
+        summary: "",
+        actionItems: [],
+      });
+
+      render(<RecordingsView />);
+      await user.click(screen.getByText("Weekly sync"));
+
+      const banners = await screen.findAllByText(
+        "Meeting notes were not written"
+      );
+      expect(banners.length).toBeGreaterThan(0);
+      expect(
+        screen.getAllByRole("button", { name: /retry notes/i }).length
+      ).toBeGreaterThan(0);
+    });
   });
 });
