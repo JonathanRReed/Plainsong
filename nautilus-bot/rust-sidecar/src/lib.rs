@@ -202,16 +202,41 @@ const DICTATION_IDLE_RESET_ERROR_MS: u64 = 9000;
 /// pipeline output is already a good result, so on timeout we insert that
 /// rather than making the user wait on a slow or stuck model.
 ///
-/// Was 6s. The Wave 3 audit measured this app had never recorded end-to-end
-/// (key-release-to-glyph) latency at all -- only ASR decode time -- while
-/// competing dictation tools land the *entire* pipeline, insertion included,
-/// in 130-700ms. Six seconds of silent waiting in front of insertion was
-/// never a real budget, just whatever felt "safe" before anyone measured
-/// anything. 2.5s is still generous next to that competitor bar, and still
-/// falls back to the already-good local pipeline output on timeout (see
+/// Was 6s flat, for every provider. The Wave 3 audit measured this app had
+/// never recorded end-to-end (key-release-to-glyph) latency at all -- only
+/// ASR decode time -- while competing dictation tools land the *entire*
+/// pipeline, insertion included, in 130-700ms. Six seconds of silent
+/// waiting in front of insertion was never a real budget, just whatever
+/// felt "safe" before anyone measured anything.
+///
+/// A flat replacement number is still wrong, though: a remote API call and a
+/// local Ollama call are not the same budget. Ollama pays a real, currently
+/// unmeasured cold-model-load cost on top of inference that a remote
+/// provider (already warm, running on someone else's hardware) does not, so
+/// collapsing both onto one tight number would either starve local models on
+/// their first call or leave remote ones needlessly generous. This mirrors
+/// `analysis_timeouts` above (line ~1485), which draws exactly the same
+/// local-vs-remote line for meeting analysis: `AnalysisProvider::Ollama`
+/// gets the long budget, everything else gets the short one. Both fall back
+/// to the already-good local pipeline output on timeout (see
 /// `resolve_dictation_format_attempt` in `dictation_timing.rs` and its call
-/// sites below) rather than losing the dictation.
-const DICTATION_FORMAT_TIMEOUT: Duration = Duration::from_millis(2_500);
+/// sites below) rather than losing the dictation, and `format_outcome` on
+/// the runtime timing record tracks how often each actually fires --
+/// tighten these from real rates, not from a guess.
+const DICTATION_FORMAT_TIMEOUT_REMOTE: Duration = Duration::from_millis(2_500);
+/// Generous next to the 130-700ms competitor bar precisely because it has to
+/// cover a cold local model load that the remote budget above never has to.
+const DICTATION_FORMAT_TIMEOUT_LOCAL: Duration = Duration::from_millis(6_000);
+
+/// Picks the pre-insert LLM formatting budget for `provider`, following the
+/// same local-vs-remote split as `analysis_timeouts`.
+fn dictation_format_timeout(provider: AnalysisProvider) -> Duration {
+    if provider == AnalysisProvider::Ollama {
+        DICTATION_FORMAT_TIMEOUT_LOCAL
+    } else {
+        DICTATION_FORMAT_TIMEOUT_REMOTE
+    }
+}
 const MAX_BENCHMARK_AUDIO_BYTES: usize = 6 * 1024 * 1024;
 /// Shown when a pre-insert LLM pass could not run. The user still gets their
 /// words — the locally formatted text — so this is a warning, not an error.
@@ -229,28 +254,56 @@ mod dictation_format_timeout_tests {
 
     // These exercise the exact mechanism `stop_dictation_for_sidecar` uses at
     // both of its pre-insert LLM call sites --
-    // `tokio::time::timeout(DICTATION_FORMAT_TIMEOUT, future)` racing a real
-    // (short, real-wall-clock) future -- rather than mocking the whole
-    // function. They use a much shorter timeout than the real constant so the
-    // suite doesn't wait 2.5s; the mechanism under test is identical either
-    // way.
+    // `tokio::time::timeout(dictation_format_timeout(provider), future)`
+    // racing a future -- rather than mocking the whole function.
 
     #[test]
-    fn format_timeout_is_2500ms_generous_next_to_the_130_700ms_competitor_bar() {
-        // Regression guard: this was 6s. See the constant's doc comment for
-        // why 2.5s is still a deliberately generous cap, not a tight one.
-        assert_eq!(DICTATION_FORMAT_TIMEOUT, Duration::from_millis(2_500));
+    fn remote_and_local_dictation_format_timeouts_follow_analysis_timeouts_split() {
+        // Regression guard: this was one flat 6s, then one flat 2.5s. Neither
+        // was right -- a local Ollama call pays a real cold-model-load cost a
+        // remote call never does. See the constants' doc comments for the
+        // full reasoning; this just pins the values and the dispatch.
+        assert_eq!(
+            DICTATION_FORMAT_TIMEOUT_REMOTE,
+            Duration::from_millis(2_500)
+        );
+        assert_eq!(DICTATION_FORMAT_TIMEOUT_LOCAL, Duration::from_millis(6_000));
+        assert!(
+            DICTATION_FORMAT_TIMEOUT_LOCAL > DICTATION_FORMAT_TIMEOUT_REMOTE,
+            "local must stay the more generous budget -- it's the one covering cold model load"
+        );
+
+        assert_eq!(
+            dictation_format_timeout(AnalysisProvider::Ollama),
+            DICTATION_FORMAT_TIMEOUT_LOCAL
+        );
+        for remote in [
+            AnalysisProvider::OpenAi,
+            AnalysisProvider::Anthropic,
+            AnalysisProvider::Gemini,
+            AnalysisProvider::DeepSeek,
+            AnalysisProvider::OllamaCloud,
+        ] {
+            assert_eq!(
+                dictation_format_timeout(remote),
+                DICTATION_FORMAT_TIMEOUT_REMOTE,
+                "{remote:?} is a remote provider and must get the shorter budget"
+            );
+        }
     }
 
-    #[tokio::test]
+    #[tokio::test(start_paused = true)]
     async fn a_slow_pass_times_out_and_falls_back_to_local_text_not_empty() {
+        // Paused virtual time: `sleep` and `timeout` both race on the same
+        // mocked clock, so this resolves the timeout deterministically and
+        // instantly -- no real wall-clock wait, no flakiness under load.
         let local_pipeline_text = "the meeting is at three".to_string();
         let slow_pass = async {
-            tokio::time::sleep(Duration::from_millis(200)).await;
+            tokio::time::sleep(DICTATION_FORMAT_TIMEOUT_LOCAL + Duration::from_secs(1)).await;
             Ok::<String, String>("llm output that never arrives in time".to_string())
         };
 
-        let raced = tokio::time::timeout(Duration::from_millis(5), slow_pass).await;
+        let raced = tokio::time::timeout(DICTATION_FORMAT_TIMEOUT_REMOTE, slow_pass).await;
         let attempt = match raced {
             Ok(Ok(text)) => crate::dictation_timing::DictationFormatAttempt::Applied(text),
             Ok(Err(_)) => crate::dictation_timing::DictationFormatAttempt::Failed,
@@ -269,6 +322,38 @@ mod dictation_format_timeout_tests {
         assert!(!fallback.final_text.is_empty());
         assert!(fallback.warn_timed_out);
         assert!(!fallback.warn_failed);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_slow_local_pass_gets_the_longer_budget_and_still_completes() {
+        // The whole point of the split: a pass that would time out under the
+        // remote budget must still succeed under the local one.
+        let local_pipeline_text = "the meeting is at three".to_string();
+        let slow_but_within_local_budget = async {
+            tokio::time::sleep(DICTATION_FORMAT_TIMEOUT_LOCAL - Duration::from_millis(500)).await;
+            Ok::<String, String>("cold-loaded local model output".to_string())
+        };
+
+        let raced = tokio::time::timeout(
+            dictation_format_timeout(AnalysisProvider::Ollama),
+            slow_but_within_local_budget,
+        )
+        .await;
+        let attempt = match raced {
+            Ok(Ok(text)) => crate::dictation_timing::DictationFormatAttempt::Applied(text),
+            Ok(Err(_)) => crate::dictation_timing::DictationFormatAttempt::Failed,
+            Err(_) => crate::dictation_timing::DictationFormatAttempt::TimedOut,
+        };
+        let fallback = crate::dictation_timing::resolve_dictation_format_attempt(
+            attempt,
+            &local_pipeline_text,
+        );
+
+        assert_eq!(
+            fallback.format_outcome,
+            crate::dictation_timing::DictationFormatOutcome::Applied
+        );
+        assert_eq!(fallback.final_text, "cold-loaded local model output");
     }
 
     #[tokio::test]
@@ -320,6 +405,17 @@ mod dictation_format_timeout_tests {
         assert_eq!(fallback.final_text, "Ship it tomorrow.");
         assert!(!fallback.warn_timed_out);
         assert!(!fallback.warn_failed);
+    }
+
+    #[test]
+    fn benchmark_capture_tail_constant_matches_the_documented_value() {
+        // `benchmark-latency.rs`'s `CAPTURE_TAIL_EXCLUDED_MS` is a hardcoded
+        // copy of this constant -- it lives in an external bin that cannot
+        // see `audio`'s `pub(crate)` items, so it cannot reference this
+        // value directly. This pins the real constant so a future change
+        // here is caught instead of silently making that copy (and the
+        // receipt field it feeds) wrong.
+        assert_eq!(crate::audio::DICTATION_STOP_CAPTURE_TAIL_MS, 120);
     }
 }
 
@@ -5749,11 +5845,28 @@ fn compose_prompt_with_delimited_user_text(system_prompt: &str, user_text: &str)
     )
 }
 
-async fn run_dictation_formatting_with_selected_provider(
+/// Everything `run_dictation_formatting_with_selected_provider` needs to
+/// know before it may call a model: which provider, which model id, and the
+/// fully-built system prompt (destination-app lookup, category resolution,
+/// custom-mode/custom-prompt selection, captured-context splicing -- all of
+/// it settled).
+///
+/// Split out so this preparation runs *before* the pre-insert
+/// `DICTATION_FORMAT_TIMEOUT` window starts in `stop_dictation_for_sidecar`:
+/// none of it is the model call the budget is meant to time, but a
+/// `tokio::task::spawn_blocking` frontmost-app lookup and a settings-manager
+/// lock both used to run inside that window anyway, quietly eating into the
+/// budget the audit fixed at "how long may we make the user wait."
+struct PreparedDictationFormatting {
+    provider: AnalysisProvider,
+    selected_model: String,
+    system_prompt: String,
+}
+
+async fn prepare_dictation_formatting_request(
     state: &AppState,
-    transcript: &str,
     dictation_options: &models::DictationStartOptions,
-) -> Result<String, String> {
+) -> Result<PreparedDictationFormatting, String> {
     let (provider, remote_processing_enabled, _, settings_model) =
         selected_analysis_provider_and_settings(state, settings::AiLane::Dictation).await?;
     enforce_remote_provider_policy(provider, remote_processing_enabled)?;
@@ -5761,7 +5874,8 @@ async fn run_dictation_formatting_with_selected_provider(
     let selected_model = settings_model
         .as_deref()
         .filter(|v| !v.trim().is_empty())
-        .unwrap_or_else(|| provider.default_model());
+        .unwrap_or_else(|| provider.default_model())
+        .to_string();
 
     let active_app = if dictation_options.context_app_name.is_some() {
         dictation_options.context_app_name.clone()
@@ -5839,11 +5953,27 @@ async fn run_dictation_formatting_with_selected_provider(
         system_prompt
     };
 
-    let timeout = analysis_timeouts(provider).request;
+    Ok(PreparedDictationFormatting {
+        provider,
+        selected_model,
+        system_prompt,
+    })
+}
+
+/// The part of dictation formatting that is actually a model call: this is
+/// the only work `stop_dictation_for_sidecar` wraps in
+/// `DICTATION_FORMAT_TIMEOUT`. `prepare_dictation_formatting_request` above
+/// must have already run.
+async fn execute_dictation_formatting_request(
+    state: &AppState,
+    prepared: &PreparedDictationFormatting,
+    transcript: &str,
+) -> Result<String, String> {
+    let timeout = analysis_timeouts(prepared.provider).request;
     let runtime = selected_analysis_runtime(
         state,
         settings::AiLane::Dictation,
-        Some(selected_model),
+        Some(prepared.selected_model.as_str()),
         Some(timeout),
     )
     .await?;
@@ -5851,7 +5981,7 @@ async fn run_dictation_formatting_with_selected_provider(
     runtime
         .execute(
             llm::CompletionPurpose::Generic,
-            Some(system_prompt),
+            Some(prepared.system_prompt.clone()),
             transcript.to_string(),
             llm::RequestOptions {
                 timeout,
@@ -8365,7 +8495,7 @@ mod tests {
     {
         crate::dictation_timing::assemble_dictation_timing_record(
             crate::dictation_timing::DictationTimingInputs {
-                stop_signal_received_at_epoch_ms: 1_000,
+                stop_command_received_at_epoch_ms: 1_000,
                 audio_finalized_ms: Some(15),
                 asr_complete_ms: Some(180),
                 format_complete_ms: Some(185),
@@ -10403,23 +10533,43 @@ mod tests {
 
     #[test]
     fn pre_insert_llm_passes_are_gated_and_time_boxed() {
-        // Both pre-insert LLM branches must sit behind the same opt-in gate and
-        // the same insertion-delay cap. The mode-transform branch had neither,
-        // so messages/email/meeting-follow-up called a model on every single
-        // dictation and could stall insertion for as long as the model took.
+        // Both pre-insert LLM branches must sit behind the same opt-in gate
+        // and a provider-appropriate timeout cap. The mode-transform branch
+        // used to have neither, so messages/email/meeting-follow-up called a
+        // model on every single dictation and could stall insertion for as
+        // long as the model took.
         let body = owned_stop_dictation_body();
-        let provider_calls = body.matches("_with_selected_provider(").count();
 
-        assert!(provider_calls > 0);
         assert_eq!(
-            body.matches("dictation_llm_formatting_enabled(").count(),
-            provider_calls,
-            "every pre-insert LLM call must be gated by dictation_llm_formatting_enabled"
+            body.matches("tokio::time::timeout(").count(),
+            2,
+            "exactly two pre-insert LLM call sites (mode-transform, default/voice) must be time-boxed"
         );
         assert_eq!(
-            body.matches("DICTATION_FORMAT_TIMEOUT,").count(),
-            provider_calls,
-            "every pre-insert LLM call must be wrapped in DICTATION_FORMAT_TIMEOUT"
+            body.matches("dictation_format_timeout(").count(),
+            2,
+            "every timed call must pick its budget via dictation_format_timeout (the local-vs-remote split)"
+        );
+        assert_eq!(
+            body.matches("dictation_llm_formatting_enabled(").count(),
+            2,
+            "every pre-insert LLM call must be gated by dictation_llm_formatting_enabled"
+        );
+
+        // The default/voice branch must resolve everything that is not the
+        // model call itself (settings lock, frontmost-app lookup, prompt
+        // building) *before* its timer starts, not inside it -- that
+        // preamble used to run inside the timed window, quietly eating into
+        // the budget the timeout exists to enforce.
+        let prepare_call = body
+            .find("prepare_dictation_formatting_request(")
+            .expect("the default/voice branch must call prepare_dictation_formatting_request");
+        let last_timeout_call = body
+            .rfind("tokio::time::timeout(")
+            .expect("a timeout call must exist");
+        assert!(
+            prepare_call < last_timeout_call,
+            "preparation must run before the timer starts, not inside it"
         );
     }
 
@@ -21453,12 +21603,34 @@ fn recent_dictation_result_at(state: &AppState, index: usize) -> Option<RecentDi
 /// auto-stop for session A arriving after session B already started), the
 /// stop is rejected without touching any state, so a stale stop can never
 /// tear down a session it doesn't own.
+///
+/// `stop_gesture_epoch_ms`, when the caller supplies it, is the epoch ms of
+/// the real client-side stop gesture (hotkey release, hands-free toggle,
+/// etc.) as observed by Electron -- see `dictation-shortcut-controller.ts`,
+/// which captures it before any `invoke` await. Absent that (an older
+/// caller, or a stop path with no discrete client gesture), the timing
+/// record's zero point honestly falls back to when this handler itself
+/// observed the stop, which is measurably later than the real gesture by
+/// whatever the Electron-to-sidecar IPC hop costs.
 async fn stop_dictation_for_sidecar(
     state: &AppState,
     handle: &crate::sidecar_handle::SidecarHandle,
     stop_reason: &str,
     expected_session_id: Option<u64>,
+    stop_gesture_epoch_ms: Option<i64>,
 ) -> Result<String, String> {
+    // Single `Instant`, captured once, that every stage of the timing record
+    // below measures elapsed time from. Each stage used to re-lock
+    // `dictation_session_tracker` just to read `stop_requested_at` back out
+    // -- extra lock traffic bought nothing (the value never changes once set
+    // a few lines down), one of those locks sat inside the very insertion
+    // window it was measuring, and reading it back through a lock left a
+    // window where a concurrent reset (`force_stop_dictation`, or a second
+    // stop racing this one) could clear `stop_requested_at` mid-flight and
+    // silently drop a stage's timing. A local `Instant` is `Copy`, cannot be
+    // reset out from under this function, and costs nothing to read.
+    let stop_signal_instant = std::time::Instant::now();
+
     // Claim the session atomically. Reading the active id and then re-taking
     // the lock later leaves a window where a second stop passes the same
     // checks; both would then run audio finalization and the loser would reset
@@ -21486,13 +21658,18 @@ async fn stop_dictation_for_sidecar(
         }
 
         tracker.stopping_session_id = Some(active);
-        tracker.stop_requested_at = Some(std::time::Instant::now());
+        tracker.stop_requested_at = Some(stop_signal_instant);
         active
     };
-    // Wall-clock zero point for the whole `DictationTimingRecord` below: every
-    // stage after this is reported as milliseconds elapsed since the stop
-    // signal (hotkey release, VAD auto-stop, manual stop, or popup stop).
-    let stop_signal_received_at_epoch_ms = chrono::Utc::now().timestamp_millis();
+    // Epoch-ms zero point for the `DictationTimingRecord` below (every
+    // *elapsed* field is measured from `stop_signal_instant` above, not
+    // recomputed from this -- this is only for absolute-timestamp
+    // reporting). Honestly named: absent a real client gesture epoch, all
+    // this sidecar actually knows is when its own stop-command handler ran,
+    // which is not the same moment as the user's hotkey release -- see the
+    // function doc above.
+    let stop_command_received_at_epoch_ms =
+        stop_gesture_epoch_ms.unwrap_or_else(|| chrono::Utc::now().timestamp_millis());
     let dictation_options = state.dictation_start_options.lock().await.clone();
     let settings_snapshot = {
         let sm = state.settings_manager.lock().await;
@@ -21603,12 +21780,12 @@ async fn stop_dictation_for_sidecar(
             }
         }
     };
-    let audio_finalized_ms = {
-        let tracker = state.dictation_session_tracker.lock().await;
-        tracker
-            .stop_requested_at
-            .map(|stopped_at| stopped_at.elapsed().as_millis().min(u128::from(u64::MAX)) as u64)
-    };
+    let audio_finalized_ms = Some(
+        stop_signal_instant
+            .elapsed()
+            .as_millis()
+            .min(u128::from(u64::MAX)) as u64,
+    );
     if hit_max_duration {
         // The session was ended by the length ceiling, not by the user. Say so:
         // the transcript that follows covers only the audio that fit.
@@ -21908,36 +22085,63 @@ async fn stop_dictation_for_sidecar(
                             dictation_llm_formatting_enabled(&settings_snapshot, &dictation_options)
                         })
                 {
-                    let transform = tokio::time::timeout(
-                        DICTATION_FORMAT_TIMEOUT,
-                        run_custom_dictation_transform_with_selected_provider(
-                            state,
-                            final_text.as_str(),
-                            prompt.as_str(),
-                        ),
+                    // Resolve the provider (and enforce remote-processing
+                    // policy) before the clock starts: neither is the model
+                    // call the budget is meant to time, and a policy-blocked
+                    // remote provider should fail fast rather than occupy
+                    // the timer only to be rejected inside it.
+                    let attempt = match selected_analysis_provider_and_settings(
+                        state,
+                        settings::AiLane::Dictation,
                     )
-                    .await;
-                    let attempt = match transform {
-                        Ok(Ok((output, _, _))) => {
-                            crate::dictation_timing::DictationFormatAttempt::Applied(output)
+                    .await
+                    .and_then(|(provider, remote_processing_enabled, _, _)| {
+                        enforce_remote_provider_policy(provider, remote_processing_enabled)
+                            .map(|()| provider)
+                    }) {
+                        Ok(provider) => {
+                            let format_timeout = dictation_format_timeout(provider);
+                            let transform = tokio::time::timeout(
+                                format_timeout,
+                                run_custom_dictation_transform_with_selected_provider(
+                                    state,
+                                    final_text.as_str(),
+                                    prompt.as_str(),
+                                ),
+                            )
+                            .await;
+                            match transform {
+                                Ok(Ok((output, _, _))) => {
+                                    crate::dictation_timing::DictationFormatAttempt::Applied(output)
+                                }
+                                Ok(Err(error)) => {
+                                    // Keep the local pipeline output
+                                    // verbatim: it is the user's words,
+                                    // correctly formatted.
+                                    tracing::warn!(
+                                        "Dictation mode transform for '{}' failed, keeping local pipeline output: {}",
+                                        effective_mode,
+                                        error
+                                    );
+                                    crate::dictation_timing::DictationFormatAttempt::Failed
+                                }
+                                Err(_) => {
+                                    tracing::warn!(
+                                        "Dictation mode transform for '{}' timed out after {}ms, keeping local pipeline output",
+                                        effective_mode,
+                                        format_timeout.as_millis()
+                                    );
+                                    crate::dictation_timing::DictationFormatAttempt::TimedOut
+                                }
+                            }
                         }
-                        Ok(Err(error)) => {
-                            // Keep the local pipeline output verbatim: it is
-                            // the user's words, correctly formatted.
+                        Err(error) => {
                             tracing::warn!(
-                                "Dictation mode transform for '{}' failed, keeping local pipeline output: {}",
+                                "Dictation mode transform for '{}' could not resolve a provider, keeping local pipeline output: {}",
                                 effective_mode,
                                 error
                             );
                             crate::dictation_timing::DictationFormatAttempt::Failed
-                        }
-                        Err(_) => {
-                            tracing::warn!(
-                                "Dictation mode transform for '{}' timed out after {}ms, keeping local pipeline output",
-                                effective_mode,
-                                DICTATION_FORMAT_TIMEOUT.as_millis()
-                            );
-                            crate::dictation_timing::DictationFormatAttempt::TimedOut
                         }
                     };
                     let fallback = crate::dictation_timing::resolve_dictation_format_attempt(
@@ -21985,32 +22189,53 @@ async fn stop_dictation_for_sidecar(
             }
             _ => {
                 if dictation_llm_formatting_enabled(&settings_snapshot, &dictation_options) {
-                    let formatting = tokio::time::timeout(
-                        DICTATION_FORMAT_TIMEOUT,
-                        run_dictation_formatting_with_selected_provider(
-                            state,
-                            final_text.as_str(),
-                            &dictation_options,
-                        ),
+                    // Preparation (provider/model resolution, frontmost-app
+                    // lookup, prompt building) runs before the clock starts;
+                    // only `execute_dictation_formatting_request` -- the
+                    // actual model call -- is timed.
+                    let attempt = match prepare_dictation_formatting_request(
+                        state,
+                        &dictation_options,
                     )
-                    .await;
-                    let attempt = match formatting {
-                        Ok(Ok(output)) => {
-                            crate::dictation_timing::DictationFormatAttempt::Applied(output)
+                    .await
+                    {
+                        Ok(prepared) => {
+                            let format_timeout = dictation_format_timeout(prepared.provider);
+                            let formatting = tokio::time::timeout(
+                                format_timeout,
+                                execute_dictation_formatting_request(
+                                    state,
+                                    &prepared,
+                                    final_text.as_str(),
+                                ),
+                            )
+                            .await;
+                            match formatting {
+                                Ok(Ok(output)) => {
+                                    crate::dictation_timing::DictationFormatAttempt::Applied(output)
+                                }
+                                Ok(Err(error)) => {
+                                    tracing::warn!(
+                                        "LLM dictation formatting failed, keeping local pipeline output: {}",
+                                        error
+                                    );
+                                    crate::dictation_timing::DictationFormatAttempt::Failed
+                                }
+                                Err(_) => {
+                                    tracing::warn!(
+                                        "LLM dictation formatting timed out after {}ms, keeping local pipeline output",
+                                        format_timeout.as_millis()
+                                    );
+                                    crate::dictation_timing::DictationFormatAttempt::TimedOut
+                                }
+                            }
                         }
-                        Ok(Err(error)) => {
+                        Err(error) => {
                             tracing::warn!(
-                                "LLM dictation formatting failed, keeping local pipeline output: {}",
+                                "LLM dictation formatting could not be prepared, keeping local pipeline output: {}",
                                 error
                             );
                             crate::dictation_timing::DictationFormatAttempt::Failed
-                        }
-                        Err(_) => {
-                            tracing::warn!(
-                                "LLM dictation formatting timed out after {}ms, keeping local pipeline output",
-                                DICTATION_FORMAT_TIMEOUT.as_millis()
-                            );
-                            crate::dictation_timing::DictationFormatAttempt::TimedOut
                         }
                     };
                     let fallback = crate::dictation_timing::resolve_dictation_format_attempt(
@@ -22055,12 +22280,18 @@ async fn stop_dictation_for_sidecar(
             }
         }
     }
-    let format_complete_ms = {
-        let tracker = state.dictation_session_tracker.lock().await;
-        tracker
-            .stop_requested_at
-            .map(|stopped_at| stopped_at.elapsed().as_millis().min(u128::from(u64::MAX)) as u64)
-    };
+    // `None` when the stage was never reached at all (empty transcript, or a
+    // command consumed the utterance): `NotApplicable` must mean exactly
+    // that, not "reached instantly," so this is guarded on the same
+    // condition that flips `format_outcome` off its `NotApplicable` default.
+    let format_complete_ms = (format_outcome
+        != crate::dictation_timing::DictationFormatOutcome::NotApplicable)
+        .then(|| {
+            stop_signal_instant
+                .elapsed()
+                .as_millis()
+                .min(u128::from(u64::MAX)) as u64
+        });
 
     final_text = sanitize_dictation_output(final_text.as_str(), raw_transcribed_text.as_str())
         .trim()
@@ -22237,12 +22468,12 @@ async fn stop_dictation_for_sidecar(
 
         if !final_text.is_empty() {
             let insert_started_at = std::time::Instant::now();
-            insertion_dispatched_ms = {
-                let tracker = state.dictation_session_tracker.lock().await;
-                tracker.stop_requested_at.map(|stopped_at| {
-                    stopped_at.elapsed().as_millis().min(u128::from(u64::MAX)) as u64
-                })
-            };
+            insertion_dispatched_ms = Some(
+                stop_signal_instant
+                    .elapsed()
+                    .as_millis()
+                    .min(u128::from(u64::MAX)) as u64,
+            );
             let paste_outcome =
                 match DictationInsertionMode::from_settings_value(&requested_insertion_mode) {
                     DictationInsertionMode::ClipboardOnly => {
@@ -22321,13 +22552,22 @@ async fn stop_dictation_for_sidecar(
                     .as_millis()
                     .min(u128::from(u64::MAX)) as u64,
             );
-            insertion_confirmed_ms = {
-                let tracker = state.dictation_session_tracker.lock().await;
-                tracker.stop_requested_at.map(|stopped_at| {
-                    stopped_at.elapsed().as_millis().min(u128::from(u64::MAX)) as u64
-                })
-            };
             insertion_confirmed_flag = paste_outcome.confirmed;
+            // Only a positively-confirmed insertion gets a confirmed
+            // timestamp -- a bare Cmd+V with no read-back (`paste_dispatched`)
+            // or a clipboard-only copy never confirms delivery, so recording
+            // a timestamp here under either name would claim knowledge this
+            // path doesn't have. `assemble_dictation_timing_record`'s
+            // `total_ms` already falls back to `insertion_dispatched_ms` for
+            // exactly this case.
+            if insertion_confirmed_flag {
+                insertion_confirmed_ms = Some(
+                    stop_signal_instant
+                        .elapsed()
+                        .as_millis()
+                        .min(u128::from(u64::MAX)) as u64,
+                );
+            }
             pasted = paste_outcome.pasted;
             copied = paste_outcome.copied;
             if paste_error.is_none() {
@@ -22394,13 +22634,15 @@ async fn stop_dictation_for_sidecar(
             end_to_end_ms,
         )
     };
-    // The Wave 3 timing record: key-release-to-glyph, not just ASR decode
-    // time. Additive on the completion event below and logged once here --
-    // plain Instants already captured above, no new syscalls, dropped on the
-    // floor if nothing reads it.
+    // The Wave 3 timing record: stop-command-to-glyph (key-release-to-glyph
+    // when Electron supplied the real gesture epoch -- see the function doc
+    // above and dictation_timing.rs's module doc for the honest distinction),
+    // not just ASR decode time. Additive on the completion event below and
+    // logged once here -- one plain Instant captured above, no new locks, no
+    // new syscalls, dropped on the floor if nothing reads it.
     let dictation_timing_record = crate::dictation_timing::assemble_dictation_timing_record(
         crate::dictation_timing::DictationTimingInputs {
-            stop_signal_received_at_epoch_ms,
+            stop_command_received_at_epoch_ms,
             audio_finalized_ms,
             asr_complete_ms: final_transcript_latency_ms,
             format_complete_ms,
@@ -24926,11 +25168,19 @@ pub async fn dispatch_command(
             // stop carrying a sessionId only applies while that session is
             // still the active one. Manual stops omit it and behave as before.
             let expected_session_id = params.get("sessionId").and_then(|v| v.as_u64());
+            // Optional real client-side stop-gesture epoch (hotkey release,
+            // hands-free toggle) -- see `dictation-shortcut-controller.ts`.
+            // Absent for callers that haven't been updated, or stop paths
+            // with no discrete client gesture; `stop_dictation_for_sidecar`
+            // falls back to its own receipt time and names the field
+            // honestly either way.
+            let stop_gesture_epoch_ms = params.get("stopGestureEpochMs").and_then(|v| v.as_i64());
             let result = stop_dictation_for_sidecar(
                 state.as_ref(),
                 handle,
                 stop_reason,
                 expected_session_id,
+                stop_gesture_epoch_ms,
             )
             .await?;
             reconcile_hands_free_monitor(state.as_ref(), handle).await;

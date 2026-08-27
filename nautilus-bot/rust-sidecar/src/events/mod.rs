@@ -64,9 +64,11 @@ pub struct DictationTextReadyEvent {
     /// failed or timed out, a command with no text to work on). The text was
     /// still delivered; these explain why it is not what the user expected.
     pub warnings: Vec<String>,
-    /// Wall-clock stage timing for this dictation, from the stop signal
-    /// (hotkey release) through insertion. See `dictation_timing.rs` — this
-    /// is the end-to-end, key-release-to-glyph measurement the existing
-    /// latency fields above (ASR-only) don't cover.
+    /// Wall-clock stage timing for this dictation, from the stop command
+    /// through insertion. See `dictation_timing.rs`'s module doc for the
+    /// honest distinction: this is key-release-to-glyph only when the caller
+    /// supplied a real client gesture epoch, otherwise it is
+    /// stop-command-received-to-glyph -- either way, coverage the existing
+    /// latency fields above (ASR-only) don't have.
     pub timing: crate::dictation_timing::DictationTimingRecord,
 }

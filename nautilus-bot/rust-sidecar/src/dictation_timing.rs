@@ -4,20 +4,32 @@
 //! Before this module, the only latency receipt in the repo
 //! (`artifacts/qa/dictation-latency.json`) covered `metricScope:
 //! "provider_transcription_only"` — ASR decode alone, ~70ms for a typical
-//! utterance on base.en. It said nothing about the time from the moment the
-//! user releases the dictation hotkey to the moment a glyph lands in their
-//! app: audio finalization, the local dictionary/snippet/smart-format
-//! pipeline, the optional pre-insert LLM formatting pass (guarded by
-//! `DICTATION_FORMAT_TIMEOUT` in `lib.rs`), and insertion itself.
+//! utterance on base.en. It said nothing about audio finalization, the local
+//! dictionary/snippet/smart-format pipeline, the optional pre-insert LLM
+//! formatting pass (guarded by `dictation_format_timeout` in `lib.rs`), or
+//! insertion itself.
 //!
 //! `DictationTimingRecord` is that missing measurement: six checkpoints,
-//! each expressed as milliseconds elapsed since the stop signal (hotkey
-//! release), assembled by a pure function so the assembly logic is testable
+//! each expressed as milliseconds elapsed since the stop command was
+//! received, assembled by a pure function so the assembly logic is testable
 //! without a real dictation session, a real clock, or a real LLM call.
 //! Building the record costs nothing beyond `Instant::now()` calls that
 //! already happen on this path (see `stop_dictation_for_sidecar` in
 //! `lib.rs`) — no new locks, no new syscalls, and the record is dropped on
 //! the floor if nothing reads it.
+//!
+//! One honesty note that matters more than it looks: the zero point is
+//! `stop_command_received_at_epoch_ms`, not "the hotkey release." Electron
+//! passes the real client-side stop-gesture epoch when it has one (captured
+//! before any IPC `invoke` await in `dictation-shortcut-controller.ts`), and
+//! this record uses it when present -- but a caller that omits it (an older
+//! build, or a stop path with no discrete client gesture, e.g. a VAD
+//! auto-stop) falls back to when the sidecar's own stop handler ran, which
+//! is measurably later than the real gesture by whatever the Electron-to-
+//! sidecar IPC hop costs. Only call this "key-release-to-glyph" for a
+//! session that actually supplied the gesture epoch; otherwise it is
+//! "stop-command-received-to-glyph," a related but smaller and more honest
+//! number.
 
 use serde::Serialize;
 
@@ -43,32 +55,36 @@ pub enum DictationFormatOutcome {
     Skipped,
     /// The stage produced its output within budget (local pipeline
     /// formatting, "notes" bulletizing, or an LLM pass that returned before
-    /// `DICTATION_FORMAT_TIMEOUT`).
+    /// its `dictation_format_timeout` budget -- local-vs-remote, see
+    /// `lib.rs`).
     Applied,
-    /// A pre-insert LLM pass hit `DICTATION_FORMAT_TIMEOUT` and was
-    /// abandoned; the local pipeline output was inserted instead.
+    /// A pre-insert LLM pass hit its `dictation_format_timeout` budget and
+    /// was abandoned; the local pipeline output was inserted instead.
     TimedOut,
     /// A pre-insert LLM pass returned an error (not a timeout) and was
     /// abandoned; the local pipeline output was inserted instead.
     Failed,
 }
 
-/// Wall-clock timing for one dictation, spanning stop signal (hotkey
-/// release) through insertion — the number the user actually feels, not
-/// just the ASR-only number the existing latency gate measures.
+/// Wall-clock timing for one dictation, spanning the stop command through
+/// insertion — closer to the number the user actually feels than the
+/// ASR-only number the existing latency gate measures, though see the
+/// module doc above for exactly how close (it depends on whether the caller
+/// supplied a real client gesture epoch).
 ///
 /// Every field but `format_outcome` and `insertion_confirmed` is
-/// milliseconds elapsed since `stop_signal_received_at_epoch_ms`, or `None`
+/// milliseconds elapsed since `stop_command_received_at_epoch_ms`, or `None`
 /// when that stage was never reached (e.g. insertion fields stay `None` for
 /// a preview-only session, or one where a backtrack command cleared the
 /// text before insertion was ever attempted).
 #[derive(Debug, Clone, Copy, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct DictationTimingRecord {
-    /// Epoch ms of the stop signal itself (hotkey release, VAD auto-stop,
-    /// manual stop, or popup stop) — the zero point every other field in
-    /// this record is measured from.
-    pub stop_signal_received_at_epoch_ms: i64,
+    /// Epoch ms of the stop command being received — the real client-side
+    /// gesture epoch (hotkey release, hands-free toggle) when the caller
+    /// supplied one, else the moment this sidecar's own stop handler ran.
+    /// The zero point every other field in this record is measured from.
+    pub stop_command_received_at_epoch_ms: i64,
     /// Audio capture finalized into bytes ready for ASR.
     pub audio_finalized_ms: Option<u64>,
     /// ASR returned a transcript.
@@ -89,22 +105,26 @@ pub struct DictationTimingRecord {
     /// to a dispatch-and-assume (a bare Cmd+V with no read-back) or a
     /// clipboard-only copy, which never confirms delivery into an app.
     pub insertion_confirmed: bool,
-    /// Total time from stop signal to the last thing that happened on this
-    /// dictation's path to the user's screen — `insertion_confirmed_ms` when
-    /// insertion was attempted, else `format_complete_ms`, else
-    /// `asr_complete_ms`. This is the key-release-to-glyph number.
+    /// Total time from the stop command to the last thing that happened on
+    /// this dictation's path to the user's screen —
+    /// `insertion_confirmed_ms` when insertion was attempted, else
+    /// `format_complete_ms`, else `asr_complete_ms`. This is the
+    /// stop-command-to-glyph number (key-release-to-glyph exactly when
+    /// `stop_command_received_at_epoch_ms` came from a real client gesture
+    /// epoch, not a receipt-time fallback).
     pub total_ms: Option<u64>,
 }
 
 /// Inputs to [`assemble_dictation_timing_record`]. Plain data, no `Instant`s:
 /// every field is already-elapsed milliseconds (or an epoch timestamp),
-/// computed at the call site the same way the rest of `stop_dictation_for_sidecar`
-/// already computes latencies (`tracker.stop_requested_at.map(|s| s.elapsed()...)`).
-/// Keeping this a plain-data struct is what makes assembly testable without a
-/// real clock or a real dictation session.
+/// computed at the call site from one `Instant` captured once at function
+/// entry (`stop_signal_instant` in `stop_dictation_for_sidecar`) rather than
+/// re-read from shared state, so a concurrent reset can't corrupt a stage
+/// mid-flight. Keeping this a plain-data struct is what makes assembly
+/// testable without a real clock or a real dictation session.
 #[derive(Debug, Clone, Copy, PartialEq, Default)]
 pub struct DictationTimingInputs {
-    pub stop_signal_received_at_epoch_ms: i64,
+    pub stop_command_received_at_epoch_ms: i64,
     pub audio_finalized_ms: Option<u64>,
     pub asr_complete_ms: Option<u64>,
     pub format_complete_ms: Option<u64>,
@@ -129,7 +149,7 @@ pub fn assemble_dictation_timing_record(inputs: DictationTimingInputs) -> Dictat
         .or(inputs.asr_complete_ms);
 
     DictationTimingRecord {
-        stop_signal_received_at_epoch_ms: inputs.stop_signal_received_at_epoch_ms,
+        stop_command_received_at_epoch_ms: inputs.stop_command_received_at_epoch_ms,
         audio_finalized_ms: inputs.audio_finalized_ms,
         asr_complete_ms: inputs.asr_complete_ms,
         format_complete_ms: inputs.format_complete_ms,
@@ -171,7 +191,8 @@ fn format_stage_ms(value: Option<u64>) -> String {
 /// and testable without tokio at all. The two call sites in
 /// `stop_dictation_for_sidecar` (mode-transform for messages/email/meeting
 /// follow-up, and smart-formatting for every other mode) both race an LLM
-/// call against `DICTATION_FORMAT_TIMEOUT` and land on exactly one of these.
+/// call against `dictation_format_timeout(provider)` -- local Ollama calls
+/// get a longer budget than remote ones -- and land on exactly one of these.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum DictationFormatAttempt {
     Applied(String),
@@ -232,7 +253,7 @@ mod tests {
 
     fn base_inputs() -> DictationTimingInputs {
         DictationTimingInputs {
-            stop_signal_received_at_epoch_ms: 1_000,
+            stop_command_received_at_epoch_ms: 1_000,
             audio_finalized_ms: Some(20),
             asr_complete_ms: Some(90),
             format_complete_ms: Some(95),
@@ -246,7 +267,7 @@ mod tests {
     #[test]
     fn full_success_path_totals_at_insertion_confirmed() {
         let record = assemble_dictation_timing_record(base_inputs());
-        assert_eq!(record.stop_signal_received_at_epoch_ms, 1_000);
+        assert_eq!(record.stop_command_received_at_epoch_ms, 1_000);
         assert_eq!(record.audio_finalized_ms, Some(20));
         assert_eq!(record.asr_complete_ms, Some(90));
         assert_eq!(record.format_complete_ms, Some(95));
@@ -291,8 +312,14 @@ mod tests {
         // the utterance as a command before formatting or insertion is ever
         // reached. NotApplicable, not Skipped -- the stage was never reached
         // at all, as opposed to being reached and gated off by settings.
+        //
+        // This state is genuinely reachable in production: the caller
+        // (`stop_dictation_for_sidecar`) only computes a `Some` elapsed value
+        // for `format_complete_ms` when `format_outcome` has already moved
+        // off `NotApplicable`, so a command-only session's `format_complete_ms`
+        // is `None` here, not a stray "reached instantly" timestamp.
         let inputs = DictationTimingInputs {
-            stop_signal_received_at_epoch_ms: 2_000,
+            stop_command_received_at_epoch_ms: 2_000,
             audio_finalized_ms: Some(15),
             asr_complete_ms: Some(60),
             format_complete_ms: None,
@@ -309,7 +336,7 @@ mod tests {
     #[test]
     fn nothing_reached_yields_a_fully_empty_record() {
         let record = assemble_dictation_timing_record(DictationTimingInputs {
-            stop_signal_received_at_epoch_ms: 3_000,
+            stop_command_received_at_epoch_ms: 3_000,
             ..Default::default()
         });
         assert_eq!(record.audio_finalized_ms, None);
@@ -324,7 +351,7 @@ mod tests {
     #[test]
     fn summary_formats_missing_stages_as_not_applicable() {
         let record = assemble_dictation_timing_record(DictationTimingInputs {
-            stop_signal_received_at_epoch_ms: 0,
+            stop_command_received_at_epoch_ms: 0,
             asr_complete_ms: Some(70),
             format_outcome: DictationFormatOutcome::Skipped,
             ..Default::default()

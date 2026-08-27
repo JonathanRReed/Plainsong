@@ -76,13 +76,17 @@ export interface DictationStateChangedEvent {
 export type DictationFormatOutcome = "not_applicable" | "skipped" | "applied" | "timed_out" | "failed";
 
 /**
- * Wall-clock stage timing for one dictation, from the stop signal (hotkey
- * release) through insertion -- the key-release-to-glyph number, not just
- * the ASR-only latency fields above. See `dictation_timing.rs` for what each
- * field means and why a stage can be `null` (never reached).
+ * Wall-clock stage timing for one dictation, from the stop command through
+ * insertion -- not just the ASR-only latency fields above. This is the
+ * key-release-to-glyph number only when the sidecar had a real client
+ * gesture epoch to start from; otherwise it measures from when the sidecar's
+ * stop handler received the command, which is honestly later than the
+ * user's actual gesture by the Electron-to-sidecar IPC hop. See
+ * `dictation_timing.rs`'s module doc for the full explanation, and for what
+ * each field means / why a stage can be `null` (never reached).
  */
 export interface DictationTimingRecord {
-  stopSignalReceivedAtEpochMs: number;
+  stopCommandReceivedAtEpochMs: number;
   audioFinalizedMs?: number | null;
   asrCompleteMs?: number | null;
   formatCompleteMs?: number | null;
