@@ -48,10 +48,16 @@ import {
   matchesShortcut,
 } from "@/lib/shortcuts";
 import {
+  asrLanguageName,
+  asrLanguageOptions,
   isDownloadableProvider,
+  isKnownAsrProvider,
   providerHostingPreference,
+  resolveAsrLanguageBoundary,
   type DictationRoutePreference,
 } from "@/lib/asr-capabilities";
+import { SearchableSelect } from "@/components/ui/searchable-select";
+import { StatusBanner } from "@/components/ui/status-banner";
 import { formatAppliedDictationCommandLabel } from "@/lib/dictation-command-labels";
 import {
   INSERTION_MODE_LABELS,
@@ -381,20 +387,17 @@ const ACTIVATION_DOMAIN_SUGGESTIONS = [
   "docs.google.com",
   "notion.so",
 ];
-const DICTATION_SESSION_LANGUAGE_OPTIONS = [
-  { value: "auto", label: "Auto detect" },
-  { value: "en", label: "English" },
-  { value: "es", label: "Spanish" },
-  { value: "fr", label: "French" },
-  { value: "de", label: "German" },
-  { value: "pt", label: "Portuguese" },
-  { value: "ja", label: "Japanese" },
-  { value: "zh", label: "Chinese" },
-];
-const DICTATION_ACTIVE_LANGUAGE_OPTIONS =
-  DICTATION_SESSION_LANGUAGE_OPTIONS.filter(
-    (option) => option.value !== "auto",
-  );
+/**
+ * Auto detect is the default and the first option in every list. The rest of
+ * the list is the selected model's own coverage — see `asr-capabilities.ts`.
+ * A hardcoded seven used to stand in for it, which was wrong in both
+ * directions: it hid 92 of Whisper's languages, and offered six that
+ * `base.en` answers with English-sounding nonsense.
+ */
+const DICTATION_AUTO_LANGUAGE_OPTION = {
+  value: "auto",
+  label: "Auto detect",
+};
 
 const DICTATION_COACH_CARDS: DictationCoachCard[] = [
   {
@@ -471,14 +474,24 @@ function normalizeDictationSilenceTimeoutSeconds(value: number): number {
   return Math.min(30, Math.max(0.8, value));
 }
 
-function normalizeActiveLanguageSet(languages: string[]): string[] {
-  const allowed = new Set(
-    DICTATION_ACTIVE_LANGUAGE_OPTIONS.map((option) => option.value),
-  );
+/**
+ * Keep only the languages the selected model can actually transcribe.
+ *
+ * A saved set can outlive the model it was chosen for — switching from Whisper
+ * to Parakeet drops Mandarin, Hindi and Arabic — and a narrowing hint naming a
+ * language the engine cannot produce is worse than no hint at all.
+ */
+function normalizeActiveLanguageSet(
+  languages: string[],
+  allowed: ReadonlySet<string> | null,
+): string[] {
   const normalized: string[] = [];
   for (const language of languages) {
     const value = language.trim().toLowerCase();
-    if (!allowed.has(value) || normalized.includes(value)) {
+    if (!value || value === "auto" || normalized.includes(value)) {
+      continue;
+    }
+    if (allowed && !allowed.has(value)) {
       continue;
     }
     normalized.push(value);
@@ -640,6 +653,8 @@ function getDictationPhaseSummary(
 export function DictationView() {
   const {
     productReadiness,
+    engineNotice,
+    dismissEngineNotice,
     refresh: refreshProductReadiness,
   } = useProductReadinessStatus();
   const dictationReadiness = selectReadinessForSurface(
@@ -1091,6 +1106,34 @@ export function DictationView() {
       dictationSessionLanguage,
     ],
   );
+  // What the selected route can actually transcribe. Everything the language
+  // controls offer is derived from this, so the picker's boundary is the
+  // model's boundary rather than a list someone typed once.
+  const dictationLanguageBoundary = useMemo(
+    () =>
+      resolveAsrLanguageBoundary(
+        isKnownAsrProvider(currentDictationProvider)
+          ? (currentDictationProvider as AsrProviderType)
+          : null,
+        currentDictationModelId,
+      ),
+    [currentDictationModelId, currentDictationProvider],
+  );
+  const dictationLanguageChoices = useMemo(
+    () => asrLanguageOptions(dictationLanguageBoundary),
+    [dictationLanguageBoundary],
+  );
+  const dictationLanguageCodes = useMemo(
+    () =>
+      dictationLanguageBoundary.kind === "enumerated"
+        ? new Set(dictationLanguageBoundary.codes)
+        : null,
+    [dictationLanguageBoundary],
+  );
+  const dictationSessionLanguageOptions = useMemo(
+    () => [DICTATION_AUTO_LANGUAGE_OPTION, ...dictationLanguageChoices],
+    [dictationLanguageChoices],
+  );
   const effectiveCaptureLanguage = useMemo(() => {
     const profileLanguage = customModeDraft.languageOverride.trim();
     if (dictationModePreset === "custom" && profileLanguage) {
@@ -1163,12 +1206,18 @@ export function DictationView() {
       .slice(0, 8);
   }, [dictationDictionaryEntries]);
 
+  /**
+   * Which built-in mode a set of controls adds up to.
+   *
+   * Clipboard behaviour is not part of the comparison: it is the reader's own
+   * setting, kept across profile changes, so including it would report a
+   * plainly-General setup as "custom" purely because copying is on.
+   */
   const inferModePreset = (values: {
     profile: "normal_speed" | "power_rewrite";
     insertionMode: DictationInsertionMode;
     contextSource: DictationContextSource;
     saveToInbox: boolean;
-    copyToClipboard: boolean;
     commandModeEnabled: boolean;
   }): DictationModePreset => {
     const matched = DICTATION_MODE_DEFINITIONS.find((definition) => {
@@ -1178,7 +1227,6 @@ export function DictationView() {
         definition.insertionMode === values.insertionMode &&
         definition.contextSource === values.contextSource &&
         definition.saveToInbox === values.saveToInbox &&
-        definition.copyToClipboard === values.copyToClipboard &&
         definition.commandModeEnabled === values.commandModeEnabled
       );
     });
@@ -1566,7 +1614,6 @@ export function DictationView() {
             insertionMode: nextInsertionMode,
             contextSource: nextContextSource,
             saveToInbox: nextSaveToInbox,
-            copyToClipboard: nextCopyToClipboard,
             commandModeEnabled: nextCommandModeEnabled,
           });
         setSaveToInbox(nextSaveToInbox);
@@ -1625,6 +1672,7 @@ export function DictationView() {
         setDictationActiveLanguages(
           normalizeActiveLanguageSet(
             settings.transcription.dictationActiveLanguages ?? [],
+            null,
           ),
         );
         setDictationSnippetsEnabled(
@@ -1786,7 +1834,10 @@ export function DictationView() {
             : dictationSessionLanguage;
       const nextActiveLanguages =
         updates.activeLanguages !== undefined
-          ? normalizeActiveLanguageSet(updates.activeLanguages)
+          ? normalizeActiveLanguageSet(
+              updates.activeLanguages,
+              dictationLanguageCodes,
+            )
           : dictationActiveLanguages;
       const nextAutoLearnCorrections =
         updates.autoLearnCorrections ?? dictationAutoLearnCorrections;
@@ -1804,7 +1855,6 @@ export function DictationView() {
           insertionMode: nextInsertionMode,
           contextSource: nextContextSource,
           saveToInbox: nextSaveToInbox,
-          copyToClipboard: nextCopyToClipboard,
           commandModeEnabled: nextCommandModeEnabled,
         });
 
@@ -1886,8 +1936,6 @@ export function DictationView() {
     const nextContextSource =
       definition.contextSource ?? dictationContextSource;
     const nextSaveToInbox = definition.saveToInbox ?? saveToInbox;
-    const nextCopyToClipboard =
-      definition.copyToClipboard ?? dictationCopyToClipboard;
     const nextCommandModeEnabled =
       definition.commandModeEnabled ?? dictationCommandModeEnabled;
 
@@ -1895,9 +1943,11 @@ export function DictationView() {
     setDictationInsertionMode(nextInsertionMode);
     setDictationContextSource(nextContextSource);
     setSaveToInbox(nextSaveToInbox);
-    setDictationCopyToClipboard(nextCopyToClipboard);
     setDictationCommandModeEnabled(nextCommandModeEnabled);
 
+    // Clipboard behaviour is deliberately not written here. Picking a profile
+    // must never replace what is on the reader's clipboard from then on; that
+    // is its own toggle, and it keeps whatever value it already had.
     void persistDictationPreferences({
       modePreset: modeId,
       selectedCustomModeId: null,
@@ -1905,7 +1955,6 @@ export function DictationView() {
       insertionMode: nextInsertionMode,
       contextSource: nextContextSource,
       saveToInbox: nextSaveToInbox,
-      copyToClipboard: nextCopyToClipboard,
       commandModeEnabled: nextCommandModeEnabled,
     });
   };
@@ -1925,7 +1974,6 @@ export function DictationView() {
       insertionMode: overrides.insertionMode ?? dictationInsertionMode,
       contextSource: overrides.contextSource ?? dictationContextSource,
       saveToInbox: overrides.saveToInbox ?? saveToInbox,
-      copyToClipboard: overrides.copyToClipboard ?? dictationCopyToClipboard,
       commandModeEnabled:
         overrides.commandModeEnabled ?? dictationCommandModeEnabled,
     });
@@ -3245,6 +3293,27 @@ export function DictationView() {
 
       <ScrollArea className="flex-1">
         <div className="p-6 max-w-4xl mx-auto space-y-6">
+          {/* Engine loss, said in plain words on the surface the reader is
+              actually on. It used to appear only as the bridge's own log line
+              on the buried Setup view. */}
+          {engineNotice ? (
+            <StatusBanner
+              tone={engineNotice.recovering ? "muted" : "rust"}
+              role={engineNotice.recovering ? "status" : "alert"}
+              title={engineNotice.title}
+              message={engineNotice.message}
+              actions={
+                <Button
+                  size="sm"
+                  variant="ghost"
+                  onClick={() => dismissEngineNotice?.()}
+                >
+                  Dismiss
+                </Button>
+              }
+            />
+          ) : null}
+
           <DictationCaptureHero
             phase={dictationPhase}
             phaseTitle={dictationPhaseSummary.title}
@@ -3856,6 +3925,32 @@ export function DictationView() {
                         {item.value}
                       </span>
                     ))}
+                  </div>
+
+                  {/* Copying to the clipboard changes something outside
+                      Plainsong and cannot be undone, so it is asked for
+                      plainly here instead of riding along with a profile. */}
+                  <div className="flex items-center justify-between gap-4 rounded-md border border-border/60 bg-background/75 p-4">
+                    <div className="space-y-0.5">
+                      <p className="text-sm font-medium" id="dictation-clipboard-label">
+                        Also copy every dictation to the clipboard
+                      </p>
+                      <p className="text-sm text-muted-foreground">
+                        Off by default. Turning it on replaces whatever is on
+                        your clipboard each time you dictate — Plainsong does
+                        not put the previous contents back.
+                      </p>
+                    </div>
+                    <Switch
+                      aria-labelledby="dictation-clipboard-label"
+                      checked={dictationCopyToClipboard}
+                      onCheckedChange={(checked) => {
+                        setDictationCopyToClipboard(checked);
+                        void persistDictationPreferences({
+                          copyToClipboard: checked,
+                        });
+                      }}
+                    />
                   </div>
                 </div>
 
@@ -4694,91 +4789,124 @@ export function DictationView() {
                     >
                       Session language
                     </label>
-                    <select
-                      id="dictation-session-language"
-                      aria-label="Session language"
-                      className="w-full rounded-md border bg-background p-2 text-sm"
-                      value={dictationSessionLanguage}
-                      onChange={(event) => {
-                        const next = event.target.value;
-                        setDictationSessionLanguage(next);
-                        void persistDictationPreferences({
-                          sessionLanguage: next === "auto" ? null : next,
-                        });
-                      }}
-                    >
-                      {DICTATION_SESSION_LANGUAGE_OPTIONS.map((option) => (
-                        <option key={option.value} value={option.value}>
-                          {option.label}
-                        </option>
-                      ))}
-                    </select>
-                    <p className="text-sm text-muted-foreground">
-                      Picking a language here settles it. Leave it on auto
-                      detect and the list below narrows the guess instead.
-                    </p>
-                    <div className="rounded-md border bg-muted/20 px-3 py-3">
-                      <p className="text-sm font-medium text-foreground">
-                        Languages you actually speak
+                    {dictationLanguageBoundary.kind === "english_only" ? (
+                      <>
+                        {/* One option in a picker is not a choice, and a
+                            lonely "English" explains nothing. Say why. */}
+                        <p className="rounded-md border bg-muted/20 px-3 py-2 text-sm text-muted-foreground">
+                          {currentDictationModelId
+                            ? `${currentDictationModelId} transcribes English only.`
+                            : "The selected model transcribes English only."}{" "}
+                          Speak anything else into it and it returns
+                          English-sounding words rather than admitting it
+                          cannot. Choose a multilingual model in Settings to
+                          dictate in another language.
+                        </p>
+                        <input
+                          type="hidden"
+                          id="dictation-session-language"
+                          value="en"
+                          readOnly
+                        />
+                      </>
+                    ) : dictationLanguageBoundary.kind === "unenumerated" ? (
+                      <p className="rounded-md border bg-muted/20 px-3 py-2 text-sm text-muted-foreground">
+                        Plainsong has no confirmed language list for this
+                        model ({dictationLanguageBoundary.label}), so every
+                        capture is left on auto detect.
                       </p>
-                      <p className="mt-1 text-sm text-muted-foreground">
-                        Used only while Session language is on auto detect.
-                      </p>
-                      <div className="mt-3 flex flex-wrap gap-2">
-                        {DICTATION_ACTIVE_LANGUAGE_OPTIONS.map((option) => {
-                          const selected = dictationActiveLanguages.includes(
-                            option.value,
-                          );
-                          return (
-                            <button
-                              key={option.value}
-                              type="button"
-                              aria-pressed={selected}
-                              aria-label={`Toggle ${option.label} active language`}
-                              className={cn(
-                                "rounded-full border px-3 py-1 text-sm transition-colors",
-                                selected
-                                  ? "border-foreground bg-foreground text-background"
-                                  : "border-border bg-background text-muted-foreground hover:text-foreground",
+                    ) : (
+                      <>
+                        <SearchableSelect
+                          id="dictation-session-language"
+                          ariaLabel="Session language"
+                          value={dictationSessionLanguage}
+                          options={dictationSessionLanguageOptions}
+                          searchPlaceholder="Search languages"
+                          emptyText={`This model does not transcribe that language. It covers ${dictationLanguageBoundary.label}.`}
+                          onChange={(next) => {
+                            setDictationSessionLanguage(next);
+                            void persistDictationPreferences({
+                              sessionLanguage: next === "auto" ? null : next,
+                            });
+                          }}
+                        />
+                        <p className="text-sm text-muted-foreground">
+                          Auto detect is the default. Picking a language here
+                          settles it; otherwise the list below narrows the
+                          guess. This model covers{" "}
+                          {dictationLanguageBoundary.label}.
+                        </p>
+                        <div className="rounded-md border bg-muted/20 px-3 py-3">
+                          <p className="text-sm font-medium text-foreground">
+                            Languages you actually speak
+                          </p>
+                          <p className="mt-1 text-sm text-muted-foreground">
+                            Used only while Session language is on auto detect.
+                          </p>
+                          <div className="mt-3 space-y-2">
+                            <SearchableSelect
+                              ariaLabel="Add a language you speak"
+                              value=""
+                              options={dictationLanguageChoices.filter(
+                                (option) =>
+                                  !dictationActiveLanguages.includes(
+                                    option.value,
+                                  ),
                               )}
-                              onClick={() => {
-                                const nextActiveLanguages = selected
-                                  ? dictationActiveLanguages.filter(
-                                      (language) => language !== option.value,
-                                    )
-                                  : [
-                                      ...dictationActiveLanguages,
-                                      option.value,
-                                    ];
+                              searchPlaceholder="Search languages"
+                              emptyText="Every language this model covers is already listed."
+                              onChange={(next) => {
                                 const normalized = normalizeActiveLanguageSet(
-                                  nextActiveLanguages,
+                                  [...dictationActiveLanguages, next],
+                                  dictationLanguageCodes,
                                 );
                                 setDictationActiveLanguages(normalized);
                                 void persistDictationPreferences({
                                   activeLanguages: normalized,
                                 });
                               }}
-                            >
-                              {option.label}
-                            </button>
-                          );
-                        })}
-                      </div>
-                      <p className="mt-3 text-sm text-muted-foreground">
-                        {dictationActiveLanguages.length === 0
-                          ? "Nothing picked, so auto detect considers every language."
-                          : dictationActiveLanguages.length === 1
-                            ? `Every capture will be treated as ${DICTATION_ACTIVE_LANGUAGE_OPTIONS.find((option) => option.value === dictationActiveLanguages[0])?.label ?? dictationActiveLanguages[0]} until you add another language.`
-                            : `Auto detect chooses between: ${dictationActiveLanguages
-                                .map(
-                                  (language) =>
-                                    DICTATION_ACTIVE_LANGUAGE_OPTIONS.find(
-                                      (option) => option.value === language,
-                                    )?.label ?? language,
-                                )
-                                .join(", ")}.`}
-                      </p>
-                    </div>
+                            />
+                            {dictationActiveLanguages.length > 0 ? (
+                              <div className="flex flex-wrap gap-2">
+                                {dictationActiveLanguages.map((language) => (
+                                  <button
+                                    key={language}
+                                    type="button"
+                                    aria-label={`Remove ${asrLanguageName(language)} from the languages you speak`}
+                                    className="rounded-full border border-foreground bg-foreground px-3 py-1 text-sm text-background transition-colors"
+                                    onClick={() => {
+                                      const normalized =
+                                        normalizeActiveLanguageSet(
+                                          dictationActiveLanguages.filter(
+                                            (value) => value !== language,
+                                          ),
+                                          dictationLanguageCodes,
+                                        );
+                                      setDictationActiveLanguages(normalized);
+                                      void persistDictationPreferences({
+                                        activeLanguages: normalized,
+                                      });
+                                    }}
+                                  >
+                                    {asrLanguageName(language)} ×
+                                  </button>
+                                ))}
+                              </div>
+                            ) : null}
+                          </div>
+                          <p className="mt-3 text-sm text-muted-foreground">
+                            {dictationActiveLanguages.length === 0
+                              ? "Nothing picked, so auto detect considers every language this model covers."
+                              : dictationActiveLanguages.length === 1
+                                ? `Every capture will be treated as ${asrLanguageName(dictationActiveLanguages[0])} until you add another language.`
+                                : `Auto detect chooses between: ${dictationActiveLanguages
+                                    .map(asrLanguageName)
+                                    .join(", ")}.`}
+                          </p>
+                        </div>
+                      </>
+                    )}
                   </div>
 
                   <div className="space-y-2">

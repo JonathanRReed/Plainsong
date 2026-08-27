@@ -191,7 +191,13 @@ export function SetupView() {
     productReadiness,
   } = useProductReadinessStatus();
   const dictationReady = productReadiness.dictation.state === "ready";
-  const meetingReady = productReadiness.meetings.state === "ready";
+  const meetingReady = productReadiness.meetingsCapture.state === "ready";
+  // Said as a separate line below rather than replacing the capture summary:
+  // notes and capture are different questions with different answers.
+  const meetingNotesCause =
+    productReadiness.meetings.cause?.id === "ai_route"
+      ? productReadiness.meetings.cause
+      : null;
   const fullCaptureReady = productReadiness.fullCapture.state === "ready";
   const [busyAction, setBusyAction] = useState<string | null>(null);
   const [statusMessage, setStatusMessage] = useState<string | null>(null);
@@ -465,8 +471,8 @@ export function SetupView() {
                     aria-hidden="true"
                   />
                   <span>
-                    {productReadiness.meetings.cause?.message
-                      ? productReadiness.meetings.cause.message
+                    {productReadiness.meetingsCapture.cause?.message
+                      ? productReadiness.meetingsCapture.cause.message
                       : fullCaptureReady
                         ? "Both sides of a call will be recorded and transcribed."
                         : meetingReady
@@ -474,6 +480,12 @@ export function SetupView() {
                           : "Meetings still need microphone input, permission, or a transcription engine that can handle a call."}
                   </span>
                 </p>
+                {meetingNotesCause ? (
+                  <p className="flex items-start gap-2 text-sm text-muted-foreground">
+                    <span className="neume neume-hollow mt-1.5" aria-hidden="true" />
+                    <span>{meetingNotesCause.message}</span>
+                  </p>
+                ) : null}
                 <StatusRows
                   rows={[
                     { label: "Transcribed by", value: meetingRoute.summary },

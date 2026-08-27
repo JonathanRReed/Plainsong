@@ -1,4 +1,5 @@
 export {
+  acknowledgeIncompleteTranscript,
   deleteRecording,
   deleteTranscriptSegments,
   editTranscriptSpeakerTurn,
@@ -15,7 +16,9 @@ export {
   openRecordingAudio,
   renameRecording,
   retranscribeRecording,
+  retryMeetingAnalysis,
   retryMeetingAutoName,
+  revalidateRecordingAudio,
   setRecordingSourceType,
   startRecording,
   stopRecording,
@@ -28,8 +31,11 @@ export {
 export type {
   AudioInputDeviceInfo,
   AudioInputDeviceInventory,
+  IncompleteTranscriptAcknowledgement,
   MeetingConsentAutomationStatus,
   RecordingAnalysisPatch,
+  RecordingAudioAssetReport,
+  RecordingAudioRevalidation,
   SystemAudioCapability,
   SystemAudioTestResult,
 } from "../backend";

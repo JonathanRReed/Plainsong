@@ -25,6 +25,16 @@ export interface Recording {
   consentNoticeSurface?: string | null;
   consentNoticeMessage?: string | null;
   consentNoticeUpdatedAt?: string | null;
+  /**
+   * Meeting data-integrity facts. Optional because a sidecar that predates
+   * them omits them entirely, and the renderer must degrade to making no claim
+   * rather than to making a wrong one — see `src/lib/meeting-recovery.ts`,
+   * which is the only thing that should read them.
+   */
+  transcriptComplete?: boolean | null;
+  transcriptDegradedReason?: string | null;
+  transcriptIncompleteAcknowledgedAt?: string | null;
+  captureDegradedSummary?: string | null;
 }
 
 interface RecordingMetadata {

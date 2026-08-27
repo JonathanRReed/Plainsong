@@ -328,6 +328,19 @@ describe("SetupView", () => {
           },
         },
       },
+      meetingsCapture: {
+        domain: "meetings_capture",
+        state: "blocked",
+        cause: {
+          id: "meeting_route",
+          message: "Meetings need a meeting-grade ASR route.",
+          action: {
+            id: "open_models",
+            label: "Review models",
+            destination: "models",
+          },
+        },
+      },
       fullCapture: {
         domain: "full_capture",
         state: "blocked",
@@ -470,6 +483,11 @@ describe("SetupView", () => {
     setupStatusMock.meetingBlockers = [];
     setupStatusMock.productReadiness.meetings = {
       domain: "meetings",
+      state: "ready",
+      cause: null,
+    };
+    setupStatusMock.productReadiness.meetingsCapture = {
+      domain: "meetings_capture",
       state: "ready",
       cause: null,
     };

@@ -5,6 +5,7 @@ import {
   FirstRunWizard,
 } from "@/components/first-run-wizard";
 import { MEETING_ONBOARDING_STORAGE_KEY } from "@/lib/onboarding";
+import { AI_NOTES_OPT_OUT_STORAGE_KEY } from "@/lib/ai-notes-preference";
 import { listen } from "@/lib/electron";
 import type { AsrProviderInfo } from "@/types";
 
@@ -100,8 +101,14 @@ const createSettings = () => ({
   export: {},
   privacy: {
     remoteProcessingEnabled: false,
-    dictationAi: { provider: "ollama", modelId: null },
-    meetingsAi: { provider: "ollama", modelId: null },
+    dictationAi: { provider: "ollama", modelId: null } as {
+      provider: string;
+      modelId: string | null;
+    },
+    meetingsAi: { provider: "ollama", modelId: null } as {
+      provider: string;
+      modelId: string | null;
+    },
     exportRoot: null,
     vaultInitialized: false,
     vaultSalt: null,
@@ -157,6 +164,10 @@ function getMeetingVerificationResult() {
 vi.mock("@/lib/backend/asr", () => ({
   downloadAsrModels: vi.fn(async () => {}),
   getAsrProviders: vi.fn(async () => providers),
+}));
+
+vi.mock("@/lib/backend/ai", () => ({
+  getOllamaStatus: vi.fn(async () => true),
 }));
 
 vi.mock("@/lib/backend/dictation", () => ({
@@ -236,6 +247,19 @@ async function clickPrimary(label: RegExp) {
   });
 }
 
+/**
+ * The meeting-notes step sits between meeting setup and the closing summary, so
+ * every full-onboarding walkthrough passes through it. Keeping the default
+ * choice untouched here is deliberate: these tests assert the surrounding flow,
+ * not the notes decision, which has its own tests below.
+ */
+async function passMeetingNotesStep() {
+  expect(
+    await screen.findByRole("heading", { name: /meeting notes/i }),
+  ).toBeInTheDocument();
+  await clickPrimary(/^continue$/i);
+}
+
 describe("dictationShortcutConflictMessage", () => {
   it("blocks a dictation shortcut that disables another configured action", () => {
     expect(
@@ -290,7 +314,7 @@ describe("FirstRunWizard", () => {
     expect(
       await screen.findByRole("heading", { name: /dictation model/i })
     ).toBeInTheDocument();
-    expect(screen.getByText(/^step 1 of 5$/i)).toBeInTheDocument();
+    expect(screen.getByText(/^step 1 of 6$/i)).toBeInTheDocument();
     expect(
       screen.getByRole("button", { name: /download and continue/i })
     ).toBeInTheDocument();
@@ -307,7 +331,7 @@ describe("FirstRunWizard", () => {
     });
     await waitFor(() => expect(modelHeading).toHaveFocus());
     expect(screen.getByRole("status")).toHaveTextContent(
-      "Step 1 of 5: Dictation model",
+      "Step 1 of 6: Dictation model",
     );
 
     await clickPrimary(/skip model download/i);
@@ -317,7 +341,7 @@ describe("FirstRunWizard", () => {
     });
     await waitFor(() => expect(tryHeading).toHaveFocus());
     expect(screen.getByRole("status")).toHaveTextContent(
-      "Step 2 of 5: Try dictation here",
+      "Step 2 of 6: Try dictation here",
     );
   });
 
@@ -446,6 +470,7 @@ describe("FirstRunWizard", () => {
       await screen.findByRole("heading", { name: /meeting setup/i }),
     ).toBeInTheDocument();
     await clickPrimary(/download meeting model/i);
+    await passMeetingNotesStep();
 
     expect(
       await screen.findByText(/the model download was skipped/i)
@@ -614,6 +639,7 @@ describe("FirstRunWizard", () => {
       await screen.findByRole("heading", { name: /meeting setup/i }),
     ).toBeInTheDocument();
     await clickPrimary(/download meeting model/i);
+    await passMeetingNotesStep();
     expect(
       await screen.findByRole("heading", { name: /^ready$/i }),
     ).toBeInTheDocument();
@@ -682,6 +708,7 @@ describe("FirstRunWizard", () => {
       "distil_whisper",
       "distil-large-v3"
     );
+    await passMeetingNotesStep();
     expect(
       await screen.findByRole("heading", { name: /^ready$/i })
     ).toBeInTheDocument();
@@ -742,6 +769,7 @@ describe("FirstRunWizard", () => {
     await clickPrimary(/retry meeting model download/i);
 
     expect(downloadAsrModels).toHaveBeenCalledTimes(2);
+    await passMeetingNotesStep();
     expect(
       await screen.findByRole("heading", { name: /^ready$/i })
     ).toBeInTheDocument();
@@ -989,6 +1017,7 @@ describe("FirstRunWizard", () => {
       expect(currentSettings.transcription.meetingProvider).toBe("distil_whisper");
     });
 
+    await clickPrimary(/^continue$/i);
     await clickPrimary(/finish meeting setup/i);
 
     await waitFor(() => {
@@ -1024,11 +1053,15 @@ describe("FirstRunWizard", () => {
     });
 
     render(<FirstRunWizard mode="meetings" onComplete={onComplete} />);
-    const finishButton = await screen.findByRole("button", {
-      name: /finish meeting setup/i,
+    const continueButton = await screen.findByRole("button", {
+      name: /^continue$/i,
     });
-    await waitFor(() => expect(finishButton).toBeEnabled());
-    fireEvent.click(finishButton);
+    await waitFor(() => expect(continueButton).toBeEnabled());
+    fireEvent.click(continueButton);
+    expect(
+      await screen.findByRole("heading", { name: /meeting notes/i }),
+    ).toBeInTheDocument();
+    await clickPrimary(/finish meeting setup/i);
 
     await waitFor(() => {
       expect(backend.saveSettings).toHaveBeenCalledTimes(1);
@@ -1060,7 +1093,7 @@ describe("FirstRunWizard", () => {
     render(<FirstRunWizard mode="meetings" onComplete={onComplete} />);
 
     const finishButton = await screen.findByRole("button", {
-      name: /finish meeting setup/i,
+      name: /^continue$/i,
     });
     fireEvent.change(screen.getByLabelText("Meeting audio storage"), {
       target: { value: "transcript_only" },
@@ -1097,7 +1130,7 @@ describe("FirstRunWizard", () => {
       "audio_and_transcript"
     );
 
-    fireEvent.click(screen.getByRole("button", { name: /finish meeting setup/i }));
+    fireEvent.click(screen.getByRole("button", { name: /^continue$/i }));
 
     await waitFor(() => {
       expect(saveSettings).toHaveBeenCalledTimes(2);
@@ -1110,6 +1143,8 @@ describe("FirstRunWizard", () => {
       retrySave.resolve();
       await retrySave.promise;
     });
+
+    await clickPrimary(/finish meeting setup/i);
 
     await waitFor(() => {
       expect(onComplete).toHaveBeenCalledWith({
@@ -1308,5 +1343,118 @@ describe("FirstRunWizard", () => {
     const dialog = await screen.findByRole("dialog");
     expect(dialog).toHaveAttribute("aria-modal", "true");
     expect(dialog).toHaveAttribute("aria-labelledby");
+  });
+
+  describe("meeting notes step", () => {
+    async function openNotesStep() {
+      // A meeting-grade route is already configured, so the meeting-setup step
+      // offers Continue rather than a model download.
+      currentSettings.transcription.useSharedAsrSelection = false;
+      currentSettings.transcription.meetingProvider = "distil_whisper";
+      currentSettings.transcription.meetingModelId = "distil-large-v3";
+
+      render(<FirstRunWizard mode="meetings" onComplete={vi.fn()} />);
+      await screen.findByText(/meeting transcription route/i);
+      await clickPrimary(/^continue$/i);
+      return screen.findByRole("heading", { name: /meeting notes/i });
+    }
+
+    it("says plainly that a missing Ollama means no notes, and how to fix it", async () => {
+      const ai = await import("@/lib/backend/ai");
+      vi.mocked(ai.getOllamaStatus).mockResolvedValue(false);
+
+      await openNotesStep();
+
+      expect(
+        await screen.findByText(/ollama is not running, so notes will not be written yet/i),
+      ).toBeInTheDocument();
+      expect(screen.getByText("ollama.com/download")).toBeInTheDocument();
+      expect(screen.getByText("ollama pull qwen3.5:4b")).toBeInTheDocument();
+      expect(
+        screen.getByRole("button", { name: /check again/i }),
+      ).toBeInTheDocument();
+    });
+
+    it("does not claim Ollama is missing when the probe never answered", async () => {
+      const ai = await import("@/lib/backend/ai");
+      vi.mocked(ai.getOllamaStatus).mockRejectedValue(new Error("no answer"));
+
+      await openNotesStep();
+
+      expect(
+        await screen.findByText(/could not reach ollama to check/i),
+      ).toBeInTheDocument();
+    });
+
+    it("remembers a transcripts-only choice", async () => {
+      const ai = await import("@/lib/backend/ai");
+      vi.mocked(ai.getOllamaStatus).mockResolvedValue(false);
+
+      await openNotesStep();
+      await act(async () => {
+        fireEvent.click(
+          screen.getByRole("radio", { name: /transcripts only/i }),
+        );
+      });
+      await clickPrimary(/finish meeting setup/i);
+
+      await waitFor(() => {
+        expect(storage.get(AI_NOTES_OPT_OUT_STORAGE_KEY)).toBe("true");
+      });
+    });
+
+    it("clears a stale opt-out when the reader picks a route again", async () => {
+      const ai = await import("@/lib/backend/ai");
+      vi.mocked(ai.getOllamaStatus).mockResolvedValue(true);
+      storage.set(AI_NOTES_OPT_OUT_STORAGE_KEY, "true");
+
+      await openNotesStep();
+      await act(async () => {
+        fireEvent.click(screen.getByRole("radio", { name: /on this mac/i }));
+      });
+      await clickPrimary(/finish meeting setup/i);
+
+      await waitFor(() => {
+        expect(storage.has(AI_NOTES_OPT_OUT_STORAGE_KEY)).toBe(false);
+      });
+    });
+
+    it("moves the meetings lane onto the local route without carrying a foreign model id", async () => {
+      const ai = await import("@/lib/backend/ai");
+      vi.mocked(ai.getOllamaStatus).mockResolvedValue(true);
+      currentSettings.privacy.meetingsAi = {
+        provider: "openai",
+        modelId: "gpt-5.2",
+      };
+
+      await openNotesStep();
+      await act(async () => {
+        fireEvent.click(screen.getByRole("radio", { name: /on this mac/i }));
+      });
+      await clickPrimary(/finish meeting setup/i);
+
+      await waitFor(() => {
+        expect(currentSettings.privacy.meetingsAi).toEqual({
+          provider: "ollama",
+          modelId: null,
+        });
+      });
+    });
+
+    it("opens on the configured cloud lane and points at AI & Keys", async () => {
+      currentSettings.privacy.meetingsAi = {
+        provider: "anthropic",
+        modelId: null,
+      };
+
+      await openNotesStep();
+
+      expect(
+        await screen.findByText(/currently set to anthropic/i),
+      ).toBeInTheDocument();
+      expect(
+        screen.getByRole("button", { name: /open ai & keys settings/i }),
+      ).toBeInTheDocument();
+    });
   });
 });

@@ -397,6 +397,60 @@ export async function retryMeetingAutoName(recordingId: string): Promise<void> {
   await invoke("retry_meeting_auto_name", { recordingId });
 }
 
+/**
+ * Re-run the meeting's summary, action items and title after they failed.
+ * Progress arrives on the `meeting-analysis-status` event.
+ */
+export async function retryMeetingAnalysis(recordingId: string): Promise<void> {
+  await invoke("retry_meeting_analysis", { recordingId });
+}
+
+/** One audio asset's state after a re-check, as the sidecar reports it. */
+export interface RecordingAudioAssetReport {
+  role: string;
+  lifecycle: string;
+  error?: string | null;
+}
+
+export interface RecordingAudioRevalidation {
+  recordingId: string;
+  /** Whether enough audio read back intact to re-transcribe from. */
+  recoverable: boolean;
+  message: string;
+  assets: RecordingAudioAssetReport[];
+}
+
+/**
+ * Re-read a meeting's saved audio and repair the lifecycle rows that describe
+ * it. A stop-time failure can condemn audio that is actually intact, and every
+ * runtime resolver refuses anything not marked `ready`; this is the way back
+ * without a relaunch. The meeting's own status is deliberately untouched —
+ * re-validating audio is evidence about files, not about transcription.
+ */
+export async function revalidateRecordingAudio(
+  recordingId: string
+): Promise<RecordingAudioRevalidation> {
+  return await invoke("revalidate_recording_audio", { recordingId });
+}
+
+export interface IncompleteTranscriptAcknowledgement {
+  recordingId: string;
+  acknowledged: boolean;
+  reason?: string | null;
+}
+
+/**
+ * Record that the reader accepts losing the audio of a meeting whose transcript
+ * is known incomplete. Storage policy holds that audio back precisely because
+ * it is the only complete record of what was said; this releases it. It never
+ * claims the transcript became complete — re-transcribing is what does that.
+ */
+export async function acknowledgeIncompleteTranscript(
+  recordingId: string
+): Promise<IncompleteTranscriptAcknowledgement> {
+  return await invoke("acknowledge_incomplete_transcript", { recordingId });
+}
+
 export async function setRecordingSourceType(
   recordingId: string,
   sourceType: "meeting" | "dictation"

@@ -23,6 +23,11 @@ const readinessContext = vi.hoisted(() => ({
     evidenceObservedAt: 1,
     dictation: { domain: "dictation", state: "ready", cause: null },
     meetings: { domain: "meetings", state: "ready", cause: null },
+    meetingsCapture: {
+      domain: "meetings_capture",
+      state: "ready",
+      cause: null,
+    },
     fullCapture: { domain: "full_capture", state: "ready", cause: null },
     overall: { domain: "overall", state: "ready", cause: null },
   } as ProductReadinessSnapshot,
@@ -73,6 +78,11 @@ describe("Sidebar collapsed layout", () => {
       evidenceObservedAt: 1,
       dictation: { domain: "dictation", state: "ready", cause: null },
       meetings: { domain: "meetings", state: "ready", cause: null },
+      meetingsCapture: {
+        domain: "meetings_capture",
+        state: "ready",
+        cause: null,
+      },
       fullCapture: { domain: "full_capture", state: "ready", cause: null },
       overall: { domain: "overall", state: "ready", cause: null },
     };
@@ -266,6 +276,47 @@ describe("Sidebar collapsed layout", () => {
         name: /Local only\. Remote processing is disabled by policy\./,
       }),
     ).toBeInTheDocument();
+  });
+
+  it("does not raise the sitewide Setup needed badge for a missing AI route", () => {
+    // "Setup needed" means the product cannot do its jobs. Meeting notes being
+    // unconfigured is reported by Meetings itself; it is not a setup fault, and
+    // a permanent badge for it on a fresh install is a nag, not a signal.
+    readinessContext.productReadiness = {
+      ...readinessContext.productReadiness,
+      meetings: {
+        domain: "meetings",
+        state: "degraded",
+        cause: {
+        id: "ai_route",
+        message:
+          "Notes unavailable — Ollama on this machine is not running. Meetings still record and transcribe.",
+        action: {
+          id: "open_ai_settings",
+          label: "Open AI settings",
+          destination: "ai",
+        },
+      },
+      },
+      meetingsCapture: {
+        domain: "meetings_capture",
+        state: "ready",
+        cause: null,
+      },
+      overall: { domain: "overall", state: "ready", cause: null },
+    };
+
+    render(
+      <Sidebar
+        activeView="dashboard"
+        onToggleCollapse={vi.fn()}
+        onViewChange={vi.fn()}
+      />,
+    );
+
+    expect(
+      screen.queryByRole("button", { name: /^Setup needed\./ }),
+    ).not.toBeInTheDocument();
   });
 
   it("surfaces the canonical blocker without cluttering a ready sidebar", () => {

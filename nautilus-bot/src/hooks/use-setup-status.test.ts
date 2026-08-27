@@ -19,6 +19,11 @@ function createSettings(dictationInsertionMode: "auto" | "clipboard_only"): Sett
       meetingRoutePolicy: "prefer_local",
       dictationInsertionMode,
     },
+    privacy: {
+      remoteProcessingEnabled: false,
+      dictationAi: { provider: "ollama", modelId: null },
+      meetingsAi: { provider: "ollama", modelId: null },
+    },
   } as Settings;
 }
 
@@ -187,7 +192,13 @@ describe("buildSnapshot", () => {
         ready: false,
         reason: null,
         actionableReason: "Run Test system audio.",
-      }
+      },
+      {},
+      null,
+      null,
+      // Meetings only reads "ready" once the AI-notes lane has actually
+      // answered; an unprobed lane is unknown, which degrades the domain.
+      { optedOut: false, localRuntimeReady: true, credentialPresent: null }
     );
 
     expect(snapshot.systemAudioAvailable).toBe(true);
@@ -201,6 +212,45 @@ describe("buildSnapshot", () => {
     expect(snapshot.productReadiness.fullCapture.cause?.id).toBe(
       "system_audio_unverified",
     );
+  });
+
+  it("does not call meetings ready while the AI notes lane is missing", () => {
+    const snapshot = buildSnapshot(
+      createSettings("clipboard_only"),
+      createProviders(),
+      createPermissions(),
+      false,
+      null,
+      null,
+      {},
+      null,
+      null,
+      { optedOut: false, localRuntimeReady: false, credentialPresent: null }
+    );
+
+    expect(snapshot.meetingNotesRoute.state).toBe("unconfigured");
+    expect(snapshot.productReadiness.meetings.state).toBe("degraded");
+    expect(snapshot.productReadiness.meetings.cause?.id).toBe("ai_route");
+    // Capture itself is unaffected: the transcript still lands.
+    expect(snapshot.meetingReady).toBe(true);
+  });
+
+  it("stays quiet about AI notes once transcripts-only is chosen", () => {
+    const snapshot = buildSnapshot(
+      createSettings("clipboard_only"),
+      createProviders(),
+      createPermissions(),
+      false,
+      null,
+      null,
+      {},
+      null,
+      null,
+      { optedOut: true, localRuntimeReady: false, credentialPresent: null }
+    );
+
+    expect(snapshot.meetingNotesRoute.state).toBe("opted_out");
+    expect(snapshot.productReadiness.meetings.state).toBe("ready");
   });
 
   it("requires microphone permission even when an input device is present", () => {

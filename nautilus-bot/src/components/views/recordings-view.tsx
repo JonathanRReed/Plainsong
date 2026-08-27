@@ -43,8 +43,11 @@ import {
   getRecording,
   openRecordingAudio,
   renameRecording,
+  acknowledgeIncompleteTranscript,
   retranscribeRecording,
+  retryMeetingAnalysis,
   retryMeetingAutoName,
+  revalidateRecordingAudio,
   setRecordingSourceType,
   updateMeetingChatMessages,
   updateRecordingAnalysis,
@@ -99,8 +102,28 @@ import {
   OPEN_RECORDING_WORKSPACE_EVENT,
   requestMainView,
   requestReadinessDestination,
+  requestSettingsTab,
   type OpenRecordingWorkspaceDetail,
 } from "@/lib/navigation";
+import {
+  describeMeetingStartFailure,
+  type MeetingStartFailure,
+} from "@/lib/meeting-start-error";
+import { openPermissionSettings } from "@/lib/backend/settings";
+import {
+  describeMeetingAnalysis,
+  MEETING_ANALYSIS_STATUS_EVENT,
+  parseMeetingAnalysisStatus,
+  readStoredAnalysisFailure,
+  type MeetingAnalysisStatusEvent,
+} from "@/lib/meeting-analysis-status";
+import { StatusBanner } from "@/components/ui/status-banner";
+import {
+  canRecheckMeetingAudio,
+  describeCaptureDegradation,
+  describeIncompleteTranscript,
+  readMeetingIntegrity,
+} from "@/lib/meeting-recovery";
 import { actionItemsToMarkdownList } from "@/lib/markdown";
 import { DocumentField } from "@/components/views/meetings/document-field";
 import { AudioIssueBanner } from "@/components/views/meetings/audio-issue-banner";
@@ -109,7 +132,10 @@ import { MarkdownText } from "@/components/views/meetings/markdown-text";
 import { WorkspaceSkeleton } from "@/components/views/meetings/workspace-skeleton";
 import { listen } from "@/lib/electron";
 import { useProductReadinessStatus } from "@/features/readiness/product-readiness-context";
-import { selectReadinessForSurface } from "@/features/readiness/product-readiness";
+import {
+  meetingCaptureIsReady,
+  selectReadinessForSurface,
+} from "@/features/readiness/product-readiness";
 import {
   AlertCircle,
   ArrowLeft,
@@ -913,11 +939,19 @@ function buildRelationshipRecallPrompts(args: {
 }
 
 export function RecordingsView() {
-  const { productReadiness } = useProductReadinessStatus();
+  const { productReadiness, engineNotice, dismissEngineNotice } =
+    useProductReadinessStatus();
+  // Two readings of the same domain, and they are not interchangeable.
+  // `meetingsReadiness` includes the AI-notes lane and is what the reader is
+  // told; `meetingCaptureReadiness` is capture alone and is what every action
+  // is gated on. Gating on the first disabled meeting capture on every fresh
+  // install, because the default notes route points at an absent Ollama.
   const meetingsReadiness = selectReadinessForSurface(
     productReadiness,
     "meetings",
   );
+  const meetingCaptureReadiness = productReadiness.meetingsCapture;
+  const captureIsReady = meetingCaptureIsReady(productReadiness);
   const fullCaptureReadiness = productReadiness.fullCapture;
   const {
     recordings,
@@ -1032,6 +1066,12 @@ export function RecordingsView() {
   const [analysisFailureByTarget, setAnalysisFailureByTarget] = useState<
     Partial<Record<string, RecordingAnalysisFailedEvent>>
   >({});
+  // Whole-meeting analysis state, keyed by meeting, so a row in the list can
+  // move while a different meeting is open. Separate from the per-target map
+  // above, which only describes the one meeting on screen.
+  const [analysisStatusByRecording, setAnalysisStatusByRecording] = useState<
+    Record<string, { phase: MeetingAnalysisStatusEvent["phase"]; error: string | null }>
+  >({});
   const [activeSpeechTarget, setActiveSpeechTarget] = useState<string | null>(null);
   const meetingChatRequestGuard = useScopedRequestGuard<string | null>();
   const meetingSummaryRequestGuard = useScopedRequestGuard<string | null>();
@@ -1099,6 +1139,21 @@ export function RecordingsView() {
   >(
     "all"
   );
+  // What the last audio re-check found, and whether an acknowledgement is
+  // waiting on a confirmation. Both are per-meeting and cleared on navigation.
+  const [audioRecheckResult, setAudioRecheckResult] = useState<{
+    recordingId: string;
+    recoverable: boolean;
+    message: string;
+  } | null>(null);
+  const [isRecheckingAudio, setIsRecheckingAudio] = useState(false);
+  const [pendingAcknowledgement, setPendingAcknowledgement] =
+    useState<Recording | null>(null);
+  const [isAcknowledging, setIsAcknowledging] = useState(false);
+  // Why the last attempt to start a meeting did not. Held on screen rather than
+  // shown as a toast: it carries the one action that resolves it.
+  const [meetingStartFailure, setMeetingStartFailure] =
+    useState<MeetingStartFailure | null>(null);
   const [isBulkReclassifying, setIsBulkReclassifying] = useState(false);
   const [isExportingMeeting, setIsExportingMeeting] = useState(false);
   const [isRefreshingTranscriptPanel, setIsRefreshingTranscriptPanel] =
@@ -1220,6 +1275,50 @@ export function RecordingsView() {
       unlistenFailure?.();
     };
   }, [selectedRecording?.id]);
+
+  // Whole-meeting analysis status, listened for at the view level rather than
+  // per open meeting: the failure this surfaces is normally discovered later,
+  // from the list, not while the meeting is on screen.
+  useEffect(() => {
+    let disposed = false;
+    let unlisten: (() => void) | undefined;
+
+    void listen(MEETING_ANALYSIS_STATUS_EVENT, (event) => {
+      const payload = parseMeetingAnalysisStatus(event.payload);
+      if (!payload) {
+        return;
+      }
+      setAnalysisStatusByRecording((current) => ({
+        ...current,
+        [payload.recordingId]: {
+          phase: payload.phase,
+          error: payload.error ?? null,
+        },
+      }));
+      if (payload.phase === "completed") {
+        // The stored failure is cleared on the sidecar side; re-read the
+        // records so the list stops carrying a failure that is over.
+        void refetch();
+      }
+    })
+      .then((next) => {
+        if (disposed) {
+          next();
+          return;
+        }
+        unlisten = next;
+      })
+      .catch((error) => {
+        // A build whose sidecar half has not landed simply never reports; the
+        // stored failure field still drives the banner.
+        console.warn("Failed to subscribe to meeting analysis status:", error);
+      });
+
+    return () => {
+      disposed = true;
+      unlisten?.();
+    };
+  }, [refetch]);
 
   useEffect(() => {
     meetingNotesRef.current = meetingNotes;
@@ -2050,8 +2149,8 @@ export function RecordingsView() {
   };
 
   const openMeetingCapture = () => {
-    if (meetingsReadiness.state !== "ready") {
-      const cause = meetingsReadiness.cause;
+    if (!captureIsReady) {
+      const cause = meetingCaptureReadiness.cause;
       toast(
         cause?.message ?? "Plainsong could not confirm that meetings are ready.",
         "error",
@@ -2067,7 +2166,7 @@ export function RecordingsView() {
   const handleStartRecording = async (options: { mic: boolean; systemAudio: boolean; template?: string }) => {
     const requestedReadiness = options.systemAudio
       ? fullCaptureReadiness
-      : meetingsReadiness;
+      : meetingCaptureReadiness;
     if (requestedReadiness.state !== "ready") {
       const cause = requestedReadiness.cause;
       toast(
@@ -2082,6 +2181,7 @@ export function RecordingsView() {
       return;
     }
 
+    setMeetingStartFailure(null);
     try {
       const selectedTemplateId = options.template ?? "auto";
       const shouldSeedTemplateOutline =
@@ -2104,12 +2204,39 @@ export function RecordingsView() {
       }
     } catch (error) {
       console.error("Failed to start recording:", error);
-      toast(
-        error instanceof Error ? error.message : "Failed to start recording",
-        "error"
-      );
+      const failure = describeMeetingStartFailure(error);
+      setMeetingStartFailure(failure);
+      toast(failure.message, "error");
     } finally {
       setShowConsent(false);
+    }
+  };
+
+  /**
+   * The one action a start failure offers. Each code resolves to exactly one
+   * button; the old code appended advice to the message instead, which is how a
+   * system-audio failure came to carry microphone-permission guidance.
+   */
+  const runMeetingStartAction = (failure: MeetingStartFailure) => {
+    switch (failure.action.id) {
+      case "open_microphone_settings":
+        void openPermissionSettings("microphone");
+        return;
+      case "open_system_audio_settings":
+        void openPermissionSettings("system_audio");
+        return;
+      case "open_audio_input_settings":
+        requestReadinessDestination("transcription");
+        return;
+      case "open_storage_settings":
+        requestSettingsTab("storage");
+        return;
+      case "retry":
+        setMeetingStartFailure(null);
+        setShowConsent(true);
+        return;
+      case "none":
+        setMeetingStartFailure(null);
     }
   };
 
@@ -3410,6 +3537,148 @@ export function RecordingsView() {
     setPendingRetranscribe(recording);
   };
 
+  /**
+   * Read the one true state of a meeting's notes: what is happening now if
+   * anything is, otherwise what the record itself remembers about the last
+   * attempt. Returns null when there is nothing to say.
+   */
+  const meetingAnalysisNotice = useCallback(
+    (recording: Recording | null | undefined) => {
+      if (!recording) {
+        return null;
+      }
+      const live = analysisStatusByRecording[recording.id];
+      return describeMeetingAnalysis({
+        storedFailure: readStoredAnalysisFailure(recording),
+        livePhase: live?.phase ?? null,
+        liveError: live?.error ?? null,
+      });
+    },
+    [analysisStatusByRecording],
+  );
+
+  const selectedAnalysisNotice = meetingAnalysisNotice(selectedRecording);
+  const selectedMeetingIntegrity = readMeetingIntegrity(selectedRecording);
+  const selectedIncompleteTranscript = describeIncompleteTranscript(
+    selectedMeetingIntegrity,
+  );
+  const selectedCaptureDegradation = describeCaptureDegradation(
+    selectedMeetingIntegrity,
+  );
+  const canRecheckSelectedAudio = canRecheckMeetingAudio(
+    selectedRecording,
+    selectedMeetingIntegrity,
+  );
+
+  /**
+   * Re-read the saved audio and repair the lifecycle rows describing it.
+   *
+   * A stop-time failure can condemn audio that is perfectly intact, and every
+   * runtime resolver refuses anything not marked `ready`. Before this the only
+   * escape was relaunching the app and hoping the startup reconcile covered it.
+   * The meeting's own status is left alone by the sidecar: this is evidence
+   * about files, not about whether it was transcribed.
+   */
+  const handleRecheckMeetingAudio = async (recordingIdToCheck: string) => {
+    setIsRecheckingAudio(true);
+    setAudioRecheckResult(null);
+    try {
+      const report = await revalidateRecordingAudio(recordingIdToCheck);
+      setAudioRecheckResult({
+        recordingId: recordingIdToCheck,
+        recoverable: Boolean(report?.recoverable),
+        message:
+          report?.message ??
+          (report?.recoverable
+            ? "The saved audio was re-checked and is intact."
+            : "The saved audio was re-checked and some of it could not be read."),
+      });
+      await refetch();
+      if (selectedRecording?.id === recordingIdToCheck) {
+        await refreshSelectedRecording(recordingIdToCheck);
+      }
+    } catch (error) {
+      const message =
+        error instanceof Error
+          ? error.message
+          : "Plainsong could not re-check this meeting's audio.";
+      setAudioRecheckResult({
+        recordingId: recordingIdToCheck,
+        recoverable: false,
+        message,
+      });
+      toast(message, "error");
+    } finally {
+      setIsRecheckingAudio(false);
+    }
+  };
+
+  /**
+   * Record that the reader accepts losing this meeting's audio.
+   *
+   * Storage policy holds the audio of an incomplete meeting back precisely
+   * because it is the only complete record of what was said. This releases it,
+   * and never claims the transcript became complete.
+   */
+  const handleAcknowledgeIncompleteTranscript = async (
+    recordingIdToAcknowledge: string,
+  ) => {
+    setIsAcknowledging(true);
+    try {
+      await acknowledgeIncompleteTranscript(recordingIdToAcknowledge);
+      setPendingAcknowledgement(null);
+      await refetch();
+      if (selectedRecording?.id === recordingIdToAcknowledge) {
+        await refreshSelectedRecording(recordingIdToAcknowledge);
+      }
+      toast(
+        "Noted. This meeting's audio is no longer held back from cleanup.",
+        "success",
+      );
+    } catch (error) {
+      toast(
+        error instanceof Error
+          ? error.message
+          : "Plainsong could not record that acknowledgement.",
+        "error",
+      );
+    } finally {
+      setIsAcknowledging(false);
+    }
+  };
+
+  const handleRetryMeetingAnalysis = async (recordingIdToRetry: string) => {
+    setAnalysisStatusByRecording((current) => ({
+      ...current,
+      [recordingIdToRetry]: { phase: "running", error: null },
+    }));
+    try {
+      await retryMeetingAnalysis(recordingIdToRetry);
+      // Whether the command returns on start or on finish is the sidecar's
+      // business. Drop the local override and let the events plus the stored
+      // field say what actually happened.
+      setAnalysisStatusByRecording((current) => {
+        const next = { ...current };
+        delete next[recordingIdToRetry];
+        return next;
+      });
+      await refetch();
+      if (selectedRecording?.id === recordingIdToRetry) {
+        await refreshSelectedRecording(recordingIdToRetry);
+      }
+    } catch (error) {
+      const message =
+        error instanceof Error
+          ? error.message
+          : "Couldn't start the meeting notes again.";
+      setAnalysisStatusByRecording((current) => ({
+        ...current,
+        [recordingIdToRetry]: { phase: "failed", error: message },
+      }));
+      toast(message, "error");
+    }
+  };
+
   const handleMarkAsDictation = async (recordingIdToUpdate: string) => {
     try {
       await setRecordingSourceType(recordingIdToUpdate, "dictation");
@@ -3590,6 +3859,19 @@ export function RecordingsView() {
                           : "Re-transcribe from audio"}
                       </DropdownMenuItem>
                     )}
+                    {canRecheckSelectedAudio && !isLiveSelectedMeeting && (
+                      <DropdownMenuItem
+                        disabled={isRecheckingAudio}
+                        onClick={() => {
+                          if (selectedRecording) {
+                            void handleRecheckMeetingAudio(selectedRecording.id);
+                          }
+                        }}
+                      >
+                        <FileAudio className="mr-2 h-4 w-4" />
+                        Re-check audio
+                      </DropdownMenuItem>
+                    )}
                     <DropdownMenuSeparator />
                     <DropdownMenuItem
                       onClick={() => {
@@ -3686,6 +3968,111 @@ export function RecordingsView() {
               </p>
             ) : null}
           </div>
+
+          {/* What the capture actually got. Rendered before anything derived
+              from the transcript, because it is the reason the transcript is
+              short. */}
+          {selectedCaptureDegradation ? (
+            <div className="shrink-0 px-6 pt-4">
+              <StatusBanner
+                tone="muted"
+                title={selectedCaptureDegradation.title}
+                message={selectedCaptureDegradation.message}
+              />
+            </div>
+          ) : null}
+
+          {/* A transcript the sidecar knows is incomplete, and the reason its
+              audio is still on disk. Both were reachable only programmatically
+              before this. */}
+          {selectedIncompleteTranscript && selectedRecording ? (
+            <div className="shrink-0 px-6 pt-4">
+              <StatusBanner
+                title={selectedIncompleteTranscript.title}
+                message={selectedIncompleteTranscript.message}
+                actions={
+                  <>
+                    {canRetranscribeRecording(selectedRecording) ? (
+                      <Button
+                        size="sm"
+                        variant="outline"
+                        onClick={() =>
+                          void handleRetranscribeRecording(selectedRecording.id)
+                        }
+                      >
+                        <RefreshCw className="mr-2 h-4 w-4" />
+                        Re-transcribe
+                      </Button>
+                    ) : null}
+                    {selectedIncompleteTranscript.audioHeld ? (
+                      <Button
+                        size="sm"
+                        variant="ghost"
+                        onClick={() =>
+                          setPendingAcknowledgement(selectedRecording)
+                        }
+                      >
+                        Accept losing the audio
+                      </Button>
+                    ) : null}
+                  </>
+                }
+              />
+            </div>
+          ) : null}
+
+          {/* What the last re-check found. The sidecar leaves the meeting's
+              own status alone, so this says what happened to the files. */}
+          {audioRecheckResult &&
+          audioRecheckResult.recordingId === selectedRecording?.id ? (
+            <div className="shrink-0 px-6 pt-4">
+              <StatusBanner
+                tone={audioRecheckResult.recoverable ? "muted" : "rust"}
+                title={
+                  audioRecheckResult.recoverable
+                    ? "Saved audio re-checked"
+                    : "Saved audio could not be fully read"
+                }
+                message={audioRecheckResult.message}
+                actions={
+                  <Button
+                    size="sm"
+                    variant="ghost"
+                    onClick={() => setAudioRecheckResult(null)}
+                  >
+                    Dismiss
+                  </Button>
+                }
+              />
+            </div>
+          ) : null}
+
+          {/* Meeting notes that were never written. The list says the same
+              thing; a reader who opened the meeting to look for the summary
+              needs to be told here, where the summary is missing. */}
+          {selectedAnalysisNotice ? (
+            <div className="shrink-0 px-6 pt-4">
+              <StatusBanner
+                tone={selectedAnalysisNotice.busy ? "muted" : "rust"}
+                title={selectedAnalysisNotice.title}
+                message={selectedAnalysisNotice.message}
+                actions={
+                  selectedAnalysisNotice.retryable && selectedRecording ? (
+                    <Button
+                      size="sm"
+                      variant="outline"
+                      onClick={() =>
+                        void handleRetryMeetingAnalysis(selectedRecording.id)
+                      }
+                    >
+                      <RefreshCw className="mr-2 h-4 w-4" />
+                      Retry notes
+                    </Button>
+                  ) : null
+                }
+              />
+            </div>
+          ) : null}
 
           {/* The same failure surface the list carries. Without it here, Play
               audio in the header above could fail with nothing on screen but a
@@ -5219,7 +5606,7 @@ export function RecordingsView() {
             <Button
               variant="active"
               onClick={openMeetingCapture}
-              disabled={meetingsReadiness.state !== "ready"}
+              disabled={!captureIsReady}
             >
               <Mic2 className="h-4 w-4 mr-2" />
               New meeting
@@ -5230,21 +5617,100 @@ export function RecordingsView() {
 
       <ScrollArea className="flex-1">
         <div className="p-6">
+          {/* Engine loss, said in plain words on the surface the reader is
+              actually on. It used to appear only as the bridge's own log line
+              on the buried Setup view. */}
+          {engineNotice ? (
+            <StatusBanner
+              tone={engineNotice.recovering ? "muted" : "rust"}
+              role={engineNotice.recovering ? "status" : "alert"}
+              title={engineNotice.title}
+              message={engineNotice.message}
+              actions={
+                <Button
+                  size="sm"
+                  variant="ghost"
+                  onClick={() => dismissEngineNotice?.()}
+                >
+                  Dismiss
+                </Button>
+              }
+            />
+          ) : null}
+
+          {meetingStartFailure ? (
+            <StatusBanner
+              className="mb-4"
+              title="This meeting did not start"
+              message={meetingStartFailure.message}
+              actions={
+                <>
+                  {meetingStartFailure.action.label ? (
+                    <Button
+                      size="sm"
+                      variant="outline"
+                      onClick={() =>
+                        runMeetingStartAction(meetingStartFailure)
+                      }
+                    >
+                      {meetingStartFailure.action.label}
+                    </Button>
+                  ) : null}
+                  <Button
+                    size="sm"
+                    variant="ghost"
+                    onClick={() => setMeetingStartFailure(null)}
+                  >
+                    Dismiss
+                  </Button>
+                </>
+              }
+            />
+          ) : null}
+
+          {/* Rust and "needs attention" are reserved for something that stops
+              a meeting being recorded. A missing notes route does not, and
+              saying it does beside a working New meeting button was the
+              contradiction this view used to ship. */}
           {meetingsReadiness.state !== "ready" ? (
             <div
               role={
-                meetingsReadiness.state === "unknown" ? "status" : "alert"
+                !captureIsReady && meetingsReadiness.state !== "unknown"
+                  ? "alert"
+                  : "status"
               }
-              aria-label="Meetings need attention"
-              className="mb-4 flex flex-wrap items-start justify-between gap-3 rounded-md border border-rust/35 bg-rust/10 px-4 py-3"
+              aria-label={
+                captureIsReady
+                  ? "Meeting notes are unavailable"
+                  : "Meetings need attention"
+              }
+              className={`mb-4 flex flex-wrap items-start justify-between gap-3 rounded-md border px-4 py-3 ${
+                captureIsReady
+                  ? "border-border/80 bg-muted/30"
+                  : "border-rust/35 bg-rust/10"
+              }`}
             >
-              <div className="flex min-w-0 items-start gap-2.5 text-sm text-rust">
+              <div
+                className={`flex min-w-0 items-start gap-2.5 text-sm ${
+                  captureIsReady ? "text-muted-foreground" : "text-rust"
+                }`}
+              >
                 <span
-                  className="neume neume-rust mt-1 shrink-0"
+                  className={`neume mt-1 shrink-0 ${
+                    captureIsReady ? "neume-hollow" : "neume-rust"
+                  }`}
                   aria-hidden="true"
                 />
                 <div>
-                  <p className="font-medium">Meetings need attention</p>
+                  <p
+                    className={`font-medium ${
+                      captureIsReady ? "text-foreground" : ""
+                    }`}
+                  >
+                    {captureIsReady
+                      ? "Meeting notes are unavailable"
+                      : "Meetings need attention"}
+                  </p>
                   <p className="mt-1 leading-6">
                     {meetingsReadiness.cause?.message ??
                       "Plainsong could not confirm that meetings are ready."}
@@ -5743,6 +6209,7 @@ export function RecordingsView() {
               {filteredMeetings.map((recording) => {
                 const isLiveRow = recording.id === recordingId && isRecording;
                 const statusBand = recordingStatusBand(recording.status, isLiveRow);
+                const analysisNotice = meetingAnalysisNotice(recording);
                 return (
                 <Card
                   key={recording.id}
@@ -5849,6 +6316,21 @@ export function RecordingsView() {
                                   : "Re-transcribe from audio"}
                               </DropdownMenuItem>
                             )}
+                            {canRecheckMeetingAudio(
+                              recording,
+                              readMeetingIntegrity(recording),
+                            ) && !isLiveRow && (
+                              <DropdownMenuItem
+                                disabled={isRecheckingAudio}
+                                onClick={(e) => {
+                                  e.stopPropagation();
+                                  void handleRecheckMeetingAudio(recording.id);
+                                }}
+                              >
+                                <FileAudio className="h-4 w-4 mr-2" />
+                                Re-check audio
+                              </DropdownMenuItem>
+                            )}
                             <DropdownMenuSeparator />
                             <DropdownMenuItem
                               onClick={async (e) => {
@@ -5879,6 +6361,47 @@ export function RecordingsView() {
                         </DropdownMenu>
                       </div>
                     </div>
+
+                    {/* A meeting whose notes failed used to look identical to
+                        one that never asked for any. The row says so, and
+                        carries the way back. */}
+                    {analysisNotice ? (
+                      <div
+                        className="mt-3 flex flex-wrap items-center justify-between gap-2 border-t border-border/60 pt-3"
+                        role={analysisNotice.busy ? "status" : "alert"}
+                      >
+                        <div className="min-w-0">
+                          <p
+                            className={`text-sm font-medium ${
+                              analysisNotice.busy ? "text-foreground" : "text-rust"
+                            }`}
+                          >
+                            {analysisNotice.title}
+                          </p>
+                          <p className="text-sm text-muted-foreground">
+                            {analysisNotice.message}
+                          </p>
+                        </div>
+                        {analysisNotice.retryable ? (
+                          <Button
+                            size="sm"
+                            variant="outline"
+                            onClick={(event) => {
+                              event.stopPropagation();
+                              void handleRetryMeetingAnalysis(recording.id);
+                            }}
+                          >
+                            <RefreshCw className="mr-2 h-4 w-4" />
+                            Retry notes
+                          </Button>
+                        ) : (
+                          <Loader2
+                            className="h-4 w-4 animate-spin text-muted-foreground"
+                            aria-hidden="true"
+                          />
+                        )}
+                      </div>
+                    ) : null}
                   </CardContent>
                 </Card>
                 );
@@ -5925,6 +6448,53 @@ export function RecordingsView() {
             >
               <RefreshCw className="mr-2 h-4 w-4" />
               Replace and regenerate
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      {/* Acknowledging is the reader agreeing to lose something. The audio of
+          an incomplete meeting is the only complete record of it, so the cost
+          is stated before the button, never after. */}
+      <Dialog
+        open={pendingAcknowledgement !== null}
+        onOpenChange={(open) => {
+          if (!open) setPendingAcknowledgement(null);
+        }}
+      >
+        <DialogContent>
+          <DialogHeader>
+            <DialogTitle>Accept losing this meeting&apos;s audio?</DialogTitle>
+            <DialogDescription>
+              Part of this transcript is missing, and the saved audio is the
+              only complete record of what was said. Accepting this lets
+              Plainsong&apos;s storage cleanup delete that audio, after which
+              the meeting cannot be transcribed again. The transcript stays
+              exactly as it is — still incomplete.
+            </DialogDescription>
+          </DialogHeader>
+          <DialogFooter>
+            <Button
+              variant="outline"
+              onClick={() => setPendingAcknowledgement(null)}
+            >
+              Keep the audio
+            </Button>
+            <Button
+              variant="destructive"
+              disabled={isAcknowledging}
+              onClick={() => {
+                if (pendingAcknowledgement) {
+                  void handleAcknowledgeIncompleteTranscript(
+                    pendingAcknowledgement.id,
+                  );
+                }
+              }}
+            >
+              {isAcknowledging ? (
+                <Loader2 className="mr-2 h-4 w-4 animate-spin" />
+              ) : null}
+              Accept losing the audio
             </Button>
           </DialogFooter>
         </DialogContent>

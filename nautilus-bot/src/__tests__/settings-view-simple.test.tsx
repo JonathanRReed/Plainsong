@@ -366,6 +366,34 @@ describe("SettingsView performance behavior", () => {
     expect(getSettings).toHaveBeenCalledTimes(2);
   });
 
+  it("saves Keep running after close through settings alone", async () => {
+    // The toggle used to fire `app:set_minimize_to_tray` alongside the save.
+    // Its handler was deleted, so the call could only ever reject into an
+    // empty catch; the setting already travels on `settings-changed`.
+    const electron = await import("@/lib/electron");
+    const backend = await import("@/lib/backend");
+    const invoke = vi.mocked(electron.invoke);
+    const saveSettings = vi.mocked(backend.saveSettings);
+
+    render(<ToastProvider><SettingsView /></ToastProvider>);
+    await screen.findByText("How Plainsong listens, writes, and what it keeps.");
+
+    fireEvent.click(
+      screen.getByRole("switch", { name: "Keep running after close" }),
+    );
+
+    await waitFor(() => {
+      expect(saveSettings).toHaveBeenCalled();
+    });
+    const saved = saveSettings.mock.calls[
+      saveSettings.mock.calls.length - 1
+    ][0] as { ui: { minimizeToTray: boolean } };
+    expect(saved.ui.minimizeToTray).toBe(false);
+    for (const [command] of invoke.mock.calls) {
+      expect(command).not.toBe("app:set_minimize_to_tray");
+    }
+  });
+
   it("gives visible settings controls accessible names", async () => {
     render(<ToastProvider><SettingsView /></ToastProvider>);
 
