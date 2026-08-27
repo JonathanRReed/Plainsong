@@ -33,6 +33,18 @@ export type CustomMeetingTemplate = {
  */
 export const MAX_CUSTOM_MEETING_TEMPLATES = 50;
 
+/**
+ * Field-length and outline-size caps, mirroring `MAX_MEETING_TEMPLATE_NAME_LEN`,
+ * `MAX_MEETING_TEMPLATE_PROMPT_LEN`, and `MAX_MEETING_TEMPLATE_OUTLINE_SECTIONS`
+ * in rust-sidecar/src/settings.rs. Rust sanitizes on every save regardless, so
+ * these exist purely so the editor dialog can stop the user from typing past
+ * the point where their content would otherwise be silently trimmed on the
+ * next launch -- see FIX 1 in the ux-12 review.
+ */
+export const MAX_MEETING_TEMPLATE_NAME_LENGTH = 80;
+export const MAX_MEETING_TEMPLATE_PROMPT_LENGTH = 4000;
+export const MAX_MEETING_TEMPLATE_OUTLINE_SECTIONS = 12;
+
 export const MEETING_TEMPLATES: MeetingTemplateOption[] = [
   {
     value: "auto",

@@ -10,6 +10,11 @@ import {
 } from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
 import { Textarea } from "@/components/ui/textarea";
+import {
+  MAX_MEETING_TEMPLATE_NAME_LENGTH,
+  MAX_MEETING_TEMPLATE_OUTLINE_SECTIONS,
+  MAX_MEETING_TEMPLATE_PROMPT_LENGTH,
+} from "@/lib/meeting-templates";
 
 export type MeetingTemplateDraft = {
   name: string;
@@ -25,11 +30,19 @@ function outlineToLines(outline: string[]): string {
   return outline.join("\n");
 }
 
-function linesToOutline(lines: string): string[] {
+function nonEmptyOutlineLines(lines: string): string[] {
   return lines
     .split("\n")
     .map((line) => line.trim())
     .filter((line) => line.length > 0);
+}
+
+/** Capped to the same ceiling Rust enforces on save
+ * (`MAX_MEETING_TEMPLATE_OUTLINE_SECTIONS` in settings.rs), so what this
+ * dialog saves is never silently trimmed later -- the count warning below
+ * this textarea tells the user why a line beyond the twelfth was dropped. */
+function linesToOutline(lines: string): string[] {
+  return nonEmptyOutlineLines(lines).slice(0, MAX_MEETING_TEMPLATE_OUTLINE_SECTIONS);
 }
 
 interface MeetingTemplateEditorDialogProps {
@@ -37,10 +50,17 @@ interface MeetingTemplateEditorDialogProps {
   onOpenChange: (open: boolean) => void;
   /** "Save as new template" vs "Save changes" -- the same fields, two intents. */
   mode: "create" | "edit";
-  /** The prompts to pre-fill the form with: either the current playbook's
-   * prompts (creating from "Save current structure as a template") or the
-   * existing custom template's own fields (editing). */
+  /** The prompts to pre-fill the form with: either the meeting's current
+   * effective structure -- the note's own section headings when it has any,
+   * the active playbook's outline otherwise -- when creating from "Save
+   * current structure as a template", or the existing custom template's own
+   * fields when editing. See `buildTemplateSaveSeed` in recordings-view.tsx. */
   seed: MeetingTemplateDraft;
+  /** Names of every other saved template (excluding the one being edited,
+   * if any), for the duplicate-name warning below. Two templates sharing a
+   * name is not invalid -- ids, not names, are how a template resolves --
+   * but it makes the picker confusing, so this is a soft warning only. */
+  existingNames?: string[];
   onSave: (draft: MeetingTemplateDraft) => Promise<void> | void;
 }
 
@@ -55,6 +75,7 @@ export function MeetingTemplateEditorDialog({
   onOpenChange,
   mode,
   seed,
+  existingNames = [],
   onSave,
 }: MeetingTemplateEditorDialogProps) {
   const [name, setName] = useState(seed.name);
@@ -62,6 +83,11 @@ export function MeetingTemplateEditorDialog({
   const [outlineText, setOutlineText] = useState(outlineToLines(seed.notesOutline));
   const [isSaving, setIsSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const outlineLineCount = nonEmptyOutlineLines(outlineText).length;
+  const outlineOverflow = outlineLineCount - MAX_MEETING_TEMPLATE_OUTLINE_SECTIONS;
+  const isDuplicateName =
+    name.trim().length > 0 &&
+    existingNames.some((existing) => existing.trim().toLowerCase() === name.trim().toLowerCase());
 
   // Re-seed only on the open transition -- editing a second template right
   // after the first must not carry its draft over, but typing in the form
@@ -130,8 +156,15 @@ export function MeetingTemplateEditorDialog({
               onChange={(event) => setName(event.target.value)}
               placeholder="e.g. Board Update"
               disabled={isSaving}
+              maxLength={MAX_MEETING_TEMPLATE_NAME_LENGTH}
               autoFocus
             />
+            {isDuplicateName ? (
+              <p className="text-xs text-muted-foreground">
+                You already have a template named &ldquo;{name.trim()}&rdquo;. Both
+                will still work, but they&apos;ll look the same in the picker.
+              </p>
+            ) : null}
           </div>
 
           <div className="space-y-1.5">
@@ -145,6 +178,7 @@ export function MeetingTemplateEditorDialog({
               placeholder="Summarize this meeting with..."
               rows={4}
               disabled={isSaving}
+              maxLength={MAX_MEETING_TEMPLATE_PROMPT_LENGTH}
               className="resize-y"
             />
             <p className="text-xs text-muted-foreground">
@@ -168,8 +202,15 @@ export function MeetingTemplateEditorDialog({
             />
             <p className="text-xs text-muted-foreground">
               One section heading per line, seeded into a meeting&apos;s notes
-              when this template is picked.
+              when this template is picked. Up to {MAX_MEETING_TEMPLATE_OUTLINE_SECTIONS}{" "}
+              sections.
             </p>
+            {outlineOverflow > 0 ? (
+              <p role="alert" className="text-xs text-destructive">
+                {outlineOverflow} line{outlineOverflow === 1 ? "" : "s"} past the{" "}
+                {MAX_MEETING_TEMPLATE_OUTLINE_SECTIONS}-section limit won&apos;t be saved.
+              </p>
+            ) : null}
           </div>
 
           {error ? (
