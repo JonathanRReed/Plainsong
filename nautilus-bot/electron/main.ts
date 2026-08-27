@@ -32,6 +32,7 @@ import {
   type NativeShortcutRawEvent,
 } from "./native-macos-shortcut";
 import { startNativeMacosShortcutController } from "./native-macos-shortcut-runtime";
+import { createMacosCalendarRuntime, type MacosCalendarRuntime } from "./macos-calendar-runtime";
 import {
   convertShortcutToAccelerator,
   findConflictingShortcuts,
@@ -1236,6 +1237,44 @@ async function handleLocalCommand(
         handled: true,
         result: { conflicts: shortcutConflicts },
       };
+    case "get_calendar_snapshot": {
+      // Reads the stored TCC answer and, only if it is already "authorized",
+      // the events. It cannot prompt — see macos-calendar-runtime.ts — so it is
+      // safe for the Meetings view to call on mount, which is what lets the
+      // "Connect your calendar" card know it has something to offer.
+      const payload = (args ?? {}) as { forceRefresh?: unknown };
+      return {
+        handled: true,
+        result: await getMacosCalendarRuntime().readSnapshot({
+          forceRefresh: payload.forceRefresh === true,
+        }),
+      };
+    }
+    case "request_calendar_access": {
+      // The one path that can raise the macOS calendar prompt, so it is gated
+      // the same way the folder pickers are: it must come from the main window
+      // and it consumes a real user gesture. Calendar access is additive
+      // convenience; asking for it unprompted at launch is exactly the
+      // behaviour this feature was scoped to avoid.
+      requireMainWindowGesture("Connecting your calendar");
+      return {
+        handled: true,
+        result: await getMacosCalendarRuntime().requestAccess(),
+      };
+    }
+    case "open_calendar_privacy_settings": {
+      // Deliberately not routed through the sidecar's open_permission_settings:
+      // that helper falls back to the Accessibility pane for a section it does
+      // not know, and sending someone looking for the Calendars switch to the
+      // Accessibility list is worse than offering no button at all.
+      if (process.platform !== "darwin") {
+        return { handled: true, result: false };
+      }
+      await shell.openExternal(
+        "x-apple.systempreferences:com.apple.preference.security?Privacy_Calendars",
+      );
+      return { handled: true, result: true };
+    }
     case "select_export_location": {
       const parent = requireMainWindowGesture("Choosing an export folder");
       const selectedPath = await chooseDirectory(
@@ -1758,6 +1797,37 @@ function getNativeShortcutHelperPath(): string {
   }
 
   return path.join(process.resourcesPath, "shortcut-helper", binaryName);
+}
+
+function getNativeCalendarHelperPath(): string {
+  const binaryName = "plainsong-native-calendar-helper";
+
+  if (isDev) {
+    return path.join(__dirname, "../dist-native", binaryName);
+  }
+
+  return path.join(process.resourcesPath, "calendar-helper", binaryName);
+}
+
+/**
+ * Lazily built so the helper path is resolved once, and so a build with no
+ * calendar helper (or a non-macOS build) answers "unavailable" rather than
+ * throwing at import time.
+ *
+ * Nothing constructs this during bootstrap. It comes into existence the first
+ * time the renderer asks about the calendar, which is itself only after the
+ * Meetings view is on screen.
+ */
+let macosCalendarRuntime: MacosCalendarRuntime | null = null;
+
+function getMacosCalendarRuntime(): MacosCalendarRuntime {
+  if (!macosCalendarRuntime) {
+    macosCalendarRuntime = createMacosCalendarRuntime({
+      platform: process.platform,
+      helperPath: getNativeCalendarHelperPath(),
+    });
+  }
+  return macosCalendarRuntime;
 }
 
 function getSidecarBinaryName(): string {
