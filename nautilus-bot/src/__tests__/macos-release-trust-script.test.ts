@@ -421,7 +421,12 @@ function runTrustScript(
   shortcutHelperEntitlement = "",
   sidecarEntitlement = "",
   releaseDir: string | null = null,
-  helperEntitlements: { restricted?: string; generic?: string; app?: string } = {},
+  helperEntitlements: {
+    restricted?: string;
+    generic?: string;
+    app?: string;
+    calendar?: string;
+  } = {},
 ) {
   const outPath = path.join(tempRoot, "artifacts", "qa", "macos", `${mode}-trust.json`);
   const markdownPath = path.join(tempRoot, "artifacts", "qa", "macos", `${mode}-trust.md`);
@@ -443,6 +448,7 @@ function runTrustScript(
     RESTRICTED_HELPER_ENTITLEMENT: helperEntitlements.restricted ?? "",
     GENERIC_HELPER_ENTITLEMENT: helperEntitlements.generic ?? "",
     APP_ENTITLEMENT: helperEntitlements.app ?? "",
+    CALENDAR_HELPER_ENTITLEMENT: helperEntitlements.calendar ?? "",
     SPOOFED_PATH_TRACE_LOG: spoofedPathTracePath,
     SPEECH_HELPER_ENTITLEMENTS: speechHelperEntitlements,
     TRUST_SPCTL_RESULT: mode,
@@ -789,6 +795,71 @@ describe("verify-macos-release-trust.mjs", { timeout: 30_000 }, () => {
       // Signing is untouched, so this really is the fuses failing it.
       expect(artifact.checks.appSignatureValid).toBe(true);
       expect(artifact.checks.appUsesDeveloperId).toBe(true);
+    } finally {
+      rmSync(tempRoot, { recursive: true, force: true });
+    }
+  });
+
+  it("fails closed when the calendar helper inherits unrelated privileges", () => {
+    // The read-only EventKit helper exists so that calendar access is NOT on
+    // the signature carrying the microphone and the Accessibility grant. A
+    // helper that quietly acquired one of those back would defeat the split
+    // while passing every other check in this gate.
+    const { tempRoot, tempScript } = createTempRepo("verify-macos-release-trust.mjs");
+    try {
+      const { appPath } = createFakeMacosApp(tempRoot);
+      const { outPath, result } = runTrustScript(
+        tempScript,
+        tempRoot,
+        appPath,
+        "accept",
+        "AJ9VWBRNZN",
+        "mock-apple-tools",
+        "minimal",
+        "",
+        "",
+        null,
+        { calendar: "com.apple.security.device.microphone" },
+      );
+
+      expect(result.status).not.toBe(0);
+      const artifact = JSON.parse(readFileSync(outPath, "utf8")) as {
+        checks: Record<string, boolean>;
+        pass: boolean;
+      };
+      expect(artifact.pass).toBe(false);
+      expect(artifact.checks.calendarHelperHasCalendarEntitlement).toBe(true);
+      expect(artifact.checks.calendarHelperHasNoUnrelatedEntitlements).toBe(false);
+    } finally {
+      rmSync(tempRoot, { recursive: true, force: true });
+    }
+  });
+
+  it("fails closed when the app takes the calendar entitlement back", () => {
+    const { tempRoot, tempScript } = createTempRepo("verify-macos-release-trust.mjs");
+    try {
+      const { appPath } = createFakeMacosApp(tempRoot);
+      const { outPath, result } = runTrustScript(
+        tempScript,
+        tempRoot,
+        appPath,
+        "accept",
+        "AJ9VWBRNZN",
+        "mock-apple-tools",
+        "minimal",
+        "",
+        "",
+        null,
+        { app: "com.apple.security.personal-information.calendars" },
+      );
+
+      expect(result.status).not.toBe(0);
+      const artifact = JSON.parse(readFileSync(outPath, "utf8")) as {
+        checks: Record<string, boolean>;
+        pass: boolean;
+      };
+      expect(artifact.pass).toBe(false);
+      expect(artifact.checks.appHasNoCalendarEntitlement).toBe(false);
     } finally {
       rmSync(tempRoot, { recursive: true, force: true });
     }

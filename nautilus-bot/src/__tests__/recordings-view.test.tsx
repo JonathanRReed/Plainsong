@@ -289,6 +289,25 @@ vi.mock("@/lib/backend", () => ({
   openPermissionSettings: vi.fn(async () => {}) as any,
 }));
 
+// The calendar affordance in the Meetings header. Mocked at the backend rather
+// than at the component so the view is exercised through the real cue: the
+// thing under test is what the view does with the prefill the cue hands it.
+const calendarSnapshot = vi.hoisted(() => ({
+  current: {
+    authorization: "unknown",
+    observedAt: 0,
+    events: [] as any[],
+    calendars: [] as any[],
+    errorCode: null,
+  },
+}));
+
+vi.mock("@/lib/backend/calendar", () => ({
+  getCalendarSnapshot: vi.fn(async () => calendarSnapshot.current),
+  requestCalendarAccess: vi.fn(async () => calendarSnapshot.current),
+  openCalendarPrivacySettings: vi.fn(async () => {}),
+}));
+
 function deferred<T>() {
   let resolve!: (value: T) => void;
   let reject!: (reason?: unknown) => void;
@@ -302,6 +321,15 @@ function deferred<T>() {
 describe("RecordingsView", () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    // No calendar unless a test says otherwise: the header affordance must be
+    // invisible to every other test in this file.
+    calendarSnapshot.current = {
+      authorization: "unknown",
+      observedAt: 0,
+      events: [],
+      calendars: [],
+      errorCode: null,
+    };
     eventListeners.clear();
     transcriptViewerProps.current = null;
     speechSynthesisMock.speak.mockClear();
@@ -3361,6 +3389,99 @@ describe("RecordingsView", () => {
       expect(
         screen.getAllByRole("button", { name: /retry notes/i }).length
       ).toBeGreaterThan(0);
+    });
+  });
+
+  describe("calendar affordance", () => {
+    const startsAt = new Date(Date.now() + 12 * 60_000).toISOString();
+    const endsAt = new Date(Date.now() + 42 * 60_000).toISOString();
+
+    function withUpcomingMeeting(title = "Pricing review") {
+      calendarSnapshot.current = {
+        authorization: "authorized",
+        observedAt: Date.now(),
+        calendars: [{ id: "work", title: "Work", accountName: "iCloud" }],
+        errorCode: null,
+        events: [
+          {
+            id: "cal-1",
+            title,
+            startsAt,
+            endsAt,
+            isAllDay: false,
+            calendarId: "work",
+            calendarName: "Work",
+            videoService: "zoom",
+          },
+        ],
+      };
+    }
+
+    it("names the started meeting after the calendar event", async () => {
+      // The whole payoff: one click, and the recording is already called what
+      // the meeting is called.
+      withUpcomingMeeting();
+      startMeeting.mockResolvedValue("new-recording");
+      backend.renameRecording.mockResolvedValue(undefined);
+
+      render(<RecordingsView />);
+      fireEvent.click(await screen.findByRole("button", { name: "Start capture" }));
+      fireEvent.click(
+        await screen.findByRole("button", { name: "Confirm meeting consent" }),
+      );
+
+      await waitFor(() => {
+        expect(backend.renameRecording).toHaveBeenCalledWith(
+          "new-recording",
+          "Pricing review",
+        );
+      });
+    });
+
+    it("still starts the meeting when the rename fails", async () => {
+      // A lost title is not a reason to lose the recording.
+      withUpcomingMeeting();
+      startMeeting.mockResolvedValue("new-recording");
+      backend.renameRecording.mockRejectedValueOnce(new Error("database is locked"));
+
+      render(<RecordingsView />);
+      fireEvent.click(await screen.findByRole("button", { name: "Start capture" }));
+      fireEvent.click(
+        await screen.findByRole("button", { name: "Confirm meeting consent" }),
+      );
+
+      await waitFor(() => expect(startMeeting).toHaveBeenCalled());
+      await waitFor(() => expect(refetchRecordings).toHaveBeenCalled());
+      expect(toast).not.toHaveBeenCalledWith(
+        expect.stringContaining("database is locked"),
+        "error",
+      );
+    });
+
+    it("leaves an ordinary New meeting unnamed", async () => {
+      // "New meeting" is not a calendar start, and must not inherit a title
+      // from an event the reader did not choose.
+      withUpcomingMeeting();
+      startMeeting.mockResolvedValue("new-recording");
+
+      render(<RecordingsView />);
+      fireEvent.click(await screen.findByRole("button", { name: /new meeting/i }));
+      fireEvent.click(
+        await screen.findByRole("button", { name: "Confirm meeting consent" }),
+      );
+
+      await waitFor(() => expect(startMeeting).toHaveBeenCalled());
+      expect(backend.renameRecording).not.toHaveBeenCalled();
+    });
+
+    it("says nothing when there is no calendar to read", async () => {
+      render(<RecordingsView />);
+
+      await screen.findByRole("heading", { name: "Meetings" });
+      expect(
+        screen.queryByRole("button", { name: "Start capture" }),
+      ).not.toBeInTheDocument();
+      expect(screen.queryByText("Connect your calendar")).not.toBeInTheDocument();
     });
   });
 });
