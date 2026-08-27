@@ -54,14 +54,23 @@ export const OVERLAY_BASE_SIZE: Record<OverlayKind, OverlaySize> = {
  * `__window_show__` that is a full-screen click-capture primitive, built
  * entirely out of commands the renderer is allowed to send.
  *
- * The caps are generous headroom over the base sizes (the HUD grows while a
- * live partial is transcribed, and the expanded card is taller than the pill),
- * not tight fits — the point is to bound the window to something that still
- * reads as an overlay, not to police layout.
+ * The caps are headroom over what the renderer ACTUALLY asks for, not round
+ * numbers. The binding cases are:
+ *
+ * - dictation: `getPopupSize` (src/lib/dictation-popup-layout.ts) tops out at
+ *   432x396 — the full-mode processing card with a six-line message and a
+ *   four-line preview.
+ * - recording: 470x228, the expanded chip in recording-popup.tsx.
+ *
+ * Clamping BELOW those would clip the card rather than contain an attack, and
+ * the layout module is explicit that a short estimate cuts off the live-text
+ * box first — the one thing the user is reading while speaking. A test pins
+ * these caps against both real maxima, so a layout change that outgrows them
+ * fails there instead of silently truncating the HUD.
  */
 export const OVERLAY_MAX_SIZE: Record<OverlayKind, OverlaySize> = {
-  dictation: { width: 720, height: 360 },
-  recording: { width: 480, height: 200 },
+  dictation: { width: 720, height: 480 },
+  recording: { width: 560, height: 320 },
 };
 
 /** Below this an overlay is invisible but still hit-testable. */
