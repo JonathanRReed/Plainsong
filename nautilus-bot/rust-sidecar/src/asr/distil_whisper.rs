@@ -90,7 +90,10 @@ impl DistilWhisperProvider {
 
     fn has_trusted_required_files(&self) -> bool {
         DISTIL_REQUIRED_FILES.iter().all(|(file_name, sha256, _)| {
-            crate::download::is_model_artifact_trusted(&self.model_dir.join(file_name), sha256)
+            crate::download::is_model_artifact_trusted(
+                &self.model_dir.join(file_name),
+                Some(sha256),
+            )
         })
     }
 
@@ -322,7 +325,7 @@ impl AsrProvider for DistilWhisperProvider {
                 .download_verified_model_asset(
                     &url,
                     &destination,
-                    sha256,
+                    Some(sha256),
                     distil_artifact_max_bytes(file_name),
                     move |p| {
                         cb(weighted_bundle_progress(

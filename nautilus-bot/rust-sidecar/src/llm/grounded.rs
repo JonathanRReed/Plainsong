@@ -1115,21 +1115,33 @@ impl<'a> GroundedOrchestrator<'a> {
         _notes: Option<&str>,
     ) -> ContextExecution {
         let default_execution = self.default_context_execution(purpose);
-        if self.options.context_window_tokens.is_some() || self.provider != Provider::Ollama {
+        if self.options.context_window_tokens.is_some()
+            || !matches!(self.provider, Provider::Ollama | Provider::Gemini)
+        {
             return default_execution;
         }
         let metadata = match self.transport.model_context_metadata(&self.model).await {
             Ok(metadata) => metadata,
             Err(error) => {
                 tracing::warn!(
-                    "Could not probe Ollama context metadata for '{}': {}",
+                    "Could not probe {} context metadata for '{}': {}",
+                    self.provider.as_settings_value(),
                     self.model,
                     error
                 );
                 ModelContextMetadata::default()
             }
         };
-        choose_ollama_context_execution(default_execution.context_window_tokens, 0, metadata)
+        match self.provider {
+            Provider::Gemini => {
+                choose_gemini_context_execution(default_execution.context_window_tokens, metadata)
+            }
+            _ => choose_ollama_context_execution(
+                default_execution.context_window_tokens,
+                0,
+                metadata,
+            ),
+        }
     }
 
     fn conservative_replan(
@@ -1223,6 +1235,50 @@ fn choose_ollama_context_execution(
             .ok()
             .filter(|tokens| *tokens > 0)
             .map(|tokens| tokens as usize),
+        default_context_floor: None,
+    }
+}
+
+// A live probe's capacity can be slightly optimistic (rounding in the
+// provider's own docs/response, or a future format quirk this crate
+// hasn't seen), so shave a flat safety margin off it before using it as
+// the real window -- unlike Ollama's num_ctx, there is nothing to request
+// explicitly here, so this margin is the only cushion available.
+const GEMINI_LIVE_CAPACITY_SAFETY_MARGIN_TOKENS: usize = 8_192;
+
+/// Chooses the context window for a Gemini request from live model
+/// metadata (fetched via `GeminiClient::model_context_metadata`).
+///
+/// Unlike Ollama, a cloud model's advertised capacity IS its real context
+/// window: there is no distinct "configured default" a runtime might
+/// silently apply instead (Gemini's `ModelContextMetadata::default_tokens`
+/// is always `None` -- see `context_metadata_from_model_payload` in
+/// gemini.rs), and no `num_ctx`-style parameter this transport sends, so
+/// `choose_ollama_context_execution`'s "no configured default known ->
+/// plan conservatively against 4K" branch does not apply and must not be
+/// reused here (it would clamp a 1M-token model to 4K).
+///
+/// `fallback_context_tokens` -- `Provider::model_budget()`'s name-pattern
+/// heuristic -- is used whenever live capacity is unavailable (the probe
+/// failed, no API key, or returned zero) and as a floor otherwise: a live
+/// probe must never budget a model for less than the static heuristic
+/// already would.
+fn choose_gemini_context_execution(
+    fallback_context_tokens: usize,
+    metadata: ModelContextMetadata,
+) -> ContextExecution {
+    let context_window_tokens = metadata
+        .capacity_tokens
+        .filter(|tokens| *tokens > 0)
+        .map(|capacity| {
+            capacity
+                .saturating_sub(GEMINI_LIVE_CAPACITY_SAFETY_MARGIN_TOKENS)
+                .max(fallback_context_tokens)
+        })
+        .unwrap_or(fallback_context_tokens);
+    ContextExecution {
+        context_window_tokens,
+        requested_context_tokens: None,
         default_context_floor: None,
     }
 }
@@ -1646,6 +1702,9 @@ mod tests {
         requests: Arc<Mutex<Vec<CompletionRequest>>>,
         invalidations: Arc<AtomicUsize>,
         responder: Arc<Responder>,
+        // None means "use the trait default" (Ok(ModelContextMetadata::default())),
+        // matching every real transport that doesn't implement live metadata probing.
+        context_metadata: Option<Result<ModelContextMetadata, LlmError>>,
     }
 
     impl MockTransport {
@@ -1660,7 +1719,18 @@ mod tests {
                 requests: Arc::new(Mutex::new(Vec::new())),
                 invalidations: Arc::new(AtomicUsize::new(0)),
                 responder: Arc::new(responder),
+                context_metadata: None,
             }
+        }
+
+        fn with_provider(mut self, provider: Provider) -> Self {
+            self.provider = provider;
+            self
+        }
+
+        fn with_context_metadata(mut self, metadata: ModelContextMetadata) -> Self {
+            self.context_metadata = Some(Ok(metadata));
+            self
         }
     }
 
@@ -1681,6 +1751,17 @@ mod tests {
                 index
             };
             (self.responder)(request, index)
+        }
+
+        async fn model_context_metadata(
+            &self,
+            _model: &str,
+        ) -> Result<ModelContextMetadata, LlmError> {
+            match &self.context_metadata {
+                Some(Ok(metadata)) => Ok(*metadata),
+                Some(Err(error)) => Err(error.clone()),
+                None => Ok(ModelContextMetadata::default()),
+            }
         }
 
         async fn invalidate_model_context_metadata(&self, _model: &str) {
@@ -2362,6 +2443,86 @@ mod tests {
         );
         assert_eq!(unknown_default.context_window_tokens, 4_096);
         assert_eq!(unknown_default.requested_context_tokens, Some(4_096));
+    }
+
+    #[test]
+    fn gemini_context_selection_never_clamps_a_million_token_model_to_4k() {
+        // Regression test: naively reusing choose_ollama_context_execution
+        // for Gemini clamps to a 4K "no configured default known" fallback,
+        // since Gemini's ModelContextMetadata::default_tokens is always
+        // None. A live-probed 1M-capacity Gemini model must land close to
+        // its real capacity, and never below Provider::model_budget()'s
+        // static 1_000_000 name-heuristic value for the 3.x family.
+        let fallback_heuristic = 1_000_000;
+        let live_probed = choose_gemini_context_execution(
+            fallback_heuristic,
+            ModelContextMetadata {
+                capacity_tokens: Some(1_048_576), // real gemini-3.5-flash inputTokenLimit
+                default_tokens: None,
+            },
+        );
+        assert_eq!(live_probed.context_window_tokens, 1_048_576 - 8_192);
+        assert!(live_probed.context_window_tokens >= fallback_heuristic);
+        assert_eq!(live_probed.requested_context_tokens, None);
+
+        // A capacity that would fall below the fallback after the safety
+        // margin (or is implausibly tiny) must never win over the heuristic.
+        let implausibly_tiny_capacity = choose_gemini_context_execution(
+            fallback_heuristic,
+            ModelContextMetadata {
+                capacity_tokens: Some(500),
+                default_tokens: None,
+            },
+        );
+        assert_eq!(
+            implausibly_tiny_capacity.context_window_tokens,
+            fallback_heuristic
+        );
+
+        // No live data (probe failed, no API key, or a provider that never
+        // reports capacity) falls back to the heuristic untouched.
+        let no_live_data =
+            choose_gemini_context_execution(fallback_heuristic, ModelContextMetadata::default());
+        assert_eq!(no_live_data.context_window_tokens, fallback_heuristic);
+    }
+
+    #[tokio::test]
+    async fn prepare_context_execution_dispatches_gemini_through_the_gemini_chooser() {
+        let transport = MockTransport::new(|_, _| {
+            Ok(CompletionResponse {
+                text: "unused".to_string(),
+                model: "gemini-3.5-flash".to_string(),
+            })
+        })
+        .with_provider(Provider::Gemini)
+        .with_context_metadata(ModelContextMetadata {
+            capacity_tokens: Some(1_048_576),
+            default_tokens: None,
+        });
+        let orchestrator = GroundedOrchestrator::new(
+            &transport,
+            "gemini-3.5-flash",
+            GroundingContext::new(vec![GroundedSegment {
+                recording_id: "r1".to_string(),
+                segment_id: "s1".to_string(),
+                text: "hello".to_string(),
+                start_time: 0.0,
+                end_time: 1.0,
+            }])
+            .unwrap(),
+            Duration::from_secs(1),
+            Duration::from_secs(10),
+            OrchestrationOptions::default(),
+        );
+
+        let execution = orchestrator
+            .prepare_context_execution(CompletionPurpose::Summary, "instruction", None)
+            .await;
+
+        // Must reflect the live-probed capacity (minus the safety margin),
+        // not the plain name-heuristic default and not Ollama's 4K
+        // no-configured-default clamp.
+        assert_eq!(execution.context_window_tokens, 1_048_576 - 8_192);
     }
 
     #[tokio::test]

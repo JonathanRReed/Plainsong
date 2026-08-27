@@ -15069,7 +15069,10 @@ fn normalize_platform_engine_id(value: &str) -> Option<&'static str> {
     match value.trim() {
         "provider_default" => Some("provider_default"),
         "macos_apple_speech" => Some("macos_apple_speech"),
-        "macos_mlx_sidecar" => Some("macos_mlx_sidecar"),
+        // macos_mlx_sidecar was a stub engine with no production runtime
+        // behind it (see `asr::platform::mlx_sidecar`) and has been retired;
+        // rejecting it here drops it from `manual_engine_priority` on load
+        // the same way other retired engine ids are dropped.
         "windows_foundry_local" => Some("windows_foundry_local"),
         "windows_sdk_dictation" => Some("windows_sdk_dictation"),
         _ => None,
@@ -18301,6 +18304,16 @@ pub async fn build_app_state() -> Result<AppState, String> {
     let mut model_integrity_artifacts = download::managed_model_integrity_artifacts(&models_root);
     model_integrity_artifacts.extend(asr::model_integrity_artifacts(&models_root));
     model_integrity_artifacts.extend(text::recasepunct::model_integrity_artifacts(&models_root));
+    // This runs inline (fail-closed trust semantics are correct here), and
+    // an artifact without a cached-and-trusted receipt yet is re-hashed in
+    // full -- for many multi-gigabyte models on first launch after an
+    // upgrade, that can be a minute-scale stall. Log the count up front so
+    // it is attributable instead of looking like a hang.
+    tracing::info!(
+        "Re-verifying integrity receipts for {} local model artifact(s) at startup; \
+         already-cached ones are skipped quickly, uncached ones are re-hashed",
+        model_integrity_artifacts.len()
+    );
     let integrity_migration =
         download::migrate_legacy_model_integrity_receipts(&model_integrity_artifacts).await;
     if integrity_migration.migrated_count > 0 {

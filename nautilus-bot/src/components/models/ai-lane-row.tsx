@@ -105,7 +105,7 @@ export function AiLaneRow({
           <div className="rounded-md border bg-muted/30 p-3 text-sm">
             <p className="text-muted-foreground">
               No Ollama models found. Run{" "}
-              <code className="rounded bg-muted px-1">ollama pull llama3.2</code>{" "}
+              <code className="rounded bg-muted px-1">ollama pull qwen3.5:4b</code>{" "}
               to download a model.
             </p>
           </div>

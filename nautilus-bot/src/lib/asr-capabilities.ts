@@ -122,10 +122,18 @@ export function isMeetingEligibleModel(providerType: AsrProviderType, modelId: s
       // a short-form English model and stays out of the meeting lane.
       return normalizedModelId.startsWith("parakeet-tdt-0.6b");
     case "groq":
-    case "openai_cloud":
     case "elevenlabs_scribe":
     case "cohere_transcribe":
       return true;
+    case "openai_cloud":
+      // Only whisper-1 requests verbose_json from the transcriptions
+      // endpoint (openai_cloud.rs's uses_verbose_json()), which is what
+      // actually returns segment timestamps. gpt-transcribe (the dictation
+      // default) and the gpt-4o-*-transcribe models return a single
+      // un-timed block, which breaks seek/timeline/diarization alignment
+      // for a meeting -- so they stay dictation-only and the meeting lane
+      // always resolves openai_cloud to whisper-1.
+      return normalizedModelId === "whisper-1";
     case "qwen3_asr":
       // Qwen3-ASR is an encoder-decoder model capable of long-form transcription.
       // Mark as experimental — the decoder loop is implemented but not yet

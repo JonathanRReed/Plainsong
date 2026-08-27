@@ -192,11 +192,13 @@ describe("asr-route-catalog", () => {
     expect(recommended?.modelId).toBe("moonshine-base");
   });
 
-  it("recommends whisper.cpp base.en over distil_whisper for dictation when no platform-native engine is ready", () => {
+  it("recommends whisper.cpp base.en over distil_whisper for dictation when neither Parakeet nor a platform-native engine is ready", () => {
     // Regression test: distil_whisper used to outrank whisper in
     // DICTATION_PROVIDER_ORDER, steering the "Recommended" badge onto the
-    // slower route even though settings.rs's documented default is
-    // whisper.cpp base.en.
+    // slower route. Parakeet TDT 0.6B v3 is now settings.rs's documented
+    // dictation default and ranks ahead of both (see the dedicated Parakeet
+    // vs. Whisper ordering test below); this test only checks the remaining
+    // whisper-vs-distil_whisper ordering among the routes it does not cover.
     const whisperAndDistilProviders: AsrProviderInfo[] = [
       {
         providerType: "whisper",
@@ -229,6 +231,43 @@ describe("asr-route-catalog", () => {
     expect(recommended?.modelId).toBe("base.en");
   });
 
+  it("recommends Parakeet over whisper.cpp base.en for dictation when both are ready", () => {
+    // Parakeet TDT 0.6B v3 is settings.rs's documented dictation default;
+    // whisper.cpp base.en mis-transcribes words it hasn't seen before
+    // (including "Plainsong" itself, per this repo's own benchmark) and is
+    // offered as the smaller-download alternative, not the recommendation.
+    const whisperAndParakeetProviders: AsrProviderInfo[] = [
+      {
+        providerType: "whisper",
+        name: "Whisper",
+        description: "Flexible local route",
+        isAvailable: true,
+        inferenceEnabled: true,
+        modelInfo: {
+          name: "Whisper",
+          version: "base.en",
+          sizeMb: 150,
+          parameters: "74M",
+          languages: ["en"],
+          license: "MIT",
+          sourceUrl: "https://example.com/whisper",
+        },
+        selectedModelId: "base.en",
+        modelOptions: [{ id: "base.en", label: "base.en" }],
+        downloadStatus: "Downloaded",
+        runtimeStatus: "ready",
+        runtimeDetails: {},
+      },
+      providers[2], // parakeet, also ready
+    ];
+
+    const routes = buildAsrRouteCatalog(whisperAndParakeetProviders, "prefer_local");
+    const recommended = getRecommendedLaneRoute(routes, "dictation", "prefer_local");
+
+    expect(recommended?.providerType).toBe("parakeet");
+    expect(recommended?.modelId).toBe("parakeet-tdt-0.6b-v3");
+  });
+
   it("recommends Parakeet before Distil Whisper for local meetings", () => {
     const routes = buildAsrRouteCatalog(
       [providers[1], providers[2]],
@@ -242,6 +281,35 @@ describe("asr-route-catalog", () => {
 
     expect(recommended?.providerType).toBe("parakeet");
     expect(recommended?.modelId).toBe("parakeet-tdt-0.6b-v3");
+  });
+
+  it("resolves the openai_cloud meeting lane to whisper-1 even when gpt-transcribe ranks first", () => {
+    // gpt-transcribe is openai_cloud's dictation default and sorts ahead of
+    // whisper-1 in its model_options() list, but it cannot produce segment
+    // timestamps -- only whisper-1 can (openai_cloud.rs's
+    // uses_verbose_json()). The meeting lane must never resolve openai_cloud
+    // to a model that silently drops timestamps.
+    const openAiCloudMultiModel = {
+      ...providers[3],
+      selectedModelId: "gpt-transcribe",
+      modelOptions: [
+        { id: "gpt-transcribe", label: "gpt-transcribe (recommended)" },
+        { id: "whisper-1", label: "whisper-1" },
+        { id: "gpt-4o-mini-transcribe", label: "gpt-4o-mini-transcribe" },
+        { id: "gpt-4o-transcribe", label: "gpt-4o-transcribe" },
+      ],
+    };
+    const routes = buildAsrRouteCatalog([openAiCloudMultiModel], "prefer_local");
+    const meetingRoutes = routes.filter(
+      (route) => route.providerType === "openai_cloud" && route.laneCompatibility.meeting,
+    );
+
+    expect(meetingRoutes).toHaveLength(1);
+    expect(meetingRoutes[0]?.modelId).toBe("whisper-1");
+
+    const recommended = getRecommendedLaneRoute(routes, "meeting", "best_available");
+    expect(recommended?.providerType).toBe("openai_cloud");
+    expect(recommended?.modelId).toBe("whisper-1");
   });
 
   it("marks missing cloud credentials as BYOK-required instead of generic failure", () => {

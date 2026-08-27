@@ -61,14 +61,17 @@ export interface AsrRouteCatalogEntry {
   recommendedRank: Record<AsrRouteLane, number | null>;
 }
 
-// Ordered so the recommended dictation route lands on whisper.cpp base.en --
-// the deliberately fast default (see settings.rs's default_provider doc) --
-// rather than the heavier distil_whisper route. Platform-native engines still
-// rank first where available.
+// Ordered so the recommended dictation route lands on Parakeet TDT 0.6B v3 --
+// the default (see settings.rs's default_provider doc) -- rather than
+// whisper.cpp base.en, which this repo's own benchmark shows mis-transcribing
+// words it hasn't seen before (including "Plainsong" itself). Platform-native
+// engines and Moonshine's lowest-friction local route still rank first where
+// available; base.en remains offered as the smaller download further down.
 const DICTATION_PROVIDER_ORDER: AsrProviderType[] = [
   "moonshine",
   "macos_apple_speech",
   "windows_sdk_dictation",
+  "parakeet",
   "whisper",
   "distil_whisper",
   "whisper_candle",
@@ -76,7 +79,6 @@ const DICTATION_PROVIDER_ORDER: AsrProviderType[] = [
   "elevenlabs_scribe",
   "groq",
   "cohere_transcribe",
-  "parakeet",
 ];
 
 const MEETING_PROVIDER_ORDER_BY_POLICY: Record<
@@ -332,7 +334,14 @@ function routeSummary(
       : "Legacy English-only Parakeet export, kept as a short-form dictation fallback.";
   }
   if (providerType === "openai_cloud") {
-    return "Cloud transcription route tuned for higher-quality meeting and dictation output.";
+    // Only whisper-1 requests OpenAI's verbose_json response format
+    // (openai_cloud.rs's uses_verbose_json()), which is what actually
+    // returns segment timestamps -- gpt-transcribe and the gpt-4o-*
+    // transcribe models return a single un-timed block, so they never
+    // appear as meeting routes (see isMeetingEligibleModel).
+    return modelId === "whisper-1"
+      ? "Cloud transcription route with segment timestamps, tuned for meeting and dictation output."
+      : "Cloud transcription route for dictation; no segment timestamps, so it is not offered for meetings.";
   }
   if (providerType === "elevenlabs_scribe") {
     return "Cloud route aimed at premium meeting and transcription quality.";
