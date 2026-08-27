@@ -2,6 +2,7 @@
 import { createHash } from "node:crypto";
 import fs from "node:fs/promises";
 import path from "node:path";
+import { fileURLToPath } from "node:url";
 
 // Mistral used to be smoke-tested here for Voxtral. Voxtral is gone and no
 // surviving ASR provider reads a Mistral key, so requiring one would fail the
@@ -16,6 +17,39 @@ if (missing.length > 0) {
   console.error(`Missing required live cloud ASR secrets: ${missing.join(", ")}`);
   process.exit(1);
 }
+
+// This gate posted hardcoded model ids ("whisper-1", "scribe_v1") that a
+// vendor could retire out from under it -- which is exactly what happened to
+// scribe_v1 on 2026-07-09. Deriving the id from the same Rust source the app
+// ships closes that gap: bumping the app's default here is now the only way
+// to change what this gate tests, instead of two places that can drift apart.
+const scriptDir = path.dirname(fileURLToPath(import.meta.url));
+const repoRoot = path.resolve(scriptDir, "..");
+
+async function defaultAsrModelId(providerVariant) {
+  const modPath = path.join(repoRoot, "rust-sidecar", "src", "asr", "mod.rs");
+  const source = await fs.readFile(modPath, "utf8");
+  const fnMatch = source.match(
+    /pub fn default_model_id\(&self\) -> &'static str \{([\s\S]*?)\n {4}\}/,
+  );
+  if (!fnMatch) {
+    throw new Error(
+      `Could not locate AsrProviderType::default_model_id() in ${modPath} to derive live-smoke model ids from.`,
+    );
+  }
+  const armMatch = fnMatch[1].match(
+    new RegExp(`AsrProviderType::${providerVariant}\\s*=>\\s*"([^"]+)"`),
+  );
+  if (!armMatch) {
+    throw new Error(
+      `Could not find a default_model_id() arm for AsrProviderType::${providerVariant} in ${modPath}.`,
+    );
+  }
+  return armMatch[1];
+}
+
+const openAiModelId = await defaultAsrModelId("OpenAiCloud");
+const elevenLabsModelId = await defaultAsrModelId("ElevenLabsScribe");
 
 const args = process.argv.slice(2);
 const outIndex = args.indexOf("--out");
@@ -50,7 +84,7 @@ async function callOpenAI() {
   const started = Date.now();
   const form = new FormData();
   form.append("file", new Blob([audio], { type: "audio/wav" }), "live-cloud-smoke.wav");
-  form.append("model", "whisper-1");
+  form.append("model", openAiModelId);
 
   const response = await fetch("https://api.openai.com/v1/audio/transcriptions", {
     method: "POST",
@@ -72,7 +106,7 @@ async function callElevenLabs() {
   const started = Date.now();
   const form = new FormData();
   form.append("file", new Blob([audio], { type: "audio/wav" }), "live-cloud-smoke.wav");
-  form.append("model_id", "scribe_v1");
+  form.append("model_id", elevenLabsModelId);
 
   const response = await fetch("https://api.elevenlabs.io/v1/speech-to-text", {
     method: "POST",
