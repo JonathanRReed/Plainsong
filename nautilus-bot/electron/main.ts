@@ -73,6 +73,7 @@ import {
   RENDERER_SCHEME,
   rendererUrl,
   resolveRendererAssetPath,
+  withRendererSecurityHeaders,
 } from "./renderer-protocol";
 import {
   RENDERER_READY_LOG_MESSAGE,
@@ -2099,21 +2100,28 @@ async function bootstrap() {
   installRendererPermissionHandlers();
 
   if (!devServerUrlIsUsable) {
-    await protocol.handle(RENDERER_SCHEME, (request) => {
+    await protocol.handle(RENDERER_SCHEME, async (request) => {
       try {
         const rendererRoot = path.join(__dirname, "../dist");
         const assetPath = resolveRendererAssetPath(rendererRoot, request.url);
-        return net.fetch(pathToFileURL(assetPath).toString());
+        // Headers, not just the index.html meta tag: a meta CSP is parsed by
+        // the document that carries it and covers nothing else the handler
+        // serves, and `frame-ancestors` has no effect in a meta tag at all.
+        return withRendererSecurityHeaders(
+          await net.fetch(pathToFileURL(assetPath).toString()),
+        );
       } catch (error) {
         console.error("[renderer] refused packaged asset request", {
           host: RENDERER_HOST,
           url: request.url,
           error,
         });
-        return new Response("Not found", {
-          status: 404,
-          headers: { "content-type": "text/plain; charset=utf-8" },
-        });
+        return withRendererSecurityHeaders(
+          new Response("Not found", {
+            status: 404,
+            headers: { "content-type": "text/plain; charset=utf-8" },
+          }),
+        );
       }
     });
   }
