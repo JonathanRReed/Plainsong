@@ -3074,9 +3074,9 @@ async fn reprocess_dictation_text_impl(
     }
 
     let normalized_mode = normalize_dictation_mode_preset(&mode_preset).to_string();
+    let reprocess_settings = state.settings_manager.lock().await.settings().clone();
     let effective_mode = if normalized_mode == "custom" {
-        let settings = state.settings_manager.lock().await.settings().clone();
-        resolved_dictation_mode_preset(&settings).to_string()
+        resolved_dictation_mode_preset(&reprocess_settings).to_string()
     } else {
         normalized_mode.clone()
     };
@@ -3084,9 +3084,20 @@ async fn reprocess_dictation_text_impl(
 
     let (output_text, used_ai, provider, model_id) = match effective_mode.as_str() {
         "messages" | "email" | "meeting_follow_up" => {
-            let prompt = dictation_mode_transform_prompt(&effective_mode)
-                .ok_or_else(|| "No transform prompt is configured for this mode.".to_string())?;
-            match run_custom_dictation_transform_with_selected_provider(state, input, prompt).await
+            // Reprocess honours the active custom mode's own prompt for exactly
+            // the same reason live dictation does; see
+            // `resolve_dictation_mode_transform_prompt`.
+            let (prompt, _prompt_source) =
+                resolve_dictation_mode_transform_prompt(&reprocess_settings, &effective_mode)
+                    .ok_or_else(|| {
+                        "No transform prompt is configured for this mode.".to_string()
+                    })?;
+            match run_custom_dictation_transform_with_selected_provider(
+                state,
+                input,
+                prompt.as_str(),
+            )
+            .await
             {
                 Ok((output, provider, model_id)) => (
                     output,
@@ -5171,6 +5182,58 @@ fn dictation_mode_transform_prompt(mode_preset: &str) -> Option<&'static str> {
         ),
         _ => None,
     }
+}
+
+/// The transform prompt a base-preset mode should actually run, plus the audit
+/// `prompt_source` describing where that prompt came from.
+///
+/// A custom mode carries its own `custom_prompt` *and* a `base_mode_preset`, and
+/// `resolved_dictation_mode_preset` collapses the pair down to the base preset
+/// before dispatch. That collapse used to lose the custom prompt outright: the
+/// "messages"/"email"/"meeting_follow_up" arms read only the hardcoded generic
+/// text, so a user who wrote a bespoke style for one of those bases silently got
+/// the stock rewrite instead. Only the "voice"/default arm consulted the mode.
+/// Resolving both here keeps every base preset honouring the user's own words,
+/// and keeps the two dispatch sites (live dictation and reprocess) in agreement.
+fn resolve_dictation_mode_transform_prompt(
+    settings: &settings::Settings,
+    mode_preset: &str,
+) -> Option<(String, String)> {
+    let normalized = normalize_dictation_mode_preset(mode_preset);
+    let generic = dictation_mode_transform_prompt(mode_preset)?;
+
+    if let Some(mode) = active_dictation_custom_mode(settings) {
+        // Only a custom mode built *on this base preset* may supply the prompt.
+        // Reprocess lets the user name a preset explicitly ("redo this as an
+        // email"), and an active custom mode based on some other preset must not
+        // hijack that request with its own unrelated style.
+        let mode_targets_this_preset = mode
+            .base_mode_preset
+            .as_deref()
+            .map(normalize_dictation_base_mode_preset)
+            == Some(normalized);
+        if mode_targets_this_preset {
+            if let Some(custom_prompt) = mode
+                .custom_prompt
+                .as_deref()
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+            {
+                // `custom_mode_format:` is the source tag the history UI already
+                // renders as "Style-specific instructions", so a custom-mode
+                // transform reads correctly without a renderer change.
+                return Some((
+                    custom_prompt.to_string(),
+                    format!("custom_mode_format:{}", mode.id),
+                ));
+            }
+        }
+    }
+
+    Some((
+        generic.to_string(),
+        format!("mode_transform:{}", normalized),
+    ))
 }
 
 fn active_dictation_custom_mode(
@@ -10396,6 +10459,119 @@ mod tests {
         let metadata = resolve_dictation_format_prompt_metadata(&settings);
         assert_eq!(metadata.0.as_deref(), Some("custom_mode_format:gmail"));
         assert_eq!(metadata.1.as_deref(), Some("Write polished email prose"));
+    }
+
+    fn custom_mode_fixture(
+        id: &str,
+        base_mode_preset: Option<&str>,
+        custom_prompt: Option<&str>,
+    ) -> settings::DictationCustomMode {
+        settings::DictationCustomMode {
+            id: id.to_string(),
+            name: id.to_string(),
+            description: String::new(),
+            base_mode_preset: base_mode_preset.map(str::to_string),
+            custom_prompt: custom_prompt.map(str::to_string),
+            profile: "normal_speed".to_string(),
+            route_preference: Some("local".to_string()),
+            language_override: None,
+            live_preview_enabled: Some(true),
+            insertion_mode: "paste".to_string(),
+            context_source: "application_context".to_string(),
+            save_to_inbox: false,
+            copy_to_clipboard: true,
+            command_mode_enabled: true,
+            dictation_provider: None,
+            dictation_model_id: None,
+            ai_provider: None,
+            ai_model_id: None,
+            activation_app_matcher: None,
+            activation_domain_matcher: None,
+        }
+    }
+
+    fn settings_with_active_custom_mode(
+        base_mode_preset: Option<&str>,
+        custom_prompt: Option<&str>,
+    ) -> settings::Settings {
+        let mut settings = settings::Settings::default();
+        settings.transcription.dictation_mode_preset = "custom".to_string();
+        settings.transcription.dictation_selected_custom_mode_id = Some("mode-1".to_string());
+        settings.transcription.dictation_custom_modes = vec![custom_mode_fixture(
+            "mode-1",
+            base_mode_preset,
+            custom_prompt,
+        )];
+        settings
+    }
+
+    #[test]
+    fn base_preset_transforms_use_the_active_custom_modes_own_prompt() {
+        // Regression: every one of these three base presets previously ignored
+        // the custom mode and ran the hardcoded generic prompt instead.
+        for preset in ["messages", "email", "meeting_follow_up"] {
+            let settings =
+                settings_with_active_custom_mode(Some(preset), Some("Speak like a lighthouse."));
+            let (prompt, source) = resolve_dictation_mode_transform_prompt(&settings, preset)
+                .unwrap_or_else(|| panic!("{preset} must resolve a transform prompt"));
+            assert_eq!(
+                prompt, "Speak like a lighthouse.",
+                "{preset} discarded the custom prompt"
+            );
+            assert_eq!(source, "custom_mode_format:mode-1");
+        }
+    }
+
+    #[test]
+    fn base_preset_transforms_fall_back_to_generic_prompt_without_a_custom_mode() {
+        let settings = settings::Settings::default();
+        for preset in ["messages", "email", "meeting_follow_up"] {
+            let (prompt, source) = resolve_dictation_mode_transform_prompt(&settings, preset)
+                .unwrap_or_else(|| panic!("{preset} must resolve a transform prompt"));
+            assert_eq!(
+                prompt,
+                dictation_mode_transform_prompt(preset).expect("generic prompt exists"),
+                "{preset} must keep the stock prompt when no custom mode is active"
+            );
+            assert_eq!(source, format!("mode_transform:{preset}"));
+        }
+    }
+
+    #[test]
+    fn custom_mode_with_a_blank_prompt_keeps_the_generic_transform() {
+        for preset in ["messages", "email", "meeting_follow_up"] {
+            let settings = settings_with_active_custom_mode(Some(preset), Some("   "));
+            let (prompt, source) = resolve_dictation_mode_transform_prompt(&settings, preset)
+                .unwrap_or_else(|| panic!("{preset} must resolve a transform prompt"));
+            assert_eq!(
+                prompt,
+                dictation_mode_transform_prompt(preset).expect("generic prompt exists")
+            );
+            assert_eq!(source, format!("mode_transform:{preset}"));
+        }
+    }
+
+    #[test]
+    fn a_custom_mode_for_another_base_preset_does_not_hijack_the_transform() {
+        // Reprocess lets the user name a preset outright; an active custom mode
+        // built on a different base must not answer for it.
+        let settings =
+            settings_with_active_custom_mode(Some("messages"), Some("Speak like a lighthouse."));
+        let (prompt, source) = resolve_dictation_mode_transform_prompt(&settings, "email")
+            .expect("email must resolve a transform prompt");
+        assert_eq!(
+            prompt,
+            dictation_mode_transform_prompt("email").expect("generic prompt exists")
+        );
+        assert_eq!(source, "mode_transform:email");
+    }
+
+    #[test]
+    fn modes_without_a_transform_prompt_resolve_to_nothing() {
+        let settings =
+            settings_with_active_custom_mode(Some("voice"), Some("Speak like a lighthouse."));
+        assert!(resolve_dictation_mode_transform_prompt(&settings, "voice").is_none());
+        assert!(resolve_dictation_mode_transform_prompt(&settings, "notes").is_none());
     }
 
     #[test]
@@ -20080,17 +20256,18 @@ async fn stop_dictation_for_sidecar(
             // dictation with no opt-in and no timeout, then quietly replace the
             // result with a crude local rewrite whenever the call failed.
             "messages" | "email" | "meeting_follow_up" => {
-                if let Some(prompt) =
-                    dictation_mode_transform_prompt(&effective_mode).filter(|_| {
-                        dictation_llm_formatting_enabled(&settings_snapshot, &dictation_options)
-                    })
+                if let Some((prompt, resolved_prompt_source)) =
+                    resolve_dictation_mode_transform_prompt(&settings_snapshot, &effective_mode)
+                        .filter(|_| {
+                            dictation_llm_formatting_enabled(&settings_snapshot, &dictation_options)
+                        })
                 {
                     let transform = tokio::time::timeout(
                         DICTATION_FORMAT_TIMEOUT,
                         run_custom_dictation_transform_with_selected_provider(
                             state,
                             final_text.as_str(),
-                            prompt,
+                            prompt.as_str(),
                         ),
                     )
                     .await;
@@ -20100,8 +20277,8 @@ async fn stop_dictation_for_sidecar(
                                 sanitize_dictation_output(output.trim(), final_text.as_str())
                                     .trim()
                                     .to_string();
-                            prompt_source = Some(format!("mode_transform:{}", effective_mode));
-                            prompt_preview = truncate_for_audit_preview(Some(prompt), 180);
+                            prompt_source = Some(resolved_prompt_source);
+                            prompt_preview = truncate_for_audit_preview(Some(prompt.as_str()), 180);
                             pipeline_stage_keys.push("mode_transform".to_string());
                         }
                         Ok(Err(error)) => {
