@@ -116,6 +116,12 @@ export interface TranscriptionSettings {
   dictationActiveLanguages?: string[];
   dictationSnippetsEnabled?: boolean;
   dictationAutoLearnCorrections?: boolean;
+  /**
+   * Mirrors `dictation_learn_from_external_corrections` in
+   * `rust-sidecar/src/settings.rs`. Off unless the user turned it on: it is the
+   * only dictation setting that reads text back out of another application.
+   */
+  dictationLearnFromExternalCorrections?: boolean;
   dictationCustomPrompt: string | null;
   meetingCustomPrompt: string | null;
   meetingAutoNameEnabled?: boolean;

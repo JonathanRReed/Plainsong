@@ -68,6 +68,25 @@ const AI_LANE_WIRE_SHAPE: Settings["privacy"]["dictationAi"] = {
   modelId: null,
 };
 
+/**
+ * The two correction-learning toggles, pinned by name on both sides.
+ *
+ * `TranscriptionSettings` is too large to mirror field for field, but these two
+ * carry a privacy promise rather than a preference:
+ * `dictationLearnFromExternalCorrections` is what admits Plainsong to another
+ * application's text field. A rename that silently drops the value on the floor
+ * would leave the checkbox reading "off" while the sidecar kept its own default
+ * — which is exactly the failure this file exists to prevent, except pointed at
+ * the one setting where the consequence is reading someone's Slack message.
+ */
+const CORRECTION_LEARNING_WIRE_SHAPE: Pick<
+  Settings["transcription"],
+  "dictationAutoLearnCorrections" | "dictationLearnFromExternalCorrections"
+> = {
+  dictationAutoLearnCorrections: true,
+  dictationLearnFromExternalCorrections: false,
+};
+
 describe("settings wire contract", () => {
   const source = (() => {
     if (!existsSync(SETTINGS_RS)) {
@@ -88,6 +107,20 @@ describe("settings wire contract", () => {
     expect(rustStructFields(source, "AiLaneSettings").map(toCamelCase)).toEqual(
       Object.keys(AI_LANE_WIRE_SHAPE),
     );
+  });
+
+  it("mirrors both correction-learning toggles Rust serializes", () => {
+    const transcriptionFields = rustStructFields(source, "TranscriptionSettings");
+    for (const key of Object.keys(CORRECTION_LEARNING_WIRE_SHAPE)) {
+      expect(transcriptionFields.map(toCamelCase)).toContain(key);
+    }
+  });
+
+  it("ships the external-correction readback off by default in Rust", () => {
+    // The renderer sends whatever the checkbox says, so the value that decides
+    // whether a fresh install reads another app's field is this one.
+    const defaults = source.slice(source.indexOf("impl Default for TranscriptionSettings"));
+    expect(defaults).toMatch(/dictation_learn_from_external_corrections:\s*false/);
   });
 
   it("keeps the retired single-provider keys out of the schema", () => {
