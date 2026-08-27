@@ -4,8 +4,11 @@ import {
   type CustomMeetingTemplate,
 } from "@/lib/meeting-templates";
 
-/** Holds whatever the user wrote above the first recognised heading. */
-const GENERAL_MEETING_NOTES_TITLE = "General notes";
+/** Holds whatever the user wrote above the first recognised heading. Exported
+ * so callers building a template outline from a note's current sections (see
+ * "Save current structure as a template" in recordings-view.tsx) can exclude
+ * this catch-all bucket -- it is not a reusable outline heading. */
+export const GENERAL_MEETING_NOTES_TITLE = "General notes";
 
 export type MeetingNoteSection = {
   title: string;
@@ -38,23 +41,26 @@ const BUILTIN_KNOWN_BARE_SECTION_TITLES = new Set<string>([
   ),
 ]);
 
-/** The built-in known-bare-title set, plus every outline heading any of the
- * caller's saved custom templates uses. A custom template's own headings
- * need the exact same bare-round-trip treatment a built-in's do -- otherwise
- * they would only be recognised as headings via the bulleted-title heuristic,
- * which stops working the moment the user replaces the placeholder bullet
- * with real text. */
-function knownBareSectionTitles(
-  customTemplates: readonly CustomMeetingTemplate[]
-): Set<string> {
-  if (customTemplates.length === 0) {
+/** The built-in known-bare-title set, plus the outline headings of the one
+ * template actually resolved for this note. A custom template's own
+ * headings need the exact same bare-round-trip treatment a built-in's do --
+ * otherwise they would only be recognised as headings via the
+ * bulleted-title heuristic, which stops working the moment the user
+ * replaces the placeholder bullet with real text.
+ *
+ * Deliberately narrow: this takes one template's outline, not the caller's
+ * whole custom-template list. Unioning every saved template's headings in
+ * regardless of which one a given note actually uses let one template's
+ * "Sentiment" section promote a bare "Sentiment" line to a heading in a
+ * completely unrelated meeting using a different template -- and the next
+ * edit would write that reordering to disk. */
+function knownBareSectionTitles(templateOutline: readonly string[]): Set<string> {
+  if (templateOutline.length === 0) {
     return BUILTIN_KNOWN_BARE_SECTION_TITLES;
   }
   return new Set([
     ...BUILTIN_KNOWN_BARE_SECTION_TITLES,
-    ...customTemplates.flatMap((template) =>
-      template.notesOutline.map((title) => normalizeMeetingSectionTitle(title))
-    ),
+    ...templateOutline.map((title) => normalizeMeetingSectionTitle(title)),
   ]);
 }
 
@@ -118,14 +124,17 @@ function formatMeetingSectionTitle(title: string, knownTitles: Set<string>): str
 
 /** Sections back to text. This is lossless by contract: nothing the user typed
  * is dropped, so re-serializing on every keystroke can never delete a section.
- * `customTemplates` should be the same list passed to the
- * `parseMeetingNoteSections` call that produced `sections`, so a custom
- * template's own headings keep round-tripping bare. */
+ * `templateId`/`customTemplates` should match the `parseMeetingNoteSections`
+ * call that produced `sections`, so the same one resolved template's own
+ * headings keep round-tripping bare -- not every template the caller happens
+ * to have on hand. */
 export function serializeMeetingNoteSections(
   sections: MeetingNoteSection[],
+  templateId?: string | null,
   customTemplates: readonly CustomMeetingTemplate[] = []
 ): string {
-  const knownTitles = knownBareSectionTitles(customTemplates);
+  const template = getMeetingTemplateOption(templateId, customTemplates);
+  const knownTitles = knownBareSectionTitles(template.notesOutline);
   return sections
     .flatMap((section) => {
       const title = section.title.trim();
@@ -155,7 +164,7 @@ export function parseMeetingNoteSections(
   customTemplates: readonly CustomMeetingTemplate[] = []
 ): MeetingNoteSection[] {
   const template = getMeetingTemplateOption(templateId, customTemplates);
-  const knownTitles = knownBareSectionTitles(customTemplates);
+  const knownTitles = knownBareSectionTitles(template.notesOutline);
   const templateTitles = new Set(
     template.notesOutline.map((title) => normalizeMeetingSectionTitle(title))
   );
