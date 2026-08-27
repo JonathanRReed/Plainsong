@@ -64,6 +64,10 @@ import {
 import { runExplicitUpdaterInstallFlow } from "./updater-install-flow";
 import { overlayVisibilityAllowed, resolveWindowUiSettings } from "./window-ui-settings";
 import {
+  clampWindowSizeToWorkArea,
+  isFiniteWindowNumber,
+} from "./window-bounds-policy";
+import {
   isRendererUrl,
   RENDERER_HOST,
   RENDERER_SCHEME,
@@ -1009,15 +1013,39 @@ async function handleLocalCommand(
 ): Promise<{ handled: boolean; result?: unknown }> {
   const senderWindow = BrowserWindow.fromWebContents(event.sender);
 
-  const chooseDirectory = async (title: string): Promise<string | null> => {
-    const options: Electron.OpenDialogOptions = {
+  /**
+   * Gate every native modal this handler can open.
+   *
+   * A modal is parented to the window that asked for it and blocks that window
+   * until it is dismissed, and neither fact was checked here. Any window could
+   * ask — including a hidden, non-focusable overlay, which parents a modal to a
+   * window the user cannot see or dismiss — and nothing required a user
+   * gesture, so a renderer could put an unprompted folder picker carrying
+   * Plainsong's name in front of the user at any moment. `begin_meeting_capture`
+   * already had both guards; the storage-location commands, which are the ones
+   * that hand a directory to a privileged sidecar approval, did not.
+   *
+   * The gesture is consumed BEFORE the dialog opens, and is single-use: two
+   * dialogs need two clicks.
+   */
+  const requireMainWindowGesture = (action: string): BrowserWindow => {
+    if (!senderWindow || senderWindow !== mainWindow) {
+      throw new Error(`${action} can only be requested from the main Plainsong window`);
+    }
+    const route = event.senderFrame?.url ?? senderWindow.webContents.getURL();
+    captureAdmission.consume(senderWindow.id, route);
+    return senderWindow;
+  };
+
+  const chooseDirectory = async (
+    parent: BrowserWindow,
+    title: string,
+  ): Promise<string | null> => {
+    const result = await dialog.showOpenDialog(parent, {
       title,
       buttonLabel: "Choose folder",
       properties: ["openDirectory", "createDirectory"],
-    };
-    const result = senderWindow
-      ? await dialog.showOpenDialog(senderWindow, options)
-      : await dialog.showOpenDialog(options);
+    });
     return result.canceled ? null : (result.filePaths[0] ?? null);
   };
 
@@ -1027,14 +1055,30 @@ async function handleLocalCommand(
         return { handled: true, result: null };
       }
       const payload = (args ?? {}) as { width?: unknown; height?: unknown };
-      if (typeof payload.width === "number" && typeof payload.height === "number") {
-        const size = { width: payload.width, height: payload.height };
-        const overlayKind = getOverlayKind(senderWindow);
-        if (overlayKind) {
-          resizeOverlayKeepingBottomEdge(senderWindow, overlayKind, size);
-        } else {
-          senderWindow.setSize(Math.round(size.width), Math.round(size.height), true);
-        }
+      // NaN and Infinity both satisfy `typeof x === "number"`, which was the
+      // only guard here.
+      if (
+        !isFiniteWindowNumber(payload.width) ||
+        !isFiniteWindowNumber(payload.height)
+      ) {
+        return { handled: true, result: null };
+      }
+      const size = { width: payload.width, height: payload.height };
+      const overlayKind = getOverlayKind(senderWindow);
+      if (overlayKind) {
+        resizeOverlayKeepingBottomEdge(senderWindow, overlayKind, size);
+      } else {
+        // The main window is resizable and has no persisted bounds, so a size
+        // larger than the display it is on cannot be recovered from without a
+        // relaunch. Clamp to the work area of the display the window actually
+        // occupies, not the primary display.
+        const [minWidth, minHeight] = senderWindow.getMinimumSize();
+        const { workArea } = screen.getDisplayMatching(senderWindow.getBounds());
+        const clamped = clampWindowSizeToWorkArea(size, workArea, {
+          width: minWidth,
+          height: minHeight,
+        });
+        senderWindow.setSize(clamped.width, clamped.height, true);
       }
       return { handled: true, result: null };
     }
@@ -1075,13 +1119,35 @@ async function handleLocalCommand(
       return { handled: true, result: null };
     }
     case "__window_set_position__": {
-      if (!senderWindow) {
+      // Only the overlays move themselves — they are the windows this process
+      // positions programmatically anyway. The main window's position belongs
+      // to the user: it is not persisted, so a renderer that could park it
+      // off-screen made the app unusable until it was quit and relaunched, and
+      // no renderer code has ever needed to move it.
+      const overlayKind = senderWindow ? getOverlayKind(senderWindow) : null;
+      if (!senderWindow || !overlayKind) {
         return { handled: true, result: null };
       }
       const payload = (args ?? {}) as { x?: unknown; y?: unknown };
-      if (typeof payload.x === "number" && typeof payload.y === "number") {
-        senderWindow.setPosition(Math.round(payload.x), Math.round(payload.y), true);
+      if (!isFiniteWindowNumber(payload.x) || !isFiniteWindowNumber(payload.y)) {
+        return { handled: true, result: null };
       }
+      // Route through the same bottom-anchored clamp every other overlay move
+      // uses, so the window stays inside the work area of the display it is
+      // being moved to and `moved` is not mistaken for a user drag.
+      const x = Math.round(payload.x);
+      const y = Math.round(payload.y);
+      const current = senderWindow.getBounds();
+      const { workArea } = screen.getDisplayNearestPoint({ x, y });
+      applyOverlayBounds(
+        senderWindow,
+        overlayKind,
+        resolveOverlayBounds({
+          workArea,
+          size: { width: current.width, height: current.height },
+          anchor: { bottom: y + current.height, left: x },
+        }),
+      );
       return { handled: true, result: null };
     }
     case "__window_hide__":
@@ -1134,7 +1200,11 @@ async function handleLocalCommand(
         result: { conflicts: shortcutConflicts },
       };
     case "select_export_location": {
-      const selectedPath = await chooseDirectory("Choose a dedicated export folder");
+      const parent = requireMainWindowGesture("Choosing an export folder");
+      const selectedPath = await chooseDirectory(
+        parent,
+        "Choose a dedicated export folder",
+      );
       if (!selectedPath) {
         return { handled: true, result: null };
       }
@@ -1149,7 +1219,11 @@ async function handleLocalCommand(
       };
     }
     case "select_backup_location": {
-      const selectedPath = await chooseDirectory("Choose a dedicated backup folder");
+      const parent = requireMainWindowGesture("Choosing a backup folder");
+      const selectedPath = await chooseDirectory(
+        parent,
+        "Choose a dedicated backup folder",
+      );
       if (!selectedPath) {
         return { handled: true, result: null };
       }
@@ -1168,8 +1242,13 @@ async function handleLocalCommand(
       if (!ipcBridge) {
         throw new Error("Storage approval service is not ready");
       }
+      // One gesture for this command, whichever of the two dialogs it opens.
+      const parent = requireMainWindowGesture("Choosing a cloud backup destination");
       if (request.provider === "i_cloud") {
-        const selectedPath = await chooseDirectory("Choose an iCloud backup folder");
+        const selectedPath = await chooseDirectory(
+          parent,
+          "Choose an iCloud backup folder",
+        );
         if (!selectedPath) {
           return { handled: true, result: null };
         }
@@ -1196,9 +1275,7 @@ async function handleLocalCommand(
         cancelId: 0,
         noLink: true,
       };
-      const confirmation = senderWindow
-        ? await dialog.showMessageBox(senderWindow, messageOptions)
-        : await dialog.showMessageBox(messageOptions);
+      const confirmation = await dialog.showMessageBox(parent, messageOptions);
       if (confirmation.response !== 1) {
         return { handled: true, result: null };
       }
