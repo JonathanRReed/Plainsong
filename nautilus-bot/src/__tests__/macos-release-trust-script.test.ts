@@ -108,10 +108,12 @@ function createFakeMacosApp(
     resourcesDir,
     "shortcut-helper",
   );
+  const calendarHelperDir = path.join(resourcesDir, "calendar-helper");
 
   mkdirSync(macosDir, { recursive: true });
   mkdirSync(sidecarDir, { recursive: true });
   mkdirSync(shortcutHelperDir, { recursive: true });
+  mkdirSync(calendarHelperDir, { recursive: true });
 
   writeFakeElectronFramework(appPath, fuseWire);
   const electronHelpers = writeFakeElectronHelpers(appPath);
@@ -132,18 +134,25 @@ function createFakeMacosApp(
     sidecarDir,
     "nautilus-macos-speech-helper-aarch64-apple-darwin",
   );
+  const calendarHelperExecutable = path.join(
+    calendarHelperDir,
+    "plainsong-native-calendar-helper",
+  );
 
   writeFileSync(mainExecutable, "", "utf8");
   writeFileSync(sidecarExecutable, "", "utf8");
   writeFileSync(helperExecutable, "", "utf8");
   writeFileSync(speechHelperExecutable, "", "utf8");
+  writeFileSync(calendarHelperExecutable, "", "utf8");
   chmodSync(mainExecutable, 0o755);
   chmodSync(sidecarExecutable, 0o755);
   chmodSync(helperExecutable, 0o755);
   chmodSync(speechHelperExecutable, 0o755);
+  chmodSync(calendarHelperExecutable, 0o755);
 
   return {
     appPath,
+    calendarHelperExecutable,
     dmgPath,
     electronHelpers,
     helperExecutable,
@@ -276,7 +285,17 @@ childProcess.spawnSync = function mockedSpawnSync(command, args = []) {
       const isSpeechHelper =
         basename === "nautilus-macos-speech-helper-aarch64-apple-darwin";
       const isShortcutHelper = basename === "plainsong-native-shortcut-helper";
+      const isCalendarHelper = basename === "plainsong-native-calendar-helper";
       const isSidecar = basename === "plainsong-sidecar";
+      // The read-only EventKit helper holds exactly one entitlement; an extra
+      // one can be injected through the environment to exercise the failure.
+      const calendarEntitlement = isCalendarHelper
+        ? "<key>com.apple.security.personal-information.calendars</key><true/>"
+        : "";
+      const unrelatedCalendarPrivilege =
+        isCalendarHelper && process.env.CALENDAR_HELPER_ENTITLEMENT
+          ? "<key>" + process.env.CALENDAR_HELPER_ENTITLEMENT + "</key><true/>"
+          : "";
       const speechEntitlement = isSpeechHelper
         ? "<key>com.apple.security.personal-information.speech-recognition</key><true/>"
         : "";
@@ -327,6 +346,8 @@ childProcess.spawnSync = function mockedSpawnSync(command, args = []) {
           "<plist version=\"1.0\"><dict>",
           speechEntitlement,
           unrelatedSpeechPrivilege,
+          calendarEntitlement,
+          unrelatedCalendarPrivilege,
           shortcutPrivilege,
           sidecarPrivilege,
           helperBaseline,
@@ -512,6 +533,7 @@ describe("verify-macos-release-trust.mjs", { timeout: 30_000 }, () => {
     try {
       const {
         appPath,
+        calendarHelperExecutable,
         dmgPath,
         helperExecutable,
         mainExecutable,
@@ -555,6 +577,7 @@ describe("verify-macos-release-trust.mjs", { timeout: 30_000 }, () => {
       expect(artifact.identity.sidecarTeamIdentifier).toBe("AJ9VWBRNZN");
       expect(artifact.identity.shortcutHelperTeamIdentifier).toBe("AJ9VWBRNZN");
       expect(artifact.identity.speechHelperTeamIdentifier).toBe("AJ9VWBRNZN");
+      expect(artifact.identity.calendarHelperTeamIdentifier).toBe("AJ9VWBRNZN");
       expect(artifact.identity.zipAppTeamIdentifier).toBe("AJ9VWBRNZN");
       expect(artifact.identity.zipSidecarTeamIdentifier).toBe("AJ9VWBRNZN");
       expect(artifact.identity.zipShortcutHelperTeamIdentifier).toBe("AJ9VWBRNZN");
@@ -563,6 +586,7 @@ describe("verify-macos-release-trust.mjs", { timeout: 30_000 }, () => {
       expect(artifact.architectures.sidecar).toContain("arm64");
       expect(artifact.architectures.shortcutHelper).toContain("arm64");
       expect(artifact.architectures.speechHelper).toContain("arm64");
+      expect(artifact.architectures.calendarHelper).toContain("arm64");
       expect(artifact.architectures.zipApp).toContain("arm64");
       expect(artifact.architectures.zipSidecar).toContain("arm64");
       expect(artifact.architectures.zipShortcutHelper).toContain("arm64");
@@ -572,6 +596,7 @@ describe("verify-macos-release-trust.mjs", { timeout: 30_000 }, () => {
       expect(artifact.paths.sidecar).toBe(sidecarExecutable);
       expect(artifact.paths.shortcutHelper).toBe(helperExecutable);
       expect(artifact.paths.speechHelper).toBe(speechHelperExecutable);
+      expect(artifact.paths.calendarHelper).toBe(calendarHelperExecutable);
       expect(artifact.paths.dmg).toBe(realpathSync(dmgPath));
       expect(artifact.paths.zip).toBe(realpathSync(zipPath));
       expect(path.basename(artifact.paths.zipApp)).toBe("Plainsong.app");
@@ -582,6 +607,7 @@ describe("verify-macos-release-trust.mjs", { timeout: 30_000 }, () => {
       expect(artifact.checks.sidecarExecutablePresent).toBe(true);
       expect(artifact.checks.shortcutHelperExecutablePresent).toBe(true);
       expect(artifact.checks.speechHelperExecutablePresent).toBe(true);
+      expect(artifact.checks.calendarHelperExecutablePresent).toBe(true);
       expect(artifact.checks.appSignatureValid).toBe(true);
       expect(artifact.checks.sidecarSignatureValid).toBe(true);
       expect(artifact.checks.shortcutHelperSignatureValid).toBe(true);

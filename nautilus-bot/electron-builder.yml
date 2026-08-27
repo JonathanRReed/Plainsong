@@ -86,6 +86,7 @@ mac:
   binaries:
     - Contents/Resources/sidecar/nautilus-macos-speech-helper-aarch64-apple-darwin
     - Contents/Resources/shortcut-helper/plainsong-native-shortcut-helper
+    - Contents/Resources/calendar-helper/plainsong-native-calendar-helper
   icon: build-resources/icon.icns
   # Required TCC usage strings — without these macOS terminates the app the
   # moment it accesses the microphone / speech recognition.
@@ -93,6 +94,17 @@ mac:
     NSMicrophoneUsageDescription: "Plainsong transcribes your speech on your Mac for dictation and meeting capture. Audio stays on your device."
     NSAudioCaptureUsageDescription: "Plainsong captures audio playing on your Mac to record and transcribe meetings. Depending on your transcription settings, meeting audio may be processed on this Mac or sent to the cloud provider you choose."
     NSSpeechRecognitionUsageDescription: "Plainsong can use Apple's on-device speech recognition to transcribe your dictation."
+    # Calendar reading is done by a separate signed helper, but TCC attributes a
+    # spawned child's prompt to the RESPONSIBLE process — this app — and reads
+    # the string from this Info.plist. Both keys are listed because macOS 13
+    # (the support floor) reads NSCalendarsUsageDescription and macOS 14+ reads
+    # NSCalendarsFullAccessUsageDescription; shipping one of the two shows half
+    # the supported range an empty prompt. The helper's own embedded plist
+    # (build-resources/info.mac.calendar-helper.plist) carries the identical
+    # pair, and the strings are word-for-word the same because which one a
+    # reader sees depends on their macOS version, not on what Plainsong does.
+    NSCalendarsUsageDescription: "Plainsong reads your calendar on this Mac so it can offer to start capturing the meeting you are about to join. Nothing is written to your calendar and nothing leaves your Mac."
+    NSCalendarsFullAccessUsageDescription: "Plainsong reads your calendar on this Mac so it can offer to start capturing the meeting you are about to join. Nothing is written to your calendar and nothing leaves your Mac."
   # macOS-only native helper (built by `shortcut-helper:build`) that observes
   # the dictation hotkey via a listen-only CGEventTap so press-and-hold works.
   # Packaged the same way as the Rust sidecar: it must be signed with the same
@@ -102,6 +114,13 @@ mac:
       to: shortcut-helper
       filter:
         - plainsong-native-shortcut-helper
+    # Read-only EventKit helper (built by `calendar-helper:build`). Kept in its
+    # own resource directory rather than beside the shortcut helper so the
+    # packaged-helper gate can name one path per entitlement policy.
+    - from: dist-native/
+      to: calendar-helper
+      filter:
+        - plainsong-native-calendar-helper
     - from: rust-sidecar/binaries/
       to: sidecar
       filter:
