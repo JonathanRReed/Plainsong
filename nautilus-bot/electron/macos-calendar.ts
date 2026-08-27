@@ -97,7 +97,7 @@ export const CALENDAR_SNAPSHOT_TTL_MS = 60_000;
  * header can usefully offer. A longer horizon is a bigger read of the user's
  * calendar for no extra affordance.
  */
-export const CALENDAR_HORIZON_MINUTES = 480;
+const CALENDAR_HORIZON_MINUTES = 480;
 
 /**
  * Recognized conferencing hosts.
@@ -118,21 +118,6 @@ const VIDEO_SERVICE_HOSTS: ReadonlyArray<readonly [CalendarVideoService, readonl
   ["bluejeans", ["bluejeans.com"]],
   ["jitsi", ["meet.jit.si", "jitsi.net"]],
 ];
-
-const VIDEO_SERVICE_LABELS: Record<CalendarVideoService, string> = {
-  zoom: "Zoom",
-  google_meet: "Google Meet",
-  microsoft_teams: "Microsoft Teams",
-  webex: "Webex",
-  whereby: "Whereby",
-  gotomeeting: "GoToMeeting",
-  bluejeans: "BlueJeans",
-  jitsi: "Jitsi",
-};
-
-export function videoServiceLabel(service: CalendarVideoService): string {
-  return VIDEO_SERVICE_LABELS[service];
-}
 
 function hostMatches(hostname: string, domain: string): boolean {
   return hostname === domain || hostname.endsWith(`.${domain}`);

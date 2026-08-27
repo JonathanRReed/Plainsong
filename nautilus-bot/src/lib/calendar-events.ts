@@ -80,7 +80,7 @@ export function videoServiceLabel(service: CalendarVideoService): string {
  * fetches the wider window so the settings row can say which calendars are in
  * play without a second read.
  */
-export const CALENDAR_LOOKAHEAD_MS = 30 * 60_000;
+const CALENDAR_LOOKAHEAD_MS = 30 * 60_000;
 
 /**
  * How long after its start an event stays offerable.
@@ -90,7 +90,7 @@ export const CALENDAR_LOOKAHEAD_MS = 30 * 60_000;
  * the offer becomes noise — the meeting is either being recorded already or it
  * was never going to be.
  */
-export const CALENDAR_IN_PROGRESS_GRACE_MS = 10 * 60_000;
+const CALENDAR_IN_PROGRESS_GRACE_MS = 10 * 60_000;
 
 export interface CalendarSelectionOptions {
   now: number;
@@ -112,7 +112,7 @@ function startTime(event: CalendarEventSummary): number {
  * capture it at midnight — or at whatever moment the app happened to notice —
  * would be a countdown to a fiction.
  */
-export function calendarEventIsOfferable(
+function calendarEventIsOfferable(
   event: CalendarEventSummary,
   options: CalendarSelectionOptions,
 ): boolean {

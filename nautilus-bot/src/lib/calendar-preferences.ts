@@ -17,7 +17,7 @@
 
 export const CALENDAR_DISCONNECTED_STORAGE_KEY = "plainsong_calendar_disconnected";
 export const CALENDAR_IGNORED_STORAGE_KEY = "plainsong_calendar_ignored_ids";
-export const CALENDAR_DISMISSED_STORAGE_KEY = "plainsong_calendar_dismissed_ids";
+const CALENDAR_DISMISSED_STORAGE_KEY = "plainsong_calendar_dismissed_ids";
 export const CALENDAR_PREFERENCE_EVENT = "plainsong-calendar-preference";
 
 /** Bounded so a long-running session cannot grow the dismissal list forever. */

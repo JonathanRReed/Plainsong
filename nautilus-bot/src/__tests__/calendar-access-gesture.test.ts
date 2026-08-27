@@ -1,5 +1,6 @@
 import { readFileSync, readdirSync, statSync } from "node:fs";
 import path from "node:path";
+import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
 
 /**
@@ -15,7 +16,16 @@ import { describe, expect, it } from "vitest";
  * it is gesture-bound. Do not widen the scan.
  */
 
-const repoRoot = process.cwd();
+/**
+ * Derived from this file's own location rather than from `process.cwd()`.
+ *
+ * The scan below turns absolute paths into repo-relative ones and compares them
+ * against a literal allowlist, so a working directory that is not the repo root
+ * would report every allowed file as an offender. `cwd` is process-global and
+ * vitest runs these files on a shared thread pool; this is one fewer thing that
+ * can be true only most of the time.
+ */
+const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..", "..");
 
 function read(relativePath: string): string {
   return readFileSync(path.join(repoRoot, relativePath), "utf8");
@@ -50,13 +60,18 @@ const ALLOWED_RENDERER_CALLERS = new Set([
 
 describe("calendar access is never requested without a user gesture", () => {
   it("is named by only two renderer modules", () => {
-    const offenders = [...sourceFiles("src"), ...sourceFiles("electron")].filter(
+    const scanned = [...sourceFiles("src"), ...sourceFiles("electron")];
+    // Guard the scan itself: an empty or truncated walk would make every
+    // assertion below vacuously true.
+    expect(scanned).toContain(path.join("src", "hooks", "use-calendar-events.ts"));
+
+    const offenders = scanned.filter(
       (file) =>
         read(file).includes("requestCalendarAccess") &&
         !ALLOWED_RENDERER_CALLERS.has(file),
     );
 
-    expect(offenders).toEqual([]);
+    expect(offenders, "unexpected callers of the prompting path").toEqual([]);
   });
 
   it("names the IPC command in exactly one place", () => {
