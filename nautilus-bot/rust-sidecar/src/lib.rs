@@ -8304,6 +8304,39 @@ mod tests {
         ));
     }
 
+    #[tokio::test]
+    async fn stopping_a_meeting_never_waits_forever_on_the_storage_gate() {
+        let gate = Mutex::new(());
+
+        let held = gate.lock().await;
+        // The regression: this await had no timeout, so a retention sweep
+        // holding the gate kept the microphone running and the overlay lit for
+        // as long as the sweep took.
+        assert!(
+            acquire_storage_gate_for_stop(&gate, Duration::from_millis(50))
+                .await
+                .is_none(),
+            "a busy gate must give up so capture can be ended first"
+        );
+        drop(held);
+
+        assert!(
+            acquire_storage_gate_for_stop(&gate, Duration::from_millis(50))
+                .await
+                .is_some(),
+            "a free gate must still be taken for the durable-write phase"
+        );
+    }
+
+    #[test]
+    fn the_stop_gate_budget_stays_within_the_ipc_stop_timeout() {
+        // `stop_recording` is a LONG command in the Electron policy (5 min), but
+        // the point of the budget is that the user is not left recording. Keep it
+        // in seconds, not minutes.
+        assert!(MEETING_STOP_STORAGE_GATE_TIMEOUT >= Duration::from_secs(5));
+        assert!(MEETING_STOP_STORAGE_GATE_TIMEOUT <= Duration::from_secs(30));
+    }
+
     #[test]
     fn a_mixed_meeting_that_lost_its_microphone_says_so_on_the_record() {
         let degradation = audio::RecordingSourceDegradation {
@@ -12501,6 +12534,13 @@ async fn enforce_meeting_retention_policy(
     reason: &str,
     recording_id_filter: Option<&str>,
 ) -> Result<(usize, usize, usize), String> {
+    // Claim the lease before the gate. This sweep holds the audio storage gate
+    // for as long as it takes to delete every eligible meeting's audio, and
+    // stopping a live meeting has to take the same gate — so a sweep that starts
+    // mid-meeting is what made stop block with the microphone still running.
+    let _maintenance_lease = state
+        .operation_coordinator
+        .try_acquire(operation_coordinator::OperationKind::StorageMaintenance)?;
     let _storage_guard = state.audio_storage_gate.lock().await;
     let (preset, custom_months, delete_mode) = {
         let settings_manager = state.settings_manager.lock().await;
@@ -12676,6 +12716,11 @@ async fn apply_meeting_transcript_only_storage_policy(
     reason: &str,
     recording_id_filter: Option<&str>,
 ) -> Result<(usize, usize), String> {
+    // See `enforce_meeting_retention_policy`: the lease is what keeps this sweep
+    // from starting during a meeting and making its stop wait on the gate.
+    let _maintenance_lease = state
+        .operation_coordinator
+        .try_acquire(operation_coordinator::OperationKind::StorageMaintenance)?;
     let _storage_guard = state.audio_storage_gate.lock().await;
     let storage_mode = {
         let settings_manager = state.settings_manager.lock().await;
@@ -22154,6 +22199,25 @@ async fn stop_recording_for_sidecar(
     result
 }
 
+/// How long stopping a meeting will wait for the audio storage gate before it
+/// ends capture anyway.
+///
+/// Long enough for a short encryption or deletion step already in flight to
+/// finish, short enough that the user is never left recording into a
+/// still-running retention sweep.
+const MEETING_STOP_STORAGE_GATE_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// Take the audio storage gate, or give up after `timeout`.
+///
+/// Separated from the stop path so the "how long do we wait" policy is testable
+/// without an `AppState`; the caller decides what giving up means.
+async fn acquire_storage_gate_for_stop(
+    gate: &Mutex<()>,
+    timeout: Duration,
+) -> Option<tokio::sync::MutexGuard<'_, ()>> {
+    tokio::time::timeout(timeout, gate.lock()).await.ok()
+}
+
 async fn stop_recording_for_sidecar_inner(
     state: &Arc<AppState>,
     handle: &crate::sidecar_handle::SidecarHandle,
@@ -22202,14 +22266,46 @@ async fn stop_recording_for_sidecar_inner(
         &recording_id,
         Some("Stopping capture and saving audio"),
     );
-    let _storage_guard = state.audio_storage_gate.lock().await;
 
     state.recording_stream_stop.store(true, Ordering::SeqCst);
+
+    // Ending data acquisition must not wait behind a storage sweep. The gate
+    // protects the recordings directory from concurrent deletion, backup and
+    // encryption work; it protects nothing about the capture streams, which is
+    // what keeps holding the microphone and filling the disk while the user is
+    // waiting for their meeting to stop. The `StorageMaintenance` lease makes
+    // this a rare path, and the timeout means "rare" never becomes "forever".
+    let mut storage_guard =
+        acquire_storage_gate_for_stop(&state.audio_storage_gate, MEETING_STOP_STORAGE_GATE_TIMEOUT)
+            .await;
+    if storage_guard.is_none() {
+        tracing::warn!(
+            "Recording storage was still busy after {:?}; ending capture for {} before taking the gate",
+            MEETING_STOP_STORAGE_GATE_TIMEOUT,
+            recording_id
+        );
+        emit_meeting_lifecycle_phase(
+            state.as_ref(),
+            handle,
+            "stopping",
+            &recording_id,
+            Some("Recording storage is busy. Ending capture now and saving the audio as soon as it frees up."),
+        );
+    }
 
     let stop_result = {
         let mut audio = state.audio_capture.lock().await;
         audio.stop_recording(&recording_id)
     };
+
+    // Capture has ended either way, so waiting here costs no more audio. Every
+    // durable write below — the finalization-failure path included — happens
+    // under the gate.
+    if storage_guard.is_none() {
+        storage_guard = Some(state.audio_storage_gate.lock().await);
+    }
+    let _storage_guard = storage_guard;
+
     let stop_result = match stop_result {
         Ok(result) => result,
         Err(error) => {

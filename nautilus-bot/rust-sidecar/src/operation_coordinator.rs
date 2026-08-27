@@ -10,6 +10,15 @@ pub(crate) enum OperationKind {
     VaultMigration,
     VaultLock,
     RuntimeAudio,
+    /// A retention or transcript-only storage sweep.
+    ///
+    /// These hold the audio storage gate for as long as it takes to delete
+    /// every eligible meeting's audio. Nothing stopped one from starting during
+    /// a meeting, and stopping that meeting then blocked on the gate — with the
+    /// microphone still running — until the sweep finished. Excluding it against
+    /// `Capture` the way `Backup`/`Restore` already are is what keeps the stop
+    /// path's gate wait short in the first place.
+    StorageMaintenance,
 }
 
 impl OperationKind {
@@ -22,6 +31,7 @@ impl OperationKind {
             Self::VaultMigration => "vault migration",
             Self::VaultLock => "vault lock",
             Self::RuntimeAudio => "decrypted audio playback",
+            Self::StorageMaintenance => "recording storage maintenance",
         }
     }
 }
@@ -35,6 +45,7 @@ struct CoordinatorState {
     vault_migration: usize,
     vault_lock: usize,
     runtime_audio: usize,
+    storage_maintenance: usize,
 }
 
 impl CoordinatorState {
@@ -47,6 +58,7 @@ impl CoordinatorState {
             OperationKind::VaultMigration => self.vault_migration,
             OperationKind::VaultLock => self.vault_lock,
             OperationKind::RuntimeAudio => self.runtime_audio,
+            OperationKind::StorageMaintenance => self.storage_maintenance,
         }
     }
 
@@ -59,6 +71,7 @@ impl CoordinatorState {
             OperationKind::VaultMigration => self.vault_migration += 1,
             OperationKind::VaultLock => self.vault_lock += 1,
             OperationKind::RuntimeAudio => self.runtime_audio += 1,
+            OperationKind::StorageMaintenance => self.storage_maintenance += 1,
         }
     }
 
@@ -71,6 +84,7 @@ impl CoordinatorState {
             OperationKind::VaultMigration => &mut self.vault_migration,
             OperationKind::VaultLock => &mut self.vault_lock,
             OperationKind::RuntimeAudio => &mut self.runtime_audio,
+            OperationKind::StorageMaintenance => &mut self.storage_maintenance,
         };
         *count = count.saturating_sub(1);
     }
@@ -129,7 +143,12 @@ impl OperationCoordinator {
                 OperationKind::Restore,
                 OperationKind::VaultMigration,
                 OperationKind::VaultLock,
+                OperationKind::StorageMaintenance,
             ],
+            // Post-processing is deliberately not excluded against storage
+            // maintenance in either direction: the transcript-only sweep runs
+            // from inside the post-processing pipeline, so excluding them would
+            // make that pipeline unable to run its own cleanup.
             OperationKind::PostProcess => &[
                 OperationKind::Backup,
                 OperationKind::Restore,
@@ -143,6 +162,7 @@ impl OperationCoordinator {
                 OperationKind::Restore,
                 OperationKind::VaultMigration,
                 OperationKind::VaultLock,
+                OperationKind::StorageMaintenance,
             ],
             OperationKind::Restore => &[
                 OperationKind::Capture,
@@ -152,6 +172,7 @@ impl OperationCoordinator {
                 OperationKind::VaultMigration,
                 OperationKind::VaultLock,
                 OperationKind::RuntimeAudio,
+                OperationKind::StorageMaintenance,
             ],
             OperationKind::VaultMigration => &[
                 OperationKind::Capture,
@@ -161,6 +182,7 @@ impl OperationCoordinator {
                 OperationKind::VaultMigration,
                 OperationKind::VaultLock,
                 OperationKind::RuntimeAudio,
+                OperationKind::StorageMaintenance,
             ],
             // Runtime audio is revoked by vault lock instead of blocking it.
             OperationKind::VaultLock => &[
@@ -170,11 +192,20 @@ impl OperationCoordinator {
                 OperationKind::Restore,
                 OperationKind::VaultMigration,
                 OperationKind::VaultLock,
+                OperationKind::StorageMaintenance,
             ],
             OperationKind::RuntimeAudio => &[
                 OperationKind::Restore,
                 OperationKind::VaultMigration,
                 OperationKind::VaultLock,
+            ],
+            OperationKind::StorageMaintenance => &[
+                OperationKind::Capture,
+                OperationKind::Backup,
+                OperationKind::Restore,
+                OperationKind::VaultMigration,
+                OperationKind::VaultLock,
+                OperationKind::StorageMaintenance,
             ],
         };
 
@@ -275,6 +306,59 @@ mod tests {
             .expect("runtime audio lease must be cancelled");
         drop(playback);
         drop(lock);
+    }
+
+    #[test]
+    fn storage_maintenance_and_capture_exclude_each_other() {
+        let coordinator = OperationCoordinator::new();
+        let capture = coordinator
+            .try_acquire(OperationKind::Capture)
+            .expect("capture lease");
+        // The regression this exists for: a retention or transcript-only sweep
+        // starting mid-meeting takes the audio storage gate for as long as the
+        // sweep runs, and stopping that meeting then waited behind it with the
+        // microphone still live.
+        let error = coordinator
+            .try_acquire(OperationKind::StorageMaintenance)
+            .err()
+            .expect("storage maintenance must not start during a capture");
+        assert!(error.contains("meeting capture"));
+        drop(capture);
+
+        let maintenance = coordinator
+            .try_acquire(OperationKind::StorageMaintenance)
+            .expect("idle storage maintenance must be allowed");
+        let error = coordinator
+            .try_acquire(OperationKind::Capture)
+            .err()
+            .expect("a capture must not start on top of a running sweep");
+        assert!(error.contains("recording storage maintenance"));
+        assert!(
+            coordinator
+                .try_acquire(OperationKind::StorageMaintenance)
+                .is_err(),
+            "two concurrent sweeps would fight over the same audio storage gate"
+        );
+        drop(maintenance);
+    }
+
+    #[test]
+    fn storage_maintenance_can_run_inside_meeting_post_processing() {
+        // The transcript-only sweep is invoked by the post-processing pipeline
+        // itself, so excluding these two would make that pipeline unable to run
+        // its own storage policy.
+        let coordinator = OperationCoordinator::new();
+        let post_process = coordinator
+            .try_acquire(OperationKind::PostProcess)
+            .expect("post-process lease");
+        let maintenance = coordinator
+            .try_acquire(OperationKind::StorageMaintenance)
+            .expect("post-processing must be able to run its own cleanup");
+        coordinator
+            .try_acquire(OperationKind::PostProcess)
+            .expect("a sweep must not block another meeting's post-processing");
+        drop(maintenance);
+        drop(post_process);
     }
 
     #[test]
