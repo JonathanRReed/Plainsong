@@ -6788,13 +6788,18 @@ fn cleanup_recording_audio_operation_sources(
     }
 }
 
-/// Headroom kept free beyond the ciphertext itself.
+/// Headroom kept free beyond the ciphertext itself, in seconds of recording.
 ///
 /// Encryption writes a whole second copy of every track before the plaintext can
 /// be removed, and the finalize path that calls it runs with roughly a minute of
 /// recording headroom. Filling the volume to the last byte here would leave no
 /// room for the journal writes that make the operation recoverable.
-const RECORDING_ENCRYPTION_SPACE_MARGIN_BYTES: u64 = 32 * 1024 * 1024;
+///
+/// Expressed in seconds rather than a flat byte count so it goes through
+/// `audio::meeting_headroom_bytes` and scales with the number of tracks this
+/// bundle actually holds -- the same per-track sizing the capture-side space
+/// thresholds use. A mic-only meeting is not charged the three-track price.
+const RECORDING_ENCRYPTION_MARGIN_SECONDS: u64 = 60;
 
 /// Journal state for an operation deferred because the disk was too full.
 const RECORDING_ENCRYPTION_SPACE_PENDING: &str = "space_pending";
@@ -6891,7 +6896,10 @@ async fn encrypt_recording_audio_operation_with_checkpoint(
                 crate::crypto::ProjectKeyManager::streaming_ciphertext_len(item.plaintext_bytes)
             })
             .sum::<u64>()
-            .saturating_add(RECORDING_ENCRYPTION_SPACE_MARGIN_BYTES);
+            .saturating_add(crate::audio::meeting_headroom_bytes(
+                pending.len() as u64,
+                RECORDING_ENCRYPTION_MARGIN_SECONDS,
+            ));
         let staged_path = first.staged_path.clone();
         let available =
             tokio::task::spawn_blocking(move || available_space_for_encryption(&staged_path))
@@ -7942,6 +7950,35 @@ mod tests {
                 "{message} must classify as a disk-full failure"
             );
         }
+    }
+
+    #[test]
+    fn the_capture_preflight_refusal_is_classified_as_disk_full() {
+        // The exact wording `ensure_recording_start_has_disk_headroom` bails
+        // with. This is the one meeting-start failure the user can act on
+        // directly, so it must not fall through to a device error.
+        let refusal = format!(
+            "Not enough free disk space to record a meeting ({} MB free, {} MB needed). \
+             Free some space and start again.",
+            120,
+            crate::audio::meeting_headroom_bytes(3, 30 * 60) / (1024 * 1024)
+        );
+        assert!(
+            meeting_start_failure_is_out_of_space(&refusal),
+            "the capture preflight refusal must classify as disk_full: {refusal}"
+        );
+    }
+
+    #[test]
+    fn the_encryption_margin_scales_with_track_count() {
+        // Sized through the capture-side headroom helper, so a mic-only bundle
+        // is not charged the three-track price.
+        let one_track =
+            crate::audio::meeting_headroom_bytes(1, RECORDING_ENCRYPTION_MARGIN_SECONDS);
+        let three_tracks =
+            crate::audio::meeting_headroom_bytes(3, RECORDING_ENCRYPTION_MARGIN_SECONDS);
+        assert!(one_track > 0);
+        assert_eq!(three_tracks, one_track * 3);
     }
 
     #[test]
@@ -22976,12 +23013,15 @@ impl MeetingStartErrorCode {
 /// matching whenever a message is reworded.
 fn meeting_start_failure_is_out_of_space(message: &str) -> bool {
     let normalized = message.to_ascii_lowercase();
+    // "disk space" is the fragment that catches the capture preflight's own
+    // refusal ("Not enough free disk space to record a meeting..."), along with
+    // "insufficient disk space" and "out of disk space". Matching the narrower
+    // "not enough space" alone missed it.
     normalized.contains("no space left")
         || normalized.contains("not enough space")
         || normalized.contains("insufficient space")
-        || normalized.contains("insufficient disk")
+        || normalized.contains("disk space")
         || normalized.contains("disk is full")
-        || normalized.contains("out of disk space")
         || normalized.contains("free space")
 }
 
@@ -23015,8 +23055,24 @@ fn fail_meeting_start(
             "message": &message,
         }),
     );
-    message
+    // The returned string is what reaches the renderer as the command's error.
+    // JSON-RPC carries only a message there, so the typed code rides in a
+    // machine-readable prefix that the Electron bridge lifts back onto
+    // `error.code` -- the same `PREFIX:` convention `SIDECAR_DUPLICATE:`
+    // already uses. Callers that persist or log the failure use `message`
+    // directly, before this point, so nothing stores the prefix.
+    format!(
+        "{}{}:{}",
+        MEETING_START_FAILURE_PREFIX,
+        code.as_str(),
+        message
+    )
 }
+
+/// Marks a meeting-start error as carrying a typed code.
+///
+/// Wire form: `MEETING_START_FAILED:<code>:<human message>`.
+const MEETING_START_FAILURE_PREFIX: &str = "MEETING_START_FAILED:";
 
 fn emit_meeting_lifecycle_phase(
     state: &AppState,
