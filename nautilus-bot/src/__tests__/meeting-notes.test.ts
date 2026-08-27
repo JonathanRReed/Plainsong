@@ -195,6 +195,75 @@ describe("meeting note sections", () => {
     const sections = parseMeetingNoteSections("## Custom section\n- ", "auto");
     expect(getNextMeetingSectionTitle(sections)).toBe("Custom section 2");
   });
+
+  describe("custom (user-saved) templates", () => {
+    const customTemplate = {
+      id: "custom-board-update",
+      name: "Board Update",
+      summaryPrompt: "Summarize board sentiment, asks, and follow-ups.",
+      notesOutline: ["Sentiment", "Asks"],
+    };
+
+    it("recognises a custom template's own outline headings as template sections", () => {
+      const notes = "Sentiment\nCautiously optimistic\n\nAsks\nMore runway";
+      const sections = parseMeetingNoteSections(notes, customTemplate.id, [customTemplate]);
+
+      expect(
+        sections.find((section) => section.title === "Sentiment")?.isTemplateSection
+      ).toBe(true);
+      expect(
+        sections.find((section) => section.title === "Asks")?.isTemplateSection
+      ).toBe(true);
+    });
+
+    it("round-trips a custom template's outline byte for byte, including after real text replaces the placeholder", () => {
+      const seeded = "Sentiment\n- \n\nAsks\n- ";
+      const parsed = parseMeetingNoteSections(seeded, customTemplate.id, [customTemplate]);
+      expect(serializeMeetingNoteSections(parsed, [customTemplate])).toBe(seeded);
+
+      // Once the placeholder bullet is replaced with prose, the heading must
+      // still read back as a heading on the next parse -- the bulleted-title
+      // heuristic alone would stop working here, which is exactly why a
+      // custom template's headings are added to the known-bare-title set.
+      const edited = serializeMeetingNoteSections(
+        parsed.map((section) =>
+          section.title === "Sentiment"
+            ? { ...section, body: "Cautiously optimistic" }
+            : section
+        ),
+        [customTemplate]
+      );
+      const reparsed = parseMeetingNoteSections(edited, customTemplate.id, [customTemplate]);
+      expect(reparsed.find((section) => section.title === "Sentiment")?.body).toBe(
+        "Cautiously optimistic"
+      );
+      expect(serializeMeetingNoteSections(reparsed, [customTemplate])).toBe(edited);
+    });
+
+    it("folds a deleted custom template's notes into general text rather than losing them", () => {
+      // The meeting's stored template id still names the deleted template,
+      // but it is no longer in the caller's custom-template list -- the
+      // shape a meeting record takes right after its template is removed.
+      // Parsing must not throw, and the text must not be lost: with no
+      // outline to recognise "Sentiment" as a heading, it folds into the
+      // general block exactly as any other unrecognised prose does (see
+      // "keeps every character when unrecognised prose is normalised into
+      // the general block" above) -- deleting a template must not break a
+      // past meeting's displayed notes.
+      const notes = "Sentiment\nCautiously optimistic";
+      const sections = parseMeetingNoteSections(notes, customTemplate.id, []);
+
+      expect(sections.some((section) => section.title === "Sentiment")).toBe(false);
+      const serialized = serializeMeetingNoteSections(sections, []);
+      expect(serialized).toBe(`General notes\n${notes}`);
+      // Stable once normalised, and still resolvable without the template.
+      expect(
+        serializeMeetingNoteSections(
+          parseMeetingNoteSections(serialized, customTemplate.id, [])
+        )
+      ).toBe(serialized);
+    });
+  });
 });
 
 describe("rebaseMeetingNotes", () => {

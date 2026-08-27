@@ -1,4 +1,8 @@
-import { getMeetingTemplateOption, MEETING_TEMPLATES } from "@/lib/meeting-templates";
+import {
+  getMeetingTemplateOption,
+  MEETING_TEMPLATES,
+  type CustomMeetingTemplate,
+} from "@/lib/meeting-templates";
 
 /** Holds whatever the user wrote above the first recognised heading. */
 const GENERAL_MEETING_NOTES_TITLE = "General notes";
@@ -19,17 +23,40 @@ function normalizeMeetingSectionTitle(value: string): string {
   return value.trim().toLowerCase();
 }
 
-/** Every heading a template can lay down, plus the general block. These read
- * back as headings on sight and write back bare, so a note the outline created
- * round-trips byte for byte. A bare line that is not one of these is only a
- * heading in the one narrow case below; terse notes ("ship date slipped") are
- * the primary input here, so guessing at short lines is not allowed. */
-const KNOWN_BARE_SECTION_TITLES = new Set<string>([
+/** Every heading a built-in template can lay down, plus the general block.
+ * These read back as headings on sight and write back bare, so a note the
+ * outline created round-trips byte for byte. A bare line that is not one of
+ * these is only a heading in the one narrow case below; terse notes ("ship
+ * date slipped") are the primary input here, so guessing at short lines is
+ * not allowed. Fixed at module load because the built-in set never changes;
+ * a user's custom templates do, so those titles are unioned in per call by
+ * `knownBareSectionTitles` below rather than baked in here. */
+const BUILTIN_KNOWN_BARE_SECTION_TITLES = new Set<string>([
   normalizeMeetingSectionTitle(GENERAL_MEETING_NOTES_TITLE),
   ...MEETING_TEMPLATES.flatMap((template) =>
     template.notesOutline.map((title) => normalizeMeetingSectionTitle(title))
   ),
 ]);
+
+/** The built-in known-bare-title set, plus every outline heading any of the
+ * caller's saved custom templates uses. A custom template's own headings
+ * need the exact same bare-round-trip treatment a built-in's do -- otherwise
+ * they would only be recognised as headings via the bulleted-title heuristic,
+ * which stops working the moment the user replaces the placeholder bullet
+ * with real text. */
+function knownBareSectionTitles(
+  customTemplates: readonly CustomMeetingTemplate[]
+): Set<string> {
+  if (customTemplates.length === 0) {
+    return BUILTIN_KNOWN_BARE_SECTION_TITLES;
+  }
+  return new Set([
+    ...BUILTIN_KNOWN_BARE_SECTION_TITLES,
+    ...customTemplates.flatMap((template) =>
+      template.notesOutline.map((title) => normalizeMeetingSectionTitle(title))
+    ),
+  ]);
+}
 
 /** Sections the user created by hand carry an explicit markdown marker so they
  * survive a reload without the parser having to guess. */
@@ -65,7 +92,8 @@ function looksLikeBulletedSectionTitle(
 
 function readMeetingSectionHeading(
   line: string,
-  nextLine: string | undefined
+  nextLine: string | undefined,
+  knownTitles: Set<string>
 ): string | null {
   const trimmed = line.trim();
   const explicit = EXPLICIT_SECTION_HEADING.exec(trimmed);
@@ -75,7 +103,7 @@ function readMeetingSectionHeading(
   if (!trimmed) {
     return null;
   }
-  if (KNOWN_BARE_SECTION_TITLES.has(normalizeMeetingSectionTitle(trimmed))) {
+  if (knownTitles.has(normalizeMeetingSectionTitle(trimmed))) {
     return trimmed;
   }
   return looksLikeBulletedSectionTitle(trimmed, nextLine) ? trimmed : null;
@@ -84,15 +112,20 @@ function readMeetingSectionHeading(
 /** A known heading writes back bare so existing notes round-trip byte for byte;
  * a hand-made title gets the explicit marker so it is still a heading next
  * time the note is parsed. */
-function formatMeetingSectionTitle(title: string): string {
-  return KNOWN_BARE_SECTION_TITLES.has(normalizeMeetingSectionTitle(title))
-    ? title
-    : `## ${title}`;
+function formatMeetingSectionTitle(title: string, knownTitles: Set<string>): string {
+  return knownTitles.has(normalizeMeetingSectionTitle(title)) ? title : `## ${title}`;
 }
 
 /** Sections back to text. This is lossless by contract: nothing the user typed
- * is dropped, so re-serializing on every keystroke can never delete a section. */
-export function serializeMeetingNoteSections(sections: MeetingNoteSection[]): string {
+ * is dropped, so re-serializing on every keystroke can never delete a section.
+ * `customTemplates` should be the same list passed to the
+ * `parseMeetingNoteSections` call that produced `sections`, so a custom
+ * template's own headings keep round-tripping bare. */
+export function serializeMeetingNoteSections(
+  sections: MeetingNoteSection[],
+  customTemplates: readonly CustomMeetingTemplate[] = []
+): string {
+  const knownTitles = knownBareSectionTitles(customTemplates);
   return sections
     .flatMap((section) => {
       const title = section.title.trim();
@@ -103,7 +136,7 @@ export function serializeMeetingNoteSections(sections: MeetingNoteSection[]): st
         return body ? [body] : [];
       }
 
-      const titleLine = formatMeetingSectionTitle(title);
+      const titleLine = formatMeetingSectionTitle(title, knownTitles);
       if (body) {
         return [`${titleLine}\n${body}`];
       }
@@ -118,9 +151,11 @@ export function serializeMeetingNoteSections(sections: MeetingNoteSection[]): st
 
 export function parseMeetingNoteSections(
   notes: string,
-  templateId: string | null | undefined
+  templateId: string | null | undefined,
+  customTemplates: readonly CustomMeetingTemplate[] = []
 ): MeetingNoteSection[] {
-  const template = getMeetingTemplateOption(templateId);
+  const template = getMeetingTemplateOption(templateId, customTemplates);
+  const knownTitles = knownBareSectionTitles(customTemplates);
   const templateTitles = new Set(
     template.notesOutline.map((title) => normalizeMeetingSectionTitle(title))
   );
@@ -155,7 +190,7 @@ export function parseMeetingNoteSections(
   lines.forEach((line, index) => {
     const startsBlock = index === 0 || lines[index - 1].trim() === "";
     const heading = startsBlock
-      ? readMeetingSectionHeading(line, lines[index + 1])
+      ? readMeetingSectionHeading(line, lines[index + 1], knownTitles)
       : null;
     if (heading !== null) {
       closeOpenSection();

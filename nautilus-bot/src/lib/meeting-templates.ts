@@ -1,23 +1,37 @@
-type MeetingTemplateId =
-  | "auto"
-  | "1on1"
-  | "standup"
-  | "sales"
-  | "interview"
-  | "brainstorm"
-  | "coaching"
-  | "doctor"
-  | "legal"
-  | "research"
-  | "personal_admin";
-
 type MeetingTemplateOption = {
-  value: MeetingTemplateId;
+  value: string;
   label: string;
   description: string;
   summaryPrompt: string;
   notesOutline: string[];
+  /** Absent (or false) for every built-in in `MEETING_TEMPLATES` below; true
+   * only for a template synthesized from the user's saved list in settings.
+   * The picker uses this to label "Your templates" apart from the built-in
+   * set (audit finding ux-12 — Granola-style user recipes). */
+  isCustom?: boolean;
 };
+
+/**
+ * A user-saved meeting template ("recipe"). Mirrors `MeetingCustomTemplate`
+ * in rust-sidecar/src/settings.rs and `MeetingCustomTemplate` in
+ * src/types/settings.ts -- the settings wire contract test pins all three
+ * to the same field set.
+ */
+export type CustomMeetingTemplate = {
+  id: string;
+  name: string;
+  summaryPrompt: string;
+  notesOutline: string[];
+};
+
+/**
+ * A settings.json with more saved templates than this is almost certainly a
+ * bug, not a user with genuinely that many playbooks. Mirrors
+ * `MAX_MEETING_CUSTOM_TEMPLATES` in rust-sidecar/src/settings.rs so the
+ * renderer can refuse a new save before round-tripping to find out that Rust
+ * would have dropped it anyway.
+ */
+export const MAX_CUSTOM_MEETING_TEMPLATES = 50;
 
 export const MEETING_TEMPLATES: MeetingTemplateOption[] = [
   {
@@ -116,16 +130,73 @@ export const MEETING_TEMPLATES: MeetingTemplateOption[] = [
   },
 ];
 
-export function getMeetingTemplateOption(
-  templateId: string | null | undefined
-): MeetingTemplateOption {
-  return (
-    MEETING_TEMPLATES.find((template) => template.value === templateId) ??
-    MEETING_TEMPLATES[0]
-  );
+/** Every id a built-in template can carry. New custom templates are always
+ * minted with a `custom-` prefix (see recordings-view.tsx), which can never
+ * collide with one of these, so nothing on the renderer side needs to check
+ * against this set at save time. It exists as the renderer-side mirror of
+ * `BUILTIN_MEETING_TEMPLATE_IDS` in rust-sidecar/src/settings.rs, which is
+ * the real backstop: it drops any custom entry that *does* carry a built-in
+ * id, from a settings.json edited by hand or written by an older client. */
+export const BUILTIN_MEETING_TEMPLATE_IDS: ReadonlySet<string> = new Set(
+  MEETING_TEMPLATES.map((template) => template.value)
+);
+
+/** A custom template as a `MeetingTemplateOption`, so the picker and the
+ * outline/notes-parsing helpers below can treat it exactly like a built-in. */
+function customTemplateToOption(template: CustomMeetingTemplate): MeetingTemplateOption {
+  return {
+    value: template.id,
+    label: template.name,
+    description: "Your template",
+    summaryPrompt: template.summaryPrompt,
+    notesOutline: template.notesOutline,
+    isCustom: true,
+  };
 }
 
-export function buildMeetingTemplateOutline(templateId: string | null | undefined): string {
-  const template = getMeetingTemplateOption(templateId);
+/** Built-ins first, then the user's saved templates -- the order the picker
+ * renders them in. A custom entry carrying a built-in id is filtered out
+ * here too (Rust already drops these on load/save -- see
+ * `sanitize_meeting_custom_templates` -- but a settings file read before
+ * that sanitization ran, or edited by hand, could still hand this one), so
+ * the picker never lists the same id twice. */
+export function getAllMeetingTemplateOptions(
+  customTemplates: readonly CustomMeetingTemplate[] = []
+): MeetingTemplateOption[] {
+  const customOptions = customTemplates
+    .filter((template) => !BUILTIN_MEETING_TEMPLATE_IDS.has(template.id))
+    .map(customTemplateToOption);
+  return [...MEETING_TEMPLATES, ...customOptions];
+}
+
+/**
+ * Resolve a template id against the built-in set first, then the caller's
+ * custom templates, falling back to the default ("auto") template for
+ * anything else -- including a custom id whose template has since been
+ * deleted. That fallback is what keeps a past meeting displayable after its
+ * template is removed (deleting a template must not break the meetings that
+ * used it): there is never an id this function fails to resolve to *some*
+ * option.
+ */
+export function getMeetingTemplateOption(
+  templateId: string | null | undefined,
+  customTemplates: readonly CustomMeetingTemplate[] = []
+): MeetingTemplateOption {
+  const builtin = MEETING_TEMPLATES.find((template) => template.value === templateId);
+  if (builtin) {
+    return builtin;
+  }
+  const custom = customTemplates.find((template) => template.id === templateId);
+  if (custom) {
+    return customTemplateToOption(custom);
+  }
+  return MEETING_TEMPLATES[0];
+}
+
+export function buildMeetingTemplateOutline(
+  templateId: string | null | undefined,
+  customTemplates: readonly CustomMeetingTemplate[] = []
+): string {
+  const template = getMeetingTemplateOption(templateId, customTemplates);
   return template.notesOutline.map((section) => `${section}\n- `).join("\n\n");
 }
