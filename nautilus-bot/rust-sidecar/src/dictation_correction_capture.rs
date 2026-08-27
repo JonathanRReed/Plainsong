@@ -66,8 +66,15 @@ const MIN_SPAN_ANCHOR_CONFIDENCE: f64 = 0.6;
 
 /// Longest field value the readback will consider, in characters. A field far
 /// larger than the insertion is a document, and Plainsong has no business
-/// diffing a document. Also bounds the alignment DP below.
+/// diffing a document.
 pub const MAX_READBACK_CHARS: usize = 4000;
+
+/// Word ceiling on either side of the alignment. The subsequence table below is
+/// quadratic, and this runs on a background thread after every insertion, so
+/// the worst case has to be a number rather than "whatever the user pasted
+/// into". Six hundred words is far past any dictation that could still be
+/// called a correction; past it the readback is abandoned rather than trimmed.
+const MAX_ALIGNMENT_WORDS: usize = 600;
 
 /// Word/char bounds on either side of a candidate. Mirrors
 /// `dictation_parity::looks_like_auto_learning_safe_phrase`, which guards the
@@ -349,6 +356,9 @@ pub fn derive_readback_candidates(
     let readback_words = tokenize_words(readback_text);
     if readback_words.is_empty() {
         return Err(ReadbackAbort::ReadbackEmpty);
+    }
+    if inserted_words.len() > MAX_ALIGNMENT_WORDS || readback_words.len() > MAX_ALIGNMENT_WORDS {
+        return Err(ReadbackAbort::ReadbackTooLarge);
     }
 
     let span = locate_inserted_span(&inserted_words, &readback_words)
@@ -972,6 +982,21 @@ mod tests {
             ReadbackOutcome::Aborted(ReadbackAbort::ReadbackFailed(
                 "Accessibility read failed.".to_string()
             ))
+        );
+    }
+
+    #[test]
+    fn refuses_to_align_more_words_than_the_bound_allows() {
+        // The alignment table is quadratic and this runs after every insert,
+        // so the worst case has to be a number rather than an assumption.
+        let long = "word ".repeat(MAX_ALIGNMENT_WORDS + 1);
+        assert_eq!(
+            derive_readback_candidates(&long, "word word", &no_dictionary()),
+            Err(ReadbackAbort::ReadbackTooLarge)
+        );
+        assert_eq!(
+            derive_readback_candidates("word word", &long, &no_dictionary()),
+            Err(ReadbackAbort::ReadbackTooLarge)
         );
     }
 
