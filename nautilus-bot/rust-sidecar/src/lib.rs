@@ -17254,7 +17254,10 @@ fn installed_nautilus_app_bundle_path() -> Option<PathBuf> {
     path.exists().then_some(path)
 }
 
-#[cfg(target_os = "macos")]
+/// Whether an insertion target is Plainsong itself. Used by the macOS
+/// reactivation path (never bring ourselves forward) and by post-insert
+/// correction capture (a result edited in Plainsong's own box is the in-app
+/// learning path's business, not the other-apps readback's).
 fn is_self_activation_target(app_name: Option<&str>, app_bundle_id: Option<&str>) -> bool {
     let name_matches = app_name
         .map(str::trim)
@@ -22227,6 +22230,7 @@ async fn stop_dictation_for_sidecar(
                 && settings_snapshot
                     .transcription
                     .dictation_learn_from_external_corrections
+                && !is_self_activation_target(app_target.as_deref(), app_bundle_id.as_deref())
             {
                 let anchor_text = final_text.clone();
                 post_insert_focus_anchor = tokio::task::spawn_blocking(move || {
