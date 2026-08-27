@@ -98,6 +98,26 @@ fn is_internal_model_metadata_file(path: &Path) -> bool {
 const MODEL_INTEGRITY_MAC_KEY_SECRET: &str = "model_integrity_receipt_mac_key";
 const MODEL_INTEGRITY_MAC_KEY_BYTES: usize = 32;
 
+/// Prefix that marks a MAC-key error as a keychain *availability* problem
+/// (transient I/O, locked keychain, no credential-store backend in this
+/// sandbox) as opposed to a data-corruption problem (a stored key of the
+/// wrong shape). Callers that want to react differently to "the keychain is
+/// down" than to "trust nothing until this is fixed" can match on this
+/// prefix instead of guessing from the message.
+const KEYCHAIN_UNAVAILABLE_PREFIX: &str = "keychain unavailable";
+
+/// The MAC key never changes once generated, so once a lookup succeeds (or
+/// definitively fails) there is nothing more to learn from asking again.
+/// Memoized because the naive per-call keychain round trip was measured at
+/// 60+ synchronous keychain reads during the startup integrity migration
+/// alone -- see `migrate_legacy_model_integrity_receipts`. Stores `String`
+/// rather than `anyhow::Error` because the latter is not `Clone` and
+/// `OnceLock::get_or_init` needs a value it can hand back on every call.
+#[cfg(not(test))]
+static MODEL_INTEGRITY_MAC_KEY: std::sync::OnceLock<
+    Result<[u8; MODEL_INTEGRITY_MAC_KEY_BYTES], String>,
+> = std::sync::OnceLock::new();
+
 /// Fetches the keychain-held MAC key for model-integrity receipts, generating
 /// and persisting a fresh one on first use.
 ///
@@ -110,14 +130,29 @@ const MODEL_INTEGRITY_MAC_KEY_BYTES: usize = 32;
 /// requires keychain access, not just filesystem write access.
 #[cfg(not(test))]
 fn model_integrity_mac_key() -> Result<[u8; MODEL_INTEGRITY_MAC_KEY_BYTES]> {
-    if let Some(existing) = crate::secrets::get_internal_secret(MODEL_INTEGRITY_MAC_KEY_SECRET)
-        .context("Failed to read model-integrity receipt MAC key from the OS keychain")?
-    {
-        let bytes = hex::decode(existing.trim())
-            .context("Stored model-integrity receipt MAC key is not valid hex")?;
+    MODEL_INTEGRITY_MAC_KEY
+        .get_or_init(model_integrity_mac_key_uncached)
+        .clone()
+        .map_err(|message| anyhow::anyhow!(message))
+}
+
+#[cfg(not(test))]
+fn model_integrity_mac_key_uncached() -> Result<[u8; MODEL_INTEGRITY_MAC_KEY_BYTES], String> {
+    let existing = crate::secrets::get_internal_secret(MODEL_INTEGRITY_MAC_KEY_SECRET)
+        .map_err(|error| {
+            format!(
+                "{KEYCHAIN_UNAVAILABLE_PREFIX}: failed to read the model-integrity receipt MAC key ({error})"
+            )
+        })?;
+    if let Some(existing) = existing {
+        let bytes = hex::decode(existing.trim()).map_err(|error| {
+            format!(
+                "model-integrity receipt MAC key stored in the keychain is not valid hex: {error}"
+            )
+        })?;
         return bytes.try_into().map_err(|bytes: Vec<u8>| {
-            anyhow::anyhow!(
-                "Stored model-integrity receipt MAC key has {} bytes, expected {}",
+            format!(
+                "model-integrity receipt MAC key stored in the keychain has {} bytes, expected {}",
                 bytes.len(),
                 MODEL_INTEGRITY_MAC_KEY_BYTES
             )
@@ -128,7 +163,11 @@ fn model_integrity_mac_key() -> Result<[u8; MODEL_INTEGRITY_MAC_KEY_BYTES]> {
     use rand::Rng;
     rand::rng().fill_bytes(&mut key);
     crate::secrets::set_internal_secret(MODEL_INTEGRITY_MAC_KEY_SECRET, &hex::encode(key))
-        .context("Failed to persist model-integrity receipt MAC key to the OS keychain")?;
+        .map_err(|error| {
+            format!(
+                "{KEYCHAIN_UNAVAILABLE_PREFIX}: failed to persist a new model-integrity receipt MAC key ({error})"
+            )
+        })?;
     Ok(key)
 }
 
@@ -190,6 +229,16 @@ fn assert_pinned_digest_is_never_empty(expected_sha256: Option<&str>) {
     );
 }
 
+/// Returning `false` here (rather than a `Result`) is deliberate: this is
+/// the fast-path "is the cached receipt still good" check, used broadly for
+/// simple boolean gating, and its callers already have a safe fallback --
+/// `verify_or_record_model_integrity` falls through to a full re-hash of
+/// the file, which succeeds independently of the keychain and correctly
+/// re-confirms a genuinely valid file as trusted. So a keychain hiccup here
+/// costs a slower re-verify, never a false "this model is missing/corrupt".
+/// The keychain-specific failure is still surfaced distinctly (as a log
+/// warning, not silently folded into "untrusted" with no explanation) so
+/// the slowdown is attributable instead of looking like receipt corruption.
 pub(crate) fn is_model_artifact_trusted(path: &Path, expected_sha256: Option<&str>) -> bool {
     assert_pinned_digest_is_never_empty(expected_sha256);
     let Some(digest) = expected_sha256.filter(|digest| !digest.is_empty()) else {
@@ -198,8 +247,19 @@ pub(crate) fn is_model_artifact_trusted(path: &Path, expected_sha256: Option<&st
     if !path.is_file() {
         return false;
     }
-    let Ok(expected_receipt) = model_integrity_receipt_contents(path, digest) else {
-        return false;
+    let expected_receipt = match model_integrity_receipt_contents(path, digest) {
+        Ok(receipt) => receipt,
+        Err(error) => {
+            if error.to_string().contains(KEYCHAIN_UNAVAILABLE_PREFIX) {
+                tracing::warn!(
+                    "Could not verify {} via its cached integrity receipt because the OS \
+                     keychain is unavailable ({error}); falling back to re-hashing the file \
+                     directly instead of reporting it as untrusted.",
+                    path.display()
+                );
+            }
+            return false;
+        }
     };
     std::fs::read_to_string(model_integrity_receipt_path(path))
         .is_ok_and(|receipt| receipt == expected_receipt)
@@ -269,7 +329,17 @@ async fn verify_or_record_model_integrity(
     if actual_sha256 != expected_sha256 {
         return Ok(false);
     }
-    write_model_integrity_receipt(path, expected_sha256).await?;
+    // The direct hash comparison above already confirmed the file is
+    // correct -- the receipt is only a cache for next time. Losing that
+    // cache to a keychain hiccup must not turn an already-verified file
+    // into a reported failure; log it and still report the file trusted.
+    if let Err(error) = write_model_integrity_receipt(path, expected_sha256).await {
+        tracing::warn!(
+            "Verified {} but could not persist an integrity receipt ({error}); the next \
+             launch will re-verify by hashing the file directly.",
+            path.display()
+        );
+    }
     Ok(true)
 }
 
@@ -959,7 +1029,19 @@ impl DownloadManager {
                 expected_sha256
             );
             tokio::fs::rename(&temp_path, destination).await?;
-            write_model_integrity_receipt(destination, expected_sha256).await?;
+            // The freshly-downloaded file already passed the real hash
+            // comparison above -- it IS correct. The receipt is purely a
+            // cache so a later launch can skip re-hashing a multi-gigabyte
+            // file; losing that cache to a keychain hiccup (the receipt's
+            // MAC key lives there) must never fail an otherwise-successful
+            // multi-gigabyte download and force the user to redo it.
+            if let Err(error) = write_model_integrity_receipt(destination, expected_sha256).await {
+                tracing::warn!(
+                    "Downloaded and verified {} but could not persist an integrity receipt \
+                     ({error}); the next launch will re-verify by hashing the file directly.",
+                    destination.display()
+                );
+            }
         } else {
             tracing::warn!(
                 "Model {} has no pinned SHA256 — skipping integrity verification",
