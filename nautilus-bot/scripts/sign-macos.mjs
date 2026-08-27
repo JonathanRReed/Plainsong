@@ -19,6 +19,17 @@ const shortcutHelperEntitlements = path.resolve(
   "build-resources",
   "entitlements.mac.shortcut-helper.plist",
 );
+// Read-only EventKit helper. It gets the calendar entitlement and nothing
+// else, for the same reason the Speech helper gets only Speech: the app's own
+// signature already carries microphone, Apple Events and the Accessibility
+// grant, and calendar reading has no business joining that set.
+const calendarHelperName = "plainsong-native-calendar-helper";
+const calendarHelperEntitlements = path.resolve(
+  import.meta.dirname,
+  "..",
+  "build-resources",
+  "entitlements.mac.calendar-helper.plist",
+);
 const sidecarName = "plainsong-sidecar";
 const sidecarEntitlements = path.resolve(
   import.meta.dirname,
@@ -53,6 +64,12 @@ export function optionsForSignedFile(filePath, inheritedOptionsForFile, signCont
     return {
       ...inherited,
       entitlements: shortcutHelperEntitlements,
+    };
+  }
+  if (path.basename(filePath) === calendarHelperName) {
+    return {
+      ...inherited,
+      entitlements: calendarHelperEntitlements,
     };
   }
   if (genericHelperPattern.test(path.basename(filePath))) {

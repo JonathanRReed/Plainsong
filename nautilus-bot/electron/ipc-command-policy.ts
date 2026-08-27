@@ -27,6 +27,10 @@ const FAST_COMMANDS = new Set<string>([
   "get_asr_provider_model",
   "get_available_space",
   "get_backup_config",
+  // Spawns a local helper that prints JSON and exits. If that is slow, the Mac
+  // is in trouble; the Meetings header should show nothing rather than sit on
+  // a pending request.
+  "get_calendar_snapshot",
   "get_default_asr_provider",
   "get_dictation_audio_level",
   "get_dictation_overlay_state",
@@ -89,6 +93,9 @@ const LONG_COMMANDS = new Set<string>([
   "repair_cursor_insert_permissions",
   "reprocess_dictation_text",
   "request_apple_speech_permission",
+  // Blocks on a macOS permission dialog the reader has to read and answer, so
+  // it gets the long timeout every other TCC prompt here gets.
+  "request_calendar_access",
   "request_dictation_permissions",
   "reset_app_state",
   "retry_meeting_auto_name",
