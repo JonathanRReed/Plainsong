@@ -1,12 +1,33 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  The main Plainsong.app bundle's policy.
+
+  `com.apple.security.cs.disable-library-validation` was here and is gone.
+  Library validation is only disabled to load code signed by someone else, and
+  the Electron main process loads none: no package in the production dependency
+  tree ships a .node binary, nothing under electron/ requires one, and the Rust
+  sidecar, the Speech helper and the shortcut helper are separate processes with
+  their own signatures and their own entitlement files. Everything this process
+  does load — the Electron Framework, Squirrel, Mantle, ReactiveObjC — is
+  re-signed with the same Team ID, which library validation accepts.
+
+  It mattered because of what this particular bundle holds. The app carries the
+  microphone, Apple Events and (at runtime) the Accessibility grant that lets it
+  inject keystrokes into every application. Disabling library validation on THAT
+  signature turns a notarized Plainsong into a loader for someone else's dylib
+  under all of it — and notarization cannot be retracted by shipping a later
+  version. This is the same reasoning the electronFuses block in
+  electron-builder.yml is written from.
+
+  If a packaged smoke test ever fails to launch because of this, the fix is to
+  find the unsigned library and sign it, not to restore the entitlement.
+-->
 <plist version="1.0">
   <dict>
     <key>com.apple.security.cs.allow-jit</key>
     <true/>
     <key>com.apple.security.cs.allow-unsigned-executable-memory</key>
-    <true/>
-    <key>com.apple.security.cs.disable-library-validation</key>
     <true/>
     <key>com.apple.security.device.audio-input</key>
     <true/>

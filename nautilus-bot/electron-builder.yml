@@ -2,6 +2,21 @@ appId: com.plainsong.app
 productName: Plainsong
 copyright: Copyright © 2026 Jonathan Reed
 
+# CFBundleVersion. Without this electron-builder defaults it to `version`, so a
+# prerelease shipped CFBundleVersion="0.9.0-beta.2" — and Apple defines that key
+# as one to three period-separated INTEGERS. A value with a hyphen and a word in
+# it is not a build number; it is a string macOS has no ordering for, so
+# anything comparing builds either fails or falls back to string comparison. The
+# semantic version stays in CFBundleShortVersionString, where it belongs.
+#
+# The number is `encodeBundleBuildVersion(version)` from
+# scripts/lib/bundle-build-version.mjs, which packs the version into one integer
+# and ranks a prerelease below the release it precedes (0.9.0-beta.2 → 900302,
+# and the 0.9.0 that follows → 900999). This file is static YAML, so it is
+# applied by hand and pinned to package.json by a unit test: a version bump that
+# forgets it fails there rather than in a shipped bundle.
+buildVersion: "900302"
+
 # Electron ships these fuses permissive by default, which would make a notarized
 # Plainsong a reusable gadget: `ELECTRON_RUN_AS_NODE=1` on the signed binary runs
 # arbitrary Node under our Developer ID, which carries device.microphone,
@@ -114,11 +129,53 @@ dmg:
   # emit a pre-staple DMG blockmap/hash into beta-mac.yml; macOS updates use
   # the ZIP and its blockmap, while the final DMG is covered by SHA256SUMS.txt.
   writeUpdateInfo: false
+  # The install gesture, stated in the window itself: app on the left,
+  # /Applications on the right, drag between them. Without an explicit layout
+  # electron-builder opens a default-sized window with both items wherever the
+  # Finder puts them, which reads as an unfinished disk image on the one screen
+  # every user sees before the app has run once.
+  #
+  # The window is sized to hold the two 128pt icons and their labels with margin
+  # at the default Finder icon spacing; the y values put both rows on the same
+  # baseline, and the x values leave the drag arc unobstructed.
+  #
+  # No background image deliberately: a bitmap has to be authored at 1x and 2x
+  # and kept aligned with these coordinates by hand, and a misaligned one looks
+  # worse than none. The layout alone carries the instruction.
+  window:
+    width: 560
+    height: 400
+  iconSize: 128
+  iconTextSize: 12
+  contents:
+    - x: 150
+      y: 200
+      type: file
+    - x: 410
+      y: 200
+      type: link
+      path: /Applications
 
 publish:
   # The repository remains private during the limited beta, so installed apps
   # use a credential-free feed rather than GitHub Releases. This URL must match
   # the public R2 custom domain verified by the release gate before invitations.
+  #
+  # This block bakes exactly ONE feed into the packaged app-update.yml, and the
+  # feed is per-channel: /beta/ carries beta-mac.yml, /stable/ carries
+  # latest-mac.yml (`resolveUpdaterChannel("stable")` is "latest" — there is no
+  # stable-mac.yml). A stable install reading THIS url would have requested
+  # latest-mac.yml out of the beta bucket. The running app therefore calls
+  # autoUpdater.setFeedURL(updaterFeedOptions(channel)) before every check
+  # (electron/updater-channel.ts), and what is written here is only the default
+  # a build falls back to before that runs.
+  #
+  # It stays /beta/ with channel beta because this candidate IS a beta:
+  # `effectiveUpdaterChannel` pins a prerelease build to the beta channel
+  # regardless of the configured setting, so the packaged default and the
+  # runtime resolution agree for every install of this build. Publishing the
+  # first stable release means creating /stable/latest-mac.yml, which
+  # `qa:packaged:macos:public-update-feed` now requires for both channels.
   provider: generic
   url: https://updates.plainsong.jonathanrreed.com/beta/
   channel: beta

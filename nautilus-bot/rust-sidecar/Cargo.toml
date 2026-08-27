@@ -74,6 +74,10 @@ reqwest = { version = "0.13", features = ["json", "stream", "multipart"] }
 # Download management
 futures-util = "0.3"
 sha2 = "0.11"
+# MAC for on-disk model-integrity receipts (see download::model_integrity_mac_key).
+# Must track sha2's digest/crypto-common major version (0.11.x) or Mac::new_from_slice
+# fails to resolve due to duplicate digest crate versions.
+hmac = "0.13"
 rand = "0.10"
 async-trait = "0.1"
 hex = "0.4"

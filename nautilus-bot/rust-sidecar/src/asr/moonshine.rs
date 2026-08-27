@@ -141,7 +141,10 @@ impl MoonshineProvider {
         moonshine_repo_files(self.model_id.as_str())
             .iter()
             .all(|(_, _, _, local_name, sha256)| {
-                crate::download::is_model_artifact_trusted(&self.model_dir.join(local_name), sha256)
+                crate::download::is_model_artifact_trusted(
+                    &self.model_dir.join(local_name),
+                    Some(sha256),
+                )
             })
     }
 
@@ -774,7 +777,7 @@ impl AsrProvider for MoonshineProvider {
                 .download_verified_model_asset(
                     &url,
                     &destination,
-                    sha256,
+                    Some(sha256),
                     moonshine_artifact_max_bytes(local_name),
                     move |p| {
                         cb((i as f32 / n_files + p.percentage as f32 / 100.0 / n_files) * 100.0);

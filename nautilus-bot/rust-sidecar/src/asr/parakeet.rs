@@ -480,16 +480,19 @@ impl ParakeetProvider {
             let tokens_sha256 = PARAKEET_LEGACY_TOKENS_SOURCES[0].1;
             return crate::download::is_model_artifact_trusted(
                 &self.legacy_onnx_path(),
-                onnx_sha256,
+                Some(onnx_sha256),
             ) && crate::download::is_model_artifact_trusted(
                 &self.vocab_path(),
-                tokens_sha256,
+                Some(tokens_sha256),
             );
         }
 
         PARAKEET_V3_ARTIFACTS.iter().all(|(file_name, _, _)| {
             v3_sha256(file_name).is_some_and(|sha256| {
-                crate::download::is_model_artifact_trusted(&self.model_dir.join(file_name), sha256)
+                crate::download::is_model_artifact_trusted(
+                    &self.model_dir.join(file_name),
+                    Some(sha256),
+                )
             })
         })
     }
@@ -1140,7 +1143,7 @@ async fn download_v3(
     for (file_name, expected_bytes, _) in PARAKEET_V3_ARTIFACTS {
         let destination = model_dir.join(file_name);
         let sha256 = v3_sha256(file_name).expect("every v3 artifact has a pinned digest");
-        if crate::download::is_model_artifact_trusted(&destination, sha256) {
+        if crate::download::is_model_artifact_trusted(&destination, Some(sha256)) {
             completed_bytes += expected_bytes;
             progress_cb((completed_bytes as f32 / total_bytes as f32) * 100.0);
             continue;
@@ -1158,7 +1161,7 @@ async fn download_v3(
             .download_verified_model_asset(
                 &url,
                 &destination,
-                sha256,
+                Some(sha256),
                 expected_bytes.saturating_mul(2),
                 move |p| {
                     let done = base + share * (p.percentage as f32 / 100.0);
@@ -1208,7 +1211,10 @@ async fn download_legacy(
         std::fs::remove_file(&vocab_dest).ok();
     }
 
-    if !crate::download::is_model_artifact_trusted(&onnx_dest, PARAKEET_LEGACY_ONNX_SOURCES[0].1) {
+    if !crate::download::is_model_artifact_trusted(
+        &onnx_dest,
+        Some(PARAKEET_LEGACY_ONNX_SOURCES[0].1),
+    ) {
         let mut last_error = None;
         for (source, sha256) in PARAKEET_LEGACY_ONNX_SOURCES {
             let cb = progress_cb.clone();
@@ -1216,7 +1222,7 @@ async fn download_legacy(
                 .download_verified_model_asset(
                     source,
                     &onnx_dest,
-                    sha256,
+                    Some(sha256),
                     PARAKEET_LEGACY_ONNX_MAX_BYTES,
                     move |p| {
                         cb(p.percentage as f32 * 0.95);
@@ -1248,8 +1254,10 @@ async fn download_legacy(
         }
     }
 
-    if !crate::download::is_model_artifact_trusted(&vocab_dest, PARAKEET_LEGACY_TOKENS_SOURCES[0].1)
-    {
+    if !crate::download::is_model_artifact_trusted(
+        &vocab_dest,
+        Some(PARAKEET_LEGACY_TOKENS_SOURCES[0].1),
+    ) {
         let mut last_error = None;
         for (source, sha256) in PARAKEET_LEGACY_TOKENS_SOURCES {
             let cb = progress_cb.clone();
@@ -1257,7 +1265,7 @@ async fn download_legacy(
                 .download_verified_model_asset(
                     source,
                     &vocab_dest,
-                    sha256,
+                    Some(sha256),
                     PARAKEET_LEGACY_TOKENS_MAX_BYTES,
                     move |p| {
                         cb(95.0 + p.percentage as f32 * 0.05);

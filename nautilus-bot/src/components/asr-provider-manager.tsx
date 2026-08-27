@@ -121,7 +121,6 @@ export function AsrProviderManager({ className }: AsrProviderManagerProps) {
 
   const manualEngineOptions = [
     { value: "provider_default", label: "Provider default" },
-    { value: "macos_mlx_sidecar", label: "macOS MLX sidecar (advanced)" },
     { value: "windows_foundry_local", label: "Windows Foundry Local" },
   ] as const;
 

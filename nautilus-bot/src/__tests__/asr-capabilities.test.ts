@@ -8,6 +8,7 @@ import {
   getAsrModelCapability,
   isDictationOnlyProvider,
   isKnownAsrProvider,
+  isMeetingEligibleModel,
   isMeetingEligibleProvider,
   isSharedMeetingCompatible,
 } from "@/lib/asr-capabilities";
@@ -44,6 +45,19 @@ describe("ASR capability mappings", () => {
 
   it("keeps the short-form legacy Parakeet export out of the meeting lane", () => {
     expect(isSharedMeetingCompatible("parakeet", "parakeet-tdt-ctc-110m")).toBe(false);
+  });
+
+  it("resolves the openai_cloud meeting lane to whisper-1 only, for its timestamps", () => {
+    // Only whisper-1 requests verbose_json from OpenAI's transcriptions
+    // endpoint (openai_cloud.rs's uses_verbose_json()), which is what
+    // actually returns segment timestamps. gpt-transcribe (the dictation
+    // default) and the gpt-4o-*-transcribe models return a single un-timed
+    // block, which would break seek/timeline/diarization alignment for a
+    // meeting, so they must stay out of the meeting lane.
+    expect(isMeetingEligibleModel("openai_cloud", "whisper-1")).toBe(true);
+    expect(isMeetingEligibleModel("openai_cloud", "gpt-transcribe")).toBe(false);
+    expect(isMeetingEligibleModel("openai_cloud", "gpt-4o-transcribe")).toBe(false);
+    expect(isMeetingEligibleModel("openai_cloud", "gpt-4o-mini-transcribe")).toBe(false);
   });
 });
 

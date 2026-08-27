@@ -75,10 +75,10 @@ pub fn is_model_available() -> bool {
     let tokenizer = tokenizer_path();
     crate::download::is_model_artifact_trusted(
         &onnx,
-        "dd922d459da618cd324280889740608b76fb3e9e61d3f402291be1251f91421b",
+        Some("dd922d459da618cd324280889740608b76fb3e9e61d3f402291be1251f91421b"),
     ) && crate::download::is_model_artifact_trusted(
         &tokenizer,
-        "9e86d0263de80b3b68327a21f5350c8cdf846e4c4400253c9baf05e3d44871c3",
+        Some("9e86d0263de80b3b68327a21f5350c8cdf846e4c4400253c9baf05e3d44871c3"),
     )
 }
 
@@ -103,7 +103,7 @@ pub async fn download_model(progress_cb: Box<dyn Fn(f32) + Send + Sync>) -> Resu
         .download_verified_model_asset(
             &onnx_url,
             &onnx_dest,
-            "dd922d459da618cd324280889740608b76fb3e9e61d3f402291be1251f91421b",
+            Some("dd922d459da618cd324280889740608b76fb3e9e61d3f402291be1251f91421b"),
             PUNCT_CAP_SEG_ONNX_MAX_BYTES,
             move |p| {
                 cb1((p.percentage * 0.9) as f32);
@@ -123,7 +123,7 @@ pub async fn download_model(progress_cb: Box<dyn Fn(f32) + Send + Sync>) -> Resu
         .download_verified_model_asset(
             &tokenizer_url,
             &tokenizer_dest,
-            "9e86d0263de80b3b68327a21f5350c8cdf846e4c4400253c9baf05e3d44871c3",
+            Some("9e86d0263de80b3b68327a21f5350c8cdf846e4c4400253c9baf05e3d44871c3"),
             PUNCT_CAP_SEG_TOKENIZER_MAX_BYTES,
             move |p| {
                 cb2((90.0 + p.percentage * 0.1) as f32);

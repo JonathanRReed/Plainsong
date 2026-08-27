@@ -1,20 +1,37 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  The policy every Electron child process is signed with, EXCEPT the ones
+  scripts/sign-macos.mjs routes elsewhere (the Rust sidecar, the Speech helper,
+  the shortcut helper, and the generic "<Product> Helper" that hosts Chromium's
+  utility services — see entitlements.mac.helper.plist).
+
+  In practice this file is the GPU, Renderer and Plugin helpers' policy. It used
+  to be a copy of the main app's set, which handed all three of them the
+  microphone, unscoped Apple Events, and disabled library validation. None of
+  the three has a use for any of that:
+
+  - The Renderer helper runs web content. `getUserMedia` there is brokered by
+    Chromium's audio service; the renderer sandbox never opens the device
+    itself, so the microphone entitlement bought nothing and widened what a
+    compromised renderer inherits.
+  - Nothing in Plainsong drives another application through Apple Events from a
+    child process. The main app holds that entitlement for the two bundles
+    named in its own plist.
+  - Library validation is only disabled to load unsigned native code. These
+    helpers load the Electron Framework, which carries the same Team ID.
+
+  What remains is what Chromium genuinely requires: V8 needs JIT and writable-
+  executable memory, and `inherit` is what makes a child adopt the parent's
+  sandbox rather than being denied outright.
+-->
 <plist version="1.0">
   <dict>
     <key>com.apple.security.cs.allow-jit</key>
     <true/>
     <key>com.apple.security.cs.allow-unsigned-executable-memory</key>
     <true/>
-    <key>com.apple.security.cs.disable-library-validation</key>
-    <true/>
     <key>com.apple.security.inherit</key>
-    <true/>
-    <key>com.apple.security.device.audio-input</key>
-    <true/>
-    <key>com.apple.security.device.microphone</key>
-    <true/>
-    <key>com.apple.security.automation.apple-events</key>
     <true/>
   </dict>
 </plist>

@@ -26,6 +26,18 @@ const sidecarEntitlements = path.resolve(
   "build-resources",
   "entitlements.mac.sidecar.plist",
 );
+// The generic "<Product> Helper" bundle, which Chromium uses for its utility
+// processes — the audio service among them. Matched by shape rather than by the
+// literal product name so a productName change cannot silently reroute it, and
+// anchored so the GPU/Renderer/Plugin helpers ("<Product> Helper (GPU)" and
+// friends) do NOT match: those keep the narrower inherit policy.
+const genericHelperPattern = /^.+ Helper(\.app)?$/;
+const genericHelperEntitlements = path.resolve(
+  import.meta.dirname,
+  "..",
+  "build-resources",
+  "entitlements.mac.helper.plist",
+);
 
 export function optionsForSignedFile(filePath, inheritedOptionsForFile, signContext) {
   // 2.x passes a context object as the second argument. Forward it so an
@@ -41,6 +53,12 @@ export function optionsForSignedFile(filePath, inheritedOptionsForFile, signCont
     return {
       ...inherited,
       entitlements: shortcutHelperEntitlements,
+    };
+  }
+  if (genericHelperPattern.test(path.basename(filePath))) {
+    return {
+      ...inherited,
+      entitlements: genericHelperEntitlements,
     };
   }
   if (path.basename(filePath) !== speechHelperName) {

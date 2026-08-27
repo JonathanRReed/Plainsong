@@ -220,8 +220,15 @@ impl AsrProviderType {
             AsrProviderType::MacosAppleSpeech => "macos_apple_speech",
             AsrProviderType::Moonshine => "moonshine-base",
             AsrProviderType::WindowsSdkDictation => "windows_sdk_dictation",
-            AsrProviderType::ElevenLabsScribe => "scribe_v2_realtime",
-            AsrProviderType::OpenAiCloud => "whisper-1",
+            // scribe_v2_realtime is websocket-only and cannot be served by
+            // this provider's batch /v1/speech-to-text endpoint -- see
+            // elevenlabs_scribe.rs's sanitize_elevenlabs_asr_model_id.
+            AsrProviderType::ElevenLabsScribe => "scribe_v2",
+            // Verified live against
+            // https://developers.openai.com/api/docs/guides/speech-to-text on
+            // 2026-08-27: gpt-transcribe is OpenAI's current recommended
+            // default for this endpoint, superseding whisper-1.
+            AsrProviderType::OpenAiCloud => "gpt-transcribe",
             AsrProviderType::Groq => "whisper-large-v3-turbo",
             AsrProviderType::CohereTranscribe => "cohere-transcribe-03-2026",
             AsrProviderType::Qwen3Asr => "qwen3-asr-0.6b",
@@ -326,14 +333,14 @@ impl AsrProviderType {
                 id: "windows_sdk_dictation".to_string(),
                 label: "Managed by Windows".to_string(),
             }],
+            // scribe_v2_realtime is intentionally not offered here: it is a
+            // websocket-only model and this provider posts to the batch
+            // /v1/speech-to-text endpoint, which cannot serve it (see
+            // elevenlabs_scribe.rs's sanitize_elevenlabs_asr_model_id).
             AsrProviderType::ElevenLabsScribe => vec![
                 ModelOption {
-                    id: "scribe_v2_realtime".to_string(),
-                    label: "Scribe v2 Realtime (150ms, 90+ languages, recommended)".to_string(),
-                },
-                ModelOption {
                     id: "scribe_v2".to_string(),
-                    label: "Scribe v2".to_string(),
+                    label: "Scribe v2 (recommended)".to_string(),
                 },
                 ModelOption {
                     id: "scribe_v2_experimental".to_string(),
@@ -341,6 +348,10 @@ impl AsrProviderType {
                 },
             ],
             AsrProviderType::OpenAiCloud => vec![
+                ModelOption {
+                    id: "gpt-transcribe".to_string(),
+                    label: "gpt-transcribe (recommended)".to_string(),
+                },
                 ModelOption {
                     id: "whisper-1".to_string(),
                     label: "whisper-1".to_string(),

@@ -93,6 +93,111 @@ fn is_internal_model_metadata_file(path: &Path) -> bool {
         })
 }
 
+/// OS-keychain secret name for the receipt MAC key, generated on first use.
+#[cfg(not(test))]
+const MODEL_INTEGRITY_MAC_KEY_SECRET: &str = "model_integrity_receipt_mac_key";
+const MODEL_INTEGRITY_MAC_KEY_BYTES: usize = 32;
+
+/// Prefix that marks a MAC-key error as a keychain *availability* problem
+/// (transient I/O, locked keychain, no credential-store backend in this
+/// sandbox) as opposed to a data-corruption problem (a stored key of the
+/// wrong shape). Callers that want to react differently to "the keychain is
+/// down" than to "trust nothing until this is fixed" can match on this
+/// prefix instead of guessing from the message.
+const KEYCHAIN_UNAVAILABLE_PREFIX: &str = "keychain unavailable";
+
+/// The MAC key never changes once generated, so once a lookup succeeds (or
+/// definitively fails) there is nothing more to learn from asking again.
+/// Memoized because the naive per-call keychain round trip was measured at
+/// 60+ synchronous keychain reads during the startup integrity migration
+/// alone -- see `migrate_legacy_model_integrity_receipts`. Stores `String`
+/// rather than `anyhow::Error` because the latter is not `Clone` and
+/// `OnceLock::get_or_init` needs a value it can hand back on every call.
+#[cfg(not(test))]
+static MODEL_INTEGRITY_MAC_KEY: std::sync::OnceLock<
+    Result<[u8; MODEL_INTEGRITY_MAC_KEY_BYTES], String>,
+> = std::sync::OnceLock::new();
+
+/// Fetches the keychain-held MAC key for model-integrity receipts, generating
+/// and persisting a fresh one on first use.
+///
+/// Receipts are plaintext sibling files (hash + size + mtime) that let a
+/// relaunch skip re-hashing multi-gigabyte models. Without a MAC, anything
+/// that can write into the models directory can swap a model file and hand-
+/// write a receipt that reproduces the exact same format -- the format and
+/// even the app's own pinned digests are public (open source). Keying the
+/// receipt to a secret held in the OS keychain means forging one also
+/// requires keychain access, not just filesystem write access.
+#[cfg(not(test))]
+fn model_integrity_mac_key() -> Result<[u8; MODEL_INTEGRITY_MAC_KEY_BYTES]> {
+    MODEL_INTEGRITY_MAC_KEY
+        .get_or_init(model_integrity_mac_key_uncached)
+        .clone()
+        .map_err(|message| anyhow::anyhow!(message))
+}
+
+#[cfg(not(test))]
+fn model_integrity_mac_key_uncached() -> Result<[u8; MODEL_INTEGRITY_MAC_KEY_BYTES], String> {
+    let existing = crate::secrets::get_internal_secret(MODEL_INTEGRITY_MAC_KEY_SECRET)
+        .map_err(|error| {
+            format!(
+                "{KEYCHAIN_UNAVAILABLE_PREFIX}: failed to read the model-integrity receipt MAC key ({error})"
+            )
+        })?;
+    if let Some(existing) = existing {
+        let bytes = hex::decode(existing.trim()).map_err(|error| {
+            format!(
+                "model-integrity receipt MAC key stored in the keychain is not valid hex: {error}"
+            )
+        })?;
+        return bytes.try_into().map_err(|bytes: Vec<u8>| {
+            format!(
+                "model-integrity receipt MAC key stored in the keychain has {} bytes, expected {}",
+                bytes.len(),
+                MODEL_INTEGRITY_MAC_KEY_BYTES
+            )
+        });
+    }
+
+    let mut key = [0u8; MODEL_INTEGRITY_MAC_KEY_BYTES];
+    use rand::Rng;
+    rand::rng().fill_bytes(&mut key);
+    crate::secrets::set_internal_secret(MODEL_INTEGRITY_MAC_KEY_SECRET, &hex::encode(key))
+        .map_err(|error| {
+            format!(
+                "{KEYCHAIN_UNAVAILABLE_PREFIX}: failed to persist a new model-integrity receipt MAC key ({error})"
+            )
+        })?;
+    Ok(key)
+}
+
+/// Test builds never touch the real OS keychain for this key: it is
+/// unavailable or flaky in headless CI/sandbox runners, and would make every
+/// model-integrity test's outcome depend on whatever a previous run (or a
+/// concurrent test binary) happened to persist there. A fixed in-process key
+/// still exercises the MAC's real format and tamper-detection behavior,
+/// matching how `secrets.rs`'s own vault-key tests inject a fake store
+/// instead of hitting the keychain.
+#[cfg(test)]
+fn model_integrity_mac_key() -> Result<[u8; MODEL_INTEGRITY_MAC_KEY_BYTES]> {
+    Ok([0x42; MODEL_INTEGRITY_MAC_KEY_BYTES])
+}
+
+fn compute_receipt_mac(payload: &[u8]) -> Result<String> {
+    use hmac::{
+        digest::{KeyInit, Mac},
+        Hmac,
+    };
+    use sha2::Sha256;
+
+    let key = model_integrity_mac_key()?;
+    let mut mac = Hmac::<Sha256>::new_from_slice(&key).map_err(|error| {
+        anyhow::anyhow!("Failed to initialize model-integrity receipt MAC: {error}")
+    })?;
+    mac.update(payload);
+    Ok(hex::encode(mac.finalize().into_bytes()))
+}
+
 fn model_integrity_receipt_contents(path: &Path, expected_sha256: &str) -> Result<String> {
     let metadata = std::fs::metadata(path)?;
     let modified_nanos = metadata
@@ -100,21 +205,61 @@ fn model_integrity_receipt_contents(path: &Path, expected_sha256: &str) -> Resul
         .duration_since(std::time::UNIX_EPOCH)
         .context("Model modification time predates the Unix epoch")?
         .as_nanos();
-    Ok(format!(
+    let payload = format!(
         "{}\nsha256={}\nsize={}\nmodified_nanos={}\n",
         MODEL_INTEGRITY_RECEIPT_VERSION,
         expected_sha256,
         metadata.len(),
         modified_nanos
-    ))
+    );
+    let mac = compute_receipt_mac(payload.as_bytes())?;
+    Ok(format!("{payload}mac={mac}\n"))
 }
 
-pub(crate) fn is_model_artifact_trusted(path: &Path, expected_sha256: &str) -> bool {
+/// Every call site pins a real digest; `Some("")` is a programmer error (an
+/// accidentally-empty struct field, not a deliberate "not yet pinned" state)
+/// and is rejected loudly in debug/test builds rather than silently treated
+/// as untrusted-forever in release builds. `None` is the only correct way to
+/// say "not yet pinned".
+fn assert_pinned_digest_is_never_empty(expected_sha256: Option<&str>) {
+    debug_assert!(
+        expected_sha256.is_none_or(|digest| !digest.is_empty()),
+        "expected_sha256 must be None (\"not yet pinned\"), never Some(\"\"); an empty pinned \
+         digest used to silently disable integrity verification"
+    );
+}
+
+/// Returning `false` here (rather than a `Result`) is deliberate: this is
+/// the fast-path "is the cached receipt still good" check, used broadly for
+/// simple boolean gating, and its callers already have a safe fallback --
+/// `verify_or_record_model_integrity` falls through to a full re-hash of
+/// the file, which succeeds independently of the keychain and correctly
+/// re-confirms a genuinely valid file as trusted. So a keychain hiccup here
+/// costs a slower re-verify, never a false "this model is missing/corrupt".
+/// The keychain-specific failure is still surfaced distinctly (as a log
+/// warning, not silently folded into "untrusted" with no explanation) so
+/// the slowdown is attributable instead of looking like receipt corruption.
+pub(crate) fn is_model_artifact_trusted(path: &Path, expected_sha256: Option<&str>) -> bool {
+    assert_pinned_digest_is_never_empty(expected_sha256);
+    let Some(digest) = expected_sha256.filter(|digest| !digest.is_empty()) else {
+        return false;
+    };
     if !path.is_file() {
         return false;
     }
-    let Ok(expected_receipt) = model_integrity_receipt_contents(path, expected_sha256) else {
-        return false;
+    let expected_receipt = match model_integrity_receipt_contents(path, digest) {
+        Ok(receipt) => receipt,
+        Err(error) => {
+            if error.to_string().contains(KEYCHAIN_UNAVAILABLE_PREFIX) {
+                tracing::warn!(
+                    "Could not verify {} via its cached integrity receipt because the OS \
+                     keychain is unavailable ({error}); falling back to re-hashing the file \
+                     directly instead of reporting it as untrusted.",
+                    path.display()
+                );
+            }
+            return false;
+        }
     };
     std::fs::read_to_string(model_integrity_receipt_path(path))
         .is_ok_and(|receipt| receipt == expected_receipt)
@@ -128,12 +273,12 @@ pub(crate) fn whisper_model_expected_sha256(model_id: &str) -> Option<String> {
 #[cfg(feature = "asr-whisper")]
 pub(crate) fn is_whisper_model_artifact_trusted(model_id: &str, path: &Path) -> bool {
     whisper_model_expected_sha256(model_id)
-        .is_some_and(|sha256| is_model_artifact_trusted(path, &sha256))
+        .is_some_and(|sha256| is_model_artifact_trusted(path, Some(&sha256)))
 }
 
 pub(crate) fn is_diarization_model_artifact_trusted(model_id: &str, path: &Path) -> bool {
     diarization_model_info(model_id)
-        .is_some_and(|model| is_model_artifact_trusted(path, model.sha256))
+        .is_some_and(|model| is_model_artifact_trusted(path, Some(model.sha256)))
 }
 
 async fn write_model_integrity_receipt(path: &Path, expected_sha256: &str) -> Result<()> {
@@ -145,15 +290,21 @@ async fn write_model_integrity_receipt(path: &Path, expected_sha256: &str) -> Re
     Ok(())
 }
 
-async fn verify_or_record_model_integrity(path: &PathBuf, expected_sha256: &str) -> Result<bool> {
+/// `expected_sha256` of `None` means "not yet pinned": verification is
+/// skipped and the file is trusted purely on existence, for a model table
+/// entry whose digest genuinely has not been recorded yet. `Some("")` is
+/// rejected as a hard error rather than silently treated the same way --
+/// see `assert_pinned_digest_is_never_empty`.
+async fn verify_or_record_model_integrity(
+    path: &PathBuf,
+    expected_sha256: Option<&str>,
+) -> Result<bool> {
+    assert_pinned_digest_is_never_empty(expected_sha256);
     if is_model_artifact_trusted(path, expected_sha256) {
         return Ok(true);
     }
 
-    // When no SHA256 is pinned, skip integrity verification and trust the
-    // file as-is. This is used for models whose hashes have not yet been
-    // populated. The file must still exist and be non-empty.
-    if expected_sha256.is_empty() {
+    let Some(expected_sha256) = expected_sha256 else {
         let exists = tokio::fs::metadata(path).await.is_ok();
         if exists {
             tracing::warn!(
@@ -162,13 +313,33 @@ async fn verify_or_record_model_integrity(path: &PathBuf, expected_sha256: &str)
             );
         }
         return Ok(exists);
+    };
+    if expected_sha256.is_empty() {
+        // Reached only in release builds, where the debug_assert! above is
+        // compiled out. Fail closed instead of reproducing the old silent
+        // bypass.
+        anyhow::bail!(
+            "Refusing to verify {}: expected_sha256 was an empty string, not None. \
+             This is a bug in the artifact table, not a legitimate \"unpinned\" model.",
+            path.display()
+        );
     }
 
     let actual_sha256 = calculate_sha256(path).await?;
     if actual_sha256 != expected_sha256 {
         return Ok(false);
     }
-    write_model_integrity_receipt(path, expected_sha256).await?;
+    // The direct hash comparison above already confirmed the file is
+    // correct -- the receipt is only a cache for next time. Losing that
+    // cache to a keychain hiccup must not turn an already-verified file
+    // into a reported failure; log it and still report the file trusted.
+    if let Err(error) = write_model_integrity_receipt(path, expected_sha256).await {
+        tracing::warn!(
+            "Verified {} but could not persist an integrity receipt ({error}); the next \
+             launch will re-verify by hashing the file directly.",
+            path.display()
+        );
+    }
     Ok(true)
 }
 
@@ -192,11 +363,27 @@ pub(crate) async fn migrate_legacy_model_integrity_receipts(
     let mut report = ModelIntegrityMigrationReport::default();
 
     for (path, expected_sha256) in artifacts {
-        if !path.is_file() || is_model_artifact_trusted(path, expected_sha256) {
+        // An empty string is never a legitimate "not yet pinned" entry here
+        // (every hand-written table caller passes a real 64-hex-char digest;
+        // see `managed_model_integrity_artifacts` and its per-provider
+        // equivalents). Rather than silently trusting the file as-is -- the
+        // exact foot-gun this migration exists to close -- treat it as a
+        // hard failure so a future accidentally-blank table entry is loud.
+        if expected_sha256.is_empty() {
+            report.errors.push((
+                path.clone(),
+                "expected_sha256 is an empty string; refusing to skip integrity verification. \
+                 Pin a real digest for this artifact."
+                    .to_string(),
+            ));
             continue;
         }
 
-        match verify_or_record_model_integrity(path, expected_sha256).await {
+        if !path.is_file() || is_model_artifact_trusted(path, Some(expected_sha256)) {
+            continue;
+        }
+
+        match verify_or_record_model_integrity(path, Some(expected_sha256)).await {
             Ok(true) => report.migrated_count += 1,
             Ok(false) => {
                 tokio::fs::remove_file(model_integrity_receipt_path(path))
@@ -547,7 +734,7 @@ impl DownloadManager {
         // metadata instead of re-reading multi-gigabyte models.
         if destination.exists() {
             if validate_whisper_artifact(&destination, min_expected_bytes).await
-                && verify_or_record_model_integrity(&destination, &model_info.sha256).await?
+                && verify_or_record_model_integrity(&destination, Some(&model_info.sha256)).await?
             {
                 tracing::info!("Model {} already exists at {:?}", model_name, destination);
                 return Ok(destination);
@@ -569,7 +756,7 @@ impl DownloadManager {
         self.download_file_verified(
             &model_info.url,
             &destination,
-            &model_info.sha256,
+            Some(&model_info.sha256),
             model_info.max_bytes,
             progress_callback,
         )
@@ -587,12 +774,13 @@ impl DownloadManager {
     }
 
     /// Download a model to a temporary file and install it only after its
-    /// app-pinned SHA-256 digest has been verified.
+    /// app-pinned SHA-256 digest has been verified. `None` means "not yet
+    /// pinned"; see `verify_or_record_model_integrity`.
     async fn download_file_verified(
         &self,
         url: &str,
         destination: &PathBuf,
-        expected_sha256: &str,
+        expected_sha256: Option<&str>,
         max_bytes: u64,
         progress_callback: impl Fn(DownloadProgress) + Send + Sync + 'static,
     ) -> Result<()> {
@@ -607,15 +795,17 @@ impl DownloadManager {
     }
 
     /// Download or migrate a model asset under an immutable URL and
-    /// application-pinned SHA-256 digest.
+    /// application-pinned SHA-256 digest. `None` means "not yet pinned"; see
+    /// `verify_or_record_model_integrity`.
     pub(crate) async fn download_verified_model_asset(
         &self,
         url: &str,
         destination: &PathBuf,
-        expected_sha256: &str,
+        expected_sha256: Option<&str>,
         max_bytes: u64,
         progress_callback: impl Fn(DownloadProgress) + Send + Sync + 'static,
     ) -> Result<()> {
+        assert_pinned_digest_is_never_empty(expected_sha256);
         if destination.exists() {
             if verify_or_record_model_integrity(destination, expected_sha256).await? {
                 return Ok(());
@@ -809,10 +999,20 @@ impl DownloadManager {
             }
         }
 
-        // Skip integrity verification when no SHA256 is pinned. This allows
-        // new models to be downloaded before their hashes have been verified
-        // and pinned. The file is still checked for completeness above.
-        if !expected_sha256.is_empty() {
+        // Skip integrity verification when no SHA256 is pinned (expected_sha256
+        // is None). This allows new models to be downloaded before their
+        // hashes have been verified and pinned. The file is still checked for
+        // completeness above. `Some("")` is a programmer error, not a
+        // legitimate "unpinned" state -- see `assert_pinned_digest_is_never_empty`.
+        if let Some(expected_sha256) = expected_sha256 {
+            if expected_sha256.is_empty() {
+                tokio::fs::remove_file(&temp_path).await.ok();
+                anyhow::bail!(
+                    "Refusing to install {}: expected_sha256 was an empty string, not None. \
+                     This is a bug in the artifact table, not a legitimate \"unpinned\" model.",
+                    destination.display()
+                );
+            }
             let actual_sha256 = calculate_sha256(&temp_path).await?;
             if actual_sha256 != expected_sha256 {
                 tokio::fs::remove_file(&temp_path).await.ok();
@@ -829,7 +1029,19 @@ impl DownloadManager {
                 expected_sha256
             );
             tokio::fs::rename(&temp_path, destination).await?;
-            write_model_integrity_receipt(destination, expected_sha256).await?;
+            // The freshly-downloaded file already passed the real hash
+            // comparison above -- it IS correct. The receipt is purely a
+            // cache so a later launch can skip re-hashing a multi-gigabyte
+            // file; losing that cache to a keychain hiccup (the receipt's
+            // MAC key lives there) must never fail an otherwise-successful
+            // multi-gigabyte download and force the user to redo it.
+            if let Err(error) = write_model_integrity_receipt(destination, expected_sha256).await {
+                tracing::warn!(
+                    "Downloaded and verified {} but could not persist an integrity receipt \
+                     ({error}); the next launch will re-verify by hashing the file directly.",
+                    destination.display()
+                );
+            }
         } else {
             tracing::warn!(
                 "Model {} has no pinned SHA256 — skipping integrity verification",
@@ -861,7 +1073,7 @@ impl DownloadManager {
         let destination = diarization_dir.join(model.file_name);
 
         if destination.exists() {
-            if verify_or_record_model_integrity(&destination, model.sha256).await? {
+            if verify_or_record_model_integrity(&destination, Some(model.sha256)).await? {
                 tracing::info!(
                     "Diarization model {} already exists at {:?}",
                     model_id,
@@ -885,7 +1097,7 @@ impl DownloadManager {
         self.download_file_verified(
             model.url,
             &destination,
-            model.sha256,
+            Some(model.sha256),
             model.max_bytes,
             _progress_callback,
         )
@@ -930,7 +1142,7 @@ impl DownloadManager {
 
     /// Whether the Silero VAD ONNX model has already been downloaded.
     pub fn is_silero_vad_model_downloaded(&self) -> bool {
-        is_model_artifact_trusted(&self.silero_vad_model_path(), SILERO_VAD_ONNX_SHA256)
+        is_model_artifact_trusted(&self.silero_vad_model_path(), Some(SILERO_VAD_ONNX_SHA256))
     }
 
     /// Download the Silero VAD ONNX model (MIT-licensed, ~2.2MB), the small
@@ -948,7 +1160,7 @@ impl DownloadManager {
         let destination = self.silero_vad_model_path();
 
         if destination.exists() {
-            if verify_or_record_model_integrity(&destination, SILERO_VAD_ONNX_SHA256).await? {
+            if verify_or_record_model_integrity(&destination, Some(SILERO_VAD_ONNX_SHA256)).await? {
                 tracing::info!("Silero VAD model already exists at {:?}", destination);
                 return Ok(destination);
             }
@@ -963,7 +1175,7 @@ impl DownloadManager {
         self.download_file_verified(
             SILERO_VAD_ONNX_URL,
             &destination,
-            SILERO_VAD_ONNX_SHA256,
+            Some(SILERO_VAD_ONNX_SHA256),
             SILERO_VAD_MAX_BYTES,
             progress_callback,
         )
@@ -1156,27 +1368,10 @@ impl DownloadManager {
             }
         }
 
-        // Check platform MLX assets
-        let mlx_dir = self.models_dir.join("mlx");
-        if mlx_dir.exists() {
-            let mut entries = tokio::fs::read_dir(&mlx_dir).await?;
-            while let Some(entry) = entries.next_entry().await? {
-                if is_internal_model_metadata_file(&entry.path()) {
-                    continue;
-                }
-                let metadata = entry.metadata().await?;
-                if metadata.is_file() {
-                    let name = entry.file_name().to_string_lossy().to_string();
-                    models.push(DownloadedModel {
-                        name: format!("MLX {}", name),
-                        provider: "platform_mlx".to_string(),
-                        path: entry.path(),
-                        size_bytes: metadata.len(),
-                        downloaded_at: metadata.modified()?,
-                    });
-                }
-            }
-        }
+        // The macOS MLX sidecar's stub asset listing has been removed along
+        // with the retired engine (see `PlatformEngine::MacosMlxSidecar` and
+        // `mlx_sidecar::probe`). Any leftover `models/mlx/manifest.json` from
+        // a prior install is inert and simply no longer enumerated here.
 
         // Check platform Windows Foundry assets
         let foundry_dir = self.models_dir.join("windows_foundry");
@@ -1270,26 +1465,15 @@ impl DownloadManager {
 
     pub async fn download_platform_assets(&self, engine: &str) -> Result<PathBuf> {
         match engine.trim() {
-            "macos_mlx_sidecar" => self.download_mlx_assets().await,
+            // macos_mlx_sidecar used to write a stub manifest marker here with
+            // no real sidecar assets behind it, so "downloading" it just made
+            // a broken engine look installed. The engine has been retired.
             "windows_foundry_local" => self.download_windows_foundry_assets().await,
             _ => Err(anyhow::anyhow!(
-                "Unsupported platform asset bundle '{}'. Supported: macos_mlx_sidecar, windows_foundry_local",
+                "Unsupported platform asset bundle '{}'. Supported: windows_foundry_local",
                 engine
             )),
         }
-    }
-
-    async fn download_mlx_assets(&self) -> Result<PathBuf> {
-        let mlx_dir = self.models_dir.join("mlx");
-        tokio::fs::create_dir_all(&mlx_dir).await?;
-        let manifest = mlx_dir.join("manifest.json");
-        let payload = serde_json::json!({
-            "engine": "macos_mlx_sidecar",
-            "installedAt": chrono::Utc::now().to_rfc3339(),
-            "note": "Stub MLX sidecar bundle marker. Replace with real sidecar assets in production packaging."
-        });
-        tokio::fs::write(&manifest, serde_json::to_vec_pretty(&payload)?).await?;
-        Ok(manifest)
     }
 
     async fn download_windows_foundry_assets(&self) -> Result<PathBuf> {
@@ -1718,18 +1902,20 @@ mod tests {
             .expect("write model");
         let digest = calculate_sha256(&model_path).await.expect("hash model");
 
-        assert!(verify_or_record_model_integrity(&model_path, &digest)
+        assert!(verify_or_record_model_integrity(&model_path, Some(&digest))
             .await
             .expect("verify model"));
-        assert!(is_model_artifact_trusted(&model_path, &digest));
+        assert!(is_model_artifact_trusted(&model_path, Some(&digest)));
 
         tokio::fs::write(&model_path, b"tampered model bytes with a different size")
             .await
             .expect("tamper model");
-        assert!(!is_model_artifact_trusted(&model_path, &digest));
-        assert!(!verify_or_record_model_integrity(&model_path, &digest)
-            .await
-            .expect("reject tampered model"));
+        assert!(!is_model_artifact_trusted(&model_path, Some(&digest)));
+        assert!(
+            !verify_or_record_model_integrity(&model_path, Some(&digest))
+                .await
+                .expect("reject tampered model")
+        );
 
         tokio::fs::remove_dir_all(&test_dir).await.ok();
     }
@@ -1764,9 +1950,174 @@ mod tests {
         assert_eq!(report.migrated_count, 1);
         assert_eq!(report.rejected_paths, vec![altered_path.clone()]);
         assert!(report.errors.is_empty());
-        assert!(is_model_artifact_trusted(&exact_path, &expected_digest));
-        assert!(!is_model_artifact_trusted(&altered_path, &expected_digest));
+        assert!(is_model_artifact_trusted(
+            &exact_path,
+            Some(&expected_digest)
+        ));
+        assert!(!is_model_artifact_trusted(
+            &altered_path,
+            Some(&expected_digest)
+        ));
         assert!(!model_integrity_receipt_path(&altered_path).exists());
+
+        tokio::fs::remove_dir_all(&test_dir).await.ok();
+    }
+
+    #[test]
+    fn every_managed_integrity_artifact_carries_a_real_pinned_digest() {
+        // The startup/registration-time guardrail for finding 8: a future
+        // hand-added table entry with a forgotten or blank sha256 must fail
+        // this test rather than silently disabling verification for that
+        // artifact (see the historical `expected_sha256.is_empty()` bypass
+        // this whole module used to have).
+        let artifacts =
+            managed_model_integrity_artifacts(std::path::Path::new("/tmp/plainsong-test-root"));
+        assert!(
+            !artifacts.is_empty(),
+            "the managed artifact registry must not be empty"
+        );
+        for (path, sha256) in &artifacts {
+            assert_eq!(
+                sha256.len(),
+                64,
+                "{} has a pinned digest of length {} (expected 64 hex chars)",
+                path.display(),
+                sha256.len()
+            );
+            assert!(
+                sha256.chars().all(|c| c.is_ascii_hexdigit()),
+                "{} has a non-hex pinned digest: {sha256}",
+                path.display()
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn verify_or_record_model_integrity_treats_none_as_not_yet_pinned() {
+        let test_dir = std::env::temp_dir()
+            .join("plainsong-model-integrity-unpinned")
+            .join(uuid::Uuid::new_v4().to_string());
+        tokio::fs::create_dir_all(&test_dir)
+            .await
+            .expect("create test directory");
+        let model_path = test_dir.join("unpinned-model.bin");
+        tokio::fs::write(&model_path, b"any bytes at all")
+            .await
+            .expect("write model");
+
+        // `None` means "not yet pinned": the file is trusted on existence
+        // alone, and no receipt is written (there is nothing to pin it to).
+        assert!(verify_or_record_model_integrity(&model_path, None)
+            .await
+            .expect("unpinned artifacts are trusted on existence"));
+        assert!(!model_integrity_receipt_path(&model_path).exists());
+
+        tokio::fs::remove_dir_all(&test_dir).await.ok();
+    }
+
+    #[tokio::test]
+    #[should_panic(expected = "expected_sha256 must be None")]
+    async fn verify_or_record_model_integrity_rejects_empty_string_as_a_hard_error() {
+        let test_dir = std::env::temp_dir()
+            .join("plainsong-model-integrity-empty-digest")
+            .join(uuid::Uuid::new_v4().to_string());
+        tokio::fs::create_dir_all(&test_dir)
+            .await
+            .expect("create test directory");
+        let model_path = test_dir.join("model.bin");
+        tokio::fs::write(&model_path, b"some bytes")
+            .await
+            .expect("write model");
+
+        // Some("") must never be silently treated as "not yet pinned" (that
+        // is what `None` is for) or as "trust it" -- it is the exact
+        // foot-gun this finding closes. Debug/test builds (debug_assertions
+        // enabled, which `cargo test` always has) make this a loud panic via
+        // `assert_pinned_digest_is_never_empty`; the `anyhow::bail!` further
+        // down in the same function is the release-build backstop for when
+        // `debug_assert!` compiles out and is not separately exercisable
+        // here since `cargo test` cannot disable debug_assertions.
+        let _ = verify_or_record_model_integrity(&model_path, Some("")).await;
+    }
+
+    #[tokio::test]
+    async fn migrate_legacy_model_integrity_receipts_hard_fails_on_empty_digest_entries() {
+        let test_dir = std::env::temp_dir()
+            .join("plainsong-model-integrity-migration-empty")
+            .join(uuid::Uuid::new_v4().to_string());
+        tokio::fs::create_dir_all(&test_dir)
+            .await
+            .expect("create test directory");
+        let path = test_dir.join("model.bin");
+        tokio::fs::write(&path, b"some bytes")
+            .await
+            .expect("write model");
+
+        let report =
+            migrate_legacy_model_integrity_receipts(&[(path.clone(), String::new())]).await;
+
+        assert_eq!(report.migrated_count, 0);
+        assert!(report.rejected_paths.is_empty());
+        assert_eq!(report.errors.len(), 1);
+        assert_eq!(report.errors[0].0, path);
+        assert!(!is_model_artifact_trusted(&path, None));
+
+        tokio::fs::remove_dir_all(&test_dir).await.ok();
+    }
+
+    #[tokio::test]
+    async fn integrity_receipt_is_mac_protected_against_hand_forged_files() {
+        // Forging a receipt requires reproducing the exact bytes
+        // `model_integrity_receipt_contents` would compute -- including the
+        // MAC, which needs the keychain-held key. A receipt written with the
+        // right plaintext fields (version/sha256/size/modified_nanos) but
+        // without a matching `mac=` line -- exactly what someone with only
+        // filesystem access to the models directory could produce by reading
+        // this module's public source -- must be rejected.
+        let test_dir = std::env::temp_dir()
+            .join("plainsong-model-integrity-mac")
+            .join(uuid::Uuid::new_v4().to_string());
+        tokio::fs::create_dir_all(&test_dir)
+            .await
+            .expect("create test directory");
+        let model_path = test_dir.join("model.bin");
+        tokio::fs::write(&model_path, b"model bytes")
+            .await
+            .expect("write model");
+        let digest = calculate_sha256(&model_path).await.expect("hash model");
+
+        let metadata = tokio::fs::metadata(&model_path).await.expect("stat model");
+        let modified_nanos = metadata
+            .modified()
+            .expect("mtime")
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("mtime after epoch")
+            .as_nanos();
+        let forged_receipt_without_mac = format!(
+            "{}\nsha256={}\nsize={}\nmodified_nanos={}\n",
+            MODEL_INTEGRITY_RECEIPT_VERSION,
+            digest,
+            metadata.len(),
+            modified_nanos
+        );
+        tokio::fs::write(
+            model_integrity_receipt_path(&model_path),
+            &forged_receipt_without_mac,
+        )
+        .await
+        .expect("write forged receipt");
+
+        assert!(
+            !is_model_artifact_trusted(&model_path, Some(&digest)),
+            "a receipt missing its MAC must never be trusted"
+        );
+
+        // The real receipt-writing path (which does know the MAC key)
+        // produces a receipt this same check accepts.
+        assert!(verify_or_record_model_integrity(&model_path, Some(&digest))
+            .await
+            .expect("verify model"));
+        assert!(is_model_artifact_trusted(&model_path, Some(&digest)));
 
         tokio::fs::remove_dir_all(&test_dir).await.ok();
     }

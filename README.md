@@ -16,7 +16,7 @@ into searchable notes without sending a bot into your call.
 - **Local-first.** Transcription runs on your Mac by default. No account, no
   cloud dependency, no audio leaving your machine unless you opt in.
 - **Bring your own keys.** Optional cloud transcription and AI cleanup use your
-  own keys for providers such as OpenAI, Anthropic, Mistral, ElevenLabs, Groq,
+  own keys for providers such as OpenAI, Anthropic, ElevenLabs, Groq,
   Cohere, DeepSeek, and Gemini. Usage is billed to you, keys are stored in the OS keychain,
   never routed through our servers.
 - **Actually free and open.** MIT licensed, no trial, no tiers, no nags. Build

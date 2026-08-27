@@ -139,14 +139,34 @@ impl Provider {
         }
     }
 
+    /// Fallback model used when a lane has no explicit model configured.
+    ///
+    /// Verified live against each provider's documentation on 2026-08-27 (see
+    /// the model-currency audit); do not restore any of the prior values from
+    /// training-data memory without re-checking the provider's own docs first:
+    /// - Ollama/OllamaCloud: `llama3.2` is a generation behind and has no MLX
+    ///   build; `qwen3.5:4b` is the current small/fast tier
+    ///   (https://ollama.com/library/qwen3.5).
+    /// - OpenAi: `gpt-4o-mini` is superseded; `gpt-5.6-luna` is the current
+    ///   cost-optimized tier
+    ///   (https://developers.openai.com/api/docs/models).
+    /// - Gemini: `gemini-2.0-flash` was shut down by Google; `gemini-3.7-flash`
+    ///   is the current flagship Flash model ($0.75/$3.75 per Mtok) and the
+    ///   right quality tradeoff for meeting summarization on a BYOK app --
+    ///   `gemini-3.5-flash-lite` is cheaper/faster but a lower-quality choice
+    ///   for this workload (product decision, verified live)
+    ///   (https://ai.google.dev/gemini-api/docs/models).
+    /// - DeepSeek: `deepseek-chat` was retired 2026-07-24 and no longer
+    ///   resolves; `deepseek-v4-flash` is its documented non-thinking-mode
+    ///   successor (https://api-docs.deepseek.com/updates/).
     pub fn default_model(self) -> &'static str {
         match self {
-            Self::Ollama => "llama3.2",
-            Self::OpenAi => "gpt-4o-mini",
+            Self::Ollama => "qwen3.5:4b",
+            Self::OpenAi => "gpt-5.6-luna",
             Self::Anthropic => "claude-opus-5",
-            Self::Gemini => "gemini-2.0-flash",
-            Self::DeepSeek => "deepseek-chat",
-            Self::OllamaCloud => "llama3.2",
+            Self::Gemini => "gemini-3.7-flash",
+            Self::DeepSeek => "deepseek-v4-flash",
+            Self::OllamaCloud => "qwen3.5:4b",
         }
     }
 
@@ -156,7 +176,14 @@ impl Provider {
             Self::Ollama => model_context_hint(&normalized).unwrap_or(4_096),
             Self::OllamaCloud => model_context_hint(&normalized).unwrap_or(32_768),
             Self::OpenAi => {
-                if normalized.contains("gpt-4o")
+                // The gpt-5.x family (shipped under codenames -- gpt-5.6-sol,
+                // -terra, -luna, -cyber -- see
+                // https://developers.openai.com/api/docs/models) carries a
+                // ~1M-token window; every prior GPT-5.x string used to fall
+                // through to the 16K catch-all below.
+                if normalized.starts_with("gpt-5") {
+                    1_000_000
+                } else if normalized.contains("gpt-4o")
                     || normalized.contains("gpt-4.1")
                     || normalized.starts_with("o1")
                     || normalized.starts_with("o3")
@@ -169,8 +196,15 @@ impl Provider {
             }
             Self::Anthropic => anthropic_context_window(&normalized),
             Self::Gemini => {
-                if normalized.contains("1.5") || normalized.contains("2.") {
-                    128_000
+                // Every currently-documented Gemini generation from 1.5
+                // onward (1.5, 2.x, 3.x) advertises a ~1M-token input window
+                // (https://ai.google.dev/gemini-api/docs/models); only
+                // pre-1.5 / unrecognized names fall back conservatively.
+                if normalized.contains("1.5")
+                    || normalized.contains("2.")
+                    || normalized.contains("3.")
+                {
+                    1_000_000
                 } else {
                     32_768
                 }
@@ -516,13 +550,16 @@ impl CompletionTransport for ProviderTransport {
     async fn model_context_metadata(&self, model: &str) -> Result<ModelContextMetadata, LlmError> {
         match self {
             Self::Ollama(client) => client.model_context_metadata(model).await,
+            Self::Gemini(client) => client.model_context_metadata(model).await,
             _ => Ok(ModelContextMetadata::default()),
         }
     }
 
     async fn invalidate_model_context_metadata(&self, model: &str) {
-        if let Self::Ollama(client) = self {
-            client.invalidate_model_context_metadata(model).await;
+        match self {
+            Self::Ollama(client) => client.invalidate_model_context_metadata(model).await,
+            Self::Gemini(client) => client.invalidate_model_context_metadata(model).await,
+            _ => {}
         }
     }
 }
@@ -779,6 +816,76 @@ mod tests {
                 .model_budget("claude-haiku-4-5-20251001", CompletionPurpose::Summary)
                 .context_window_tokens,
             200_000
+        );
+    }
+
+    #[test]
+    fn default_models_are_not_retired_provider_identifiers() {
+        // Regression coverage for the 2026-08-27 model-currency audit: every
+        // fallback below was verified live against its provider's own docs
+        // (see the doc comment on `Provider::default_model`). None of these
+        // may be reverted to a pre-audit value without re-checking live docs.
+        assert_eq!(Provider::Ollama.default_model(), "qwen3.5:4b");
+        assert_eq!(Provider::OllamaCloud.default_model(), "qwen3.5:4b");
+        assert_eq!(Provider::OpenAi.default_model(), "gpt-5.6-luna");
+        assert_eq!(Provider::Gemini.default_model(), "gemini-3.7-flash");
+        assert_eq!(Provider::DeepSeek.default_model(), "deepseek-v4-flash");
+    }
+
+    #[test]
+    fn openai_gpt5_family_gets_its_real_million_token_window() {
+        // gpt-4o-mini (the old default) still resolves via the gpt-4o branch.
+        assert_eq!(
+            Provider::OpenAi
+                .model_budget("gpt-4o-mini", CompletionPurpose::Summary)
+                .context_window_tokens,
+            128_000
+        );
+        for model in [
+            "gpt-5.6-sol",
+            "gpt-5.6-terra",
+            "gpt-5.6-luna",
+            "gpt-5.6-cyber",
+        ] {
+            assert_eq!(
+                Provider::OpenAi
+                    .model_budget(model, CompletionPurpose::Summary)
+                    .context_window_tokens,
+                1_000_000,
+                "{model} must not fall through to the 16K catch-all"
+            );
+        }
+        // A genuinely unrecognized model still gets the conservative fallback.
+        assert_eq!(
+            Provider::OpenAi
+                .model_budget("some-future-mini-model", CompletionPurpose::Summary)
+                .context_window_tokens,
+            16_384
+        );
+    }
+
+    #[test]
+    fn gemini_3x_family_gets_its_real_million_token_window() {
+        for model in [
+            "gemini-3.5-flash-lite",
+            "gemini-3.5-flash",
+            "gemini-3.6-flash",
+            "gemini-3.7-flash",
+            "gemini-2.5-pro",
+        ] {
+            assert_eq!(
+                Provider::Gemini
+                    .model_budget(model, CompletionPurpose::Summary)
+                    .context_window_tokens,
+                1_000_000,
+                "{model} must not fall through to the 32K catch-all"
+            );
+        }
+        assert_eq!(
+            Provider::Gemini
+                .model_budget("gemini-pro", CompletionPurpose::Summary)
+                .context_window_tokens,
+            32_768
         );
     }
 

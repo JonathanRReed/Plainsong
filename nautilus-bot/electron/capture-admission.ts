@@ -23,6 +23,16 @@ function normalizeRoute(rawRoute: string): string {
   }
 }
 
+/**
+ * Proof that a privileged action was asked for by the user, in this window, on
+ * this page, just now.
+ *
+ * Named for its first caller (meeting capture, which also carries the grant's
+ * nonce to the sidecar), but the gesture requirement is what the native folder
+ * and cloud-destination dialogs need too: a modal parented to a window is a
+ * thing the user must have asked for, or it is an unprompted dialog with the
+ * app's name on it. The messages below are therefore action-neutral.
+ */
 export class CaptureAdmissionController {
   private readonly maxAgeMs: number;
   private readonly now: () => number;
@@ -44,11 +54,11 @@ export class CaptureAdmissionController {
     const observation = this.observations.get(windowId);
     if (!observation || this.now() - observation.observedAt > this.maxAgeMs) {
       this.observations.delete(windowId);
-      throw new Error("Starting or stopping capture requires a recent click or key press");
+      throw new Error("This action requires a recent click or key press");
     }
     const normalizedRoute = normalizeRoute(route);
     if (observation.route !== normalizedRoute) {
-      throw new Error("Capture must be requested from the same page as the user action");
+      throw new Error("This action must be requested from the same page as the user action");
     }
     this.observations.delete(windowId);
     return { nonce: randomUUID(), windowId, route: normalizedRoute };

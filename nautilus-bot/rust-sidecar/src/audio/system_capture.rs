@@ -950,6 +950,29 @@ pub struct MixedAudioCapture {
     dropped_mic_samples: Arc<AtomicU64>,
     dropped_system_samples: Arc<AtomicU64>,
     dropped_mixed_chunks: Arc<AtomicU64>,
+    /// Frames the mixer had to invent because a source delivered nothing,
+    /// published out of the capture thread so the stop path can say which
+    /// sources were silent and for how long. Without these the mixed WAV is
+    /// indistinguishable from a meeting where nobody spoke.
+    mic_padded_frames: Arc<AtomicU64>,
+    system_padded_frames: Arc<AtomicU64>,
+    mixed_frames: Arc<AtomicU64>,
+}
+
+/// What a mixed session captured beyond the audio itself.
+///
+/// The padded-frame counts are the evidence that separates a source which had
+/// nothing to play from one that went away: the mixer pads a starved source with
+/// silence so the tracks stay aligned, and that silence is otherwise
+/// indistinguishable from a quiet room.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct MixedCaptureOutcome {
+    pub dropped_mic_samples: u64,
+    pub dropped_system_samples: u64,
+    pub dropped_mixed_chunks: u64,
+    pub mic_padded_frames: u64,
+    pub system_padded_frames: u64,
+    pub mixed_frames: u64,
 }
 
 pub struct MixedAudioChunk {
@@ -1237,6 +1260,175 @@ type SystemStreamStart = (
     SystemStreamHealthSlot,
     bool,
 );
+
+/// The microphone half of the mixed session, as the loop needs to hold it.
+struct MicStreamStart {
+    stream: cpal::Stream,
+    sample_rate: u32,
+    channels: usize,
+}
+
+/// Build the microphone stream for a mixed session, preferring the requested
+/// device and falling back to the host default.
+///
+/// Pulled out of `MixedAudioCapture::start`'s inline closure so the mid-session
+/// rebuild below can call the same construction path the initial start uses —
+/// mirroring how `start_system_stream` serves both the system route's start and
+/// its retry loop.
+///
+/// `runtime_failure` is the rebuild trigger, taken by the loop. `capture_failure`
+/// is the honest record for the stop path and is never consumed: it keeps the
+/// first cause so a meeting that lost its microphone says so even if the mic
+/// later came back.
+fn start_mic_stream(
+    preferred_device: Option<cpal::Device>,
+    mic_buffer: Arc<crossbeam::queue::ArrayQueue<f32>>,
+    is_capturing: Arc<AtomicBool>,
+    dropped_mic_samples: Arc<AtomicU64>,
+    runtime_failure: Arc<Mutex<Option<String>>>,
+    capture_failure: Arc<Mutex<Option<String>>>,
+    play_immediately: bool,
+) -> Result<MicStreamStart> {
+    let host = cpal::default_host();
+    let mut candidates: Vec<cpal::Device> = Vec::new();
+    if let Some(device) = preferred_device {
+        candidates.push(device);
+    }
+    // A replug can invalidate the handle the session started with, so the host
+    // default is always retried behind the preferred device.
+    if let Some(default_device) = host.default_input_device() {
+        candidates.push(default_device);
+    }
+    if candidates.is_empty() {
+        anyhow::bail!("No microphone available");
+    }
+
+    let mut last_error = None;
+    for device in candidates {
+        match build_mic_input_stream(
+            &device,
+            Arc::clone(&mic_buffer),
+            Arc::clone(&is_capturing),
+            Arc::clone(&dropped_mic_samples),
+            Arc::clone(&runtime_failure),
+            Arc::clone(&capture_failure),
+        ) {
+            Ok(start) => {
+                if play_immediately {
+                    if let Err(error) = start.stream.play() {
+                        tracing::warn!("Microphone candidate failed to play: {}", error);
+                        last_error = Some(anyhow::anyhow!(error));
+                        continue;
+                    }
+                }
+                return Ok(start);
+            }
+            Err(error) => {
+                tracing::warn!("Microphone candidate failed to build: {}", error);
+                last_error = Some(error);
+            }
+        }
+    }
+    Err(last_error.unwrap_or_else(|| anyhow::anyhow!("No microphone could be opened")))
+}
+
+fn build_mic_input_stream(
+    device: &cpal::Device,
+    mic_buffer: Arc<crossbeam::queue::ArrayQueue<f32>>,
+    is_capturing: Arc<AtomicBool>,
+    dropped_mic_samples: Arc<AtomicU64>,
+    runtime_failure: Arc<Mutex<Option<String>>>,
+    capture_failure: Arc<Mutex<Option<String>>>,
+) -> Result<MicStreamStart> {
+    let config = device.default_input_config()?;
+    let sample_rate = config.sample_rate();
+    // The queues, the mixer and the WAV writers all work in mono frames, so
+    // interleaved multi-channel input has to be downmixed before it is enqueued.
+    let num_channels = config.channels() as usize;
+    let sample_format = config.sample_format();
+    let stream_config = config.config();
+    // Latched if this callback ever panics, so the mic half of a mixed capture
+    // goes quiet rather than aborting the process at cpal's C boundary.
+    let mic_callback_poisoned = Arc::new(AtomicBool::new(false));
+
+    macro_rules! build_mic_stream {
+        ($sample_type:ty) => {{
+            let mic_buffer = Arc::clone(&mic_buffer);
+            let is_capturing = Arc::clone(&is_capturing);
+            let dropped_samples = Arc::clone(&dropped_mic_samples);
+            let runtime_failure = Arc::clone(&runtime_failure);
+            let capture_failure = Arc::clone(&capture_failure);
+            let callback_poisoned = Arc::clone(&mic_callback_poisoned);
+
+            device.build_input_stream(
+                stream_config,
+                move |data: &[$sample_type], _: &cpal::InputCallbackInfo| {
+                    crate::audio::guard_audio_callback(
+                        &callback_poisoned,
+                        "Mixed-capture microphone",
+                        || {
+                            if is_capturing.load(Ordering::SeqCst) {
+                                push_normalized_samples(
+                                    data,
+                                    num_channels,
+                                    &mic_buffer,
+                                    &dropped_samples,
+                                );
+                            }
+                        },
+                    );
+                },
+                move |err| {
+                    // This used to log and nothing else. A microphone that died
+                    // mid-meeting therefore produced half-silence that the
+                    // meeting record presented as complete, because only the
+                    // mic-only capture path ever wrote the failure slot the stop
+                    // path reads.
+                    tracing::error!("Mic stream error: {}", err);
+                    record_mic_failure(&capture_failure, err.to_string());
+                    if let Ok(mut slot) = runtime_failure.lock() {
+                        *slot = Some(err.to_string());
+                    }
+                },
+                None,
+            )
+        }};
+    }
+
+    let stream = match sample_format {
+        cpal::SampleFormat::I8 => build_mic_stream!(i8),
+        cpal::SampleFormat::I16 => build_mic_stream!(i16),
+        cpal::SampleFormat::I24 => build_mic_stream!(cpal::I24),
+        cpal::SampleFormat::I32 => build_mic_stream!(i32),
+        cpal::SampleFormat::I64 => build_mic_stream!(i64),
+        cpal::SampleFormat::U8 => build_mic_stream!(u8),
+        cpal::SampleFormat::U16 => build_mic_stream!(u16),
+        cpal::SampleFormat::U24 => build_mic_stream!(cpal::U24),
+        cpal::SampleFormat::U32 => build_mic_stream!(u32),
+        cpal::SampleFormat::U64 => build_mic_stream!(u64),
+        cpal::SampleFormat::F32 => build_mic_stream!(f32),
+        cpal::SampleFormat::F64 => build_mic_stream!(f64),
+        _ => Err(cpal::ErrorKind::UnsupportedConfig.into()),
+    }?;
+
+    Ok(MicStreamStart {
+        stream,
+        sample_rate,
+        channels: num_channels,
+    })
+}
+
+/// First microphone failure wins.
+///
+/// A device that dies, is replaced and dies again would otherwise overwrite the
+/// cause that explains where the audio actually stops.
+fn record_mic_failure(slot: &Arc<Mutex<Option<String>>>, reason: String) {
+    if let Ok(mut failure) = slot.lock() {
+        if failure.is_none() {
+            *failure = Some(reason);
+        }
+    }
+}
 
 fn classify_system_audio_error(
     error: &cpal::Error,
@@ -2085,9 +2277,17 @@ impl MixedAudioCapture {
             dropped_mic_samples: Arc::new(AtomicU64::new(0)),
             dropped_system_samples: Arc::new(AtomicU64::new(0)),
             dropped_mixed_chunks: Arc::new(AtomicU64::new(0)),
+            mic_padded_frames: Arc::new(AtomicU64::new(0)),
+            system_padded_frames: Arc::new(AtomicU64::new(0)),
+            mixed_frames: Arc::new(AtomicU64::new(0)),
         }
     }
 
+    /// `capture_failure` is the session's honest record of a capture stream that
+    /// died mid-meeting. The mic-only path has always written it; the mixed path
+    /// constructed one and never touched it, so a "me and them" meeting whose
+    /// microphone died presented half-silence as a complete recording.
+    #[allow(clippy::too_many_arguments)]
     pub fn start(
         &mut self,
         capture_mic: bool,
@@ -2095,6 +2295,7 @@ impl MixedAudioCapture {
         mic_device: Option<cpal::Device>,
         waveform_buffer: Arc<std::sync::Mutex<Vec<f32>>>,
         streaming_queue: Option<Arc<crossbeam::queue::ArrayQueue<Vec<f32>>>>,
+        capture_failure: Arc<Mutex<Option<String>>>,
         events: Option<MixedCaptureEvents>,
     ) -> Result<MixedAudioCaptureStart> {
         if !capture_mic && !capture_system {
@@ -2109,6 +2310,9 @@ impl MixedAudioCapture {
         self.dropped_mic_samples.store(0, Ordering::SeqCst);
         self.dropped_system_samples.store(0, Ordering::SeqCst);
         self.dropped_mixed_chunks.store(0, Ordering::SeqCst);
+        self.mic_padded_frames.store(0, Ordering::SeqCst);
+        self.system_padded_frames.store(0, Ordering::SeqCst);
+        self.mixed_frames.store(0, Ordering::SeqCst);
 
         let (aligned_sender, aligned_receiver) =
             crossbeam::channel::bounded::<MixedAudioChunk>(100);
@@ -2121,10 +2325,12 @@ impl MixedAudioCapture {
         let dropped_mic_samples = Arc::clone(&self.dropped_mic_samples);
         let dropped_system_samples = Arc::clone(&self.dropped_system_samples);
         let dropped_mixed_chunks = Arc::clone(&self.dropped_mixed_chunks);
+        let published_mic_padded = Arc::clone(&self.mic_padded_frames);
+        let published_system_padded = Arc::clone(&self.system_padded_frames);
+        let published_mixed_frames = Arc::clone(&self.mixed_frames);
 
         self.capture_thread = Some(std::thread::spawn(move || {
             const MIXED_BUFFER_CAPACITY: usize = 65_536;
-            let host = cpal::default_host();
             let mic_buffer: Arc<crossbeam::queue::ArrayQueue<f32>> =
                 Arc::new(crossbeam::queue::ArrayQueue::new(MIXED_BUFFER_CAPACITY));
             let system_buffer: Arc<crossbeam::queue::ArrayQueue<f32>> =
@@ -2136,81 +2342,30 @@ impl MixedAudioCapture {
             let mut system_sample_rate = None;
             let mut mic_channels = 1usize;
             let mut system_channels = 1usize;
+            // Taken by the loop below to trigger a rebuild. Distinct from
+            // `capture_failure`, which keeps the first cause forever so the stop
+            // path can report the meeting honestly even after a recovery.
+            let mic_runtime_failure: Arc<Mutex<Option<String>>> = Arc::new(Mutex::new(None));
             let system_runtime_failure: SystemAudioRuntimeFailureSlot = Arc::new(Mutex::new(None));
             let mut system_route: Option<SystemAudioRouteMetadata> = None;
             let mut system_route_health: Option<SystemStreamHealthSlot> = None;
             let mut system_route_has_alternative = false;
 
             if capture_mic {
-                let preferred_mic_device = mic_device.clone();
-                let mut setup = || -> Result<cpal::Stream> {
-                    let device = preferred_mic_device
-                        .clone()
-                        .or_else(|| host.default_input_device())
-                        .context("No microphone available")?;
-                    let config = device.default_input_config()?;
-                    mic_sample_rate = Some(config.sample_rate());
-                    // The queues, the mixer and the WAV writers all work in mono
-                    // frames, so interleaved multi-channel input has to be
-                    // downmixed before it is enqueued.
-                    let num_channels = config.channels() as usize;
-                    mic_channels = num_channels;
-                    let sample_format = config.sample_format();
-                    let stream_config = config.config();
-                    // Latched if this callback ever panics, so the mic half of
-                    // a mixed capture goes quiet rather than aborting.
-                    let mic_callback_poisoned = Arc::new(AtomicBool::new(false));
-                    macro_rules! build_mic_stream {
-                        ($sample_type:ty) => {{
-                            let mic_buffer = Arc::clone(&mic_buffer);
-                            let is_capturing = Arc::clone(&is_capturing);
-                            let dropped_samples = Arc::clone(&dropped_mic_samples);
-                            let callback_poisoned = Arc::clone(&mic_callback_poisoned);
-
-                            device.build_input_stream(
-                                stream_config,
-                                move |data: &[$sample_type], _: &cpal::InputCallbackInfo| {
-                                    crate::audio::guard_audio_callback(
-                                        &callback_poisoned,
-                                        "Mixed-capture microphone",
-                                        || {
-                                            if is_capturing.load(Ordering::SeqCst) {
-                                                push_normalized_samples(
-                                                    data,
-                                                    num_channels,
-                                                    &mic_buffer,
-                                                    &dropped_samples,
-                                                );
-                                            }
-                                        },
-                                    );
-                                },
-                                |err| tracing::error!("Mic stream error: {}", err),
-                                None,
-                            )
-                        }};
+                match start_mic_stream(
+                    mic_device.clone(),
+                    Arc::clone(&mic_buffer),
+                    Arc::clone(&is_capturing),
+                    Arc::clone(&dropped_mic_samples),
+                    Arc::clone(&mic_runtime_failure),
+                    Arc::clone(&capture_failure),
+                    false,
+                ) {
+                    Ok(start) => {
+                        mic_sample_rate = Some(start.sample_rate);
+                        mic_channels = start.channels;
+                        _mic_stream = Some(start.stream);
                     }
-
-                    match sample_format {
-                        cpal::SampleFormat::I8 => build_mic_stream!(i8),
-                        cpal::SampleFormat::I16 => build_mic_stream!(i16),
-                        cpal::SampleFormat::I24 => build_mic_stream!(cpal::I24),
-                        cpal::SampleFormat::I32 => build_mic_stream!(i32),
-                        cpal::SampleFormat::I64 => build_mic_stream!(i64),
-                        cpal::SampleFormat::U8 => build_mic_stream!(u8),
-                        cpal::SampleFormat::U16 => build_mic_stream!(u16),
-                        cpal::SampleFormat::U24 => build_mic_stream!(cpal::U24),
-                        cpal::SampleFormat::U32 => build_mic_stream!(u32),
-                        cpal::SampleFormat::U64 => build_mic_stream!(u64),
-                        cpal::SampleFormat::F32 => build_mic_stream!(f32),
-                        cpal::SampleFormat::F64 => build_mic_stream!(f64),
-                        _ => Err(cpal::ErrorKind::UnsupportedConfig.into()),
-                    }
-                    .map_err(Into::into)
-                };
-
-                match setup() {
-                    Ok(stream) => _mic_stream = Some(stream),
                     Err(e) => {
                         let message = format!("Failed to start microphone stream: {}", e);
                         tracing::error!("{}", message);
@@ -2355,9 +2510,146 @@ impl MixedAudioCapture {
                     std::result::Result<SystemStreamStart, SystemAudioRuntimeFailure>,
                 >,
             > = None;
+            let mut next_mic_route_retry = Instant::now();
+            let mut mic_rebuild_pending = false;
+            let mut pending_mic_failure: Option<String> = None;
+            let mut mic_failure_reported = false;
+            let mut mic_rebuild_receiver: Option<
+                crossbeam::channel::Receiver<Result<MicStreamStart>>,
+            > = None;
 
             while is_capturing.load(Ordering::SeqCst) {
                 let now = Instant::now();
+
+                // The microphone half mirrors the system route's retry loop:
+                // CoreAudio reports the failure once and then simply stops
+                // delivering, so without a rebuild an unplugged and replugged
+                // microphone stays dead for the rest of the meeting.
+                if capture_mic {
+                    if let Some(receiver) = mic_rebuild_receiver.as_ref() {
+                        match receiver.try_recv() {
+                            Ok(Ok(start)) => {
+                                mic_rebuild_receiver = None;
+                                match source_resampler_for(
+                                    Some(start.sample_rate),
+                                    target_sample_rate,
+                                ) {
+                                    Ok(resampler) => {
+                                        let play_result = start.stream.play();
+                                        match play_result {
+                                            Ok(()) => {
+                                                mic_resampler = resampler;
+                                                _mic_stream = Some(start.stream);
+                                                last_mic_data = now;
+                                                mic_rebuild_pending = false;
+                                                pending_mic_failure = None;
+                                                mic_failure_reported = false;
+                                                tracing::info!(
+                                                    "Microphone capture rebuilt mid-meeting ({} Hz, {} ch)",
+                                                    start.sample_rate,
+                                                    start.channels
+                                                );
+                                            }
+                                            Err(error) => {
+                                                pending_mic_failure = Some(format!(
+                                                    "Replacement microphone stream failed to start: {error}"
+                                                ));
+                                                next_mic_route_retry =
+                                                    now + SYSTEM_ROUTE_RETRY_INTERVAL;
+                                            }
+                                        }
+                                    }
+                                    Err(error) => {
+                                        drop(start.stream);
+                                        while mic_buffer.pop().is_some() {}
+                                        pending_mic_failure = Some(format!(
+                                            "Failed to prepare replacement microphone resampler: {error}"
+                                        ));
+                                        next_mic_route_retry = now + SYSTEM_ROUTE_RETRY_INTERVAL;
+                                    }
+                                }
+                            }
+                            Ok(Err(error)) => {
+                                mic_rebuild_receiver = None;
+                                pending_mic_failure = Some(error.to_string());
+                                next_mic_route_retry = now + SYSTEM_ROUTE_RETRY_INTERVAL;
+                            }
+                            Err(crossbeam::channel::TryRecvError::Disconnected) => {
+                                mic_rebuild_receiver = None;
+                                pending_mic_failure = Some(
+                                    "Replacement microphone worker stopped unexpectedly"
+                                        .to_string(),
+                                );
+                                next_mic_route_retry = now + SYSTEM_ROUTE_RETRY_INTERVAL;
+                            }
+                            Err(crossbeam::channel::TryRecvError::Empty) => {}
+                        }
+                    }
+
+                    if let Some(failure) = mic_runtime_failure
+                        .lock()
+                        .ok()
+                        .and_then(|mut failure| failure.take())
+                    {
+                        pending_mic_failure = Some(failure);
+                        mic_rebuild_pending = true;
+                        mic_failure_reported = false;
+                    }
+
+                    if mic_rebuild_receiver.is_none()
+                        && system_route_retry_due(mic_rebuild_pending, now, next_mic_route_retry)
+                    {
+                        if !mic_failure_reported {
+                            if let Some(failure) = pending_mic_failure.as_deref() {
+                                emit_source_capture_failure(events.as_ref(), "mic", failure);
+                            }
+                            mic_failure_reported = true;
+                        }
+
+                        // Stop the old callback before the replacement can
+                        // start, then consume every sample it queued and flush
+                        // the old rate converter's tail, so old and new streams
+                        // never write into the shared queue at the same time.
+                        drop(_mic_stream.take());
+                        source_scratch.clear();
+                        while let Some(sample) = mic_buffer.pop() {
+                            source_scratch.push(sample);
+                        }
+                        if !source_scratch.is_empty() {
+                            last_mic_data = now;
+                        }
+                        if let Some(resampler) = mic_resampler.as_mut() {
+                            converted_scratch.clear();
+                            resampler.push(&source_scratch, &mut converted_scratch);
+                            resampler.finish(&mut converted_scratch);
+                            mixer.push_mic(&converted_scratch);
+                        } else {
+                            mixer.push_mic(&source_scratch);
+                        }
+                        mic_resampler = None;
+
+                        let (result_tx, result_rx) = crossbeam::channel::bounded(1);
+                        let mic_buffer = Arc::clone(&mic_buffer);
+                        let is_capturing = Arc::clone(&is_capturing);
+                        let dropped_mic_samples = Arc::clone(&dropped_mic_samples);
+                        let mic_runtime_failure = Arc::clone(&mic_runtime_failure);
+                        let capture_failure = Arc::clone(&capture_failure);
+                        let preferred_device = mic_device.clone();
+                        std::thread::spawn(move || {
+                            let result = start_mic_stream(
+                                preferred_device,
+                                mic_buffer,
+                                is_capturing,
+                                dropped_mic_samples,
+                                mic_runtime_failure,
+                                capture_failure,
+                                false,
+                            );
+                            let _ = result_tx.send(result);
+                        });
+                        mic_rebuild_receiver = Some(result_rx);
+                    }
+                }
 
                 if capture_system {
                     if let Some(receiver) = system_rebuild_receiver.as_ref() {
@@ -2549,7 +2841,7 @@ impl MixedAudioCapture {
                     }
                 }
 
-                if capture_mic {
+                if capture_mic && mic_rebuild_receiver.is_none() {
                     source_scratch.clear();
                     while let Some(sample) = mic_buffer.pop() {
                         source_scratch.push(sample);
@@ -2609,8 +2901,13 @@ impl MixedAudioCapture {
 
                 // Frames the mixer had to invent because a source delivered
                 // nothing: the evidence that separates a device which has gone
-                // away from one that simply has nothing to play.
+                // away from one that simply has nothing to play. Published on
+                // every pass so the stop path still gets a truthful summary if
+                // the capture thread has to be abandoned at teardown.
                 let padded_now = mixer.counts();
+                published_mic_padded.store(padded_now.mic_padded, Ordering::Relaxed);
+                published_system_padded.store(padded_now.system_padded, Ordering::Relaxed);
+                published_mixed_frames.store(padded_now.mixed, Ordering::Relaxed);
                 if let Some(watchdog) = mic_watchdog.as_mut() {
                     let padded = padded_now.mic_padded - padded_before.mic_padded;
                     if let Some(seconds) = watchdog.observe(&mic_output[mic_before..], padded) {
@@ -2676,6 +2973,9 @@ impl MixedAudioCapture {
             }
 
             let counts = mixer.counts();
+            published_mic_padded.store(counts.mic_padded, Ordering::Relaxed);
+            published_system_padded.store(counts.system_padded, Ordering::Relaxed);
+            published_mixed_frames.store(counts.mixed, Ordering::Relaxed);
             if counts.mic_padded > 0 || counts.system_padded > 0 {
                 tracing::warn!(
                     "Mixed audio capture padded starved sources with silence (mic={}, system={}, of {} mixed frames)",
@@ -2744,12 +3044,15 @@ impl MixedAudioCapture {
         tracing::info!("Mixed audio capture stopped");
     }
 
-    pub fn drop_counts(&self) -> (u64, u64, u64) {
-        (
-            self.dropped_mic_samples.load(Ordering::Relaxed),
-            self.dropped_system_samples.load(Ordering::Relaxed),
-            self.dropped_mixed_chunks.load(Ordering::Relaxed),
-        )
+    pub fn outcome(&self) -> MixedCaptureOutcome {
+        MixedCaptureOutcome {
+            dropped_mic_samples: self.dropped_mic_samples.load(Ordering::Relaxed),
+            dropped_system_samples: self.dropped_system_samples.load(Ordering::Relaxed),
+            dropped_mixed_chunks: self.dropped_mixed_chunks.load(Ordering::Relaxed),
+            mic_padded_frames: self.mic_padded_frames.load(Ordering::Relaxed),
+            system_padded_frames: self.system_padded_frames.load(Ordering::Relaxed),
+            mixed_frames: self.mixed_frames.load(Ordering::Relaxed),
+        }
     }
 }
 
@@ -2827,6 +3130,29 @@ fn emit_system_audio_status(
             "routeDevice": route.map(|route| route.display_name.as_str()),
             "nativeSampleRate": route.map(|route| route.sample_rate),
             "nativeChannels": route.map(|route| route.channels),
+        }),
+    );
+}
+
+/// Emit "this capture source failed and is being rebuilt" on the same channel
+/// the silence watchdog uses.
+///
+/// The renderer already renders a per-source warning banner from this event, so
+/// a microphone that died mid-meeting reaches the user through the surface built
+/// for exactly that — rather than only appearing at stop, when the meeting is
+/// already over.
+fn emit_source_capture_failure(events: Option<&MixedCaptureEvents>, source: &str, detail: &str) {
+    tracing::error!("Mixed capture source '{source}' failed: {detail}");
+    let Some(events) = events else {
+        return;
+    };
+    events.handle.emit(
+        "meeting-audio-source-warning",
+        serde_json::json!({
+            "recordingId": &events.recording_id,
+            "source": source,
+            "reason": "capture_failed",
+            "detail": detail,
         }),
     );
 }

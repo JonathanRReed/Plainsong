@@ -32,6 +32,74 @@ const OVERLAY_BOTTOM_MARGIN: Record<OverlayKind, number> = {
 };
 const OVERLAY_SIDE_MARGIN = 20;
 
+/**
+ * The size each overlay window is created at (see windows.ts). Also the size a
+ * malformed resize request falls back to, so a NaN estimate leaves the pill
+ * looking exactly as it does at rest instead of collapsing or filling the
+ * screen.
+ */
+export const OVERLAY_BASE_SIZE: Record<OverlayKind, OverlaySize> = {
+  dictation: { width: 420, height: 120 },
+  recording: { width: 320, height: 80 },
+};
+
+/**
+ * The largest each overlay may be resized to from the renderer.
+ *
+ * These windows are always-on-top, `visibleOnFullScreen`, frameless and
+ * transparent. `__window_set_size__` used to pass the renderer's numbers to
+ * `resolveOverlayBounds`, which clamps only to the full work area — so a
+ * renderer asking for 5000x5000 got an always-on-top window covering the whole
+ * display. Paired with `__window_set_ignore_mouse_events__ {ignore:false}` and
+ * `__window_show__` that is a full-screen click-capture primitive, built
+ * entirely out of commands the renderer is allowed to send.
+ *
+ * The caps are headroom over what the renderer ACTUALLY asks for, not round
+ * numbers. The binding cases are:
+ *
+ * - dictation: `getPopupSize` (src/lib/dictation-popup-layout.ts) tops out at
+ *   432x396 — the full-mode processing card with a six-line message and a
+ *   four-line preview.
+ * - recording: 470x228, the expanded chip in recording-popup.tsx.
+ *
+ * Clamping BELOW those would clip the card rather than contain an attack, and
+ * the layout module is explicit that a short estimate cuts off the live-text
+ * box first — the one thing the user is reading while speaking. A test pins
+ * these caps against both real maxima, so a layout change that outgrows them
+ * fails there instead of silently truncating the HUD.
+ */
+export const OVERLAY_MAX_SIZE: Record<OverlayKind, OverlaySize> = {
+  dictation: { width: 720, height: 480 },
+  recording: { width: 560, height: 320 },
+};
+
+/** Below this an overlay is invisible but still hit-testable. */
+const OVERLAY_MIN_DIMENSION = 1;
+
+function clampDimension(value: number, fallback: number, max: number): number {
+  if (typeof value !== "number" || !Number.isFinite(value)) {
+    return fallback;
+  }
+  return Math.min(Math.max(Math.round(value), OVERLAY_MIN_DIMENSION), max);
+}
+
+/**
+ * Bound a renderer-requested overlay size to {@link OVERLAY_MAX_SIZE}.
+ *
+ * Non-finite dimensions (NaN, Infinity — both of which pass a `typeof x ===
+ * "number"` guard) fall back to that overlay's base size rather than being
+ * rejected, so a bad estimate mid-sentence resets the pill instead of leaving
+ * it at whatever it last was.
+ */
+export function clampOverlaySize(kind: OverlayKind, size: OverlaySize): OverlaySize {
+  const max = OVERLAY_MAX_SIZE[kind];
+  const base = OVERLAY_BASE_SIZE[kind];
+  return {
+    width: clampDimension(size.width, base.width, max.width),
+    height: clampDimension(size.height, base.height, max.height),
+  };
+}
+
 function clamp(value: number, min: number, max: number): number {
   // `min` wins when the range is inverted (a window wider/taller than the work
   // area); callers clamp the size first so that can't normally happen.

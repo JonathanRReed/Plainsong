@@ -1,3 +1,60 @@
+/**
+ * The channel manifest filename electron-updater requests, per channel.
+ *
+ * Mirrors `updaterChannelManifestFilename` in electron/updater-channel.ts,
+ * which the app itself uses — a .mjs gate cannot import the TypeScript module,
+ * so the rule is duplicated and the duplication is pinned by a unit test.
+ * Stable maps to `latest`, not `stable`: electron-builder publishes no
+ * `stable-mac.yml`.
+ */
+export const UPDATE_CHANNELS = ["stable", "beta"];
+
+export function updaterChannelManifestFilename(channel, platform = "darwin") {
+  const suffix = platform === "darwin" ? "-mac" : platform === "linux" ? "-linux" : "";
+  const channelName = channel === "beta" ? "beta" : "latest";
+  return `${channelName}${suffix}.yml`;
+}
+
+/**
+ * The feed directory for `channel`, given the feed's base origin+path.
+ *
+ * Each channel has its OWN directory (/stable/, /beta/), so the two feeds
+ * cannot be confused for each other even where their manifest names coincide.
+ *
+ * The base is normalized through {@link resolveFeedBaseUrl} first, so passing
+ * a URL that already names a channel cannot produce `/beta/stable/`.
+ */
+export function channelFeedUrl(baseUrl, channel) {
+  const base = resolveFeedBaseUrl(baseUrl ?? "");
+  if (!base) return null;
+  return new URL(`${channel}/`, base).href;
+}
+
+/** The full manifest URL a channel resolves to, or null for an unusable base. */
+export function channelManifestUrl(baseUrl, channel, platform = "darwin") {
+  const feedUrl = channelFeedUrl(baseUrl, channel);
+  if (!feedUrl) return null;
+  return new URL(updaterChannelManifestFilename(channel, platform), feedUrl).href;
+}
+
+/**
+ * The base a per-channel feed URL was derived from: strip a trailing channel
+ * segment if the URL already names one, so `--feed-url .../beta/` and
+ * `--feed-url .../` both work.
+ */
+export function resolveFeedBaseUrl(feedUrl) {
+  const validation = validatePublicFeedUrl(feedUrl);
+  if (!validation.valid) return null;
+  const url = new URL(validation.normalizedUrl);
+  const segments = url.pathname.split("/").filter(Boolean);
+  const last = segments.at(-1);
+  if (last && UPDATE_CHANNELS.includes(last)) {
+    url.pathname = `/${segments.slice(0, -1).join("/")}`;
+    if (!url.pathname.endsWith("/")) url.pathname = `${url.pathname}/`;
+  }
+  return url.href;
+}
+
 function scalarValue(text, key) {
   const match = text.match(
     new RegExp(`^${key}:\\s*['"]?([^'"\\n]+)['"]?\\s*$`, "m"),
@@ -187,6 +244,24 @@ export function evaluatePublicUpdateFeedEvidence(evidence) {
       evidence.rangeBytes === 1 &&
       Boolean(expectedContentRange) &&
       evidence.contentRange?.toLowerCase() === expectedContentRange.toLowerCase(),
+    // Every channel a running app can select must resolve to a manifest that
+    // exists. The app derives the feed directory from the channel at runtime,
+    // so a channel with no published manifest is a channel whose users get
+    // ERR_UPDATER_CHANNEL_FILE_NOT_FOUND on every check — including stable
+    // users the first time a stable build ships.
+    ...Object.fromEntries(
+      UPDATE_CHANNELS.map((channel) => [
+        `${channel}ChannelManifestReachable`,
+        evidence.channelManifests?.[channel]?.status === 200,
+      ]),
+    ),
+    ...Object.fromEntries(
+      UPDATE_CHANNELS.map((channel) => [
+        `${channel}ChannelManifestUsesOwnDirectory`,
+        evidence.channelManifests?.[channel]?.url ===
+          channelManifestUrl(evidence.feedBaseUrl, channel),
+      ]),
+    ),
   };
   return {
     pass: Object.values(checks).every(Boolean),
