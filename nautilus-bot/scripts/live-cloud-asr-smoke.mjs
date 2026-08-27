@@ -37,7 +37,14 @@ async function defaultAsrModelId(providerVariant) {
       `Could not locate AsrProviderType::default_model_id() in ${modPath} to derive live-smoke model ids from.`,
     );
   }
-  const armMatch = fnMatch[1].match(
+  // Strip `//` (and `///`) line comments before matching an arm, so a
+  // retired/commented-out arm (e.g. a provider mid-migration to a new
+  // model id) can never be picked up as if it were live code.
+  const fnBodyWithoutComments = fnMatch[1]
+    .split("\n")
+    .map((line) => line.replace(/\/\/.*$/, ""))
+    .join("\n");
+  const armMatch = fnBodyWithoutComments.match(
     new RegExp(`AsrProviderType::${providerVariant}\\s*=>\\s*"([^"]+)"`),
   );
   if (!armMatch) {
