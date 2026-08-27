@@ -160,6 +160,51 @@ pub trait FocusedFieldReader {
     fn read_focused_field(&self) -> Result<Option<FocusedFieldSnapshot>, String>;
 }
 
+/// Whether the field a reader just looked at is plausibly the one Plainsong
+/// wrote into, judged by whether the inserted text is actually sitting in it.
+///
+/// This is what makes the anchor trustworthy rather than assumed. Plainsong
+/// inserts either by setting an Accessibility attribute or by dispatching a
+/// paste; in the second case it never learns which element took the keystrokes.
+/// Reading the focused field once, immediately, and finding the inserted text
+/// there is direct evidence — and if it is not there, no anchor is recorded and
+/// no readback is ever scheduled.
+///
+/// Compared on whitespace-normalized text, because destination apps reflow what
+/// they are given (a chat box turns a newline into a send, an editor
+/// re-indents).
+pub fn anchor_snapshot_contains_insertion(snapshot_text: &str, inserted_text: &str) -> bool {
+    let inserted = tokenize_words(inserted_text).join(" ");
+    if inserted.is_empty() {
+        return false;
+    }
+    tokenize_words(snapshot_text).join(" ").contains(&inserted)
+}
+
+/// Records which field an insertion landed in, immediately after it lands.
+///
+/// Returns `None` — meaning "do not follow this insertion up" — whenever the
+/// evidence is not there: the read failed, nothing is focused, the field
+/// exposes no text, or the text Plainsong just inserted is not in it.
+pub fn capture_insertion_anchor(
+    reader: &dyn FocusedFieldReader,
+    inserted_text: &str,
+) -> Option<FocusedFieldFingerprint> {
+    let snapshot = match reader.read_focused_field() {
+        Ok(Some(snapshot)) => snapshot,
+        Ok(None) => return None,
+        Err(error) => {
+            tracing::debug!("Post-insert anchor read failed: {}", error);
+            return None;
+        }
+    };
+
+    if !anchor_snapshot_contains_insertion(&snapshot.text, inserted_text) {
+        return None;
+    }
+    Some(snapshot.fingerprint)
+}
+
 /// A single original → corrected word-level pair, ready to be queued.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ReadbackCorrectionCandidate {
@@ -974,6 +1019,62 @@ mod tests {
             ),
             ReadbackOutcome::Aborted(ReadbackAbort::NoAcceptableCandidates)
         );
+    }
+
+    // ── Anchoring the insertion to a field ──────────────────────────────────
+
+    #[test]
+    fn anchors_an_insertion_to_the_field_that_actually_holds_it() {
+        assert_eq!(
+            capture_insertion_anchor(
+                &reader_returning("Hey team send it to cuban netties thanks"),
+                "send it to cuban netties",
+            ),
+            Some(fingerprint())
+        );
+    }
+
+    #[test]
+    fn refuses_to_anchor_to_a_field_that_does_not_hold_the_insertion() {
+        // The paste went somewhere else, or nowhere. Without evidence that
+        // this is the right field, no readback may be scheduled against it.
+        assert!(capture_insertion_anchor(
+            &reader_returning("a completely unrelated draft"),
+            "send it to cuban netties",
+        )
+        .is_none());
+    }
+
+    #[test]
+    fn refuses_to_anchor_when_nothing_is_readable() {
+        assert!(
+            capture_insertion_anchor(&FakeReader(Ok(None)), "send it to cuban netties").is_none()
+        );
+        assert!(capture_insertion_anchor(
+            &FakeReader(Err("Accessibility read failed.".to_string())),
+            "send it to cuban netties",
+        )
+        .is_none());
+    }
+
+    #[test]
+    fn anchor_matching_survives_the_destination_apps_reflow() {
+        assert!(anchor_snapshot_contains_insertion(
+            "Hey team\n  send it   to cuban netties\nthanks",
+            "send it to cuban netties",
+        ));
+    }
+
+    #[test]
+    fn anchor_matching_rejects_empty_text_on_either_side() {
+        assert!(!anchor_snapshot_contains_insertion(
+            "some field text",
+            "   "
+        ));
+        assert!(!anchor_snapshot_contains_insertion(
+            "",
+            "send it to cuban netties"
+        ));
     }
 
     // ── End to end ──────────────────────────────────────────────────────────

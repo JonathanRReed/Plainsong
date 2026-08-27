@@ -1570,6 +1570,11 @@ impl Database {
             )",
             [],
         )?;
+        // Where the suggestion came from: an edit the user made inside
+        // Plainsong, or one read back out of the app the text was inserted
+        // into. Rows written before this column existed are the former, which
+        // is what a NULL reads as.
+        self.ensure_table_column("dictation_correction_suggestions", "source", "TEXT")?;
         self.conn.execute(
             "CREATE INDEX IF NOT EXISTS idx_dictation_correction_suggestions_spoken_form
              ON dictation_correction_suggestions(spoken_form)",
@@ -4484,7 +4489,7 @@ impl Database {
         &self,
     ) -> Result<Vec<DictationCorrectionSuggestion>> {
         let mut stmt = self.conn.prepare(
-            "SELECT id, original_text, corrected_text, spoken_form, replacement, app_target, created_at, updated_at
+            "SELECT id, original_text, corrected_text, spoken_form, replacement, app_target, source, created_at, updated_at
              FROM dictation_correction_suggestions
              ORDER BY updated_at DESC, created_at DESC",
         )?;
@@ -4497,12 +4502,13 @@ impl Database {
                 spoken_form: row.get(3)?,
                 replacement: row.get(4)?,
                 app_target: row.get(5)?,
+                source: row.get(6)?,
                 created_at: row
-                    .get::<_, String>(6)?
+                    .get::<_, String>(7)?
                     .parse()
                     .unwrap_or_else(|_| Utc::now()),
                 updated_at: row
-                    .get::<_, String>(7)?
+                    .get::<_, String>(8)?
                     .parse()
                     .unwrap_or_else(|_| Utc::now()),
             })
@@ -4518,6 +4524,7 @@ impl Database {
         spoken_form: &str,
         replacement: &str,
         app_target: Option<&str>,
+        source: Option<&str>,
     ) -> Result<(String, DictationCorrectionSuggestion)> {
         let normalized_spoken_form = spoken_form.trim();
         let normalized_replacement = replacement.trim();
@@ -4526,6 +4533,10 @@ impl Database {
         }
 
         let normalized_app_target = app_target
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(str::to_string);
+        let normalized_source = source
             .map(str::trim)
             .filter(|value| !value.is_empty())
             .map(str::to_string);
@@ -4551,14 +4562,15 @@ impl Database {
         if let Some(existing) = existing {
             self.conn.execute(
                 "UPDATE dictation_correction_suggestions
-                 SET original_text = ?1, corrected_text = ?2, spoken_form = ?3, replacement = ?4, app_target = ?5, updated_at = ?6
-                 WHERE id = ?7",
+                 SET original_text = ?1, corrected_text = ?2, spoken_form = ?3, replacement = ?4, app_target = ?5, source = ?6, updated_at = ?7
+                 WHERE id = ?8",
                 params![
                     original_text.trim(),
                     corrected_text.trim(),
                     normalized_spoken_form,
                     normalized_replacement,
                     &normalized_app_target,
+                    &normalized_source,
                     now.to_rfc3339(),
                     &existing.id,
                 ],
@@ -4573,6 +4585,7 @@ impl Database {
                     spoken_form: normalized_spoken_form.to_string(),
                     replacement: normalized_replacement.to_string(),
                     app_target: normalized_app_target,
+                    source: normalized_source,
                     created_at: existing.created_at,
                     updated_at: now,
                 },
@@ -4585,14 +4598,15 @@ impl Database {
                 spoken_form: normalized_spoken_form.to_string(),
                 replacement: normalized_replacement.to_string(),
                 app_target: normalized_app_target,
+                source: normalized_source,
                 created_at: now,
                 updated_at: now,
             };
 
             self.conn.execute(
                 "INSERT INTO dictation_correction_suggestions (
-                    id, original_text, corrected_text, spoken_form, replacement, app_target, created_at, updated_at
-                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+                    id, original_text, corrected_text, spoken_form, replacement, app_target, source, created_at, updated_at
+                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
                 params![
                     &suggestion.id,
                     &suggestion.original_text,
@@ -4600,6 +4614,7 @@ impl Database {
                     &suggestion.spoken_form,
                     &suggestion.replacement,
                     &suggestion.app_target,
+                    &suggestion.source,
                     suggestion.created_at.to_rfc3339(),
                     suggestion.updated_at.to_rfc3339(),
                 ],
@@ -4607,6 +4622,41 @@ impl Database {
 
             Ok(("created".to_string(), suggestion))
         }
+    }
+
+    /// Drops queued suggestions that have gone stale or overflowed the inbox.
+    ///
+    /// Returns how many rows were removed. Both bounds matter for a queue that
+    /// can be fed by text read out of other applications: expiry means an
+    /// unreviewed suggestion does not sit there indefinitely, and the cap means
+    /// a run of dictations into a hostile field cannot grow the table without
+    /// limit. Newest survives in both cases — an old suggestion the user has
+    /// already scrolled past twice is the one they care least about.
+    pub fn prune_dictation_correction_suggestions(
+        &mut self,
+        now: chrono::DateTime<Utc>,
+        max_age_days: i64,
+        max_entries: usize,
+    ) -> Result<usize> {
+        let cutoff = now - chrono::Duration::days(max_age_days.max(0));
+        let mut removed = self.conn.execute(
+            "DELETE FROM dictation_correction_suggestions WHERE updated_at < ?1",
+            params![cutoff.to_rfc3339()],
+        )?;
+
+        let surviving = self.list_dictation_correction_suggestions()?;
+        if surviving.len() > max_entries {
+            // `list_...` is already newest-first, so everything past the cap is
+            // the oldest tail.
+            for suggestion in surviving.into_iter().skip(max_entries) {
+                removed += self.conn.execute(
+                    "DELETE FROM dictation_correction_suggestions WHERE id = ?1",
+                    params![&suggestion.id],
+                )?;
+            }
+        }
+
+        Ok(removed)
     }
 
     pub fn get_dictation_correction_suggestion(
@@ -8499,9 +8549,11 @@ mod tests {
                 "jon",
                 "John",
                 Some("Slack"),
+                None,
             )
             .unwrap();
         assert_eq!(first_action, "created");
+        assert!(first.source.is_none());
 
         let (second_action, second) = db
             .upsert_dictation_correction_suggestion(
@@ -8510,6 +8562,7 @@ mod tests {
                 "jon",
                 "John",
                 Some("Slack"),
+                None,
             )
             .unwrap();
         assert_eq!(second_action, "updated");
@@ -8525,6 +8578,102 @@ mod tests {
             .list_dictation_correction_suggestions()
             .unwrap()
             .is_empty());
+    }
+
+    #[test]
+    fn correction_suggestions_remember_which_app_they_were_read_out_of() {
+        let mut db = in_memory_db();
+        let (_, external) = db
+            .upsert_dictation_correction_suggestion(
+                "send it to cuban netties",
+                "send it to kubernetes",
+                "cuban netties",
+                "kubernetes",
+                Some("Slack"),
+                Some(crate::models::CORRECTION_SUGGESTION_SOURCE_EXTERNAL_APP),
+            )
+            .unwrap();
+        assert_eq!(
+            external.source.as_deref(),
+            Some(crate::models::CORRECTION_SUGGESTION_SOURCE_EXTERNAL_APP)
+        );
+
+        let stored = db.list_dictation_correction_suggestions().unwrap();
+        assert_eq!(
+            stored[0].source.as_deref(),
+            Some(crate::models::CORRECTION_SUGGESTION_SOURCE_EXTERNAL_APP)
+        );
+    }
+
+    #[test]
+    fn pruning_correction_suggestions_drops_stale_entries_and_holds_the_cap() {
+        let mut db = in_memory_db();
+        let now = Utc::now();
+
+        for index in 0..5 {
+            db.upsert_dictation_correction_suggestion(
+                &format!("word{} here", index),
+                &format!("term{} here", index),
+                &format!("word{}", index),
+                &format!("term{}", index),
+                Some("Slack"),
+                Some(crate::models::CORRECTION_SUGGESTION_SOURCE_EXTERNAL_APP),
+            )
+            .unwrap();
+        }
+
+        // Age two of them past the window by hand; `upsert` always stamps now.
+        let stale_ids = db
+            .list_dictation_correction_suggestions()
+            .unwrap()
+            .into_iter()
+            .take(2)
+            .map(|suggestion| suggestion.id)
+            .collect::<Vec<_>>();
+        for id in &stale_ids {
+            db.conn
+                .execute(
+                    "UPDATE dictation_correction_suggestions SET updated_at = ?1 WHERE id = ?2",
+                    params![(now - chrono::Duration::days(30)).to_rfc3339(), id],
+                )
+                .unwrap();
+        }
+
+        let removed = db
+            .prune_dictation_correction_suggestions(now, 7, 10)
+            .unwrap();
+        assert_eq!(removed, 2);
+        assert_eq!(db.list_dictation_correction_suggestions().unwrap().len(), 3);
+
+        // Now squeeze the cap: the newest two survive.
+        let removed = db
+            .prune_dictation_correction_suggestions(now, 7, 2)
+            .unwrap();
+        assert_eq!(removed, 1);
+        let surviving = db.list_dictation_correction_suggestions().unwrap();
+        assert_eq!(surviving.len(), 2);
+        assert!(!stale_ids.contains(&surviving[0].id));
+    }
+
+    #[test]
+    fn pruning_correction_suggestions_leaves_a_healthy_queue_alone() {
+        let mut db = in_memory_db();
+        db.upsert_dictation_correction_suggestion(
+            "jon will join",
+            "John will join",
+            "jon",
+            "John",
+            Some("Slack"),
+            None,
+        )
+        .unwrap();
+
+        assert_eq!(
+            db.prune_dictation_correction_suggestions(Utc::now(), 7, 60)
+                .unwrap(),
+            0
+        );
+        assert_eq!(db.list_dictation_correction_suggestions().unwrap().len(), 1);
     }
 
     #[test]
