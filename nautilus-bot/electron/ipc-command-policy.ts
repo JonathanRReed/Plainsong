@@ -43,6 +43,9 @@ const FAST_COMMANDS = new Set<string>([
   "is_diarization_model_available",
   "list_audio_input_devices",
   "list_diarization_models",
+  // Sits directly in front of a user-initiated capture start: a slow registry
+  // write must fail fast rather than delay the meeting behind it.
+  "register_capture_admission",
 ]);
 
 const EXTENDED_COMMANDS = new Set<string>([

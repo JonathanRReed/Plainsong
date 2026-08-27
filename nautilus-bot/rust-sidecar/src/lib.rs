@@ -107,6 +107,10 @@ pub struct AppState {
     /// lock, so it cannot remove a file after a command has claimed it.
     active_meeting_audio_postprocessing: Arc<StdMutex<HashMap<String, usize>>>,
     operation_coordinator: Arc<operation_coordinator::OperationCoordinator>,
+    /// Single-use proofs that a real user gesture asked for a meeting capture.
+    /// Registered by the privileged Electron side and redeemed by
+    /// `authorize_meeting_capture_options`.
+    capture_admission: Arc<admission::CaptureAdmissionRegistry>,
     active_capture_lease: Arc<Mutex<Option<(String, operation_coordinator::OperationLease)>>>,
     /// Set as soon as the sidecar accepts a shutdown request. Meeting
     /// post-processing failures caused by runtime teardown must remain
@@ -7435,7 +7439,8 @@ mod tests {
             "projectId": "default",
             "consentPromptShown": true
         }));
-        assert!(authorize_meeting_capture_options(missing)
+        let registry = admission::CaptureAdmissionRegistry::default();
+        assert!(authorize_meeting_capture_options(&registry, missing)
             .expect_err("renderer consent must not authorize capture")
             .contains("privileged Electron admission"));
 
@@ -7445,25 +7450,169 @@ mod tests {
             "projectId": "default",
             "admissionNonce": "renderer-controlled"
         }));
-        assert!(authorize_meeting_capture_options(invalid)
+        assert!(authorize_meeting_capture_options(&registry, invalid)
             .expect_err("invalid nonce must fail")
             .contains("invalid"));
     }
 
     #[test]
     fn start_recording_derives_consent_from_privileged_admission() {
+        let registry = admission::CaptureAdmissionRegistry::default();
+        let nonce = uuid::Uuid::new_v4().to_string();
+        registry.register(&nonce);
         let options = meeting_options_from_json(serde_json::json!({
             "mic": true,
             "systemAudio": false,
             "projectId": "default",
             "consentPromptShown": false,
+            "admissionNonce": nonce
+        }));
+
+        let authorized = authorize_meeting_capture_options(&registry, options)
+            .expect("accept valid privileged admission");
+        assert!(authorized.consent_prompt_shown);
+        assert!(authorized.admission_nonce.is_none());
+    }
+
+    #[test]
+    fn a_registered_capture_nonce_cannot_be_replayed() {
+        // A well-formed UUID used to be accepted on its own, so anything that
+        // could reach the command could mint its own admission. A registered
+        // nonce is proof exactly once.
+        let registry = admission::CaptureAdmissionRegistry::default();
+        let nonce = uuid::Uuid::new_v4().to_string();
+        registry.register(&nonce);
+
+        let first = meeting_options_from_json(serde_json::json!({
+            "mic": true,
+            "systemAudio": false,
+            "projectId": "default",
+            "admissionNonce": &nonce
+        }));
+        assert!(authorize_meeting_capture_options(&registry, first).is_ok());
+
+        let replay = meeting_options_from_json(serde_json::json!({
+            "mic": true,
+            "systemAudio": false,
+            "projectId": "default",
+            "admissionNonce": &nonce
+        }));
+        assert!(authorize_meeting_capture_options(&registry, replay).is_err());
+    }
+
+    #[test]
+    fn an_unregistered_uuid_is_refused_once_the_registrar_is_live() {
+        let registry = admission::CaptureAdmissionRegistry::default();
+        registry.register(&uuid::Uuid::new_v4().to_string());
+
+        let forged = meeting_options_from_json(serde_json::json!({
+            "mic": true,
+            "systemAudio": false,
+            "projectId": "default",
             "admissionNonce": uuid::Uuid::new_v4().to_string()
         }));
 
-        let authorized =
-            authorize_meeting_capture_options(options).expect("accept valid privileged admission");
-        assert!(authorized.consent_prompt_shown);
-        assert!(authorized.admission_nonce.is_none());
+        assert!(authorize_meeting_capture_options(&registry, forged)
+            .expect_err("an unissued proof must be refused")
+            .contains("not issued"));
+    }
+
+    #[test]
+    fn capture_admission_stays_permissive_until_electron_registers() {
+        // Until the privileged registrar exists, behaviour is exactly what it
+        // was. Enforcing first would take meeting capture down outright.
+        let registry = admission::CaptureAdmissionRegistry::default();
+        let options = meeting_options_from_json(serde_json::json!({
+            "mic": true,
+            "systemAudio": false,
+            "projectId": "default",
+            "admissionNonce": uuid::Uuid::new_v4().to_string()
+        }));
+
+        assert!(authorize_meeting_capture_options(&registry, options).is_ok());
+    }
+
+    #[test]
+    fn meeting_start_error_codes_use_the_contract_names() {
+        // The renderer branches on these exact strings instead of matching the
+        // error prose, which is what it used to do.
+        for (code, expected) in [
+            (
+                MeetingStartErrorCode::MicPermissionDenied,
+                "mic_permission_denied",
+            ),
+            (
+                MeetingStartErrorCode::SystemAudioUnavailable,
+                "system_audio_unavailable",
+            ),
+            (
+                MeetingStartErrorCode::AudioDeviceNotFound,
+                "audio_device_not_found",
+            ),
+            (
+                MeetingStartErrorCode::SidecarUnavailable,
+                "sidecar_unavailable",
+            ),
+            (MeetingStartErrorCode::DiskFull, "disk_full"),
+            (MeetingStartErrorCode::AlreadyRecording, "already_recording"),
+            (MeetingStartErrorCode::ConsentRequired, "consent_required"),
+            (MeetingStartErrorCode::Unknown, "unknown"),
+        ] {
+            assert_eq!(code.as_str(), expected);
+        }
+    }
+
+    #[test]
+    fn out_of_space_failures_are_classified_as_disk_full() {
+        for message in [
+            "No space left on device",
+            "Failed to create recording audio: not enough space",
+            "Refusing to start: insufficient disk space for this meeting",
+            "needs more free space than is available",
+        ] {
+            assert!(
+                meeting_start_failure_is_out_of_space(message),
+                "{message} must classify as a disk-full failure"
+            );
+        }
+    }
+
+    #[test]
+    fn ordinary_failures_are_not_mistaken_for_disk_full() {
+        for message in [
+            "Microphone permission is not ready.",
+            "System audio capture is unavailable",
+            "Cannot start recording while dictation is active",
+        ] {
+            assert!(
+                !meeting_start_failure_is_out_of_space(message),
+                "{message} must not classify as a disk-full failure"
+            );
+        }
+    }
+
+    #[test]
+    fn every_meeting_start_failure_carries_a_typed_code() {
+        // Each `return Err(...)`/`?` on the start path must go through
+        // `fail_meeting_start`, or the renderer is back to reading prose.
+        const SOURCE: &str = include_str!("lib.rs");
+        // Newline-anchored so this does not match its own string literal above.
+        let start = SOURCE
+            .find("\nasync fn start_recording_for_sidecar(")
+            .expect("the meeting start path must exist");
+        let body = &SOURCE[start + 1..];
+        let body = body
+            .split_once("\nasync fn ")
+            .map(|parts| parts.0)
+            .unwrap_or(body);
+
+        let failures = body.matches("return Err(").count();
+        let typed = body.matches("fail_meeting_start(").count();
+        assert!(failures > 0, "the start path must have failure returns");
+        assert!(
+            typed >= failures,
+            "every meeting-start failure must be classified: {failures} returns, {typed} typed"
+        );
     }
 
     #[test]
@@ -18732,6 +18881,7 @@ pub async fn build_app_state() -> Result<AppState, String> {
         recording_templates: Arc::new(StdMutex::new(std::collections::HashMap::new())),
         active_meeting_audio_postprocessing: Arc::new(StdMutex::new(HashMap::new())),
         operation_coordinator: operation_coordinator::OperationCoordinator::new(),
+        capture_admission: Arc::new(admission::CaptureAdmissionRegistry::default()),
         active_capture_lease: Arc::new(Mutex::new(None)),
         sidecar_shutting_down: Arc::new(AtomicBool::new(false)),
         recent_dictation_results: Arc::new(StdMutex::new(Vec::new())),
@@ -21726,7 +21876,14 @@ async fn persist_recording_finalization_failure(
 
 /// Sidecar-compatible start_recording. Emits state events via SidecarHandle.
 /// Overlay show/hide and tray updates are handled by Electron.
+/// Verify that this capture was asked for by a real user gesture.
+///
+/// The nonce used to be validated only as a UUID, which made the check a
+/// formality: anything that could reach the command could mint a well-formed
+/// proof for itself. It is now redeemed against the registry the privileged
+/// Electron side writes to, single use and short lived.
 fn authorize_meeting_capture_options(
+    capture_admission: &admission::CaptureAdmissionRegistry,
     mut options: models::RecordingOptions,
 ) -> Result<models::RecordingOptions, String> {
     let nonce = options
@@ -21735,8 +21892,100 @@ fn authorize_meeting_capture_options(
         .ok_or("Meeting capture requires privileged Electron admission")?;
     uuid::Uuid::parse_str(&nonce)
         .map_err(|_| "Meeting capture admission proof is invalid".to_string())?;
+
+    capture_admission
+        .consume(&nonce)
+        .map_err(|rejection| rejection.message().to_string())?;
+
+    // Reaching here means a privileged gesture stands behind this capture, which
+    // is exactly what the consent prompt attests to.
     options.consent_prompt_shown = true;
     Ok(options)
+}
+
+/// Why a meeting failed to start, as a value the renderer can branch on.
+///
+/// The renderer used to substring-match the error text to decide what advice to
+/// show, which quietly broke every time a message was reworded and could never
+/// distinguish two failures that happened to share a phrase. These codes are the
+/// stable contract; the human-readable message travels alongside, unchanged.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum MeetingStartErrorCode {
+    MicPermissionDenied,
+    SystemAudioUnavailable,
+    AudioDeviceNotFound,
+    SidecarUnavailable,
+    DiskFull,
+    AlreadyRecording,
+    ConsentRequired,
+    Unknown,
+}
+
+impl MeetingStartErrorCode {
+    const fn as_str(self) -> &'static str {
+        match self {
+            Self::MicPermissionDenied => "mic_permission_denied",
+            Self::SystemAudioUnavailable => "system_audio_unavailable",
+            Self::AudioDeviceNotFound => "audio_device_not_found",
+            Self::SidecarUnavailable => "sidecar_unavailable",
+            Self::DiskFull => "disk_full",
+            Self::AlreadyRecording => "already_recording",
+            Self::ConsentRequired => "consent_required",
+            Self::Unknown => "unknown",
+        }
+    }
+}
+
+/// Whether a meeting-start failure was really "the disk is full".
+///
+/// Text matching, because the failure arrives as a flattened `anyhow` chain by
+/// the time it reaches the start path and the original `io::Error` (with its
+/// `ENOSPC`) is no longer reachable. This classifier exists precisely so the
+/// *renderer* never has to do this: the guesswork stays on one line here, behind
+/// a typed code, instead of being spread across UI branches that silently stop
+/// matching whenever a message is reworded.
+fn meeting_start_failure_is_out_of_space(message: &str) -> bool {
+    let normalized = message.to_ascii_lowercase();
+    normalized.contains("no space left")
+        || normalized.contains("not enough space")
+        || normalized.contains("insufficient space")
+        || normalized.contains("insufficient disk")
+        || normalized.contains("disk is full")
+        || normalized.contains("out of disk space")
+        || normalized.contains("free space")
+}
+
+/// Announce a meeting-start failure with its typed code, and hand back the
+/// human-readable message for the command's `Err`.
+///
+/// Failures before the recording row exists have no id yet, so `recording_id` is
+/// optional; the phase event still carries the code so the renderer can explain
+/// the failure without parsing prose.
+fn fail_meeting_start(
+    state: &AppState,
+    handle: &crate::sidecar_handle::SidecarHandle,
+    recording_id: Option<&str>,
+    code: MeetingStartErrorCode,
+    message: String,
+) -> String {
+    if let Some(recording_id) = recording_id {
+        if let Ok(mut overlay) = state.recording_overlay_state.lock() {
+            overlay.phase = "error".to_string();
+            overlay.dismissed = false;
+            overlay.recording_id = Some(recording_id.to_string());
+            overlay.message = Some(message.clone());
+        }
+    }
+    handle.emit_event(
+        "meeting-recording-state-changed",
+        serde_json::json!({
+            "phase": "error",
+            "recordingId": recording_id,
+            "code": code.as_str(),
+            "message": &message,
+        }),
+    );
+    message
 }
 
 fn emit_meeting_lifecycle_phase(
@@ -21774,15 +22023,36 @@ async fn start_recording_for_sidecar(
     {
         let dictation_state = state.dictation_runtime_state.lock().await;
         if *dictation_state != DictationSessionState::Idle {
-            return Err("Cannot start recording while dictation is active".to_string());
+            return Err(fail_meeting_start(
+                state,
+                handle,
+                None,
+                MeetingStartErrorCode::AlreadyRecording,
+                "Cannot start recording while dictation is active".to_string(),
+            ));
         }
     }
     let capture_lease = state
         .operation_coordinator
-        .try_acquire(operation_coordinator::OperationKind::Capture)?;
+        .try_acquire(operation_coordinator::OperationKind::Capture)
+        .map_err(|error| {
+            fail_meeting_start(
+                state,
+                handle,
+                None,
+                MeetingStartErrorCode::AlreadyRecording,
+                error,
+            )
+        })?;
     let _storage_guard = state.audio_storage_gate.try_lock().map_err(|_| {
-        "Recording storage is busy with encryption, backup, deletion, or retention. Try again shortly."
-            .to_string()
+        fail_meeting_start(
+            state,
+            handle,
+            None,
+            MeetingStartErrorCode::AlreadyRecording,
+            "Recording storage is busy with encryption, backup, deletion, or retention. Try again shortly."
+                .to_string(),
+        )
     })?;
 
     let settings_snapshot = state.settings_manager.lock().await.settings().clone();
@@ -21791,7 +22061,18 @@ async fn start_recording_for_sidecar(
         &settings_snapshot.transcription,
         settings_snapshot.privacy.remote_processing_enabled,
     )
-    .await?;
+    .await
+    .map_err(|error| {
+        // The transcription route is unusable: no model, no runtime, or a
+        // remote route the privacy settings forbid.
+        fail_meeting_start(
+            state,
+            handle,
+            None,
+            MeetingStartErrorCode::SidecarUnavailable,
+            error,
+        )
+    })?;
 
     #[cfg(target_os = "macos")]
     if options.mic {
@@ -21800,7 +22081,15 @@ async fn start_recording_for_sidecar(
                 .transcription
                 .dictation_auto_request_permissions,
         )
-        .map_err(|error| format!("Microphone permission is not ready. {}", error))?;
+        .map_err(|error| {
+            fail_meeting_start(
+                state,
+                handle,
+                None,
+                MeetingStartErrorCode::MicPermissionDenied,
+                format!("Microphone permission is not ready. {}", error),
+            )
+        })?;
     }
 
     ensure_asr_route_ready(
@@ -21809,14 +22098,31 @@ async fn start_recording_for_sidecar(
         &meeting_selection.1,
         "meeting transcription",
     )
-    .await?;
+    .await
+    .map_err(|error| {
+        fail_meeting_start(
+            state,
+            handle,
+            None,
+            MeetingStartErrorCode::SidecarUnavailable,
+            error,
+        )
+    })?;
 
     if options.system_audio {
         let capability = {
             let audio = state.audio_capture.lock().await;
             audio.system_audio_capability()
         };
-        require_verified_system_audio_for_meeting(&capability)?;
+        require_verified_system_audio_for_meeting(&capability).map_err(|error| {
+            fail_meeting_start(
+                state,
+                handle,
+                None,
+                MeetingStartErrorCode::SystemAudioUnavailable,
+                error,
+            )
+        })?;
     }
 
     if options.mic && options.preferred_input_device_id.is_none() {
@@ -21832,14 +22138,31 @@ async fn start_recording_for_sidecar(
 
     {
         let vault_state = state.vault_state.lock().await;
-        require_recording_vault_ready(settings_snapshot.privacy.vault_initialized, &vault_state)?;
+        require_recording_vault_ready(settings_snapshot.privacy.vault_initialized, &vault_state)
+            .map_err(|error| {
+                fail_meeting_start(
+                    state,
+                    handle,
+                    None,
+                    MeetingStartErrorCode::ConsentRequired,
+                    error,
+                )
+            })?;
     }
 
     let plan = {
         let audio = state.audio_capture.lock().await;
-        audio
-            .plan_recording(&options)
-            .map_err(|error| error.to_string())?
+        audio.plan_recording(&options).map_err(|error| {
+            // Planning fails when neither capture source is usable, which is a
+            // device problem rather than a permission or capability one.
+            fail_meeting_start(
+                state,
+                handle,
+                None,
+                MeetingStartErrorCode::AudioDeviceNotFound,
+                error.to_string(),
+            )
+        })?
     };
     let recording_id = plan.recording_id.clone();
     let recording = models::Recording {
@@ -21889,7 +22212,18 @@ async fn start_recording_for_sidecar(
     {
         let mut db = state.db.lock().await;
         db.create_recording_with_audio_plan(&recording, &plan)
-            .map_err(|error| error.to_string())?;
+            .map_err(|error| {
+                let message = error.to_string();
+                // The capture preflight refuses here when there is not enough
+                // room to hold the recording, which is the one failure the user
+                // can fix directly.
+                let code = if meeting_start_failure_is_out_of_space(&message) {
+                    MeetingStartErrorCode::DiskFull
+                } else {
+                    MeetingStartErrorCode::Unknown
+                };
+                fail_meeting_start(state, handle, Some(&recording_id), code, message)
+            })?;
     }
 
     if let Ok(mut overlay) = state.recording_overlay_state.lock() {
@@ -21919,8 +22253,20 @@ async fn start_recording_for_sidecar(
     if let Err(error) = preparation_result {
         let message = error.to_string();
         persist_or_rollback_recording_activation_failure(state, &plan, &message).await;
-        emit_meeting_lifecycle_phase(state, handle, "error", &recording_id, Some(&message));
-        return Err(message);
+        // Opening the capture devices is where a missing or busy input device
+        // shows up, and where a full disk first refuses to create the WAV.
+        let code = if meeting_start_failure_is_out_of_space(&message) {
+            MeetingStartErrorCode::DiskFull
+        } else {
+            MeetingStartErrorCode::AudioDeviceNotFound
+        };
+        return Err(fail_meeting_start(
+            state,
+            handle,
+            Some(&recording_id),
+            code,
+            message,
+        ));
     }
 
     if let Err(error) = {
@@ -21933,8 +22279,18 @@ async fn start_recording_for_sidecar(
             audio.abort_prepared_recording();
         }
         persist_or_rollback_recording_activation_failure(state, &plan, &message).await;
-        emit_meeting_lifecycle_phase(state, handle, "error", &recording_id, Some(&message));
-        return Err(message);
+        let code = if meeting_start_failure_is_out_of_space(&message) {
+            MeetingStartErrorCode::DiskFull
+        } else {
+            MeetingStartErrorCode::Unknown
+        };
+        return Err(fail_meeting_start(
+            state,
+            handle,
+            Some(&recording_id),
+            code,
+            message,
+        ));
     }
 
     let activation_result = {
@@ -21944,8 +22300,18 @@ async fn start_recording_for_sidecar(
     if let Err(error) = activation_result {
         let message = error.to_string();
         persist_or_rollback_recording_activation_failure(state, &plan, &message).await;
-        emit_meeting_lifecycle_phase(state, handle, "error", &recording_id, Some(&message));
-        return Err(message);
+        let code = if meeting_start_failure_is_out_of_space(&message) {
+            MeetingStartErrorCode::DiskFull
+        } else {
+            MeetingStartErrorCode::AudioDeviceNotFound
+        };
+        return Err(fail_meeting_start(
+            state,
+            handle,
+            Some(&recording_id),
+            code,
+            message,
+        ));
     }
     *state.active_capture_lease.lock().await = Some((recording_id.clone(), capture_lease));
 
@@ -23043,7 +23409,18 @@ pub async fn dispatch_command(
                     .unwrap_or(serde_json::Value::Object(Default::default())),
             )
             .map_err(|e| e.to_string())?;
-            let options = authorize_meeting_capture_options(options)?;
+            // Admission is the consent gate: without privileged Electron proof
+            // the capture never had a consent prompt behind it.
+            let options = authorize_meeting_capture_options(&state.capture_admission, options)
+                .map_err(|error| {
+                    fail_meeting_start(
+                        state.as_ref(),
+                        handle,
+                        None,
+                        MeetingStartErrorCode::ConsentRequired,
+                        error,
+                    )
+                })?;
             let recording_id = start_recording_for_sidecar(state.as_ref(), handle, options).await?;
             Ok(serde_json::json!({ "recordingId": recording_id }))
         }
@@ -23661,6 +24038,18 @@ pub async fn dispatch_command(
             let mut db = state.db.lock().await;
             let _ = db.log_audit_event("analysis_multi_recording_completed", Some(serde_json::json!({ "recording_ids": &recording_ids, "query": &query, "model": &result.model, "citation_count": result.citations.len(), "grounded": result.grounded })), "info");
             serde_json::to_value(result).map_err(|e| e.to_string())
+        }
+        "register_capture_admission" => {
+            // Called by Electron's CaptureAdmissionController the moment it
+            // mints a nonce, before that nonce is handed to `start_recording`.
+            // Registering is what turns the nonce from "a UUID" into proof only
+            // the privileged side could have produced.
+            let nonce: String =
+                serde_json::from_value(params["nonce"].clone()).map_err(|e| e.to_string())?;
+            uuid::Uuid::parse_str(&nonce)
+                .map_err(|_| "Capture admission nonce is not a valid UUID".to_string())?;
+            state.capture_admission.register(&nonce);
+            Ok(serde_json::json!({ "registered": true }))
         }
         "retry_meeting_analysis" => {
             let recording_id: String =

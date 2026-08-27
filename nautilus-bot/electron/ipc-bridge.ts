@@ -182,6 +182,7 @@ const ALLOWED_RENDERER_COMMANDS = new Set<string>([
   "reprocess_dictation_text",
   "request_apple_speech_permission",
   "request_dictation_permissions",
+  "register_capture_admission",
   "reset_app_state",
   "restore_backup_default",
   "retranscribe_recording",
