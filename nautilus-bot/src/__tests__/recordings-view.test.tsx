@@ -1175,7 +1175,7 @@ describe("RecordingsView", () => {
       ).toBeInTheDocument();
     });
 
-    it("saves the current playbook as a new custom template from the meeting workspace", async () => {
+    it("falls back to the active playbook's outline when saving as a template with no note text", async () => {
       render(<RecordingsView />);
 
       fireEvent.click(screen.getByText("Weekly sync"));
@@ -1195,7 +1195,9 @@ describe("RecordingsView", () => {
       expect(customMeetingTemplatesState.templates).toHaveLength(1);
       expect(customMeetingTemplatesState.templates[0]).toMatchObject({
         name: "Weekly Recipe",
-        // Seeded from the currently active ("auto") playbook.
+        // "Weekly sync" has no meetingNotes, so there is no note structure to
+        // capture -- the active ("auto") playbook's outline is the only
+        // sensible seed.
         notesOutline: ["Goals", "Key discussion points", "Decisions", "Follow-ups"],
       });
       expect(
@@ -1203,6 +1205,138 @@ describe("RecordingsView", () => {
           name: "Weekly Recipe",
         })
       ).toBeInTheDocument();
+    });
+
+    it("captures the note's own section structure, not just the playbook outline, when notes are not empty", async () => {
+      render(<RecordingsView />);
+
+      fireEvent.click(screen.getByText("Weekly sync"));
+      await screen.findByRole("button", { name: "Add section" });
+
+      // A section the user added by hand -- absent from the "auto" playbook's
+      // fixed four headings.
+      fireEvent.click(screen.getByRole("button", { name: "Add section" }));
+      fireEvent.change(screen.getByDisplayValue("Custom section"), {
+        target: { value: "Budget ask" },
+      });
+      await waitFor(() => {
+        expect(backend.updateRecordingNotes).toHaveBeenCalled();
+      });
+
+      fireEvent.click(screen.getByRole("button", { name: "Save as a template" }));
+      const dialog = await screen.findByRole("dialog", { name: "Save as a template" });
+      const outlineField = within(dialog).getByLabelText(
+        "Notes outline"
+      ) as HTMLTextAreaElement;
+      const outlineLines = outlineField.value.split("\n");
+
+      // The user's own section made it into the seed...
+      expect(outlineLines).toContain("Budget ask");
+      // ...alongside the playbook's own headings, not instead of them -- a
+      // bug that fell back to the static playbook outline unconditionally
+      // would never include "Budget ask" at all.
+      expect(outlineLines.length).toBeGreaterThan(4);
+
+      fireEvent.change(within(dialog).getByLabelText("Name"), {
+        target: { value: "My Recipe" },
+      });
+      fireEvent.click(within(dialog).getByRole("button", { name: "Save template" }));
+
+      await waitFor(() => {
+        expect(customMeetingTemplatesState.templates[0]?.notesOutline).toContain(
+          "Budget ask"
+        );
+      });
+    });
+
+    it("re-reads persisted settings after saving and warns instead of trusting the optimistic value", async () => {
+      // Simulate Rust's save-time sanitization actually changing what was
+      // sent (a name too long, in this case) -- the client's own maxLength
+      // is a UX nicety, not the only line of defense, so this view must not
+      // report success on the optimistic value without checking.
+      backend.saveSettings.mockImplementationOnce(async (settings: any) => {
+        customMeetingTemplatesState.templates =
+          settings.transcription.meetingCustomTemplates.map((template: any) => ({
+            ...template,
+            name: template.name.slice(0, 5),
+          }));
+      });
+
+      render(<RecordingsView />);
+      fireEvent.click(screen.getByText("Weekly sync"));
+      await screen.findByRole("group", { name: "Meeting notes" });
+
+      fireEvent.click(screen.getByRole("button", { name: "Save as a template" }));
+      const dialog = await screen.findByRole("dialog", { name: "Save as a template" });
+      fireEvent.change(within(dialog).getByLabelText("Name"), {
+        target: { value: "A Very Long Template Name" },
+      });
+      fireEvent.click(within(dialog).getByRole("button", { name: "Save template" }));
+
+      await waitFor(() => {
+        expect(customMeetingTemplatesState.templates[0]?.name).toBe("A Ver");
+      });
+      // This view's own state reflects what actually got persisted, not the
+      // optimistic value it sent -- the picker offers the trimmed name.
+      await waitFor(() => {
+        expect(
+          within(screen.getByLabelText("Playbook") as HTMLSelectElement).getByRole(
+            "option",
+            { name: "A Ver" }
+          )
+        ).toBeInTheDocument();
+      });
+      expect(toast).toHaveBeenCalledWith(
+        expect.stringMatching(/too long or otherwise invalid and got trimmed/i),
+        "info"
+      );
+    });
+
+    it("caps the name and summary prompt fields to the same limits Rust enforces on save", async () => {
+      render(<RecordingsView />);
+      fireEvent.click(screen.getByText("Weekly sync"));
+      await screen.findByRole("group", { name: "Meeting notes" });
+
+      fireEvent.click(screen.getByRole("button", { name: "Save as a template" }));
+      const dialog = await screen.findByRole("dialog", { name: "Save as a template" });
+
+      expect(within(dialog).getByLabelText("Name")).toHaveAttribute("maxLength", "80");
+      expect(within(dialog).getByLabelText("Summary prompt")).toHaveAttribute(
+        "maxLength",
+        "4000"
+      );
+    });
+
+    it("warns softly about a duplicate template name without blocking the save", async () => {
+      customMeetingTemplatesState.templates = [
+        {
+          id: "custom-existing",
+          name: "Board Update",
+          summaryPrompt: "Summarize.",
+          notesOutline: ["Notes"],
+        },
+      ];
+
+      render(<RecordingsView />);
+      fireEvent.click(screen.getByText("Weekly sync"));
+      await screen.findByRole("group", { name: "Meeting notes" });
+
+      fireEvent.click(screen.getByRole("button", { name: "Save as a template" }));
+      const dialog = await screen.findByRole("dialog", { name: "Save as a template" });
+      fireEvent.change(within(dialog).getByLabelText("Name"), {
+        target: { value: "Board Update" },
+      });
+
+      expect(
+        within(dialog).getByText(/already have a template named/i)
+      ).toBeInTheDocument();
+
+      // A soft warning, not a block -- two templates sharing a name still
+      // both save; only their ids need to be unique.
+      fireEvent.click(within(dialog).getByRole("button", { name: "Save template" }));
+      await waitFor(() => {
+        expect(customMeetingTemplatesState.templates).toHaveLength(2);
+      });
     });
 
     it("edits and deletes a saved custom template from the manage dialog", async () => {
@@ -1243,13 +1377,17 @@ describe("RecordingsView", () => {
       fireEvent.click(
         within(reopenedManageDialog).getByRole("button", { name: "Delete Board Update v2" })
       );
+      const confirmDialog = await screen.findByRole("dialog", {
+        name: "Delete this template?",
+      });
+      fireEvent.click(within(confirmDialog).getByRole("button", { name: "Delete" }));
 
       await waitFor(() => {
         expect(customMeetingTemplatesState.templates).toHaveLength(0);
       });
     });
 
-    it("does not break a past meeting's display after its custom template is deleted", async () => {
+    it("does not break a past meeting's display after its custom template is deleted through the manage dialog", async () => {
       customMeetingTemplatesState.templates = [
         {
           id: "custom-deleted-later",
@@ -1266,15 +1404,36 @@ describe("RecordingsView", () => {
       render(<RecordingsView />);
       fireEvent.click(screen.getByText("Weekly sync"));
       await screen.findByRole("group", { name: "Meeting notes" });
-      expect(screen.getByLabelText("Playbook")).toHaveValue("custom-deleted-later");
+      const picker = screen.getByLabelText("Playbook") as HTMLSelectElement;
+      expect(picker).toHaveValue("custom-deleted-later");
+      expect(
+        within(picker).getByRole("option", { name: "Retiring Soon" })
+      ).toBeInTheDocument();
 
-      // Deleted out from under the open meeting.
-      customMeetingTemplatesState.templates = [];
+      // Driven through the manager dialog's own delete button and its
+      // confirmation step -- not by mutating the mock directly -- so this
+      // proves the delete affordance itself does the right thing, not just
+      // that the workspace tolerates an externally-vanished template.
       fireEvent.click(screen.getByRole("button", { name: "Manage templates" }));
-      fireEvent.click(screen.getByRole("button", { name: "Close" }));
+      fireEvent.click(
+        await screen.findByRole("button", { name: "Delete Retiring Soon" })
+      );
+      fireEvent.click(await screen.findByRole("button", { name: "Delete" }));
 
-      // The meeting keeps displaying -- no crash, and the picker falls back
-      // to a resolvable value instead of showing a phantom selection.
+      await waitFor(() => {
+        expect(customMeetingTemplatesState.templates).toHaveLength(0);
+      });
+
+      // Back to the still-open meeting: its picker no longer offers the
+      // deleted template -- it falls back to a resolvable value instead of
+      // showing a phantom selection -- and the workspace itself never
+      // stopped displaying.
+      fireEvent.click(screen.getByRole("button", { name: "Close" }));
+      await waitFor(() => {
+        expect(
+          within(picker).queryByRole("option", { name: "Retiring Soon" })
+        ).not.toBeInTheDocument();
+      });
       expect(screen.getByRole("group", { name: "Meeting notes" })).toBeInTheDocument();
     });
   });

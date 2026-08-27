@@ -99,21 +99,47 @@ export function RecordingPopup() {
     recordingIdRef.current = recordingId;
   }, [recordingId]);
 
+  // Loaded on mount, then re-read on every `settings-changed` broadcast, so
+  // a template saved or edited from the main window's meetings workspace
+  // updates this overlay's label without waiting for it to be reopened.
   useEffect(() => {
-    let mounted = true;
-    void getSettings()
-      .then((settings) => {
-        if (mounted) {
-          setCustomMeetingTemplates(
-            settings.transcription.meetingCustomTemplates ?? [],
-          );
+    let disposed = false;
+    let unlisten: (() => void) | undefined;
+
+    const refreshCustomMeetingTemplates = () => {
+      void getSettings()
+        .then((settings) => {
+          if (!disposed) {
+            setCustomMeetingTemplates(
+              settings.transcription.meetingCustomTemplates ?? [],
+            );
+          }
+        })
+        .catch((error) => {
+          console.warn("Failed to load custom meeting templates:", error);
+        });
+    };
+
+    refreshCustomMeetingTemplates();
+    void listen("settings-changed", () => {
+      if (!disposed) {
+        refreshCustomMeetingTemplates();
+      }
+    })
+      .then((dispose) => {
+        if (disposed) {
+          dispose?.();
+          return;
         }
+        unlisten = dispose;
       })
       .catch((error) => {
-        console.warn("Failed to load custom meeting templates:", error);
+        console.warn("Failed to subscribe to settings-changed:", error);
       });
+
     return () => {
-      mounted = false;
+      disposed = true;
+      unlisten?.();
     };
   }, []);
 

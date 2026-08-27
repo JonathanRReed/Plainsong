@@ -84,6 +84,7 @@ import {
 } from "@/components/views/meetings/template-editor-dialog";
 import { MeetingTemplateManagerDialog } from "@/components/views/meetings/template-manager-dialog";
 import {
+  GENERAL_MEETING_NOTES_TITLE,
   getNextMeetingSectionTitle,
   parseMeetingNoteSections,
   rebaseMeetingNotes,
@@ -947,6 +948,34 @@ function buildRelationshipRecallPrompts(args: {
   });
 }
 
+/** Field-by-field, not `JSON.stringify` -- key order out of a round trip
+ * through Rust's serde and a freshly-built renderer object isn't guaranteed
+ * to match byte for byte even when the content is identical, and a
+ * stringify comparison would misreport that as a truncation. Used to detect
+ * when Rust's save-time sanitization (`sanitize_meeting_custom_templates` in
+ * settings.rs) actually changed what was sent -- dropping it, or capping a
+ * name/prompt/outline length -- so the optimistic save can be corrected
+ * instead of reported as a clean success. */
+function meetingTemplatesEqual(
+  a: readonly CustomMeetingTemplate[],
+  b: readonly CustomMeetingTemplate[]
+): boolean {
+  if (a.length !== b.length) {
+    return false;
+  }
+  return a.every((template, index) => {
+    const other = b[index];
+    return (
+      other !== undefined &&
+      template.id === other.id &&
+      template.name === other.name &&
+      template.summaryPrompt === other.summaryPrompt &&
+      template.notesOutline.length === other.notesOutline.length &&
+      template.notesOutline.every((section, sectionIndex) => section === other.notesOutline[sectionIndex])
+    );
+  });
+}
+
 export function RecordingsView() {
   const { productReadiness, engineNotice, dismissEngineNotice } =
     useProductReadinessStatus();
@@ -1232,39 +1261,83 @@ export function RecordingsView() {
     },
   });
 
+  // Loaded on mount, then re-read on every `settings-changed` broadcast --
+  // the same pattern models-screen.tsx uses for its own settings-derived
+  // state -- so a save from the manage/editor dialogs elsewhere in this same
+  // view (which already re-reads directly, see `persistCustomMeetingTemplates`)
+  // or from a second window entirely both keep this list current.
   useEffect(() => {
-    let mounted = true;
-    void getSettings()
-      .then((settings) => {
-        if (mounted) {
-          setCustomMeetingTemplates(settings.transcription.meetingCustomTemplates ?? []);
+    let disposed = false;
+    let unlisten: (() => void) | undefined;
+
+    const refreshCustomMeetingTemplates = () => {
+      void getSettings()
+        .then((settings) => {
+          if (!disposed) {
+            setCustomMeetingTemplates(settings.transcription.meetingCustomTemplates ?? []);
+          }
+        })
+        .catch((error) => {
+          console.warn("Failed to load meeting templates:", error);
+        });
+    };
+
+    refreshCustomMeetingTemplates();
+    void listen("settings-changed", () => {
+      if (!disposed) {
+        refreshCustomMeetingTemplates();
+      }
+    })
+      .then((dispose) => {
+        if (disposed) {
+          dispose?.();
+          return;
         }
+        unlisten = dispose;
       })
       .catch((error) => {
-        console.warn("Failed to load meeting templates:", error);
+        console.warn("Failed to subscribe to settings-changed:", error);
       });
+
     return () => {
-      mounted = false;
+      disposed = true;
+      unlisten?.();
     };
   }, []);
 
   /** Read-modify-write settings.transcription.meetingCustomTemplates, the
    * same pattern dictation-view.tsx's `persistDictationPreferences` uses for
    * `dictationCustomModes` -- riding the existing settings surface needs no
-   * new IPC command. */
-  const persistCustomMeetingTemplates = async (next: CustomMeetingTemplate[]) => {
+   * new IPC command.
+   *
+   * Rust sanitizes on every save (dropping a malformed entry, capping a
+   * name/prompt/outline length or the whole list's count -- see
+   * `sanitize_meeting_custom_templates` in settings.rs), so `next` is not
+   * necessarily what ends up on disk. Re-reading via `getSettings()` after
+   * the write and setting state from *that* -- not the optimistic `next` --
+   * is what keeps this view honest about what was actually persisted; the
+   * caller is told when the two disagree so it can warn instead of quietly
+   * reporting success on data that was just trimmed. */
+  const persistCustomMeetingTemplates = async (
+    next: CustomMeetingTemplate[]
+  ): Promise<{ persisted: CustomMeetingTemplate[]; truncated: boolean } | null> => {
     try {
       const settings = await getSettings();
       settings.transcription.meetingCustomTemplates = next;
       await saveSettings(settings);
-      setCustomMeetingTemplates(next);
-      return true;
+      const persistedSettings = await getSettings();
+      const persisted = persistedSettings.transcription.meetingCustomTemplates ?? [];
+      setCustomMeetingTemplates(persisted);
+      return { persisted, truncated: !meetingTemplatesEqual(persisted, next) };
     } catch (error) {
       console.warn("Failed to save meeting templates:", error);
       toast("Couldn't save meeting templates — the change may not stick.", "error");
-      return false;
+      return null;
     }
   };
+
+  const TEMPLATE_TRUNCATED_WARNING =
+    "Saved, but part of it was too long or otherwise invalid and got trimmed. Check the template.";
 
   const handleSaveNewMeetingTemplate = async (draft: MeetingTemplateDraft) => {
     if (customMeetingTemplates.length >= MAX_CUSTOM_MEETING_TEMPLATES) {
@@ -1276,37 +1349,45 @@ export function RecordingsView() {
         ? crypto.randomUUID()
         : `${Date.now()}-${Math.random().toString(36).slice(2)}`
     }`;
-    const created = await persistCustomMeetingTemplates([
+    const result = await persistCustomMeetingTemplates([
       ...customMeetingTemplates,
       { id, ...draft },
     ]);
-    if (created) {
-      toast("Template saved.", "success");
+    if (!result) {
+      return;
     }
+    toast(
+      result.truncated ? TEMPLATE_TRUNCATED_WARNING : "Template saved.",
+      result.truncated ? "info" : "success"
+    );
   };
 
   const handleUpdateMeetingTemplate = async (
     id: string,
     draft: MeetingTemplateDraft
   ) => {
-    const updated = await persistCustomMeetingTemplates(
+    const result = await persistCustomMeetingTemplates(
       customMeetingTemplates.map((template) =>
         template.id === id ? { ...template, ...draft } : template
       )
     );
-    if (updated) {
-      toast("Template updated.", "success");
+    if (!result) {
+      return;
     }
+    toast(
+      result.truncated ? TEMPLATE_TRUNCATED_WARNING : "Template updated.",
+      result.truncated ? "info" : "success"
+    );
   };
 
   const handleDeleteMeetingTemplate = async (template: CustomMeetingTemplate) => {
     // Past meetings keep their stored template id regardless -- the picker
     // and the analysis pass both fall back to the default template for an id
     // that no longer resolves, so a deletion here cannot break their display.
-    const deleted = await persistCustomMeetingTemplates(
+    const result = await persistCustomMeetingTemplates(
       customMeetingTemplates.filter((existing) => existing.id !== template.id)
     );
-    if (deleted) {
+    if (result) {
       toast(`Deleted "${template.name}".`, "success");
     }
   };
@@ -3283,6 +3364,36 @@ export function RecordingsView() {
     () => parseMeetingNoteSections(meetingNotes, meetingTemplateId, customMeetingTemplates),
     [meetingNotes, meetingTemplateId, customMeetingTemplates]
   );
+
+  /** What "Save current structure as a template" actually captures: the
+   * headings the notes are organized under right now -- not the static
+   * playbook outline, which would silently discard any section the user
+   * added, removed, or renamed by hand. Falls back to the playbook outline
+   * only when there is no note text to derive a structure from. */
+  const buildTemplateSaveSeed = (): MeetingTemplateDraft => {
+    const seenTitles = new Set<string>();
+    const outlineFromNotes: string[] = [];
+    if (meetingNotes.trim()) {
+      for (const section of meetingNoteSections) {
+        const title = section.title.trim();
+        const key = title.toLowerCase();
+        // "General notes" is the catch-all for text with no heading, not a
+        // reusable outline section, so it never becomes one.
+        if (!title || title === GENERAL_MEETING_NOTES_TITLE || seenTitles.has(key)) {
+          continue;
+        }
+        seenTitles.add(key);
+        outlineFromNotes.push(title);
+      }
+    }
+    return {
+      name: "",
+      summaryPrompt: selectedTemplateOption.summaryPrompt,
+      notesOutline:
+        outlineFromNotes.length > 0 ? outlineFromNotes : selectedTemplateOption.notesOutline,
+    };
+  };
+
   const activeMeetingCaptureMode = useMemo(
     () =>
       resolveRecordingCaptureMode(activeMeeting, null, liveMeetingSystemAudio),
@@ -3548,7 +3659,7 @@ export function RecordingsView() {
       const nextSections = updater(
         parseMeetingNoteSections(current, meetingTemplateId, customMeetingTemplates)
       );
-      return serializeMeetingNoteSections(nextSections, customMeetingTemplates);
+      return serializeMeetingNoteSections(nextSections, meetingTemplateId, customMeetingTemplates);
     });
   };
 
@@ -4631,11 +4742,7 @@ export function RecordingsView() {
                               variant="outline"
                               onClick={() => {
                                 setTemplateEditorTarget(null);
-                                setTemplateEditorSeed({
-                                  name: "",
-                                  summaryPrompt: selectedTemplateOption.summaryPrompt,
-                                  notesOutline: selectedTemplateOption.notesOutline,
-                                });
+                                setTemplateEditorSeed(buildTemplateSaveSeed());
                                 setTemplateEditorOpen(true);
                               }}
                             >
@@ -6570,6 +6677,9 @@ export function RecordingsView() {
           onOpenChange={setTemplateEditorOpen}
           mode={templateEditorTarget ? "edit" : "create"}
           seed={templateEditorSeed}
+          existingNames={customMeetingTemplates
+            .filter((template) => template.id !== templateEditorTarget?.id)
+            .map((template) => template.name)}
           onSave={async (draft) => {
             if (templateEditorTarget) {
               await handleUpdateMeetingTemplate(templateEditorTarget.id, draft);
