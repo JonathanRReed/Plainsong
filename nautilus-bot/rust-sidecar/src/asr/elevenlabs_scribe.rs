@@ -28,14 +28,28 @@ struct ScribeResponse {
     words: Option<Vec<ScribeWord>>,
 }
 
+/// This provider posts to the batch `/v1/speech-to-text` file-upload endpoint
+/// (see `SCRIBE_API_URL`), not ElevenLabs' realtime websocket API. Verified
+/// live against
+/// https://elevenlabs.io/docs/api-reference/speech-to-text/convert on
+/// 2026-08-27: the batch endpoint's documented `model_id` examples and
+/// changelog entries only ever show `scribe_v2` / `scribe_v2_experimental`;
+/// `scribe_v2_realtime` (and its `_turbo`/`_lite` siblings) are introduced
+/// exclusively under ElevenLabs' realtime speech-to-text docs, gated behind
+/// the websocket API. Selecting `scribe_v2_realtime` here previously sent a
+/// model this endpoint cannot serve. `scribe_v1` was removed 2026-07-09 and
+/// remapped to `scribe_v2` for existing settings.
 fn sanitize_elevenlabs_asr_model_id(model_id: &str) -> &'static str {
     match model_id {
-        "scribe_v2_realtime" => "scribe_v2_realtime",
         "scribe_v2" => "scribe_v2",
         "scribe_v2_experimental" => "scribe_v2_experimental",
         "scribe_v1" => "scribe_v2",
         "scribe_v1_experimental" => "scribe_v2_experimental",
-        _ => "scribe_v2_realtime", // Default to v2 Realtime for ultra-low latency
+        // Legacy settings/callers may still carry the realtime-only id; remap
+        // it to the batch-endpoint model instead of sending a value the batch
+        // API cannot serve.
+        "scribe_v2_realtime" => "scribe_v2",
+        _ => "scribe_v2",
     }
 }
 
@@ -48,7 +62,7 @@ struct ScribeWord {
 
 impl Default for ElevenLabsScribeProvider {
     fn default() -> Self {
-        Self::new(Some("scribe_v2_realtime"))
+        Self::new(Some("scribe_v2"))
     }
 }
 
@@ -136,7 +150,6 @@ impl ElevenLabsScribeProvider {
 
     fn selected_label(&self) -> &'static str {
         match self.model_id.as_str() {
-            "scribe_v2_realtime" => "Scribe v2 Realtime",
             "scribe_v2_experimental" => "Scribe v2 Experimental",
             _ => "Scribe v2",
         }
@@ -158,27 +171,14 @@ impl AsrProvider for ElevenLabsScribeProvider {
     }
 
     fn model_info(&self) -> ModelInfo {
-        let (languages, wer, rtf) = match self.model_id.as_str() {
-            "scribe_v2_realtime" => (
-                vec!["90+ languages".to_string()],
-                Some(3.0),
-                Some(0.05), // 150ms latency = 0.05 RTF
-            ),
-            _ => (
-                vec!["en".to_string(), "multilingual".to_string()],
-                None,
-                None,
-            ),
-        };
-
         ModelInfo {
             name: self.selected_label().to_string(),
             version: self.model_id.clone(),
             size_mb: 0.0,
             parameters: "cloud".to_string(),
-            languages,
-            word_error_rate: wer,
-            real_time_factor: rtf,
+            languages: vec!["en".to_string(), "multilingual".to_string()],
+            word_error_rate: None,
+            real_time_factor: None,
             license: "Commercial API".to_string(),
             source_url: "https://elevenlabs.io/docs/api-reference/speech-to-text".to_string(),
         }
@@ -206,7 +206,10 @@ impl AsrProvider for ElevenLabsScribeProvider {
 
 #[cfg(test)]
 mod tests {
-    use super::ELEVENLABS_HTTP_TIMEOUTS;
+    use super::{
+        sanitize_elevenlabs_asr_model_id, ElevenLabsScribeProvider, ELEVENLABS_HTTP_TIMEOUTS,
+    };
+    use crate::asr::AsrProvider;
     use std::time::Duration;
 
     #[test]
@@ -215,5 +218,41 @@ mod tests {
         assert_eq!(ELEVENLABS_HTTP_TIMEOUTS.read, Duration::from_secs(90));
         assert_eq!(ELEVENLABS_HTTP_TIMEOUTS.total, Duration::from_secs(120));
         assert!(ELEVENLABS_HTTP_TIMEOUTS.total < Duration::from_secs(5 * 60));
+    }
+
+    #[test]
+    fn realtime_model_never_reaches_the_batch_endpoint() {
+        // scribe_v2_realtime is a websocket-only model; this provider posts to
+        // the batch /v1/speech-to-text endpoint, which cannot serve it. Every
+        // path that used to default to it must land on scribe_v2 instead.
+        assert_eq!(
+            sanitize_elevenlabs_asr_model_id("scribe_v2_realtime"),
+            "scribe_v2"
+        );
+        assert_eq!(sanitize_elevenlabs_asr_model_id(""), "scribe_v2");
+        assert_eq!(sanitize_elevenlabs_asr_model_id("garbage"), "scribe_v2");
+        assert_eq!(
+            ElevenLabsScribeProvider::new(Some("scribe_v2_realtime"))
+                .model_info()
+                .version,
+            "scribe_v2"
+        );
+        assert_eq!(
+            ElevenLabsScribeProvider::default().model_info().version,
+            "scribe_v2"
+        );
+        assert_eq!(
+            ElevenLabsScribeProvider::new(None).model_info().version,
+            "scribe_v2"
+        );
+    }
+
+    #[test]
+    fn removed_scribe_v1_still_remaps_for_legacy_settings() {
+        assert_eq!(sanitize_elevenlabs_asr_model_id("scribe_v1"), "scribe_v2");
+        assert_eq!(
+            sanitize_elevenlabs_asr_model_id("scribe_v1_experimental"),
+            "scribe_v2_experimental"
+        );
     }
 }
