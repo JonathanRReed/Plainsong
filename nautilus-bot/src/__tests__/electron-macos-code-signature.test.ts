@@ -28,10 +28,11 @@ const ADHOC_DISPLAY_OUTPUT = [
 
 // Someone else's perfectly valid Developer ID signature: every field is
 // well-formed, the seal verifies, only the team is not ours.
-const FOREIGN_DISPLAY_OUTPUT = RELEASE_DISPLAY_OUTPUT.replaceAll(
+const FOREIGN_DISPLAY_OUTPUT = RELEASE_DISPLAY_OUTPUT.split(
   PLAINSONG_RELEASE_TEAM_ID,
-  "ZZ9ATTACKER",
-).replace("Jonathan Reed", "Someone Else");
+)
+  .join("ZZ9ATTACKER")
+  .replace("Jonathan Reed", "Someone Else");
 
 describe("parseCodesignTeamIdentifier", () => {
   it("reads the team out of codesign display output", () => {

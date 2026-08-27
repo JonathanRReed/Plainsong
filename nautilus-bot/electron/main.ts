@@ -1212,11 +1212,6 @@ async function handleLocalCommand(
     case "__window_start_drag__":
       // Dragging is handled through CSS app-region on Electron.
       return { handled: true, result: null };
-    case "app:set_minimize_to_tray": {
-      const payload = (args ?? {}) as { enabled?: unknown };
-      minimizeToTrayEnabled = payload.enabled === true;
-      return { handled: true, result: null };
-    }
     case "check_for_updates":
       return { handled: true, result: await checkForUpdatesInElectron() };
     case "install_update":

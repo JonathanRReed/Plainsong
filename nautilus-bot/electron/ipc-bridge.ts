@@ -49,7 +49,6 @@ type LocalCommandCallback = (
 
 // Renderer-initiated commands must be explicitly approved here.
 const ALLOWED_RENDERER_COMMANDS = new Set<string>([
-  "__emit__",
   "__overlay_placement__",
   "__overlay_set_display_mode__",
   "__window_hide__",
