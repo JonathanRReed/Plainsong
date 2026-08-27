@@ -22061,7 +22061,9 @@ fn spawn_meeting_capture_monitor(
             }) else {
                 continue;
             };
-            match audio::meeting_space_pressure(available) {
+            // Sized to what this session actually writes: a mic-only meeting
+            // writes one track, "me and them" writes three.
+            match audio::meeting_space_pressure(available, health.track_count) {
                 audio::MeetingSpacePressure::Ok => {}
                 audio::MeetingSpacePressure::Low => {
                     if !low_space_reported {

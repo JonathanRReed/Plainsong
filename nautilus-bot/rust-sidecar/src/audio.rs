@@ -71,40 +71,57 @@ const DICTATION_AUTO_STOP_FRAME_MS: f32 = 30.0;
 const DICTATION_AUTO_STOP_MIN_SPEECH_SECONDS: f32 = 0.5;
 
 /// Bytes a mono 16-bit WAV track consumes per second at 48 kHz, the rate every
-/// mixed meeting session lands on. Used only to turn the free-space thresholds
-/// below into something a reader can reason about in minutes.
+/// mixed meeting session lands on.
 pub const MEETING_WAV_BYTES_PER_SECOND_PER_TRACK: u64 = 48_000 * 2;
-/// Free space required before a meeting is allowed to start.
+/// Recording time a meeting must have room for before it is allowed to start.
 ///
-/// A "me and them" meeting writes three tracks at once, so this is roughly 30
-/// minutes of headroom. Refusing here is recoverable and honest; running out
-/// mid-meeting is not — the writer thread dies on ENOSPC and, until the
-/// writer-failure slot existed, the session kept showing an active recording
-/// while every subsequent sample was discarded.
-pub const MEETING_START_MIN_FREE_BYTES: u64 = 3 * MEETING_WAV_BYTES_PER_SECOND_PER_TRACK * 30 * 60;
-/// Free space below which a running meeting warns the user.
+/// Refusing here is recoverable and honest; running out mid-meeting is not — the
+/// writer thread dies on ENOSPC and, until the writer-failure slot existed, the
+/// session kept showing an active recording while every subsequent sample was
+/// discarded.
+pub const MEETING_START_MIN_HEADROOM_SECONDS: u64 = 30 * 60;
+/// Remaining recording time below which a running meeting warns the user:
+/// enough to wrap up or free space before capture has to end.
+pub const MEETING_LOW_SPACE_WARN_SECONDS: u64 = 10 * 60;
+/// Remaining recording time below which a running meeting is stopped on
+/// purpose, so the clean stop path (flush, finalize, fsync, hash) can land the
+/// audio already captured. Stopping here trades the last minute of a meeting
+/// for keeping the rest.
 ///
-/// Roughly ten minutes of three-track headroom: enough time to wrap up or free
-/// space before capture has to end.
-pub const MEETING_LOW_SPACE_WARN_BYTES: u64 = 3 * MEETING_WAV_BYTES_PER_SECOND_PER_TRACK * 10 * 60;
-/// Free space below which a running meeting is stopped on purpose.
+/// Scoped to capture only. Vault encryption at stop writes a full second copy
+/// of the bundle and needs headroom of its own, which nothing checks yet.
+pub const MEETING_CRITICAL_SPACE_STOP_SECONDS: u64 = 60;
+
+/// Free bytes one meeting needs to record for `seconds`.
 ///
-/// About a minute of three-track headroom, which is what the clean stop path
-/// (flush, finalize, fsync, hash) needs to land the audio already captured.
-/// Stopping here trades the last minute of a meeting for keeping the rest.
-pub const MEETING_CRITICAL_SPACE_STOP_BYTES: u64 = 3 * MEETING_WAV_BYTES_PER_SECOND_PER_TRACK * 60;
+/// Every threshold below scales with the number of WAV tracks the session
+/// actually writes: a mic-only meeting writes one, "me and them" writes three
+/// (mixed, mic, system). Charging every meeting the three-track price refused
+/// mic-only meetings on volumes that could comfortably hold ~50 minutes of
+/// them, and warned and auto-stopped the ones that did start three times too
+/// early.
+pub fn meeting_headroom_bytes(track_count: u64, seconds: u64) -> u64 {
+    track_count
+        .max(1)
+        .saturating_mul(MEETING_WAV_BYTES_PER_SECOND_PER_TRACK)
+        .saturating_mul(seconds)
+}
 
 /// What a running meeting's capture threads have reported about themselves.
 ///
-/// Polled by the meeting lifecycle loop: both slots are written by threads that
-/// then exit, so nothing else would ever notice they are gone until stop.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+/// Polled by the meeting lifecycle loop: both failure slots are written by
+/// threads that then exit, so nothing else would ever notice they are gone
+/// until stop.
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RecordingCaptureHealth {
     /// Set when a WAV writer thread returned an error and stopped consuming
     /// samples. Everything recorded after this point is discarded.
     pub writer_failure: Option<String>,
     /// Set when the OS reported the input stream itself failed.
     pub capture_failure: Option<String>,
+    /// How many WAV tracks this session writes, so the polling loop can size the
+    /// free-space thresholds to what the meeting actually consumes.
+    pub track_count: u64,
 }
 
 /// Decide what a free-space reading means for a running meeting.
@@ -118,10 +135,11 @@ pub enum MeetingSpacePressure {
     Critical,
 }
 
-pub fn meeting_space_pressure(available_bytes: u64) -> MeetingSpacePressure {
-    if available_bytes <= MEETING_CRITICAL_SPACE_STOP_BYTES {
+pub fn meeting_space_pressure(available_bytes: u64, track_count: u64) -> MeetingSpacePressure {
+    if available_bytes <= meeting_headroom_bytes(track_count, MEETING_CRITICAL_SPACE_STOP_SECONDS) {
         MeetingSpacePressure::Critical
-    } else if available_bytes <= MEETING_LOW_SPACE_WARN_BYTES {
+    } else if available_bytes <= meeting_headroom_bytes(track_count, MEETING_LOW_SPACE_WARN_SECONDS)
+    {
         MeetingSpacePressure::Low
     } else {
         MeetingSpacePressure::Ok
@@ -129,9 +147,10 @@ pub fn meeting_space_pressure(available_bytes: u64) -> MeetingSpacePressure {
 }
 
 /// `Some(needed_bytes)` when a volume with this much free space must not be
-/// asked to hold a meeting.
-pub fn meeting_start_space_shortfall(available_bytes: u64) -> Option<u64> {
-    (available_bytes < MEETING_START_MIN_FREE_BYTES).then_some(MEETING_START_MIN_FREE_BYTES)
+/// asked to hold a meeting writing `track_count` tracks.
+pub fn meeting_start_space_shortfall(available_bytes: u64, track_count: u64) -> Option<u64> {
+    let needed = meeting_headroom_bytes(track_count, MEETING_START_MIN_HEADROOM_SECONDS);
+    (available_bytes < needed).then_some(needed)
 }
 
 /// Record the first writer failure for a session.
@@ -449,6 +468,17 @@ struct ActiveRecordingSession {
     writer_failure: Arc<std::sync::Mutex<Option<String>>>,
 }
 
+impl ActiveRecordingSession {
+    /// How many WAV tracks this session writes concurrently.
+    ///
+    /// One for a mic-only meeting; three for "me and them" (mixed, mic,
+    /// system). The free-space thresholds scale by this, so a mic-only meeting
+    /// is not warned and auto-stopped at three times the space it needs.
+    fn track_count(&self) -> u64 {
+        1 + u64::from(self.mic_audio_path.is_some()) + u64::from(self.system_audio_path.is_some())
+    }
+}
+
 /// How much of a finished meeting each source actually contributed.
 ///
 /// A starved source is padded with silence so the mixed and per-source WAVs stay
@@ -707,7 +737,11 @@ impl AudioCapture {
                 return Ok(());
             }
         };
-        let Some(needed) = meeting_start_space_shortfall(available) else {
+        // The plan already knows whether this is a one-track mic-only meeting or
+        // a three-track "me and them" bundle, so the requirement is what this
+        // meeting will actually write rather than the worst case.
+        let track_count = plan.paths().count() as u64;
+        let Some(needed) = meeting_start_space_shortfall(available, track_count) else {
             return Ok(());
         };
         anyhow::bail!(
@@ -743,6 +777,7 @@ impl AudioCapture {
                 .lock()
                 .ok()
                 .and_then(|slot| slot.clone()),
+            track_count: session.track_count(),
         })
     }
 
@@ -2893,11 +2928,17 @@ mod recording_writer_tests {
 #[cfg(test)]
 mod recording_capture_health_tests {
     use super::{
-        meeting_space_pressure, meeting_start_space_shortfall, run_wav_writer_thread,
-        write_aligned_wav_files, MeetingSpacePressure, MEETING_CRITICAL_SPACE_STOP_BYTES,
-        MEETING_LOW_SPACE_WARN_BYTES, MEETING_START_MIN_FREE_BYTES,
+        meeting_headroom_bytes, meeting_space_pressure, meeting_start_space_shortfall,
+        run_wav_writer_thread, write_aligned_wav_files, MeetingSpacePressure,
+        MEETING_CRITICAL_SPACE_STOP_SECONDS, MEETING_LOW_SPACE_WARN_SECONDS,
+        MEETING_START_MIN_HEADROOM_SECONDS,
     };
     use std::sync::{Arc, Mutex};
+
+    /// A mic-only meeting writes one WAV; "me and them" writes mixed + mic +
+    /// system.
+    const MIC_ONLY_TRACKS: u64 = 1;
+    const ME_AND_THEM_TRACKS: u64 = 3;
 
     #[test]
     fn a_dead_writer_publishes_its_reason_before_the_thread_exits() {
@@ -2954,28 +2995,87 @@ mod recording_capture_health_tests {
     fn free_space_thresholds_leave_room_to_land_the_audio() {
         const _: () = {
             assert!(
-                MEETING_CRITICAL_SPACE_STOP_BYTES < MEETING_LOW_SPACE_WARN_BYTES,
+                MEETING_CRITICAL_SPACE_STOP_SECONDS < MEETING_LOW_SPACE_WARN_SECONDS,
                 "the stop threshold must trip after the warning, not before it"
             );
             assert!(
-                MEETING_LOW_SPACE_WARN_BYTES < MEETING_START_MIN_FREE_BYTES,
+                MEETING_LOW_SPACE_WARN_SECONDS < MEETING_START_MIN_HEADROOM_SECONDS,
                 "a meeting must not start already inside the warning band"
             );
         };
 
+        for tracks in [MIC_ONLY_TRACKS, ME_AND_THEM_TRACKS] {
+            assert_eq!(
+                meeting_space_pressure(
+                    meeting_headroom_bytes(tracks, MEETING_START_MIN_HEADROOM_SECONDS),
+                    tracks
+                ),
+                MeetingSpacePressure::Ok
+            );
+            assert_eq!(
+                meeting_space_pressure(
+                    meeting_headroom_bytes(tracks, MEETING_LOW_SPACE_WARN_SECONDS),
+                    tracks
+                ),
+                MeetingSpacePressure::Low
+            );
+            assert_eq!(
+                meeting_space_pressure(
+                    meeting_headroom_bytes(tracks, MEETING_CRITICAL_SPACE_STOP_SECONDS),
+                    tracks
+                ),
+                MeetingSpacePressure::Critical
+            );
+            assert_eq!(
+                meeting_space_pressure(0, tracks),
+                MeetingSpacePressure::Critical
+            );
+        }
+    }
+
+    #[test]
+    fn thresholds_scale_with_the_tracks_a_meeting_actually_writes() {
+        // The regression: every threshold charged the three-track price, so a
+        // mic-only meeting with ~50 minutes of room was refused outright, and
+        // one that did start was warned and auto-stopped three times too early.
+        let room_for_fifty_mic_only_minutes = meeting_headroom_bytes(MIC_ONLY_TRACKS, 50 * 60);
         assert_eq!(
-            meeting_space_pressure(MEETING_START_MIN_FREE_BYTES),
+            meeting_start_space_shortfall(room_for_fifty_mic_only_minutes, MIC_ONLY_TRACKS),
+            None,
+            "a mic-only meeting with 50 minutes of room must be allowed to start"
+        );
+        assert!(
+            meeting_start_space_shortfall(room_for_fifty_mic_only_minutes, ME_AND_THEM_TRACKS)
+                .is_some(),
+            "the same volume cannot hold a three-track meeting for 30 minutes"
+        );
+
+        // 20 mic-only minutes is comfortable for one track and inside the
+        // warning band for three.
+        let room_for_twenty_mic_only_minutes = meeting_headroom_bytes(MIC_ONLY_TRACKS, 20 * 60);
+        assert_eq!(
+            meeting_space_pressure(room_for_twenty_mic_only_minutes, MIC_ONLY_TRACKS),
             MeetingSpacePressure::Ok
         );
         assert_eq!(
-            meeting_space_pressure(MEETING_LOW_SPACE_WARN_BYTES),
+            meeting_space_pressure(room_for_twenty_mic_only_minutes, ME_AND_THEM_TRACKS),
+            MeetingSpacePressure::Low
+        );
+
+        // And the auto-stop band: enough for a minute of one track, not three.
+        let room_for_two_mic_only_minutes = meeting_headroom_bytes(MIC_ONLY_TRACKS, 2 * 60);
+        assert_eq!(
+            meeting_space_pressure(room_for_two_mic_only_minutes, MIC_ONLY_TRACKS),
             MeetingSpacePressure::Low
         );
         assert_eq!(
-            meeting_space_pressure(MEETING_CRITICAL_SPACE_STOP_BYTES),
+            meeting_space_pressure(room_for_two_mic_only_minutes, ME_AND_THEM_TRACKS),
             MeetingSpacePressure::Critical
         );
-        assert_eq!(meeting_space_pressure(0), MeetingSpacePressure::Critical);
+
+        // A zero track count would be a bug elsewhere; charging nothing for it
+        // would disable the check entirely, so it is floored at one track.
+        assert_eq!(meeting_headroom_bytes(0, 60), meeting_headroom_bytes(1, 60));
     }
 
     #[test]
@@ -3011,14 +3111,14 @@ mod recording_capture_health_tests {
 
     #[test]
     fn start_preflight_refuses_only_a_volume_that_cannot_hold_a_meeting() {
-        assert_eq!(
-            meeting_start_space_shortfall(MEETING_START_MIN_FREE_BYTES),
-            None
-        );
-        assert_eq!(
-            meeting_start_space_shortfall(MEETING_START_MIN_FREE_BYTES - 1),
-            Some(MEETING_START_MIN_FREE_BYTES)
-        );
+        for tracks in [MIC_ONLY_TRACKS, ME_AND_THEM_TRACKS] {
+            let needed = meeting_headroom_bytes(tracks, MEETING_START_MIN_HEADROOM_SECONDS);
+            assert_eq!(meeting_start_space_shortfall(needed, tracks), None);
+            assert_eq!(
+                meeting_start_space_shortfall(needed - 1, tracks),
+                Some(needed)
+            );
+        }
     }
 }
 

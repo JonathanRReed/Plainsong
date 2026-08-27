@@ -545,4 +545,31 @@ mod tests {
         assert!(plan.mic_path.is_none());
         assert!(plan.system_path.is_none());
     }
+
+    #[test]
+    fn planned_track_count_matches_the_capture_mode() {
+        // The free-space thresholds scale by this count, so a mic-only meeting
+        // is not charged the three-track price it never pays.
+        assert_eq!(
+            RecordingCapturePlan::new(Path::new("/tmp"), true, false)
+                .unwrap()
+                .paths()
+                .count(),
+            1
+        );
+        assert_eq!(
+            RecordingCapturePlan::new(Path::new("/tmp"), false, true)
+                .unwrap()
+                .paths()
+                .count(),
+            2
+        );
+        assert_eq!(
+            RecordingCapturePlan::new(Path::new("/tmp"), true, true)
+                .unwrap()
+                .paths()
+                .count(),
+            3
+        );
+    }
 }
