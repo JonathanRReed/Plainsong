@@ -21401,7 +21401,7 @@ fn meeting_stop_is_already_terminal_or_processing(status: &str) -> bool {
 }
 
 async fn start_recording_for_sidecar(
-    state: &AppState,
+    state: &Arc<AppState>,
     handle: &crate::sidecar_handle::SidecarHandle,
     mut options: models::RecordingOptions,
 ) -> Result<String, String> {
@@ -21723,7 +21723,157 @@ async fn start_recording_for_sidecar(
     // Tell Electron to show the recording overlay window.
     handle.window_command("show-recording-overlay", &serde_json::Value::Null);
 
+    spawn_meeting_capture_monitor(Arc::clone(state), handle.clone(), recording_id.clone());
+
     Ok(recording_id)
+}
+
+/// How often a running meeting's capture health and free disk space are polled.
+///
+/// Fast enough that a dead writer surfaces while there is still a meeting to
+/// salvage, slow enough that the `statvfs` and the audio-capture lock are noise
+/// next to the capture threads themselves.
+const MEETING_CAPTURE_MONITOR_INTERVAL: Duration = Duration::from_secs(5);
+
+/// Announce a mid-meeting problem on both channels the user can actually see.
+///
+/// The lifecycle event deliberately re-asserts the `recording` phase rather than
+/// inventing a new one: capture really is still running, and the renderer's
+/// lifecycle reducer only understands the phases it already has — an unknown
+/// phase would put the overlay into a state nothing renders. The message is what
+/// carries the news.
+fn emit_meeting_capture_warning(
+    state: &AppState,
+    handle: &crate::sidecar_handle::SidecarHandle,
+    recording_id: &str,
+    message: &str,
+) {
+    tracing::error!("Meeting {} capture warning: {}", recording_id, message);
+    handle.emit_event(
+        "recording-status-changed",
+        serde_json::json!({
+            "recordingId": recording_id,
+            "status": "warning",
+            "message": message,
+            "updatedAt": chrono::Utc::now().to_rfc3339(),
+        }),
+    );
+    emit_meeting_lifecycle_phase(state, handle, "recording", recording_id, Some(message));
+}
+
+/// Watch a running meeting's writer threads and the disk they are writing to.
+///
+/// Nothing else notices a WAV writer that died: the mic-only capture callback
+/// discards every later sample through its `Disconnected` arm without a word,
+/// the mixed path just shuts capture down, and the overlay keeps showing an
+/// active recording either way. The user found out at stop, by which point the
+/// meeting was over. This loop is what makes both failures visible while there
+/// is still something to salvage.
+fn spawn_meeting_capture_monitor(
+    state: Arc<AppState>,
+    handle: crate::sidecar_handle::SidecarHandle,
+    recording_id: String,
+) {
+    tokio::spawn(async move {
+        let mut writer_failure_reported = false;
+        let mut low_space_reported = false;
+        loop {
+            tokio::time::sleep(MEETING_CAPTURE_MONITOR_INTERVAL).await;
+
+            let health = {
+                let audio = state.audio_capture.lock().await;
+                audio.recording_capture_health(&recording_id)
+            };
+            // `None` means this recording is no longer the live session, which
+            // is the loop's exit condition — stop already reports everything.
+            let Some(health) = health else {
+                return;
+            };
+
+            if !writer_failure_reported {
+                if let Some(reason) = health.writer_failure.as_deref() {
+                    writer_failure_reported = true;
+                    emit_meeting_capture_warning(
+                        state.as_ref(),
+                        &handle,
+                        &recording_id,
+                        &format!(
+                            "Plainsong stopped being able to save this meeting's audio, so nothing recorded from now on is kept. Stop the meeting to keep what was already saved. ({reason})"
+                        ),
+                    );
+                    let mut db = state.db.lock().await;
+                    let _ = db.log_audit_event(
+                        "recording_writer_failed",
+                        Some(serde_json::json!({
+                            "recording_id": &recording_id,
+                            "error": reason,
+                        })),
+                        "error",
+                    );
+                }
+            }
+
+            // Fails open: an unmeasurable volume must not end a meeting.
+            let Some(available) = ({
+                let audio = state.audio_capture.lock().await;
+                audio.recordings_available_space_bytes()
+            }) else {
+                continue;
+            };
+            match audio::meeting_space_pressure(available) {
+                audio::MeetingSpacePressure::Ok => {}
+                audio::MeetingSpacePressure::Low => {
+                    if !low_space_reported {
+                        low_space_reported = true;
+                        emit_meeting_capture_warning(
+                            state.as_ref(),
+                            &handle,
+                            &recording_id,
+                            &format!(
+                                "This disk is nearly full ({} MB free). Plainsong will stop this meeting on its own before the disk runs out — free some space to keep recording.",
+                                available / (1024 * 1024)
+                            ),
+                        );
+                    }
+                }
+                audio::MeetingSpacePressure::Critical => {
+                    emit_meeting_capture_warning(
+                        state.as_ref(),
+                        &handle,
+                        &recording_id,
+                        &format!(
+                            "This disk is out of space ({} MB free), so Plainsong is stopping the meeting now to save the audio it already captured.",
+                            available / (1024 * 1024)
+                        ),
+                    );
+                    {
+                        let mut db = state.db.lock().await;
+                        let _ = db.log_audit_event(
+                            "recording_stopped_low_disk_space",
+                            Some(serde_json::json!({
+                                "recording_id": &recording_id,
+                                "available_bytes": available,
+                            })),
+                            "error",
+                        );
+                    }
+                    // A deliberate stop lands the WAVs, hashes them and hands
+                    // the meeting to transcription. Letting the writer hit
+                    // ENOSPC instead loses everything after the last checkpoint.
+                    if let Err(error) =
+                        stop_recording_for_sidecar(&state, &handle, recording_id.clone()).await
+                    {
+                        tracing::error!(
+                            "Failed to stop meeting {} after running out of disk space: {}",
+                            recording_id,
+                            error
+                        );
+                    }
+                    return;
+                }
+            }
+        }
+    });
 }
 
 /// Sidecar-compatible stop_recording. Triggers transcription in a background task.
@@ -22774,7 +22924,7 @@ pub async fn dispatch_command(
             )
             .map_err(|e| e.to_string())?;
             let options = authorize_meeting_capture_options(options)?;
-            let recording_id = start_recording_for_sidecar(state.as_ref(), handle, options).await?;
+            let recording_id = start_recording_for_sidecar(state, handle, options).await?;
             Ok(serde_json::json!({ "recordingId": recording_id }))
         }
         "stop_recording" => {

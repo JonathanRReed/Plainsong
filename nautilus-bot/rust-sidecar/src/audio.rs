@@ -18,8 +18,9 @@ use crate::audio::system_capture::{
 use crate::audio::vad::{VadBackendKind, VadConfig, VadEdge, VadGate};
 use crate::models::RecordingOptions;
 use crate::recording_audio::{
-    create_new_file, sync_file, sync_parent_directory, validate_plaintext_wav, RecordingAudioRole,
-    RecordingAudioValidation, RecordingCapturePlan, ValidatedRecordingAudio,
+    available_space_bytes, create_new_file, sync_file, sync_parent_directory,
+    validate_plaintext_wav, RecordingAudioRole, RecordingAudioValidation, RecordingCapturePlan,
+    ValidatedRecordingAudio,
 };
 use crate::settings;
 use crate::sidecar_handle::SidecarHandle;
@@ -68,6 +69,101 @@ const DICTATION_AUTO_STOP_FRAME_MS: f32 = 30.0;
 /// Minimum sustained speech before auto-stop-on-silence is allowed to arm, so a
 /// stray cough or click can't immediately end the session once it goes quiet.
 const DICTATION_AUTO_STOP_MIN_SPEECH_SECONDS: f32 = 0.5;
+
+/// Bytes a mono 16-bit WAV track consumes per second at 48 kHz, the rate every
+/// mixed meeting session lands on. Used only to turn the free-space thresholds
+/// below into something a reader can reason about in minutes.
+pub const MEETING_WAV_BYTES_PER_SECOND_PER_TRACK: u64 = 48_000 * 2;
+/// Free space required before a meeting is allowed to start.
+///
+/// A "me and them" meeting writes three tracks at once, so this is roughly 30
+/// minutes of headroom. Refusing here is recoverable and honest; running out
+/// mid-meeting is not — the writer thread dies on ENOSPC and, until the
+/// writer-failure slot existed, the session kept showing an active recording
+/// while every subsequent sample was discarded.
+pub const MEETING_START_MIN_FREE_BYTES: u64 = 3 * MEETING_WAV_BYTES_PER_SECOND_PER_TRACK * 30 * 60;
+/// Free space below which a running meeting warns the user.
+///
+/// Roughly ten minutes of three-track headroom: enough time to wrap up or free
+/// space before capture has to end.
+pub const MEETING_LOW_SPACE_WARN_BYTES: u64 = 3 * MEETING_WAV_BYTES_PER_SECOND_PER_TRACK * 10 * 60;
+/// Free space below which a running meeting is stopped on purpose.
+///
+/// About a minute of three-track headroom, which is what the clean stop path
+/// (flush, finalize, fsync, hash) needs to land the audio already captured.
+/// Stopping here trades the last minute of a meeting for keeping the rest.
+pub const MEETING_CRITICAL_SPACE_STOP_BYTES: u64 = 3 * MEETING_WAV_BYTES_PER_SECOND_PER_TRACK * 60;
+
+/// What a running meeting's capture threads have reported about themselves.
+///
+/// Polled by the meeting lifecycle loop: both slots are written by threads that
+/// then exit, so nothing else would ever notice they are gone until stop.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct RecordingCaptureHealth {
+    /// Set when a WAV writer thread returned an error and stopped consuming
+    /// samples. Everything recorded after this point is discarded.
+    pub writer_failure: Option<String>,
+    /// Set when the OS reported the input stream itself failed.
+    pub capture_failure: Option<String>,
+}
+
+/// Decide what a free-space reading means for a running meeting.
+///
+/// Split out from the polling loop so the thresholds are testable without a
+/// filesystem that can be filled on demand.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MeetingSpacePressure {
+    Ok,
+    Low,
+    Critical,
+}
+
+pub fn meeting_space_pressure(available_bytes: u64) -> MeetingSpacePressure {
+    if available_bytes <= MEETING_CRITICAL_SPACE_STOP_BYTES {
+        MeetingSpacePressure::Critical
+    } else if available_bytes <= MEETING_LOW_SPACE_WARN_BYTES {
+        MeetingSpacePressure::Low
+    } else {
+        MeetingSpacePressure::Ok
+    }
+}
+
+/// `Some(needed_bytes)` when a volume with this much free space must not be
+/// asked to hold a meeting.
+pub fn meeting_start_space_shortfall(available_bytes: u64) -> Option<u64> {
+    (available_bytes < MEETING_START_MIN_FREE_BYTES).then_some(MEETING_START_MIN_FREE_BYTES)
+}
+
+/// Record the first writer failure for a session.
+///
+/// First writer to die wins: a three-track bundle shares one writer thread, but
+/// keeping the earliest cause is what explains where the audio stops.
+fn record_writer_failure(slot: &Arc<std::sync::Mutex<Option<String>>>, reason: String) {
+    if let Ok(mut failure) = slot.lock() {
+        if failure.is_none() {
+            *failure = Some(reason);
+        }
+    }
+}
+
+/// Run one WAV writer to completion and publish its failure before exiting.
+///
+/// The publish has to happen inside the writer thread. Once it returns, its
+/// receiver is dropped: the mic-only capture callback's `Disconnected` arm then
+/// discards every remaining sample in silence, and the mixed capture thread
+/// shuts itself down. This slot is the only evidence that the recording stopped
+/// being written, and it has to exist before anything else can notice.
+fn run_wav_writer_thread(
+    failure_slot: Arc<std::sync::Mutex<Option<String>>>,
+    write: impl FnOnce() -> Result<()>,
+) -> Result<()> {
+    let result = write();
+    if let Err(error) = result.as_ref() {
+        tracing::error!("Meeting WAV writer stopped: {error:#}");
+        record_writer_failure(&failure_slot, format!("{error:#}"));
+    }
+    result
+}
 
 fn to_f32_sample<T>(sample: T) -> f32
 where
@@ -322,6 +418,16 @@ struct ActiveRecordingSession {
     /// the timer running and the badge lit while nothing reached the WAV. The
     /// stop path reads this so the recording can be reported honestly.
     capture_failure: Arc<std::sync::Mutex<Option<String>>>,
+    /// Set when a WAV writer thread returned an error and exited — a full disk,
+    /// an IO error, a mismatched aligned chunk.
+    ///
+    /// A dead writer is silent by construction: the mic-only callback's
+    /// `TrySendError::Disconnected` arm discards samples without a word, and the
+    /// mixed path just shuts capture down. The overlay kept showing an active
+    /// recording either way and the user learned nothing until stop. The meeting
+    /// lifecycle loop polls this so the failure surfaces while there is still a
+    /// meeting to salvage.
+    writer_failure: Arc<std::sync::Mutex<Option<String>>>,
 }
 
 #[expect(
@@ -539,6 +645,69 @@ impl AudioCapture {
 
     pub fn plan_recording(&self, options: &RecordingOptions) -> Result<RecordingCapturePlan> {
         RecordingCapturePlan::new(&self.recordings_dir, options.mic, options.system_audio)
+    }
+
+    /// Refuse to start a meeting on a volume that cannot hold one.
+    ///
+    /// Running out of space mid-meeting kills the WAV writer thread, and the
+    /// capture side is silent about it by construction. Refusing up front is
+    /// the only outcome here the user can actually act on, so it is worth one
+    /// `statvfs` before any file exists.
+    ///
+    /// Fails open: a platform or filesystem that cannot report free space must
+    /// not block the meeting. An unmeasurable disk is not a full disk.
+    fn ensure_recording_start_has_disk_headroom(&self, plan: &RecordingCapturePlan) -> Result<()> {
+        let Some(directory) = plan.primary_path.parent() else {
+            return Ok(());
+        };
+        let available = match available_space_bytes(directory) {
+            Ok(available) => available,
+            Err(error) => {
+                tracing::warn!(
+                    "Could not measure free space for '{}': {}. Starting the meeting anyway.",
+                    directory.display(),
+                    error
+                );
+                return Ok(());
+            }
+        };
+        let Some(needed) = meeting_start_space_shortfall(available) else {
+            return Ok(());
+        };
+        anyhow::bail!(
+            "Not enough free disk space to record a meeting ({} MB free, {} MB needed). Free some space and start again.",
+            available / (1024 * 1024),
+            needed / (1024 * 1024)
+        )
+    }
+
+    /// Free bytes on the volume that holds this session's recordings, or `None`
+    /// when the platform cannot report it (callers must fail open).
+    pub fn recordings_available_space_bytes(&self) -> Option<u64> {
+        available_space_bytes(&self.recordings_dir).ok()
+    }
+
+    /// What the active session's capture and writer threads have reported.
+    ///
+    /// `None` when `recording_id` is not the live session, which is also how the
+    /// polling loop learns the meeting ended.
+    pub fn recording_capture_health(&self, recording_id: &str) -> Option<RecordingCaptureHealth> {
+        let session = self.active_recording.as_ref()?;
+        if session.id != recording_id {
+            return None;
+        }
+        Some(RecordingCaptureHealth {
+            writer_failure: session
+                .writer_failure
+                .lock()
+                .ok()
+                .and_then(|slot| slot.clone()),
+            capture_failure: session
+                .capture_failure
+                .lock()
+                .ok()
+                .and_then(|slot| slot.clone()),
+        })
     }
 
     fn ensure_microphone_preparation_retry_is_safe(
@@ -1327,10 +1496,14 @@ impl AudioCapture {
             ));
         }
 
+        self.ensure_recording_start_has_disk_headroom(&plan)?;
+
         let id = plan.recording_id.clone();
         let audio_path = plan.primary_path.clone();
         let mic_audio_path = plan.mic_path.clone();
         let system_audio_path = plan.system_path.clone();
+        let writer_failure: Arc<std::sync::Mutex<Option<String>>> =
+            Arc::new(std::sync::Mutex::new(None));
         let waveform_buffer = Arc::new(std::sync::Mutex::new(Vec::with_capacity(4410)));
         let streaming_queue: Arc<crossbeam::queue::ArrayQueue<Vec<f32>>> =
             Arc::new(crossbeam::queue::ArrayQueue::new(256));
@@ -1380,8 +1553,11 @@ impl AudioCapture {
                 }
             };
             let writer_log_path = audio_path.clone();
+            let writer_failure_for_thread = Arc::clone(&writer_failure);
             let writer_handle = std::thread::spawn(move || {
-                write_aligned_wav_files(prepared_writers, writer_receiver, &writer_log_path)
+                run_wav_writer_thread(writer_failure_for_thread, || {
+                    write_aligned_wav_files(prepared_writers, writer_receiver, &writer_log_path)
+                })
             });
 
             self.active_recording = Some(ActiveRecordingSession {
@@ -1400,6 +1576,7 @@ impl AudioCapture {
                 dropped_stream_chunks: Arc::new(AtomicU64::new(0)),
                 dropped_writer_chunks: Arc::new(AtomicU64::new(0)),
                 capture_failure: Arc::new(std::sync::Mutex::new(None)),
+                writer_failure,
             });
         } else {
             let device = preferred_mic_device
@@ -1416,8 +1593,11 @@ impl AudioCapture {
             let prepared_writer = prepare_mono_wav_writer(&audio_path, sample_rate)?;
             let (samples_sender, samples_receiver) = bounded::<Vec<f32>>(256);
             let writer_log_path = audio_path.clone();
+            let writer_failure_for_thread = Arc::clone(&writer_failure);
             let writer_handle = std::thread::spawn(move || {
-                write_wav_file(prepared_writer, samples_receiver, &writer_log_path)
+                run_wav_writer_thread(writer_failure_for_thread, || {
+                    write_wav_file(prepared_writer, samples_receiver, &writer_log_path)
+                })
             });
 
             let capture_stop_flag = Arc::new(AtomicBool::new(true));
@@ -1600,6 +1780,7 @@ impl AudioCapture {
                 dropped_stream_chunks: dropped_stream_chunks_for_session,
                 dropped_writer_chunks: dropped_writer_chunks_for_session,
                 capture_failure: capture_failure_for_session,
+                writer_failure,
             });
         }
 
@@ -2660,6 +2841,107 @@ mod recording_writer_tests {
         assert_eq!(std::fs::read(&path).unwrap(), b"do not truncate");
 
         let _ = std::fs::remove_dir_all(&root);
+    }
+}
+
+#[cfg(test)]
+mod recording_capture_health_tests {
+    use super::{
+        meeting_space_pressure, meeting_start_space_shortfall, run_wav_writer_thread,
+        write_aligned_wav_files, MeetingSpacePressure, MEETING_CRITICAL_SPACE_STOP_BYTES,
+        MEETING_LOW_SPACE_WARN_BYTES, MEETING_START_MIN_FREE_BYTES,
+    };
+    use std::sync::{Arc, Mutex};
+
+    #[test]
+    fn a_dead_writer_publishes_its_reason_before_the_thread_exits() {
+        let slot: Arc<Mutex<Option<String>>> = Arc::new(Mutex::new(None));
+        let observer = Arc::clone(&slot);
+        let handle = std::thread::spawn(move || {
+            run_wav_writer_thread(slot, || Err(anyhow::anyhow!("No space left on device")))
+        });
+
+        assert!(handle.join().expect("writer thread joins").is_err());
+        assert!(
+            observer
+                .lock()
+                .unwrap()
+                .as_deref()
+                .is_some_and(|reason| reason.contains("No space left on device")),
+            "a writer that dies must leave the reason where the lifecycle loop can find it"
+        );
+    }
+
+    #[test]
+    fn only_the_first_writer_failure_is_kept() {
+        let slot: Arc<Mutex<Option<String>>> = Arc::new(Mutex::new(None));
+        let _ = run_wav_writer_thread(Arc::clone(&slot), || Err(anyhow::anyhow!("first cause")));
+        let _ = run_wav_writer_thread(Arc::clone(&slot), || Err(anyhow::anyhow!("later noise")));
+
+        assert_eq!(slot.lock().unwrap().as_deref(), Some("first cause"));
+    }
+
+    #[test]
+    fn a_healthy_writer_leaves_the_failure_slot_empty() {
+        let root = std::env::temp_dir().join(format!(
+            "plainsong-writer-health-test-{}",
+            uuid::Uuid::new_v4()
+        ));
+        std::fs::create_dir_all(&root).unwrap();
+        let path = root.join("recording.wav");
+        let writers =
+            super::prepare_aligned_wav_writers(&path, None, None, 16_000).expect("prepare writers");
+        let (sender, receiver) = crossbeam::channel::bounded(1);
+        drop(sender);
+
+        let slot: Arc<Mutex<Option<String>>> = Arc::new(Mutex::new(None));
+        run_wav_writer_thread(Arc::clone(&slot), || {
+            write_aligned_wav_files(writers, receiver, &path)
+        })
+        .expect("an empty but well-formed session finalizes cleanly");
+
+        assert!(slot.lock().unwrap().is_none());
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn free_space_thresholds_leave_room_to_land_the_audio() {
+        const _: () = {
+            assert!(
+                MEETING_CRITICAL_SPACE_STOP_BYTES < MEETING_LOW_SPACE_WARN_BYTES,
+                "the stop threshold must trip after the warning, not before it"
+            );
+            assert!(
+                MEETING_LOW_SPACE_WARN_BYTES < MEETING_START_MIN_FREE_BYTES,
+                "a meeting must not start already inside the warning band"
+            );
+        };
+
+        assert_eq!(
+            meeting_space_pressure(MEETING_START_MIN_FREE_BYTES),
+            MeetingSpacePressure::Ok
+        );
+        assert_eq!(
+            meeting_space_pressure(MEETING_LOW_SPACE_WARN_BYTES),
+            MeetingSpacePressure::Low
+        );
+        assert_eq!(
+            meeting_space_pressure(MEETING_CRITICAL_SPACE_STOP_BYTES),
+            MeetingSpacePressure::Critical
+        );
+        assert_eq!(meeting_space_pressure(0), MeetingSpacePressure::Critical);
+    }
+
+    #[test]
+    fn start_preflight_refuses_only_a_volume_that_cannot_hold_a_meeting() {
+        assert_eq!(
+            meeting_start_space_shortfall(MEETING_START_MIN_FREE_BYTES),
+            None
+        );
+        assert_eq!(
+            meeting_start_space_shortfall(MEETING_START_MIN_FREE_BYTES - 1),
+            Some(MEETING_START_MIN_FREE_BYTES)
+        );
     }
 }
 
