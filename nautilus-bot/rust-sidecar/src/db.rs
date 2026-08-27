@@ -2505,6 +2505,23 @@ impl Database {
         Ok(bundle)
     }
 
+    /// Recordings that own at least one audio asset stuck in a non-terminal or
+    /// condemned state.
+    ///
+    /// `writing` means a writer thread never got to finish; `failed` means some
+    /// path decided the file was unusable. Both are worth re-checking against
+    /// the filesystem at startup, including for meetings that already carry a
+    /// terminal `error` status — that is exactly the case a stop-time failure
+    /// leaves behind, and nothing else would ever look at it again.
+    pub fn recording_ids_with_unsettled_audio_assets(&self) -> Result<Vec<String>> {
+        let mut statement = self.conn.prepare(
+            "SELECT DISTINCT recording_id FROM recording_audio_assets
+             WHERE lifecycle IN ('writing', 'failed')",
+        )?;
+        let rows = statement.query_map([], |row| row.get::<_, String>(0))?;
+        Ok(rows.collect::<std::result::Result<Vec<_>, _>>()?)
+    }
+
     pub fn mark_audio_assets_writing(&mut self, recording_id: &str) -> Result<()> {
         let now = Utc::now().to_rfc3339();
         let tx = self
@@ -2647,6 +2664,76 @@ impl Database {
             "UPDATE recordings SET status = ?1, updated_at = ?2 WHERE id = ?3",
             params![recording_status, &now, recording_id],
         )?;
+        tx.commit()?;
+        Ok(())
+    }
+
+    /// Repair asset lifecycles from a fresh filesystem probe, in one transaction
+    /// with an optional recording-status write.
+    ///
+    /// Unlike [`Self::set_audio_asset_validation_states`] this never clears the
+    /// stored plaintext length and hash when the caller has none to offer. An
+    /// encrypted asset cannot be re-measured without the vault key, and dropping
+    /// its recorded metadata would silently disable the integrity comparison
+    /// every runtime resolve makes against it.
+    ///
+    /// `recording_status` is `None` for repairs that are evidence about files
+    /// only and must not restate what happened to the meeting itself.
+    pub fn repair_audio_asset_lifecycles(
+        &mut self,
+        recording_id: &str,
+        updates: &[(
+            RecordingAudioRole,
+            RecordingAudioLifecycle,
+            Option<ValidatedRecordingAudio>,
+            Option<String>,
+        )],
+        recording_status: Option<&str>,
+    ) -> Result<()> {
+        let now = Utc::now().to_rfc3339();
+        let tx = self
+            .conn
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        for (role, lifecycle, metadata, last_error) in updates {
+            let plaintext_bytes = metadata
+                .as_ref()
+                .map(|metadata| i64::try_from(metadata.plaintext_bytes))
+                .transpose()
+                .context("Recording audio file is too large for SQLite metadata")?;
+            let plaintext_sha256 = metadata
+                .as_ref()
+                .map(|metadata| metadata.plaintext_sha256.as_str());
+            let updated = tx.execute(
+                "UPDATE recording_audio_assets
+                 SET lifecycle = ?1,
+                     plaintext_bytes = COALESCE(?2, plaintext_bytes),
+                     plaintext_sha256 = COALESCE(?3, plaintext_sha256),
+                     last_error = ?4, updated_at = ?5
+                 WHERE recording_id = ?6 AND role = ?7",
+                params![
+                    lifecycle.as_str(),
+                    plaintext_bytes,
+                    plaintext_sha256,
+                    last_error,
+                    &now,
+                    recording_id,
+                    role.as_str()
+                ],
+            )?;
+            if updated != 1 {
+                anyhow::bail!(
+                    "Recording '{}' has no '{}' audio asset",
+                    recording_id,
+                    role.as_str()
+                );
+            }
+        }
+        if let Some(status) = recording_status {
+            tx.execute(
+                "UPDATE recordings SET status = ?1, updated_at = ?2 WHERE id = ?3",
+                params![status, &now, recording_id],
+            )?;
+        }
         tx.commit()?;
         Ok(())
     }
@@ -5908,6 +5995,88 @@ mod tests {
                 .state,
             "db_switched"
         );
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn asset_repair_preserves_encrypted_metadata_and_finds_unsettled_recordings() {
+        let mut db = in_memory_db();
+        let root = std::env::temp_dir().join(format!(
+            "plainsong-asset-repair-test-{}",
+            uuid::Uuid::new_v4()
+        ));
+        std::fs::create_dir_all(&root).unwrap();
+        let plan = RecordingCapturePlan {
+            recording_id: "repair-me".to_string(),
+            primary_path: root.join("recording.wav"),
+            mic_path: None,
+            system_path: None,
+        };
+        let mut recording = sample_recording("repair-me", "inbox");
+        recording.audio_path.clear();
+        db.create_recording_with_audio_plan(&recording, &plan)
+            .unwrap();
+        db.mark_audio_assets_writing(&recording.id).unwrap();
+        write_test_wav(&plan.primary_path);
+        let RecordingAudioValidation::Ready(metadata) = validate_plaintext_wav(&plan.primary_path)
+        else {
+            panic!("valid wav fixture");
+        };
+        let expected_hash = metadata.plaintext_sha256.clone();
+        db.finalize_recording_audio(
+            &recording.id,
+            &[(RecordingAudioRole::Primary, metadata)],
+            1,
+            "processing",
+        )
+        .unwrap();
+
+        // A stop-time failure condemns the asset even though the file is fine,
+        // leaving the recorded plaintext hash in place (this is what an encrypted
+        // asset looks like after `switch_recording_audio_protection`).
+        db.conn
+            .execute(
+                "UPDATE recording_audio_assets
+                 SET lifecycle = 'failed', last_error = 'stop failed'
+                 WHERE recording_id = ?1",
+                params![&recording.id],
+            )
+            .unwrap();
+        db.update_recording_status(&recording.id, "error").unwrap();
+        assert_eq!(
+            db.recording_ids_with_unsettled_audio_assets().unwrap(),
+            vec!["repair-me".to_string()]
+        );
+
+        // Repairing without fresh metadata must keep the recorded hash, which is
+        // what every runtime resolve compares an encrypted asset against.
+        db.repair_audio_asset_lifecycles(
+            &recording.id,
+            &[(
+                RecordingAudioRole::Primary,
+                RecordingAudioLifecycle::Ready,
+                None,
+                None,
+            )],
+            None,
+        )
+        .unwrap();
+
+        let repaired = db.load_recording_audio_bundle(&recording.id).unwrap();
+        let primary = repaired.primary.as_ref().unwrap();
+        assert_eq!(primary.lifecycle, RecordingAudioLifecycle::Ready);
+        assert_eq!(primary.plaintext_sha256.as_deref(), Some(&*expected_hash));
+        assert!(primary.last_error.is_none());
+        assert_eq!(
+            db.get_recording(&recording.id).unwrap().unwrap().status,
+            "error",
+            "a file-only repair must not restate the meeting's own status"
+        );
+        assert!(db
+            .recording_ids_with_unsettled_audio_assets()
+            .unwrap()
+            .is_empty());
 
         let _ = std::fs::remove_dir_all(&root);
     }

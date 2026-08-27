@@ -186,6 +186,7 @@ const ALLOWED_RENDERER_COMMANDS = new Set<string>([
   "restore_backup_default",
   "retranscribe_recording",
   "retry_meeting_auto_name",
+  "revalidate_recording_audio",
   "run_diarization",
   "run_storage_retention_maintenance",
   "save_backup_config",

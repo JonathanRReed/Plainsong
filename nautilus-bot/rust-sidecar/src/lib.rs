@@ -8259,6 +8259,110 @@ mod tests {
     }
 
     #[test]
+    fn finalization_failure_keeps_audio_that_still_validates_recoverable() {
+        let metadata = recording_audio::ValidatedRecordingAudio {
+            plaintext_bytes: 4096,
+            plaintext_sha256: "abc".to_string(),
+            duration_seconds: 12,
+        };
+        let (role, lifecycle, stored, last_error) = recording_finalization_failure_update(
+            recording_audio::RecordingAudioRole::Primary,
+            recording_audio::RecordingAudioValidation::Ready(metadata.clone()),
+            "vault locked before encryption",
+        );
+
+        assert_eq!(role, recording_audio::RecordingAudioRole::Primary);
+        assert_eq!(lifecycle, recording_audio::RecordingAudioLifecycle::Ready);
+        assert_eq!(stored.as_ref(), Some(&metadata));
+        assert!(last_error
+            .as_deref()
+            .is_some_and(|error| error.contains("vault locked before encryption")));
+    }
+
+    #[test]
+    fn finalization_failure_still_condemns_audio_that_did_not_survive() {
+        let (_, missing, _, missing_error) = recording_finalization_failure_update(
+            recording_audio::RecordingAudioRole::Mic,
+            recording_audio::RecordingAudioValidation::Missing("gone".to_string()),
+            "writer died",
+        );
+        let (_, failed, _, failed_error) = recording_finalization_failure_update(
+            recording_audio::RecordingAudioRole::System,
+            recording_audio::RecordingAudioValidation::Failed("truncated".to_string()),
+            "writer died",
+        );
+
+        assert_eq!(missing, recording_audio::RecordingAudioLifecycle::Missing);
+        assert_eq!(failed, recording_audio::RecordingAudioLifecycle::Failed);
+        assert!(missing_error.is_some_and(|error| error.contains("gone")));
+        assert!(failed_error.is_some_and(|error| error.contains("truncated")));
+    }
+
+    #[test]
+    fn revalidation_promotes_readable_audio_and_probes_ciphertext_by_presence() {
+        let metadata = recording_audio::ValidatedRecordingAudio {
+            plaintext_bytes: 32,
+            plaintext_sha256: "hash".to_string(),
+            duration_seconds: 1,
+        };
+        let ready = revalidated_recording_audio_update(
+            recording_audio::RecordingAudioRole::Primary,
+            RecordingAudioProbe::Plaintext(recording_audio::RecordingAudioValidation::Ready(
+                metadata.clone(),
+            )),
+        );
+        assert_eq!(ready.1, recording_audio::RecordingAudioLifecycle::Ready);
+        assert_eq!(ready.2.as_ref(), Some(&metadata));
+        assert!(ready.3.is_none(), "a repaired asset carries no error");
+
+        let encrypted_present = revalidated_recording_audio_update(
+            recording_audio::RecordingAudioRole::Mic,
+            RecordingAudioProbe::Encrypted { present: true },
+        );
+        assert_eq!(
+            encrypted_present.1,
+            recording_audio::RecordingAudioLifecycle::Ready
+        );
+        assert!(
+            encrypted_present.2.is_none(),
+            "ciphertext cannot be re-measured, so stored metadata must be preserved by the caller"
+        );
+
+        let encrypted_absent = revalidated_recording_audio_update(
+            recording_audio::RecordingAudioRole::System,
+            RecordingAudioProbe::Encrypted { present: false },
+        );
+        assert_eq!(
+            encrypted_absent.1,
+            recording_audio::RecordingAudioLifecycle::Missing
+        );
+
+        assert!(revalidated_recording_audio_is_recoverable(&[
+            ready,
+            encrypted_present
+        ]));
+        assert!(
+            !revalidated_recording_audio_is_recoverable(&[encrypted_absent]),
+            "a missing member must not be reported as recoverable"
+        );
+        assert!(
+            !revalidated_recording_audio_is_recoverable(&[]),
+            "a recording that owns no audio is not recoverable"
+        );
+    }
+
+    #[test]
+    fn startup_reconcile_revalidates_errored_meetings_with_unsettled_audio() {
+        assert!(startup_reconcile_targets_recording("recording", false));
+        assert!(startup_reconcile_targets_recording("processing", false));
+        // The regression this exists for: a stop-time failure parks the meeting
+        // in `error` with `failed` assets and nothing ever re-reads the files.
+        assert!(startup_reconcile_targets_recording("error", true));
+        assert!(!startup_reconcile_targets_recording("error", false));
+        assert!(!startup_reconcile_targets_recording("completed", true));
+    }
+
+    #[test]
     fn meeting_audio_postprocessing_guard_is_reference_counted() {
         let active = Arc::new(StdMutex::new(HashMap::new()));
         let first = MeetingAudioPostprocessingGuard::new(Arc::clone(&active), "r1");
@@ -18592,18 +18696,32 @@ fn hydrate_interrupted_recording_overlay(
     overlay.message = Some(recovery.lifecycle_message.to_string());
 }
 
+/// Whether startup reconciliation should re-read one recording's audio.
+///
+/// "recording"/"processing" are the stranded states a crash leaves behind. The
+/// third case is the one that used to be invisible: a meeting already parked in
+/// terminal `error` whose asset rows still say `writing` or `failed`. A stop-time
+/// failure produces exactly that, the audio on disk is often perfectly readable,
+/// and nothing ever looked at it again — so a recoverable meeting stayed
+/// unrecoverable across every subsequent launch.
+fn startup_reconcile_targets_recording(status: &str, has_unsettled_audio: bool) -> bool {
+    matches!(status, "recording" | "processing") || (status == "error" && has_unsettled_audio)
+}
+
 /// Mark recordings stranded in "recording"/"processing" by a previous crash
 /// or restart as errored, so the meetings list stops showing an eternal
 /// spinner. Valid saved audio is exposed as recoverable for retranscription;
-/// missing or invalid audio stays a truthful terminal error. Runs at sidecar
-/// startup, before any new work can legitimately hold those states.
+/// missing or invalid audio stays a truthful terminal error. Errored meetings
+/// whose audio rows are still `writing`/`failed` are re-validated too, so audio
+/// that survived a stop-time failure is promoted back to `ready`. Runs at
+/// sidecar startup, before any new work can legitimately hold those states.
 pub async fn reconcile_interrupted_recordings_for_sidecar(
     state: &AppState,
     handle: &crate::sidecar_handle::SidecarHandle,
 ) {
-    let recordings = {
+    let (recordings, unsettled_audio) = {
         let db = state.db.lock().await;
-        match db.get_recordings(None) {
+        let recordings = match db.get_recordings(None) {
             Ok(recordings) => recordings,
             Err(error) => {
                 tracing::warn!(
@@ -18612,18 +18730,42 @@ pub async fn reconcile_interrupted_recordings_for_sidecar(
                 );
                 return;
             }
-        }
+        };
+        let unsettled = match db.recording_ids_with_unsettled_audio_assets() {
+            Ok(ids) => ids.into_iter().collect::<HashSet<String>>(),
+            Err(error) => {
+                tracing::warn!(
+                    "Failed to scan unsettled recording audio for startup reconciliation: {}",
+                    error
+                );
+                HashSet::new()
+            }
+        };
+        (recordings, unsettled)
     };
     let mut hydrated_overlay = false;
-    for recording in recordings
-        .into_iter()
-        .filter(|recording| matches!(recording.status.as_str(), "recording" | "processing"))
-    {
-        tracing::warn!(
-            "Recording {} was left in status '{}' by a previous session; validating its owned audio and marking it error",
-            recording.id,
-            recording.status
-        );
+    for recording in recordings.into_iter().filter(|recording| {
+        startup_reconcile_targets_recording(
+            &recording.status,
+            unsettled_audio.contains(&recording.id),
+        )
+    }) {
+        // An already-errored meeting is not "stranded": its status is correct
+        // and the user has seen it. Only its audio rows are being repaired, so
+        // it must not re-open the recovery overlay or claim a new interruption.
+        let stranded = matches!(recording.status.as_str(), "recording" | "processing");
+        if stranded {
+            tracing::warn!(
+                "Recording {} was left in status '{}' by a previous session; validating its owned audio and marking it error",
+                recording.id,
+                recording.status
+            );
+        } else {
+            tracing::info!(
+                "Recording {} is errored with unsettled audio assets; re-validating them against disk",
+                recording.id
+            );
+        }
         let bundle = {
             let db = state.db.lock().await;
             match db.load_recording_audio_bundle(&recording.id) {
@@ -18638,54 +18780,20 @@ pub async fn reconcile_interrupted_recordings_for_sidecar(
                 }
             }
         };
-        let updates = bundle
-            .assets()
-            .filter(|asset| {
-                asset.protection == recording_audio::RecordingAudioProtection::Plaintext
-            })
-            .map(
-                |asset| match recording_audio::validate_plaintext_wav(&asset.path) {
-                    recording_audio::RecordingAudioValidation::Ready(metadata) => (
-                        asset.role,
-                        recording_audio::RecordingAudioLifecycle::Ready,
-                        Some(metadata),
-                        None,
-                    ),
-                    recording_audio::RecordingAudioValidation::Missing(error) => (
-                        asset.role,
-                        recording_audio::RecordingAudioLifecycle::Missing,
-                        None,
-                        Some(error),
-                    ),
-                    recording_audio::RecordingAudioValidation::Failed(error) => (
-                        asset.role,
-                        recording_audio::RecordingAudioLifecycle::Failed,
-                        None,
-                        Some(error),
-                    ),
-                },
-            )
-            .collect::<Vec<_>>();
-        let primary_audio_ready =
-            bundle
-                .primary
-                .as_ref()
-                .is_some_and(|asset| match asset.protection {
-                    recording_audio::RecordingAudioProtection::Plaintext => {
-                        updates.iter().any(|(role, lifecycle, _, _)| {
-                            *role == recording_audio::RecordingAudioRole::Primary
-                                && *lifecycle == recording_audio::RecordingAudioLifecycle::Ready
-                        })
-                    }
-                    recording_audio::RecordingAudioProtection::Encrypted => {
-                        asset.lifecycle == recording_audio::RecordingAudioLifecycle::Ready
-                            && asset.path.is_file()
-                    }
-                });
+        // Encrypted members are probed for presence rather than skipped: an
+        // asset condemned by a stop-time failure after encryption had already
+        // published its ciphertext would otherwise stay `failed` forever.
+        let updates = revalidated_recording_audio_updates(&bundle);
+        let primary_audio_ready = updates.iter().any(|(role, lifecycle, _, _)| {
+            *role == recording_audio::RecordingAudioRole::Primary
+                && *lifecycle == recording_audio::RecordingAudioLifecycle::Ready
+        });
         let recovery = interrupted_recording_recovery_state(primary_audio_ready);
 
         let mut db = state.db.lock().await;
-        if let Err(error) = db.set_audio_asset_validation_states(&recording.id, &updates, "error") {
+        if let Err(error) =
+            db.repair_audio_asset_lifecycles(&recording.id, &updates, stranded.then_some("error"))
+        {
             tracing::warn!(
                 "Failed to reconcile interrupted recording {}: {}",
                 recording.id,
@@ -18694,14 +18802,33 @@ pub async fn reconcile_interrupted_recordings_for_sidecar(
             continue;
         }
         let _ = db.log_audit_event(
-            "recording_interrupted_reconciled",
+            if stranded {
+                "recording_interrupted_reconciled"
+            } else {
+                "recording_audio_revalidated"
+            },
             Some(serde_json::json!({
                 "recording_id": &recording.id,
                 "previous_status": &recording.status,
+                "primary_audio_ready": primary_audio_ready,
             })),
             "warning",
         );
         drop(db);
+        if !stranded {
+            // The status is already correct and already seen. Only say the audio
+            // rows changed; do not re-open the recovery overlay for a meeting the
+            // user dealt with sessions ago.
+            handle.emit_event(
+                "recording-status-changed",
+                serde_json::json!({
+                    "recordingId": &recording.id, "status": "error",
+                    "message": recovery.status_message,
+                    "updatedAt": chrono::Utc::now().to_rfc3339(),
+                }),
+            );
+            continue;
+        }
         handle.emit_event(
             "recording-status-changed",
             serde_json::json!({
@@ -20904,6 +21031,52 @@ async fn persist_or_rollback_recording_activation_failure(
     }
 }
 
+/// Lifecycle for one owned asset after a stop-time failure.
+///
+/// A stop that fails *after* the WAV is already on disk (a vault key that went
+/// away, a database write that lost a race, a join that timed out) says nothing
+/// about the audio itself. This used to mark every asset `failed` regardless,
+/// and nothing anywhere promotes an asset back to `ready`, so one transient
+/// stop-time error permanently condemned a perfectly good meeting recording.
+///
+/// The file's own validation result decides the lifecycle now. Audio that still
+/// reads back as a complete WAV stays `ready` and carries the stop-time error in
+/// `last_error` so the failure is still recorded and visible; `failed` is
+/// reserved for audio that genuinely did not survive.
+fn recording_finalization_failure_update(
+    role: recording_audio::RecordingAudioRole,
+    validation: recording_audio::RecordingAudioValidation,
+    finalization_error: &str,
+) -> (
+    recording_audio::RecordingAudioRole,
+    recording_audio::RecordingAudioLifecycle,
+    Option<recording_audio::ValidatedRecordingAudio>,
+    Option<String>,
+) {
+    match validation {
+        recording_audio::RecordingAudioValidation::Ready(metadata) => (
+            role,
+            recording_audio::RecordingAudioLifecycle::Ready,
+            Some(metadata),
+            Some(format!(
+                "Recording finalization failed after the audio was saved: {finalization_error}"
+            )),
+        ),
+        recording_audio::RecordingAudioValidation::Missing(error) => (
+            role,
+            recording_audio::RecordingAudioLifecycle::Missing,
+            None,
+            Some(format!("{finalization_error}; {error}")),
+        ),
+        recording_audio::RecordingAudioValidation::Failed(error) => (
+            role,
+            recording_audio::RecordingAudioLifecycle::Failed,
+            None,
+            Some(format!("{finalization_error}; {error}")),
+        ),
+    }
+}
+
 async fn persist_recording_finalization_failure(
     state: &AppState,
     recording_id: &str,
@@ -20925,31 +21098,18 @@ async fn persist_recording_finalization_failure(
     };
     let updates = bundle
         .assets()
-        .map(
-            |asset| match recording_audio::validate_plaintext_wav(&asset.path) {
-                recording_audio::RecordingAudioValidation::Ready(metadata) => (
-                    asset.role,
-                    recording_audio::RecordingAudioLifecycle::Failed,
-                    Some(metadata),
-                    Some(format!(
-                        "Recording finalization failed: {finalization_error}"
-                    )),
-                ),
-                recording_audio::RecordingAudioValidation::Missing(error) => (
-                    asset.role,
-                    recording_audio::RecordingAudioLifecycle::Missing,
-                    None,
-                    Some(format!("{finalization_error}; {error}")),
-                ),
-                recording_audio::RecordingAudioValidation::Failed(error) => (
-                    asset.role,
-                    recording_audio::RecordingAudioLifecycle::Failed,
-                    None,
-                    Some(format!("{finalization_error}; {error}")),
-                ),
-            },
-        )
+        .map(|asset| {
+            recording_finalization_failure_update(
+                asset.role,
+                recording_audio::validate_plaintext_wav(&asset.path),
+                finalization_error,
+            )
+        })
         .collect::<Vec<_>>();
+    let salvageable = updates.iter().any(|(role, lifecycle, _, _)| {
+        *role == recording_audio::RecordingAudioRole::Primary
+            && *lifecycle == recording_audio::RecordingAudioLifecycle::Ready
+    });
     let mut db = state.db.lock().await;
     if let Err(error) = db.set_audio_asset_validation_states(recording_id, &updates, "error") {
         tracing::error!(
@@ -20957,7 +21117,245 @@ async fn persist_recording_finalization_failure(
             recording_id,
             error
         );
+        return;
     }
+    if salvageable {
+        tracing::warn!(
+            "Recording {} failed to finalize but its saved audio still validates; it stays recoverable",
+            recording_id
+        );
+        let _ = db.log_audit_event(
+            "recording_finalization_failed_audio_retained",
+            Some(serde_json::json!({
+                "recording_id": recording_id,
+                "error": finalization_error,
+            })),
+            "warning",
+        );
+    }
+}
+
+/// What the filesystem said about one owned asset during a re-validation pass.
+///
+/// Ciphertext cannot be parsed as a WAV without the vault key, so an encrypted
+/// asset is only ever probed for presence. That is enough: the encryption switch
+/// only ever runs on an asset that was already `ready`, so a ciphertext file that
+/// is still on disk is still the ready audio it was when it was published.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum RecordingAudioProbe {
+    Plaintext(recording_audio::RecordingAudioValidation),
+    Encrypted { present: bool },
+}
+
+/// Repair one asset's lifecycle from what is actually on disk right now.
+///
+/// This is the only path that can move an asset out of `failed`. Without it a
+/// stop-time or startup failure was permanent for the life of the recording.
+fn revalidated_recording_audio_update(
+    role: recording_audio::RecordingAudioRole,
+    probe: RecordingAudioProbe,
+) -> (
+    recording_audio::RecordingAudioRole,
+    recording_audio::RecordingAudioLifecycle,
+    Option<recording_audio::ValidatedRecordingAudio>,
+    Option<String>,
+) {
+    match probe {
+        RecordingAudioProbe::Plaintext(recording_audio::RecordingAudioValidation::Ready(
+            metadata,
+        )) => (
+            role,
+            recording_audio::RecordingAudioLifecycle::Ready,
+            Some(metadata),
+            None,
+        ),
+        RecordingAudioProbe::Plaintext(recording_audio::RecordingAudioValidation::Missing(
+            error,
+        )) => (
+            role,
+            recording_audio::RecordingAudioLifecycle::Missing,
+            None,
+            Some(error),
+        ),
+        RecordingAudioProbe::Plaintext(recording_audio::RecordingAudioValidation::Failed(
+            error,
+        )) => (
+            role,
+            recording_audio::RecordingAudioLifecycle::Failed,
+            None,
+            Some(error),
+        ),
+        RecordingAudioProbe::Encrypted { present: true } => (
+            role,
+            recording_audio::RecordingAudioLifecycle::Ready,
+            None,
+            None,
+        ),
+        RecordingAudioProbe::Encrypted { present: false } => (
+            role,
+            recording_audio::RecordingAudioLifecycle::Missing,
+            None,
+            Some("Encrypted audio file is absent".to_string()),
+        ),
+    }
+}
+
+fn probe_recording_audio_asset(
+    asset: &recording_audio::RecordingAudioAsset,
+) -> RecordingAudioProbe {
+    match asset.protection {
+        recording_audio::RecordingAudioProtection::Plaintext => {
+            RecordingAudioProbe::Plaintext(recording_audio::validate_plaintext_wav(&asset.path))
+        }
+        recording_audio::RecordingAudioProtection::Encrypted => RecordingAudioProbe::Encrypted {
+            present: asset.path.is_file(),
+        },
+    }
+}
+
+fn revalidated_recording_audio_updates(
+    bundle: &recording_audio::RecordingAudioBundle,
+) -> Vec<(
+    recording_audio::RecordingAudioRole,
+    recording_audio::RecordingAudioLifecycle,
+    Option<recording_audio::ValidatedRecordingAudio>,
+    Option<String>,
+)> {
+    bundle
+        .assets()
+        .map(|asset| {
+            revalidated_recording_audio_update(asset.role, probe_recording_audio_asset(asset))
+        })
+        .collect()
+}
+
+fn revalidated_recording_audio_is_recoverable(
+    updates: &[(
+        recording_audio::RecordingAudioRole,
+        recording_audio::RecordingAudioLifecycle,
+        Option<recording_audio::ValidatedRecordingAudio>,
+        Option<String>,
+    )],
+) -> bool {
+    !updates.is_empty()
+        && updates.iter().all(|(_, lifecycle, _, _)| {
+            *lifecycle == recording_audio::RecordingAudioLifecycle::Ready
+        })
+}
+
+/// Re-read every owned audio file for one meeting and repair its lifecycle rows.
+///
+/// This is the user-reachable half of the repair: a meeting whose assets were
+/// condemned by a stop-time failure has intact audio on disk but rows that say
+/// otherwise, and every runtime resolver refuses anything that is not `ready`.
+/// Before this command the only escape was to relaunch the app and hope the
+/// startup reconcile covered it, which it did not for a recording already parked
+/// in `error`.
+///
+/// The recording's own status is deliberately left alone. Re-validating audio is
+/// evidence about files, not about whether the meeting was transcribed; the user
+/// re-transcribes from here if the audio came back ready.
+async fn revalidate_recording_audio_for_sidecar(
+    state: &AppState,
+    handle: &crate::sidecar_handle::SidecarHandle,
+    recording_id: &str,
+) -> Result<serde_json::Value, String> {
+    let _storage_guard = state.audio_storage_gate.try_lock().map_err(|_| {
+        "Recording storage is busy with encryption, backup, deletion, or retention. Try again shortly."
+            .to_string()
+    })?;
+
+    let recording = {
+        let db = state.db.lock().await;
+        db.get_recording(recording_id)
+            .map_err(|error| error.to_string())?
+            .ok_or_else(|| format!("Meeting '{recording_id}' was not found."))?
+    };
+    if matches!(recording.status.as_str(), "recording" | "processing") {
+        return Err(
+            "Wait for this meeting to finish capturing and processing before re-checking its audio."
+                .to_string(),
+        );
+    }
+
+    let bundle = {
+        let db = state.db.lock().await;
+        db.load_recording_audio_bundle(recording_id)
+            .map_err(|error| error.to_string())?
+    };
+    let updates = revalidated_recording_audio_updates(&bundle);
+    if updates.is_empty() {
+        return Err(format!(
+            "Meeting '{recording_id}' no longer owns any audio files to re-check."
+        ));
+    }
+    let recoverable = revalidated_recording_audio_is_recoverable(&updates);
+    let repaired_duration = updates
+        .iter()
+        .find(|(role, _, _, _)| *role == recording_audio::RecordingAudioRole::Primary)
+        .and_then(|(_, _, metadata, _)| metadata.as_ref())
+        .map(|metadata| metadata.duration_seconds)
+        .filter(|duration| *duration > 0);
+    let assets = updates
+        .iter()
+        .map(|(role, lifecycle, _, last_error)| {
+            serde_json::json!({
+                "role": role.as_str(),
+                "lifecycle": lifecycle.as_str(),
+                "error": last_error,
+            })
+        })
+        .collect::<Vec<_>>();
+
+    {
+        let mut db = state.db.lock().await;
+        db.repair_audio_asset_lifecycles(recording_id, &updates, None)
+            .map_err(|error| error.to_string())?;
+        // A finalization failure can land before the duration was ever written,
+        // so a repaired meeting would otherwise read as 0 seconds forever.
+        if recording.duration <= 0 {
+            if let Some(duration) = repaired_duration {
+                if let Err(error) = db.update_recording_duration(recording_id, duration) {
+                    tracing::warn!(
+                        "Repaired audio for {} but its duration could not be written: {}",
+                        recording_id,
+                        error
+                    );
+                }
+            }
+        }
+        let _ = db.log_audit_event(
+            "recording_audio_revalidated",
+            Some(serde_json::json!({
+                "recording_id": recording_id,
+                "recoverable": recoverable,
+                "assets": &assets,
+            })),
+            if recoverable { "info" } else { "warning" },
+        );
+    }
+
+    let message = if recoverable {
+        "Saved meeting audio was re-checked and is intact. Re-transcribe this meeting to finish it."
+    } else {
+        "Saved meeting audio was re-checked and some of it could not be read."
+    };
+    handle.emit_event(
+        "recording-status-changed",
+        serde_json::json!({
+            "recordingId": recording_id,
+            "status": &recording.status,
+            "message": message,
+            "updatedAt": chrono::Utc::now().to_rfc3339(),
+        }),
+    );
+
+    Ok(serde_json::json!({
+        "recordingId": recording_id,
+        "recoverable": recoverable,
+        "message": message,
+        "assets": assets,
+    }))
 }
 
 /// Sidecar-compatible start_recording. Emits state events via SidecarHandle.
@@ -22384,6 +22782,11 @@ pub async fn dispatch_command(
                 serde_json::from_value(params["recordingId"].clone()).map_err(|e| e.to_string())?;
             stop_recording_for_sidecar(state, handle, recording_id).await?;
             Ok(serde_json::Value::Null)
+        }
+        "revalidate_recording_audio" => {
+            let recording_id: String =
+                serde_json::from_value(params["recordingId"].clone()).map_err(|e| e.to_string())?;
+            revalidate_recording_audio_for_sidecar(state.as_ref(), handle, &recording_id).await
         }
         "retry_meeting_auto_name" => {
             let recording_id: String =
