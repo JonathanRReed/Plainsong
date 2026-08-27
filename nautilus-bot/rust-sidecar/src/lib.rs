@@ -17959,6 +17959,16 @@ pub async fn build_app_state() -> Result<AppState, String> {
     let mut model_integrity_artifacts = download::managed_model_integrity_artifacts(&models_root);
     model_integrity_artifacts.extend(asr::model_integrity_artifacts(&models_root));
     model_integrity_artifacts.extend(text::recasepunct::model_integrity_artifacts(&models_root));
+    // This runs inline (fail-closed trust semantics are correct here), and
+    // an artifact without a cached-and-trusted receipt yet is re-hashed in
+    // full -- for many multi-gigabyte models on first launch after an
+    // upgrade, that can be a minute-scale stall. Log the count up front so
+    // it is attributable instead of looking like a hang.
+    tracing::info!(
+        "Re-verifying integrity receipts for {} local model artifact(s) at startup; \
+         already-cached ones are skipped quickly, uncached ones are re-hashed",
+        model_integrity_artifacts.len()
+    );
     let integrity_migration =
         download::migrate_legacy_model_integrity_receipts(&model_integrity_artifacts).await;
     if integrity_migration.migrated_count > 0 {
