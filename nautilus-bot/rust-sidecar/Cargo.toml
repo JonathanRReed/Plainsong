@@ -173,7 +173,27 @@ cpal = { path = "vendor/cpal-0.18.1" }
 opt-level = 3
 lto = true
 codegen-units = 1
-panic = "abort"
+# Unwind, not abort.
+#
+# `panic = "abort"` made every one of the sidecar's own panic-recovery paths
+# dead code: the `handle.join()` arms that report "<thread> panicked", and the
+# `spawn_blocking` join-error arms, can only ever run if a panic unwinds. Under
+# abort, a panic on any worker thread -- a WAV writer, a transcription task, a
+# blocking pool thread -- killed the whole process instead, taking an in-progress
+# meeting and its unflushed audio with it.
+#
+# Unwinding is safe at the FFI boundaries here. Every `extern "C"` block in this
+# crate *declares* foreign functions Rust calls (Accessibility, CoreGraphics,
+# `renameatx_np`); none export Rust to C, so no unwind of ours can escape into a
+# C frame from this crate. Where third-party crates do install Rust callbacks
+# behind `extern "C"` trampolines -- cpal/coreaudio-rs render callbacks,
+# whisper-rs segment callbacks, ort logging -- the toolchain's plain `extern "C"`
+# ABI aborts on unwind by default (Rust 1.81+; this crate builds on 1.85+), so
+# those sites behave exactly as they did under abort rather than becoming
+# undefined. `guard_audio_callback` additionally catches panics inside the
+# realtime audio callbacks we own, so those degrade to an inert stream instead
+# of reaching that abort at all.
+panic = "unwind"
 strip = true
 
 [profile.dev]

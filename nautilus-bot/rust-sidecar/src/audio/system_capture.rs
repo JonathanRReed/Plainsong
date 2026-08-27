@@ -1314,9 +1314,13 @@ fn build_system_input_stream(
     let config = selection.stream_config;
     let num_channels = config.channels as usize;
     let backend = selection.backend;
+    // Latched if this stream's realtime callback ever panics, so system audio
+    // goes quiet instead of aborting the process mid-meeting.
+    let stream_callback_poisoned = Arc::new(AtomicBool::new(false));
 
     macro_rules! build_stream {
         ($sample_type:ty) => {{
+            let callback_poisoned = Arc::clone(&stream_callback_poisoned);
             let system_buffer = Arc::clone(&system_buffer);
             let is_capturing = Arc::clone(&is_capturing);
             let dropped_samples = Arc::clone(&dropped_samples);
@@ -1325,19 +1329,21 @@ fn build_system_input_stream(
             selection.device.build_input_stream(
                 config,
                 move |data: &[$sample_type], _: &cpal::InputCallbackInfo| {
-                    health.callbacks.fetch_add(1, Ordering::Relaxed);
-                    if is_capturing.load(Ordering::SeqCst) {
-                        let (frames, non_silent_frames) = push_normalized_samples(
-                            data,
-                            num_channels,
-                            &system_buffer,
-                            &dropped_samples,
-                        );
-                        health.captured_frames.fetch_add(frames, Ordering::Relaxed);
-                        health
-                            .non_silent_frames
-                            .fetch_add(non_silent_frames, Ordering::Relaxed);
-                    }
+                    crate::audio::guard_audio_callback(&callback_poisoned, "System audio", || {
+                        health.callbacks.fetch_add(1, Ordering::Relaxed);
+                        if is_capturing.load(Ordering::SeqCst) {
+                            let (frames, non_silent_frames) = push_normalized_samples(
+                                data,
+                                num_channels,
+                                &system_buffer,
+                                &dropped_samples,
+                            );
+                            health.captured_frames.fetch_add(frames, Ordering::Relaxed);
+                            health
+                                .non_silent_frames
+                                .fetch_add(non_silent_frames, Ordering::Relaxed);
+                        }
+                    });
                 },
                 move |error| {
                     let mut kind = classify_system_audio_error(&error, backend);
@@ -1487,23 +1493,29 @@ where
     let channels = selection.stream_config.channels as usize;
     let backend = selection.backend;
     let max_samples = selection.stream_config.sample_rate as usize * 4;
+    // Latched if this callback ever panics, so the stream goes inert rather
+    // than aborting the process at the cpal C boundary.
+    let callback_poisoned = std::sync::Arc::new(AtomicBool::new(false));
     selection.device.build_input_stream(
         selection.stream_config,
         move |data: &[T], _: &cpal::InputCallbackInfo| {
-            if let Ok(mut stats) = stats.lock() {
-                stats.callbacks += 1;
-                for_each_mono_sample(data, channels, |sample| {
-                    stats.captured_frames += 1;
-                    stats.peak = stats.peak.max(sample.abs());
-                    if sample.abs() > SYSTEM_AUDIO_TEST_NON_SILENT_THRESHOLD {
-                        stats.non_silent_frames += 1;
-                    }
-                    if tone_active.load(Ordering::Relaxed) && stats.tone_samples.len() < max_samples
-                    {
-                        stats.tone_samples.push(sample);
-                    }
-                });
-            }
+            crate::audio::guard_audio_callback(&callback_poisoned, "System audio test", || {
+                if let Ok(mut stats) = stats.lock() {
+                    stats.callbacks += 1;
+                    for_each_mono_sample(data, channels, |sample| {
+                        stats.captured_frames += 1;
+                        stats.peak = stats.peak.max(sample.abs());
+                        if sample.abs() > SYSTEM_AUDIO_TEST_NON_SILENT_THRESHOLD {
+                            stats.non_silent_frames += 1;
+                        }
+                        if tone_active.load(Ordering::Relaxed)
+                            && stats.tone_samples.len() < max_samples
+                        {
+                            stats.tone_samples.push(sample);
+                        }
+                    });
+                }
+            });
         },
         move |error| {
             let kind = classify_system_audio_error(&error, backend);
@@ -2145,23 +2157,33 @@ impl MixedAudioCapture {
                     mic_channels = num_channels;
                     let sample_format = config.sample_format();
                     let stream_config = config.config();
+                    // Latched if this callback ever panics, so the mic half of
+                    // a mixed capture goes quiet rather than aborting.
+                    let mic_callback_poisoned = Arc::new(AtomicBool::new(false));
                     macro_rules! build_mic_stream {
                         ($sample_type:ty) => {{
                             let mic_buffer = Arc::clone(&mic_buffer);
                             let is_capturing = Arc::clone(&is_capturing);
                             let dropped_samples = Arc::clone(&dropped_mic_samples);
+                            let callback_poisoned = Arc::clone(&mic_callback_poisoned);
 
                             device.build_input_stream(
                                 stream_config,
                                 move |data: &[$sample_type], _: &cpal::InputCallbackInfo| {
-                                    if is_capturing.load(Ordering::SeqCst) {
-                                        push_normalized_samples(
-                                            data,
-                                            num_channels,
-                                            &mic_buffer,
-                                            &dropped_samples,
-                                        );
-                                    }
+                                    crate::audio::guard_audio_callback(
+                                        &callback_poisoned,
+                                        "Mixed-capture microphone",
+                                        || {
+                                            if is_capturing.load(Ordering::SeqCst) {
+                                                push_normalized_samples(
+                                                    data,
+                                                    num_channels,
+                                                    &mic_buffer,
+                                                    &dropped_samples,
+                                                );
+                                            }
+                                        },
+                                    );
                                 },
                                 |err| tracing::error!("Mic stream error: {}", err),
                                 None,

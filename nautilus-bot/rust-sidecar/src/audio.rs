@@ -91,6 +91,35 @@ const DICTATION_AUTO_STOP_MIN_SPEECH_SECONDS: f32 = 0.5;
 /// rather than left with silently truncated audio.
 const DICTATION_MAX_SESSION_SECONDS: u64 = 10 * 60;
 
+/// Run one realtime audio callback body so a panic inside it cannot take the
+/// process down.
+///
+/// These closures are invoked by cpal from a CoreAudio render thread, through an
+/// `extern "C"` trampoline. An escaping panic would hit that boundary and abort
+/// -- killing an in-progress meeting and its unflushed audio over what is often
+/// a recoverable bug in one callback. Catching here turns that into a single
+/// logged error and an inert stream.
+///
+/// `poisoned` makes the stream inert rather than letting the same panic repeat
+/// hundreds of times a second: whatever invariant the callback broke, it will
+/// keep breaking it, and the log would bury everything else.
+///
+/// `AssertUnwindSafe` is honest here precisely *because* of that latch. The
+/// concern it waives is observing state a panic left half-updated, and after a
+/// panic this callback never runs again, so no later iteration can observe it.
+fn guard_audio_callback<F: FnOnce()>(poisoned: &AtomicBool, label: &str, body: F) {
+    if poisoned.load(Ordering::Relaxed) {
+        return;
+    }
+    if std::panic::catch_unwind(std::panic::AssertUnwindSafe(body)).is_err() {
+        poisoned.store(true, Ordering::Relaxed);
+        tracing::error!(
+            "{} audio callback panicked; this capture stream is now inert",
+            label
+        );
+    }
+}
+
 /// How one capture callback's worth of mono samples fares against the session
 /// length ceiling.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -897,6 +926,9 @@ impl AudioCapture {
         let buffer = Arc::clone(&self.dictation_buffer);
         let buffered_samples = Arc::clone(&self.dictation_buffered_samples);
         let max_duration_reached = Arc::clone(&self.dictation_max_duration_reached);
+        // Latched by `guard_audio_callback` if this session's realtime callback
+        // ever panics, so the stream goes quiet instead of aborting the process.
+        let callback_poisoned = Arc::new(AtomicBool::new(false));
         let callback_count = Arc::clone(&self.dictation_callback_count);
         let (startup_tx, startup_rx) = bounded::<Result<(), String>>(1);
         let audio_level = Arc::clone(&self.dictation_audio_level);
@@ -943,6 +975,7 @@ impl AudioCapture {
             macro_rules! build_dictation_stream {
                 ($sample_type:ty) => {{
                     let capture_stop = Arc::clone(&capture_stop);
+                    let callback_poisoned = Arc::clone(&callback_poisoned);
                     let callback_count = Arc::clone(&callback_count);
                     let buffer = Arc::clone(&buffer);
                     let buffered_samples = Arc::clone(&buffered_samples);
@@ -960,6 +993,7 @@ impl AudioCapture {
                     device.build_input_stream(
                         stream_config.clone(),
                         move |data: &[$sample_type], _: &cpal::InputCallbackInfo| {
+                          guard_audio_callback(&callback_poisoned, "Dictation", || {
                             if !capture_stop.load(Ordering::SeqCst) {
                                 return;
                             }
@@ -1074,6 +1108,7 @@ impl AudioCapture {
                                     vad_event_handle.as_ref(),
                                 );
                             }
+                          });
                         },
                         |err| tracing::error!("Dictation stream error: {}", err),
                         None,
@@ -1570,6 +1605,9 @@ impl AudioCapture {
 
             let capture_stop_flag = Arc::new(AtomicBool::new(true));
             let capture_flag = Arc::clone(&capture_stop_flag);
+            // Latched if this recording's realtime callback ever panics, so the
+            // stream goes inert instead of aborting the process mid-meeting.
+            let callback_poisoned = Arc::new(AtomicBool::new(false));
             let dropped_stream_chunks = Arc::new(AtomicU64::new(0));
             let dropped_writer_chunks = Arc::new(AtomicU64::new(0));
             let dropped_stream_chunks_for_session = Arc::clone(&dropped_stream_chunks);
@@ -1588,6 +1626,7 @@ impl AudioCapture {
                 macro_rules! build_recording_stream {
                     ($sample_type:ty) => {{
                         let stream_queue = Arc::clone(&stream_queue_clone);
+                        let callback_poisoned = Arc::clone(&callback_poisoned);
                         let waveform_buffer = Arc::clone(&wf_buffer);
                         let samples_sender = samples_sender.clone();
                         let dropped_stream_chunks = Arc::clone(&dropped_stream_chunks);
@@ -1596,33 +1635,35 @@ impl AudioCapture {
                         device.build_input_stream(
                             stream_config.clone(),
                             move |data: &[$sample_type], _: &cpal::InputCallbackInfo| {
-                                let chunk = downmix_to_mono(data, num_channels);
+                                guard_audio_callback(&callback_poisoned, "Recording", || {
+                                    let chunk = downmix_to_mono(data, num_channels);
 
-                                if let Ok(mut waveform) = waveform_buffer.lock() {
-                                    for &sample in
-                                        chunk.iter().step_by(chunk.len() / 100 + 1).take(100)
-                                    {
-                                        waveform.push(sample);
+                                    if let Ok(mut waveform) = waveform_buffer.lock() {
+                                        for &sample in
+                                            chunk.iter().step_by(chunk.len() / 100 + 1).take(100)
+                                        {
+                                            waveform.push(sample);
+                                        }
+                                        if waveform.len() > 4410 {
+                                            let drop_count = waveform.len() - 4410;
+                                            waveform.drain(0..drop_count);
+                                        }
                                     }
-                                    if waveform.len() > 4410 {
-                                        let drop_count = waveform.len() - 4410;
-                                        waveform.drain(0..drop_count);
-                                    }
-                                }
 
-                                if stream_queue.push(chunk.clone()).is_err() {
-                                    let _ = stream_queue.pop();
-                                    let _ = stream_queue.push(chunk.clone());
-                                    dropped_stream_chunks.fetch_add(1, Ordering::Relaxed);
-                                }
-
-                                match samples_sender.try_send(chunk) {
-                                    Ok(()) => {}
-                                    Err(TrySendError::Full(_)) => {
-                                        dropped_writer_chunks.fetch_add(1, Ordering::Relaxed);
+                                    if stream_queue.push(chunk.clone()).is_err() {
+                                        let _ = stream_queue.pop();
+                                        let _ = stream_queue.push(chunk.clone());
+                                        dropped_stream_chunks.fetch_add(1, Ordering::Relaxed);
                                     }
-                                    Err(TrySendError::Disconnected(_)) => {}
-                                }
+
+                                    match samples_sender.try_send(chunk) {
+                                        Ok(()) => {}
+                                        Err(TrySendError::Full(_)) => {
+                                            dropped_writer_chunks.fetch_add(1, Ordering::Relaxed);
+                                        }
+                                        Err(TrySendError::Disconnected(_)) => {}
+                                    }
+                                });
                             },
                             {
                                 let capture_failure = Arc::clone(&capture_failure_for_stream);
@@ -2196,12 +2237,16 @@ impl AudioCapture {
                 edge
             }
 
+            // Latched if this monitor's realtime callback ever panics, so it
+            // goes inert instead of aborting the process.
+            let callback_poisoned = Arc::new(AtomicBool::new(false));
             let sample_format = config.sample_format();
             let stream_config = config.config();
 
             macro_rules! build_hands_free_stream {
                 ($sample_type:ty) => {{
                     let running = Arc::clone(&monitor_active);
+                    let callback_poisoned = Arc::clone(&callback_poisoned);
                     let gate = Arc::clone(&gate);
                     let handle = event_handle.clone();
                     let err_active = Arc::clone(&monitor_active);
@@ -2210,31 +2255,33 @@ impl AudioCapture {
                     device.build_input_stream(
                         stream_config.clone(),
                         move |data: &[$sample_type], _: &cpal::InputCallbackInfo| {
-                            if !running.load(Ordering::SeqCst) {
-                                return;
-                            }
-                            let mono = downmix_to_mono(data, num_channels);
-                            // The frame is already downmixed for the gate; keep
-                            // it in the ring instead of dropping it, so the
-                            // session this monitor is about to trigger starts
-                            // with the user's opening words.
-                            if let Ok(mut slot) = pre_roll.lock() {
-                                if let Some(buffer) = slot.as_mut() {
-                                    buffer.push(&mono);
+                            guard_audio_callback(&callback_poisoned, "Hands-free monitor", || {
+                                if !running.load(Ordering::SeqCst) {
+                                    return;
                                 }
-                            }
-                            // Mark where speech actually began (the gate latches
-                            // well after the fact) so the hand-off is the user's
-                            // opening words, not the whole ring.
-                            if handle_frame(&mono, &gate, &running, &handle)
-                                == VadEdge::SpeechStarted
-                            {
+                                let mono = downmix_to_mono(data, num_channels);
+                                // The frame is already downmixed for the gate; keep
+                                // it in the ring instead of dropping it, so the
+                                // session this monitor is about to trigger starts
+                                // with the user's opening words.
                                 if let Ok(mut slot) = pre_roll.lock() {
                                     if let Some(buffer) = slot.as_mut() {
-                                        buffer.mark_speech_onset(speech_onset_lookback);
+                                        buffer.push(&mono);
                                     }
                                 }
-                            }
+                                // Mark where speech actually began (the gate latches
+                                // well after the fact) so the hand-off is the user's
+                                // opening words, not the whole ring.
+                                if handle_frame(&mono, &gate, &running, &handle)
+                                    == VadEdge::SpeechStarted
+                                {
+                                    if let Ok(mut slot) = pre_roll.lock() {
+                                        if let Some(buffer) = slot.as_mut() {
+                                            buffer.mark_speech_onset(speech_onset_lookback);
+                                        }
+                                    }
+                                }
+                            });
                         },
                         move |err| {
                             tracing::error!("Hands-free monitor stream error: {}", err);
@@ -2961,6 +3008,75 @@ mod dictation_capture_lifecycle_tests {
 
         assert!(!session_flag.load(Ordering::SeqCst));
         assert!(audio.dictation_capture_stop.is_none());
+    }
+
+    #[test]
+    fn a_panicking_audio_callback_does_not_escape_to_the_c_boundary() {
+        // Escaping here would hit cpal's `extern "C"` trampoline and abort the
+        // process, killing an in-progress meeting over one bad callback.
+        let poisoned = AtomicBool::new(false);
+        super::guard_audio_callback(&poisoned, "test", || panic!("callback exploded"));
+        assert!(poisoned.load(Ordering::Relaxed));
+    }
+
+    #[test]
+    fn a_poisoned_audio_callback_goes_inert_instead_of_repeating() {
+        // The same panic would otherwise recur hundreds of times a second and
+        // bury every other log line.
+        let poisoned = AtomicBool::new(false);
+        super::guard_audio_callback(&poisoned, "test", || panic!("first"));
+
+        let mut ran_again = false;
+        super::guard_audio_callback(&poisoned, "test", || ran_again = true);
+        assert!(!ran_again, "a poisoned callback must not run again");
+    }
+
+    #[test]
+    fn a_healthy_audio_callback_runs_and_stays_unpoisoned() {
+        let poisoned = AtomicBool::new(false);
+        let mut ran = false;
+        super::guard_audio_callback(&poisoned, "test", || ran = true);
+
+        assert!(ran);
+        assert!(!poisoned.load(Ordering::Relaxed));
+    }
+
+    #[test]
+    fn worker_thread_panics_are_recoverable_rather_than_fatal() {
+        // The whole point of `panic = "unwind"`: the sidecar's `handle.join()`
+        // recovery arms were dead code under abort, because a worker panic took
+        // the process with it. This is the behaviour those arms depend on.
+        let handle = std::thread::spawn(|| panic!("worker exploded"));
+        assert!(
+            handle.join().is_err(),
+            "a worker panic must be observable by its joiner, not fatal"
+        );
+    }
+
+    #[test]
+    fn the_release_profile_unwinds_so_recovery_paths_can_run() {
+        const CARGO_TOML: &str = include_str!("../Cargo.toml");
+        let release = CARGO_TOML
+            .split_once("[profile.release]")
+            .expect("a release profile must exist")
+            .1;
+        let release = release
+            .split_once("\n[")
+            .map(|parts| parts.0)
+            .unwrap_or(release);
+        // Settings only: the profile's comment explains what `abort` used to do
+        // and would otherwise trip a naive scan of the whole block.
+        let panic_setting = release
+            .lines()
+            .map(str::trim)
+            .filter(|line| !line.starts_with('#'))
+            .find_map(|line| line.strip_prefix("panic ="))
+            .map(str::trim)
+            .expect("the release profile must state a panic strategy");
+        assert_eq!(
+            panic_setting, "\"unwind\"",
+            "release must unwind: abort makes every panic-recovery branch dead code"
+        );
     }
 
     #[test]
