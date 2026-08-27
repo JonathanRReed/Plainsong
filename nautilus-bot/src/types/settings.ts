@@ -55,6 +55,19 @@ export interface DictationCustomMode {
   activationDomainMatcher?: string | null;
 }
 
+/**
+ * A user-saved meeting template ("recipe"), alongside the built-in set in
+ * `src/lib/meeting-templates.ts`. Mirrors `MeetingCustomTemplate` in
+ * rust-sidecar/src/settings.rs -- same shape, same sanitization discipline
+ * on the Rust side (dropped if malformed, capped in count and length).
+ */
+export interface MeetingCustomTemplate {
+  id: string;
+  name: string;
+  summaryPrompt: string;
+  notesOutline: string[];
+}
+
 interface AudioSettings {
   preferredInputDevice?: AudioInputDevicePreference | null;
   dictationInputOverrideEnabled?: boolean;
@@ -137,6 +150,7 @@ export interface TranscriptionSettings {
   platformOptimization?: PlatformOptimizationSettings;
   dictationCategoryFormattingEnabled?: boolean;
   dictationAppCategoryOverrides?: DictationAppCategoryOverride[];
+  meetingCustomTemplates?: MeetingCustomTemplate[];
 }
 
 export interface PlatformOptimizationSettings {

@@ -1,7 +1,7 @@
 import { existsSync, readFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { describe, expect, it } from "vitest";
-import type { Settings } from "@/types/settings";
+import type { MeetingCustomTemplate, Settings } from "@/types/settings";
 
 /**
  * The settings bridge is pass-through in both directions: `get_settings` hands
@@ -68,6 +68,18 @@ const AI_LANE_WIRE_SHAPE: Settings["privacy"]["dictationAi"] = {
   modelId: null,
 };
 
+// Extended deliberately alongside the new `meeting_custom_templates`
+// persistence (audit finding ux-12): this pins the third corner of the same
+// three-way contract the two shapes above cover for privacy settings --
+// TypeScript catches a renderer-side rename, and the runtime comparison
+// below catches a Rust-side one.
+const MEETING_CUSTOM_TEMPLATE_WIRE_SHAPE: MeetingCustomTemplate = {
+  id: "custom-1",
+  name: "Board Update",
+  summaryPrompt: "Summarize board sentiment, asks, and follow-ups.",
+  notesOutline: ["Sentiment", "Asks"],
+};
+
 describe("settings wire contract", () => {
   const source = (() => {
     if (!existsSync(SETTINGS_RS)) {
@@ -87,6 +99,12 @@ describe("settings wire contract", () => {
   it("mirrors every AiLaneSettings field Rust serializes", () => {
     expect(rustStructFields(source, "AiLaneSettings").map(toCamelCase)).toEqual(
       Object.keys(AI_LANE_WIRE_SHAPE),
+    );
+  });
+
+  it("mirrors every MeetingCustomTemplate field Rust serializes", () => {
+    expect(rustStructFields(source, "MeetingCustomTemplate").map(toCamelCase)).toEqual(
+      Object.keys(MEETING_CUSTOM_TEMPLATE_WIRE_SHAPE),
     );
   });
 
