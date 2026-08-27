@@ -67,7 +67,7 @@ Optional, for on-device AI cleanup:
 
 ```bash
 ollama serve
-ollama pull llama3.2
+ollama pull qwen3.5:4b
 ```
 
 ## Build
@@ -148,7 +148,7 @@ changing the requested benchmark.
 
 Speech recognition runs locally by default (Whisper via whisper.cpp, plus other
 native engines). Optional bring-your-own-key cloud providers (OpenAI,
-ElevenLabs, Mistral, Groq, Cohere) are supported. Keys are stored in the OS
+ElevenLabs, Groq, Cohere) are supported. Keys are stored in the OS
 keychain and requests go directly to the provider, never through a Plainsong
 server.
 
