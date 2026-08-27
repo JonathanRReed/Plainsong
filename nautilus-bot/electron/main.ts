@@ -83,6 +83,7 @@ import {
   observeCaptureAdmissionForWindow,
 } from "./capture-admission";
 import { rendererPermissionAllowed } from "./renderer-permission-policy";
+import { isAllowedExternalUrl } from "./external-url-policy";
 import {
   finalizeMeetingWithinBudget,
   nextActiveMeetingRecordingId,
@@ -1656,15 +1657,6 @@ function isRendererAppUrl(rawUrl: string): boolean {
   }
 }
 
-function isAllowedExternalUrl(rawUrl: string): boolean {
-  try {
-    const url = new URL(rawUrl);
-    return url.protocol === "https:" || url.protocol === "mailto:";
-  } catch {
-    return false;
-  }
-}
-
 // Electron approves renderer permission requests by default. Plainsong's
 // renderer processes inherit the app's microphone entitlement, so an
 // unexpected origin loaded into a window would otherwise be able to open the
@@ -1717,10 +1709,19 @@ function installRendererPermissionHandlers(): void {
 function configureWindowSecurity(win: BrowserWindow): void {
   observeCaptureAdmissionForWindow(win, captureAdmission);
 
-  win.webContents.setWindowOpenHandler(({ url }) => {
-    if (isAllowedExternalUrl(url)) {
-      void shell.openExternal(url);
+  // Both of these hand a renderer-supplied URL to the user's browser, which is
+  // the only egress the renderer controls. `isAllowedExternalUrl` is a host
+  // allowlist, not a protocol check — see external-url-policy.ts.
+  const openExternalIfAllowed = (url: string, source: string): void => {
+    if (!isAllowedExternalUrl(url)) {
+      console.warn("[security] refused to open an external URL", { source, url });
+      return;
     }
+    void shell.openExternal(url);
+  };
+
+  win.webContents.setWindowOpenHandler(({ url }) => {
+    openExternalIfAllowed(url, "window-open");
 
     return { action: "deny" };
   });
@@ -1731,10 +1732,7 @@ function configureWindowSecurity(win: BrowserWindow): void {
     }
 
     event.preventDefault();
-
-    if (isAllowedExternalUrl(url)) {
-      void shell.openExternal(url);
-    }
+    openExternalIfAllowed(url, "will-navigate");
   });
 
   win.webContents.on("will-attach-webview", (event) => {
