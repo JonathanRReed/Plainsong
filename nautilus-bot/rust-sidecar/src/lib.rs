@@ -4714,12 +4714,43 @@ fn merge_meeting_segment_text(existing: &str, incoming: &str) -> String {
     format!("{} {}", existing_trimmed, incoming_trimmed)
 }
 
-fn enrich_meeting_transcript(transcript: &mut models::Transcript) {
+/// Clean, merge, and correct a freshly transcribed meeting transcript.
+///
+/// `dictionary_entries` are the user's learned dictionary. They are applied per
+/// segment, here, because this runs before `save_transcript` and therefore
+/// before summarisation, action-item extraction, and titling all read the
+/// transcript back: correcting later would leave every derived artifact carrying
+/// the mis-heard spelling. Passing an empty slice keeps the pure clean/merge
+/// behavior.
+///
+/// Entries scoped to a destination app or app category do not apply. A meeting
+/// has no insertion target, so there is nothing for those scopes to match; only
+/// unscoped entries -- the taught names and terms -- take effect.
+fn enrich_meeting_transcript(
+    transcript: &mut models::Transcript,
+    dictionary_entries: &[models::DictationDictionaryEntry],
+) {
     let mut cleaned_segments: Vec<models::TranscriptSegment> = Vec::new();
 
     for segment in transcript.segments.drain(..) {
         let cleaned_text = sanitize_meeting_segment_text(&segment.text);
         if cleaned_text.is_empty() {
+            continue;
+        }
+        // Correct before the merge below, so a taught term is matched inside one
+        // segment rather than across a join that may not exist yet.
+        let cleaned_text = if dictionary_entries.is_empty() {
+            cleaned_text
+        } else {
+            crate::dictation_pipeline::apply_learned_dictionary(
+                cleaned_text.as_str(),
+                dictionary_entries,
+                None,
+                text::format::DictationAppCategory::Other,
+            )
+            .0
+        };
+        if cleaned_text.trim().is_empty() {
             continue;
         }
 
@@ -8478,12 +8509,136 @@ mod tests {
             created_at: now,
         };
 
-        enrich_meeting_transcript(&mut transcript);
+        enrich_meeting_transcript(&mut transcript, &[]);
 
         assert_eq!(transcript.segments.len(), 1);
         assert_eq!(transcript.segments[0].speaker_id.as_deref(), Some("me"));
         assert_eq!(transcript.segments[0].text, "Hello there. How are you?");
         assert_eq!(transcript.full_text, "Hello there. How are you?");
+    }
+
+    fn dictionary_entry_fixture(
+        spoken_form: &str,
+        replacement: &str,
+        app_scope: Option<&str>,
+        category_scope: Option<&str>,
+    ) -> models::DictationDictionaryEntry {
+        let now = chrono::Utc::now();
+        models::DictationDictionaryEntry {
+            id: format!("entry-{spoken_form}"),
+            spoken_form: spoken_form.to_string(),
+            replacement: replacement.to_string(),
+            app_scope: app_scope.map(str::to_string),
+            case_sensitive: false,
+            enabled: true,
+            category_scope: category_scope.map(str::to_string),
+            created_at: now,
+            updated_at: now,
+        }
+    }
+
+    fn meeting_transcript_fixture(segment_texts: &[&str]) -> models::Transcript {
+        let now = chrono::Utc::now();
+        models::Transcript {
+            id: "t-dict".to_string(),
+            recording_id: "r-dict".to_string(),
+            segments: segment_texts
+                .iter()
+                .enumerate()
+                .map(|(index, text)| models::TranscriptSegment {
+                    id: format!("s{index}"),
+                    start_time: index as f64 * 10.0,
+                    end_time: index as f64 * 10.0 + 5.0,
+                    text: (*text).to_string(),
+                    speaker_id: Some(format!("speaker-{index}")),
+                    confidence: 0.9,
+                })
+                .collect(),
+            full_text: segment_texts.join(" "),
+            language: "en".to_string(),
+            confidence: 0.9,
+            model: "test".to_string(),
+            model_id: Some("test-model".to_string()),
+            requested_provider: Some("distil_whisper".to_string()),
+            actual_provider: Some("distil_whisper".to_string()),
+            created_at: now,
+        }
+    }
+
+    #[test]
+    fn meeting_transcripts_apply_the_learned_dictionary_to_every_segment() {
+        // A taught term used to be corrected on the dictation path only, so
+        // meetings re-mangled it in every segment -- and in the summary, action
+        // items, and title derived from them.
+        let mut transcript =
+            meeting_transcript_fixture(&["Kubernetties is slow.", "Ask Jhon about Kubernetties."]);
+        let entries = vec![
+            dictionary_entry_fixture("Kubernetties", "Kubernetes", None, None),
+            dictionary_entry_fixture("Jhon", "John", None, None),
+        ];
+
+        enrich_meeting_transcript(&mut transcript, &entries);
+
+        assert_eq!(transcript.segments[0].text, "Kubernetes is slow.");
+        assert_eq!(transcript.segments[1].text, "Ask John about Kubernetes.");
+        // The corrected text is what `full_text` carries, which is what the
+        // summary and action-item passes actually read.
+        assert!(!transcript.full_text.contains("Kubernetties"));
+        assert!(!transcript.full_text.contains("Jhon"));
+        assert!(transcript.full_text.contains("Kubernetes"));
+        assert!(transcript.full_text.contains("John"));
+    }
+
+    #[test]
+    fn meeting_transcripts_ignore_destination_scoped_dictionary_entries() {
+        // A meeting has no insertion target, so app- and category-scoped entries
+        // have nothing to match and must not fire.
+        let mut transcript = meeting_transcript_fixture(&["Ship the widget today."]);
+        let entries = vec![
+            dictionary_entry_fixture("widget", "Widget Pro", Some("Slack"), None),
+            dictionary_entry_fixture("today", "TODAY", None, Some("email")),
+        ];
+
+        enrich_meeting_transcript(&mut transcript, &entries);
+
+        assert_eq!(transcript.segments[0].text, "Ship the widget today.");
+    }
+
+    #[test]
+    fn an_empty_dictionary_leaves_meeting_enrichment_unchanged() {
+        let mut with_entries = meeting_transcript_fixture(&["Nothing to correct here."]);
+        let mut without_entries = meeting_transcript_fixture(&["Nothing to correct here."]);
+
+        enrich_meeting_transcript(&mut with_entries, &[]);
+        enrich_meeting_transcript(
+            &mut without_entries,
+            &[dictionary_entry_fixture("absent", "present", None, None)],
+        );
+
+        assert_eq!(with_entries.full_text, without_entries.full_text);
+        assert_eq!(with_entries.full_text, "Nothing to correct here.");
+    }
+
+    #[test]
+    fn meeting_dictionary_correction_precedes_transcript_persistence() {
+        // Ordering is the whole point: correcting after `save_transcript` would
+        // leave the persisted transcript -- and every artifact derived from it --
+        // carrying the mis-heard spelling.
+        const SOURCE: &str = include_str!("lib.rs");
+        let start = SOURCE
+            .find("let mut transcript = output.transcript;")
+            .expect("meeting post-processing must take the transcript");
+        let window = &SOURCE[start..];
+        let enrich = window
+            .find("enrich_meeting_transcript(&mut transcript, &meeting_dictionary_entries)")
+            .expect("meeting post-processing must enrich with the dictionary");
+        let save = window
+            .find("db.save_transcript(&transcript)")
+            .expect("meeting post-processing must persist the transcript");
+        assert!(
+            enrich < save,
+            "the learned dictionary must be applied before the transcript is saved"
+        );
     }
 
     #[test]
@@ -11221,7 +11376,7 @@ mod tests {
             "distil-large-v3.5",
             vec![("me", me), ("them", them)],
         );
-        enrich_meeting_transcript(&mut transcript);
+        enrich_meeting_transcript(&mut transcript, &[]);
 
         assert_eq!(transcript.segments.len(), 2);
         assert_eq!(transcript.segments[0].speaker_id.as_deref(), Some("me"));
@@ -22046,7 +22201,28 @@ async fn run_meeting_transcription_pipeline(
                 .filter(|reason| !reason.is_empty())
                 .map(str::to_string);
             let mut transcript = output.transcript;
-            enrich_meeting_transcript(&mut transcript);
+            // Load the learned dictionary before enrichment: the correction has
+            // to be in the transcript that gets persisted, because summary,
+            // action items, and the auto-title are all derived from it
+            // afterwards. A dictionary read failure is not worth failing a
+            // finished meeting over -- the transcript is still correct, just not
+            // term-corrected -- so it degrades to no substitutions.
+            let meeting_dictionary_entries = {
+                let db = state_clone.db.lock().await;
+                match db.list_dictation_dictionary_entries() {
+                    Ok(entries) => entries,
+                    Err(error) => {
+                        tracing::warn!(
+                            "Could not read the dictation dictionary for meeting {}; \
+                             continuing without term corrections: {}",
+                            recording_id_clone,
+                            error
+                        );
+                        Vec::new()
+                    }
+                }
+            };
+            enrich_meeting_transcript(&mut transcript, &meeting_dictionary_entries);
 
             let persistence_result = {
                 let mut db = state_clone.db.lock().await;
