@@ -84,7 +84,12 @@ hex = "0.4"
 argon2 = "0.5"
 aes-gcm = "0.11"
 zeroize = "1.8"
-keyring = "3.6"
+# keyring 3.x ships NO platform credential store unless a backend feature is
+# named; without one it silently uses an in-memory mock, so every "stored in
+# the OS keychain" promise (vault key, provider keys, integrity MAC key) was
+# false and secrets evaporated at process exit. apple-native = macOS Keychain;
+# windows-native compiles in only on Windows builds.
+keyring = { version = "3.6", features = ["apple-native", "windows-native"] }
 regex = "1.11"
 urlencoding = "2.1"
 hostname = "0.4"
