@@ -193,6 +193,78 @@ describe("useSetupStatus live refresh", () => {
     expect(result.current.error).not.toContain("signal=null");
   });
 
+  it("keeps a dismissed engine notice down for the same incident", async () => {
+    const { result } = renderHook(() => useSetupStatus());
+
+    await waitFor(() => {
+      expect(result.current.loading).toBe(false);
+    });
+
+    await act(async () => {
+      liveMocks.listeners.get("sidecar-runtime-changed")?.({
+        payload: { ready: false, reason: "crash" },
+      });
+    });
+    expect(result.current.engineNotice).not.toBeNull();
+
+    await act(async () => {
+      result.current.dismissEngineNotice();
+    });
+    expect(result.current.engineNotice).toBeNull();
+
+    // A single dead process emits both 'exit' and 'error', and every restart
+    // attempt reports again. None of those is a new incident.
+    await act(async () => {
+      liveMocks.listeners.get("sidecar-runtime-changed")?.({
+        payload: { ready: false, reason: "crash" },
+      });
+      liveMocks.listeners.get("sidecar-runtime-changed")?.({
+        payload: { ready: false, reason: "unresponsive" },
+      });
+    });
+    expect(result.current.engineNotice).toBeNull();
+    // Readiness is still blocked; only the banner was dismissed.
+    expect(result.current.productReadiness.dictation.state).toBe("blocked");
+  });
+
+  it("raises the banner again for a genuinely new incident", async () => {
+    const { result } = renderHook(() => useSetupStatus());
+
+    await waitFor(() => {
+      expect(result.current.loading).toBe(false);
+    });
+
+    await act(async () => {
+      liveMocks.listeners.get("sidecar-runtime-changed")?.({
+        payload: { ready: false, reason: "crash" },
+      });
+    });
+    await act(async () => {
+      result.current.dismissEngineNotice();
+    });
+    expect(result.current.engineNotice).toBeNull();
+
+    // Recovery ends the incident...
+    await act(async () => {
+      liveMocks.listeners.get("sidecar-runtime-changed")?.({
+        payload: { ready: true },
+      });
+    });
+    await waitFor(() => {
+      expect(result.current.engineNotice).toBeNull();
+    });
+
+    // ...so the next failure is a new one and must be seen.
+    await act(async () => {
+      liveMocks.listeners.get("sidecar-runtime-changed")?.({
+        payload: { ready: false, reason: "spawn_failed" },
+      });
+    });
+    expect(result.current.engineNotice?.title).toBe(
+      "The local transcription engine could not start",
+    );
+  });
+
   it("lets the reader dismiss the engine notice without pretending it recovered", async () => {
     const { result } = renderHook(() => useSetupStatus());
 

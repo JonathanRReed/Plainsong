@@ -30,6 +30,11 @@ const {
         evidenceObservedAt: 1,
         dictation: { domain: "dictation", state: "ready", cause: null },
         meetings: { domain: "meetings", state: "ready", cause: null },
+        meetingsCapture: {
+          domain: "meetings_capture",
+          state: "ready",
+          cause: null,
+        },
         fullCapture: { domain: "full_capture", state: "ready", cause: null },
         overall: { domain: "overall", state: "ready", cause: null },
       } as ProductReadinessSnapshot,
@@ -112,6 +117,11 @@ describe("DashboardView memory chat", () => {
         evidenceObservedAt: 1,
         dictation: { domain: "dictation", state: "ready", cause: null },
         meetings: { domain: "meetings", state: "ready", cause: null },
+        meetingsCapture: {
+          domain: "meetings_capture",
+          state: "ready",
+          cause: null,
+        },
         fullCapture: { domain: "full_capture", state: "ready", cause: null },
         overall: { domain: "overall", state: "ready", cause: null },
       },
@@ -202,6 +212,11 @@ describe("DashboardView memory chat", () => {
         evidenceObservedAt: 2,
         dictation: { domain: "dictation", state: "ready", cause: null },
         meetings: { domain: "meetings", state: "ready", cause: null },
+        meetingsCapture: {
+          domain: "meetings_capture",
+          state: "ready",
+          cause: null,
+        },
         fullCapture: {
           domain: "full_capture",
           state: "degraded",
@@ -278,6 +293,19 @@ describe("DashboardView memory chat", () => {
             },
           },
         },
+        meetingsCapture: {
+          domain: "meetings_capture",
+          state: "blocked",
+          cause: {
+            id: "meeting_route",
+            message: "Choose a meeting model.",
+            action: {
+              id: "open_models",
+              label: "Review models",
+              destination: "models",
+            },
+          },
+        },
         fullCapture: {
           domain: "full_capture",
           state: "blocked",
@@ -341,6 +369,11 @@ describe("DashboardView memory chat", () => {
           },
         },
         meetings: { domain: "meetings", state: "ready", cause: null },
+        meetingsCapture: {
+          domain: "meetings_capture",
+          state: "ready",
+          cause: null,
+        },
         fullCapture: {
           domain: "full_capture",
           state: "degraded",

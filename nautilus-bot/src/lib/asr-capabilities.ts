@@ -620,13 +620,23 @@ const LANGUAGE_CODES_BY_ROUTE = new Map<string, readonly string[]>([
 
 /**
  * Cloud routes carry no capability entry (they have no download to measure),
- * but they do have a language boundary. Each of these runs a Whisper-family
- * model or claims the same coverage upstream.
+ * but they still have a language boundary — and it is per *model*, not per
+ * provider. `openai_cloud` serves both `whisper-1` and the GPT-4o transcribe
+ * family, which this file already documents as behaving differently; keying by
+ * provider gave the GPT-4o models Whisper's list, which is an assumption no
+ * provider doc supports.
+ *
+ * A cloud model is listed here only when its coverage is the published coverage
+ * of a Whisper release. Everything else — the GPT-4o transcribe models,
+ * ElevenLabs Scribe, Cohere — resolves to `unenumerated`, so the picker says it
+ * does not know rather than offering ~100 languages on an inherited guess.
  */
-const LANGUAGE_CODES_BY_PROVIDER = new Map<AsrProviderType, readonly string[]>([
-  ["openai_cloud", WHISPER_LARGE_V3_LANGUAGE_CODES],
-  ["groq", WHISPER_LARGE_V3_LANGUAGE_CODES],
-  ["elevenlabs_scribe", WHISPER_LARGE_V3_LANGUAGE_CODES],
+const CLOUD_LANGUAGE_CODES_BY_ROUTE = new Map<string, readonly string[]>([
+  // OpenAI's whisper-1 is the hosted Whisper large-v2 checkpoint, which
+  // predates the large-v3 addition of Cantonese.
+  ["openai_cloud:whisper-1", WHISPER_LANGUAGE_CODES],
+  ["groq:whisper-large-v3", WHISPER_LARGE_V3_LANGUAGE_CODES],
+  ["groq:whisper-large-v3-turbo", WHISPER_LARGE_V3_LANGUAGE_CODES],
 ]);
 
 /** The English name of every code the lists above can produce. */
@@ -686,9 +696,10 @@ export function resolveAsrLanguageBoundary(
     return { kind: "english_only", label: capability.languages.label };
   }
 
+  const route = `${providerType}:${(modelId ?? "").trim()}`;
   const codes =
-    LANGUAGE_CODES_BY_ROUTE.get(`${providerType}:${(modelId ?? "").trim()}`) ??
-    LANGUAGE_CODES_BY_PROVIDER.get(providerType) ??
+    LANGUAGE_CODES_BY_ROUTE.get(route) ??
+    CLOUD_LANGUAGE_CODES_BY_ROUTE.get(route) ??
     null;
   if (codes) {
     return {

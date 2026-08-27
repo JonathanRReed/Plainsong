@@ -132,7 +132,10 @@ import { MarkdownText } from "@/components/views/meetings/markdown-text";
 import { WorkspaceSkeleton } from "@/components/views/meetings/workspace-skeleton";
 import { listen } from "@/lib/electron";
 import { useProductReadinessStatus } from "@/features/readiness/product-readiness-context";
-import { selectReadinessForSurface } from "@/features/readiness/product-readiness";
+import {
+  meetingCaptureIsReady,
+  selectReadinessForSurface,
+} from "@/features/readiness/product-readiness";
 import {
   AlertCircle,
   ArrowLeft,
@@ -938,10 +941,17 @@ function buildRelationshipRecallPrompts(args: {
 export function RecordingsView() {
   const { productReadiness, engineNotice, dismissEngineNotice } =
     useProductReadinessStatus();
+  // Two readings of the same domain, and they are not interchangeable.
+  // `meetingsReadiness` includes the AI-notes lane and is what the reader is
+  // told; `meetingCaptureReadiness` is capture alone and is what every action
+  // is gated on. Gating on the first disabled meeting capture on every fresh
+  // install, because the default notes route points at an absent Ollama.
   const meetingsReadiness = selectReadinessForSurface(
     productReadiness,
     "meetings",
   );
+  const meetingCaptureReadiness = productReadiness.meetingsCapture;
+  const captureIsReady = meetingCaptureIsReady(productReadiness);
   const fullCaptureReadiness = productReadiness.fullCapture;
   const {
     recordings,
@@ -2139,8 +2149,8 @@ export function RecordingsView() {
   };
 
   const openMeetingCapture = () => {
-    if (meetingsReadiness.state !== "ready") {
-      const cause = meetingsReadiness.cause;
+    if (!captureIsReady) {
+      const cause = meetingCaptureReadiness.cause;
       toast(
         cause?.message ?? "Plainsong could not confirm that meetings are ready.",
         "error",
@@ -2156,7 +2166,7 @@ export function RecordingsView() {
   const handleStartRecording = async (options: { mic: boolean; systemAudio: boolean; template?: string }) => {
     const requestedReadiness = options.systemAudio
       ? fullCaptureReadiness
-      : meetingsReadiness;
+      : meetingCaptureReadiness;
     if (requestedReadiness.state !== "ready") {
       const cause = requestedReadiness.cause;
       toast(
@@ -5596,7 +5606,7 @@ export function RecordingsView() {
             <Button
               variant="active"
               onClick={openMeetingCapture}
-              disabled={meetingsReadiness.state !== "ready"}
+              disabled={!captureIsReady}
             >
               <Mic2 className="h-4 w-4 mr-2" />
               New meeting
@@ -5658,21 +5668,49 @@ export function RecordingsView() {
             />
           ) : null}
 
+          {/* Rust and "needs attention" are reserved for something that stops
+              a meeting being recorded. A missing notes route does not, and
+              saying it does beside a working New meeting button was the
+              contradiction this view used to ship. */}
           {meetingsReadiness.state !== "ready" ? (
             <div
               role={
-                meetingsReadiness.state === "unknown" ? "status" : "alert"
+                !captureIsReady && meetingsReadiness.state !== "unknown"
+                  ? "alert"
+                  : "status"
               }
-              aria-label="Meetings need attention"
-              className="mb-4 flex flex-wrap items-start justify-between gap-3 rounded-md border border-rust/35 bg-rust/10 px-4 py-3"
+              aria-label={
+                captureIsReady
+                  ? "Meeting notes are unavailable"
+                  : "Meetings need attention"
+              }
+              className={`mb-4 flex flex-wrap items-start justify-between gap-3 rounded-md border px-4 py-3 ${
+                captureIsReady
+                  ? "border-border/80 bg-muted/30"
+                  : "border-rust/35 bg-rust/10"
+              }`}
             >
-              <div className="flex min-w-0 items-start gap-2.5 text-sm text-rust">
+              <div
+                className={`flex min-w-0 items-start gap-2.5 text-sm ${
+                  captureIsReady ? "text-muted-foreground" : "text-rust"
+                }`}
+              >
                 <span
-                  className="neume neume-rust mt-1 shrink-0"
+                  className={`neume mt-1 shrink-0 ${
+                    captureIsReady ? "neume-hollow" : "neume-rust"
+                  }`}
                   aria-hidden="true"
                 />
                 <div>
-                  <p className="font-medium">Meetings need attention</p>
+                  <p
+                    className={`font-medium ${
+                      captureIsReady ? "text-foreground" : ""
+                    }`}
+                  >
+                    {captureIsReady
+                      ? "Meeting notes are unavailable"
+                      : "Meetings need attention"}
+                  </p>
                   <p className="mt-1 leading-6">
                     {meetingsReadiness.cause?.message ??
                       "Plainsong could not confirm that meetings are ready."}

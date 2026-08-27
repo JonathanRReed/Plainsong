@@ -87,7 +87,9 @@ export function DashboardView() {
     loading: setupLoading,
   } = useProductReadinessStatus();
   const dictationReady = productReadiness.dictation.state === "ready";
-  const meetingReady = productReadiness.meetings.state === "ready";
+  // Capture-only: the quick action opens Meetings or routes to onboarding, and
+  // an unconfigured notes lane is not a reason to send someone to onboarding.
+  const meetingReady = productReadiness.meetingsCapture.state === "ready";
   const fullCaptureReady = productReadiness.fullCapture.state === "ready";
 
   useEffect(() => {

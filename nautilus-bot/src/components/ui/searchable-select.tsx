@@ -67,13 +67,42 @@ export function SearchableSelect({
     if (!open) {
       return;
     }
+
     const handlePointerDown = (event: MouseEvent) => {
       if (!containerRef.current?.contains(event.target as Node)) {
         setOpen(false);
       }
     };
+
+    // Tabbing out of the list has to close it too. Watching only for an outside
+    // mousedown left a keyboard user with an open listbox floating over the
+    // controls below while their focus had already moved on.
+    let focusCheck: ReturnType<typeof setTimeout> | undefined;
+    const handleFocusOut = (event: FocusEvent) => {
+      const next = event.relatedTarget as Node | null;
+      if (next && containerRef.current?.contains(next)) {
+        return;
+      }
+      // During an internal pointer interaction focus can be nowhere for an
+      // instant, and `relatedTarget` is null for exactly that case as well as
+      // for a real departure. Re-check once the browser has settled focus.
+      focusCheck = setTimeout(() => {
+        if (!containerRef.current?.contains(document.activeElement)) {
+          setOpen(false);
+        }
+      }, 0);
+    };
+
+    const container = containerRef.current;
     document.addEventListener("mousedown", handlePointerDown);
-    return () => document.removeEventListener("mousedown", handlePointerDown);
+    container?.addEventListener("focusout", handleFocusOut);
+    return () => {
+      document.removeEventListener("mousedown", handlePointerDown);
+      container?.removeEventListener("focusout", handleFocusOut);
+      if (focusCheck !== undefined) {
+        clearTimeout(focusCheck);
+      }
+    };
   }, [open]);
 
   return (

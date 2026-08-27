@@ -10,6 +10,14 @@ export type ReadinessState =
 export type ReadinessDomain =
   | "dictation"
   | "meetings"
+  /**
+   * Meetings, judged on capture alone. This is the domain every *action* is
+   * gated on; `meetings` carries the same facts plus the AI-notes lane and is
+   * for messaging only. Conflating the two disabled meeting capture on every
+   * fresh install, because the default AI route points at an Ollama nobody has
+   * installed yet.
+   */
+  | "meetings_capture"
   | "full_capture"
   | "overall";
 
@@ -103,7 +111,18 @@ export interface ProductReadinessEvidence {
 export interface ProductReadinessSnapshot {
   evidenceObservedAt: number;
   dictation: ReadinessAssessment;
+  /**
+   * Meetings as the reader should hear about them: capture *and* whether notes
+   * will be written. Use for messaging. Never gate an action on this — a
+   * missing AI route degrades it, and notes have nothing to do with whether a
+   * meeting can be recorded.
+   */
   meetings: ReadinessAssessment;
+  /**
+   * Meetings as the machine can actually perform them. This is the one to gate
+   * "New meeting", the consent dialog, and every other capture action on.
+   */
+  meetingsCapture: ReadinessAssessment;
   fullCapture: ReadinessAssessment;
   overall: ReadinessAssessment;
 }
@@ -507,15 +526,20 @@ export function buildProductReadinessSnapshot(
   // Full capture asks about microphone + system audio, so it reads the capture
   // assessment. Folding the notes lane in first would have made a missing
   // Ollama the stated reason Me + Them was unavailable.
-  const meetingsCapture = meetingsAssessment(evidence);
-  const meetings = meetingNotesAssessment(meetingsCapture, evidence);
-  const fullCapture = fullCaptureAssessment(meetingsCapture, evidence);
-  const overall = overallAssessment([dictation, meetings, fullCapture]);
+  const capture = meetingsAssessment(evidence);
+  const meetings = meetingNotesAssessment(capture, evidence);
+  const meetingsCapture = withDomain(capture, "meetings_capture");
+  const fullCapture = fullCaptureAssessment(capture, evidence);
+  // Overall answers "can this product do its jobs", which is what the sidebar's
+  // sitewide "Setup needed" badge means. An unconfigured notes lane is not a
+  // setup fault — Meetings says so itself — so it is deliberately not here.
+  const overall = overallAssessment([dictation, meetingsCapture, fullCapture]);
 
   return {
     evidenceObservedAt: evidence.observedAt,
     dictation,
     meetings,
+    meetingsCapture,
     fullCapture,
     overall,
   };
@@ -530,6 +554,19 @@ export function updateProductReadinessSnapshot(
   }
 
   return buildProductReadinessSnapshot(evidence);
+}
+
+/**
+ * Whether a meeting can actually be recorded right now.
+ *
+ * The one predicate every capture action should use. It exists as a named
+ * function so the distinction from `snapshot.meetings` is greppable rather than
+ * re-derived (wrongly) at each call site.
+ */
+export function meetingCaptureIsReady(
+  snapshot: ProductReadinessSnapshot,
+): boolean {
+  return snapshot.meetingsCapture.state === "ready";
 }
 
 export function selectReadinessForSurface(

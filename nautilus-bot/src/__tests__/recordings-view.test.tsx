@@ -28,6 +28,11 @@ const readinessContext = vi.hoisted(() => ({
     evidenceObservedAt: 1,
     dictation: { domain: "dictation", state: "ready", cause: null },
     meetings: { domain: "meetings", state: "ready", cause: null },
+    meetingsCapture: {
+      domain: "meetings_capture",
+      state: "ready",
+      cause: null,
+    },
     fullCapture: { domain: "full_capture", state: "ready", cause: null },
     overall: { domain: "overall", state: "ready", cause: null },
   } as ProductReadinessSnapshot,
@@ -336,6 +341,11 @@ describe("RecordingsView", () => {
       evidenceObservedAt: 1,
       dictation: { domain: "dictation", state: "ready", cause: null },
       meetings: { domain: "meetings", state: "ready", cause: null },
+      meetingsCapture: {
+        domain: "meetings_capture",
+        state: "ready",
+        cause: null,
+      },
       fullCapture: { domain: "full_capture", state: "ready", cause: null },
       overall: { domain: "overall", state: "ready", cause: null },
     };
@@ -507,6 +517,19 @@ describe("RecordingsView", () => {
       ...readinessContext.productReadiness,
       meetings: {
         domain: "meetings",
+        state: "blocked",
+        cause: {
+          id: "meeting_route",
+          message: "Choose a meeting-ready speech model.",
+          action: {
+            id: "open_models",
+            label: "Review models",
+            destination: "models",
+          },
+        },
+      },
+      meetingsCapture: {
+        domain: "meetings_capture",
         state: "blocked",
         cause: {
           id: "meeting_route",
@@ -3000,6 +3023,61 @@ describe("RecordingsView", () => {
           screen.queryByText("This meeting did not start")
         ).not.toBeInTheDocument();
       });
+    });
+  });
+
+  it("still records a meeting when only the AI notes lane is missing", async () => {
+    // The regression that blocked this branch: consumers read `state !==
+    // "ready"` as "not ready", so the ai_route degradation disabled meeting
+    // capture on every fresh install — while the banner beside the disabled
+    // button claimed meetings still record and transcribe.
+    readinessContext.productReadiness = {
+      ...readinessContext.productReadiness,
+      meetings: {
+        domain: "meetings",
+        state: "degraded",
+        cause: {
+        id: "ai_route",
+        message:
+          "Notes unavailable — Ollama on this machine is not running. Meetings still record and transcribe.",
+        action: {
+          id: "open_ai_settings",
+          label: "Open AI settings",
+          destination: "ai",
+        },
+      },
+      },
+      meetingsCapture: {
+        domain: "meetings_capture",
+        state: "ready",
+        cause: null,
+      },
+    };
+    startMeeting.mockResolvedValueOnce("r-live");
+
+    render(<RecordingsView />);
+
+    const newMeeting = screen.getByRole("button", { name: "New meeting" });
+    expect(newMeeting).toBeEnabled();
+
+    // The message is informational, not an alarm, and does not claim the
+    // meeting needs attention before it can be recorded.
+    const notice = screen.getByRole("status", {
+      name: "Meeting notes are unavailable",
+    });
+    expect(notice).toHaveTextContent("Notes unavailable");
+    expect(notice).toHaveTextContent("Meetings still record and transcribe.");
+    expect(
+      screen.queryByRole("alert", { name: "Meetings need attention" }),
+    ).not.toBeInTheDocument();
+
+    fireEvent.click(newMeeting);
+    fireEvent.click(
+      await screen.findByRole("button", { name: "Confirm meeting consent" }),
+    );
+
+    await waitFor(() => {
+      expect(startMeeting).toHaveBeenCalled();
     });
   });
 

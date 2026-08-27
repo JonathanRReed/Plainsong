@@ -256,10 +256,40 @@ describe("language boundaries", () => {
     }
   });
 
-  it("gives cloud routes a boundary even without a capability entry", () => {
+  it("gives a hosted Whisper release its own published coverage", () => {
     expect(getAsrModelCapability("openai_cloud", "whisper-1")).toBeNull();
-    const boundary = resolveAsrLanguageBoundary("openai_cloud", "whisper-1");
-    expect(boundary.kind).toBe("enumerated");
+
+    const whisper1 = resolveAsrLanguageBoundary("openai_cloud", "whisper-1");
+    expect(whisper1.kind).toBe("enumerated");
+    if (whisper1.kind !== "enumerated") return;
+    // whisper-1 is the hosted large-v2 checkpoint, so it predates Cantonese.
+    expect(whisper1.codes).not.toContain("yue");
+    expect(whisper1.codes).toContain("uk");
+
+    const groq = resolveAsrLanguageBoundary("groq", "whisper-large-v3");
+    expect(groq.kind).toBe("enumerated");
+    if (groq.kind !== "enumerated") return;
+    expect(groq.codes).toContain("yue");
+  });
+
+  it("does not lend Whisper's list to a cloud model that never claimed it", () => {
+    // Keying by provider gave every openai_cloud model Whisper's ~100
+    // languages, including the GPT-4o transcribe family this file already
+    // documents as behaving differently, and ElevenLabs' own Scribe model.
+    for (const [provider, model] of [
+      ["openai_cloud", "gpt-transcribe"],
+      ["openai_cloud", "gpt-4o-transcribe"],
+      ["openai_cloud", "gpt-4o-mini-transcribe"],
+      ["elevenlabs_scribe", "scribe_v2"],
+      ["elevenlabs_scribe", "scribe_v2_experimental"],
+      ["cohere_transcribe", "cohere-transcribe"],
+      ["groq", "some-future-groq-model"],
+    ] as const) {
+      expect(
+        resolveAsrLanguageBoundary(provider, model).kind,
+        `${provider}:${model} should not inherit a language list`,
+      ).toBe("unenumerated");
+    }
   });
 
   it("says so rather than guessing when the set is not known", () => {

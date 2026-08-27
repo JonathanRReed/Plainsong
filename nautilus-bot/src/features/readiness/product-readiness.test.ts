@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
   buildProductReadinessSnapshot,
+  meetingCaptureIsReady,
   selectReadinessForSurface,
   updateProductReadinessSnapshot,
   type ProductReadinessEvidence,
@@ -180,6 +181,40 @@ describe("product readiness", () => {
     // Capture is the fact Me + Them depends on, so the notes lane must not
     // become the stated reason system audio is unavailable.
     expect(snapshot.fullCapture.state).toBe("ready");
+  });
+
+  it("keeps capture readiness separate from the notes lane", () => {
+    const snapshot = buildProductReadinessSnapshot(
+      evidence({
+        meetingNotesRoute: "unconfigured",
+        meetingNotesRouteReason: "Ollama on this machine is not running.",
+      }),
+    );
+
+    // The assessment every capture action is gated on is untouched...
+    expect(snapshot.meetingsCapture.state).toBe("ready");
+    expect(snapshot.meetingsCapture.cause).toBeNull();
+    expect(meetingCaptureIsReady(snapshot)).toBe(true);
+    // ...and the sitewide badge stays quiet, because nothing is broken.
+    expect(snapshot.overall.state).toBe("ready");
+    // ...while the reader is still told about the notes.
+    expect(snapshot.meetings.state).toBe("degraded");
+  });
+
+  it("still reports a real capture blocker through both readings", () => {
+    const snapshot = buildProductReadinessSnapshot(
+      evidence({
+        meetingRouteReady: false,
+        meetingRouteReason: "Choose a meeting engine.",
+        meetingNotesRoute: "unconfigured",
+        meetingNotesRouteReason: "Ollama on this machine is not running.",
+      }),
+    );
+
+    expect(snapshot.meetingsCapture.state).toBe("blocked");
+    expect(snapshot.meetingsCapture.cause?.id).toBe("meeting_route");
+    expect(meetingCaptureIsReady(snapshot)).toBe(false);
+    expect(snapshot.overall.state).toBe("blocked");
   });
 
   it("respects a remembered transcripts-only choice", () => {

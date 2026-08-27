@@ -489,6 +489,14 @@ export function useSetupStatus() {
   const [engineNotice, setEngineNotice] = useState<SidecarLossNotice | null>(
     null,
   );
+  // One incident, not one event. The bridge re-emits `ready:false` for the same
+  // ongoing failure (an exit and an error arrive from a single dead process,
+  // and each restart attempt reports again), so a dismissal keyed to the event
+  // would pop the banner straight back up. Dismissal is remembered against the
+  // incident and cleared by a `ready:true` — the only thing that actually ends
+  // one.
+  const dismissedIncidentRef = useRef<number | null>(null);
+  const engineIncidentRef = useRef(0);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [observedAt, setObservedAt] = useState(() => Date.now());
@@ -626,13 +634,24 @@ export function useSetupStatus() {
           console.warn("[sidecar] runtime lost:", runtime.detail);
         }
         const notice = describeSidecarLoss(runtime.reason);
+        // A loss while one is already open is the same incident continuing.
+        if (engineIncidentRef.current === 0) {
+          engineIncidentRef.current = Date.now();
+        }
         refreshSequenceRef.current += 1;
         setLoading(false);
-        setEngineNotice(notice);
+        // Readiness is blocked either way; only the banner is suppressed, and
+        // only for the incident the reader actually dismissed.
+        if (dismissedIncidentRef.current !== engineIncidentRef.current) {
+          setEngineNotice(notice);
+        }
         setError(`${notice.title}. ${notice.message}`);
         setObservedAt(Date.now());
         return;
       }
+      // Recovery is what ends an incident, so the next failure is a new one.
+      engineIncidentRef.current = 0;
+      dismissedIncidentRef.current = null;
       setEngineNotice(null);
       void refresh();
     })
@@ -707,7 +726,10 @@ export function useSetupStatus() {
     ]
   );
 
-  const dismissEngineNotice = useCallback(() => setEngineNotice(null), []);
+  const dismissEngineNotice = useCallback(() => {
+    dismissedIncidentRef.current = engineIncidentRef.current;
+    setEngineNotice(null);
+  }, []);
 
   return {
     ...snapshot,

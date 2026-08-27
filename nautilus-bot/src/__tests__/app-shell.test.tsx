@@ -50,6 +50,11 @@ vi.mock("@/features/readiness/product-readiness-context", () => ({
       evidenceObservedAt: 1,
       dictation: { domain: "dictation", state: "ready", cause: null },
       meetings: { domain: "meetings", state: "ready", cause: null },
+      meetingsCapture: {
+        domain: "meetings_capture",
+        state: "ready",
+        cause: null,
+      },
       fullCapture: { domain: "full_capture", state: "ready", cause: null },
       overall: { domain: "overall", state: "ready", cause: null },
     },
