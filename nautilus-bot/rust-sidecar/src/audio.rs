@@ -146,6 +146,25 @@ fn record_writer_failure(slot: &Arc<std::sync::Mutex<Option<String>>>, reason: S
     }
 }
 
+/// Convert a mixed session's padded-frame counts into seconds of source silence.
+///
+/// A zero sample rate would be a bug elsewhere, but reporting infinite silence
+/// because of it would be worse than reporting none.
+pub fn source_degradation_from_outcome(
+    outcome: &crate::audio::system_capture::MixedCaptureOutcome,
+    sample_rate: u32,
+) -> RecordingSourceDegradation {
+    if sample_rate == 0 {
+        return RecordingSourceDegradation::default();
+    }
+    let rate = f64::from(sample_rate);
+    RecordingSourceDegradation {
+        mic_silent_seconds: outcome.mic_padded_frames as f64 / rate,
+        system_silent_seconds: outcome.system_padded_frames as f64 / rate,
+        captured_seconds: outcome.mixed_frames as f64 / rate,
+    }
+}
+
 /// Run one WAV writer to completion and publish its failure before exiting.
 ///
 /// The publish has to happen inside the writer thread. Once it returns, its
@@ -430,6 +449,20 @@ struct ActiveRecordingSession {
     writer_failure: Arc<std::sync::Mutex<Option<String>>>,
 }
 
+/// How much of a finished meeting each source actually contributed.
+///
+/// A starved source is padded with silence so the mixed and per-source WAVs stay
+/// frame-aligned, which means the file itself cannot distinguish "nobody spoke"
+/// from "the microphone was gone". These counts are the difference, and they are
+/// persisted on the recording so the meeting record carries the caveat rather
+/// than presenting half-silence as a complete capture.
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
+pub struct RecordingSourceDegradation {
+    pub mic_silent_seconds: f64,
+    pub system_silent_seconds: f64,
+    pub captured_seconds: f64,
+}
+
 #[expect(
     dead_code,
     reason = "stop result includes launch QA counters returned across command boundaries"
@@ -449,6 +482,9 @@ pub struct RecordingStopResult {
     /// `Some` means audio stopped arriving before the user pressed stop, so the
     /// saved file is shorter than the elapsed session.
     pub capture_failure: Option<String>,
+    /// Per-source silence padding for a mixed session; `None` for a mic-only
+    /// meeting, which has nothing to pad against.
+    pub source_degradation: Option<RecordingSourceDegradation>,
 }
 
 /// Feed this callback's mono samples through the active dictation auto-stop VAD
@@ -1504,6 +1540,11 @@ impl AudioCapture {
         let system_audio_path = plan.system_path.clone();
         let writer_failure: Arc<std::sync::Mutex<Option<String>>> =
             Arc::new(std::sync::Mutex::new(None));
+        // One slot for both capture paths. The mixed path used to build its own
+        // and never write it, so only a mic-only meeting could report an input
+        // stream that died mid-session.
+        let capture_failure: Arc<std::sync::Mutex<Option<String>>> =
+            Arc::new(std::sync::Mutex::new(None));
         let waveform_buffer = Arc::new(std::sync::Mutex::new(Vec::with_capacity(4410)));
         let streaming_queue: Arc<crossbeam::queue::ArrayQueue<Vec<f32>>> =
             Arc::new(crossbeam::queue::ArrayQueue::new(256));
@@ -1532,6 +1573,7 @@ impl AudioCapture {
                     preferred_mic_device,
                     Arc::clone(&waveform_buffer),
                     Some(Arc::clone(&streaming_queue)),
+                    Arc::clone(&capture_failure),
                     event_handle.map(|handle| MixedCaptureEvents {
                         handle,
                         recording_id: id.clone(),
@@ -1575,7 +1617,7 @@ impl AudioCapture {
                 sample_rate,
                 dropped_stream_chunks: Arc::new(AtomicU64::new(0)),
                 dropped_writer_chunks: Arc::new(AtomicU64::new(0)),
-                capture_failure: Arc::new(std::sync::Mutex::new(None)),
+                capture_failure,
                 writer_failure,
             });
         } else {
@@ -1606,8 +1648,6 @@ impl AudioCapture {
             let dropped_writer_chunks = Arc::new(AtomicU64::new(0));
             let dropped_stream_chunks_for_session = Arc::clone(&dropped_stream_chunks);
             let dropped_writer_chunks_for_session = Arc::clone(&dropped_writer_chunks);
-            let capture_failure: Arc<std::sync::Mutex<Option<String>>> =
-                Arc::new(std::sync::Mutex::new(None));
             let capture_failure_for_stream = Arc::clone(&capture_failure);
             let capture_failure_for_session = Arc::clone(&capture_failure);
             let wf_buffer = Arc::clone(&waveform_buffer);
@@ -1899,12 +1939,17 @@ impl AudioCapture {
         let mut dropped_mic_samples = 0_u64;
         let mut dropped_system_samples = 0_u64;
         let mut dropped_mixed_chunks = 0_u64;
+        let mut source_degradation = None;
         if let Some(mut mixed_capture) = session.mixed_capture.take() {
             mixed_capture.stop();
-            let (mic_samples, system_samples, mixed_chunks) = mixed_capture.drop_counts();
-            dropped_mic_samples = mic_samples;
-            dropped_system_samples = system_samples;
-            dropped_mixed_chunks = mixed_chunks;
+            let outcome = mixed_capture.outcome();
+            dropped_mic_samples = outcome.dropped_mic_samples;
+            dropped_system_samples = outcome.dropped_system_samples;
+            dropped_mixed_chunks = outcome.dropped_mixed_chunks;
+            source_degradation = Some(source_degradation_from_outcome(
+                &outcome,
+                session.sample_rate,
+            ));
         }
 
         for handle in session.writer_handles.drain(..) {
@@ -2000,6 +2045,7 @@ impl AudioCapture {
             dropped_system_samples,
             dropped_mixed_chunks,
             capture_failure,
+            source_degradation,
         })
     }
 
@@ -2930,6 +2976,37 @@ mod recording_capture_health_tests {
             MeetingSpacePressure::Critical
         );
         assert_eq!(meeting_space_pressure(0), MeetingSpacePressure::Critical);
+    }
+
+    #[test]
+    fn padded_source_frames_become_seconds_of_reportable_silence() {
+        use crate::audio::system_capture::MixedCaptureOutcome;
+
+        let outcome = MixedCaptureOutcome {
+            mic_padded_frames: 48_000 * 320,
+            system_padded_frames: 0,
+            mixed_frames: 48_000 * 3_600,
+            ..MixedCaptureOutcome::default()
+        };
+        let degradation = super::source_degradation_from_outcome(&outcome, 48_000);
+
+        assert!((degradation.mic_silent_seconds - 320.0).abs() < 0.001);
+        assert_eq!(degradation.system_silent_seconds, 0.0);
+        assert!((degradation.captured_seconds - 3_600.0).abs() < 0.001);
+    }
+
+    #[test]
+    fn a_zero_sample_rate_reports_no_silence_rather_than_infinite_silence() {
+        use crate::audio::system_capture::MixedCaptureOutcome;
+
+        let outcome = MixedCaptureOutcome {
+            mic_padded_frames: 1_000,
+            ..MixedCaptureOutcome::default()
+        };
+        assert_eq!(
+            super::source_degradation_from_outcome(&outcome, 0),
+            super::RecordingSourceDegradation::default()
+        );
     }
 
     #[test]

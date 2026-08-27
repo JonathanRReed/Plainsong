@@ -1668,6 +1668,12 @@ impl Database {
             "transcript_incomplete_acknowledged_at",
             "TEXT",
         )?;
+        // A starved capture source is padded with silence so the mixed and
+        // per-source WAVs stay frame-aligned, which makes "the microphone was
+        // gone" and "nobody spoke" identical in the file. This is where the
+        // difference is written down, at stop, so the meeting record carries the
+        // caveat instead of the audio quietly implying a complete capture.
+        self.ensure_table_column("recordings", "capture_degraded_summary", "TEXT")?;
 
         Ok(())
     }
@@ -2590,12 +2596,18 @@ impl Database {
         Ok(())
     }
 
+    /// Commit a finished capture: every validated asset, the duration, the new
+    /// status, and how degraded the capture itself was — in one transaction.
+    ///
+    /// `capture_degraded_summary` is `None` for a clean capture and clears any
+    /// previous value, so a re-finalized recording never keeps a stale caveat.
     pub fn finalize_recording_audio(
         &mut self,
         recording_id: &str,
         validated: &[(RecordingAudioRole, ValidatedRecordingAudio)],
         duration_seconds: i64,
         recording_status: &str,
+        capture_degraded_summary: Option<&str>,
     ) -> Result<()> {
         if !validated
             .iter()
@@ -2641,12 +2653,14 @@ impl Database {
         )?;
         let updated = tx.execute(
             "UPDATE recordings
-             SET audio_path = ?1, duration = ?2, status = ?3, updated_at = ?4
-             WHERE id = ?5",
+             SET audio_path = ?1, duration = ?2, status = ?3,
+                 capture_degraded_summary = ?4, updated_at = ?5
+             WHERE id = ?6",
             params![
                 primary_path,
                 duration_seconds,
                 recording_status,
+                capture_degraded_summary,
                 &now,
                 recording_id
             ],
@@ -2656,6 +2670,19 @@ impl Database {
         }
         tx.commit()?;
         Ok(())
+    }
+
+    /// The capture caveat stored for one meeting, if any.
+    pub fn get_capture_degraded_summary(&self, recording_id: &str) -> Result<Option<String>> {
+        Ok(self
+            .conn
+            .query_row(
+                "SELECT capture_degraded_summary FROM recordings WHERE id = ?1",
+                params![recording_id],
+                |row| row.get::<_, Option<String>>(0),
+            )
+            .optional()?
+            .flatten())
     }
 
     pub fn set_audio_asset_validation_states(
@@ -6138,7 +6165,7 @@ mod tests {
             };
             validated.push((role, metadata));
         }
-        db.finalize_recording_audio(&recording.id, &validated, 1, "completed")
+        db.finalize_recording_audio(&recording.id, &validated, 1, "completed", None)
             .unwrap();
 
         let operation = db
@@ -6244,6 +6271,64 @@ mod tests {
     }
 
     #[test]
+    fn capture_degradation_is_committed_with_the_finalized_audio() {
+        let mut db = in_memory_db();
+        let root = std::env::temp_dir().join(format!(
+            "plainsong-capture-degradation-test-{}",
+            uuid::Uuid::new_v4()
+        ));
+        std::fs::create_dir_all(&root).unwrap();
+        let plan = RecordingCapturePlan {
+            recording_id: "degraded-capture".to_string(),
+            primary_path: root.join("recording.wav"),
+            mic_path: None,
+            system_path: None,
+        };
+        let mut recording = sample_recording("degraded-capture", "inbox");
+        recording.audio_path.clear();
+        db.create_recording_with_audio_plan(&recording, &plan)
+            .unwrap();
+        db.mark_audio_assets_writing(&recording.id).unwrap();
+        write_test_wav(&plan.primary_path);
+        let RecordingAudioValidation::Ready(metadata) = validate_plaintext_wav(&plan.primary_path)
+        else {
+            panic!("valid wav fixture");
+        };
+
+        db.finalize_recording_audio(
+            &recording.id,
+            &[(RecordingAudioRole::Primary, metadata.clone())],
+            1,
+            "processing",
+            Some("The microphone delivered nothing for about 320s of this 3600s meeting"),
+        )
+        .unwrap();
+
+        assert_eq!(
+            db.get_capture_degraded_summary(&recording.id).unwrap(),
+            Some(
+                "The microphone delivered nothing for about 320s of this 3600s meeting".to_string()
+            )
+        );
+
+        // A later clean finalize clears the caveat rather than leaving a stale one.
+        db.finalize_recording_audio(
+            &recording.id,
+            &[(RecordingAudioRole::Primary, metadata)],
+            1,
+            "processing",
+            None,
+        )
+        .unwrap();
+        assert_eq!(
+            db.get_capture_degraded_summary(&recording.id).unwrap(),
+            None
+        );
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
     fn asset_repair_preserves_encrypted_metadata_and_finds_unsettled_recordings() {
         let mut db = in_memory_db();
         let root = std::env::temp_dir().join(format!(
@@ -6273,6 +6358,7 @@ mod tests {
             &[(RecordingAudioRole::Primary, metadata)],
             1,
             "processing",
+            None,
         )
         .unwrap();
 

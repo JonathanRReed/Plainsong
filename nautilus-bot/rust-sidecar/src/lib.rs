@@ -8305,6 +8305,57 @@ mod tests {
     }
 
     #[test]
+    fn a_mixed_meeting_that_lost_its_microphone_says_so_on_the_record() {
+        let degradation = audio::RecordingSourceDegradation {
+            mic_silent_seconds: 320.0,
+            system_silent_seconds: 0.0,
+            captured_seconds: 3_600.0,
+        };
+
+        let summary = describe_recording_capture_degradation(None, Some(&degradation))
+            .expect("half a meeting of padded microphone silence must be reported");
+        assert!(summary.contains("microphone"));
+        assert!(summary.contains("320s"));
+        assert!(
+            !summary.contains("System audio"),
+            "a source that was live all meeting must not be blamed"
+        );
+    }
+
+    #[test]
+    fn a_clean_mixed_meeting_carries_no_caveat() {
+        // Two devices never open at the same instant; the sub-second padding
+        // that produces is normal, and putting a caveat on every healthy
+        // meeting would make the real ones unreadable.
+        let degradation = audio::RecordingSourceDegradation {
+            mic_silent_seconds: 0.4,
+            system_silent_seconds: 0.2,
+            captured_seconds: 1_800.0,
+        };
+        assert_eq!(
+            describe_recording_capture_degradation(None, Some(&degradation)),
+            None
+        );
+        assert_eq!(describe_recording_capture_degradation(None, None), None);
+    }
+
+    #[test]
+    fn a_dead_capture_stream_and_source_silence_are_both_reported() {
+        let degradation = audio::RecordingSourceDegradation {
+            mic_silent_seconds: 60.0,
+            system_silent_seconds: 90.0,
+            captured_seconds: 600.0,
+        };
+        let summary =
+            describe_recording_capture_degradation(Some("device disconnected"), Some(&degradation))
+                .expect("both halves must be reported");
+
+        assert!(summary.contains("device disconnected"));
+        assert!(summary.contains("60s"));
+        assert!(summary.contains("90s"));
+    }
+
+    #[test]
     fn finalization_failure_keeps_audio_that_still_validates_recoverable() {
         let metadata = recording_audio::ValidatedRecordingAudio {
             plaintext_bytes: 4096,
@@ -22021,6 +22072,46 @@ fn spawn_meeting_capture_monitor(
     });
 }
 
+/// Padding shorter than this is the normal cost of starting and stopping two
+/// devices that never open at exactly the same instant, not a source that went
+/// away. Reporting it would put a caveat on every healthy mixed meeting.
+const MEETING_SOURCE_SILENCE_REPORT_THRESHOLD_SECONDS: f64 = 1.0;
+
+/// One sentence saying what this meeting's audio is actually missing, or `None`
+/// when the capture was clean.
+///
+/// Persisted on the recording and emitted at stop. Both halves matter: a dead
+/// input stream truncates the recording, and a mixed session that lost one
+/// source keeps running with that source padded to silence — the file cannot
+/// tell that apart from a quiet room, so the record has to.
+fn describe_recording_capture_degradation(
+    capture_failure: Option<&str>,
+    degradation: Option<&audio::RecordingSourceDegradation>,
+) -> Option<String> {
+    let mut parts: Vec<String> = Vec::new();
+    if let Some(reason) = capture_failure {
+        parts.push(format!(
+            "A capture stream stopped sending audio during this meeting, so the recording ends early. Audio captured before that point was saved. ({reason})"
+        ));
+    }
+    if let Some(degradation) = degradation {
+        for (label, silent_seconds) in [
+            ("The microphone", degradation.mic_silent_seconds),
+            ("System audio", degradation.system_silent_seconds),
+        ] {
+            if silent_seconds < MEETING_SOURCE_SILENCE_REPORT_THRESHOLD_SECONDS {
+                continue;
+            }
+            parts.push(format!(
+                "{label} delivered nothing for about {}s of this {}s meeting; that stretch is silence in the saved audio, not a quiet room.",
+                silent_seconds.round() as i64,
+                degradation.captured_seconds.round() as i64
+            ));
+        }
+    }
+    (!parts.is_empty()).then(|| parts.join(" "))
+}
+
 /// Sidecar-compatible stop_recording. Triggers transcription in a background task.
 async fn stop_recording_for_sidecar(
     state: &Arc<AppState>,
@@ -22134,21 +22225,27 @@ async fn stop_recording_for_sidecar_inner(
     // recording still "succeeds" with a file that is shorter than the elapsed
     // session. Say so instead of presenting a silently truncated meeting as a
     // complete one.
-    if let Some(reason) = stop_result.capture_failure.as_deref() {
-        let message = format!(
-            "The microphone stopped sending audio during this meeting, so the recording ends early. Audio captured before that point was saved. ({reason})"
-        );
+    //
+    // The per-source silence padding matters for the same reason and is the only
+    // way to say it for a "me and them" meeting: a mixed session keeps running
+    // when one source dies, and the padded silence in the file is
+    // indistinguishable from a quiet room.
+    let capture_degradation = describe_recording_capture_degradation(
+        stop_result.capture_failure.as_deref(),
+        stop_result.source_degradation.as_ref(),
+    );
+    if let Some(message) = capture_degradation.as_deref() {
         tracing::error!(
-            "Recording {} lost capture mid-session: {}",
+            "Recording {} captured degraded audio: {}",
             recording_id,
-            reason
+            message
         );
         handle.emit_event(
             "recording-status-changed",
             serde_json::json!({
                 "recordingId": &recording_id,
                 "status": "warning",
-                "message": &message,
+                "message": message,
                 "updatedAt": chrono::Utc::now().to_rfc3339(),
             }),
         );
@@ -22168,12 +22265,14 @@ async fn stop_recording_for_sidecar_inner(
             &stop_result.validated_assets,
             duration_seconds,
             "processing",
+            capture_degradation.as_deref(),
         )
         .map_err(|error| error.to_string())?;
         let details = serde_json::json!({
             "recording_id": &recording_id, "audio_path": &audio_path,
             "duration_seconds": duration_seconds,
             "dropped_stream_chunks": stop_result.dropped_stream_chunks,
+            "capture_degraded_summary": &capture_degradation,
         });
         if let Err(error) = db.log_audit_event("recording_stopped", Some(details), "info") {
             tracing::warn!("Failed to log audit event: {}", error);
