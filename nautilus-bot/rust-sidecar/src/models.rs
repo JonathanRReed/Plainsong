@@ -109,6 +109,15 @@ pub struct Recording {
     pub consent_notice_message: Option<String>,
     #[serde(default)]
     pub consent_notice_updated_at: Option<DateTime<Utc>>,
+    /// Why the last automatic analysis pass failed, or `None` when the most
+    /// recent pass succeeded. Serialized as `analysisFailure`.
+    ///
+    /// Analysis failure used to be reported only to the log, so a default
+    /// install pointing at an uninstalled Ollama silently produced no summary,
+    /// no action items, and no title. Persisting the reason is what lets the app
+    /// say so and offer a retry.
+    #[serde(default)]
+    pub analysis_failure: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

@@ -230,19 +230,39 @@ impl Provider {
     }
 }
 
+/// Anthropic models that advertise a one-million-token context window.
+const ANTHROPIC_MILLION_TOKEN_MODELS: &[&str] = &[
+    "claude-fable-5",
+    "claude-mythos-5",
+    "claude-opus-5",
+    "claude-opus-4-8",
+    "claude-opus-4-7",
+    "claude-opus-4-6",
+    "claude-sonnet-5",
+    "claude-sonnet-4-6",
+];
+
+/// Current-lineup Anthropic models that are capped at the standard
+/// two-hundred-thousand-token window. These match the `else` default below, so
+/// they are listed for an explicit reason rather than a functional one: without
+/// a named entry, a reader checking "is the lineup covered?" cannot tell a
+/// deliberate 200k model apart from one nobody has classified yet, and the next
+/// person extending `ANTHROPIC_MILLION_TOKEN_MODELS` has nothing stopping them
+/// from sweeping a 200k model into the million-token tier. Over-reporting the
+/// window is the dangerous direction: the budget math would pack a prompt the
+/// endpoint then rejects.
+const ANTHROPIC_STANDARD_CONTEXT_MODELS: &[&str] = &["claude-haiku-4-5"];
+
 fn anthropic_context_window(model: &str) -> usize {
-    if [
-        "claude-fable-5",
-        "claude-mythos-5",
-        "claude-opus-5",
-        "claude-opus-4-8",
-        "claude-opus-4-7",
-        "claude-opus-4-6",
-        "claude-sonnet-5",
-        "claude-sonnet-4-6",
-    ]
-    .iter()
-    .any(|prefix| model.starts_with(prefix))
+    if ANTHROPIC_STANDARD_CONTEXT_MODELS
+        .iter()
+        .any(|prefix| model.starts_with(prefix))
+    {
+        return 200_000;
+    }
+    if ANTHROPIC_MILLION_TOKEN_MODELS
+        .iter()
+        .any(|prefix| model.starts_with(prefix))
     {
         1_000_000
     } else {
@@ -762,6 +782,38 @@ mod tests {
         assert_eq!(
             Provider::Anthropic
                 .model_budget("claude-sonnet-4-20250514", CompletionPurpose::Summary)
+                .context_window_tokens,
+            200_000
+        );
+    }
+
+    #[test]
+    fn current_anthropic_lineup_reports_its_real_context_window() {
+        // Every model in the shipping lineup is pinned here so a lineup refresh
+        // cannot leave a member silently classified by the fallback branch.
+        for (model, expected) in [
+            ("claude-fable-5", 1_000_000),
+            ("claude-opus-5", 1_000_000),
+            ("claude-sonnet-5", 1_000_000),
+            ("claude-haiku-4-5", 200_000),
+        ] {
+            assert_eq!(
+                Provider::Anthropic
+                    .model_budget(model, CompletionPurpose::Summary)
+                    .context_window_tokens,
+                expected,
+                "{model} reported the wrong context window"
+            );
+        }
+    }
+
+    #[test]
+    fn dated_haiku_snapshots_stay_on_the_standard_context_window() {
+        // Anthropic model ids carry a date suffix in production traffic, and the
+        // lookup is prefix-based, so the dated form must classify identically.
+        assert_eq!(
+            Provider::Anthropic
+                .model_budget("claude-haiku-4-5-20251001", CompletionPurpose::Summary)
                 .context_window_tokens,
             200_000
         );

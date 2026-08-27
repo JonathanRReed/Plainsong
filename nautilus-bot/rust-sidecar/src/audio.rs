@@ -52,7 +52,15 @@ use std::time::{Duration, Instant};
 /// wait, so there is no quiet period to detect. Anything faster here is a real
 /// trade against clipping the end of the last word, and needs testing against
 /// human speech rather than a `say` fixture.
-const DICTATION_STOP_CAPTURE_TAIL_MS: u64 = 120;
+///
+/// The wait itself belongs to the *caller*, not to `stop_dictation`: it used to
+/// be a `std::thread::sleep` at the top of the stop body, which ran while the
+/// caller held the async `audio_capture` mutex and blocked a tokio worker for
+/// its whole duration. `stop_dictation_for_sidecar` now awaits it before
+/// acquiring the lock, which keeps the ordering identical (capture is still
+/// live, `is_dictating` has not been flipped) without parking a runtime thread
+/// or the mutex.
+pub(crate) const DICTATION_STOP_CAPTURE_TAIL_MS: u64 = 120;
 /// Core Audio can take longer than 1.5 seconds to construct its first input
 /// stream after launch, especially while the audio server is waking. This is
 /// only a failure deadline; successful stream starts still return immediately.
@@ -69,6 +77,81 @@ const DICTATION_AUTO_STOP_FRAME_MS: f32 = 30.0;
 /// Minimum sustained speech before auto-stop-on-silence is allowed to arm, so a
 /// stray cough or click can't immediately end the session once it goes quiet.
 const DICTATION_AUTO_STOP_MIN_SPEECH_SECONDS: f32 = 0.5;
+/// Hard ceiling on how much audio one dictation session may buffer.
+///
+/// The capture buffer is an unbounded `SegQueue<f32>` held entirely in RAM until
+/// stop, so a session that never ends grows without limit: at a 48kHz device
+/// that is 192 KB/s, or roughly 11.5 MB per minute. Nothing bounded it, and a
+/// stuck session (a hands-free mis-trigger, a hotkey that never released, a user
+/// who walked away) would grow until the process died.
+///
+/// Ten minutes caps the worst case near 115 MB at 48kHz while sitting far beyond
+/// any real dictation: this is a short-form modality where hotkey release and
+/// auto-stop-on-silence end typical sessions in seconds. Reaching this ceiling
+/// means something went wrong, so the session is ended and the user is told
+/// rather than left with silently truncated audio.
+const DICTATION_MAX_SESSION_SECONDS: u64 = 10 * 60;
+
+/// Run one realtime audio callback body so a panic inside it cannot take the
+/// process down.
+///
+/// These closures are invoked by cpal from a CoreAudio render thread, through an
+/// `extern "C"` trampoline. An escaping panic would hit that boundary and abort
+/// -- killing an in-progress meeting and its unflushed audio over what is often
+/// a recoverable bug in one callback. Catching here turns that into a single
+/// logged error and an inert stream.
+///
+/// `poisoned` makes the stream inert rather than letting the same panic repeat
+/// hundreds of times a second: whatever invariant the callback broke, it will
+/// keep breaking it, and the log would bury everything else.
+///
+/// `AssertUnwindSafe` is honest here precisely *because* of that latch. The
+/// concern it waives is observing state a panic left half-updated, and after a
+/// panic this callback never runs again, so no later iteration can observe it.
+fn guard_audio_callback<F: FnOnce()>(poisoned: &AtomicBool, label: &str, body: F) {
+    if poisoned.load(Ordering::Relaxed) {
+        return;
+    }
+    if std::panic::catch_unwind(std::panic::AssertUnwindSafe(body)).is_err() {
+        poisoned.store(true, Ordering::Relaxed);
+        tracing::error!(
+            "{} audio callback panicked; this capture stream is now inert",
+            label
+        );
+    }
+}
+
+/// How one capture callback's worth of mono samples fares against the session
+/// length ceiling.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct DictationBufferAdmission {
+    /// Leading samples that still fit and must be buffered.
+    pub accepted: u64,
+    /// True exactly when this callback is the one that fills the buffer, so the
+    /// caller can stop capture and announce the ceiling a single time.
+    pub ceiling_reached: bool,
+}
+
+/// Decide how much of an incoming callback fits under the session ceiling.
+///
+/// Split out of the realtime capture callback so the ceiling arithmetic -- the
+/// part that decides whether a user's audio is kept or dropped -- is testable
+/// without a live input device.
+pub(crate) fn admit_dictation_samples(
+    buffered: u64,
+    incoming: u64,
+    max_session_samples: u64,
+) -> DictationBufferAdmission {
+    let remaining = max_session_samples.saturating_sub(buffered);
+    let accepted = remaining.min(incoming);
+    DictationBufferAdmission {
+        accepted,
+        // Only report the ceiling when this callback actually had audio to
+        // place: an empty callback against a full buffer is not the moment the
+        // limit was hit, and must not re-announce it.
+        ceiling_reached: incoming > 0 && accepted < incoming,
+    }
+}
 
 /// Bytes a mono 16-bit WAV track consumes per second at 48 kHz, the rate every
 /// mixed meeting session lands on.
@@ -338,6 +421,15 @@ pub struct AudioCapture {
     /// the old thread's parking loop or its callbacks, so a stale stream can
     /// never push interleaved samples into a new session's buffer.
     dictation_capture_stop: Option<Arc<AtomicBool>>,
+    /// Mono samples currently held in `dictation_buffer` for the active session.
+    /// The queue itself has no cheap length, and the capture callback must decide
+    /// whether it is still under the session ceiling without walking it, so the
+    /// count is maintained alongside.
+    dictation_buffered_samples: Arc<AtomicU64>,
+    /// Set once when the active session hits `DICTATION_MAX_SESSION_SECONDS`, so
+    /// the ceiling is announced exactly once and `stop_dictation` can explain the
+    /// truncation instead of silently returning a clipped recording.
+    dictation_max_duration_reached: Arc<AtomicBool>,
     /// UI-only accumulator of mono dictation samples for streaming partials.
     /// Never feeds the final transcription; only read by the partial-decode task.
     dictation_partial_buffer: Arc<std::sync::Mutex<DictationPartialBuffer>>,
@@ -694,6 +786,8 @@ impl AudioCapture {
             dictation_audio_level: Arc::new(std::sync::atomic::AtomicU32::new(0)),
             dictation_callback_count: Arc::new(AtomicU64::new(0)),
             dictation_capture_stop: None,
+            dictation_buffered_samples: Arc::new(AtomicU64::new(0)),
+            dictation_max_duration_reached: Arc::new(AtomicBool::new(false)),
             dictation_partial_buffer: Arc::new(std::sync::Mutex::new(
                 DictationPartialBuffer::default(),
             )),
@@ -974,6 +1068,9 @@ impl AudioCapture {
         }
 
         while self.dictation_buffer.pop().is_some() {}
+        self.dictation_buffered_samples.store(0, Ordering::SeqCst);
+        self.dictation_max_duration_reached
+            .store(false, Ordering::SeqCst);
         if let Ok(mut partial) = self.dictation_partial_buffer.lock() {
             partial.samples.clear();
             partial.total_samples = 0;
@@ -994,9 +1091,12 @@ impl AudioCapture {
                 pre_roll_samples.len(),
                 pre_roll_samples.len() as f32 / sample_rate.max(1) as f32 * 1000.0
             );
+            let seeded = pre_roll_samples.len() as u64;
             for sample in pre_roll_samples {
                 self.dictation_buffer.push(sample);
             }
+            self.dictation_buffered_samples
+                .fetch_add(seeded, Ordering::SeqCst);
         }
 
         tracing::info!(
@@ -1064,6 +1164,11 @@ impl AudioCapture {
         self.dictation_capture_stop = Some(Arc::clone(&capture_stop));
 
         let buffer = Arc::clone(&self.dictation_buffer);
+        let buffered_samples = Arc::clone(&self.dictation_buffered_samples);
+        let max_duration_reached = Arc::clone(&self.dictation_max_duration_reached);
+        // Latched by `guard_audio_callback` if this session's realtime callback
+        // ever panics, so the stream goes quiet instead of aborting the process.
+        let callback_poisoned = Arc::new(AtomicBool::new(false));
         let callback_count = Arc::clone(&self.dictation_callback_count);
         let (startup_tx, startup_rx) = bounded::<Result<(), String>>(1);
         let audio_level = Arc::clone(&self.dictation_audio_level);
@@ -1097,14 +1202,25 @@ impl AudioCapture {
             // Trim lazily (only past 2x the window) so the front-drain memmove is
             // amortized to roughly once per window rather than every callback.
             let max_partial_samples = (config.sample_rate() as usize).saturating_mul(30);
+            // Ceiling for the *transcription* buffer, in mono samples at this
+            // device's real rate. Unlike the partial buffer above this one may
+            // not slide: dropping the oldest audio would silently rewrite what
+            // the user said. It stops instead, and says so.
+            let max_session_samples = u64::from(config.sample_rate())
+                .saturating_mul(DICTATION_MAX_SESSION_SECONDS)
+                .max(1);
             let sample_format = config.sample_format();
             let stream_config = config.config();
 
             macro_rules! build_dictation_stream {
                 ($sample_type:ty) => {{
                     let capture_stop = Arc::clone(&capture_stop);
+                    let callback_poisoned = Arc::clone(&callback_poisoned);
                     let callback_count = Arc::clone(&callback_count);
                     let buffer = Arc::clone(&buffer);
+                    let buffered_samples = Arc::clone(&buffered_samples);
+                    let max_duration_reached = Arc::clone(&max_duration_reached);
+                    let limit_event_handle = vad_event_handle.clone();
                     let audio_level = Arc::clone(&audio_level);
                     let partial_buffer = Arc::clone(&partial_buffer);
                     let streaming_active = Arc::clone(&streaming_active);
@@ -1117,6 +1233,7 @@ impl AudioCapture {
                     device.build_input_stream(
                         stream_config.clone(),
                         move |data: &[$sample_type], _: &cpal::InputCallbackInfo| {
+                          guard_audio_callback(&callback_poisoned, "Dictation", || {
                             if !capture_stop.load(Ordering::SeqCst) {
                                 return;
                             }
@@ -1151,14 +1268,59 @@ impl AudioCapture {
                             let mut sum_sq = 0.0_f64;
                             let mut mono_len = 0_usize;
 
+                            // Room left under this session's ceiling. Decided
+                            // once per callback and committed with a single
+                            // atomic add: a per-sample atomic on the realtime
+                            // thread would cost more than the push it guards.
+                            let admission = admit_dictation_samples(
+                                buffered_samples.load(Ordering::Relaxed),
+                                capacity as u64,
+                                max_session_samples,
+                            );
+                            let mut accepted_remaining = admission.accepted;
+
                             for_each_mono_sample(data, num_channels, |sample| {
-                                buffer.push(sample);
+                                if accepted_remaining > 0 {
+                                    buffer.push(sample);
+                                    accepted_remaining -= 1;
+                                }
                                 if need_mono_scratch {
                                     mono_scratch.push(sample);
                                 }
                                 sum_sq += (sample as f64) * (sample as f64);
                                 mono_len += 1;
                             });
+
+                            if admission.accepted > 0 {
+                                buffered_samples
+                                    .fetch_add(admission.accepted, Ordering::Relaxed);
+                            }
+
+                            if admission.ceiling_reached
+                                && !max_duration_reached.swap(true, Ordering::SeqCst)
+                            {
+                                // End capture here rather than letting the mic
+                                // run on producing audio that can no longer be
+                                // stored. Announced once; `stop_dictation` also
+                                // reports it, so the user is never handed a
+                                // silently truncated transcript.
+                                tracing::warn!(
+                                    "Dictation session {} reached the {}s maximum length; capture stopped",
+                                    session_id,
+                                    DICTATION_MAX_SESSION_SECONDS
+                                );
+                                capture_stop.store(false, Ordering::SeqCst);
+                                if let Some(handle) = limit_event_handle.as_ref() {
+                                    handle.emit(
+                                        "dictation-vad-signal",
+                                        serde_json::json!({
+                                            "signal": "max_duration_stop",
+                                            "sessionId": session_id,
+                                            "maxDurationSeconds": DICTATION_MAX_SESSION_SECONDS,
+                                        }),
+                                    );
+                                }
+                            }
 
                             if streaming {
                                 if let Ok(mut shared) = partial_buffer.lock() {
@@ -1186,6 +1348,7 @@ impl AudioCapture {
                                     vad_event_handle.as_ref(),
                                 );
                             }
+                          });
                         },
                         |err| tracing::error!("Dictation stream error: {}", err),
                         None,
@@ -1389,13 +1552,17 @@ impl AudioCapture {
         *gate_slot = None;
     }
 
+    /// Ends capture and returns the encoded WAV.
+    ///
+    /// The caller is responsible for having already waited
+    /// `DICTATION_STOP_CAPTURE_TAIL_MS` so the speaker's final consonant is
+    /// captured; see that constant for why the wait does not live here.
     pub fn stop_dictation(&mut self) -> Result<Vec<u8>> {
         if !self.is_dictating.load(Ordering::SeqCst) {
             return Err(anyhow::anyhow!("No dictation in progress"));
         }
 
         tracing::info!("Stopping dictation capture...");
-        std::thread::sleep(Duration::from_millis(DICTATION_STOP_CAPTURE_TAIL_MS));
         self.is_dictating.store(false, Ordering::SeqCst);
         self.signal_capture_stop();
         self.clear_dictation_vad_gate();
@@ -1419,6 +1586,7 @@ impl AudioCapture {
         while let Some(sample) = self.dictation_buffer.pop() {
             samples.push(sample);
         }
+        self.dictation_buffered_samples.store(0, Ordering::SeqCst);
 
         // The partial buffer is UI-only and never contributes to `samples`.
         // Stop streaming and release its memory now that capture has ended.
@@ -1519,10 +1687,25 @@ impl AudioCapture {
         }
 
         while self.dictation_buffer.pop().is_some() {}
+        self.dictation_buffered_samples.store(0, Ordering::SeqCst);
+        self.dictation_max_duration_reached
+            .store(false, Ordering::SeqCst);
         if let Ok(mut partial) = self.dictation_partial_buffer.lock() {
             partial.samples.clear();
             partial.total_samples = 0;
         }
+    }
+
+    /// Whether the session that just ended was cut short by the maximum-length
+    /// ceiling. Read after `stop_dictation` so the caller can tell the user the
+    /// recording was truncated rather than presenting it as complete.
+    pub fn dictation_hit_max_duration(&self) -> bool {
+        self.dictation_max_duration_reached.load(Ordering::SeqCst)
+    }
+
+    /// Longest single dictation session, in seconds, before capture is stopped.
+    pub fn dictation_max_session_seconds() -> u64 {
+        DICTATION_MAX_SESSION_SECONDS
     }
 
     /// Get the current audio level for dictation (0.0 to 1.0)
@@ -1679,6 +1862,9 @@ impl AudioCapture {
 
             let capture_stop_flag = Arc::new(AtomicBool::new(true));
             let capture_flag = Arc::clone(&capture_stop_flag);
+            // Latched if this recording's realtime callback ever panics, so the
+            // stream goes inert instead of aborting the process mid-meeting.
+            let callback_poisoned = Arc::new(AtomicBool::new(false));
             let dropped_stream_chunks = Arc::new(AtomicU64::new(0));
             let dropped_writer_chunks = Arc::new(AtomicU64::new(0));
             let dropped_stream_chunks_for_session = Arc::clone(&dropped_stream_chunks);
@@ -1695,6 +1881,7 @@ impl AudioCapture {
                 macro_rules! build_recording_stream {
                     ($sample_type:ty) => {{
                         let stream_queue = Arc::clone(&stream_queue_clone);
+                        let callback_poisoned = Arc::clone(&callback_poisoned);
                         let waveform_buffer = Arc::clone(&wf_buffer);
                         let samples_sender = samples_sender.clone();
                         let dropped_stream_chunks = Arc::clone(&dropped_stream_chunks);
@@ -1703,33 +1890,35 @@ impl AudioCapture {
                         device.build_input_stream(
                             stream_config.clone(),
                             move |data: &[$sample_type], _: &cpal::InputCallbackInfo| {
-                                let chunk = downmix_to_mono(data, num_channels);
+                                guard_audio_callback(&callback_poisoned, "Recording", || {
+                                    let chunk = downmix_to_mono(data, num_channels);
 
-                                if let Ok(mut waveform) = waveform_buffer.lock() {
-                                    for &sample in
-                                        chunk.iter().step_by(chunk.len() / 100 + 1).take(100)
-                                    {
-                                        waveform.push(sample);
+                                    if let Ok(mut waveform) = waveform_buffer.lock() {
+                                        for &sample in
+                                            chunk.iter().step_by(chunk.len() / 100 + 1).take(100)
+                                        {
+                                            waveform.push(sample);
+                                        }
+                                        if waveform.len() > 4410 {
+                                            let drop_count = waveform.len() - 4410;
+                                            waveform.drain(0..drop_count);
+                                        }
                                     }
-                                    if waveform.len() > 4410 {
-                                        let drop_count = waveform.len() - 4410;
-                                        waveform.drain(0..drop_count);
-                                    }
-                                }
 
-                                if stream_queue.push(chunk.clone()).is_err() {
-                                    let _ = stream_queue.pop();
-                                    let _ = stream_queue.push(chunk.clone());
-                                    dropped_stream_chunks.fetch_add(1, Ordering::Relaxed);
-                                }
-
-                                match samples_sender.try_send(chunk) {
-                                    Ok(()) => {}
-                                    Err(TrySendError::Full(_)) => {
-                                        dropped_writer_chunks.fetch_add(1, Ordering::Relaxed);
+                                    if stream_queue.push(chunk.clone()).is_err() {
+                                        let _ = stream_queue.pop();
+                                        let _ = stream_queue.push(chunk.clone());
+                                        dropped_stream_chunks.fetch_add(1, Ordering::Relaxed);
                                     }
-                                    Err(TrySendError::Disconnected(_)) => {}
-                                }
+
+                                    match samples_sender.try_send(chunk) {
+                                        Ok(()) => {}
+                                        Err(TrySendError::Full(_)) => {
+                                            dropped_writer_chunks.fetch_add(1, Ordering::Relaxed);
+                                        }
+                                        Err(TrySendError::Disconnected(_)) => {}
+                                    }
+                                });
                             },
                             {
                                 let capture_failure = Arc::clone(&capture_failure_for_stream);
@@ -2310,12 +2499,16 @@ impl AudioCapture {
                 edge
             }
 
+            // Latched if this monitor's realtime callback ever panics, so it
+            // goes inert instead of aborting the process.
+            let callback_poisoned = Arc::new(AtomicBool::new(false));
             let sample_format = config.sample_format();
             let stream_config = config.config();
 
             macro_rules! build_hands_free_stream {
                 ($sample_type:ty) => {{
                     let running = Arc::clone(&monitor_active);
+                    let callback_poisoned = Arc::clone(&callback_poisoned);
                     let gate = Arc::clone(&gate);
                     let handle = event_handle.clone();
                     let err_active = Arc::clone(&monitor_active);
@@ -2324,31 +2517,33 @@ impl AudioCapture {
                     device.build_input_stream(
                         stream_config.clone(),
                         move |data: &[$sample_type], _: &cpal::InputCallbackInfo| {
-                            if !running.load(Ordering::SeqCst) {
-                                return;
-                            }
-                            let mono = downmix_to_mono(data, num_channels);
-                            // The frame is already downmixed for the gate; keep
-                            // it in the ring instead of dropping it, so the
-                            // session this monitor is about to trigger starts
-                            // with the user's opening words.
-                            if let Ok(mut slot) = pre_roll.lock() {
-                                if let Some(buffer) = slot.as_mut() {
-                                    buffer.push(&mono);
+                            guard_audio_callback(&callback_poisoned, "Hands-free monitor", || {
+                                if !running.load(Ordering::SeqCst) {
+                                    return;
                                 }
-                            }
-                            // Mark where speech actually began (the gate latches
-                            // well after the fact) so the hand-off is the user's
-                            // opening words, not the whole ring.
-                            if handle_frame(&mono, &gate, &running, &handle)
-                                == VadEdge::SpeechStarted
-                            {
+                                let mono = downmix_to_mono(data, num_channels);
+                                // The frame is already downmixed for the gate; keep
+                                // it in the ring instead of dropping it, so the
+                                // session this monitor is about to trigger starts
+                                // with the user's opening words.
                                 if let Ok(mut slot) = pre_roll.lock() {
                                     if let Some(buffer) = slot.as_mut() {
-                                        buffer.mark_speech_onset(speech_onset_lookback);
+                                        buffer.push(&mono);
                                     }
                                 }
-                            }
+                                // Mark where speech actually began (the gate latches
+                                // well after the fact) so the hand-off is the user's
+                                // opening words, not the whole ring.
+                                if handle_frame(&mono, &gate, &running, &handle)
+                                    == VadEdge::SpeechStarted
+                                {
+                                    if let Ok(mut slot) = pre_roll.lock() {
+                                        if let Some(buffer) = slot.as_mut() {
+                                            buffer.mark_speech_onset(speech_onset_lookback);
+                                        }
+                                    }
+                                }
+                            });
                         },
                         move |err| {
                             tracing::error!("Hands-free monitor stream error: {}", err);
@@ -3230,7 +3425,7 @@ mod system_audio_test_guard_tests {
 
 #[cfg(test)]
 mod dictation_capture_lifecycle_tests {
-    use super::AudioCapture;
+    use super::{admit_dictation_samples, AudioCapture};
     use crate::audio::vad::{EnergyThresholdVadGate, VadConfig, VadGate};
     use std::sync::atomic::{AtomicBool, Ordering};
     use std::sync::Arc;
@@ -3272,6 +3467,144 @@ mod dictation_capture_lifecycle_tests {
 
         assert!(!session_flag.load(Ordering::SeqCst));
         assert!(audio.dictation_capture_stop.is_none());
+    }
+
+    #[test]
+    fn a_panicking_audio_callback_does_not_escape_to_the_c_boundary() {
+        // Escaping here would hit cpal's `extern "C"` trampoline and abort the
+        // process, killing an in-progress meeting over one bad callback.
+        let poisoned = AtomicBool::new(false);
+        super::guard_audio_callback(&poisoned, "test", || panic!("callback exploded"));
+        assert!(poisoned.load(Ordering::Relaxed));
+    }
+
+    #[test]
+    fn a_poisoned_audio_callback_goes_inert_instead_of_repeating() {
+        // The same panic would otherwise recur hundreds of times a second and
+        // bury every other log line.
+        let poisoned = AtomicBool::new(false);
+        super::guard_audio_callback(&poisoned, "test", || panic!("first"));
+
+        let mut ran_again = false;
+        super::guard_audio_callback(&poisoned, "test", || ran_again = true);
+        assert!(!ran_again, "a poisoned callback must not run again");
+    }
+
+    #[test]
+    fn a_healthy_audio_callback_runs_and_stays_unpoisoned() {
+        let poisoned = AtomicBool::new(false);
+        let mut ran = false;
+        super::guard_audio_callback(&poisoned, "test", || ran = true);
+
+        assert!(ran);
+        assert!(!poisoned.load(Ordering::Relaxed));
+    }
+
+    #[test]
+    fn worker_thread_panics_are_recoverable_rather_than_fatal() {
+        // The whole point of `panic = "unwind"`: the sidecar's `handle.join()`
+        // recovery arms were dead code under abort, because a worker panic took
+        // the process with it. This is the behaviour those arms depend on.
+        let handle = std::thread::spawn(|| panic!("worker exploded"));
+        assert!(
+            handle.join().is_err(),
+            "a worker panic must be observable by its joiner, not fatal"
+        );
+    }
+
+    #[test]
+    fn the_release_profile_unwinds_so_recovery_paths_can_run() {
+        const CARGO_TOML: &str = include_str!("../Cargo.toml");
+        let release = CARGO_TOML
+            .split_once("[profile.release]")
+            .expect("a release profile must exist")
+            .1;
+        let release = release
+            .split_once("\n[")
+            .map(|parts| parts.0)
+            .unwrap_or(release);
+        // Settings only: the profile's comment explains what `abort` used to do
+        // and would otherwise trip a naive scan of the whole block.
+        let panic_setting = release
+            .lines()
+            .map(str::trim)
+            .filter(|line| !line.starts_with('#'))
+            .find_map(|line| line.strip_prefix("panic ="))
+            .map(str::trim)
+            .expect("the release profile must state a panic strategy");
+        assert_eq!(
+            panic_setting, "\"unwind\"",
+            "release must unwind: abort makes every panic-recovery branch dead code"
+        );
+    }
+
+    #[test]
+    fn dictation_admits_samples_until_the_session_ceiling() {
+        // Ordinary callback, plenty of headroom: everything is kept and nothing
+        // is announced.
+        let admission = admit_dictation_samples(0, 480, 48_000);
+        assert_eq!(admission.accepted, 480);
+        assert!(!admission.ceiling_reached);
+
+        // Exactly filling the buffer is still a complete accept: no audio was
+        // lost, so the user has nothing to be told about yet.
+        let admission = admit_dictation_samples(47_520, 480, 48_000);
+        assert_eq!(admission.accepted, 480);
+        assert!(!admission.ceiling_reached);
+    }
+
+    #[test]
+    fn dictation_truncates_the_callback_that_overruns_the_ceiling() {
+        // Partial fit: keep the leading samples that still fit, and report the
+        // ceiling so capture stops and the user is told.
+        let admission = admit_dictation_samples(47_800, 480, 48_000);
+        assert_eq!(admission.accepted, 200);
+        assert!(admission.ceiling_reached);
+    }
+
+    #[test]
+    fn dictation_admits_nothing_once_the_buffer_is_full() {
+        let admission = admit_dictation_samples(48_000, 480, 48_000);
+        assert_eq!(admission.accepted, 0);
+        assert!(admission.ceiling_reached);
+
+        // An empty callback against a full buffer is not the moment the limit
+        // was hit; re-announcing it would stop a session twice.
+        let admission = admit_dictation_samples(48_000, 0, 48_000);
+        assert_eq!(admission.accepted, 0);
+        assert!(!admission.ceiling_reached);
+    }
+
+    #[test]
+    fn dictation_session_ceiling_bounds_worst_case_capture_memory() {
+        // The ceiling exists to bound RAM. Pin the arithmetic so a future bump
+        // cannot quietly reintroduce an unbounded-in-practice buffer: f32 mono
+        // at a 48kHz device.
+        let max_samples = 48_000_u64 * AudioCapture::dictation_max_session_seconds();
+        let worst_case_bytes = max_samples * std::mem::size_of::<f32>() as u64;
+        assert!(
+            worst_case_bytes <= 192 * 1024 * 1024,
+            "dictation capture may buffer at most 192 MiB, got {worst_case_bytes} bytes"
+        );
+    }
+
+    #[test]
+    fn a_fresh_dictation_session_clears_the_previous_ceiling_flag() {
+        // The truncation notice is per session. A session that hit the ceiling
+        // must not make the next one report truncation it never suffered.
+        let mut audio = AudioCapture::new();
+        audio
+            .dictation_max_duration_reached
+            .store(true, Ordering::SeqCst);
+        audio
+            .dictation_buffered_samples
+            .store(999, Ordering::SeqCst);
+        audio.is_dictating.store(true, Ordering::SeqCst);
+
+        audio.abort_dictation();
+
+        assert!(!audio.dictation_hit_max_duration());
+        assert_eq!(audio.dictation_buffered_samples.load(Ordering::SeqCst), 0);
     }
 
     /// Both stop paths must clear the auto-stop VAD gate slot so a finished

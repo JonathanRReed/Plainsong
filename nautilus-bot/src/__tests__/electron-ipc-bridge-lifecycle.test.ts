@@ -286,9 +286,15 @@ describe("IpcBridge crash-loop containment", () => {
     replacementChild.emit("spawn");
     await vi.advanceTimersByTimeAsync(0);
 
+    // The renderer branches on the typed `reason`; the human-readable string
+    // travels alongside as `message` rather than being the only signal.
     expect(runtimeEvents).toContainEqual({
       name: "sidecar-runtime-changed",
-      payload: { ready: false, reason: "Sidecar process exited (code=1, signal=null)" },
+      payload: {
+        ready: false,
+        reason: "crash",
+        message: "Sidecar process exited (code=1, signal=null)",
+      },
     });
     expect(runtimeEvents).toContainEqual({
       name: "sidecar-runtime-changed",
@@ -296,6 +302,71 @@ describe("IpcBridge crash-loop containment", () => {
     });
 
     bridge.shutdown();
+    consoleWarn.mockRestore();
+  });
+
+  it("reports a signalled sidecar as killed rather than crashed", async () => {
+    const consoleWarn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const firstChild = fakeChildProcess();
+    const spawnProcess = vi
+      .fn()
+      .mockReturnValueOnce(firstChild)
+      .mockReturnValue(fakeChildProcess()) as unknown as typeof import("node:child_process").spawn;
+
+    const { IpcBridge } = await import("../../electron/ipc-bridge");
+    const bridge = new IpcBridge("/tmp/plainsong-sidecar", spawnProcess);
+    const runtimeEvents: Array<{ name: string; payload: unknown }> = [];
+    bridge.onEvent((name, payload) => runtimeEvents.push({ name, payload }));
+    bridge.start();
+
+    firstChild.emit("exit", null, "SIGKILL");
+    await vi.advanceTimersByTimeAsync(0);
+
+    expect(runtimeEvents).toContainEqual({
+      name: "sidecar-runtime-changed",
+      payload: {
+        ready: false,
+        reason: "killed",
+        message: "Sidecar process exited (code=null, signal=SIGKILL)",
+      },
+    });
+
+    bridge.shutdown();
+    consoleWarn.mockRestore();
+  });
+
+  it("reports a sidecar that never started as spawn_failed", async () => {
+    const consoleError = vi.spyOn(console, "error").mockImplementation(() => {});
+    const consoleWarn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const firstChild = fakeChildProcess();
+    const spawnProcess = vi
+      .fn()
+      .mockReturnValueOnce(firstChild)
+      .mockReturnValue(fakeChildProcess()) as unknown as typeof import("node:child_process").spawn;
+
+    const { IpcBridge } = await import("../../electron/ipc-bridge");
+    const bridge = new IpcBridge("/tmp/plainsong-sidecar", spawnProcess);
+    const runtimeEvents: Array<{ name: string; payload: unknown }> = [];
+    bridge.onEvent((name, payload) => runtimeEvents.push({ name, payload }));
+    bridge.start();
+
+    firstChild.emit("error", new Error("ENOENT"));
+    await vi.advanceTimersByTimeAsync(0);
+
+    const spawnFailure = runtimeEvents.find(
+      (event) =>
+        event.name === "sidecar-runtime-changed" &&
+        (event.payload as { reason?: string }).reason === "spawn_failed",
+    );
+    expect(spawnFailure).toBeDefined();
+    // The path is part of what makes this actionable, so the message must
+    // survive the move out of `reason`.
+    expect((spawnFailure?.payload as { message?: string }).message).toContain(
+      "/tmp/plainsong-sidecar",
+    );
+
+    bridge.shutdown();
+    consoleError.mockRestore();
     consoleWarn.mockRestore();
   });
 
@@ -503,5 +574,53 @@ describe("IpcBridge sender validation", () => {
         {},
       ),
     ).resolves.toEqual({ ok: true });
+  });
+});
+
+describe("sidecar error codes", () => {
+  it("lifts a typed meeting-start code onto error.code", async () => {
+    const { sidecarError } = await import("../../electron/ipc-bridge");
+
+    const error = sidecarError(
+      "MEETING_START_FAILED:mic_permission_denied:Microphone permission is not ready. Grant access in System Settings.",
+    );
+
+    // The renderer branches on the code and shows the message; the prefix must
+    // not survive into anything a user reads.
+    expect(error.code).toBe("mic_permission_denied");
+    expect(error.message).toBe(
+      "Microphone permission is not ready. Grant access in System Settings.",
+    );
+    expect(error.message).not.toContain("MEETING_START_FAILED");
+  });
+
+  it("keeps a message containing colons intact", async () => {
+    const { sidecarError } = await import("../../electron/ipc-bridge");
+
+    const error = sidecarError(
+      "MEETING_START_FAILED:disk_full:Not enough space: 120 MB free, 900 MB needed.",
+    );
+
+    expect(error.code).toBe("disk_full");
+    expect(error.message).toBe("Not enough space: 120 MB free, 900 MB needed.");
+  });
+
+  it("leaves ordinary sidecar errors untouched", async () => {
+    const { sidecarError } = await import("../../electron/ipc-bridge");
+
+    const error = sidecarError("Recording storage is busy. Try again shortly.");
+
+    expect(error.code).toBeUndefined();
+    expect(error.message).toBe("Recording storage is busy. Try again shortly.");
+  });
+
+  it("does not strip a malformed prefix", async () => {
+    const { sidecarError } = await import("../../electron/ipc-bridge");
+
+    const raw = "MEETING_START_FAILED:no-separator-here";
+    const error = sidecarError(raw);
+
+    expect(error.code).toBeUndefined();
+    expect(error.message).toBe(raw);
   });
 });

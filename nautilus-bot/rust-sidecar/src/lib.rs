@@ -107,6 +107,10 @@ pub struct AppState {
     /// lock, so it cannot remove a file after a command has claimed it.
     active_meeting_audio_postprocessing: Arc<StdMutex<HashMap<String, usize>>>,
     operation_coordinator: Arc<operation_coordinator::OperationCoordinator>,
+    /// Single-use proofs that a real user gesture asked for a meeting capture.
+    /// Registered by the privileged Electron side and redeemed by
+    /// `authorize_meeting_capture_options`.
+    capture_admission: Arc<admission::CaptureAdmissionRegistry>,
     active_capture_lease: Arc<Mutex<Option<(String, operation_coordinator::OperationLease)>>>,
     /// Set as soon as the sidecar accepts a shutdown request. Meeting
     /// post-processing failures caused by runtime teardown must remain
@@ -1269,7 +1273,7 @@ async fn smoke_test_cursor_insert_impl(
     let target = (get_frontmost_app_name(), None);
 
     let outcome = paste_text_systemwide(
-        state,
+        &state.accessibility_trust_observed,
         &sample,
         true,
         target.0.as_deref(),
@@ -1522,6 +1526,190 @@ fn emit_analysis_failure(
             "updatedAt": chrono::Utc::now().to_rfc3339(),
         }),
     );
+}
+
+/// Lifecycle of one meeting's automatic-analysis pass.
+///
+/// The pass used to report nothing at all: a default install points the meeting
+/// AI lane at an Ollama that is not installed, every stage failed, and the only
+/// trace was a `tracing::warn!`. The user was left with an unexplained
+/// placeholder title and no summary. These phases are what let the app say the
+/// analysis is running, that it failed and why, or that it finished.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum MeetingAnalysisPhase {
+    Running,
+    Failed,
+    Completed,
+}
+
+impl MeetingAnalysisPhase {
+    const fn as_str(self) -> &'static str {
+        match self {
+            Self::Running => "running",
+            Self::Failed => "failed",
+            Self::Completed => "completed",
+        }
+    }
+}
+
+fn emit_meeting_analysis_status(
+    handle: &sidecar_handle::SidecarHandle,
+    recording_id: &str,
+    phase: MeetingAnalysisPhase,
+    error: Option<&str>,
+) {
+    handle.emit_event(
+        "meeting-analysis-status",
+        serde_json::json!({
+            "recordingId": recording_id,
+            "phase": phase.as_str(),
+            "error": error,
+        }),
+    );
+}
+
+/// Persist (or clear) a meeting's analysis failure and announce the outcome.
+///
+/// Persistence and the event are deliberately paired: an event alone is lost the
+/// moment the window reloads, and a column alone never reaches an open library
+/// view. A failure to write the column must not mask the failure being reported,
+/// so it degrades to a log.
+async fn record_meeting_analysis_outcome(
+    state: &AppState,
+    handle: &sidecar_handle::SidecarHandle,
+    recording_id: &str,
+    failure: Option<&str>,
+) {
+    {
+        let mut db = state.db.lock().await;
+        if let Err(error) = db.set_recording_analysis_failure(recording_id, failure) {
+            tracing::warn!(
+                "Failed to persist analysis outcome for {}: {}",
+                recording_id,
+                error
+            );
+        }
+    }
+    match failure {
+        Some(reason) => emit_meeting_analysis_status(
+            handle,
+            recording_id,
+            MeetingAnalysisPhase::Failed,
+            Some(reason),
+        ),
+        None => emit_meeting_analysis_status(
+            handle,
+            recording_id,
+            MeetingAnalysisPhase::Completed,
+            None,
+        ),
+    }
+}
+
+/// Run the meeting analysis pass: summary, action items, and title.
+///
+/// Shared by the automatic post-meeting lane and `retry_meeting_analysis` so a
+/// retry is exactly the pass that failed, not a second implementation of it.
+///
+/// `auto_name_meeting_recording` runs unconditionally at the end. It used to run
+/// only when auto-analysis was disabled, or as a side effect of a *successful*
+/// summary, so the one case that most needed a title -- analysis failing on a
+/// default install -- was the case that never got one, and the meeting kept its
+/// placeholder name forever.
+async fn run_meeting_analysis_pass(
+    state: &AppState,
+    handle: &sidecar_handle::SidecarHandle,
+    recording_id: &str,
+) {
+    emit_meeting_analysis_status(handle, recording_id, MeetingAnalysisPhase::Running, None);
+
+    // Summary and action items are independent safe patches. A failed pass
+    // leaves any prior successful content and provenance untouched.
+    let mut failure_reasons: Vec<String> = Vec::new();
+    let mut summary_text: Option<String> = None;
+
+    match summarize_recording_grounded_internal(
+        state,
+        recording_id,
+        None,
+        Some(analysis_progress_callback(
+            handle,
+            recording_id,
+            "summary",
+            None,
+        )),
+    )
+    .await
+    {
+        Ok(result) => match persist_grounded_summary(state, recording_id, &result).await {
+            Ok(recording) => {
+                emit_analysis_ready(handle, &recording, "summary");
+                summary_text = Some(result.summary.clone());
+            }
+            Err(error) => {
+                emit_analysis_failure(handle, recording_id, "summary", None, &error);
+                failure_reasons.push(format!("summary: {}", error));
+            }
+        },
+        Err(error) => {
+            emit_analysis_failure(handle, recording_id, "summary", None, &error);
+            failure_reasons.push(format!("summary: {}", error));
+        }
+    }
+
+    match extract_action_items_grounded_internal(
+        state,
+        recording_id,
+        None,
+        Some(analysis_progress_callback(
+            handle,
+            recording_id,
+            "actionItems",
+            None,
+        )),
+    )
+    .await
+    {
+        Ok(result) => match persist_grounded_action_items(state, recording_id, &result).await {
+            Ok(recording) => emit_analysis_ready(handle, &recording, "actionItems"),
+            Err(error) => {
+                emit_analysis_failure(handle, recording_id, "actionItems", None, &error);
+                failure_reasons.push(format!("action items: {}", error));
+            }
+        },
+        Err(error) => {
+            emit_analysis_failure(handle, recording_id, "actionItems", None, &error);
+            failure_reasons.push(format!("action items: {}", error));
+        }
+    }
+
+    // Unconditional: a meeting whose summary failed still deserves a real name.
+    // With a summary it titles from that; without one it falls back to the
+    // transcript, which is exactly the path a failed analysis needs.
+    if let Err(error) = auto_name_meeting_recording(
+        state,
+        handle,
+        recording_id,
+        summary_text.as_deref(),
+        summary_text.is_none(),
+    )
+    .await
+    {
+        tracing::warn!("Meeting auto-name failed for '{}': {}", recording_id, error);
+        failure_reasons.push(format!("title: {}", error));
+    }
+
+    if failure_reasons.is_empty() {
+        record_meeting_analysis_outcome(state, handle, recording_id, None).await;
+    } else {
+        let reason = failure_reasons.join("; ");
+        tracing::warn!(
+            recording_id = %recording_id,
+            failure_count = failure_reasons.len(),
+            "Automatic analysis finished with failures"
+        );
+        record_meeting_analysis_outcome(state, handle, recording_id, Some(&reason)).await;
+    }
 }
 
 async fn run_grounded_response_for_segments(
@@ -3074,9 +3262,9 @@ async fn reprocess_dictation_text_impl(
     }
 
     let normalized_mode = normalize_dictation_mode_preset(&mode_preset).to_string();
+    let reprocess_settings = state.settings_manager.lock().await.settings().clone();
     let effective_mode = if normalized_mode == "custom" {
-        let settings = state.settings_manager.lock().await.settings().clone();
-        resolved_dictation_mode_preset(&settings).to_string()
+        resolved_dictation_mode_preset(&reprocess_settings).to_string()
     } else {
         normalized_mode.clone()
     };
@@ -3084,9 +3272,20 @@ async fn reprocess_dictation_text_impl(
 
     let (output_text, used_ai, provider, model_id) = match effective_mode.as_str() {
         "messages" | "email" | "meeting_follow_up" => {
-            let prompt = dictation_mode_transform_prompt(&effective_mode)
-                .ok_or_else(|| "No transform prompt is configured for this mode.".to_string())?;
-            match run_custom_dictation_transform_with_selected_provider(state, input, prompt).await
+            // Reprocess honours the active custom mode's own prompt for exactly
+            // the same reason live dictation does; see
+            // `resolve_dictation_mode_transform_prompt`.
+            let (prompt, _prompt_source) =
+                resolve_dictation_mode_transform_prompt(&reprocess_settings, &effective_mode)
+                    .ok_or_else(|| {
+                        "No transform prompt is configured for this mode.".to_string()
+                    })?;
+            match run_custom_dictation_transform_with_selected_provider(
+                state,
+                input,
+                prompt.as_str(),
+            )
+            .await
             {
                 Ok((output, provider, model_id)) => (
                     output,
@@ -3357,7 +3556,7 @@ async fn transform_selected_text_impl(
 
         let paste_outcome = match transform_target.scope {
             SelectedTextTransformTargetScope::Selection => paste_text_systemwide(
-                state,
+                &state.accessibility_trust_observed,
                 transform.output_text.as_str(),
                 true,
                 target.0.as_deref(),
@@ -4703,12 +4902,43 @@ fn merge_meeting_segment_text(existing: &str, incoming: &str) -> String {
     format!("{} {}", existing_trimmed, incoming_trimmed)
 }
 
-fn enrich_meeting_transcript(transcript: &mut models::Transcript) {
+/// Clean, merge, and correct a freshly transcribed meeting transcript.
+///
+/// `dictionary_entries` are the user's learned dictionary. They are applied per
+/// segment, here, because this runs before `save_transcript` and therefore
+/// before summarisation, action-item extraction, and titling all read the
+/// transcript back: correcting later would leave every derived artifact carrying
+/// the mis-heard spelling. Passing an empty slice keeps the pure clean/merge
+/// behavior.
+///
+/// Entries scoped to a destination app or app category do not apply. A meeting
+/// has no insertion target, so there is nothing for those scopes to match; only
+/// unscoped entries -- the taught names and terms -- take effect.
+fn enrich_meeting_transcript(
+    transcript: &mut models::Transcript,
+    dictionary_entries: &[models::DictationDictionaryEntry],
+) {
     let mut cleaned_segments: Vec<models::TranscriptSegment> = Vec::new();
 
     for segment in transcript.segments.drain(..) {
         let cleaned_text = sanitize_meeting_segment_text(&segment.text);
         if cleaned_text.is_empty() {
+            continue;
+        }
+        // Correct before the merge below, so a taught term is matched inside one
+        // segment rather than across a join that may not exist yet.
+        let cleaned_text = if dictionary_entries.is_empty() {
+            cleaned_text
+        } else {
+            crate::dictation_pipeline::apply_learned_dictionary(
+                cleaned_text.as_str(),
+                dictionary_entries,
+                None,
+                text::format::DictationAppCategory::Other,
+            )
+            .0
+        };
+        if cleaned_text.trim().is_empty() {
             continue;
         }
 
@@ -5171,6 +5401,58 @@ fn dictation_mode_transform_prompt(mode_preset: &str) -> Option<&'static str> {
         ),
         _ => None,
     }
+}
+
+/// The transform prompt a base-preset mode should actually run, plus the audit
+/// `prompt_source` describing where that prompt came from.
+///
+/// A custom mode carries its own `custom_prompt` *and* a `base_mode_preset`, and
+/// `resolved_dictation_mode_preset` collapses the pair down to the base preset
+/// before dispatch. That collapse used to lose the custom prompt outright: the
+/// "messages"/"email"/"meeting_follow_up" arms read only the hardcoded generic
+/// text, so a user who wrote a bespoke style for one of those bases silently got
+/// the stock rewrite instead. Only the "voice"/default arm consulted the mode.
+/// Resolving both here keeps every base preset honouring the user's own words,
+/// and keeps the two dispatch sites (live dictation and reprocess) in agreement.
+fn resolve_dictation_mode_transform_prompt(
+    settings: &settings::Settings,
+    mode_preset: &str,
+) -> Option<(String, String)> {
+    let normalized = normalize_dictation_mode_preset(mode_preset);
+    let generic = dictation_mode_transform_prompt(mode_preset)?;
+
+    if let Some(mode) = active_dictation_custom_mode(settings) {
+        // Only a custom mode built *on this base preset* may supply the prompt.
+        // Reprocess lets the user name a preset explicitly ("redo this as an
+        // email"), and an active custom mode based on some other preset must not
+        // hijack that request with its own unrelated style.
+        let mode_targets_this_preset = mode
+            .base_mode_preset
+            .as_deref()
+            .map(normalize_dictation_base_mode_preset)
+            == Some(normalized);
+        if mode_targets_this_preset {
+            if let Some(custom_prompt) = mode
+                .custom_prompt
+                .as_deref()
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+            {
+                // `custom_mode_format:` is the source tag the history UI already
+                // renders as "Style-specific instructions", so a custom-mode
+                // transform reads correctly without a renderer change.
+                return Some((
+                    custom_prompt.to_string(),
+                    format!("custom_mode_format:{}", mode.id),
+                ));
+            }
+        }
+    }
+
+    Some((
+        generic.to_string(),
+        format!("mode_transform:{}", normalized),
+    ))
 }
 
 fn active_dictation_custom_mode(
@@ -5670,7 +5952,7 @@ async fn unlock_vault_runtime(state: &AppState, password: &str) -> Result<(), St
                 .begin_recording_audio_encryption(&recording_id)
                 .map_err(|error| error.to_string())?;
             if let Some(operation) = operation {
-                encrypt_recording_audio_operation(state, operation, &recording_key).await?;
+                encrypt_recording_audio_operation(state, operation, &recording_key, None).await?;
             }
         }
         if !vault_initialized
@@ -5969,7 +6251,7 @@ async fn migrate_storage_encryption(state: &AppState, password: &str) -> Result<
                 .map_err(|error| error.to_string())?
         };
         if let Some(operation) = operation {
-            encrypt_recording_audio_operation(state, operation, &recording_key).await?;
+            encrypt_recording_audio_operation(state, operation, &recording_key, None).await?;
         }
     }
 
@@ -6068,6 +6350,51 @@ fn ensure_regular_file_in_roots(
     Ok(canonical)
 }
 
+/// A `Write` sink that hashes and counts without keeping anything.
+///
+/// Verification only ever needed the plaintext's length and digest, so buffering
+/// a whole decrypted track to compute them was pure waste -- and on a long
+/// meeting it was the difference between a few megabytes resident and a few
+/// hundred.
+struct PlaintextDigestSink {
+    hasher: sha2::Sha256,
+    bytes: u64,
+}
+
+impl PlaintextDigestSink {
+    fn new() -> Self {
+        use sha2::Digest as _;
+        Self {
+            hasher: sha2::Sha256::new(),
+            bytes: 0,
+        }
+    }
+
+    fn finish(self) -> (u64, String) {
+        use sha2::Digest as _;
+        (self.bytes, hex::encode(self.hasher.finalize()))
+    }
+}
+
+impl std::io::Write for PlaintextDigestSink {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        use sha2::Digest as _;
+        self.hasher.update(buf);
+        self.bytes += buf.len() as u64;
+        Ok(buf.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+/// Confirm an encrypted output decrypts back to exactly the journaled plaintext.
+///
+/// WAV validity is not re-checked here. The journaled SHA-256 was taken from a
+/// payload this code already validated as a readable WAV, so a digest match is a
+/// strictly stronger statement than re-parsing would be -- and it costs one
+/// streaming pass instead of a full-file buffer.
 fn verify_encrypted_recording_item(
     path: &Path,
     item: &recording_audio::RecordingAudioOperationItem,
@@ -6076,47 +6403,95 @@ fn verify_encrypted_recording_item(
 ) -> Result<(), String> {
     let canonical =
         ensure_regular_file_in_roots(path, "encrypted recording output", approved_roots)?;
-    let ciphertext = std::fs::read(&canonical).map_err(|error| {
+    let file = std::fs::File::open(&canonical).map_err(|error| {
         format!(
             "Failed to read encrypted recording output '{}': {}",
             canonical.display(),
             error
         )
     })?;
-    let plaintext =
-        crate::crypto::ProjectKeyManager::decrypt(&ciphertext, key).map_err(|error| {
+    let mut reader = std::io::BufReader::new(file);
+    let mut sink = PlaintextDigestSink::new();
+
+    let mut magic = [0_u8; 8];
+    let is_streaming = match std::io::Read::read_exact(&mut reader, &mut magic) {
+        Ok(()) => crate::crypto::ProjectKeyManager::is_streaming_payload(&magic),
+        // Too short to carry a magic; it cannot be a streaming payload.
+        Err(_) => false,
+    };
+    // Rewind: both decoders expect the payload from byte zero.
+    std::io::Seek::seek(&mut reader, std::io::SeekFrom::Start(0)).map_err(|error| {
+        format!(
+            "Failed to rewind encrypted recording output '{}': {}",
+            canonical.display(),
+            error
+        )
+    })?;
+
+    if is_streaming {
+        crate::crypto::ProjectKeyManager::decrypt_stream(&mut reader, &mut sink, key).map_err(
+            |error| {
+                format!(
+                    "Failed to verify encrypted recording output '{}': {}",
+                    canonical.display(),
+                    error
+                )
+            },
+        )?;
+    } else {
+        // Legacy whole-file payload. These predate the streaming format and are
+        // read in full because that format has no frames to stream.
+        let mut ciphertext = Vec::new();
+        std::io::Read::read_to_end(&mut reader, &mut ciphertext).map_err(|error| {
             format!(
-                "Failed to verify encrypted recording output '{}': {}",
+                "Failed to read encrypted recording output '{}': {}",
                 canonical.display(),
                 error
             )
         })?;
-    if plaintext.len() as u64 != item.plaintext_bytes {
+        let plaintext =
+            crate::crypto::ProjectKeyManager::decrypt(&ciphertext, key).map_err(|error| {
+                format!(
+                    "Failed to verify encrypted recording output '{}': {}",
+                    canonical.display(),
+                    error
+                )
+            })?;
+        std::io::Write::write_all(&mut sink, &plaintext).map_err(|error| error.to_string())?;
+    }
+
+    let (recovered_bytes, recovered_hash) = sink.finish();
+    if recovered_bytes != item.plaintext_bytes {
         return Err(format!(
             "Encrypted output '{}' recovered {} bytes, expected {}",
             canonical.display(),
-            plaintext.len(),
+            recovered_bytes,
             item.plaintext_bytes
         ));
     }
-    use sha2::{Digest as _, Sha256};
-    let recovered_hash = hex::encode(Sha256::digest(&plaintext));
     if recovered_hash != item.plaintext_sha256 {
         return Err(format!(
             "Encrypted output '{}' failed plaintext hash verification",
             canonical.display()
         ));
     }
-    validate_wav_bytes(
-        &plaintext,
-        &format!("Encrypted output '{}'", canonical.display()),
-    )
+    Ok(())
 }
 
+/// Encrypt one track from its source file into its staged output.
+///
+/// Streams: source bytes are hashed and encrypted a frame at a time, so peak
+/// memory is one frame rather than the whole track. This used to read the entire
+/// track into memory, encrypt it into a second full-size buffer, and write that
+/// out -- around three times the track size resident at once, for up to three
+/// tracks, on a long meeting.
+///
+/// `on_progress` receives plaintext bytes processed so far, for the UI.
 fn stage_recording_audio_operation_item(
     item: &recording_audio::RecordingAudioOperationItem,
     key: &[u8; 32],
     approved_roots: &[PathBuf],
+    mut on_progress: impl FnMut(u64),
 ) -> Result<(), String> {
     if item.staged_path.parent() != item.source_path.parent()
         || item.target_path.parent() != item.source_path.parent()
@@ -6130,26 +6505,21 @@ fn stage_recording_audio_operation_item(
 
     let canonical =
         ensure_regular_file_in_roots(&item.source_path, "recording audio source", approved_roots)?;
-    let plaintext = std::fs::read(&canonical).map_err(|error| {
-        format!(
-            "Failed to read recording audio '{}' for encryption: {}",
-            canonical.display(),
-            error
-        )
-    })?;
-    use sha2::{Digest as _, Sha256};
-    if plaintext.len() as u64 != item.plaintext_bytes
-        || hex::encode(Sha256::digest(&plaintext)) != item.plaintext_sha256
-    {
-        return Err(format!(
-            "Recording audio '{}' changed after encryption was journaled",
-            canonical.display()
-        ));
+
+    // Validate the source as a readable WAV before encrypting it. The
+    // path-based validator streams, so this stays O(1) in memory where the old
+    // byte-slice check needed the whole file resident.
+    match recording_audio::validate_plaintext_wav(&canonical) {
+        recording_audio::RecordingAudioValidation::Ready(_) => {}
+        recording_audio::RecordingAudioValidation::Missing(reason)
+        | recording_audio::RecordingAudioValidation::Failed(reason) => {
+            return Err(format!(
+                "Recording audio source '{}' is not encryptable: {}",
+                canonical.display(),
+                reason
+            ))
+        }
     }
-    validate_wav_bytes(
-        &plaintext,
-        &format!("Recording audio source '{}'", canonical.display()),
-    )?;
 
     if item.staged_path.exists() {
         match verify_encrypted_recording_item(&item.staged_path, item, key, approved_roots) {
@@ -6169,20 +6539,39 @@ fn stage_recording_audio_operation_item(
         }
     }
 
-    let ciphertext =
-        crate::crypto::ProjectKeyManager::encrypt(&plaintext, key).map_err(|error| {
-            format!(
-                "Failed to encrypt recording audio '{}': {}",
-                canonical.display(),
-                error
-            )
-        })?;
-    let mut staged_file =
+    let source_file = std::fs::File::open(&canonical).map_err(|error| {
+        format!(
+            "Failed to read recording audio '{}' for encryption: {}",
+            canonical.display(),
+            error
+        )
+    })?;
+    // Hash the source on the same pass that encrypts it, so "did this file
+    // change after the operation was journaled?" costs no extra read.
+    let mut hashing_source = HashingReader::new(std::io::BufReader::new(source_file));
+
+    let staged_file =
         recording_audio::create_new_file(&item.staged_path).map_err(|error| error.to_string())?;
     let staged_guard = recording_audio::DurableTempFile::new(item.staged_path.clone());
-    staged_file.write_all(&ciphertext).map_err(|error| {
+    let mut staged_writer = std::io::BufWriter::new(staged_file);
+
+    crate::crypto::ProjectKeyManager::encrypt_stream(
+        &mut hashing_source,
+        &mut staged_writer,
+        key,
+        &mut on_progress,
+    )
+    .map_err(|error| {
         format!(
-            "Failed to write staged encrypted audio '{}': {}",
+            "Failed to encrypt recording audio '{}': {}",
+            canonical.display(),
+            error
+        )
+    })?;
+
+    let staged_file = staged_writer.into_inner().map_err(|error| {
+        format!(
+            "Failed to flush staged encrypted audio '{}': {}",
             item.staged_path.display(),
             error
         )
@@ -6195,9 +6584,53 @@ fn stage_recording_audio_operation_item(
         )
     })?;
     drop(staged_file);
+
+    let (source_bytes, source_hash) = hashing_source.finish();
+    if source_bytes != item.plaintext_bytes || source_hash != item.plaintext_sha256 {
+        // The staged output is of a file we no longer recognise. The temp guard
+        // is still armed, so it is removed when this returns.
+        return Err(format!(
+            "Recording audio '{}' changed after encryption was journaled",
+            canonical.display()
+        ));
+    }
+
     verify_encrypted_recording_item(&item.staged_path, item, key, approved_roots)?;
     let _ = staged_guard.disarm();
     Ok(())
+}
+
+/// A `Read` adapter that digests and counts everything it passes through.
+struct HashingReader<R> {
+    inner: R,
+    hasher: sha2::Sha256,
+    bytes: u64,
+}
+
+impl<R: std::io::Read> HashingReader<R> {
+    fn new(inner: R) -> Self {
+        use sha2::Digest as _;
+        Self {
+            inner,
+            hasher: sha2::Sha256::new(),
+            bytes: 0,
+        }
+    }
+
+    fn finish(self) -> (u64, String) {
+        use sha2::Digest as _;
+        (self.bytes, hex::encode(self.hasher.finalize()))
+    }
+}
+
+impl<R: std::io::Read> std::io::Read for HashingReader<R> {
+    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+        use sha2::Digest as _;
+        let read = self.inner.read(buf)?;
+        self.hasher.update(&buf[..read]);
+        self.bytes += read as u64;
+        Ok(read)
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -6355,98 +6788,322 @@ fn cleanup_recording_audio_operation_sources(
     }
 }
 
-fn reconcile_recording_audio_encryption(
-    db: &mut db::Database,
+/// Headroom kept free beyond the ciphertext itself, in seconds of recording.
+///
+/// Encryption writes a whole second copy of every track before the plaintext can
+/// be removed, and the finalize path that calls it runs with roughly a minute of
+/// recording headroom. Filling the volume to the last byte here would leave no
+/// room for the journal writes that make the operation recoverable.
+///
+/// Expressed in seconds rather than a flat byte count so it goes through
+/// `audio::meeting_headroom_bytes` and scales with the number of tracks this
+/// bundle actually holds -- the same per-track sizing the capture-side space
+/// thresholds use. A mic-only meeting is not charged the three-track price.
+const RECORDING_ENCRYPTION_MARGIN_SECONDS: u64 = 60;
+
+/// Journal state for an operation deferred because the disk was too full.
+const RECORDING_ENCRYPTION_SPACE_PENDING: &str = "space_pending";
+
+fn emit_recording_encryption_status(
+    handle: Option<&crate::sidecar_handle::SidecarHandle>,
     recording_id: &str,
-    key: &[u8; 32],
-    approved_roots: &[PathBuf],
-    stop_after: Option<RecordingAudioEncryptionCheckpoint>,
-) -> Result<(), String> {
-    let Some(operation) = db
-        .load_open_recording_audio_operation(recording_id)
-        .map_err(|error| error.to_string())?
-    else {
-        return Ok(());
+    phase: &str,
+    processed_bytes: u64,
+    total_bytes: u64,
+    message: Option<&str>,
+) {
+    let Some(handle) = handle else {
+        return;
     };
-
-    if matches!(operation.state.as_str(), "db_switched" | "cleanup_pending") {
-        return cleanup_recording_audio_operation_sources(
-            db,
-            &operation,
-            approved_roots,
-            stop_after,
-        );
-    }
-
-    stop_after_encryption_checkpoint(stop_after, RecordingAudioEncryptionCheckpoint::Prepared)?;
-    let pre_switch_result = (|| {
-        for item in &operation.items {
-            if item.target_path.exists() {
-                verify_encrypted_recording_item(&item.target_path, item, key, approved_roots)?;
-            } else {
-                stage_recording_audio_operation_item(item, key, approved_roots)?;
-            }
-            db.set_recording_audio_operation_item_state(&operation.id, item.role, "staged", None)
-                .map_err(|error| error.to_string())?;
-        }
-        db.set_recording_audio_operation_state(&operation.id, "outputs_synced", None)
-            .map_err(|error| error.to_string())?;
-        stop_after_encryption_checkpoint(stop_after, RecordingAudioEncryptionCheckpoint::Staged)?;
-
-        for item in &operation.items {
-            publish_recording_audio_operation_item(item, key, approved_roots)?;
-            db.set_recording_audio_operation_item_state(
-                &operation.id,
-                item.role,
-                "published",
-                None,
-            )
-            .map_err(|error| error.to_string())?;
-        }
-        db.set_recording_audio_operation_state(&operation.id, "published", None)
-            .map_err(|error| error.to_string())?;
-        stop_after_encryption_checkpoint(
-            stop_after,
-            RecordingAudioEncryptionCheckpoint::Published,
-        )?;
-        db.switch_recording_audio_encryption(&operation)
-            .map_err(|error| error.to_string())?;
-        stop_after_encryption_checkpoint(stop_after, RecordingAudioEncryptionCheckpoint::Switched)
-    })();
-
-    if let Err(error) = pre_switch_result {
-        if !error.starts_with("injected crash after") {
-            let _ = db.set_recording_audio_operation_state(&operation.id, "failed", Some(&error));
-        }
-        return Err(error);
-    }
-
-    let refreshed = db
-        .load_open_recording_audio_operation(recording_id)
-        .map_err(|error| error.to_string())?
-        .ok_or_else(|| {
-            format!(
-                "Recording audio operation disappeared for '{}'",
-                recording_id
-            )
-        })?;
-    cleanup_recording_audio_operation_sources(db, &refreshed, approved_roots, stop_after)
+    handle.emit_event(
+        "recording-audio-encryption-status",
+        serde_json::json!({
+            "recordingId": recording_id,
+            "phase": phase,
+            "processedBytes": processed_bytes,
+            "totalBytes": total_bytes,
+            "message": message,
+        }),
+    );
 }
 
+/// Free space on the volume holding `path`, or `None` if it cannot be measured.
+///
+/// Unmeasurable means "do not block the user": a platform without the syscall
+/// must not make encryption impossible, only unpreflighted.
+fn available_space_for_encryption(path: &Path) -> Option<u64> {
+    let directory = path.parent()?;
+    crate::download::available_space_for_path(directory).ok()
+}
+
+/// Encrypt a recording's audio bundle into the vault.
+///
+/// Runs the file work on the blocking pool and takes the database lock only for
+/// the short journal updates between phases. It previously did all of it inline
+/// on the async runtime while holding that lock for the entire operation, so
+/// encrypting a long meeting stalled every other database user -- and the whole
+/// app with it.
 async fn encrypt_recording_audio_operation(
     state: &AppState,
     operation: recording_audio::RecordingAudioOperation,
     key: &[u8; 32],
+    handle: Option<&crate::sidecar_handle::SidecarHandle>,
+) -> Result<(), String> {
+    encrypt_recording_audio_operation_with_checkpoint(state, operation, key, handle, None).await
+}
+
+/// `stop_after` injects a simulated crash after a named checkpoint, so the
+/// journal's recovery path can be exercised without actually killing the
+/// process. Production always passes `None`.
+async fn encrypt_recording_audio_operation_with_checkpoint(
+    state: &AppState,
+    operation: recording_audio::RecordingAudioOperation,
+    key: &[u8; 32],
+    handle: Option<&crate::sidecar_handle::SidecarHandle>,
+    stop_after: Option<RecordingAudioEncryptionCheckpoint>,
 ) -> Result<(), String> {
     let approved_roots = approved_path_roots()?;
-    let mut db = state.db.lock().await;
-    reconcile_recording_audio_encryption(
-        &mut db,
-        &operation.recording_id,
+    let recording_id = operation.recording_id.clone();
+
+    // Resume path: the switch already happened, so only source cleanup remains.
+    if matches!(operation.state.as_str(), "db_switched" | "cleanup_pending") {
+        let mut db = state.db.lock().await;
+        return cleanup_recording_audio_operation_sources(
+            &mut db,
+            &operation,
+            &approved_roots,
+            stop_after,
+        );
+    }
+
+    let pending: Vec<_> = operation
+        .items
+        .iter()
+        .filter(|item| !item.target_path.exists())
+        .cloned()
+        .collect();
+    let total_plaintext_bytes: u64 = pending.iter().map(|item| item.plaintext_bytes).sum();
+
+    // Space preflight. Encryption writes a full second copy of every track, and
+    // nothing checked for room before starting -- so on the ~1-minute-headroom
+    // stop path the encryption step itself could run the disk out and fail the
+    // finalize. Defer instead: the recording stays intact and plaintext, and the
+    // journal records that it is waiting on free space.
+    if let Some(first) = pending.first() {
+        let required: u64 = pending
+            .iter()
+            .map(|item| {
+                crate::crypto::ProjectKeyManager::streaming_ciphertext_len(item.plaintext_bytes)
+            })
+            .sum::<u64>()
+            .saturating_add(crate::audio::meeting_headroom_bytes(
+                pending.len() as u64,
+                RECORDING_ENCRYPTION_MARGIN_SECONDS,
+            ));
+        let staged_path = first.staged_path.clone();
+        let available =
+            tokio::task::spawn_blocking(move || available_space_for_encryption(&staged_path))
+                .await
+                .map_err(|error| format!("Free-space check did not complete: {error}"))?;
+
+        if let Some(available) = available {
+            if available < required {
+                let message = format!(
+                    "Not enough free space to secure this recording: {} MB needed, {} MB available. Free some space and Plainsong will finish securing it.",
+                    required / (1024 * 1024),
+                    available / (1024 * 1024)
+                );
+                {
+                    let mut db = state.db.lock().await;
+                    db.set_recording_audio_operation_state(
+                        &operation.id,
+                        RECORDING_ENCRYPTION_SPACE_PENDING,
+                        Some(&message),
+                    )
+                    .map_err(|error| error.to_string())?;
+                }
+                emit_recording_encryption_status(
+                    handle,
+                    &recording_id,
+                    "deferred",
+                    0,
+                    total_plaintext_bytes,
+                    Some(&message),
+                );
+                tracing::warn!(
+                    recording_id = %recording_id,
+                    required_bytes = required,
+                    available_bytes = available,
+                    "Deferring recording encryption until there is free space"
+                );
+                // Deferred, not failed: the finalize must still succeed.
+                return Ok(());
+            }
+        }
+    }
+
+    emit_recording_encryption_status(
+        handle,
+        &recording_id,
+        "securing",
+        0,
+        total_plaintext_bytes,
+        None,
+    );
+
+    let result = run_recording_encryption_phases(
+        state,
+        &operation,
         key,
         &approved_roots,
-        None,
+        handle,
+        total_plaintext_bytes,
+        stop_after,
     )
+    .await;
+
+    match result {
+        Ok(()) => {
+            emit_recording_encryption_status(
+                handle,
+                &recording_id,
+                "completed",
+                total_plaintext_bytes,
+                total_plaintext_bytes,
+                None,
+            );
+            Ok(())
+        }
+        Err(error) => {
+            if !error.starts_with("injected crash after") {
+                let mut db = state.db.lock().await;
+                let _ =
+                    db.set_recording_audio_operation_state(&operation.id, "failed", Some(&error));
+            }
+            emit_recording_encryption_status(
+                handle,
+                &recording_id,
+                "failed",
+                0,
+                total_plaintext_bytes,
+                Some(&error),
+            );
+            Err(error)
+        }
+    }
+}
+
+/// Stage, publish, switch, clean up -- each file phase on the blocking pool,
+/// each journal update under a lock held only for that write.
+async fn run_recording_encryption_phases(
+    state: &AppState,
+    operation: &recording_audio::RecordingAudioOperation,
+    key: &[u8; 32],
+    approved_roots: &[PathBuf],
+    handle: Option<&crate::sidecar_handle::SidecarHandle>,
+    total_plaintext_bytes: u64,
+    stop_after: Option<RecordingAudioEncryptionCheckpoint>,
+) -> Result<(), String> {
+    stop_after_encryption_checkpoint(stop_after, RecordingAudioEncryptionCheckpoint::Prepared)?;
+    let mut processed_bytes = 0_u64;
+
+    for item in &operation.items {
+        let item_for_task = item.clone();
+        let roots = approved_roots.to_vec();
+        let task_key = *key;
+        let already_published = item.target_path.exists();
+        let item_bytes = item.plaintext_bytes;
+
+        // Progress leaves the blocking thread through a channel: the handle is
+        // borrowed and cannot cross into the task, and draining here keeps the
+        // events ordered with the phase transitions below.
+        let (progress_tx, mut progress_rx) = tokio::sync::mpsc::unbounded_channel::<u64>();
+        let staging = tokio::task::spawn_blocking(move || {
+            if already_published {
+                verify_encrypted_recording_item(
+                    &item_for_task.target_path,
+                    &item_for_task,
+                    &task_key,
+                    &roots,
+                )
+            } else {
+                stage_recording_audio_operation_item(&item_for_task, &task_key, &roots, |bytes| {
+                    let _ = progress_tx.send(bytes);
+                })
+            }
+        });
+
+        let base = processed_bytes;
+        while let Some(bytes) = progress_rx.recv().await {
+            emit_recording_encryption_status(
+                handle,
+                &operation.recording_id,
+                "securing",
+                base.saturating_add(bytes),
+                total_plaintext_bytes,
+                None,
+            );
+        }
+
+        staging
+            .await
+            .map_err(|error| format!("Recording encryption task did not complete: {error}"))??;
+        processed_bytes = processed_bytes.saturating_add(item_bytes);
+
+        let mut db = state.db.lock().await;
+        db.set_recording_audio_operation_item_state(&operation.id, item.role, "staged", None)
+            .map_err(|error| error.to_string())?;
+    }
+
+    {
+        let mut db = state.db.lock().await;
+        db.set_recording_audio_operation_state(&operation.id, "outputs_synced", None)
+            .map_err(|error| error.to_string())?;
+    }
+    stop_after_encryption_checkpoint(stop_after, RecordingAudioEncryptionCheckpoint::Staged)?;
+
+    for item in &operation.items {
+        let item_for_task = item.clone();
+        let roots = approved_roots.to_vec();
+        let task_key = *key;
+        tokio::task::spawn_blocking(move || {
+            publish_recording_audio_operation_item(&item_for_task, &task_key, &roots)
+        })
+        .await
+        .map_err(|error| format!("Recording publication task did not complete: {error}"))??;
+
+        let mut db = state.db.lock().await;
+        db.set_recording_audio_operation_item_state(&operation.id, item.role, "published", None)
+            .map_err(|error| error.to_string())?;
+    }
+
+    {
+        let mut db = state.db.lock().await;
+        db.set_recording_audio_operation_state(&operation.id, "published", None)
+            .map_err(|error| error.to_string())?;
+    }
+    stop_after_encryption_checkpoint(stop_after, RecordingAudioEncryptionCheckpoint::Published)?;
+    {
+        let mut db = state.db.lock().await;
+        db.switch_recording_audio_encryption(operation)
+            .map_err(|error| error.to_string())?;
+    }
+    stop_after_encryption_checkpoint(stop_after, RecordingAudioEncryptionCheckpoint::Switched)?;
+
+    let refreshed = {
+        let db = state.db.lock().await;
+        db.load_open_recording_audio_operation(&operation.recording_id)
+            .map_err(|error| error.to_string())?
+    };
+    let Some(refreshed) = refreshed else {
+        return Err(format!(
+            "Recording audio operation disappeared for '{}'",
+            operation.recording_id
+        ));
+    };
+
+    let mut db = state.db.lock().await;
+    cleanup_recording_audio_operation_sources(&mut db, &refreshed, approved_roots, stop_after)
 }
 
 fn ensure_runtime_directory(path: &Path) -> Result<(), String> {
@@ -7157,7 +7814,8 @@ mod tests {
             "projectId": "default",
             "consentPromptShown": true
         }));
-        assert!(authorize_meeting_capture_options(missing)
+        let registry = admission::CaptureAdmissionRegistry::default();
+        assert!(authorize_meeting_capture_options(&registry, missing)
             .expect_err("renderer consent must not authorize capture")
             .contains("privileged Electron admission"));
 
@@ -7167,25 +7825,198 @@ mod tests {
             "projectId": "default",
             "admissionNonce": "renderer-controlled"
         }));
-        assert!(authorize_meeting_capture_options(invalid)
+        assert!(authorize_meeting_capture_options(&registry, invalid)
             .expect_err("invalid nonce must fail")
             .contains("invalid"));
     }
 
     #[test]
     fn start_recording_derives_consent_from_privileged_admission() {
+        let registry = admission::CaptureAdmissionRegistry::default();
+        let nonce = uuid::Uuid::new_v4().to_string();
+        registry.register(&nonce);
         let options = meeting_options_from_json(serde_json::json!({
             "mic": true,
             "systemAudio": false,
             "projectId": "default",
             "consentPromptShown": false,
+            "admissionNonce": nonce
+        }));
+
+        let authorized = authorize_meeting_capture_options(&registry, options)
+            .expect("accept valid privileged admission");
+        assert!(authorized.consent_prompt_shown);
+        assert!(authorized.admission_nonce.is_none());
+    }
+
+    #[test]
+    fn a_registered_capture_nonce_cannot_be_replayed() {
+        // A well-formed UUID used to be accepted on its own, so anything that
+        // could reach the command could mint its own admission. A registered
+        // nonce is proof exactly once.
+        let registry = admission::CaptureAdmissionRegistry::default();
+        let nonce = uuid::Uuid::new_v4().to_string();
+        registry.register(&nonce);
+
+        let first = meeting_options_from_json(serde_json::json!({
+            "mic": true,
+            "systemAudio": false,
+            "projectId": "default",
+            "admissionNonce": &nonce
+        }));
+        assert!(authorize_meeting_capture_options(&registry, first).is_ok());
+
+        let replay = meeting_options_from_json(serde_json::json!({
+            "mic": true,
+            "systemAudio": false,
+            "projectId": "default",
+            "admissionNonce": &nonce
+        }));
+        assert!(authorize_meeting_capture_options(&registry, replay).is_err());
+    }
+
+    #[test]
+    fn an_unregistered_uuid_is_refused_once_the_registrar_is_live() {
+        let registry = admission::CaptureAdmissionRegistry::default();
+        registry.register(&uuid::Uuid::new_v4().to_string());
+
+        let forged = meeting_options_from_json(serde_json::json!({
+            "mic": true,
+            "systemAudio": false,
+            "projectId": "default",
             "admissionNonce": uuid::Uuid::new_v4().to_string()
         }));
 
-        let authorized =
-            authorize_meeting_capture_options(options).expect("accept valid privileged admission");
-        assert!(authorized.consent_prompt_shown);
-        assert!(authorized.admission_nonce.is_none());
+        assert!(authorize_meeting_capture_options(&registry, forged)
+            .expect_err("an unissued proof must be refused")
+            .contains("not issued"));
+    }
+
+    #[test]
+    fn capture_admission_stays_permissive_until_electron_registers() {
+        // Until the privileged registrar exists, behaviour is exactly what it
+        // was. Enforcing first would take meeting capture down outright.
+        let registry = admission::CaptureAdmissionRegistry::default();
+        let options = meeting_options_from_json(serde_json::json!({
+            "mic": true,
+            "systemAudio": false,
+            "projectId": "default",
+            "admissionNonce": uuid::Uuid::new_v4().to_string()
+        }));
+
+        assert!(authorize_meeting_capture_options(&registry, options).is_ok());
+    }
+
+    #[test]
+    fn meeting_start_error_codes_use_the_contract_names() {
+        // The renderer branches on these exact strings instead of matching the
+        // error prose, which is what it used to do.
+        for (code, expected) in [
+            (
+                MeetingStartErrorCode::MicPermissionDenied,
+                "mic_permission_denied",
+            ),
+            (
+                MeetingStartErrorCode::SystemAudioUnavailable,
+                "system_audio_unavailable",
+            ),
+            (
+                MeetingStartErrorCode::AudioDeviceNotFound,
+                "audio_device_not_found",
+            ),
+            (
+                MeetingStartErrorCode::SidecarUnavailable,
+                "sidecar_unavailable",
+            ),
+            (MeetingStartErrorCode::DiskFull, "disk_full"),
+            (MeetingStartErrorCode::AlreadyRecording, "already_recording"),
+            (MeetingStartErrorCode::ConsentRequired, "consent_required"),
+            (MeetingStartErrorCode::Unknown, "unknown"),
+        ] {
+            assert_eq!(code.as_str(), expected);
+        }
+    }
+
+    #[test]
+    fn out_of_space_failures_are_classified_as_disk_full() {
+        for message in [
+            "No space left on device",
+            "Failed to create recording audio: not enough space",
+            "Refusing to start: insufficient disk space for this meeting",
+            "needs more free space than is available",
+        ] {
+            assert!(
+                meeting_start_failure_is_out_of_space(message),
+                "{message} must classify as a disk-full failure"
+            );
+        }
+    }
+
+    #[test]
+    fn the_capture_preflight_refusal_is_classified_as_disk_full() {
+        // The exact wording `ensure_recording_start_has_disk_headroom` bails
+        // with. This is the one meeting-start failure the user can act on
+        // directly, so it must not fall through to a device error.
+        let refusal = format!(
+            "Not enough free disk space to record a meeting ({} MB free, {} MB needed). \
+             Free some space and start again.",
+            120,
+            crate::audio::meeting_headroom_bytes(3, 30 * 60) / (1024 * 1024)
+        );
+        assert!(
+            meeting_start_failure_is_out_of_space(&refusal),
+            "the capture preflight refusal must classify as disk_full: {refusal}"
+        );
+    }
+
+    #[test]
+    fn the_encryption_margin_scales_with_track_count() {
+        // Sized through the capture-side headroom helper, so a mic-only bundle
+        // is not charged the three-track price.
+        let one_track =
+            crate::audio::meeting_headroom_bytes(1, RECORDING_ENCRYPTION_MARGIN_SECONDS);
+        let three_tracks =
+            crate::audio::meeting_headroom_bytes(3, RECORDING_ENCRYPTION_MARGIN_SECONDS);
+        assert!(one_track > 0);
+        assert_eq!(three_tracks, one_track * 3);
+    }
+
+    #[test]
+    fn ordinary_failures_are_not_mistaken_for_disk_full() {
+        for message in [
+            "Microphone permission is not ready.",
+            "System audio capture is unavailable",
+            "Cannot start recording while dictation is active",
+        ] {
+            assert!(
+                !meeting_start_failure_is_out_of_space(message),
+                "{message} must not classify as a disk-full failure"
+            );
+        }
+    }
+
+    #[test]
+    fn every_meeting_start_failure_carries_a_typed_code() {
+        // Each `return Err(...)`/`?` on the start path must go through
+        // `fail_meeting_start`, or the renderer is back to reading prose.
+        const SOURCE: &str = include_str!("lib.rs");
+        // Newline-anchored so this does not match its own string literal above.
+        let start = SOURCE
+            .find("\nasync fn start_recording_for_sidecar(")
+            .expect("the meeting start path must exist");
+        let body = &SOURCE[start + 1..];
+        let body = body
+            .split_once("\nasync fn ")
+            .map(|parts| parts.0)
+            .unwrap_or(body);
+
+        let failures = body.matches("return Err(").count();
+        let typed = body.matches("fail_meeting_start(").count();
+        assert!(failures > 0, "the start path must have failure returns");
+        assert!(
+            typed >= failures,
+            "every meeting-start failure must be classified: {failures} returns, {typed} typed"
+        );
     }
 
     #[test]
@@ -8076,6 +8907,7 @@ mod tests {
             consent_notice_surface: None,
             consent_notice_message: None,
             consent_notice_updated_at: None,
+            analysis_failure: None,
         }
     }
 
@@ -8649,12 +9481,136 @@ mod tests {
             created_at: now,
         };
 
-        enrich_meeting_transcript(&mut transcript);
+        enrich_meeting_transcript(&mut transcript, &[]);
 
         assert_eq!(transcript.segments.len(), 1);
         assert_eq!(transcript.segments[0].speaker_id.as_deref(), Some("me"));
         assert_eq!(transcript.segments[0].text, "Hello there. How are you?");
         assert_eq!(transcript.full_text, "Hello there. How are you?");
+    }
+
+    fn dictionary_entry_fixture(
+        spoken_form: &str,
+        replacement: &str,
+        app_scope: Option<&str>,
+        category_scope: Option<&str>,
+    ) -> models::DictationDictionaryEntry {
+        let now = chrono::Utc::now();
+        models::DictationDictionaryEntry {
+            id: format!("entry-{spoken_form}"),
+            spoken_form: spoken_form.to_string(),
+            replacement: replacement.to_string(),
+            app_scope: app_scope.map(str::to_string),
+            case_sensitive: false,
+            enabled: true,
+            category_scope: category_scope.map(str::to_string),
+            created_at: now,
+            updated_at: now,
+        }
+    }
+
+    fn meeting_transcript_fixture(segment_texts: &[&str]) -> models::Transcript {
+        let now = chrono::Utc::now();
+        models::Transcript {
+            id: "t-dict".to_string(),
+            recording_id: "r-dict".to_string(),
+            segments: segment_texts
+                .iter()
+                .enumerate()
+                .map(|(index, text)| models::TranscriptSegment {
+                    id: format!("s{index}"),
+                    start_time: index as f64 * 10.0,
+                    end_time: index as f64 * 10.0 + 5.0,
+                    text: (*text).to_string(),
+                    speaker_id: Some(format!("speaker-{index}")),
+                    confidence: 0.9,
+                })
+                .collect(),
+            full_text: segment_texts.join(" "),
+            language: "en".to_string(),
+            confidence: 0.9,
+            model: "test".to_string(),
+            model_id: Some("test-model".to_string()),
+            requested_provider: Some("distil_whisper".to_string()),
+            actual_provider: Some("distil_whisper".to_string()),
+            created_at: now,
+        }
+    }
+
+    #[test]
+    fn meeting_transcripts_apply_the_learned_dictionary_to_every_segment() {
+        // A taught term used to be corrected on the dictation path only, so
+        // meetings re-mangled it in every segment -- and in the summary, action
+        // items, and title derived from them.
+        let mut transcript =
+            meeting_transcript_fixture(&["Kubernetties is slow.", "Ask Jhon about Kubernetties."]);
+        let entries = vec![
+            dictionary_entry_fixture("Kubernetties", "Kubernetes", None, None),
+            dictionary_entry_fixture("Jhon", "John", None, None),
+        ];
+
+        enrich_meeting_transcript(&mut transcript, &entries);
+
+        assert_eq!(transcript.segments[0].text, "Kubernetes is slow.");
+        assert_eq!(transcript.segments[1].text, "Ask John about Kubernetes.");
+        // The corrected text is what `full_text` carries, which is what the
+        // summary and action-item passes actually read.
+        assert!(!transcript.full_text.contains("Kubernetties"));
+        assert!(!transcript.full_text.contains("Jhon"));
+        assert!(transcript.full_text.contains("Kubernetes"));
+        assert!(transcript.full_text.contains("John"));
+    }
+
+    #[test]
+    fn meeting_transcripts_ignore_destination_scoped_dictionary_entries() {
+        // A meeting has no insertion target, so app- and category-scoped entries
+        // have nothing to match and must not fire.
+        let mut transcript = meeting_transcript_fixture(&["Ship the widget today."]);
+        let entries = vec![
+            dictionary_entry_fixture("widget", "Widget Pro", Some("Slack"), None),
+            dictionary_entry_fixture("today", "TODAY", None, Some("email")),
+        ];
+
+        enrich_meeting_transcript(&mut transcript, &entries);
+
+        assert_eq!(transcript.segments[0].text, "Ship the widget today.");
+    }
+
+    #[test]
+    fn an_empty_dictionary_leaves_meeting_enrichment_unchanged() {
+        let mut with_entries = meeting_transcript_fixture(&["Nothing to correct here."]);
+        let mut without_entries = meeting_transcript_fixture(&["Nothing to correct here."]);
+
+        enrich_meeting_transcript(&mut with_entries, &[]);
+        enrich_meeting_transcript(
+            &mut without_entries,
+            &[dictionary_entry_fixture("absent", "present", None, None)],
+        );
+
+        assert_eq!(with_entries.full_text, without_entries.full_text);
+        assert_eq!(with_entries.full_text, "Nothing to correct here.");
+    }
+
+    #[test]
+    fn meeting_dictionary_correction_precedes_transcript_persistence() {
+        // Ordering is the whole point: correcting after `save_transcript` would
+        // leave the persisted transcript -- and every artifact derived from it --
+        // carrying the mis-heard spelling.
+        const SOURCE: &str = include_str!("lib.rs");
+        let start = SOURCE
+            .find("let mut transcript = output.transcript;")
+            .expect("meeting post-processing must take the transcript");
+        let window = &SOURCE[start..];
+        let enrich = window
+            .find("enrich_meeting_transcript(&mut transcript, &meeting_dictionary_entries)")
+            .expect("meeting post-processing must enrich with the dictionary");
+        let save = window
+            .find("db.save_transcript(&transcript)")
+            .expect("meeting post-processing must persist the transcript");
+        assert!(
+            enrich < save,
+            "the learned dictionary must be applied before the transcript is saved"
+        );
     }
 
     #[test]
@@ -9334,6 +10290,194 @@ mod tests {
             body.matches("DICTATION_FORMAT_TIMEOUT,").count(),
             provider_calls,
             "every pre-insert LLM call must be wrapped in DICTATION_FORMAT_TIMEOUT"
+        );
+    }
+
+    #[test]
+    fn meeting_analysis_phases_use_the_contract_names() {
+        // The renderer switches on these exact strings.
+        assert_eq!(MeetingAnalysisPhase::Running.as_str(), "running");
+        assert_eq!(MeetingAnalysisPhase::Failed.as_str(), "failed");
+        assert_eq!(MeetingAnalysisPhase::Completed.as_str(), "completed");
+    }
+
+    #[test]
+    fn meeting_analysis_status_payload_matches_the_event_contract() {
+        const SOURCE: &str = include_str!("lib.rs");
+        let start = SOURCE
+            .find("fn emit_meeting_analysis_status(")
+            .expect("the status emitter must exist");
+        let body = &SOURCE[start..];
+        let body = body
+            .split_once("\n}\n")
+            .map(|parts| parts.0)
+            .unwrap_or(body);
+
+        assert!(
+            body.contains("\"meeting-analysis-status\""),
+            "the event name is part of the renderer contract"
+        );
+        // Payload keys follow the camelCase convention every other sidecar
+        // event uses.
+        for key in ["\"recordingId\"", "\"phase\"", "\"error\""] {
+            assert!(body.contains(key), "status payload must carry {key}");
+        }
+    }
+
+    #[test]
+    fn the_analysis_pass_always_titles_the_meeting() {
+        // Titling used to run only when auto-analysis was disabled, or as a
+        // side effect of a *successful* summary. The case that most needed a
+        // title -- analysis failing on a default install -- was the one case
+        // that never got one, leaving a placeholder name forever.
+        const SOURCE: &str = include_str!("lib.rs");
+        let start = SOURCE
+            .find("async fn run_meeting_analysis_pass(")
+            .expect("the shared analysis pass must exist");
+        let body = &SOURCE[start..];
+        let body = body
+            .split_once("\nasync fn ")
+            .map(|parts| parts.0)
+            .unwrap_or(body);
+
+        let title_call = body
+            .find("auto_name_meeting_recording(")
+            .expect("the pass must name the meeting");
+        // The naming call must not sit inside the summary success arm: it comes
+        // after both stages have been attempted.
+        let action_items = body
+            .find("extract_action_items_grounded_internal(")
+            .expect("the pass must extract action items");
+        assert!(
+            action_items < title_call,
+            "titling must run after both analysis stages, not inside the summary arm"
+        );
+    }
+
+    #[test]
+    fn a_failed_analysis_pass_is_persisted_and_announced() {
+        const SOURCE: &str = include_str!("lib.rs");
+        let start = SOURCE
+            .find("async fn record_meeting_analysis_outcome(")
+            .expect("the outcome recorder must exist");
+        let body = &SOURCE[start..];
+        let body = body
+            .split_once("\n/// Run the meeting analysis pass")
+            .map(|parts| parts.0)
+            .unwrap_or(body);
+
+        assert!(
+            body.contains("set_recording_analysis_failure"),
+            "the outcome must be persisted: an event alone is lost on reload"
+        );
+        assert!(
+            body.contains("MeetingAnalysisPhase::Failed")
+                && body.contains("MeetingAnalysisPhase::Completed"),
+            "the outcome must be announced in both directions"
+        );
+    }
+
+    #[test]
+    fn retry_meeting_analysis_reuses_the_shared_pass() {
+        // A retry must be the pass that failed, not a second implementation
+        // that can drift away from it.
+        const SOURCE: &str = include_str!("lib.rs");
+        let start = SOURCE
+            .find("\"retry_meeting_analysis\" => {")
+            .expect("the retry command must be dispatched");
+        let arm = &SOURCE[start..];
+        let arm = arm
+            .split_once("\n        \"summarize_recording\" =>")
+            .map(|parts| parts.0)
+            .unwrap_or(arm);
+
+        assert!(
+            arm.contains("run_meeting_analysis_pass("),
+            "retry must call the shared analysis pass"
+        );
+        assert!(
+            arm.contains("recordingId"),
+            "retry takes the recordingId argument named in the contract"
+        );
+    }
+
+    #[test]
+    fn the_stop_capture_tail_is_awaited_before_the_capture_mutex() {
+        // The 120ms capture tail used to be a blocking sleep inside
+        // `stop_dictation`, which ran while the caller held the async
+        // `audio_capture` mutex and parked a tokio worker. It must be awaited
+        // before the lock is taken.
+        let body = owned_stop_dictation_body();
+        let tail = body
+            .find("DICTATION_STOP_CAPTURE_TAIL_MS")
+            .expect("stop must wait the capture tail");
+        let lock = body
+            .find("state.audio_capture.lock().await")
+            .expect("stop must take the capture mutex");
+        assert!(
+            tail < lock,
+            "the capture tail must be awaited before the audio_capture mutex is acquired"
+        );
+        assert!(
+            body[tail..lock].contains("tokio::time::sleep"),
+            "the capture tail must be an async sleep, not a blocking one"
+        );
+    }
+
+    #[test]
+    fn stop_dictation_does_not_block_while_holding_the_capture_mutex() {
+        const AUDIO_SOURCE: &str = include_str!("audio.rs");
+        let start = AUDIO_SOURCE
+            .find("pub fn stop_dictation(&mut self)")
+            .expect("stop_dictation must exist");
+        let body = &AUDIO_SOURCE[start..];
+        let body = body
+            .split_once("\n    pub fn ")
+            .map(|parts| parts.0)
+            .unwrap_or(body);
+        assert!(
+            !body.contains("std::thread::sleep"),
+            "stop_dictation runs under the async audio_capture mutex and must not block"
+        );
+    }
+
+    #[test]
+    fn dictation_insertion_never_blocks_the_async_runtime() {
+        // `paste_text_systemwide` shells out, waits for app activation, and then
+        // polls for the insert -- roughly a second of blocking work. On the stop
+        // path that ran inline on a tokio worker. It must stay dispatched to the
+        // blocking pool. The macOS insertion body cannot execute under `cargo
+        // test` on CI hosts without an accessibility grant, hence the source
+        // check.
+        let body = owned_stop_dictation_body();
+        let call = body
+            .find("paste_text_systemwide(")
+            .expect("dictation stop must contain the delivery path");
+        let dispatch = body
+            .find("tokio::task::spawn_blocking(")
+            .expect("dictation stop must dispatch insertion to the blocking pool");
+        assert!(
+            dispatch < call,
+            "systemwide insertion must be wrapped in spawn_blocking, not awaited inline"
+        );
+    }
+
+    #[test]
+    fn paste_text_systemwide_takes_no_borrow_of_app_state() {
+        // Taking `&AppState` is what forced insertion to run inline: the borrow
+        // could not cross into `spawn_blocking`. Keep the narrowed parameter so
+        // the blocking dispatch above stays possible.
+        const SOURCE: &str = include_str!("lib.rs");
+        let signature = SOURCE
+            .split_once("\nfn paste_text_systemwide(")
+            .expect("paste_text_systemwide must exist")
+            .1
+            .split_once(')')
+            .expect("signature must close")
+            .0;
+        assert!(
+            !signature.contains("&AppState"),
+            "paste_text_systemwide must not borrow AppState: {signature}"
         );
     }
 
@@ -10632,6 +11776,119 @@ mod tests {
         assert_eq!(metadata.1.as_deref(), Some("Write polished email prose"));
     }
 
+    fn custom_mode_fixture(
+        id: &str,
+        base_mode_preset: Option<&str>,
+        custom_prompt: Option<&str>,
+    ) -> settings::DictationCustomMode {
+        settings::DictationCustomMode {
+            id: id.to_string(),
+            name: id.to_string(),
+            description: String::new(),
+            base_mode_preset: base_mode_preset.map(str::to_string),
+            custom_prompt: custom_prompt.map(str::to_string),
+            profile: "normal_speed".to_string(),
+            route_preference: Some("local".to_string()),
+            language_override: None,
+            live_preview_enabled: Some(true),
+            insertion_mode: "paste".to_string(),
+            context_source: "application_context".to_string(),
+            save_to_inbox: false,
+            copy_to_clipboard: true,
+            command_mode_enabled: true,
+            dictation_provider: None,
+            dictation_model_id: None,
+            ai_provider: None,
+            ai_model_id: None,
+            activation_app_matcher: None,
+            activation_domain_matcher: None,
+        }
+    }
+
+    fn settings_with_active_custom_mode(
+        base_mode_preset: Option<&str>,
+        custom_prompt: Option<&str>,
+    ) -> settings::Settings {
+        let mut settings = settings::Settings::default();
+        settings.transcription.dictation_mode_preset = "custom".to_string();
+        settings.transcription.dictation_selected_custom_mode_id = Some("mode-1".to_string());
+        settings.transcription.dictation_custom_modes = vec![custom_mode_fixture(
+            "mode-1",
+            base_mode_preset,
+            custom_prompt,
+        )];
+        settings
+    }
+
+    #[test]
+    fn base_preset_transforms_use_the_active_custom_modes_own_prompt() {
+        // Regression: every one of these three base presets previously ignored
+        // the custom mode and ran the hardcoded generic prompt instead.
+        for preset in ["messages", "email", "meeting_follow_up"] {
+            let settings =
+                settings_with_active_custom_mode(Some(preset), Some("Speak like a lighthouse."));
+            let (prompt, source) = resolve_dictation_mode_transform_prompt(&settings, preset)
+                .unwrap_or_else(|| panic!("{preset} must resolve a transform prompt"));
+            assert_eq!(
+                prompt, "Speak like a lighthouse.",
+                "{preset} discarded the custom prompt"
+            );
+            assert_eq!(source, "custom_mode_format:mode-1");
+        }
+    }
+
+    #[test]
+    fn base_preset_transforms_fall_back_to_generic_prompt_without_a_custom_mode() {
+        let settings = settings::Settings::default();
+        for preset in ["messages", "email", "meeting_follow_up"] {
+            let (prompt, source) = resolve_dictation_mode_transform_prompt(&settings, preset)
+                .unwrap_or_else(|| panic!("{preset} must resolve a transform prompt"));
+            assert_eq!(
+                prompt,
+                dictation_mode_transform_prompt(preset).expect("generic prompt exists"),
+                "{preset} must keep the stock prompt when no custom mode is active"
+            );
+            assert_eq!(source, format!("mode_transform:{preset}"));
+        }
+    }
+
+    #[test]
+    fn custom_mode_with_a_blank_prompt_keeps_the_generic_transform() {
+        for preset in ["messages", "email", "meeting_follow_up"] {
+            let settings = settings_with_active_custom_mode(Some(preset), Some("   "));
+            let (prompt, source) = resolve_dictation_mode_transform_prompt(&settings, preset)
+                .unwrap_or_else(|| panic!("{preset} must resolve a transform prompt"));
+            assert_eq!(
+                prompt,
+                dictation_mode_transform_prompt(preset).expect("generic prompt exists")
+            );
+            assert_eq!(source, format!("mode_transform:{preset}"));
+        }
+    }
+
+    #[test]
+    fn a_custom_mode_for_another_base_preset_does_not_hijack_the_transform() {
+        // Reprocess lets the user name a preset outright; an active custom mode
+        // built on a different base must not answer for it.
+        let settings =
+            settings_with_active_custom_mode(Some("messages"), Some("Speak like a lighthouse."));
+        let (prompt, source) = resolve_dictation_mode_transform_prompt(&settings, "email")
+            .expect("email must resolve a transform prompt");
+        assert_eq!(
+            prompt,
+            dictation_mode_transform_prompt("email").expect("generic prompt exists")
+        );
+        assert_eq!(source, "mode_transform:email");
+    }
+
+    #[test]
+    fn modes_without_a_transform_prompt_resolve_to_nothing() {
+        let settings =
+            settings_with_active_custom_mode(Some("voice"), Some("Speak like a lighthouse."));
+        assert!(resolve_dictation_mode_transform_prompt(&settings, "voice").is_none());
+        assert!(resolve_dictation_mode_transform_prompt(&settings, "notes").is_none());
+    }
+
     #[test]
     fn resolved_dictation_mode_uses_custom_mode_base_preset() {
         let mut settings = settings::Settings::default();
@@ -11199,7 +12456,7 @@ mod tests {
             "distil-large-v3.5",
             vec![("me", me), ("them", them)],
         );
-        enrich_meeting_transcript(&mut transcript);
+        enrich_meeting_transcript(&mut transcript, &[]);
 
         assert_eq!(transcript.segments.len(), 2);
         assert_eq!(transcript.segments[0].speaker_id.as_deref(), Some("me"));
@@ -16994,7 +18251,6 @@ fn send_native_copy_key(
 
 #[cfg(target_os = "macos")]
 fn send_meeting_consent_notice_via_zoom(
-    state: &AppState,
     target: &PendingDictationTarget,
     notice_text: &str,
 ) -> Result<(), String> {
@@ -17027,7 +18283,6 @@ fn send_meeting_consent_notice_via_zoom(
     )
     .or_else(|_| {
         dispatch_paste_from_clipboard(
-            state,
             notice_text,
             false,
             target.app_name.as_deref(),
@@ -17105,7 +18360,7 @@ fn send_meeting_consent_notice_internal(state: &AppState) -> MeetingConsentNotic
     }
 
     let send_result = match surface.as_str() {
-        "zoom" => send_meeting_consent_notice_via_zoom(state, &target, &notice_text),
+        "zoom" => send_meeting_consent_notice_via_zoom(&target, &notice_text),
         "google_meet" => send_meeting_consent_notice_via_google_meet(&target, &notice_text),
         _ => Err("Unsupported meeting surface.".to_string()),
     };
@@ -17204,13 +18459,11 @@ fn schedule_clipboard_restore(previous: String, inserted_text: String) {
 
 #[cfg(target_os = "macos")]
 fn dispatch_paste_from_clipboard(
-    state: &AppState,
     text: &str,
     keep_text_in_clipboard: bool,
     target_app: Option<&str>,
     target_app_bundle_id: Option<&str>,
 ) -> Result<CursorInsertStrategy, String> {
-    let _ = state;
     let previous_clipboard = read_clipboard_text().ok();
     copy_to_clipboard(text)
         .map_err(|error| format!("Failed to stage clipboard paste: {}", error))?;
@@ -17398,7 +18651,6 @@ fn capture_application_context_text(target_app: Option<&str>) -> Result<Option<S
 
 #[cfg(target_os = "windows")]
 fn dispatch_paste_from_clipboard(
-    _state: &AppState,
     _text: &str,
     _keep_text_in_clipboard: bool,
     target_app: Option<&str>,
@@ -17421,7 +18673,6 @@ fn dispatch_paste_from_clipboard(
 
 #[cfg(not(any(target_os = "macos", target_os = "windows")))]
 fn dispatch_paste_from_clipboard(
-    _state: &AppState,
     _text: &str,
     _keep_text_in_clipboard: bool,
     _target_app: Option<&str>,
@@ -17482,8 +18733,12 @@ fn mark_accessibility_insert_observed(observed: &AtomicBool) {
     observed.store(true, Ordering::Relaxed);
 }
 
+/// Blocking, and deliberately so: it shells out, waits on app activation, and
+/// polls for the insert to land. It takes the one `AppState` flag it actually
+/// touches rather than the whole struct so callers on the async runtime can hand
+/// it to `spawn_blocking` without borrowing state across the await.
 fn paste_text_systemwide(
-    state: &AppState,
+    accessibility_trust_observed: &Arc<AtomicBool>,
     text: &str,
     keep_text_in_clipboard: bool,
     target_app: Option<&str>,
@@ -17502,7 +18757,7 @@ fn paste_text_systemwide(
 
         match insert_text_via_accessibility(text, target_app, target_app_bundle_id) {
             Ok(()) => {
-                mark_accessibility_insert_observed(&state.accessibility_trust_observed);
+                mark_accessibility_insert_observed(accessibility_trust_observed);
                 let copied = if keep_text_in_clipboard {
                     match copy_to_clipboard(text) {
                         Ok(()) => true,
@@ -17536,7 +18791,6 @@ fn paste_text_systemwide(
         }
 
         match dispatch_paste_from_clipboard(
-            state,
             text,
             keep_text_in_clipboard,
             target_app,
@@ -17623,7 +18877,6 @@ fn paste_text_systemwide(
         tracing::info!("Text copied to clipboard successfully");
 
         let paste_dispatch = dispatch_paste_from_clipboard(
-            state,
             text,
             keep_text_in_clipboard,
             target_app,
@@ -18390,6 +19643,7 @@ pub async fn build_app_state() -> Result<AppState, String> {
         recording_templates: Arc::new(StdMutex::new(std::collections::HashMap::new())),
         active_meeting_audio_postprocessing: Arc::new(StdMutex::new(HashMap::new())),
         operation_coordinator: operation_coordinator::OperationCoordinator::new(),
+        capture_admission: Arc::new(admission::CaptureAdmissionRegistry::default()),
         active_capture_lease: Arc::new(Mutex::new(None)),
         sidecar_shutting_down: Arc::new(AtomicBool::new(false)),
         recent_dictation_results: Arc::new(StdMutex::new(Vec::new())),
@@ -18517,6 +19771,17 @@ async fn save_settings_for_sidecar(
         );
     normalize_platform_optimization(&mut settings.transcription.platform_optimization);
     normalize_contextual_asr_settings(&mut settings.transcription);
+
+    // Validated strictly on save, and only against what the *selected* model can
+    // decode. A language the model cannot handle is refused with a reason rather
+    // than dropped, which is what the old twelve-language allowlist did: it both
+    // discarded languages real models support and accepted ones they do not.
+    settings.transcription.dictation_active_languages =
+        settings::validate_dictation_active_languages(
+            &settings.transcription.dictation_provider,
+            &settings.transcription.dictation_model_id,
+            &settings.transcription.dictation_active_languages,
+        )?;
 
     // Unparseable provider values fall back to whisper.cpp — the same fast
     // default `settings::normalize_transcription_provider_value` uses — so
@@ -20023,7 +21288,7 @@ fn reuse_recent_dictation_result(
 
     let (target_app, target_app_bundle_id) = resolve_recent_dictation_repaste_target();
     let outcome = paste_text_systemwide(
-        state,
+        &state.accessibility_trust_observed,
         &result.text,
         true,
         target_app.as_deref(),
@@ -20174,10 +21439,22 @@ async fn stop_dictation_for_sidecar(
         }),
     );
 
-    let audio_bytes = {
+    // Deliberate extra recording so the speaker's final consonant lands (see
+    // `DICTATION_STOP_CAPTURE_TAIL_MS`). It is awaited here, *before* taking the
+    // capture mutex: as a blocking sleep inside `stop_dictation` it held the
+    // async `audio_capture` lock and parked a tokio worker for its whole
+    // duration. Waiting first preserves the ordering the tail depends on --
+    // capture is still live and `is_dictating` is still true.
+    tokio::time::sleep(Duration::from_millis(
+        crate::audio::DICTATION_STOP_CAPTURE_TAIL_MS,
+    ))
+    .await;
+
+    let (audio_bytes, hit_max_duration) = {
         let mut audio = state.audio_capture.lock().await;
+        let hit_max_duration = audio.dictation_hit_max_duration();
         match audio.stop_dictation() {
-            Ok(audio_bytes) => audio_bytes,
+            Ok(audio_bytes) => (audio_bytes, hit_max_duration),
             Err(error) => {
                 return Err(fail_dictation_stop(
                     state,
@@ -20190,6 +21467,14 @@ async fn stop_dictation_for_sidecar(
             }
         }
     };
+    if hit_max_duration {
+        // The session was ended by the length ceiling, not by the user. Say so:
+        // the transcript that follows covers only the audio that fit.
+        warnings.push(format!(
+            "Dictation reached the maximum length of {} minutes and was stopped. Only the audio captured up to that point was transcribed.",
+            crate::audio::AudioCapture::dictation_max_session_seconds() / 60
+        ));
+    }
     let dictation_duration_seconds = match compute_wav_duration_seconds_from_bytes(&audio_bytes) {
         Ok(duration_seconds) => duration_seconds,
         Err(error) => {
@@ -20461,17 +21746,18 @@ async fn stop_dictation_for_sidecar(
             // dictation with no opt-in and no timeout, then quietly replace the
             // result with a crude local rewrite whenever the call failed.
             "messages" | "email" | "meeting_follow_up" => {
-                if let Some(prompt) =
-                    dictation_mode_transform_prompt(&effective_mode).filter(|_| {
-                        dictation_llm_formatting_enabled(&settings_snapshot, &dictation_options)
-                    })
+                if let Some((prompt, resolved_prompt_source)) =
+                    resolve_dictation_mode_transform_prompt(&settings_snapshot, &effective_mode)
+                        .filter(|_| {
+                            dictation_llm_formatting_enabled(&settings_snapshot, &dictation_options)
+                        })
                 {
                     let transform = tokio::time::timeout(
                         DICTATION_FORMAT_TIMEOUT,
                         run_custom_dictation_transform_with_selected_provider(
                             state,
                             final_text.as_str(),
-                            prompt,
+                            prompt.as_str(),
                         ),
                     )
                     .await;
@@ -20481,8 +21767,8 @@ async fn stop_dictation_for_sidecar(
                                 sanitize_dictation_output(output.trim(), final_text.as_str())
                                     .trim()
                                     .to_string();
-                            prompt_source = Some(format!("mode_transform:{}", effective_mode));
-                            prompt_preview = truncate_for_audit_preview(Some(prompt), 180);
+                            prompt_source = Some(resolved_prompt_source);
+                            prompt_preview = truncate_for_audit_preview(Some(prompt.as_str()), 180);
                             pipeline_stage_keys.push("mode_transform".to_string());
                         }
                         Ok(Err(error)) => {
@@ -20664,6 +21950,7 @@ async fn stop_dictation_for_sidecar(
         consent_notice_surface: None,
         consent_notice_message: None,
         consent_notice_updated_at: None,
+        analysis_failure: None,
     };
 
     // Cursor delivery crosses native process and accessibility boundaries.
@@ -20755,13 +22042,55 @@ async fn stop_dictation_for_sidecar(
                             },
                         }
                     }
-                    DictationInsertionMode::Auto => paste_text_systemwide(
-                        state,
-                        final_text.as_str(),
-                        tracker_copy_to_clipboard(state).await,
-                        app_target.as_deref(),
-                        app_bundle_id.as_deref(),
-                    ),
+                    DictationInsertionMode::Auto => {
+                        // Insertion shells out to `open`, waits for the target
+                        // app to come forward, then polls for the paste to land
+                        // -- close to a second of blocking work on the hottest
+                        // dictation path. Running it inline stalled a tokio
+                        // worker for that whole window. Hoist the few reads it
+                        // needs, then hand the blocking body to the blocking
+                        // pool, matching how `get_frontmost_app_name` is already
+                        // dispatched.
+                        let keep_text_in_clipboard = tracker_copy_to_clipboard(state).await;
+                        let accessibility_trust_observed =
+                            Arc::clone(&state.accessibility_trust_observed);
+                        let insert_text = final_text.clone();
+                        let insert_app_target = app_target.clone();
+                        let insert_app_bundle_id = app_bundle_id.clone();
+                        match tokio::task::spawn_blocking(move || {
+                            paste_text_systemwide(
+                                &accessibility_trust_observed,
+                                insert_text.as_str(),
+                                keep_text_in_clipboard,
+                                insert_app_target.as_deref(),
+                                insert_app_bundle_id.as_deref(),
+                            )
+                        })
+                        .await
+                        {
+                            Ok(outcome) => outcome,
+                            Err(join_error) => {
+                                // A panic inside insertion must not be reported
+                                // as a successful insert; the transcript is
+                                // already durably committed above.
+                                tracing::error!(
+                                    "Dictation insertion task failed to complete: {}",
+                                    join_error
+                                );
+                                PasteOutcome {
+                                    pasted: false,
+                                    copied: false,
+                                    direct_accessibility: false,
+                                    confirmed: false,
+                                    successful_strategy: None,
+                                    error: Some(
+                                        "Text insertion did not complete. The transcript was saved."
+                                            .to_string(),
+                                    ),
+                                }
+                            }
+                        }
+                    }
                 };
             insert_latency_ms = Some(
                 insert_started_at
@@ -21614,7 +22943,14 @@ async fn revalidate_recording_audio_for_sidecar(
 
 /// Sidecar-compatible start_recording. Emits state events via SidecarHandle.
 /// Overlay show/hide and tray updates are handled by Electron.
+/// Verify that this capture was asked for by a real user gesture.
+///
+/// The nonce used to be validated only as a UUID, which made the check a
+/// formality: anything that could reach the command could mint a well-formed
+/// proof for itself. It is now redeemed against the registry the privileged
+/// Electron side writes to, single use and short lived.
 fn authorize_meeting_capture_options(
+    capture_admission: &admission::CaptureAdmissionRegistry,
     mut options: models::RecordingOptions,
 ) -> Result<models::RecordingOptions, String> {
     let nonce = options
@@ -21623,9 +22959,120 @@ fn authorize_meeting_capture_options(
         .ok_or("Meeting capture requires privileged Electron admission")?;
     uuid::Uuid::parse_str(&nonce)
         .map_err(|_| "Meeting capture admission proof is invalid".to_string())?;
+
+    capture_admission
+        .consume(&nonce)
+        .map_err(|rejection| rejection.message().to_string())?;
+
+    // Reaching here means a privileged gesture stands behind this capture, which
+    // is exactly what the consent prompt attests to.
     options.consent_prompt_shown = true;
     Ok(options)
 }
+
+/// Why a meeting failed to start, as a value the renderer can branch on.
+///
+/// The renderer used to substring-match the error text to decide what advice to
+/// show, which quietly broke every time a message was reworded and could never
+/// distinguish two failures that happened to share a phrase. These codes are the
+/// stable contract; the human-readable message travels alongside, unchanged.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum MeetingStartErrorCode {
+    MicPermissionDenied,
+    SystemAudioUnavailable,
+    AudioDeviceNotFound,
+    SidecarUnavailable,
+    DiskFull,
+    AlreadyRecording,
+    ConsentRequired,
+    Unknown,
+}
+
+impl MeetingStartErrorCode {
+    const fn as_str(self) -> &'static str {
+        match self {
+            Self::MicPermissionDenied => "mic_permission_denied",
+            Self::SystemAudioUnavailable => "system_audio_unavailable",
+            Self::AudioDeviceNotFound => "audio_device_not_found",
+            Self::SidecarUnavailable => "sidecar_unavailable",
+            Self::DiskFull => "disk_full",
+            Self::AlreadyRecording => "already_recording",
+            Self::ConsentRequired => "consent_required",
+            Self::Unknown => "unknown",
+        }
+    }
+}
+
+/// Whether a meeting-start failure was really "the disk is full".
+///
+/// Text matching, because the failure arrives as a flattened `anyhow` chain by
+/// the time it reaches the start path and the original `io::Error` (with its
+/// `ENOSPC`) is no longer reachable. This classifier exists precisely so the
+/// *renderer* never has to do this: the guesswork stays on one line here, behind
+/// a typed code, instead of being spread across UI branches that silently stop
+/// matching whenever a message is reworded.
+fn meeting_start_failure_is_out_of_space(message: &str) -> bool {
+    let normalized = message.to_ascii_lowercase();
+    // "disk space" is the fragment that catches the capture preflight's own
+    // refusal ("Not enough free disk space to record a meeting..."), along with
+    // "insufficient disk space" and "out of disk space". Matching the narrower
+    // "not enough space" alone missed it.
+    normalized.contains("no space left")
+        || normalized.contains("not enough space")
+        || normalized.contains("insufficient space")
+        || normalized.contains("disk space")
+        || normalized.contains("disk is full")
+        || normalized.contains("free space")
+}
+
+/// Announce a meeting-start failure with its typed code, and hand back the
+/// human-readable message for the command's `Err`.
+///
+/// Failures before the recording row exists have no id yet, so `recording_id` is
+/// optional; the phase event still carries the code so the renderer can explain
+/// the failure without parsing prose.
+fn fail_meeting_start(
+    state: &AppState,
+    handle: &crate::sidecar_handle::SidecarHandle,
+    recording_id: Option<&str>,
+    code: MeetingStartErrorCode,
+    message: String,
+) -> String {
+    if let Some(recording_id) = recording_id {
+        if let Ok(mut overlay) = state.recording_overlay_state.lock() {
+            overlay.phase = "error".to_string();
+            overlay.dismissed = false;
+            overlay.recording_id = Some(recording_id.to_string());
+            overlay.message = Some(message.clone());
+        }
+    }
+    handle.emit_event(
+        "meeting-recording-state-changed",
+        serde_json::json!({
+            "phase": "error",
+            "recordingId": recording_id,
+            "code": code.as_str(),
+            "message": &message,
+        }),
+    );
+    // The returned string is what reaches the renderer as the command's error.
+    // JSON-RPC carries only a message there, so the typed code rides in a
+    // machine-readable prefix that the Electron bridge lifts back onto
+    // `error.code` -- the same `PREFIX:` convention `SIDECAR_DUPLICATE:`
+    // already uses. Callers that persist or log the failure use `message`
+    // directly, before this point, so nothing stores the prefix.
+    format!(
+        "{}{}:{}",
+        MEETING_START_FAILURE_PREFIX,
+        code.as_str(),
+        message
+    )
+}
+
+/// Marks a meeting-start error as carrying a typed code.
+///
+/// Wire form: `MEETING_START_FAILED:<code>:<human message>`.
+const MEETING_START_FAILURE_PREFIX: &str = "MEETING_START_FAILED:";
 
 fn emit_meeting_lifecycle_phase(
     state: &AppState,
@@ -21662,15 +23109,36 @@ async fn start_recording_for_sidecar(
     {
         let dictation_state = state.dictation_runtime_state.lock().await;
         if *dictation_state != DictationSessionState::Idle {
-            return Err("Cannot start recording while dictation is active".to_string());
+            return Err(fail_meeting_start(
+                state,
+                handle,
+                None,
+                MeetingStartErrorCode::AlreadyRecording,
+                "Cannot start recording while dictation is active".to_string(),
+            ));
         }
     }
     let capture_lease = state
         .operation_coordinator
-        .try_acquire(operation_coordinator::OperationKind::Capture)?;
+        .try_acquire(operation_coordinator::OperationKind::Capture)
+        .map_err(|error| {
+            fail_meeting_start(
+                state,
+                handle,
+                None,
+                MeetingStartErrorCode::AlreadyRecording,
+                error,
+            )
+        })?;
     let _storage_guard = state.audio_storage_gate.try_lock().map_err(|_| {
-        "Recording storage is busy with encryption, backup, deletion, or retention. Try again shortly."
-            .to_string()
+        fail_meeting_start(
+            state,
+            handle,
+            None,
+            MeetingStartErrorCode::AlreadyRecording,
+            "Recording storage is busy with encryption, backup, deletion, or retention. Try again shortly."
+                .to_string(),
+        )
     })?;
 
     let settings_snapshot = state.settings_manager.lock().await.settings().clone();
@@ -21679,7 +23147,18 @@ async fn start_recording_for_sidecar(
         &settings_snapshot.transcription,
         settings_snapshot.privacy.remote_processing_enabled,
     )
-    .await?;
+    .await
+    .map_err(|error| {
+        // The transcription route is unusable: no model, no runtime, or a
+        // remote route the privacy settings forbid.
+        fail_meeting_start(
+            state,
+            handle,
+            None,
+            MeetingStartErrorCode::SidecarUnavailable,
+            error,
+        )
+    })?;
 
     #[cfg(target_os = "macos")]
     if options.mic {
@@ -21688,7 +23167,15 @@ async fn start_recording_for_sidecar(
                 .transcription
                 .dictation_auto_request_permissions,
         )
-        .map_err(|error| format!("Microphone permission is not ready. {}", error))?;
+        .map_err(|error| {
+            fail_meeting_start(
+                state,
+                handle,
+                None,
+                MeetingStartErrorCode::MicPermissionDenied,
+                format!("Microphone permission is not ready. {}", error),
+            )
+        })?;
     }
 
     ensure_asr_route_ready(
@@ -21697,14 +23184,31 @@ async fn start_recording_for_sidecar(
         &meeting_selection.1,
         "meeting transcription",
     )
-    .await?;
+    .await
+    .map_err(|error| {
+        fail_meeting_start(
+            state,
+            handle,
+            None,
+            MeetingStartErrorCode::SidecarUnavailable,
+            error,
+        )
+    })?;
 
     if options.system_audio {
         let capability = {
             let audio = state.audio_capture.lock().await;
             audio.system_audio_capability()
         };
-        require_verified_system_audio_for_meeting(&capability)?;
+        require_verified_system_audio_for_meeting(&capability).map_err(|error| {
+            fail_meeting_start(
+                state,
+                handle,
+                None,
+                MeetingStartErrorCode::SystemAudioUnavailable,
+                error,
+            )
+        })?;
     }
 
     if options.mic && options.preferred_input_device_id.is_none() {
@@ -21720,14 +23224,31 @@ async fn start_recording_for_sidecar(
 
     {
         let vault_state = state.vault_state.lock().await;
-        require_recording_vault_ready(settings_snapshot.privacy.vault_initialized, &vault_state)?;
+        require_recording_vault_ready(settings_snapshot.privacy.vault_initialized, &vault_state)
+            .map_err(|error| {
+                fail_meeting_start(
+                    state,
+                    handle,
+                    None,
+                    MeetingStartErrorCode::ConsentRequired,
+                    error,
+                )
+            })?;
     }
 
     let plan = {
         let audio = state.audio_capture.lock().await;
-        audio
-            .plan_recording(&options)
-            .map_err(|error| error.to_string())?
+        audio.plan_recording(&options).map_err(|error| {
+            // Planning fails when neither capture source is usable, which is a
+            // device problem rather than a permission or capability one.
+            fail_meeting_start(
+                state,
+                handle,
+                None,
+                MeetingStartErrorCode::AudioDeviceNotFound,
+                error.to_string(),
+            )
+        })?
     };
     let recording_id = plan.recording_id.clone();
     let recording = models::Recording {
@@ -21771,12 +23292,24 @@ async fn start_recording_for_sidecar(
         consent_notice_surface: None,
         consent_notice_message: None,
         consent_notice_updated_at: None,
+        analysis_failure: None,
     };
 
     {
         let mut db = state.db.lock().await;
         db.create_recording_with_audio_plan(&recording, &plan)
-            .map_err(|error| error.to_string())?;
+            .map_err(|error| {
+                let message = error.to_string();
+                // The capture preflight refuses here when there is not enough
+                // room to hold the recording, which is the one failure the user
+                // can fix directly.
+                let code = if meeting_start_failure_is_out_of_space(&message) {
+                    MeetingStartErrorCode::DiskFull
+                } else {
+                    MeetingStartErrorCode::Unknown
+                };
+                fail_meeting_start(state, handle, Some(&recording_id), code, message)
+            })?;
     }
 
     if let Ok(mut overlay) = state.recording_overlay_state.lock() {
@@ -21806,8 +23339,20 @@ async fn start_recording_for_sidecar(
     if let Err(error) = preparation_result {
         let message = error.to_string();
         persist_or_rollback_recording_activation_failure(state, &plan, &message).await;
-        emit_meeting_lifecycle_phase(state, handle, "error", &recording_id, Some(&message));
-        return Err(message);
+        // Opening the capture devices is where a missing or busy input device
+        // shows up, and where a full disk first refuses to create the WAV.
+        let code = if meeting_start_failure_is_out_of_space(&message) {
+            MeetingStartErrorCode::DiskFull
+        } else {
+            MeetingStartErrorCode::AudioDeviceNotFound
+        };
+        return Err(fail_meeting_start(
+            state,
+            handle,
+            Some(&recording_id),
+            code,
+            message,
+        ));
     }
 
     if let Err(error) = {
@@ -21820,8 +23365,18 @@ async fn start_recording_for_sidecar(
             audio.abort_prepared_recording();
         }
         persist_or_rollback_recording_activation_failure(state, &plan, &message).await;
-        emit_meeting_lifecycle_phase(state, handle, "error", &recording_id, Some(&message));
-        return Err(message);
+        let code = if meeting_start_failure_is_out_of_space(&message) {
+            MeetingStartErrorCode::DiskFull
+        } else {
+            MeetingStartErrorCode::Unknown
+        };
+        return Err(fail_meeting_start(
+            state,
+            handle,
+            Some(&recording_id),
+            code,
+            message,
+        ));
     }
 
     let activation_result = {
@@ -21831,8 +23386,18 @@ async fn start_recording_for_sidecar(
     if let Err(error) = activation_result {
         let message = error.to_string();
         persist_or_rollback_recording_activation_failure(state, &plan, &message).await;
-        emit_meeting_lifecycle_phase(state, handle, "error", &recording_id, Some(&message));
-        return Err(message);
+        let code = if meeting_start_failure_is_out_of_space(&message) {
+            MeetingStartErrorCode::DiskFull
+        } else {
+            MeetingStartErrorCode::AudioDeviceNotFound
+        };
+        return Err(fail_meeting_start(
+            state,
+            handle,
+            Some(&recording_id),
+            code,
+            message,
+        ));
     }
     *state.active_capture_lease.lock().await = Some((recording_id.clone(), capture_lease));
 
@@ -22418,7 +23983,8 @@ async fn stop_recording_for_sidecar_inner(
             .map_err(|error| error.to_string())?;
         if let Some(operation) = operation {
             if let Err(error) =
-                encrypt_recording_audio_operation(state.as_ref(), operation, &key).await
+                encrypt_recording_audio_operation(state.as_ref(), operation, &key, Some(handle))
+                    .await
             {
                 let message = format!(
                     "Recording was finalized, but vault encryption must be retried before transcription: {}",
@@ -22634,7 +24200,28 @@ async fn run_meeting_transcription_pipeline(
                 .filter(|reason| !reason.is_empty())
                 .map(str::to_string);
             let mut transcript = output.transcript;
-            enrich_meeting_transcript(&mut transcript);
+            // Load the learned dictionary before enrichment: the correction has
+            // to be in the transcript that gets persisted, because summary,
+            // action items, and the auto-title are all derived from it
+            // afterwards. A dictionary read failure is not worth failing a
+            // finished meeting over -- the transcript is still correct, just not
+            // term-corrected -- so it degrades to no substitutions.
+            let meeting_dictionary_entries = {
+                let db = state_clone.db.lock().await;
+                match db.list_dictation_dictionary_entries() {
+                    Ok(entries) => entries,
+                    Err(error) => {
+                        tracing::warn!(
+                            "Could not read the dictation dictionary for meeting {}; \
+                             continuing without term corrections: {}",
+                            recording_id_clone,
+                            error
+                        );
+                        Vec::new()
+                    }
+                }
+            };
+            enrich_meeting_transcript(&mut transcript, &meeting_dictionary_entries);
 
             let persistence_result = {
                 let mut db = state_clone.db.lock().await;
@@ -22862,7 +24449,23 @@ async fn run_meeting_transcription_pipeline(
                         let sm = state_clone.settings_manager.lock().await;
                         sm.settings().transcription.enable_auto_analysis
                     };
-                    if !auto_analyze {
+
+                    if auto_analyze && !full_text.trim().is_empty() {
+                        let state_analysis = Arc::clone(&state_clone);
+                        let handle_analysis = handle_clone.clone();
+                        let rec_id_analysis = recording_id_clone.clone();
+                        tokio::spawn(async move {
+                            run_meeting_analysis_pass(
+                                state_analysis.as_ref(),
+                                &handle_analysis,
+                                &rec_id_analysis,
+                            )
+                            .await;
+                        });
+                    } else {
+                        // No analysis pass will run, so nothing else will name
+                        // this meeting. Title it from the transcript directly
+                        // rather than leaving the placeholder in place.
                         match auto_name_meeting_recording(
                             state_clone.as_ref(),
                             &handle_clone,
@@ -22886,140 +24489,6 @@ async fn run_meeting_transcription_pipeline(
                                 e
                             ),
                         }
-                    }
-
-                    if auto_analyze && !full_text.trim().is_empty() {
-                        let state_analysis = Arc::clone(&state_clone);
-                        let handle_analysis = handle_clone.clone();
-                        let rec_id_analysis = recording_id_clone.clone();
-                        tokio::spawn(async move {
-                            // Summary and action items are independent safe
-                            // patches. A failed pass leaves any prior successful
-                            // content and provenance untouched.
-                            let mut failure_reasons: Vec<String> = Vec::new();
-                            match summarize_recording_grounded_internal(
-                                state_analysis.as_ref(),
-                                &rec_id_analysis,
-                                None,
-                                Some(analysis_progress_callback(
-                                    &handle_analysis,
-                                    &rec_id_analysis,
-                                    "summary",
-                                    None,
-                                )),
-                            )
-                            .await
-                            {
-                                Ok(result) => match persist_grounded_summary(
-                                    state_analysis.as_ref(),
-                                    &rec_id_analysis,
-                                    &result,
-                                )
-                                .await
-                                {
-                                    Ok(recording) => {
-                                        emit_analysis_ready(
-                                            &handle_analysis,
-                                            &recording,
-                                            "summary",
-                                        );
-                                        if let Err(error) = auto_name_meeting_recording(
-                                            state_analysis.as_ref(),
-                                            &handle_analysis,
-                                            &rec_id_analysis,
-                                            Some(&result.summary),
-                                            false,
-                                        )
-                                        .await
-                                        {
-                                            tracing::warn!(
-                                                "Meeting auto-name from summary failed for '{}': {}",
-                                                rec_id_analysis,
-                                                error
-                                            );
-                                        }
-                                    }
-                                    Err(error) => {
-                                        emit_analysis_failure(
-                                            &handle_analysis,
-                                            &rec_id_analysis,
-                                            "summary",
-                                            None,
-                                            &error,
-                                        );
-                                        failure_reasons.push(format!("summary: {}", error));
-                                    }
-                                },
-                                Err(error) => {
-                                    emit_analysis_failure(
-                                        &handle_analysis,
-                                        &rec_id_analysis,
-                                        "summary",
-                                        None,
-                                        &error,
-                                    );
-                                    failure_reasons.push(format!("summary: {}", error));
-                                }
-                            }
-
-                            match extract_action_items_grounded_internal(
-                                state_analysis.as_ref(),
-                                &rec_id_analysis,
-                                None,
-                                Some(analysis_progress_callback(
-                                    &handle_analysis,
-                                    &rec_id_analysis,
-                                    "actionItems",
-                                    None,
-                                )),
-                            )
-                            .await
-                            {
-                                Ok(result) => match persist_grounded_action_items(
-                                    state_analysis.as_ref(),
-                                    &rec_id_analysis,
-                                    &result,
-                                )
-                                .await
-                                {
-                                    Ok(recording) => {
-                                        emit_analysis_ready(
-                                            &handle_analysis,
-                                            &recording,
-                                            "actionItems",
-                                        );
-                                    }
-                                    Err(error) => {
-                                        emit_analysis_failure(
-                                            &handle_analysis,
-                                            &rec_id_analysis,
-                                            "actionItems",
-                                            None,
-                                            &error,
-                                        );
-                                        failure_reasons.push(format!("action items: {}", error));
-                                    }
-                                },
-                                Err(error) => {
-                                    emit_analysis_failure(
-                                        &handle_analysis,
-                                        &rec_id_analysis,
-                                        "actionItems",
-                                        None,
-                                        &error,
-                                    );
-                                    failure_reasons.push(format!("action items: {}", error));
-                                }
-                            }
-
-                            if !failure_reasons.is_empty() {
-                                tracing::warn!(
-                                    recording_id = %rec_id_analysis,
-                                    failure_count = failure_reasons.len(),
-                                    "Automatic analysis finished with partial failures"
-                                );
-                            }
-                        });
                     }
 
                     if let Err(error) = enforce_meeting_retention_policy(
@@ -23288,7 +24757,18 @@ pub async fn dispatch_command(
                     .unwrap_or(serde_json::Value::Object(Default::default())),
             )
             .map_err(|e| e.to_string())?;
-            let options = authorize_meeting_capture_options(options)?;
+            // Admission is the consent gate: without privileged Electron proof
+            // the capture never had a consent prompt behind it.
+            let options = authorize_meeting_capture_options(&state.capture_admission, options)
+                .map_err(|error| {
+                    fail_meeting_start(
+                        state.as_ref(),
+                        handle,
+                        None,
+                        MeetingStartErrorCode::ConsentRequired,
+                        error,
+                    )
+                })?;
             let recording_id = start_recording_for_sidecar(state, handle, options).await?;
             Ok(serde_json::json!({ "recordingId": recording_id }))
         }
@@ -23950,6 +25430,52 @@ pub async fn dispatch_command(
             let mut db = state.db.lock().await;
             let _ = db.log_audit_event("analysis_multi_recording_completed", Some(serde_json::json!({ "recording_ids": &recording_ids, "query": &query, "model": &result.model, "citation_count": result.citations.len(), "grounded": result.grounded })), "info");
             serde_json::to_value(result).map_err(|e| e.to_string())
+        }
+        "register_capture_admission" => {
+            // Called by Electron's CaptureAdmissionController the moment it
+            // mints a nonce, before that nonce is handed to `start_recording`.
+            // Registering is what turns the nonce from "a UUID" into proof only
+            // the privileged side could have produced.
+            let nonce: String =
+                serde_json::from_value(params["nonce"].clone()).map_err(|e| e.to_string())?;
+            uuid::Uuid::parse_str(&nonce)
+                .map_err(|_| "Capture admission nonce is not a valid UUID".to_string())?;
+            state.capture_admission.register(&nonce);
+            Ok(serde_json::json!({ "registered": true }))
+        }
+        "retry_meeting_analysis" => {
+            let recording_id: String =
+                serde_json::from_value(params["recordingId"].clone()).map_err(|e| e.to_string())?;
+
+            // Refuse a retry for a meeting that has no transcript to analyse
+            // rather than emitting a running/failed pair that tells the user
+            // nothing they can act on.
+            let transcript_is_analysable = {
+                let db = state.db.lock().await;
+                db.get_transcript(&recording_id)
+                    .map_err(|error| error.to_string())?
+                    .is_some_and(|transcript| !transcript.full_text.trim().is_empty())
+            };
+            if !transcript_is_analysable {
+                return Err(
+                    "This meeting has no transcript text to analyze. Re-transcribe it first."
+                        .to_string(),
+                );
+            }
+
+            // Runs the same pass the automatic lane runs, so a retry is the
+            // pass that failed rather than a second implementation of it.
+            run_meeting_analysis_pass(state.as_ref(), handle, &recording_id).await;
+
+            let recording = {
+                let db = state.db.lock().await;
+                db.get_recording(&recording_id)
+                    .map_err(|error| error.to_string())?
+            };
+            match recording {
+                Some(recording) => serde_json::to_value(recording).map_err(|e| e.to_string()),
+                None => Err(format!("Recording '{}' no longer exists.", recording_id)),
+            }
         }
         "summarize_recording" => {
             let recording_id: String =

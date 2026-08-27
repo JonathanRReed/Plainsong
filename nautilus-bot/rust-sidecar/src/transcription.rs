@@ -208,6 +208,7 @@ mod tests {
             consent_notice_surface: None,
             consent_notice_message: None,
             consent_notice_updated_at: None,
+            analysis_failure: None,
         }
     }
 

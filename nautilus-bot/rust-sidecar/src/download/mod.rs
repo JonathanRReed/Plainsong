@@ -1553,7 +1553,7 @@ impl Default for DownloadManager {
 /// Free space (bytes) available to unprivileged callers on the volume
 /// containing `path`, via `statvfs` (`f_bavail * f_frsize`).
 #[cfg(unix)]
-fn available_space_for_path(path: &std::path::Path) -> Result<u64> {
+pub(crate) fn available_space_for_path(path: &std::path::Path) -> Result<u64> {
     use std::os::unix::ffi::OsStrExt;
 
     let c_path = std::ffi::CString::new(path.as_os_str().as_bytes())
@@ -1570,7 +1570,7 @@ fn available_space_for_path(path: &std::path::Path) -> Result<u64> {
 }
 
 #[cfg(not(unix))]
-fn available_space_for_path(path: &std::path::Path) -> Result<u64> {
+pub(crate) fn available_space_for_path(path: &std::path::Path) -> Result<u64> {
     // No implementation on this platform. Return an honest error instead of
     // a fabricated value; callers fail open (skip the preflight check).
     Err(anyhow::anyhow!(

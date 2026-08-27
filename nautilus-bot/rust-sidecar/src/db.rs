@@ -1640,6 +1640,11 @@ impl Database {
         self.ensure_table_column("recordings", "consent_notice_surface", "TEXT")?;
         self.ensure_table_column("recordings", "consent_notice_message", "TEXT")?;
         self.ensure_table_column("recordings", "consent_notice_updated_at", "TEXT")?;
+        // Durable record of the last automatic-analysis failure. Without it the
+        // meeting AI lane failed with only a `tracing::warn!`, so a default
+        // install pointed at an uninstalled Ollama produced no summary, no
+        // action items, and no title, and the app said nothing at all.
+        self.ensure_table_column("recordings", "analysis_failure", "TEXT")?;
 
         // Chunked meeting transcription survives per-chunk ASR failures and
         // still returns a transcript, so "completed" alone never meant "the
@@ -2137,7 +2142,8 @@ impl Database {
                     recordings.consent_notice_message,
                     recordings.consent_notice_updated_at,
                     meeting_artifacts.summary_provenance,
-                    meeting_artifacts.action_items_provenance
+                    meeting_artifacts.action_items_provenance,
+                    recordings.analysis_failure
              FROM recordings
              LEFT JOIN meeting_artifacts ON meeting_artifacts.recording_id = recordings.id
              WHERE (?1 IS NULL OR recordings.project_id = ?1)
@@ -2191,6 +2197,10 @@ impl Database {
                 consent_notice_surface: row.get(17)?,
                 consent_notice_message: row.get(18)?,
                 consent_notice_updated_at,
+                analysis_failure: row
+                    .get::<_, Option<String>>(22)?
+                    .map(|value| value.trim().to_string())
+                    .filter(|value| !value.is_empty()),
             })
         })?;
 
@@ -2228,7 +2238,8 @@ impl Database {
                     recordings.consent_notice_message,
                     recordings.consent_notice_updated_at,
                     meeting_artifacts.summary_provenance,
-                    meeting_artifacts.action_items_provenance
+                    meeting_artifacts.action_items_provenance,
+                    recordings.analysis_failure
              FROM recordings
              LEFT JOIN meeting_artifacts ON meeting_artifacts.recording_id = recordings.id
              WHERE recordings.id = ?1",
@@ -2279,6 +2290,10 @@ impl Database {
                 consent_notice_surface: row.get(17)?,
                 consent_notice_message: row.get(18)?,
                 consent_notice_updated_at,
+                analysis_failure: row
+                    .get::<_, Option<String>>(22)?
+                    .map(|value| value.trim().to_string())
+                    .filter(|value| !value.is_empty()),
             })
         });
 
@@ -3451,6 +3466,27 @@ impl Database {
         self.conn.execute(
             "UPDATE recordings SET status = ?1, updated_at = ?2 WHERE id = ?3",
             params![status, Utc::now().to_rfc3339(), recording_id],
+        )?;
+        Ok(())
+    }
+
+    /// Record why automatic analysis failed, or clear the record on success.
+    ///
+    /// `updated_at` is deliberately left alone: a failed analysis pass does not
+    /// change the recording's own content, and bumping it would reorder the
+    /// user's library on a background failure they did not cause.
+    pub fn set_recording_analysis_failure(
+        &mut self,
+        recording_id: &str,
+        failure: Option<&str>,
+    ) -> Result<()> {
+        let normalized = failure
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(str::to_string);
+        self.conn.execute(
+            "UPDATE recordings SET analysis_failure = ?1 WHERE id = ?2",
+            params![normalized, recording_id],
         )?;
         Ok(())
     }
@@ -5719,6 +5755,93 @@ mod tests {
         }
     }
 
+    #[test]
+    fn analysis_failure_round_trips_through_list_and_detail_reads() {
+        let mut db = in_memory_db();
+        db.create_recording(&sample_recording("meeting-1", "inbox"))
+            .unwrap();
+
+        // A fresh recording has no recorded failure.
+        assert_eq!(
+            db.get_recording("meeting-1")
+                .unwrap()
+                .unwrap()
+                .analysis_failure,
+            None
+        );
+
+        db.set_recording_analysis_failure("meeting-1", Some("summary: Ollama is not running"))
+            .unwrap();
+
+        // Both the detail read and the library list must carry it: the list is
+        // what the library view renders, and an event alone is lost on reload.
+        assert_eq!(
+            db.get_recording("meeting-1")
+                .unwrap()
+                .unwrap()
+                .analysis_failure,
+            Some("summary: Ollama is not running".to_string())
+        );
+        let listed = db.get_recordings(None).unwrap();
+        assert_eq!(
+            listed[0].analysis_failure,
+            Some("summary: Ollama is not running".to_string())
+        );
+    }
+
+    #[test]
+    fn a_clean_analysis_pass_clears_a_persisted_failure() {
+        let mut db = in_memory_db();
+        db.create_recording(&sample_recording("meeting-2", "inbox"))
+            .unwrap();
+        db.set_recording_analysis_failure("meeting-2", Some("summary: boom"))
+            .unwrap();
+
+        db.set_recording_analysis_failure("meeting-2", None)
+            .unwrap();
+
+        assert_eq!(
+            db.get_recording("meeting-2")
+                .unwrap()
+                .unwrap()
+                .analysis_failure,
+            None
+        );
+    }
+
+    #[test]
+    fn blank_analysis_failures_are_stored_as_absent() {
+        // A whitespace-only reason is not a failure the UI can show, and must
+        // not light up a "retry" affordance with nothing to explain.
+        let mut db = in_memory_db();
+        db.create_recording(&sample_recording("meeting-3", "inbox"))
+            .unwrap();
+
+        db.set_recording_analysis_failure("meeting-3", Some("   "))
+            .unwrap();
+
+        assert_eq!(
+            db.get_recording("meeting-3")
+                .unwrap()
+                .unwrap()
+                .analysis_failure,
+            None
+        );
+    }
+
+    #[test]
+    fn recording_analysis_failure_serializes_as_camel_case() {
+        let mut recording = sample_recording("meeting-4", "inbox");
+        recording.analysis_failure = Some("summary: boom".to_string());
+
+        let value = serde_json::to_value(&recording).unwrap();
+
+        // The renderer contract is `analysisFailure`; the struct-level
+        // `rename_all = "camelCase"` is what provides it.
+        assert_eq!(value["analysisFailure"], "summary: boom");
+        assert!(value.get("analysis_failure").is_none());
+    }
+
     fn sample_project(_id: &str, name: &str) -> CreateProjectRequest {
         CreateProjectRequest {
             name: name.to_string(),
@@ -5751,6 +5874,7 @@ mod tests {
             consent_notice_surface: None,
             consent_notice_message: None,
             consent_notice_updated_at: None,
+            analysis_failure: None,
         }
     }
 
