@@ -4,6 +4,7 @@ import { randomUUID } from "node:crypto";
 import { createInterface } from "node:readline";
 import { getCommandTimeoutMs, getCommandWorkKey } from "./ipc-command-policy";
 import { buildSidecarEnv } from "./sidecar-env";
+import { trustedSenderFrameUrl } from "./trusted-sender";
 import {
   isExpectedSidecarStdinClose,
   retryOnceAfterMicrophonePreparationTimeout,
@@ -283,14 +284,10 @@ export class IpcBridge {
       return true;
     }
 
-    let frameUrl: string | undefined;
-    try {
-      frameUrl = event.senderFrame?.url;
-    } catch {
-      // senderFrame throws if the frame was disposed mid-call; treat as untrusted.
-      return false;
-    }
-
+    // Requires the TOP-LEVEL frame, not merely a frame whose URL passes the
+    // predicate: a subframe carries the same preload and the same
+    // `window.electronAPI`. See trusted-sender.ts.
+    const frameUrl = trustedSenderFrameUrl(event);
     if (!frameUrl) {
       return false;
     }
@@ -577,7 +574,7 @@ export class IpcBridge {
       if (!this.isTrustedSender(event)) {
         console.warn("[security] rejected sidecar command from untrusted sender", {
           command,
-          url: event.senderFrame?.url,
+          url: trustedSenderFrameUrl(event),
         });
         throw new Error("Renderer command rejected: untrusted sender");
       }

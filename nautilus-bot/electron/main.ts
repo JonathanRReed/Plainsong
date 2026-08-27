@@ -89,6 +89,7 @@ import {
 } from "./capture-admission";
 import { rendererPermissionAllowed } from "./renderer-permission-policy";
 import { isAllowedExternalUrl } from "./external-url-policy";
+import { trustedSenderFrameUrl } from "./trusted-sender";
 import {
   finalizeMeetingWithinBudget,
   nextActiveMeetingRecordingId,
@@ -2063,7 +2064,17 @@ app.on("activate", () => {
   }
 });
 
+// The one ipcMain handler that ran no sender check. It leaks little on its own
+// — a window label — but "every ipcMain handler validates its sender" is the
+// property worth holding, not "every handler that returns something sensitive".
 ipcMain.handle("window:get-label", (event) => {
+  const frameUrl = trustedSenderFrameUrl(event);
+  if (!isTrustedRendererOrigin(frameUrl)) {
+    console.warn("[security] rejected window:get-label from untrusted sender", {
+      url: frameUrl,
+    });
+    return null;
+  }
   const win = BrowserWindow.fromWebContents(event.sender);
   if (!win) {
     return null;
