@@ -23,6 +23,7 @@ import { formatMeetingStartError } from "@/lib/meeting-start-error";
 import type { DictationStateChangedEvent as SharedDictationStateChangedEvent } from "@/features/dictation/runtime";
 import {
   INITIAL_MEETING_LIFECYCLE_STATE,
+  meetingCaptureRestarted,
   meetingPhaseIsCapturing,
   reduceMeetingLifecycleState,
   type MeetingLifecycleEvent,
@@ -308,10 +309,16 @@ export function RecordingProvider({ children }: { children: ReactNode }) {
           if (!mounted) return;
 
           const payload = event.payload;
+          const previous = lifecycleFromRecordingState(stateRef.current);
+          const next = reduceMeetingLifecycleState(previous, payload);
           setState((prev) => reconcileMeetingState(prev, payload));
-          if (payload.phase === "recording" && payload.recordingId) {
-            startTimer(payload.startedAtMs);
-          } else {
+          // Restarting the timer on every `recording` event would zero the
+          // meeting clock each time the sidecar re-emits that phase to carry a
+          // mid-meeting warning. Only an actual entry into capture starts it;
+          // a meeting that is still recording keeps the clock it has.
+          if (meetingCaptureRestarted(previous, next)) {
+            startTimer(next.startedAtMs);
+          } else if (next.phase !== "recording") {
             clearTimer();
           }
         }

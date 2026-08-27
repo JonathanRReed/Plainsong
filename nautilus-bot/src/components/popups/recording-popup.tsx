@@ -37,6 +37,7 @@ import { rebaseMeetingNotes } from "@/lib/meeting-notes";
 import { AudioWaveform } from "@/components/ui/audio-waveform";
 import {
   INITIAL_MEETING_LIFECYCLE_STATE,
+  meetingCaptureRestarted,
   reduceMeetingLifecycleState,
   type MeetingLifecycleEvent,
   type MeetingLifecyclePhase,
@@ -125,10 +126,8 @@ export function RecordingPopup() {
         "meeting-recording-state-changed",
         (event) => {
           const payload = event.payload;
-          const next = reduceMeetingLifecycleState(
-            lifecycleRef.current,
-            payload,
-          );
+          const previous = lifecycleRef.current;
+          const next = reduceMeetingLifecycleState(previous, payload);
           lifecycleRef.current = next;
           if (next.phase !== "idle" && next.recordingId) {
             setRecordingId(next.recordingId);
@@ -141,7 +140,12 @@ export function RecordingPopup() {
             setConsentNoticeMessage(null);
             setPhase(next.phase);
             setMessage(next.message);
-            if (next.phase === "recording") {
+            // Only on an actual transition into capture. The sidecar re-emits
+            // `recording` mid-meeting to carry a warning (dead writer, filling
+            // disk); resetting on those would erase the visible source warning
+            // and the transcript preview at the exact moment the user needs
+            // them.
+            if (meetingCaptureRestarted(previous, next)) {
               setTranscriptionPreview("");
               setTranscriptCommitted(false);
               setPreviewDelay(describeTranscriptDelay(null));

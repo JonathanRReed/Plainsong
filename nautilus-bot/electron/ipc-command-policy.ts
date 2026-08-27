@@ -15,6 +15,7 @@ const ANALYSIS_COMMANDS = new Set<string>([
 ]);
 
 const FAST_COMMANDS = new Set<string>([
+  "acknowledge_incomplete_transcript",
   "cancel_analysis_run",
   "check_for_updates",
   "check_system_audio_availability",
@@ -83,6 +84,9 @@ const LONG_COMMANDS = new Set<string>([
   "request_dictation_permissions",
   "reset_app_state",
   "retry_meeting_auto_name",
+  // Re-hashes every owned audio file for one meeting; a long meeting's WAV
+  // bundle takes real time to read end to end.
+  "revalidate_recording_audio",
   "smoke_test_cursor_insert",
   "start_dictation",
   "start_recording",

@@ -390,6 +390,37 @@ pub(crate) fn compute_file_sha256(path: &Path) -> Result<String> {
     Ok(hex::encode(hasher.finalize()))
 }
 
+/// Free bytes on the volume that holds `path`.
+///
+/// Returns an error rather than a guess when the platform has no
+/// implementation or the call fails: every caller fails *open* (it records
+/// audio anyway) instead of refusing to capture a meeting because the free
+/// space could not be measured. A fabricated number here would either block
+/// legitimate meetings or hide a disk that is genuinely about to fill.
+#[cfg(unix)]
+pub(crate) fn available_space_bytes(path: &Path) -> Result<u64> {
+    use std::os::unix::ffi::OsStrExt;
+
+    let c_path = std::ffi::CString::new(path.as_os_str().as_bytes())
+        .context("Recording directory path contains an interior NUL byte")?;
+    let mut stats: libc::statvfs = unsafe { std::mem::zeroed() };
+    if unsafe { libc::statvfs(c_path.as_ptr(), &mut stats) } != 0 {
+        return Err(std::io::Error::last_os_error())
+            .with_context(|| format!("statvfs failed for {}", path.display()));
+    }
+    // The statvfs field widths differ across unix platforms; keep both casts.
+    #[allow(clippy::unnecessary_cast)]
+    Ok((stats.f_bavail as u64).saturating_mul(stats.f_frsize as u64))
+}
+
+#[cfg(not(unix))]
+pub(crate) fn available_space_bytes(path: &Path) -> Result<u64> {
+    Err(anyhow::anyhow!(
+        "Free-space check is not implemented on this platform (path: {})",
+        path.display()
+    ))
+}
+
 pub(crate) fn create_new_file(path: &Path) -> Result<File> {
     let mut options = OpenOptions::new();
     options.read(true).write(true).create_new(true);
@@ -513,5 +544,32 @@ mod tests {
         );
         assert!(plan.mic_path.is_none());
         assert!(plan.system_path.is_none());
+    }
+
+    #[test]
+    fn planned_track_count_matches_the_capture_mode() {
+        // The free-space thresholds scale by this count, so a mic-only meeting
+        // is not charged the three-track price it never pays.
+        assert_eq!(
+            RecordingCapturePlan::new(Path::new("/tmp"), true, false)
+                .unwrap()
+                .paths()
+                .count(),
+            1
+        );
+        assert_eq!(
+            RecordingCapturePlan::new(Path::new("/tmp"), false, true)
+                .unwrap()
+                .paths()
+                .count(),
+            2
+        );
+        assert_eq!(
+            RecordingCapturePlan::new(Path::new("/tmp"), true, true)
+                .unwrap()
+                .paths()
+                .count(),
+            3
+        );
     }
 }

@@ -17,7 +17,9 @@ use crate::store::{
 };
 use anyhow::{Context, Result};
 use chrono::Utc;
-use rusqlite::{params, params_from_iter, types::Value, Connection, TransactionBehavior};
+use rusqlite::{
+    params, params_from_iter, types::Value, Connection, OptionalExtension, TransactionBehavior,
+};
 use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -30,6 +32,21 @@ pub struct SpeakerAliasUpsert {
     pub name: Option<String>,
     pub color: Option<String>,
     pub sample_count: i64,
+}
+
+/// How complete one meeting's stored transcript actually is.
+///
+/// Kept out of [`Recording`] on purpose: this is storage-policy evidence, not
+/// renderer-facing content, and the only thing that reads it is the set of
+/// sweeps that would otherwise delete the audio holding the missing minutes.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MeetingTranscriptCompletion {
+    pub complete: bool,
+    /// Why the transcript is incomplete, as reported by chunked transcription.
+    pub degraded_reason: Option<String>,
+    /// When the user accepted losing the audio anyway. Never implies the
+    /// transcript became complete.
+    pub acknowledged_at: Option<String>,
 }
 
 const SENSITIVE_AUDIT_DETAIL_KEYS: [&str; 4] = [
@@ -1624,6 +1641,40 @@ impl Database {
         self.ensure_table_column("recordings", "consent_notice_message", "TEXT")?;
         self.ensure_table_column("recordings", "consent_notice_updated_at", "TEXT")?;
 
+        // Chunked meeting transcription survives per-chunk ASR failures and
+        // still returns a transcript, so "completed" alone never meant "the
+        // whole meeting was transcribed". That distinction only lived in an
+        // in-memory `fallback_reason` and an emitted event, which is not
+        // something a storage sweep running hours later can consult — so the
+        // transcript-only sweep happily deleted the audio of meetings the code
+        // already knew were partially transcribed. It is a column now.
+        //
+        // Defaulting to 1 is the honest choice for rows written before this
+        // existed: they were completed by the same code path and nothing
+        // recorded a degradation, so treating them as suspect would refuse
+        // retention on an entire back catalogue with no evidence.
+        self.ensure_table_column(
+            "recordings",
+            "transcript_complete",
+            "INTEGER NOT NULL DEFAULT 1",
+        )?;
+        self.ensure_table_column("recordings", "transcript_degraded_reason", "TEXT")?;
+        // Set when the user has been told the transcript is incomplete and
+        // chose to let storage policy delete the audio anyway. Deliberately
+        // separate from `transcript_complete`: acknowledging is a decision
+        // about deletion, not a claim that the missing words came back.
+        self.ensure_table_column(
+            "recordings",
+            "transcript_incomplete_acknowledged_at",
+            "TEXT",
+        )?;
+        // A starved capture source is padded with silence so the mixed and
+        // per-source WAVs stay frame-aligned, which makes "the microphone was
+        // gone" and "nobody spoke" identical in the file. This is where the
+        // difference is written down, at stop, so the meeting record carries the
+        // caveat instead of the audio quietly implying a complete capture.
+        self.ensure_table_column("recordings", "capture_degraded_summary", "TEXT")?;
+
         Ok(())
     }
 
@@ -2505,6 +2556,23 @@ impl Database {
         Ok(bundle)
     }
 
+    /// Recordings that own at least one audio asset stuck in a non-terminal or
+    /// condemned state.
+    ///
+    /// `writing` means a writer thread never got to finish; `failed` means some
+    /// path decided the file was unusable. Both are worth re-checking against
+    /// the filesystem at startup, including for meetings that already carry a
+    /// terminal `error` status — that is exactly the case a stop-time failure
+    /// leaves behind, and nothing else would ever look at it again.
+    pub fn recording_ids_with_unsettled_audio_assets(&self) -> Result<Vec<String>> {
+        let mut statement = self.conn.prepare(
+            "SELECT DISTINCT recording_id FROM recording_audio_assets
+             WHERE lifecycle IN ('writing', 'failed')",
+        )?;
+        let rows = statement.query_map([], |row| row.get::<_, String>(0))?;
+        Ok(rows.collect::<std::result::Result<Vec<_>, _>>()?)
+    }
+
     pub fn mark_audio_assets_writing(&mut self, recording_id: &str) -> Result<()> {
         let now = Utc::now().to_rfc3339();
         let tx = self
@@ -2528,12 +2596,18 @@ impl Database {
         Ok(())
     }
 
+    /// Commit a finished capture: every validated asset, the duration, the new
+    /// status, and how degraded the capture itself was — in one transaction.
+    ///
+    /// `capture_degraded_summary` is `None` for a clean capture and clears any
+    /// previous value, so a re-finalized recording never keeps a stale caveat.
     pub fn finalize_recording_audio(
         &mut self,
         recording_id: &str,
         validated: &[(RecordingAudioRole, ValidatedRecordingAudio)],
         duration_seconds: i64,
         recording_status: &str,
+        capture_degraded_summary: Option<&str>,
     ) -> Result<()> {
         if !validated
             .iter()
@@ -2579,12 +2653,14 @@ impl Database {
         )?;
         let updated = tx.execute(
             "UPDATE recordings
-             SET audio_path = ?1, duration = ?2, status = ?3, updated_at = ?4
-             WHERE id = ?5",
+             SET audio_path = ?1, duration = ?2, status = ?3,
+                 capture_degraded_summary = ?4, updated_at = ?5
+             WHERE id = ?6",
             params![
                 primary_path,
                 duration_seconds,
                 recording_status,
+                capture_degraded_summary,
                 &now,
                 recording_id
             ],
@@ -2594,6 +2670,19 @@ impl Database {
         }
         tx.commit()?;
         Ok(())
+    }
+
+    /// The capture caveat stored for one meeting, if any.
+    pub fn get_capture_degraded_summary(&self, recording_id: &str) -> Result<Option<String>> {
+        Ok(self
+            .conn
+            .query_row(
+                "SELECT capture_degraded_summary FROM recordings WHERE id = ?1",
+                params![recording_id],
+                |row| row.get::<_, Option<String>>(0),
+            )
+            .optional()?
+            .flatten())
     }
 
     pub fn set_audio_asset_validation_states(
@@ -2647,6 +2736,76 @@ impl Database {
             "UPDATE recordings SET status = ?1, updated_at = ?2 WHERE id = ?3",
             params![recording_status, &now, recording_id],
         )?;
+        tx.commit()?;
+        Ok(())
+    }
+
+    /// Repair asset lifecycles from a fresh filesystem probe, in one transaction
+    /// with an optional recording-status write.
+    ///
+    /// Unlike [`Self::set_audio_asset_validation_states`] this never clears the
+    /// stored plaintext length and hash when the caller has none to offer. An
+    /// encrypted asset cannot be re-measured without the vault key, and dropping
+    /// its recorded metadata would silently disable the integrity comparison
+    /// every runtime resolve makes against it.
+    ///
+    /// `recording_status` is `None` for repairs that are evidence about files
+    /// only and must not restate what happened to the meeting itself.
+    pub fn repair_audio_asset_lifecycles(
+        &mut self,
+        recording_id: &str,
+        updates: &[(
+            RecordingAudioRole,
+            RecordingAudioLifecycle,
+            Option<ValidatedRecordingAudio>,
+            Option<String>,
+        )],
+        recording_status: Option<&str>,
+    ) -> Result<()> {
+        let now = Utc::now().to_rfc3339();
+        let tx = self
+            .conn
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        for (role, lifecycle, metadata, last_error) in updates {
+            let plaintext_bytes = metadata
+                .as_ref()
+                .map(|metadata| i64::try_from(metadata.plaintext_bytes))
+                .transpose()
+                .context("Recording audio file is too large for SQLite metadata")?;
+            let plaintext_sha256 = metadata
+                .as_ref()
+                .map(|metadata| metadata.plaintext_sha256.as_str());
+            let updated = tx.execute(
+                "UPDATE recording_audio_assets
+                 SET lifecycle = ?1,
+                     plaintext_bytes = COALESCE(?2, plaintext_bytes),
+                     plaintext_sha256 = COALESCE(?3, plaintext_sha256),
+                     last_error = ?4, updated_at = ?5
+                 WHERE recording_id = ?6 AND role = ?7",
+                params![
+                    lifecycle.as_str(),
+                    plaintext_bytes,
+                    plaintext_sha256,
+                    last_error,
+                    &now,
+                    recording_id,
+                    role.as_str()
+                ],
+            )?;
+            if updated != 1 {
+                anyhow::bail!(
+                    "Recording '{}' has no '{}' audio asset",
+                    recording_id,
+                    role.as_str()
+                );
+            }
+        }
+        if let Some(status) = recording_status {
+            tx.execute(
+                "UPDATE recordings SET status = ?1, updated_at = ?2 WHERE id = ?3",
+                params![status, &now, recording_id],
+            )?;
+        }
         tx.commit()?;
         Ok(())
     }
@@ -3294,6 +3453,130 @@ impl Database {
             params![status, Utc::now().to_rfc3339(), recording_id],
         )?;
         Ok(())
+    }
+
+    /// Commit a meeting's terminal status and how complete its transcript is,
+    /// in one transaction.
+    ///
+    /// These two facts have to land together. Writing the status first and the
+    /// completeness afterwards leaves a window in which the meeting reads as a
+    /// clean "completed" — and the transcript-only storage sweep, which runs off
+    /// exactly that status, would delete the source audio of a meeting whose
+    /// transcript is missing whole chunks.
+    ///
+    /// A complete transcript also clears any prior acknowledgement: a successful
+    /// re-transcription means there is nothing left to acknowledge.
+    pub fn complete_recording_with_transcript_state(
+        &mut self,
+        recording_id: &str,
+        status: &str,
+        transcript_complete: bool,
+        degraded_reason: Option<&str>,
+    ) -> Result<()> {
+        let now = Utc::now().to_rfc3339();
+        let tx = self
+            .conn
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let updated = tx.execute(
+            "UPDATE recordings
+             SET status = ?1,
+                 transcript_complete = ?2,
+                 transcript_degraded_reason = ?3,
+                 transcript_incomplete_acknowledged_at =
+                     CASE WHEN ?2 = 1 THEN NULL ELSE transcript_incomplete_acknowledged_at END,
+                 updated_at = ?4
+             WHERE id = ?5",
+            params![
+                status,
+                i64::from(transcript_complete),
+                degraded_reason,
+                &now,
+                recording_id
+            ],
+        )?;
+        if updated != 1 {
+            anyhow::bail!("Recording '{}' was not found", recording_id);
+        }
+        tx.commit()?;
+        Ok(())
+    }
+
+    /// Whether a meeting's transcript is known incomplete, and the reason.
+    ///
+    /// `None` when the recording does not exist.
+    pub fn get_transcript_completion(
+        &self,
+        recording_id: &str,
+    ) -> Result<Option<MeetingTranscriptCompletion>> {
+        let mut statement = self.conn.prepare(
+            "SELECT transcript_complete, transcript_degraded_reason,
+                    transcript_incomplete_acknowledged_at
+             FROM recordings WHERE id = ?1",
+        )?;
+        let mut rows = statement.query(params![recording_id])?;
+        let Some(row) = rows.next()? else {
+            return Ok(None);
+        };
+        Ok(Some(MeetingTranscriptCompletion {
+            complete: row.get::<_, i64>(0)? != 0,
+            degraded_reason: row.get::<_, Option<String>>(1)?,
+            acknowledged_at: row.get::<_, Option<String>>(2)?,
+        }))
+    }
+
+    /// Meetings whose transcript is known incomplete and whose audio the user
+    /// has not agreed to lose.
+    ///
+    /// This is the set every audio-deleting storage sweep has to skip: for these
+    /// recordings the saved audio is the only complete record of the meeting.
+    pub fn recording_ids_with_unacknowledged_incomplete_transcripts(&self) -> Result<Vec<String>> {
+        let mut statement = self.conn.prepare(
+            "SELECT id FROM recordings
+             WHERE transcript_complete = 0
+               AND transcript_incomplete_acknowledged_at IS NULL",
+        )?;
+        let rows = statement.query_map([], |row| row.get::<_, String>(0))?;
+        Ok(rows.collect::<std::result::Result<Vec<_>, _>>()?)
+    }
+
+    /// Record that the user accepted losing the audio of an incomplete meeting.
+    ///
+    /// Returns the degraded reason they were acknowledging, or an error when the
+    /// meeting's transcript is not actually flagged incomplete — acknowledging
+    /// something that is not true must not be silently accepted.
+    pub fn acknowledge_incomplete_transcript(
+        &mut self,
+        recording_id: &str,
+    ) -> Result<Option<String>> {
+        let now = Utc::now().to_rfc3339();
+        let tx = self
+            .conn
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let state: Option<(i64, Option<String>)> = tx
+            .query_row(
+                "SELECT transcript_complete, transcript_degraded_reason
+                 FROM recordings WHERE id = ?1",
+                params![recording_id],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .optional()?;
+        let Some((complete, reason)) = state else {
+            anyhow::bail!("Recording '{}' was not found", recording_id);
+        };
+        if complete != 0 {
+            anyhow::bail!(
+                "Recording '{}' does not have an incomplete transcript to acknowledge",
+                recording_id
+            );
+        }
+        tx.execute(
+            "UPDATE recordings
+             SET transcript_incomplete_acknowledged_at = ?1, updated_at = ?1
+             WHERE id = ?2",
+            params![&now, recording_id],
+        )?;
+        tx.commit()?;
+        Ok(reason)
     }
 
     pub fn update_recording_duration(
@@ -5882,7 +6165,7 @@ mod tests {
             };
             validated.push((role, metadata));
         }
-        db.finalize_recording_audio(&recording.id, &validated, 1, "completed")
+        db.finalize_recording_audio(&recording.id, &validated, 1, "completed", None)
             .unwrap();
 
         let operation = db
@@ -5908,6 +6191,222 @@ mod tests {
                 .state,
             "db_switched"
         );
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn degraded_transcripts_are_durable_and_hold_audio_back_until_acknowledged() {
+        let mut db = in_memory_db();
+        db.create_recording(&sample_recording("degraded", "inbox"))
+            .unwrap();
+        db.create_recording(&sample_recording("clean", "inbox"))
+            .unwrap();
+
+        // Rows written before this column existed must not be treated as
+        // suspect: nothing recorded a degradation for them.
+        assert_eq!(
+            db.get_transcript_completion("clean").unwrap(),
+            Some(MeetingTranscriptCompletion {
+                complete: true,
+                degraded_reason: None,
+                acknowledged_at: None,
+            })
+        );
+
+        db.complete_recording_with_transcript_state(
+            "degraded",
+            "completed",
+            false,
+            Some("chunk 41 of 60 failed"),
+        )
+        .unwrap();
+        db.complete_recording_with_transcript_state("clean", "completed", true, None)
+            .unwrap();
+
+        assert_eq!(
+            db.get_recording("degraded").unwrap().unwrap().status,
+            "completed",
+            "a degraded transcript is still a completed meeting"
+        );
+        assert_eq!(
+            db.recording_ids_with_unacknowledged_incomplete_transcripts()
+                .unwrap(),
+            vec!["degraded".to_string()]
+        );
+
+        assert_eq!(
+            db.acknowledge_incomplete_transcript("degraded").unwrap(),
+            Some("chunk 41 of 60 failed".to_string())
+        );
+        assert!(db
+            .recording_ids_with_unacknowledged_incomplete_transcripts()
+            .unwrap()
+            .is_empty());
+        let acknowledged = db.get_transcript_completion("degraded").unwrap().unwrap();
+        assert!(
+            !acknowledged.complete,
+            "acknowledging the loss must not claim the transcript became complete"
+        );
+        assert_eq!(
+            acknowledged.degraded_reason.as_deref(),
+            Some("chunk 41 of 60 failed")
+        );
+        assert!(acknowledged.acknowledged_at.is_some());
+
+        // Acknowledging something that is not true is refused.
+        assert!(db.acknowledge_incomplete_transcript("clean").is_err());
+
+        // A clean re-transcription clears both the flag and the acknowledgement.
+        db.complete_recording_with_transcript_state("degraded", "completed", true, None)
+            .unwrap();
+        assert_eq!(
+            db.get_transcript_completion("degraded").unwrap(),
+            Some(MeetingTranscriptCompletion {
+                complete: true,
+                degraded_reason: None,
+                acknowledged_at: None,
+            })
+        );
+    }
+
+    #[test]
+    fn capture_degradation_is_committed_with_the_finalized_audio() {
+        let mut db = in_memory_db();
+        let root = std::env::temp_dir().join(format!(
+            "plainsong-capture-degradation-test-{}",
+            uuid::Uuid::new_v4()
+        ));
+        std::fs::create_dir_all(&root).unwrap();
+        let plan = RecordingCapturePlan {
+            recording_id: "degraded-capture".to_string(),
+            primary_path: root.join("recording.wav"),
+            mic_path: None,
+            system_path: None,
+        };
+        let mut recording = sample_recording("degraded-capture", "inbox");
+        recording.audio_path.clear();
+        db.create_recording_with_audio_plan(&recording, &plan)
+            .unwrap();
+        db.mark_audio_assets_writing(&recording.id).unwrap();
+        write_test_wav(&plan.primary_path);
+        let RecordingAudioValidation::Ready(metadata) = validate_plaintext_wav(&plan.primary_path)
+        else {
+            panic!("valid wav fixture");
+        };
+
+        db.finalize_recording_audio(
+            &recording.id,
+            &[(RecordingAudioRole::Primary, metadata.clone())],
+            1,
+            "processing",
+            Some("The microphone delivered nothing for about 320s of this 3600s meeting"),
+        )
+        .unwrap();
+
+        assert_eq!(
+            db.get_capture_degraded_summary(&recording.id).unwrap(),
+            Some(
+                "The microphone delivered nothing for about 320s of this 3600s meeting".to_string()
+            )
+        );
+
+        // A later clean finalize clears the caveat rather than leaving a stale one.
+        db.finalize_recording_audio(
+            &recording.id,
+            &[(RecordingAudioRole::Primary, metadata)],
+            1,
+            "processing",
+            None,
+        )
+        .unwrap();
+        assert_eq!(
+            db.get_capture_degraded_summary(&recording.id).unwrap(),
+            None
+        );
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn asset_repair_preserves_encrypted_metadata_and_finds_unsettled_recordings() {
+        let mut db = in_memory_db();
+        let root = std::env::temp_dir().join(format!(
+            "plainsong-asset-repair-test-{}",
+            uuid::Uuid::new_v4()
+        ));
+        std::fs::create_dir_all(&root).unwrap();
+        let plan = RecordingCapturePlan {
+            recording_id: "repair-me".to_string(),
+            primary_path: root.join("recording.wav"),
+            mic_path: None,
+            system_path: None,
+        };
+        let mut recording = sample_recording("repair-me", "inbox");
+        recording.audio_path.clear();
+        db.create_recording_with_audio_plan(&recording, &plan)
+            .unwrap();
+        db.mark_audio_assets_writing(&recording.id).unwrap();
+        write_test_wav(&plan.primary_path);
+        let RecordingAudioValidation::Ready(metadata) = validate_plaintext_wav(&plan.primary_path)
+        else {
+            panic!("valid wav fixture");
+        };
+        let expected_hash = metadata.plaintext_sha256.clone();
+        db.finalize_recording_audio(
+            &recording.id,
+            &[(RecordingAudioRole::Primary, metadata)],
+            1,
+            "processing",
+            None,
+        )
+        .unwrap();
+
+        // A stop-time failure condemns the asset even though the file is fine,
+        // leaving the recorded plaintext hash in place (this is what an encrypted
+        // asset looks like after `switch_recording_audio_protection`).
+        db.conn
+            .execute(
+                "UPDATE recording_audio_assets
+                 SET lifecycle = 'failed', last_error = 'stop failed'
+                 WHERE recording_id = ?1",
+                params![&recording.id],
+            )
+            .unwrap();
+        db.update_recording_status(&recording.id, "error").unwrap();
+        assert_eq!(
+            db.recording_ids_with_unsettled_audio_assets().unwrap(),
+            vec!["repair-me".to_string()]
+        );
+
+        // Repairing without fresh metadata must keep the recorded hash, which is
+        // what every runtime resolve compares an encrypted asset against.
+        db.repair_audio_asset_lifecycles(
+            &recording.id,
+            &[(
+                RecordingAudioRole::Primary,
+                RecordingAudioLifecycle::Ready,
+                None,
+                None,
+            )],
+            None,
+        )
+        .unwrap();
+
+        let repaired = db.load_recording_audio_bundle(&recording.id).unwrap();
+        let primary = repaired.primary.as_ref().unwrap();
+        assert_eq!(primary.lifecycle, RecordingAudioLifecycle::Ready);
+        assert_eq!(primary.plaintext_sha256.as_deref(), Some(&*expected_hash));
+        assert!(primary.last_error.is_none());
+        assert_eq!(
+            db.get_recording(&recording.id).unwrap().unwrap().status,
+            "error",
+            "a file-only repair must not restate the meeting's own status"
+        );
+        assert!(db
+            .recording_ids_with_unsettled_audio_assets()
+            .unwrap()
+            .is_empty());
 
         let _ = std::fs::remove_dir_all(&root);
     }
