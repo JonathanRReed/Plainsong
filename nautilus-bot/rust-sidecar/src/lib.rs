@@ -1524,6 +1524,190 @@ fn emit_analysis_failure(
     );
 }
 
+/// Lifecycle of one meeting's automatic-analysis pass.
+///
+/// The pass used to report nothing at all: a default install points the meeting
+/// AI lane at an Ollama that is not installed, every stage failed, and the only
+/// trace was a `tracing::warn!`. The user was left with an unexplained
+/// placeholder title and no summary. These phases are what let the app say the
+/// analysis is running, that it failed and why, or that it finished.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum MeetingAnalysisPhase {
+    Running,
+    Failed,
+    Completed,
+}
+
+impl MeetingAnalysisPhase {
+    const fn as_str(self) -> &'static str {
+        match self {
+            Self::Running => "running",
+            Self::Failed => "failed",
+            Self::Completed => "completed",
+        }
+    }
+}
+
+fn emit_meeting_analysis_status(
+    handle: &sidecar_handle::SidecarHandle,
+    recording_id: &str,
+    phase: MeetingAnalysisPhase,
+    error: Option<&str>,
+) {
+    handle.emit_event(
+        "meeting-analysis-status",
+        serde_json::json!({
+            "recordingId": recording_id,
+            "phase": phase.as_str(),
+            "error": error,
+        }),
+    );
+}
+
+/// Persist (or clear) a meeting's analysis failure and announce the outcome.
+///
+/// Persistence and the event are deliberately paired: an event alone is lost the
+/// moment the window reloads, and a column alone never reaches an open library
+/// view. A failure to write the column must not mask the failure being reported,
+/// so it degrades to a log.
+async fn record_meeting_analysis_outcome(
+    state: &AppState,
+    handle: &sidecar_handle::SidecarHandle,
+    recording_id: &str,
+    failure: Option<&str>,
+) {
+    {
+        let mut db = state.db.lock().await;
+        if let Err(error) = db.set_recording_analysis_failure(recording_id, failure) {
+            tracing::warn!(
+                "Failed to persist analysis outcome for {}: {}",
+                recording_id,
+                error
+            );
+        }
+    }
+    match failure {
+        Some(reason) => emit_meeting_analysis_status(
+            handle,
+            recording_id,
+            MeetingAnalysisPhase::Failed,
+            Some(reason),
+        ),
+        None => emit_meeting_analysis_status(
+            handle,
+            recording_id,
+            MeetingAnalysisPhase::Completed,
+            None,
+        ),
+    }
+}
+
+/// Run the meeting analysis pass: summary, action items, and title.
+///
+/// Shared by the automatic post-meeting lane and `retry_meeting_analysis` so a
+/// retry is exactly the pass that failed, not a second implementation of it.
+///
+/// `auto_name_meeting_recording` runs unconditionally at the end. It used to run
+/// only when auto-analysis was disabled, or as a side effect of a *successful*
+/// summary, so the one case that most needed a title -- analysis failing on a
+/// default install -- was the case that never got one, and the meeting kept its
+/// placeholder name forever.
+async fn run_meeting_analysis_pass(
+    state: &AppState,
+    handle: &sidecar_handle::SidecarHandle,
+    recording_id: &str,
+) {
+    emit_meeting_analysis_status(handle, recording_id, MeetingAnalysisPhase::Running, None);
+
+    // Summary and action items are independent safe patches. A failed pass
+    // leaves any prior successful content and provenance untouched.
+    let mut failure_reasons: Vec<String> = Vec::new();
+    let mut summary_text: Option<String> = None;
+
+    match summarize_recording_grounded_internal(
+        state,
+        recording_id,
+        None,
+        Some(analysis_progress_callback(
+            handle,
+            recording_id,
+            "summary",
+            None,
+        )),
+    )
+    .await
+    {
+        Ok(result) => match persist_grounded_summary(state, recording_id, &result).await {
+            Ok(recording) => {
+                emit_analysis_ready(handle, &recording, "summary");
+                summary_text = Some(result.summary.clone());
+            }
+            Err(error) => {
+                emit_analysis_failure(handle, recording_id, "summary", None, &error);
+                failure_reasons.push(format!("summary: {}", error));
+            }
+        },
+        Err(error) => {
+            emit_analysis_failure(handle, recording_id, "summary", None, &error);
+            failure_reasons.push(format!("summary: {}", error));
+        }
+    }
+
+    match extract_action_items_grounded_internal(
+        state,
+        recording_id,
+        None,
+        Some(analysis_progress_callback(
+            handle,
+            recording_id,
+            "actionItems",
+            None,
+        )),
+    )
+    .await
+    {
+        Ok(result) => match persist_grounded_action_items(state, recording_id, &result).await {
+            Ok(recording) => emit_analysis_ready(handle, &recording, "actionItems"),
+            Err(error) => {
+                emit_analysis_failure(handle, recording_id, "actionItems", None, &error);
+                failure_reasons.push(format!("action items: {}", error));
+            }
+        },
+        Err(error) => {
+            emit_analysis_failure(handle, recording_id, "actionItems", None, &error);
+            failure_reasons.push(format!("action items: {}", error));
+        }
+    }
+
+    // Unconditional: a meeting whose summary failed still deserves a real name.
+    // With a summary it titles from that; without one it falls back to the
+    // transcript, which is exactly the path a failed analysis needs.
+    if let Err(error) = auto_name_meeting_recording(
+        state,
+        handle,
+        recording_id,
+        summary_text.as_deref(),
+        summary_text.is_none(),
+    )
+    .await
+    {
+        tracing::warn!("Meeting auto-name failed for '{}': {}", recording_id, error);
+        failure_reasons.push(format!("title: {}", error));
+    }
+
+    if failure_reasons.is_empty() {
+        record_meeting_analysis_outcome(state, handle, recording_id, None).await;
+    } else {
+        let reason = failure_reasons.join("; ");
+        tracing::warn!(
+            recording_id = %recording_id,
+            failure_count = failure_reasons.len(),
+            "Automatic analysis finished with failures"
+        );
+        record_meeting_analysis_outcome(state, handle, recording_id, Some(&reason)).await;
+    }
+}
+
 async fn run_grounded_response_for_segments(
     state: &AppState,
     segments: Vec<AnalysisContextSegment>,
@@ -8170,6 +8354,7 @@ mod tests {
             consent_notice_surface: None,
             consent_notice_message: None,
             consent_notice_updated_at: None,
+            analysis_failure: None,
         }
     }
 
@@ -9318,6 +9503,114 @@ mod tests {
             body.matches("DICTATION_FORMAT_TIMEOUT,").count(),
             provider_calls,
             "every pre-insert LLM call must be wrapped in DICTATION_FORMAT_TIMEOUT"
+        );
+    }
+
+    #[test]
+    fn meeting_analysis_phases_use_the_contract_names() {
+        // The renderer switches on these exact strings.
+        assert_eq!(MeetingAnalysisPhase::Running.as_str(), "running");
+        assert_eq!(MeetingAnalysisPhase::Failed.as_str(), "failed");
+        assert_eq!(MeetingAnalysisPhase::Completed.as_str(), "completed");
+    }
+
+    #[test]
+    fn meeting_analysis_status_payload_matches_the_event_contract() {
+        const SOURCE: &str = include_str!("lib.rs");
+        let start = SOURCE
+            .find("fn emit_meeting_analysis_status(")
+            .expect("the status emitter must exist");
+        let body = &SOURCE[start..];
+        let body = body
+            .split_once("\n}\n")
+            .map(|parts| parts.0)
+            .unwrap_or(body);
+
+        assert!(
+            body.contains("\"meeting-analysis-status\""),
+            "the event name is part of the renderer contract"
+        );
+        // Payload keys follow the camelCase convention every other sidecar
+        // event uses.
+        for key in ["\"recordingId\"", "\"phase\"", "\"error\""] {
+            assert!(body.contains(key), "status payload must carry {key}");
+        }
+    }
+
+    #[test]
+    fn the_analysis_pass_always_titles_the_meeting() {
+        // Titling used to run only when auto-analysis was disabled, or as a
+        // side effect of a *successful* summary. The case that most needed a
+        // title -- analysis failing on a default install -- was the one case
+        // that never got one, leaving a placeholder name forever.
+        const SOURCE: &str = include_str!("lib.rs");
+        let start = SOURCE
+            .find("async fn run_meeting_analysis_pass(")
+            .expect("the shared analysis pass must exist");
+        let body = &SOURCE[start..];
+        let body = body
+            .split_once("\nasync fn ")
+            .map(|parts| parts.0)
+            .unwrap_or(body);
+
+        let title_call = body
+            .find("auto_name_meeting_recording(")
+            .expect("the pass must name the meeting");
+        // The naming call must not sit inside the summary success arm: it comes
+        // after both stages have been attempted.
+        let action_items = body
+            .find("extract_action_items_grounded_internal(")
+            .expect("the pass must extract action items");
+        assert!(
+            action_items < title_call,
+            "titling must run after both analysis stages, not inside the summary arm"
+        );
+    }
+
+    #[test]
+    fn a_failed_analysis_pass_is_persisted_and_announced() {
+        const SOURCE: &str = include_str!("lib.rs");
+        let start = SOURCE
+            .find("async fn record_meeting_analysis_outcome(")
+            .expect("the outcome recorder must exist");
+        let body = &SOURCE[start..];
+        let body = body
+            .split_once("\n/// Run the meeting analysis pass")
+            .map(|parts| parts.0)
+            .unwrap_or(body);
+
+        assert!(
+            body.contains("set_recording_analysis_failure"),
+            "the outcome must be persisted: an event alone is lost on reload"
+        );
+        assert!(
+            body.contains("MeetingAnalysisPhase::Failed")
+                && body.contains("MeetingAnalysisPhase::Completed"),
+            "the outcome must be announced in both directions"
+        );
+    }
+
+    #[test]
+    fn retry_meeting_analysis_reuses_the_shared_pass() {
+        // A retry must be the pass that failed, not a second implementation
+        // that can drift away from it.
+        const SOURCE: &str = include_str!("lib.rs");
+        let start = SOURCE
+            .find("\"retry_meeting_analysis\" => {")
+            .expect("the retry command must be dispatched");
+        let arm = &SOURCE[start..];
+        let arm = arm
+            .split_once("\n        \"summarize_recording\" =>")
+            .map(|parts| parts.0)
+            .unwrap_or(arm);
+
+        assert!(
+            arm.contains("run_meeting_analysis_pass("),
+            "retry must call the shared analysis pass"
+        );
+        assert!(
+            arm.contains("recordingId"),
+            "retry takes the recordingId argument named in the contract"
         );
     }
 
@@ -20711,6 +21004,7 @@ async fn stop_dictation_for_sidecar(
         consent_notice_surface: None,
         consent_notice_message: None,
         consent_notice_updated_at: None,
+        analysis_failure: None,
     };
 
     // Cursor delivery crosses native process and accessibility boundaries.
@@ -21589,6 +21883,7 @@ async fn start_recording_for_sidecar(
         consent_notice_surface: None,
         consent_notice_message: None,
         consent_notice_updated_at: None,
+        analysis_failure: None,
     };
 
     {
@@ -22440,7 +22735,23 @@ async fn run_meeting_transcription_pipeline(
                         let sm = state_clone.settings_manager.lock().await;
                         sm.settings().transcription.enable_auto_analysis
                     };
-                    if !auto_analyze {
+
+                    if auto_analyze && !full_text.trim().is_empty() {
+                        let state_analysis = Arc::clone(&state_clone);
+                        let handle_analysis = handle_clone.clone();
+                        let rec_id_analysis = recording_id_clone.clone();
+                        tokio::spawn(async move {
+                            run_meeting_analysis_pass(
+                                state_analysis.as_ref(),
+                                &handle_analysis,
+                                &rec_id_analysis,
+                            )
+                            .await;
+                        });
+                    } else {
+                        // No analysis pass will run, so nothing else will name
+                        // this meeting. Title it from the transcript directly
+                        // rather than leaving the placeholder in place.
                         match auto_name_meeting_recording(
                             state_clone.as_ref(),
                             &handle_clone,
@@ -22464,140 +22775,6 @@ async fn run_meeting_transcription_pipeline(
                                 e
                             ),
                         }
-                    }
-
-                    if auto_analyze && !full_text.trim().is_empty() {
-                        let state_analysis = Arc::clone(&state_clone);
-                        let handle_analysis = handle_clone.clone();
-                        let rec_id_analysis = recording_id_clone.clone();
-                        tokio::spawn(async move {
-                            // Summary and action items are independent safe
-                            // patches. A failed pass leaves any prior successful
-                            // content and provenance untouched.
-                            let mut failure_reasons: Vec<String> = Vec::new();
-                            match summarize_recording_grounded_internal(
-                                state_analysis.as_ref(),
-                                &rec_id_analysis,
-                                None,
-                                Some(analysis_progress_callback(
-                                    &handle_analysis,
-                                    &rec_id_analysis,
-                                    "summary",
-                                    None,
-                                )),
-                            )
-                            .await
-                            {
-                                Ok(result) => match persist_grounded_summary(
-                                    state_analysis.as_ref(),
-                                    &rec_id_analysis,
-                                    &result,
-                                )
-                                .await
-                                {
-                                    Ok(recording) => {
-                                        emit_analysis_ready(
-                                            &handle_analysis,
-                                            &recording,
-                                            "summary",
-                                        );
-                                        if let Err(error) = auto_name_meeting_recording(
-                                            state_analysis.as_ref(),
-                                            &handle_analysis,
-                                            &rec_id_analysis,
-                                            Some(&result.summary),
-                                            false,
-                                        )
-                                        .await
-                                        {
-                                            tracing::warn!(
-                                                "Meeting auto-name from summary failed for '{}': {}",
-                                                rec_id_analysis,
-                                                error
-                                            );
-                                        }
-                                    }
-                                    Err(error) => {
-                                        emit_analysis_failure(
-                                            &handle_analysis,
-                                            &rec_id_analysis,
-                                            "summary",
-                                            None,
-                                            &error,
-                                        );
-                                        failure_reasons.push(format!("summary: {}", error));
-                                    }
-                                },
-                                Err(error) => {
-                                    emit_analysis_failure(
-                                        &handle_analysis,
-                                        &rec_id_analysis,
-                                        "summary",
-                                        None,
-                                        &error,
-                                    );
-                                    failure_reasons.push(format!("summary: {}", error));
-                                }
-                            }
-
-                            match extract_action_items_grounded_internal(
-                                state_analysis.as_ref(),
-                                &rec_id_analysis,
-                                None,
-                                Some(analysis_progress_callback(
-                                    &handle_analysis,
-                                    &rec_id_analysis,
-                                    "actionItems",
-                                    None,
-                                )),
-                            )
-                            .await
-                            {
-                                Ok(result) => match persist_grounded_action_items(
-                                    state_analysis.as_ref(),
-                                    &rec_id_analysis,
-                                    &result,
-                                )
-                                .await
-                                {
-                                    Ok(recording) => {
-                                        emit_analysis_ready(
-                                            &handle_analysis,
-                                            &recording,
-                                            "actionItems",
-                                        );
-                                    }
-                                    Err(error) => {
-                                        emit_analysis_failure(
-                                            &handle_analysis,
-                                            &rec_id_analysis,
-                                            "actionItems",
-                                            None,
-                                            &error,
-                                        );
-                                        failure_reasons.push(format!("action items: {}", error));
-                                    }
-                                },
-                                Err(error) => {
-                                    emit_analysis_failure(
-                                        &handle_analysis,
-                                        &rec_id_analysis,
-                                        "actionItems",
-                                        None,
-                                        &error,
-                                    );
-                                    failure_reasons.push(format!("action items: {}", error));
-                                }
-                            }
-
-                            if !failure_reasons.is_empty() {
-                                tracing::warn!(
-                                    recording_id = %rec_id_analysis,
-                                    failure_count = failure_reasons.len(),
-                                    "Automatic analysis finished with partial failures"
-                                );
-                            }
-                        });
                     }
 
                     if let Err(error) = enforce_meeting_retention_policy(
@@ -23484,6 +23661,40 @@ pub async fn dispatch_command(
             let mut db = state.db.lock().await;
             let _ = db.log_audit_event("analysis_multi_recording_completed", Some(serde_json::json!({ "recording_ids": &recording_ids, "query": &query, "model": &result.model, "citation_count": result.citations.len(), "grounded": result.grounded })), "info");
             serde_json::to_value(result).map_err(|e| e.to_string())
+        }
+        "retry_meeting_analysis" => {
+            let recording_id: String =
+                serde_json::from_value(params["recordingId"].clone()).map_err(|e| e.to_string())?;
+
+            // Refuse a retry for a meeting that has no transcript to analyse
+            // rather than emitting a running/failed pair that tells the user
+            // nothing they can act on.
+            let transcript_is_analysable = {
+                let db = state.db.lock().await;
+                db.get_transcript(&recording_id)
+                    .map_err(|error| error.to_string())?
+                    .is_some_and(|transcript| !transcript.full_text.trim().is_empty())
+            };
+            if !transcript_is_analysable {
+                return Err(
+                    "This meeting has no transcript text to analyze. Re-transcribe it first."
+                        .to_string(),
+                );
+            }
+
+            // Runs the same pass the automatic lane runs, so a retry is the
+            // pass that failed rather than a second implementation of it.
+            run_meeting_analysis_pass(state.as_ref(), handle, &recording_id).await;
+
+            let recording = {
+                let db = state.db.lock().await;
+                db.get_recording(&recording_id)
+                    .map_err(|error| error.to_string())?
+            };
+            match recording {
+                Some(recording) => serde_json::to_value(recording).map_err(|e| e.to_string()),
+                None => Err(format!("Recording '{}' no longer exists.", recording_id)),
+            }
         }
         "summarize_recording" => {
             let recording_id: String =

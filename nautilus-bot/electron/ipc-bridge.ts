@@ -185,6 +185,7 @@ const ALLOWED_RENDERER_COMMANDS = new Set<string>([
   "reset_app_state",
   "restore_backup_default",
   "retranscribe_recording",
+  "retry_meeting_analysis",
   "retry_meeting_auto_name",
   "run_diarization",
   "run_storage_retention_maintenance",
