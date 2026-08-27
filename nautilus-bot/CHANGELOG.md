@@ -2,6 +2,182 @@
 
 All notable changes to Plainsong are documented in this file.
 
+## [Unreleased] - 0.9.0-beta.3 (in progress)
+
+Two audited fix waves merged on top of the `0.9.0-beta.2` integration
+candidate: Electron security hardening, meeting data-integrity fixes, model
+currency, sidecar robustness, and a renderer UX pass on Dictation and
+Meetings recovery. `package.json` has not been bumped and no `0.9.0-beta.3`
+package has been built; this section is a source-level record of what
+changed underneath `0.9.0-beta.2`. See `LAUNCH.md` for which qualification
+evidence is stale and must be recaptured before this becomes a candidate.
+
+### Added
+- Onboarding now asks how meeting notes get written: local Ollama (with live
+  detection), bring-your-own-key cloud AI, or transcripts only — instead of
+  silently defaulting to an Ollama install that usually isn't there.
+- Meeting recovery actions that did not exist before: "Re-check audio" on a
+  meeting whose audio state looks wrong, "Re-transcribe" plus an explicit
+  acknowledge step on an incomplete transcript before its audio can be
+  cleaned up, and a "Retry" action on a meeting whose summary/action items
+  failed to generate.
+- Mid-meeting warnings for a dead WAV writer and a filling disk: new meetings
+  are refused up front on a volume without enough free space, a low-space
+  warning fires while there's still time to act, and a critical-space
+  threshold stops the meeting cleanly instead of writing a truncated file.
+- A dictation session left running unattended now auto-stops after 10
+  minutes with a truncation warning instead of growing its capture buffer
+  without bound.
+- An explicit, off-by-default "Also copy every dictation to the clipboard"
+  toggle in Settings, with the plain-language caveat that turning it on
+  replaces clipboard contents on every dictation and does not restore them.
+
+### Changed
+- **Parakeet TDT 0.6B v3 is now the default and recommended dictation
+  model** (640 MB), because this repo's own benchmark shows whisper.cpp
+  `base.en` mis-transcribing words it hasn't seen before — including
+  "Plainsong" itself. Whisper `base.en` (142 MB) remains available as the
+  smaller-download alternative in first-run setup, and installs that already
+  had `base.en` configured keep it and keep getting its background
+  auto-download; nothing forces a re-download. The meeting lane's default is
+  unchanged.
+- **Meeting capture no longer depends on having an AI route configured.**
+  Recording, transcript, and playback are judged on capture alone; a missing
+  or unconfigured AI provider (e.g. Ollama not installed) now only degrades
+  the notes/summary messaging, quietly, instead of disabling "New meeting,"
+  the consent dialog, and the dashboard quick action the way it did when
+  capture and AI-notes readiness were the same check.
+- **Dictation profile tiles no longer silently turn on clipboard copying.**
+  Every built-in mode and recommended app style previously set
+  `copyToClipboard: true` on selection, which permanently overwrote whatever
+  the user had copied on every subsequent dictation. Clipboard copying is
+  off by default now and is only ever changed by the explicit toggle above.
+- **The dictation language picker reflects what the selected model can
+  actually transcribe**, instead of a fixed 7-option dropdown (auto-detect
+  plus 6 languages). A multilingual Whisper model now offers its full
+  published set (99 languages, 100 with `large-v3`'s Cantonese support);
+  Parakeet TDT v3 offers its 25 supported European languages; an
+  English-only model states that in a sentence instead of showing a picker.
+  Saving a language selection is validated against the selected model's real
+  coverage rather than a fixed 12-language allowlist that used to accept
+  languages an English-only model couldn't handle and reject languages a
+  multilingual model could.
+- Recording encryption now streams in fixed 1 MiB frames instead of holding
+  a whole track (and its ciphertext copy) in memory, and checks free disk
+  space first — if there isn't enough, it defers encryption and keeps the
+  recording intact rather than failing the meeting stop.
+- Learned dictionary corrections (names, jargon, product names taught via
+  the personal dictionary) now apply to meeting transcripts, summaries,
+  action items, and auto-generated titles, not only to live dictation.
+- Custom dictation mode prompts are now honored when built on the Messages,
+  Email, or Meeting Follow-up presets, not only on the default preset.
+- Systemwide text insertion at the end of a dictation now runs off the async
+  runtime, removing an up-to-one-second stall it previously caused elsewhere
+  in the app.
+- Disk-space thresholds for an in-progress meeting are now sized to how
+  many audio tracks that meeting actually writes (microphone-only vs.
+  microphone-plus-system-audio) instead of one fixed byte budget that
+  refused or warned mic-only meetings too early.
+- Model currency: the Gemini analysis default is now `gemini-3.7-flash`; the
+  OpenAI analysis default is `gpt-5.6-luna`; the DeepSeek default is
+  `deepseek-v4-flash`; the Ollama default is `qwen3.5:4b` (matching the
+  Settings empty-state hint, which also now suggests `ollama pull
+  qwen3.5:4b`); the OpenAI cloud dictation default is `gpt-transcribe`
+  (meeting-lane OpenAI transcription stays pinned to `whisper-1`, the only
+  OpenAI cloud model that returns the segment timestamps meetings need); and
+  the ElevenLabs default is `scribe_v2` (`scribe_v2_realtime` was
+  websocket-only and could never work through this app's upload path).
+  Context-window budgeting now recognizes GPT-5.x and Gemini-3.x models'
+  real ~1M-token windows instead of clamping them to a stale estimate.
+
+### Fixed
+- A mic failure mid-meeting in a "me and them" (microphone plus system
+  audio) recording is now detected and noted on the meeting instead of being
+  silently padded with silence and presented as a complete recording; a
+  replugged microphone can recover without ending the meeting.
+- A meeting whose Stop step failed for an unrelated reason after its audio
+  was already safely written no longer has that audio condemned — it stays
+  usable, and the app can self-repair such meetings on next launch.
+- Stopping a meeting can no longer hang indefinitely behind a background
+  storage sweep; capture now ends within about 10 seconds regardless.
+- Storage-retention cleanup no longer deletes the source audio of a meeting
+  whose transcript came out incomplete until the user explicitly
+  acknowledges the loss (or it's successfully re-transcribed).
+- A mid-meeting warning banner no longer erases the live transcript preview,
+  the elapsed timer, or the lost-audio counter already on screen.
+- Retired the non-functional "macOS MLX sidecar (advanced)" dictation
+  engine: its download step only ever wrote a stub marker file, so selecting
+  it always failed transcription. It no longer appears in Settings, and
+  installs that had it selected are moved off it automatically.
+- A panic in one background worker (a WAV writer, a transcription task, an
+  audio callback) no longer takes down the whole local transcription
+  process; that one component fails and the rest of the app keeps running.
+- Downloaded model integrity receipts are now HMAC-protected with a
+  keychain-held key rather than a plain hash, and an accidentally-empty
+  pinned digest can no longer silently disable verification of a downloaded
+  model file.
+- A manual "Retry" on meeting analysis can no longer run alongside an
+  automatic analysis pass for the same meeting, and the capture-admission
+  check introduced in the prior wave is now actually enforced rather than
+  decorative.
+- Sidecar-loss and meeting-start failures now show one plain-language
+  message and one action instead of a raw process-exit log line or generic
+  advice glued onto an unrelated error (for example: "Plainsong does not
+  have microphone access, so there is nothing to record" with an "Open
+  Microphone settings" action, distinct from a system-audio or disk-full
+  failure). A capture source that hard-fails is now described as failed,
+  not as having "gone silent," which previously read as a muting problem.
+
+### Security
+- `shell.openExternal` and in-app link navigation now check a fixed host
+  allowlist before opening anything in the user's browser; a link to any
+  other host is refused and logged, not opened.
+- The dictation and recording overlays can no longer be resized past a fixed
+  cap or shown while the user has that overlay turned off; native folder
+  dialogs (export, backup, cloud backup) now require a real click or key
+  press in the main window; the main window itself rejects unbounded resize
+  or move requests; and every `ipcMain` handler now requires a trusted
+  top-level frame as its sender.
+- The renderer bundle now serves its Content-Security-Policy (including
+  `frame-ancestors 'none'`), `X-Content-Type-Options`, and `Referrer-Policy`
+  as real headers on every asset the app serves, not only as a `<meta>` tag
+  on `index.html`.
+- Auto-update now verifies the running app's code signature and Apple
+  Developer team before handing off to an installed update, and refuses
+  with a manual-download message if either check fails. It previously only
+  displayed the signature and rejected exactly the literal string
+  `Signature=adhoc`, so any other signature — including one from an
+  unrelated Developer ID — passed through unchecked.
+
+### Release infrastructure
+- `CFBundleVersion` is now a real integer build number
+  (`encodeBundleBuildVersion`, e.g. `900302` for `0.9.0-beta.2`) instead of
+  the literal semantic-version string, which macOS has no ordering for.
+  `CFBundleShortVersionString` still carries the full semantic version.
+- The release DMG now lays out the app icon and an `/Applications` shortcut
+  in a sized window instead of Finder's default, unstyled placement.
+- macOS entitlements are now split per binary instead of every Electron
+  helper process copying the main app's entitlements: the GPU, Renderer, and
+  Plugin helpers are narrowed to JIT/inherit only; the generic helper that
+  hosts Chromium's audio service keeps audio and nothing else; the sidecar
+  and shortcut helper carry no entitlements at all; and
+  `com.apple.security.cs.disable-library-validation` has been removed from
+  the main app's own entitlements (flagged for packaged-QA verification — if
+  a packaged build fails to launch because of this, the fix is to sign the
+  offending library, not restore the entitlement).
+- The public update feed is now resolved per channel: `/beta/` and
+  `/stable/` are separate manifest directories, and the running app
+  re-resolves its feed URL from the active channel at check time instead of
+  trusting a single URL baked in at build time. A future stable release
+  requires publishing `/stable/latest-mac.yml` before stable installs can
+  check for updates at all.
+- `scripts/build-dmg.mjs` (the local, ad-hoc DMG builder — not the release
+  path) now prints an unmissable runtime warning that its output is not a
+  release artifact and does not notarize, staple, or apply the release DMG
+  layout. The `0.9.0-beta.2` DMG shipped unnotarized because this script was
+  used instead of `bun run release:mac`; the warning now prints before and
+  after every local build.
+
 ## [0.9.0-beta.2] - 2026-08-23 (integration candidate)
 
 This private candidate reconciles the full dual-pillar beta with current

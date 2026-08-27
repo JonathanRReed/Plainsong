@@ -1,30 +1,54 @@
 # Competitive positioning and roadmap
 
-Last reviewed: 2026-07-28
+Last reviewed: 2026-08-27
 
 This document keeps product claims tied to current, first-party evidence. It is
 not launch copy and it should not be used as a substitute for release QA.
+Competitor facts below are attributed research, not first-party verification —
+this repository cannot confirm what another product ships. Recheck them from
+primary sources before any public claim relies on them.
 
 ## Current market facts
 
 - Free, local, open-source dictation is a crowded category. Handy is MIT,
   cross-platform, and added streaming model support in
   [v0.9.0](https://github.com/cjpais/Handy/releases/tag/v0.9.0) on 2026-07-01.
-- Local dictation plus local meeting capture is not unique. Muesli describes
-  local dictation, simultaneous microphone and system-audio meeting capture,
-  live transcripts, diarization, and local model support in its
+- Local dictation plus local meeting capture is not unique, and the field
+  contesting it has widened. Muesli describes local dictation, simultaneous
+  microphone and system-audio meeting capture, live transcripts, diarization,
+  and local model support in its
   [public MIT repository](https://github.com/Muesli-HQ/muesli). Its own
   one-line description is "local meeting transcription + dictation for macOS
   (Granola + WisprFlow alternative)" — the same sentence we would write about
-  ourselves.
-
+  ourselves. As of Aug 2026 research, Handy and VoiceInk are also each
+  reported to have moved toward covering both dictation and meeting-style
+  capture, not just dictation alone. **Do not claim Plainsong is the only
+  free, open-source, local-first app doing both pillars** — that claim was
+  already weakening before this review and should be treated as retired
+  until independently re-verified against each project's current README and
+  releases immediately before any public copy ships.
 - Superwhisper offers both voice typing and device-side
   [meeting transcription](https://superwhisper.com/meeting-transcription),
   including optional speaker separation.
 - Granola is a useful contrast for privacy positioning, but claims must remain
   precise. Granola's own [security page](https://www.granola.ai/security) says
   it uses transcription providers such as Deepgram and AssemblyAI and AI
-  providers such as OpenAI and Anthropic.
+  providers such as OpenAI and Anthropic. As of Aug 2026 research, Granola has
+  pivoted toward enterprise positioning and now caps its free tier at 25
+  notes — a meaningful contrast with Plainsong's retention model, which
+  defaults every recording and dictation history entry to "never delete"
+  (`dictation_retention_preset` / `meeting_retention_preset` both default to
+  `"never"` in `rust-sidecar/src/settings.rs`) until the user chooses
+  otherwise. There is no note count, recording count, or history-length cap
+  anywhere in this codebase. This is a verifiable, repo-grounded contrast —
+  Granola's cap is attributed research and should be re-verified before it
+  appears in public copy, but Plainsong's absence of any cap is a first-party
+  fact.
+- As of Aug 2026 research, destination-app-aware AI formatting (dictation
+  cleanup that adapts to the app being dictated into) is now table stakes
+  across this category, not a differentiator. Plainsong has this
+  (`src/lib/dictation-profiles.ts`'s per-app style presets), but so, by this
+  research, do multiple competitors — do not lead with it as unique.
 - Anarlog remains open source, MIT-licensed, and maintained. Its
   [repository](https://github.com/fastrepl/anarlog) says the team is primarily
   building Char while keeping Anarlog available as the local-first meeting
@@ -60,19 +84,45 @@ the table invites exactly the diff that embarrasses us.
 ## Plainsong's defensible position
 
 Plainsong should compete on a complete local workflow, not on an exclusivity
-claim that the market has already invalidated:
+claim that the market has already invalidated. The durable wedge, in order of
+how well this repository can currently back it, is: **local-only, no-account,
+unlimited history, and honest engineering** — not "the only app that does
+both pillars," which is no longer defensible per the research above.
 
-1. Local dictation and bot-free meeting capture in one auditable MIT codebase.
+1. Local dictation and bot-free meeting capture in one auditable MIT codebase
+   (shared with other projects now — a workflow claim, not an exclusivity
+   claim).
 2. No account required for local use.
 3. Local transcription by default, with remote processing disabled until the
    user explicitly enables and configures it.
-4. User-controlled storage, retention, export, backup, and reset behavior.
-5. Provider choice for optional analysis, including local Ollama.
-6. Honest release evidence for signing, notarization, permissions, insertion,
+4. Unlimited local history by default: no note cap, no recording cap, and no
+   forced deletion — retention is user-controlled and off by default (see the
+   Granola contrast above). This is a claim this repository can back directly.
+5. User-controlled storage, retention, export, backup, and reset behavior.
+6. Provider choice for optional analysis, including local Ollama.
+7. Honest release evidence for signing, notarization, permissions, insertion,
    capture, recovery, and update behavior.
 
 The product loses credibility if any one of those claims is represented by a
 placeholder control, a source-only test, or an unverified package.
+
+### Claims that must not be made
+
+- **Do not claim to be the only free, open-source, local-first app that does
+  both dictation and meeting capture.** Muesli, and per Aug 2026 research
+  Handy and VoiceInk, each contest this.
+- **Do not lead with context-aware/destination-app-aware formatting as a
+  differentiator.** Per Aug 2026 research it is now table stakes in this
+  category.
+- **Do not claim Granola feature parity**, and do not cite Granola's free-tier
+  cap, pricing, or enterprise positioning as current fact in public copy
+  without re-verifying it from Granola's own site immediately beforehand —
+  it is attributed research here, not first-party evidence.
+- **Do not claim Whisperflow or Raycast speed parity** without a controlled,
+  same-hardware comparison (see `LAUNCH.md`).
+- **Do not claim unlimited history is unique in the category.** This
+  repository can verify Plainsong imposes no cap; it cannot verify that no
+  competitor does the same.
 
 ## What the product should lead with
 
