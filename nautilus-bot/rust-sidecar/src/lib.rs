@@ -6,6 +6,7 @@ mod backup;
 mod crypto;
 mod db;
 mod diarization;
+pub mod dictation_correction_capture;
 mod dictation_dictionary_csv;
 pub mod dictation_parity;
 mod dictation_pipeline;
