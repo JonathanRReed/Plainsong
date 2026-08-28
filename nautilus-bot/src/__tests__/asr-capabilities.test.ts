@@ -1,6 +1,9 @@
 import { describe, expect, it } from "vitest";
 import {
+  ASR_LANGUAGE_NAMES,
   ASR_PROVIDER_TYPES,
+  asrLanguageName,
+  asrLanguageOptions,
   asrModelTier,
   describeAsrModel,
   describePauseBehavior,
@@ -8,8 +11,10 @@ import {
   getAsrModelCapability,
   isDictationOnlyProvider,
   isKnownAsrProvider,
+  isMeetingEligibleModel,
   isMeetingEligibleProvider,
   isSharedMeetingCompatible,
+  resolveAsrLanguageBoundary,
 } from "@/lib/asr-capabilities";
 
 describe("ASR capability mappings", () => {
@@ -44,6 +49,19 @@ describe("ASR capability mappings", () => {
 
   it("keeps the short-form legacy Parakeet export out of the meeting lane", () => {
     expect(isSharedMeetingCompatible("parakeet", "parakeet-tdt-ctc-110m")).toBe(false);
+  });
+
+  it("resolves the openai_cloud meeting lane to whisper-1 only, for its timestamps", () => {
+    // Only whisper-1 requests verbose_json from OpenAI's transcriptions
+    // endpoint (openai_cloud.rs's uses_verbose_json()), which is what
+    // actually returns segment timestamps. gpt-transcribe (the dictation
+    // default) and the gpt-4o-*-transcribe models return a single un-timed
+    // block, which would break seek/timeline/diarization alignment for a
+    // meeting, so they must stay out of the meeting lane.
+    expect(isMeetingEligibleModel("openai_cloud", "whisper-1")).toBe(true);
+    expect(isMeetingEligibleModel("openai_cloud", "gpt-transcribe")).toBe(false);
+    expect(isMeetingEligibleModel("openai_cloud", "gpt-4o-transcribe")).toBe(false);
+    expect(isMeetingEligibleModel("openai_cloud", "gpt-4o-mini-transcribe")).toBe(false);
   });
 });
 
@@ -188,5 +206,124 @@ describe("ASR model capability metadata", () => {
   it("treats Qwen3-ASR as meeting-eligible to match the Rust side", () => {
     expect(isMeetingEligibleProvider("qwen3_asr")).toBe(true);
     expect(isSharedMeetingCompatible("qwen3_asr", "qwen3-asr-0.6b")).toBe(true);
+  });
+});
+
+describe("language boundaries", () => {
+  it("gives a multilingual Whisper route its whole set", () => {
+    const boundary = resolveAsrLanguageBoundary("whisper", "large-v3-turbo");
+
+    expect(boundary.kind).toBe("enumerated");
+    if (boundary.kind !== "enumerated") return;
+    // ux-6: the picker offered seven against a model that accepts ~100.
+    expect(boundary.codes.length).toBeGreaterThan(90);
+    expect(boundary.codes).toContain("uk");
+    expect(boundary.codes).toContain("sw");
+    // Cantonese arrives with large-v3, and only there.
+    expect(boundary.codes).toContain("yue");
+    const base = resolveAsrLanguageBoundary("whisper", "base");
+    expect(base.kind).toBe("enumerated");
+    if (base.kind !== "enumerated") return;
+    expect(base.codes).not.toContain("yue");
+  });
+
+  it("stops at Parakeet v3's 25 European languages", () => {
+    const boundary = resolveAsrLanguageBoundary(
+      "parakeet",
+      "parakeet-tdt-0.6b-v3",
+    );
+
+    expect(boundary.kind).toBe("enumerated");
+    if (boundary.kind !== "enumerated") return;
+    expect(boundary.codes).toHaveLength(25);
+    expect(boundary.codes).toContain("uk");
+    // The route's own tradeoff says these are absent; the picker must agree.
+    expect(boundary.codes).not.toContain("zh");
+    expect(boundary.codes).not.toContain("hi");
+    expect(boundary.codes).not.toContain("ar");
+  });
+
+  it("reports an English-only model as a boundary, not a one-item list", () => {
+    for (const [provider, model] of [
+      ["whisper", "base.en"],
+      ["distil_whisper", "distil-large-v3.5"],
+      ["moonshine", "moonshine-base"],
+      ["parakeet", "parakeet-tdt-ctc-110m"],
+    ] as const) {
+      const boundary = resolveAsrLanguageBoundary(provider, model);
+      expect(boundary.kind).toBe("english_only");
+      expect(asrLanguageOptions(boundary)).toEqual([]);
+    }
+  });
+
+  it("gives a hosted Whisper release its own published coverage", () => {
+    expect(getAsrModelCapability("openai_cloud", "whisper-1")).toBeNull();
+
+    const whisper1 = resolveAsrLanguageBoundary("openai_cloud", "whisper-1");
+    expect(whisper1.kind).toBe("enumerated");
+    if (whisper1.kind !== "enumerated") return;
+    // whisper-1 is the hosted large-v2 checkpoint, so it predates Cantonese.
+    expect(whisper1.codes).not.toContain("yue");
+    expect(whisper1.codes).toContain("uk");
+
+    const groq = resolveAsrLanguageBoundary("groq", "whisper-large-v3");
+    expect(groq.kind).toBe("enumerated");
+    if (groq.kind !== "enumerated") return;
+    expect(groq.codes).toContain("yue");
+  });
+
+  it("does not lend Whisper's list to a cloud model that never claimed it", () => {
+    // Keying by provider gave every openai_cloud model Whisper's ~100
+    // languages, including the GPT-4o transcribe family this file already
+    // documents as behaving differently, and ElevenLabs' own Scribe model.
+    for (const [provider, model] of [
+      ["openai_cloud", "gpt-transcribe"],
+      ["openai_cloud", "gpt-4o-transcribe"],
+      ["openai_cloud", "gpt-4o-mini-transcribe"],
+      ["elevenlabs_scribe", "scribe_v2"],
+      ["elevenlabs_scribe", "scribe_v2_experimental"],
+      ["cohere_transcribe", "cohere-transcribe"],
+      ["groq", "some-future-groq-model"],
+    ] as const) {
+      expect(
+        resolveAsrLanguageBoundary(provider, model).kind,
+        `${provider}:${model} should not inherit a language list`,
+      ).toBe("unenumerated");
+    }
+  });
+
+  it("says so rather than guessing when the set is not known", () => {
+    expect(resolveAsrLanguageBoundary("qwen3_asr", "qwen3-asr-0.6b").kind).toBe(
+      "unenumerated",
+    );
+    expect(resolveAsrLanguageBoundary(null, null).kind).toBe("unenumerated");
+  });
+
+  it("names and sorts the options it hands the picker", () => {
+    const options = asrLanguageOptions(
+      resolveAsrLanguageBoundary("parakeet", "parakeet-tdt-0.6b-v3"),
+    );
+
+    expect(options).toHaveLength(25);
+    expect(options[0].label.localeCompare(options[1].label)).toBeLessThanOrEqual(0);
+    expect(options).toContainEqual({ value: "uk", label: "Ukrainian" });
+    expect(asrLanguageName("yue")).toBe("Cantonese");
+    // An unnamed code degrades to itself rather than to a blank row.
+    expect(asrLanguageName("zz")).toBe("zz");
+  });
+
+  it("can name every language code it offers", () => {
+    for (const [provider, model] of [
+      ["whisper", "large-v3-turbo"],
+      ["parakeet", "parakeet-tdt-0.6b-v3"],
+    ] as const) {
+      const boundary = resolveAsrLanguageBoundary(provider, model);
+      if (boundary.kind !== "enumerated") {
+        throw new Error(`${provider}:${model} should enumerate its languages`);
+      }
+      for (const code of boundary.codes) {
+        expect(ASR_LANGUAGE_NAMES[code], `missing name for ${code}`).toBeTruthy();
+      }
+    }
   });
 });

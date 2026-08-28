@@ -19,8 +19,11 @@ Press a hotkey, speak, and your words appear at the cursor in any app,
 transcribed on your own machine. Meetings are recorded, transcribed, and turned
 into searchable notes without sending a bot into the call.
 
-- **Local-first.** Speech recognition runs on-device by default via whisper.cpp
-  (`base.en`); no account and no audio leaves your machine unless you opt in.
+- **Local-first.** Speech recognition runs on-device by default. Parakeet TDT
+  0.6B v3 (640 MB) is the recommended default dictation model; whisper.cpp
+  `base.en` (142 MB) is offered as a smaller, less accurate download, and
+  installs that already had `base.en` configured keep it. No account and no
+  audio leaves your machine unless you opt in.
 - **Bring your own keys.** Optional cloud transcription and AI cleanup use your
   own provider keys, stored in the OS keychain and sent directly to the
   provider, never through a Plainsong server.
@@ -67,7 +70,7 @@ Optional, for on-device AI cleanup:
 
 ```bash
 ollama serve
-ollama pull llama3.2
+ollama pull qwen3.5:4b
 ```
 
 ## Build
@@ -146,9 +149,11 @@ changing the requested benchmark.
 
 ## ASR providers
 
-Speech recognition runs locally by default (Whisper via whisper.cpp, plus other
-native engines). Optional bring-your-own-key cloud providers (OpenAI,
-ElevenLabs, Mistral, Groq, Cohere) are supported. Keys are stored in the OS
+Speech recognition runs locally by default: Parakeet TDT 0.6B v3 is the
+recommended default dictation model, with Whisper (via whisper.cpp),
+Distil-Whisper, Moonshine, and other native engines available as
+alternatives. Optional bring-your-own-key cloud providers (OpenAI,
+ElevenLabs, Groq, Cohere) are supported. Keys are stored in the OS
 keychain and requests go directly to the provider, never through a Plainsong
 server.
 

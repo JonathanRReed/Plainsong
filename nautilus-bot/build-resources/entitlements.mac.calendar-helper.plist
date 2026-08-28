@@ -1,0 +1,23 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  The read-only EventKit helper (scripts/native-macos-calendar-helper.swift),
+  routed here by scripts/sign-macos.mjs.
+
+  One key, matching the Speech helper's shape: the binary that reads the
+  calendar holds the calendar entitlement, and nothing else in the bundle does.
+  The main app carries microphone, Apple Events and — at runtime — the
+  Accessibility grant that lets it type into every application; adding calendar
+  reading to THAT signature would have widened the blast radius of the one
+  process with the most to lose, to save compiling 300 lines of Swift.
+
+  Deliberately absent: microphone and audio-input (this helper never opens a
+  device), Apple Events (it drives no other application), JIT and
+  disable-library-validation (it loads only system frameworks).
+-->
+<plist version="1.0">
+  <dict>
+    <key>com.apple.security.personal-information.calendars</key>
+    <true/>
+  </dict>
+</plist>

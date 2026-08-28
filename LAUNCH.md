@@ -2,11 +2,56 @@
 
 Release target: `0.9.0-beta.2`
 
-Last reconciled: August 23, 2026
+Last reconciled: August 27, 2026
 
 This checklist is the release boundary for the private integration candidate.
 Dictation and Meetings are both supported product pillars. Source readiness,
 packaged candidate readiness, and distribution are separate states.
+
+## Evidence staleness since the 0.9.0-beta.2 qualification
+
+Everything under "Current verdict" and "Exact packaged candidate gate" below
+describes the source and package as they stood on **August 23, 2026**. Two
+further audited fix waves have merged into `main` since then — Electron
+security hardening, meeting data-integrity fixes, model currency, sidecar
+robustness, and a renderer UX pass on Dictation and Meetings recovery. See
+`nautilus-bot/CHANGELOG.md`'s `[Unreleased] - 0.9.0-beta.3` section for the
+full, evidence-checked list. `package.json` has not been bumped and no
+`0.9.0-beta.3` package has been built, so this document still tracks
+`0.9.0-beta.2` — but its qualification claims are **stale, not current**:
+
+- **Stale: the "868 Vitest tests ... pass" claim and every other source-ready
+  line below.** They describe the `0.9.0-beta.2` revision's source tree, not
+  current `HEAD`. The two merged waves added new source files, new tests, and
+  changed entitlements, packaging config, and default models. The
+  source-ready gate must be rerun top to bottom on current `HEAD` before any
+  of those lines can be asserted again.
+- **Stale: every number in "Exact packaged candidate gate" and the size/
+  cold-start figures in "Current verdict."** The size gate (374 MB), the
+  cold-start gate (2428 ms), and the native-helper, signature, and
+  entitlement checks were all measured against a binary that no longer
+  matches current source — the entitlements files changed shape (see
+  `nautilus-bot/docs/CODE_SIGNING.md`'s "Per-binary entitlements" section),
+  `CFBundleVersion` changed from a string to a numeric build version, and the
+  DMG layout changed. None of these numbers can be assumed to still hold;
+  they must be re-measured against a freshly built package.
+- **Never true, still not true: the product acceptance gate.** Real-hardware
+  Dictation matrix, Meeting lifecycle soak, and updater-journey evidence were
+  required and absent for `0.9.0-beta.2` before this reconciliation, and
+  remain required and absent now. Nothing in this reconciliation changes that.
+- **What must be recaptured before a beta.3 candidate decision:** rebuild the
+  packaged candidate (`bun run release:mac`) against current `HEAD`; rerun
+  every command under "Exact packaged candidate gate"; capture a fresh
+  aggregate release audit (`bun run qa:packaged:macos:release-audit`) — the
+  existing receipts predate this revision, and
+  `scripts/lib/release-receipt-freshness.mjs` is designed to reject a receipt
+  older than the candidate it's supposed to describe; and take fresh invite-
+  kit screenshots, since the Dictation and Settings UI changed visibly (a new
+  clipboard-copy toggle, a searchable language picker, meeting recovery
+  actions, and a new onboarding step asking how meeting notes get written).
+  This recapture work is scheduled for a later wave. This reconciliation's
+  job was to say plainly what is stale, not to produce new green checkmarks
+  for claims nobody has re-run.
 
 ## Current verdict
 
@@ -29,11 +74,17 @@ required before any release decision. Historical `1.0.0` and `0.9.0-beta.1`
 artifacts, hashes, signatures, and QA receipts do not prove the current build.
 
 The app is configured to use the credential-free generic feed at
-`https://updates.plainsong.jonathanrreed.com/beta/`. That host was previously
-recorded as unprovisioned; its current state must be refreshed before any
-release decision. GitHub Actions runner availability was also previously
-blocked by account state and must be refreshed independently. Neither external
-gate can be waived by local source results.
+`https://updates.plainsong.jonathanrreed.com/beta/`. That host still has no
+DNS record — confirmed directly (`host updates.plainsong.jonathanrreed.com`)
+on 2026-08-27, NXDOMAIN, same as when
+`nautilus-bot/docs/beta/EXTERNAL-UPDATE-FEED-GATE.md` recorded it unprovisioned
+on 2026-08-09. It has not moved. Separately, the update-feed gate now also
+requires a `/stable/latest-mac.yml` manifest, not only `/beta/beta-mac.yml`
+(see `nautilus-bot/docs/CODE_SIGNING.md`'s "Operational notes"), so the first
+stable release depends on the same unprovisioned host plus one more published
+manifest. GitHub Actions runner availability was also previously blocked by
+account state and must be refreshed independently. Neither external gate can
+be waived by local source results.
 
 No beta artifact has been distributed, tagged, pushed, published, or sent to
 testers from this work. Those external actions still require explicit approval.

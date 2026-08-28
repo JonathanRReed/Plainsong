@@ -53,6 +53,13 @@ import { Input } from "@/components/ui/input";
 import { Progress } from "@/components/ui/progress";
 import type { AsrProviderInfo, AsrProviderType } from "@/types";
 import { MEETING_ONBOARDING_STORAGE_KEY, type OnboardingMode } from "@/lib/onboarding";
+import { readAiNotesOptOut, writeAiNotesOptOut } from "@/lib/ai-notes-preference";
+import { getOllamaStatus } from "@/lib/backend/ai";
+import {
+  describeAnalysisDestination,
+  isRemoteAnalysisProvider,
+} from "@/components/models/ai-lanes";
+import { requestReadinessDestination } from "@/lib/navigation";
 import { findConflictingShortcuts } from "../../electron/shortcut-registration";
 
 type Props = {
@@ -67,7 +74,11 @@ type Step =
   | "permissions"
   | "dictation-model"
   | "hotkey"
-  | "meeting-setup";
+  | "meeting-setup"
+  | "ai-notes";
+
+/** How meeting summaries, action items and titles get written — or that they don't. */
+type AiNotesChoice = "ollama" | "byok" | "none";
 
 type ScratchDictationState =
   | "idle"
@@ -77,9 +88,12 @@ type ScratchDictationState =
   | "complete"
   | "error";
 
-// Ordered so the fast local default (whisper.cpp base.en -- see
-// settings.rs's default_provider/default_model_id) is first and pre-selected.
-// Model weights are downloaded on demand; none ship inside the app bundle.
+// Ordered so the recommended default (Parakeet TDT 0.6B v3 -- see
+// settings.rs's default_provider/default_model_id) is first and
+// pre-selected. Whisper base.en mis-transcribes words it hasn't seen before
+// -- including "Plainsong" itself, per this repo's own benchmark -- so it is
+// offered as the small-download alternative, not the default. Model weights
+// are downloaded on demand; none ship inside the app bundle.
 const POWER_MODEL_OPTIONS: Array<{
   id: string;
   providerType: AsrProviderType;
@@ -89,12 +103,19 @@ const POWER_MODEL_OPTIONS: Array<{
   recommended?: boolean;
 }> = [
   {
+    id: "parakeet-tdt-0.6b-v3",
+    providerType: "parakeet",
+    label: "Parakeet TDT 0.6B v3",
+    size: "640 MB",
+    desc: "Recommended default — more accurate transcription, works for meetings too",
+    recommended: true,
+  },
+  {
     id: "base.en",
     providerType: "whisper",
     label: "Whisper base.en",
     size: "142 MB",
-    desc: "Fast local default — downloaded on demand",
-    recommended: true,
+    desc: "Smaller download (142 MB vs. 640 MB), but less accurate on unfamiliar words",
   },
   {
     id: "distil-large-v3.5",
@@ -109,13 +130,6 @@ const POWER_MODEL_OPTIONS: Array<{
     label: "Moonshine Base",
     size: "246 MB",
     desc: "Lightweight alternative for lower-end machines",
-  },
-  {
-    id: "parakeet-tdt-0.6b-v3",
-    providerType: "parakeet",
-    label: "Parakeet TDT 0.6B v3",
-    size: "640 MB",
-    desc: "Fast local long-form route for meetings and multilingual dictation",
   },
 ];
 
@@ -191,6 +205,7 @@ const STEP_LABELS: Record<Step, string> = {
   "dictation-model": "Dictation model",
   hotkey: "Hotkey",
   "meeting-setup": "Meeting setup",
+  "ai-notes": "Meeting notes",
 };
 
 // Mirrors settings-view-simple.tsx's dictationShortcutBehaviorHint copy, so
@@ -373,6 +388,13 @@ export function FirstRunWizard({ mode = "full", onComplete }: Props) {
   const [modelState, setModelState] = useState<"idle" | "downloading" | "done" | "error">("idle");
   const [modelError, setModelError] = useState<string | null>(null);
   const [modelSkipped, setModelSkipped] = useState(false);
+  // Placeholder only, corrected by the settings-load effect below before any
+  // download can actually fire (see the dictationProvider branches there).
+  // Kept as "base.en" rather than the new "parakeet-tdt-0.6b-v3" default so
+  // a settings.json that already names a non-default provider (e.g. an
+  // existing whisper/base.en setup) is never at risk of racing a real click
+  // against the correction effect and downloading the wrong model; the
+  // fresh-install case corrects to Parakeet the same way.
   const [selectedModelId, setSelectedModelId] = useState("base.en");
   const [downloadPercent, setDownloadPercent] = useState<number | null>(null);
   const downloadingProviderTypeRef = useRef<AsrProviderType | null>(null);
@@ -402,8 +424,14 @@ export function FirstRunWizard({ mode = "full", onComplete }: Props) {
   const [saveBusy, setSaveBusy] = useState(false);
   const [saveError, setSaveError] = useState<string | null>(null);
   const [saveErrorContext, setSaveErrorContext] = useState<
-    "hotkey" | "meeting-route" | "meeting-settings" | null
+    "hotkey" | "meeting-route" | "meeting-settings" | "ai-notes" | null
   >(null);
+
+  // Meeting notes: which route writes them, and whether the local one answers.
+  const [aiNotesChoice, setAiNotesChoice] = useState<AiNotesChoice>("ollama");
+  const [aiNotesProvider, setAiNotesProvider] = useState<string>("ollama");
+  const [localAiReady, setLocalAiReady] = useState<boolean | null>(null);
+  const [localAiChecking, setLocalAiChecking] = useState(false);
 
   const [meetingAudioStorageMode, setMeetingAudioStorageMode] = useState<"always" | "transcript_only">("always");
   const [meetingRetentionPreset, setMeetingRetentionPreset] = useState<"1m" | "2m" | "3m" | "custom" | "never">("never");
@@ -425,16 +453,20 @@ export function FirstRunWizard({ mode = "full", onComplete }: Props) {
 
   const steps = useMemo(() => {
     if (mode === "meetings") {
-      return ["meeting-setup"] as Step[];
+      return ["meeting-setup", "ai-notes"] as Step[];
     }
     if (mode === "dictation") {
       return ["permissions", "dictation-model", "hotkey"] as Step[];
     }
+    // The notes step sits after meeting setup because it is only about what
+    // happens once a meeting is captured, and before "ready" so the summary
+    // there can tell the truth about whether notes will be written.
     return [
       "dictation-model",
       "try-dictation",
       "use-everywhere",
       "meeting-setup",
+      "ai-notes",
       "ready",
     ] as Step[];
   }, [mode]);
@@ -483,6 +515,19 @@ export function FirstRunWizard({ mode = "full", onComplete }: Props) {
           settings.transcription.meetingRetentionDeleteMode === "audio_and_transcript"
             ? "audio_and_transcript"
             : "audio_only"
+        );
+        // The notes step opens on whatever is already true: a remembered
+        // transcripts-only choice, an already-chosen cloud lane, or the local
+        // default. It never silently re-decides for the reader.
+        const configuredNotesProvider =
+          settings.privacy?.meetingsAi?.provider?.trim() || "ollama";
+        setAiNotesProvider(configuredNotesProvider);
+        setAiNotesChoice(
+          readAiNotesOptOut()
+            ? "none"
+            : isRemoteAnalysisProvider(configuredNotesProvider)
+              ? "byok"
+              : "ollama",
         );
         initialDictationProviderRef.current = settings.transcription.dictationProvider ?? null;
         if (settings.transcription.dictationProvider === "moonshine") {
@@ -844,24 +889,32 @@ export function FirstRunWizard({ mode = "full", onComplete }: Props) {
   // consent for a model download.
   //
   // But only do this when the user doesn't already have a different,
-  // previously-configured dictation route (e.g. parakeet, distil_whisper,
-  // macos_apple_speech). Someone who opens "Fix dictation setup" for an
-  // unrelated reason (a hotkey conflict, say) and just clicks through this
-  // step must not have their working provider silently downgraded/overwritten
-  // to whisper/base.en. If nothing but the default route was ever configured,
-  // downloading base.en in the background is a safe no-op for
-  // provider selection and is the only way dictation ends up with a
-  // downloaded model at all.
+  // previously-configured dictation route (e.g. distil_whisper,
+  // macos_apple_speech, a cloud provider). Someone who opens "Fix dictation
+  // setup" for an unrelated reason (a hotkey conflict, say) and just clicks
+  // through this step must not have their working provider silently
+  // downgraded/overwritten. Both "parakeet" (the current default) and
+  // "whisper" (the default for every install that predates this default
+  // change -- i.e. the entire pre-upgrade user base) count as "still on a
+  // default route" here, not as a deliberate non-default choice.
   const ensureDefaultModelDownloading = useCallback(() => {
     const existingProvider = initialDictationProviderRef.current;
-    const hasExistingNonDefaultRoute = Boolean(existingProvider) && existingProvider !== "whisper";
+    const hasExistingNonDefaultRoute =
+      Boolean(existingProvider) &&
+      existingProvider !== "parakeet" &&
+      existingProvider !== "whisper";
     if (hasExistingNonDefaultRoute) {
       return;
     }
     if (modelState === "idle" || modelState === "error") {
-      void startModelDownload("base.en");
+      // Already corrected to match the actual configured/default provider
+      // by the settings-load effect above -- parakeet-tdt-0.6b-v3 for a
+      // fresh install, base.en for a pre-upgrade whisper install -- so this
+      // downloads whichever default route the user is really on instead of
+      // assuming parakeet unconditionally.
+      void startModelDownload(selectedModelId);
     }
-  }, [modelState, startModelDownload]);
+  }, [modelState, selectedModelId, startModelDownload]);
 
   const persistDictationStep = useCallback(async () => {
     setSaveBusy(true);
@@ -989,6 +1042,63 @@ export function FirstRunWizard({ mode = "full", onComplete }: Props) {
     }
   }, [applyRecommendedMeetingRoute, meetingRecommendedRoute, refreshMeetingSetup]);
 
+  /**
+   * Ask whether the local analysis runtime is actually answering. A probe that
+   * throws leaves this `null` — unknown — because "Ollama is missing" and "we
+   * could not ask" are different claims and only one of them is actionable.
+   */
+  const checkLocalAiRuntime = useCallback(async () => {
+    setLocalAiChecking(true);
+    try {
+      const ready = await getOllamaStatus();
+      if (mountedRef.current) {
+        setLocalAiReady(typeof ready === "boolean" ? ready : null);
+      }
+    } catch {
+      if (mountedRef.current) {
+        setLocalAiReady(null);
+      }
+    } finally {
+      if (mountedRef.current) {
+        setLocalAiChecking(false);
+      }
+    }
+  }, []);
+
+  useEffect(() => {
+    if (step === "ai-notes") {
+      void checkLocalAiRuntime();
+    }
+  }, [checkLocalAiRuntime, step]);
+
+  const persistAiNotesStep = useCallback(async () => {
+    setSaveBusy(true);
+    setSaveError(null);
+    setSaveErrorContext(null);
+    try {
+      if (aiNotesChoice === "ollama") {
+        const settings = await getSettings();
+        if (settings.privacy.meetingsAi.provider !== "ollama") {
+          // A provider change invalidates the model id with it: a model name
+          // from OpenAI means nothing to Ollama, and null asks for the
+          // provider's own default rather than a name that cannot resolve.
+          settings.privacy.meetingsAi = { provider: "ollama", modelId: null };
+          await saveSettings(settings);
+        }
+      }
+      // Written last so a failed settings save cannot leave the app believing
+      // notes were declined when they were not.
+      writeAiNotesOptOut(aiNotesChoice === "none");
+      return true;
+    } catch (error) {
+      setSaveError(error instanceof Error ? error.message : String(error));
+      setSaveErrorContext("ai-notes");
+      return false;
+    } finally {
+      setSaveBusy(false);
+    }
+  }, [aiNotesChoice]);
+
   const persistMeetingStep = useCallback(async () => {
     setSaveBusy(true);
     setSaveError(null);
@@ -1080,6 +1190,13 @@ export function FirstRunWizard({ mode = "full", onComplete }: Props) {
         }
       }
       const saved = await persistMeetingStep();
+      if (!saved) {
+        return;
+      }
+    }
+
+    if (step === "ai-notes") {
+      const saved = await persistAiNotesStep();
       if (!saved) {
         return;
       }
@@ -1198,7 +1315,7 @@ export function FirstRunWizard({ mode = "full", onComplete }: Props) {
             modelState={modelState}
             modelError={modelError}
             modelPercent={downloadPercent}
-            onDownloadModel={() => void startModelDownload("base.en")}
+            onDownloadModel={() => void startModelDownload("parakeet-tdt-0.6b-v3")}
             scratchState={scratchState}
             scratchText={scratchText}
             scratchError={scratchError}
@@ -1232,7 +1349,7 @@ export function FirstRunWizard({ mode = "full", onComplete }: Props) {
             modelState={modelState}
             modelError={modelError}
             modelSkipped={modelSkipped}
-            onRetryModel={() => void startModelDownload("base.en")}
+            onRetryModel={() => void startModelDownload("parakeet-tdt-0.6b-v3")}
             microphoneReady={
               perms?.microphonePermissionReady ?? perms?.microphoneReady
             }
@@ -1327,6 +1444,34 @@ export function FirstRunWizard({ mode = "full", onComplete }: Props) {
                   )
                 : null
             }
+            saveError={saveError}
+            saveErrorContext={saveErrorContext}
+          />
+        ) : null}
+
+        {step === "ai-notes" ? (
+          <AiNotesStep
+            choice={aiNotesChoice}
+            onChoiceChange={setAiNotesChoice}
+            configuredProvider={aiNotesProvider}
+            localAiReady={localAiReady}
+            localAiChecking={localAiChecking}
+            onRecheckLocalAi={() => void checkLocalAiRuntime()}
+            onOpenAiSettings={() => {
+              void (async () => {
+                // Save the choice before leaving, or a reader who went to add a
+                // key would come back to a wizard that forgot they had decided.
+                const saved = await persistAiNotesStep();
+                if (!saved) {
+                  return;
+                }
+                completeWizard({
+                  markOnboardingComplete: mode === "full",
+                  meetingsCompleted: mode === "meetings",
+                });
+                requestReadinessDestination("ai");
+              })();
+            }}
             saveError={saveError}
             saveErrorContext={saveErrorContext}
           />
@@ -1495,9 +1640,10 @@ function TryDictationStep({
               <Download className="h-4 w-4" />
             </span>
             <div>
-              <p className="text-sm font-medium">Fast local model</p>
+              <p className="text-sm font-medium">Recommended local model</p>
               <p className="text-sm text-muted-foreground">
-                Whisper base.en is a 142 MB download. You can choose a larger model later.
+                Parakeet TDT 0.6B v3 is a 640 MB download. A smaller 142 MB option is
+                available later, with less accuracy on unfamiliar words.
               </p>
             </div>
           </div>
@@ -1752,7 +1898,7 @@ function ReadyStep({
         }
       : modelState === "downloading"
         ? {
-            detail: "Downloading Whisper base.en in the background.",
+            detail: "Downloading Parakeet TDT 0.6B v3 in the background.",
             tone: "progress" as const,
           }
         : modelState === "error"
@@ -1766,7 +1912,7 @@ function ReadyStep({
             }
           : modelState === "done"
             ? {
-                detail: "Whisper base.en is ready for your first dictation.",
+                detail: "Parakeet TDT 0.6B v3 is ready for your first dictation.",
                 tone: "ready" as const,
               }
             : {
@@ -2085,8 +2231,10 @@ function DictationModelStep({
   return (
     <div className="space-y-4">
       <p className="text-sm text-muted-foreground">
-        Choose the local model Plainsong will use for dictation. Whisper base.en is the fast
-        default and downloads on demand; the larger choices trade space and time for accuracy.
+        Choose the local model Plainsong will use for dictation. Parakeet TDT 0.6B v3 is the
+        recommended default and downloads on demand; Whisper base.en is a smaller download with
+        less accuracy on unfamiliar words, and the larger choices trade space and time for
+        accuracy.
       </p>
 
       <div className="space-y-2">
@@ -2286,6 +2434,186 @@ function HotkeyStep({
   );
 }
 
+const AI_NOTES_OPTIONS: Array<{
+  id: AiNotesChoice;
+  label: string;
+  detail: string;
+}> = [
+  {
+    id: "ollama",
+    label: "Write notes on this Mac with Ollama",
+    detail:
+      "Nothing leaves the machine. Ollama is a separate free download and has to be running.",
+  },
+  {
+    id: "byok",
+    label: "Use my own API key",
+    detail:
+      "Transcripts are sent to the provider you pick. Add the key under AI & Keys.",
+  },
+  {
+    id: "none",
+    label: "Transcripts only — no AI notes",
+    detail:
+      "Meetings are still recorded, transcribed and searchable. No summary, action items or auto-title.",
+  },
+];
+
+/**
+ * How meeting notes get written, asked once, before the first meeting.
+ *
+ * A default install points the meetings lane at an Ollama nobody installed, so
+ * the summary, action items and title of the first meeting all failed silently.
+ * The three answers here are the only honest ones: run it locally, bring a key,
+ * or say plainly that you do not want notes — and the last one is remembered so
+ * readiness reports a decision instead of a fault.
+ */
+function AiNotesStep({
+  choice,
+  onChoiceChange,
+  configuredProvider,
+  localAiReady,
+  localAiChecking,
+  onRecheckLocalAi,
+  onOpenAiSettings,
+  saveError,
+  saveErrorContext,
+}: {
+  choice: AiNotesChoice;
+  onChoiceChange(choice: AiNotesChoice): void;
+  configuredProvider: string;
+  localAiReady: boolean | null;
+  localAiChecking: boolean;
+  onRecheckLocalAi(): void;
+  onOpenAiSettings(): void;
+  saveError: string | null;
+  saveErrorContext: "hotkey" | "meeting-route" | "meeting-settings" | "ai-notes" | null;
+}) {
+  return (
+    <div className="space-y-4">
+      <p className="text-sm text-muted-foreground">
+        Meeting summaries, action items and automatic titles are written by an AI
+        route you choose. Capture and the transcript never depend on it.
+      </p>
+
+      <div
+        className="space-y-2"
+        role="radiogroup"
+        aria-label="How meeting notes are written"
+      >
+        {AI_NOTES_OPTIONS.map((option) => (
+          <button
+            key={option.id}
+            type="button"
+            role="radio"
+            aria-checked={choice === option.id}
+            onClick={() => onChoiceChange(option.id)}
+            className={`flex w-full items-start justify-between gap-3 rounded-lg border-2 p-3 text-left transition-all ${
+              choice === option.id
+                ? "border-primary bg-primary/5"
+                : "border-border hover:border-primary/40"
+            }`}
+          >
+            <div>
+              <p className="text-sm font-medium">{option.label}</p>
+              <p className="text-sm text-muted-foreground">{option.detail}</p>
+            </div>
+          </button>
+        ))}
+      </div>
+
+      {choice === "ollama" ? (
+        <div className="rounded-lg border border-border p-3">
+          <div className="flex items-start justify-between gap-3">
+            <div className="min-w-0">
+              <p className="text-sm font-medium">Ollama on this Mac</p>
+              <p className="text-sm text-muted-foreground" aria-live="polite">
+                {localAiChecking
+                  ? "Checking whether Ollama is running…"
+                  : localAiReady === true
+                    ? "Ollama answered. Meeting notes can be written locally."
+                    : localAiReady === false
+                      ? "Ollama is not running, so notes will not be written yet."
+                      : "Plainsong could not reach Ollama to check."}
+              </p>
+            </div>
+            {localAiChecking ? (
+              <Loader2 className="h-4 w-4 shrink-0 animate-spin text-muted-foreground" />
+            ) : (
+              <span
+                className={`neume shrink-0 ${
+                  localAiReady === true ? "neume-lit" : "neume-hollow"
+                }`}
+                aria-hidden="true"
+              />
+            )}
+          </div>
+          {localAiReady === true ? null : (
+            <div className="mt-3 space-y-2">
+              <p className="text-sm text-muted-foreground">
+                Install Ollama from{" "}
+                <code className="rounded bg-muted px-1">ollama.com/download</code>
+                , start it, then pull a model with{" "}
+                <code className="rounded bg-muted px-1">
+                  ollama pull qwen3.5:4b
+                </code>
+                .
+              </p>
+              <Button
+                size="sm"
+                variant="outline"
+                onClick={onRecheckLocalAi}
+                disabled={localAiChecking}
+              >
+                Check again
+              </Button>
+              <p className="text-sm text-muted-foreground">
+                You can continue now. Meetings will record and transcribe, and
+                Plainsong will say plainly that notes are unavailable until
+                Ollama answers.
+              </p>
+            </div>
+          )}
+        </div>
+      ) : null}
+
+      {choice === "byok" ? (
+        <div className="rounded-lg border border-border p-3 space-y-2">
+          <p className="text-sm font-medium">
+            {isRemoteAnalysisProvider(configuredProvider)
+              ? `Currently set to ${describeAnalysisDestination(configuredProvider)}`
+              : "No cloud provider is selected yet"}
+          </p>
+          <p className="text-sm text-muted-foreground">
+            Add the key under AI &amp; Keys and turn cloud AI on. Until then,
+            meetings still record and transcribe, and Plainsong reports notes as
+            unavailable rather than pretending they were written.
+          </p>
+          <Button size="sm" variant="outline" onClick={onOpenAiSettings}>
+            <KeyRound className="mr-2 h-4 w-4" />
+            Open AI &amp; Keys settings
+          </Button>
+        </div>
+      ) : null}
+
+      {choice === "none" ? (
+        <div className="rounded-lg border border-border p-3">
+          <p className="text-sm text-muted-foreground">
+            Plainsong will remember this and stop reporting a missing AI route as
+            a problem. Change it any time in AI &amp; Keys.
+          </p>
+        </div>
+      ) : null}
+
+      {saveError && saveErrorContext === "ai-notes" ? (
+        <p className="text-sm text-destructive" role="alert">
+          Couldn&apos;t save the meeting-notes choice: {saveError}
+        </p>
+      ) : null}
+    </div>
+  );
+}
+
 function MeetingSetupStep({
   loading,
   routeSummary,
@@ -2337,7 +2665,12 @@ function MeetingSetupStep({
   onApplyRecommendedRoute?: () => void;
   recommendedRouteSummary: string | null;
   saveError: string | null;
-  saveErrorContext: "hotkey" | "meeting-route" | "meeting-settings" | null;
+  saveErrorContext:
+    | "hotkey"
+    | "meeting-route"
+    | "meeting-settings"
+    | "ai-notes"
+    | null;
 }) {
   const systemAudioBackendLabel =
     systemAudioCapability?.backend === "core_audio_process_tap"

@@ -16,7 +16,7 @@ into searchable notes without sending a bot into your call.
 - **Local-first.** Transcription runs on your Mac by default. No account, no
   cloud dependency, no audio leaving your machine unless you opt in.
 - **Bring your own keys.** Optional cloud transcription and AI cleanup use your
-  own keys for providers such as OpenAI, Anthropic, Mistral, ElevenLabs, Groq,
+  own keys for providers such as OpenAI, Anthropic, ElevenLabs, Groq,
   Cohere, DeepSeek, and Gemini. Usage is billed to you, keys are stored in the OS keychain,
   never routed through our servers.
 - **Actually free and open.** MIT licensed, no trial, no tiers, no nags. Build
@@ -32,7 +32,8 @@ into searchable notes without sending a bot into your call.
 - System-wide dictation via a global hotkey, with a focus-preserving overlay
 - Three activation modes: toggle, hold-to-talk (native key listener), and
   hands-free voice-activity detection
-- Local speech recognition (Whisper and other engines) with optional BYOK cloud
+- Local speech recognition (Parakeet by default, plus Whisper and other
+  engines) with optional BYOK cloud
 - Dictation modes, snippets, a personal dictionary, and editing commands
 - Meeting recording (microphone, plus system audio where available), transcript
   review, summaries, action items, and cross-meeting search
@@ -58,7 +59,9 @@ the release gate passes and distribution is explicitly approved:
 2. Drag `Plainsong.app` into `/Applications`.
 3. On first run, grant Microphone access so Plainsong can hear you and
    Accessibility access so it can insert text into other apps. Then let it
-   download the `base.en` model.
+   download the recommended default model, Parakeet TDT 0.6B v3 (640 MB);
+   Whisper `base.en` (142 MB) is offered as a smaller, less accurate
+   alternative.
 
 Homebrew is planned after the beta and first public release (see
 [nautilus-bot/docs/homebrew.md](./nautilus-bot/docs/homebrew.md)).

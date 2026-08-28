@@ -43,8 +43,11 @@ import {
   getRecording,
   openRecordingAudio,
   renameRecording,
+  acknowledgeIncompleteTranscript,
   retranscribeRecording,
+  retryMeetingAnalysis,
   retryMeetingAutoName,
+  revalidateRecordingAudio,
   setRecordingSourceType,
   updateMeetingChatMessages,
   updateRecordingAnalysis,
@@ -68,10 +71,20 @@ import type {
 } from "@/types";
 import {
   buildMeetingTemplateOutline,
+  getAllMeetingTemplateOptions,
   getMeetingTemplateOption,
+  MAX_CUSTOM_MEETING_TEMPLATES,
   MEETING_TEMPLATES,
+  type CustomMeetingTemplate,
 } from "@/lib/meeting-templates";
+import { getSettings, saveSettings } from "@/lib/backend/settings";
 import {
+  MeetingTemplateEditorDialog,
+  type MeetingTemplateDraft,
+} from "@/components/views/meetings/template-editor-dialog";
+import { MeetingTemplateManagerDialog } from "@/components/views/meetings/template-manager-dialog";
+import {
+  GENERAL_MEETING_NOTES_TITLE,
   getNextMeetingSectionTitle,
   parseMeetingNoteSections,
   rebaseMeetingNotes,
@@ -99,8 +112,30 @@ import {
   OPEN_RECORDING_WORKSPACE_EVENT,
   requestMainView,
   requestReadinessDestination,
+  requestSettingsTab,
   type OpenRecordingWorkspaceDetail,
 } from "@/lib/navigation";
+import {
+  describeMeetingStartFailure,
+  type MeetingStartFailure,
+} from "@/lib/meeting-start-error";
+import { openPermissionSettings } from "@/lib/backend/settings";
+import {
+  describeMeetingAnalysis,
+  MEETING_ANALYSIS_STATUS_EVENT,
+  parseMeetingAnalysisStatus,
+  readStoredAnalysisFailure,
+  type MeetingAnalysisStatusEvent,
+} from "@/lib/meeting-analysis-status";
+import { StatusBanner } from "@/components/ui/status-banner";
+import { CalendarMeetingCue } from "@/components/meetings/calendar-meeting-cue";
+import type { CalendarCapturePrefill } from "@/lib/calendar-events";
+import {
+  canRecheckMeetingAudio,
+  describeCaptureDegradation,
+  describeIncompleteTranscript,
+  readMeetingIntegrity,
+} from "@/lib/meeting-recovery";
 import { actionItemsToMarkdownList } from "@/lib/markdown";
 import { DocumentField } from "@/components/views/meetings/document-field";
 import { AudioIssueBanner } from "@/components/views/meetings/audio-issue-banner";
@@ -109,7 +144,10 @@ import { MarkdownText } from "@/components/views/meetings/markdown-text";
 import { WorkspaceSkeleton } from "@/components/views/meetings/workspace-skeleton";
 import { listen } from "@/lib/electron";
 import { useProductReadinessStatus } from "@/features/readiness/product-readiness-context";
-import { selectReadinessForSurface } from "@/features/readiness/product-readiness";
+import {
+  meetingCaptureIsReady,
+  selectReadinessForSurface,
+} from "@/features/readiness/product-readiness";
 import {
   AlertCircle,
   ArrowLeft,
@@ -912,12 +950,48 @@ function buildRelationshipRecallPrompts(args: {
   });
 }
 
+/** Field-by-field, not `JSON.stringify` -- key order out of a round trip
+ * through Rust's serde and a freshly-built renderer object isn't guaranteed
+ * to match byte for byte even when the content is identical, and a
+ * stringify comparison would misreport that as a truncation. Used to detect
+ * when Rust's save-time sanitization (`sanitize_meeting_custom_templates` in
+ * settings.rs) actually changed what was sent -- dropping it, or capping a
+ * name/prompt/outline length -- so the optimistic save can be corrected
+ * instead of reported as a clean success. */
+function meetingTemplatesEqual(
+  a: readonly CustomMeetingTemplate[],
+  b: readonly CustomMeetingTemplate[]
+): boolean {
+  if (a.length !== b.length) {
+    return false;
+  }
+  return a.every((template, index) => {
+    const other = b[index];
+    return (
+      other !== undefined &&
+      template.id === other.id &&
+      template.name === other.name &&
+      template.summaryPrompt === other.summaryPrompt &&
+      template.notesOutline.length === other.notesOutline.length &&
+      template.notesOutline.every((section, sectionIndex) => section === other.notesOutline[sectionIndex])
+    );
+  });
+}
+
 export function RecordingsView() {
-  const { productReadiness } = useProductReadinessStatus();
+  const { productReadiness, engineNotice, dismissEngineNotice } =
+    useProductReadinessStatus();
+  // Two readings of the same domain, and they are not interchangeable.
+  // `meetingsReadiness` includes the AI-notes lane and is what the reader is
+  // told; `meetingCaptureReadiness` is capture alone and is what every action
+  // is gated on. Gating on the first disabled meeting capture on every fresh
+  // install, because the default notes route points at an absent Ollama.
   const meetingsReadiness = selectReadinessForSurface(
     productReadiness,
     "meetings",
   );
+  const meetingCaptureReadiness = productReadiness.meetingsCapture;
+  const captureIsReady = meetingCaptureIsReady(productReadiness);
   const fullCaptureReadiness = productReadiness.fullCapture;
   const {
     recordings,
@@ -940,6 +1014,10 @@ export function RecordingsView() {
     Record<string, Recording["status"]>
   >({});
   const [showConsent, setShowConsent] = useState(false);
+  // Set only by the calendar affordance, consumed by the start that follows it.
+  // A ref rather than state because nothing renders from it: it is read once,
+  // after the meeting exists, to give the recording the event's name.
+  const pendingCalendarPrefill = useRef<CalendarCapturePrefill | null>(null);
   const [showRecordingDetail, setShowRecordingDetail] = useState(false);
   // Opening a meeting and coming back are navigations between two pages that
   // never coexist. Each page's h1 takes focus on arrival; otherwise focus is
@@ -993,6 +1071,23 @@ export function RecordingsView() {
   const [meetingNotesSaveStatus, setMeetingNotesSaveStatus] =
     useState<MeetingNotesSaveStatus | null>(null);
   const [meetingTemplateId, setMeetingTemplateId] = useState("auto");
+  // The user's saved meeting templates (audit finding ux-12 — user-defined
+  // recipes alongside the 11 built-ins). Loaded once on mount and kept in
+  // sync with every save this view makes, the same pattern dictation-view.tsx
+  // uses for `dictationCustomModes`.
+  const [customMeetingTemplates, setCustomMeetingTemplates] = useState<
+    CustomMeetingTemplate[]
+  >([]);
+  const [templateEditorOpen, setTemplateEditorOpen] = useState(false);
+  // null while creating a new template; the template being edited otherwise.
+  const [templateEditorTarget, setTemplateEditorTarget] =
+    useState<CustomMeetingTemplate | null>(null);
+  const [templateEditorSeed, setTemplateEditorSeed] = useState<{
+    name: string;
+    summaryPrompt: string;
+    notesOutline: string[];
+  } | null>(null);
+  const [templateManagerOpen, setTemplateManagerOpen] = useState(false);
   const [meetingSummary, setMeetingSummary] = useState("");
   const [meetingActionItemsText, setMeetingActionItemsText] = useState("");
   const [enhancedMeetingNotesDraft, setEnhancedMeetingNotesDraft] =
@@ -1031,6 +1126,12 @@ export function RecordingsView() {
   >({});
   const [analysisFailureByTarget, setAnalysisFailureByTarget] = useState<
     Partial<Record<string, RecordingAnalysisFailedEvent>>
+  >({});
+  // Whole-meeting analysis state, keyed by meeting, so a row in the list can
+  // move while a different meeting is open. Separate from the per-target map
+  // above, which only describes the one meeting on screen.
+  const [analysisStatusByRecording, setAnalysisStatusByRecording] = useState<
+    Record<string, { phase: MeetingAnalysisStatusEvent["phase"]; error: string | null }>
   >({});
   const [activeSpeechTarget, setActiveSpeechTarget] = useState<string | null>(null);
   const meetingChatRequestGuard = useScopedRequestGuard<string | null>();
@@ -1099,6 +1200,21 @@ export function RecordingsView() {
   >(
     "all"
   );
+  // What the last audio re-check found, and whether an acknowledgement is
+  // waiting on a confirmation. Both are per-meeting and cleared on navigation.
+  const [audioRecheckResult, setAudioRecheckResult] = useState<{
+    recordingId: string;
+    recoverable: boolean;
+    message: string;
+  } | null>(null);
+  const [isRecheckingAudio, setIsRecheckingAudio] = useState(false);
+  const [pendingAcknowledgement, setPendingAcknowledgement] =
+    useState<Recording | null>(null);
+  const [isAcknowledging, setIsAcknowledging] = useState(false);
+  // Why the last attempt to start a meeting did not. Held on screen rather than
+  // shown as a toast: it carries the one action that resolves it.
+  const [meetingStartFailure, setMeetingStartFailure] =
+    useState<MeetingStartFailure | null>(null);
   const [isBulkReclassifying, setIsBulkReclassifying] = useState(false);
   const [isExportingMeeting, setIsExportingMeeting] = useState(false);
   const [isRefreshingTranscriptPanel, setIsRefreshingTranscriptPanel] =
@@ -1150,6 +1266,137 @@ export function RecordingsView() {
       }
     },
   });
+
+  // Loaded on mount, then re-read on every `settings-changed` broadcast --
+  // the same pattern models-screen.tsx uses for its own settings-derived
+  // state -- so a save from the manage/editor dialogs elsewhere in this same
+  // view (which already re-reads directly, see `persistCustomMeetingTemplates`)
+  // or from a second window entirely both keep this list current.
+  useEffect(() => {
+    let disposed = false;
+    let unlisten: (() => void) | undefined;
+
+    const refreshCustomMeetingTemplates = () => {
+      void getSettings()
+        .then((settings) => {
+          if (!disposed) {
+            setCustomMeetingTemplates(settings.transcription.meetingCustomTemplates ?? []);
+          }
+        })
+        .catch((error) => {
+          console.warn("Failed to load meeting templates:", error);
+        });
+    };
+
+    refreshCustomMeetingTemplates();
+    void listen("settings-changed", () => {
+      if (!disposed) {
+        refreshCustomMeetingTemplates();
+      }
+    })
+      .then((dispose) => {
+        if (disposed) {
+          dispose?.();
+          return;
+        }
+        unlisten = dispose;
+      })
+      .catch((error) => {
+        console.warn("Failed to subscribe to settings-changed:", error);
+      });
+
+    return () => {
+      disposed = true;
+      unlisten?.();
+    };
+  }, []);
+
+  /** Read-modify-write settings.transcription.meetingCustomTemplates, the
+   * same pattern dictation-view.tsx's `persistDictationPreferences` uses for
+   * `dictationCustomModes` -- riding the existing settings surface needs no
+   * new IPC command.
+   *
+   * Rust sanitizes on every save (dropping a malformed entry, capping a
+   * name/prompt/outline length or the whole list's count -- see
+   * `sanitize_meeting_custom_templates` in settings.rs), so `next` is not
+   * necessarily what ends up on disk. Re-reading via `getSettings()` after
+   * the write and setting state from *that* -- not the optimistic `next` --
+   * is what keeps this view honest about what was actually persisted; the
+   * caller is told when the two disagree so it can warn instead of quietly
+   * reporting success on data that was just trimmed. */
+  const persistCustomMeetingTemplates = async (
+    next: CustomMeetingTemplate[]
+  ): Promise<{ persisted: CustomMeetingTemplate[]; truncated: boolean } | null> => {
+    try {
+      const settings = await getSettings();
+      settings.transcription.meetingCustomTemplates = next;
+      await saveSettings(settings);
+      const persistedSettings = await getSettings();
+      const persisted = persistedSettings.transcription.meetingCustomTemplates ?? [];
+      setCustomMeetingTemplates(persisted);
+      return { persisted, truncated: !meetingTemplatesEqual(persisted, next) };
+    } catch (error) {
+      console.warn("Failed to save meeting templates:", error);
+      toast("Couldn't save meeting templates — the change may not stick.", "error");
+      return null;
+    }
+  };
+
+  const TEMPLATE_TRUNCATED_WARNING =
+    "Saved, but part of it was too long or otherwise invalid and got trimmed. Check the template.";
+
+  const handleSaveNewMeetingTemplate = async (draft: MeetingTemplateDraft) => {
+    if (customMeetingTemplates.length >= MAX_CUSTOM_MEETING_TEMPLATES) {
+      toast(`You can save up to ${MAX_CUSTOM_MEETING_TEMPLATES} templates.`, "error");
+      return;
+    }
+    const id = `custom-${
+      typeof crypto !== "undefined" && "randomUUID" in crypto
+        ? crypto.randomUUID()
+        : `${Date.now()}-${Math.random().toString(36).slice(2)}`
+    }`;
+    const result = await persistCustomMeetingTemplates([
+      ...customMeetingTemplates,
+      { id, ...draft },
+    ]);
+    if (!result) {
+      return;
+    }
+    toast(
+      result.truncated ? TEMPLATE_TRUNCATED_WARNING : "Template saved.",
+      result.truncated ? "info" : "success"
+    );
+  };
+
+  const handleUpdateMeetingTemplate = async (
+    id: string,
+    draft: MeetingTemplateDraft
+  ) => {
+    const result = await persistCustomMeetingTemplates(
+      customMeetingTemplates.map((template) =>
+        template.id === id ? { ...template, ...draft } : template
+      )
+    );
+    if (!result) {
+      return;
+    }
+    toast(
+      result.truncated ? TEMPLATE_TRUNCATED_WARNING : "Template updated.",
+      result.truncated ? "info" : "success"
+    );
+  };
+
+  const handleDeleteMeetingTemplate = async (template: CustomMeetingTemplate) => {
+    // Past meetings keep their stored template id regardless -- the picker
+    // and the analysis pass both fall back to the default template for an id
+    // that no longer resolves, so a deletion here cannot break their display.
+    const result = await persistCustomMeetingTemplates(
+      customMeetingTemplates.filter((existing) => existing.id !== template.id)
+    );
+    if (result) {
+      toast(`Deleted "${template.name}".`, "success");
+    }
+  };
 
   useEffect(() => {
     if (!selectedRecording?.id) {
@@ -1220,6 +1467,50 @@ export function RecordingsView() {
       unlistenFailure?.();
     };
   }, [selectedRecording?.id]);
+
+  // Whole-meeting analysis status, listened for at the view level rather than
+  // per open meeting: the failure this surfaces is normally discovered later,
+  // from the list, not while the meeting is on screen.
+  useEffect(() => {
+    let disposed = false;
+    let unlisten: (() => void) | undefined;
+
+    void listen(MEETING_ANALYSIS_STATUS_EVENT, (event) => {
+      const payload = parseMeetingAnalysisStatus(event.payload);
+      if (!payload) {
+        return;
+      }
+      setAnalysisStatusByRecording((current) => ({
+        ...current,
+        [payload.recordingId]: {
+          phase: payload.phase,
+          error: payload.error ?? null,
+        },
+      }));
+      if (payload.phase === "completed") {
+        // The stored failure is cleared on the sidecar side; re-read the
+        // records so the list stops carrying a failure that is over.
+        void refetch();
+      }
+    })
+      .then((next) => {
+        if (disposed) {
+          next();
+          return;
+        }
+        unlisten = next;
+      })
+      .catch((error) => {
+        // A build whose sidecar half has not landed simply never reports; the
+        // stored failure field still drives the banner.
+        console.warn("Failed to subscribe to meeting analysis status:", error);
+      });
+
+    return () => {
+      disposed = true;
+      unlisten?.();
+    };
+  }, [refetch]);
 
   useEffect(() => {
     meetingNotesRef.current = meetingNotes;
@@ -2049,9 +2340,9 @@ export function RecordingsView() {
       });
   };
 
-  const openMeetingCapture = () => {
-    if (meetingsReadiness.state !== "ready") {
-      const cause = meetingsReadiness.cause;
+  const openMeetingCapture = (calendarPrefill?: CalendarCapturePrefill) => {
+    if (!captureIsReady) {
+      const cause = meetingCaptureReadiness.cause;
       toast(
         cause?.message ?? "Plainsong could not confirm that meetings are ready.",
         "error",
@@ -2061,13 +2352,17 @@ export function RecordingsView() {
       }
       return;
     }
+    // Starting from the calendar lands on the same consent step as "New
+    // meeting", template picker and all. The event supplies the name; every
+    // other decision about the meeting stays where the reader expects it.
+    pendingCalendarPrefill.current = calendarPrefill ?? null;
     setShowConsent(true);
   };
 
   const handleStartRecording = async (options: { mic: boolean; systemAudio: boolean; template?: string }) => {
     const requestedReadiness = options.systemAudio
       ? fullCaptureReadiness
-      : meetingsReadiness;
+      : meetingCaptureReadiness;
     if (requestedReadiness.state !== "ready") {
       const cause = requestedReadiness.cause;
       toast(
@@ -2082,12 +2377,13 @@ export function RecordingsView() {
       return;
     }
 
+    setMeetingStartFailure(null);
     try {
       const selectedTemplateId = options.template ?? "auto";
       const shouldSeedTemplateOutline =
         !liveMeetingNotes.trim() && typeof options.template === "string";
       const seededNotes = shouldSeedTemplateOutline
-        ? buildMeetingTemplateOutline(options.template)
+        ? buildMeetingTemplateOutline(options.template, customMeetingTemplates)
         : liveMeetingNotes;
       const startedId = await startMeeting({
         ...options,
@@ -2100,16 +2396,59 @@ export function RecordingsView() {
         setLiveMeetingSystemAudio(options.systemAudio);
         setLiveMeetingConsentShown(true);
         lastSavedLiveMeetingNotesRef.current = seededNotes;
+        // Name the recording after the calendar event that started it.
+        //
+        // Renaming after the fact rather than passing a title through
+        // `start_recording` keeps this inside the renderer, and it composes
+        // with auto-naming exactly as it should: the sidecar's
+        // `auto_name_meeting_recording` only overwrites a PLACEHOLDER title,
+        // so an event's name survives the analysis pass. A failure here loses
+        // the name and nothing else, which is why it does not fail the start.
+        const prefill = pendingCalendarPrefill.current;
+        if (prefill) {
+          try {
+            await renameRecording(startedId, prefill.title);
+          } catch (error) {
+            console.error("Failed to apply the calendar meeting title:", error);
+          }
+        }
         void refetch();
       }
     } catch (error) {
       console.error("Failed to start recording:", error);
-      toast(
-        error instanceof Error ? error.message : "Failed to start recording",
-        "error"
-      );
+      const failure = describeMeetingStartFailure(error);
+      setMeetingStartFailure(failure);
+      toast(failure.message, "error");
     } finally {
       setShowConsent(false);
+    }
+  };
+
+  /**
+   * The one action a start failure offers. Each code resolves to exactly one
+   * button; the old code appended advice to the message instead, which is how a
+   * system-audio failure came to carry microphone-permission guidance.
+   */
+  const runMeetingStartAction = (failure: MeetingStartFailure) => {
+    switch (failure.action.id) {
+      case "open_microphone_settings":
+        void openPermissionSettings("microphone");
+        return;
+      case "open_system_audio_settings":
+        void openPermissionSettings("system_audio");
+        return;
+      case "open_audio_input_settings":
+        requestReadinessDestination("transcription");
+        return;
+      case "open_storage_settings":
+        requestSettingsTab("storage");
+        return;
+      case "retry":
+        setMeetingStartFailure(null);
+        setShowConsent(true);
+        return;
+      case "none":
+        setMeetingStartFailure(null);
     }
   };
 
@@ -2132,7 +2471,7 @@ export function RecordingsView() {
   };
 
   const handleApplyTemplateOutline = () => {
-    const outline = buildMeetingTemplateOutline(meetingTemplateId);
+    const outline = buildMeetingTemplateOutline(meetingTemplateId, customMeetingTemplates);
     setMeetingNotes((current) => {
       const trimmedCurrent = current.trim();
       if (!trimmedCurrent) {
@@ -3040,17 +3379,47 @@ export function RecordingsView() {
     };
   }, [meetings]);
   const selectedTemplateOption = useMemo(
-    () => getMeetingTemplateOption(meetingTemplateId),
-    [meetingTemplateId]
+    () => getMeetingTemplateOption(meetingTemplateId, customMeetingTemplates),
+    [meetingTemplateId, customMeetingTemplates]
   );
   const liveMeetingTemplateOption = useMemo(
-    () => getMeetingTemplateOption(liveMeetingTemplateId),
-    [liveMeetingTemplateId]
+    () => getMeetingTemplateOption(liveMeetingTemplateId, customMeetingTemplates),
+    [liveMeetingTemplateId, customMeetingTemplates]
   );
   const meetingNoteSections = useMemo(
-    () => parseMeetingNoteSections(meetingNotes, meetingTemplateId),
-    [meetingNotes, meetingTemplateId]
+    () => parseMeetingNoteSections(meetingNotes, meetingTemplateId, customMeetingTemplates),
+    [meetingNotes, meetingTemplateId, customMeetingTemplates]
   );
+
+  /** What "Save current structure as a template" actually captures: the
+   * headings the notes are organized under right now -- not the static
+   * playbook outline, which would silently discard any section the user
+   * added, removed, or renamed by hand. Falls back to the playbook outline
+   * only when there is no note text to derive a structure from. */
+  const buildTemplateSaveSeed = (): MeetingTemplateDraft => {
+    const seenTitles = new Set<string>();
+    const outlineFromNotes: string[] = [];
+    if (meetingNotes.trim()) {
+      for (const section of meetingNoteSections) {
+        const title = section.title.trim();
+        const key = title.toLowerCase();
+        // "General notes" is the catch-all for text with no heading, not a
+        // reusable outline section, so it never becomes one.
+        if (!title || title === GENERAL_MEETING_NOTES_TITLE || seenTitles.has(key)) {
+          continue;
+        }
+        seenTitles.add(key);
+        outlineFromNotes.push(title);
+      }
+    }
+    return {
+      name: "",
+      summaryPrompt: selectedTemplateOption.summaryPrompt,
+      notesOutline:
+        outlineFromNotes.length > 0 ? outlineFromNotes : selectedTemplateOption.notesOutline,
+    };
+  };
+
   const activeMeetingCaptureMode = useMemo(
     () =>
       resolveRecordingCaptureMode(activeMeeting, null, liveMeetingSystemAudio),
@@ -3314,9 +3683,9 @@ export function RecordingsView() {
   ) => {
     setMeetingNotes((current) => {
       const nextSections = updater(
-        parseMeetingNoteSections(current, meetingTemplateId)
+        parseMeetingNoteSections(current, meetingTemplateId, customMeetingTemplates)
       );
-      return serializeMeetingNoteSections(nextSections);
+      return serializeMeetingNoteSections(nextSections, meetingTemplateId, customMeetingTemplates);
     });
   };
 
@@ -3408,6 +3777,148 @@ export function RecordingsView() {
       return;
     }
     setPendingRetranscribe(recording);
+  };
+
+  /**
+   * Read the one true state of a meeting's notes: what is happening now if
+   * anything is, otherwise what the record itself remembers about the last
+   * attempt. Returns null when there is nothing to say.
+   */
+  const meetingAnalysisNotice = useCallback(
+    (recording: Recording | null | undefined) => {
+      if (!recording) {
+        return null;
+      }
+      const live = analysisStatusByRecording[recording.id];
+      return describeMeetingAnalysis({
+        storedFailure: readStoredAnalysisFailure(recording),
+        livePhase: live?.phase ?? null,
+        liveError: live?.error ?? null,
+      });
+    },
+    [analysisStatusByRecording],
+  );
+
+  const selectedAnalysisNotice = meetingAnalysisNotice(selectedRecording);
+  const selectedMeetingIntegrity = readMeetingIntegrity(selectedRecording);
+  const selectedIncompleteTranscript = describeIncompleteTranscript(
+    selectedMeetingIntegrity,
+  );
+  const selectedCaptureDegradation = describeCaptureDegradation(
+    selectedMeetingIntegrity,
+  );
+  const canRecheckSelectedAudio = canRecheckMeetingAudio(
+    selectedRecording,
+    selectedMeetingIntegrity,
+  );
+
+  /**
+   * Re-read the saved audio and repair the lifecycle rows describing it.
+   *
+   * A stop-time failure can condemn audio that is perfectly intact, and every
+   * runtime resolver refuses anything not marked `ready`. Before this the only
+   * escape was relaunching the app and hoping the startup reconcile covered it.
+   * The meeting's own status is left alone by the sidecar: this is evidence
+   * about files, not about whether it was transcribed.
+   */
+  const handleRecheckMeetingAudio = async (recordingIdToCheck: string) => {
+    setIsRecheckingAudio(true);
+    setAudioRecheckResult(null);
+    try {
+      const report = await revalidateRecordingAudio(recordingIdToCheck);
+      setAudioRecheckResult({
+        recordingId: recordingIdToCheck,
+        recoverable: Boolean(report?.recoverable),
+        message:
+          report?.message ??
+          (report?.recoverable
+            ? "The saved audio was re-checked and is intact."
+            : "The saved audio was re-checked and some of it could not be read."),
+      });
+      await refetch();
+      if (selectedRecording?.id === recordingIdToCheck) {
+        await refreshSelectedRecording(recordingIdToCheck);
+      }
+    } catch (error) {
+      const message =
+        error instanceof Error
+          ? error.message
+          : "Plainsong could not re-check this meeting's audio.";
+      setAudioRecheckResult({
+        recordingId: recordingIdToCheck,
+        recoverable: false,
+        message,
+      });
+      toast(message, "error");
+    } finally {
+      setIsRecheckingAudio(false);
+    }
+  };
+
+  /**
+   * Record that the reader accepts losing this meeting's audio.
+   *
+   * Storage policy holds the audio of an incomplete meeting back precisely
+   * because it is the only complete record of what was said. This releases it,
+   * and never claims the transcript became complete.
+   */
+  const handleAcknowledgeIncompleteTranscript = async (
+    recordingIdToAcknowledge: string,
+  ) => {
+    setIsAcknowledging(true);
+    try {
+      await acknowledgeIncompleteTranscript(recordingIdToAcknowledge);
+      setPendingAcknowledgement(null);
+      await refetch();
+      if (selectedRecording?.id === recordingIdToAcknowledge) {
+        await refreshSelectedRecording(recordingIdToAcknowledge);
+      }
+      toast(
+        "Noted. This meeting's audio is no longer held back from cleanup.",
+        "success",
+      );
+    } catch (error) {
+      toast(
+        error instanceof Error
+          ? error.message
+          : "Plainsong could not record that acknowledgement.",
+        "error",
+      );
+    } finally {
+      setIsAcknowledging(false);
+    }
+  };
+
+  const handleRetryMeetingAnalysis = async (recordingIdToRetry: string) => {
+    setAnalysisStatusByRecording((current) => ({
+      ...current,
+      [recordingIdToRetry]: { phase: "running", error: null },
+    }));
+    try {
+      await retryMeetingAnalysis(recordingIdToRetry);
+      // Whether the command returns on start or on finish is the sidecar's
+      // business. Drop the local override and let the events plus the stored
+      // field say what actually happened.
+      setAnalysisStatusByRecording((current) => {
+        const next = { ...current };
+        delete next[recordingIdToRetry];
+        return next;
+      });
+      await refetch();
+      if (selectedRecording?.id === recordingIdToRetry) {
+        await refreshSelectedRecording(recordingIdToRetry);
+      }
+    } catch (error) {
+      const message =
+        error instanceof Error
+          ? error.message
+          : "Couldn't start the meeting notes again.";
+      setAnalysisStatusByRecording((current) => ({
+        ...current,
+        [recordingIdToRetry]: { phase: "failed", error: message },
+      }));
+      toast(message, "error");
+    }
   };
 
   const handleMarkAsDictation = async (recordingIdToUpdate: string) => {
@@ -3590,6 +4101,19 @@ export function RecordingsView() {
                           : "Re-transcribe from audio"}
                       </DropdownMenuItem>
                     )}
+                    {canRecheckSelectedAudio && !isLiveSelectedMeeting && (
+                      <DropdownMenuItem
+                        disabled={isRecheckingAudio}
+                        onClick={() => {
+                          if (selectedRecording) {
+                            void handleRecheckMeetingAudio(selectedRecording.id);
+                          }
+                        }}
+                      >
+                        <FileAudio className="mr-2 h-4 w-4" />
+                        Re-check audio
+                      </DropdownMenuItem>
+                    )}
                     <DropdownMenuSeparator />
                     <DropdownMenuItem
                       onClick={() => {
@@ -3686,6 +4210,111 @@ export function RecordingsView() {
               </p>
             ) : null}
           </div>
+
+          {/* What the capture actually got. Rendered before anything derived
+              from the transcript, because it is the reason the transcript is
+              short. */}
+          {selectedCaptureDegradation ? (
+            <div className="shrink-0 px-6 pt-4">
+              <StatusBanner
+                tone="muted"
+                title={selectedCaptureDegradation.title}
+                message={selectedCaptureDegradation.message}
+              />
+            </div>
+          ) : null}
+
+          {/* A transcript the sidecar knows is incomplete, and the reason its
+              audio is still on disk. Both were reachable only programmatically
+              before this. */}
+          {selectedIncompleteTranscript && selectedRecording ? (
+            <div className="shrink-0 px-6 pt-4">
+              <StatusBanner
+                title={selectedIncompleteTranscript.title}
+                message={selectedIncompleteTranscript.message}
+                actions={
+                  <>
+                    {canRetranscribeRecording(selectedRecording) ? (
+                      <Button
+                        size="sm"
+                        variant="outline"
+                        onClick={() =>
+                          void handleRetranscribeRecording(selectedRecording.id)
+                        }
+                      >
+                        <RefreshCw className="mr-2 h-4 w-4" />
+                        Re-transcribe
+                      </Button>
+                    ) : null}
+                    {selectedIncompleteTranscript.audioHeld ? (
+                      <Button
+                        size="sm"
+                        variant="ghost"
+                        onClick={() =>
+                          setPendingAcknowledgement(selectedRecording)
+                        }
+                      >
+                        Accept losing the audio
+                      </Button>
+                    ) : null}
+                  </>
+                }
+              />
+            </div>
+          ) : null}
+
+          {/* What the last re-check found. The sidecar leaves the meeting's
+              own status alone, so this says what happened to the files. */}
+          {audioRecheckResult &&
+          audioRecheckResult.recordingId === selectedRecording?.id ? (
+            <div className="shrink-0 px-6 pt-4">
+              <StatusBanner
+                tone={audioRecheckResult.recoverable ? "muted" : "rust"}
+                title={
+                  audioRecheckResult.recoverable
+                    ? "Saved audio re-checked"
+                    : "Saved audio could not be fully read"
+                }
+                message={audioRecheckResult.message}
+                actions={
+                  <Button
+                    size="sm"
+                    variant="ghost"
+                    onClick={() => setAudioRecheckResult(null)}
+                  >
+                    Dismiss
+                  </Button>
+                }
+              />
+            </div>
+          ) : null}
+
+          {/* Meeting notes that were never written. The list says the same
+              thing; a reader who opened the meeting to look for the summary
+              needs to be told here, where the summary is missing. */}
+          {selectedAnalysisNotice ? (
+            <div className="shrink-0 px-6 pt-4">
+              <StatusBanner
+                tone={selectedAnalysisNotice.busy ? "muted" : "rust"}
+                title={selectedAnalysisNotice.title}
+                message={selectedAnalysisNotice.message}
+                actions={
+                  selectedAnalysisNotice.retryable && selectedRecording ? (
+                    <Button
+                      size="sm"
+                      variant="outline"
+                      onClick={() =>
+                        void handleRetryMeetingAnalysis(selectedRecording.id)
+                      }
+                    >
+                      <RefreshCw className="mr-2 h-4 w-4" />
+                      Retry notes
+                    </Button>
+                  ) : null
+                }
+              />
+            </div>
+          ) : null}
 
           {/* The same failure surface the list carries. Without it here, Play
               audio in the header above could fail with nothing on screen but a
@@ -3821,18 +4450,22 @@ export function RecordingsView() {
                                       </Button>
                                     </DropdownMenuTrigger>
                                     <DropdownMenuContent align="end" className="max-h-72 overflow-y-auto">
-                                      {MEETING_TEMPLATES.map((template) => (
-                                        <DropdownMenuItem
-                                          key={template.value}
-                                          onClick={() =>
-                                            requestRegeneration("summary", template.value)
-                                          }
-                                        >
-                                          {template.value === meetingTemplateId
-                                            ? `${template.label} (current)`
-                                            : template.label}
-                                        </DropdownMenuItem>
-                                      ))}
+                                      {getAllMeetingTemplateOptions(customMeetingTemplates).map(
+                                        (template) => (
+                                          <DropdownMenuItem
+                                            key={template.value}
+                                            onClick={() =>
+                                              requestRegeneration("summary", template.value)
+                                            }
+                                          >
+                                            {template.label}
+                                            {template.isCustom ? " (yours)" : ""}
+                                            {template.value === meetingTemplateId
+                                              ? " (current)"
+                                              : ""}
+                                          </DropdownMenuItem>
+                                        )
+                                      )}
                                     </DropdownMenuContent>
                                   </DropdownMenu>
                                   <Button
@@ -4104,11 +4737,22 @@ export function RecordingsView() {
                               onChange={(event) => setMeetingTemplateId(event.target.value)}
                               className="h-9 rounded-md border bg-background px-3 text-sm"
                             >
-                              {MEETING_TEMPLATES.map((template) => (
-                                <option key={template.value} value={template.value}>
-                                  {template.label}
-                                </option>
-                              ))}
+                              <optgroup label="Built-in">
+                                {MEETING_TEMPLATES.map((template) => (
+                                  <option key={template.value} value={template.value}>
+                                    {template.label}
+                                  </option>
+                                ))}
+                              </optgroup>
+                              {customMeetingTemplates.length > 0 ? (
+                                <optgroup label="Your templates">
+                                  {customMeetingTemplates.map((template) => (
+                                    <option key={template.id} value={template.id}>
+                                      {template.name}
+                                    </option>
+                                  ))}
+                                </optgroup>
+                              ) : null}
                             </select>
                             <Button
                               type="button"
@@ -4117,6 +4761,26 @@ export function RecordingsView() {
                               onClick={handleApplyTemplateOutline}
                             >
                               Add its headings to my notes
+                            </Button>
+                            <Button
+                              type="button"
+                              size="sm"
+                              variant="outline"
+                              onClick={() => {
+                                setTemplateEditorTarget(null);
+                                setTemplateEditorSeed(buildTemplateSaveSeed());
+                                setTemplateEditorOpen(true);
+                              }}
+                            >
+                              Save as a template
+                            </Button>
+                            <Button
+                              type="button"
+                              size="sm"
+                              variant="outline"
+                              onClick={() => setTemplateManagerOpen(true)}
+                            >
+                              Manage templates
                             </Button>
                             {selectedMeetingConsent.needsManualNotice ? (
                               <Button
@@ -5191,7 +5855,8 @@ export function RecordingsView() {
         </div>
       ) : (
         <>
-      <div className="p-6 border-b flex items-center justify-between">
+      <div className="border-b">
+      <div className="p-6 pb-4 flex items-center justify-between">
         <div>
           <p className="rubric mb-1.5">MEETINGS</p>
           <h1
@@ -5218,8 +5883,8 @@ export function RecordingsView() {
           ) : (
             <Button
               variant="active"
-              onClick={openMeetingCapture}
-              disabled={meetingsReadiness.state !== "ready"}
+              onClick={() => openMeetingCapture()}
+              disabled={!captureIsReady}
             >
               <Mic2 className="h-4 w-4 mr-2" />
               New meeting
@@ -5227,24 +5892,114 @@ export function RecordingsView() {
           )}
         </div>
       </div>
+        {/* The calendar affordance, and nothing else this file has to know
+            about. It renders one line at most and usually nothing: the
+            component decides, from a permission state this view never reads,
+            whether there is anything honest to say. Readiness is deliberately
+            not involved — a Mac with no calendar access records meetings
+            exactly as well as one with it. */}
+        <CalendarMeetingCue
+          captureInProgress={isRecording}
+          onStartCapture={(prefill) => openMeetingCapture(prefill)}
+        />
+      </div>
 
       <ScrollArea className="flex-1">
         <div className="p-6">
+          {/* Engine loss, said in plain words on the surface the reader is
+              actually on. It used to appear only as the bridge's own log line
+              on the buried Setup view. */}
+          {engineNotice ? (
+            <StatusBanner
+              tone={engineNotice.recovering ? "muted" : "rust"}
+              role={engineNotice.recovering ? "status" : "alert"}
+              title={engineNotice.title}
+              message={engineNotice.message}
+              actions={
+                <Button
+                  size="sm"
+                  variant="ghost"
+                  onClick={() => dismissEngineNotice?.()}
+                >
+                  Dismiss
+                </Button>
+              }
+            />
+          ) : null}
+
+          {meetingStartFailure ? (
+            <StatusBanner
+              className="mb-4"
+              title="This meeting did not start"
+              message={meetingStartFailure.message}
+              actions={
+                <>
+                  {meetingStartFailure.action.label ? (
+                    <Button
+                      size="sm"
+                      variant="outline"
+                      onClick={() =>
+                        runMeetingStartAction(meetingStartFailure)
+                      }
+                    >
+                      {meetingStartFailure.action.label}
+                    </Button>
+                  ) : null}
+                  <Button
+                    size="sm"
+                    variant="ghost"
+                    onClick={() => setMeetingStartFailure(null)}
+                  >
+                    Dismiss
+                  </Button>
+                </>
+              }
+            />
+          ) : null}
+
+          {/* Rust and "needs attention" are reserved for something that stops
+              a meeting being recorded. A missing notes route does not, and
+              saying it does beside a working New meeting button was the
+              contradiction this view used to ship. */}
           {meetingsReadiness.state !== "ready" ? (
             <div
               role={
-                meetingsReadiness.state === "unknown" ? "status" : "alert"
+                !captureIsReady && meetingsReadiness.state !== "unknown"
+                  ? "alert"
+                  : "status"
               }
-              aria-label="Meetings need attention"
-              className="mb-4 flex flex-wrap items-start justify-between gap-3 rounded-md border border-rust/35 bg-rust/10 px-4 py-3"
+              aria-label={
+                captureIsReady
+                  ? "Meeting notes are unavailable"
+                  : "Meetings need attention"
+              }
+              className={`mb-4 flex flex-wrap items-start justify-between gap-3 rounded-md border px-4 py-3 ${
+                captureIsReady
+                  ? "border-border/80 bg-muted/30"
+                  : "border-rust/35 bg-rust/10"
+              }`}
             >
-              <div className="flex min-w-0 items-start gap-2.5 text-sm text-rust">
+              <div
+                className={`flex min-w-0 items-start gap-2.5 text-sm ${
+                  captureIsReady ? "text-muted-foreground" : "text-rust"
+                }`}
+              >
                 <span
-                  className="neume neume-rust mt-1 shrink-0"
+                  className={`neume mt-1 shrink-0 ${
+                    captureIsReady ? "neume-hollow" : "neume-rust"
+                  }`}
                   aria-hidden="true"
                 />
                 <div>
-                  <p className="font-medium">Meetings need attention</p>
+                  <p
+                    className={`font-medium ${
+                      captureIsReady ? "text-foreground" : ""
+                    }`}
+                  >
+                    {captureIsReady
+                      ? "Meeting notes are unavailable"
+                      : "Meetings need attention"}
+                  </p>
                   <p className="mt-1 leading-6">
                     {meetingsReadiness.cause?.message ??
                       "Plainsong could not confirm that meetings are ready."}
@@ -5732,7 +6487,7 @@ export function RecordingsView() {
                   : "Try a different search, or a different status."}
               </p>
               {meetings.length === 0 && (
-                <Button className="mt-4" variant="active" onClick={openMeetingCapture}>
+                <Button className="mt-4" variant="active" onClick={() => openMeetingCapture()}>
                   <Mic2 data-icon="inline-start" />
                   Start a meeting
                 </Button>
@@ -5743,6 +6498,7 @@ export function RecordingsView() {
               {filteredMeetings.map((recording) => {
                 const isLiveRow = recording.id === recordingId && isRecording;
                 const statusBand = recordingStatusBand(recording.status, isLiveRow);
+                const analysisNotice = meetingAnalysisNotice(recording);
                 return (
                 <Card
                   key={recording.id}
@@ -5849,6 +6605,21 @@ export function RecordingsView() {
                                   : "Re-transcribe from audio"}
                               </DropdownMenuItem>
                             )}
+                            {canRecheckMeetingAudio(
+                              recording,
+                              readMeetingIntegrity(recording),
+                            ) && !isLiveRow && (
+                              <DropdownMenuItem
+                                disabled={isRecheckingAudio}
+                                onClick={(e) => {
+                                  e.stopPropagation();
+                                  void handleRecheckMeetingAudio(recording.id);
+                                }}
+                              >
+                                <FileAudio className="h-4 w-4 mr-2" />
+                                Re-check audio
+                              </DropdownMenuItem>
+                            )}
                             <DropdownMenuSeparator />
                             <DropdownMenuItem
                               onClick={async (e) => {
@@ -5879,6 +6650,47 @@ export function RecordingsView() {
                         </DropdownMenu>
                       </div>
                     </div>
+
+                    {/* A meeting whose notes failed used to look identical to
+                        one that never asked for any. The row says so, and
+                        carries the way back. */}
+                    {analysisNotice ? (
+                      <div
+                        className="mt-3 flex flex-wrap items-center justify-between gap-2 border-t border-border/60 pt-3"
+                        role={analysisNotice.busy ? "status" : "alert"}
+                      >
+                        <div className="min-w-0">
+                          <p
+                            className={`text-sm font-medium ${
+                              analysisNotice.busy ? "text-foreground" : "text-rust"
+                            }`}
+                          >
+                            {analysisNotice.title}
+                          </p>
+                          <p className="text-sm text-muted-foreground">
+                            {analysisNotice.message}
+                          </p>
+                        </div>
+                        {analysisNotice.retryable ? (
+                          <Button
+                            size="sm"
+                            variant="outline"
+                            onClick={(event) => {
+                              event.stopPropagation();
+                              void handleRetryMeetingAnalysis(recording.id);
+                            }}
+                          >
+                            <RefreshCw className="mr-2 h-4 w-4" />
+                            Retry notes
+                          </Button>
+                        ) : (
+                          <Loader2
+                            className="h-4 w-4 animate-spin text-muted-foreground"
+                            aria-hidden="true"
+                          />
+                        )}
+                      </div>
+                    ) : null}
                   </CardContent>
                 </Card>
                 );
@@ -5894,6 +6706,43 @@ export function RecordingsView() {
         open={showConsent}
         onOpenChange={setShowConsent}
         onStart={handleStartRecording}
+        customTemplates={customMeetingTemplates}
+      />
+
+      {templateEditorSeed ? (
+        <MeetingTemplateEditorDialog
+          open={templateEditorOpen}
+          onOpenChange={setTemplateEditorOpen}
+          mode={templateEditorTarget ? "edit" : "create"}
+          seed={templateEditorSeed}
+          existingNames={customMeetingTemplates
+            .filter((template) => template.id !== templateEditorTarget?.id)
+            .map((template) => template.name)}
+          onSave={async (draft) => {
+            if (templateEditorTarget) {
+              await handleUpdateMeetingTemplate(templateEditorTarget.id, draft);
+            } else {
+              await handleSaveNewMeetingTemplate(draft);
+            }
+          }}
+        />
+      ) : null}
+
+      <MeetingTemplateManagerDialog
+        open={templateManagerOpen}
+        onOpenChange={setTemplateManagerOpen}
+        templates={customMeetingTemplates}
+        onEdit={(template) => {
+          setTemplateEditorTarget(template);
+          setTemplateEditorSeed({
+            name: template.name,
+            summaryPrompt: template.summaryPrompt,
+            notesOutline: template.notesOutline,
+          });
+          setTemplateManagerOpen(false);
+          setTemplateEditorOpen(true);
+        }}
+        onDelete={(template) => void handleDeleteMeetingTemplate(template)}
       />
 
       {/* Regenerating overwrites in place, so text Plainsong did not write in
@@ -5925,6 +6774,53 @@ export function RecordingsView() {
             >
               <RefreshCw className="mr-2 h-4 w-4" />
               Replace and regenerate
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      {/* Acknowledging is the reader agreeing to lose something. The audio of
+          an incomplete meeting is the only complete record of it, so the cost
+          is stated before the button, never after. */}
+      <Dialog
+        open={pendingAcknowledgement !== null}
+        onOpenChange={(open) => {
+          if (!open) setPendingAcknowledgement(null);
+        }}
+      >
+        <DialogContent>
+          <DialogHeader>
+            <DialogTitle>Accept losing this meeting&apos;s audio?</DialogTitle>
+            <DialogDescription>
+              Part of this transcript is missing, and the saved audio is the
+              only complete record of what was said. Accepting this lets
+              Plainsong&apos;s storage cleanup delete that audio, after which
+              the meeting cannot be transcribed again. The transcript stays
+              exactly as it is — still incomplete.
+            </DialogDescription>
+          </DialogHeader>
+          <DialogFooter>
+            <Button
+              variant="outline"
+              onClick={() => setPendingAcknowledgement(null)}
+            >
+              Keep the audio
+            </Button>
+            <Button
+              variant="destructive"
+              disabled={isAcknowledging}
+              onClick={() => {
+                if (pendingAcknowledgement) {
+                  void handleAcknowledgeIncompleteTranscript(
+                    pendingAcknowledgement.id,
+                  );
+                }
+              }}
+            >
+              {isAcknowledging ? (
+                <Loader2 className="mr-2 h-4 w-4 animate-spin" />
+              ) : null}
+              Accept losing the audio
             </Button>
           </DialogFooter>
         </DialogContent>

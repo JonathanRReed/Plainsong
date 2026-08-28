@@ -128,6 +128,51 @@ describe("describeAudioSourceWarning", () => {
 
     expect(warning.title).toBe("Microphone has gone silent");
   });
+
+  it("does not send a failed capture to check the mute button", () => {
+    // A hard capture failure used to be described as a device that had gone
+    // quiet, so the advice pointed at a mute switch that was never involved
+    // while Plainsong was already rebuilding the stream.
+    const warning = describeAudioSourceWarning({
+      recordingId: "r1",
+      source: "mic",
+      reason: "capture_failed",
+      detail: "cpal stream error: device disconnected",
+    });
+
+    expect(warning.title).toBe("Microphone capture failed");
+    expect(warning.message).toMatch(/rebuilding it/i);
+    expect(warning.message).not.toMatch(/unmuted/i);
+    expect(warning.message).toMatch(/is being recorded until it comes back/i);
+  });
+
+  it("passes a route failure through in the sidecar's own words", () => {
+    const warning = describeAudioSourceWarning({
+      recordingId: "r1",
+      source: "system",
+      reason: "route_changed",
+      detail: "The default output device changed mid-meeting.",
+    });
+
+    expect(warning.title).toBe("System audio is not being recorded");
+    expect(warning.message).toBe(
+      "The default output device changed mid-meeting."
+    );
+    expect(warning.message).not.toMatch(/unmuted/i);
+  });
+
+  it("does not describe a recovered route as a live problem", () => {
+    const warning = describeAudioSourceWarning({
+      recordingId: "r1",
+      source: "system",
+      reason: "route_changed",
+      recovered: true,
+      detail: "Replacement route started.",
+    });
+
+    expect(warning.title).toBe("System audio is recording again");
+    expect(warning.message).toMatch(/has been restored/i);
+  });
 });
 
 describe("meeting post-capture transcript streaming", () => {

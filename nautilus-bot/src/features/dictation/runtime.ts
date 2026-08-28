@@ -69,6 +69,34 @@ export interface DictationStateChangedEvent {
   captureReady?: boolean;
 }
 
+/**
+ * How the format/cleanup stage of one dictation concluded. Mirrors
+ * `DictationFormatOutcome` in `rust-sidecar/src/dictation_timing.rs`.
+ */
+export type DictationFormatOutcome = "not_applicable" | "skipped" | "applied" | "timed_out" | "failed";
+
+/**
+ * Wall-clock stage timing for one dictation, from the stop command through
+ * insertion -- not just the ASR-only latency fields above. This is the
+ * key-release-to-glyph number only when the sidecar had a real client
+ * gesture epoch to start from; otherwise it measures from when the sidecar's
+ * stop handler received the command, which is honestly later than the
+ * user's actual gesture by the Electron-to-sidecar IPC hop. See
+ * `dictation_timing.rs`'s module doc for the full explanation, and for what
+ * each field means / why a stage can be `null` (never reached).
+ */
+export interface DictationTimingRecord {
+  stopCommandReceivedAtEpochMs: number;
+  audioFinalizedMs?: number | null;
+  asrCompleteMs?: number | null;
+  formatCompleteMs?: number | null;
+  formatOutcome: DictationFormatOutcome;
+  insertionDispatchedMs?: number | null;
+  insertionConfirmedMs?: number | null;
+  insertionConfirmed: boolean;
+  totalMs?: number | null;
+}
+
 interface DictationTextReadyEvent {
   text: string;
   pasted?: boolean;
@@ -115,6 +143,11 @@ interface DictationTextReadyEvent {
    * delivered.
    */
   warnings?: string[];
+  /**
+   * Additive Wave 3 field: end-to-end stage timing for this dictation. See
+   * `DictationTimingRecord` above.
+   */
+  timing?: DictationTimingRecord;
 }
 
 function normalizeStateEvent(payload: DictationStateChangedEvent): DictationStateChangedEvent {

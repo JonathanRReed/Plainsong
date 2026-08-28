@@ -19,12 +19,35 @@ const shortcutHelperEntitlements = path.resolve(
   "build-resources",
   "entitlements.mac.shortcut-helper.plist",
 );
+// Read-only EventKit helper. It gets the calendar entitlement and nothing
+// else, for the same reason the Speech helper gets only Speech: the app's own
+// signature already carries microphone, Apple Events and the Accessibility
+// grant, and calendar reading has no business joining that set.
+const calendarHelperName = "plainsong-native-calendar-helper";
+const calendarHelperEntitlements = path.resolve(
+  import.meta.dirname,
+  "..",
+  "build-resources",
+  "entitlements.mac.calendar-helper.plist",
+);
 const sidecarName = "plainsong-sidecar";
 const sidecarEntitlements = path.resolve(
   import.meta.dirname,
   "..",
   "build-resources",
   "entitlements.mac.sidecar.plist",
+);
+// The generic "<Product> Helper" bundle, which Chromium uses for its utility
+// processes — the audio service among them. Matched by shape rather than by the
+// literal product name so a productName change cannot silently reroute it, and
+// anchored so the GPU/Renderer/Plugin helpers ("<Product> Helper (GPU)" and
+// friends) do NOT match: those keep the narrower inherit policy.
+const genericHelperPattern = /^.+ Helper(\.app)?$/;
+const genericHelperEntitlements = path.resolve(
+  import.meta.dirname,
+  "..",
+  "build-resources",
+  "entitlements.mac.helper.plist",
 );
 
 export function optionsForSignedFile(filePath, inheritedOptionsForFile, signContext) {
@@ -41,6 +64,18 @@ export function optionsForSignedFile(filePath, inheritedOptionsForFile, signCont
     return {
       ...inherited,
       entitlements: shortcutHelperEntitlements,
+    };
+  }
+  if (path.basename(filePath) === calendarHelperName) {
+    return {
+      ...inherited,
+      entitlements: calendarHelperEntitlements,
+    };
+  }
+  if (genericHelperPattern.test(path.basename(filePath))) {
+    return {
+      ...inherited,
+      entitlements: genericHelperEntitlements,
     };
   }
   if (path.basename(filePath) !== speechHelperName) {

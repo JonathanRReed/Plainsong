@@ -4,6 +4,7 @@ import { randomUUID } from "node:crypto";
 import { createInterface } from "node:readline";
 import { getCommandTimeoutMs, getCommandWorkKey } from "./ipc-command-policy";
 import { buildSidecarEnv } from "./sidecar-env";
+import { trustedSenderFrameUrl } from "./trusted-sender";
 import {
   isExpectedSidecarStdinClose,
   retryOnceAfterMicrophonePreparationTimeout,
@@ -38,6 +39,54 @@ type EventCallback = (eventName: string, payload: unknown) => void;
 type WindowCommandCallback = (command: string, payload: unknown) => void;
 type CommandResolvedCallback = (command: string, args: unknown, result: unknown) => void;
 type TerminatedCallback = (reason: string) => void;
+
+/**
+ * Marks a meeting-start error as carrying a typed code (see
+ * `fail_meeting_start` in rust-sidecar/src/lib.rs).
+ *
+ * JSON-RPC's error object carries only a message, so the sidecar prefixes the
+ * typed code onto it and the bridge lifts it back off here. The renderer reads
+ * `error.code` and no longer has to match on the prose to tell a permission
+ * refusal from a missing device.
+ */
+const MEETING_START_FAILURE_PREFIX = "MEETING_START_FAILED:";
+
+/** An `Error` that may carry a typed `code` from the sidecar. */
+export type SidecarError = Error & { code?: string };
+
+export function sidecarError(rawMessage: string): SidecarError {
+  if (!rawMessage.startsWith(MEETING_START_FAILURE_PREFIX)) {
+    return new Error(rawMessage);
+  }
+  const remainder = rawMessage.slice(MEETING_START_FAILURE_PREFIX.length);
+  const separator = remainder.indexOf(":");
+  if (separator <= 0) {
+    return new Error(rawMessage);
+  }
+  // The human-readable message is what the user sees; the code is what the UI
+  // branches on.
+  const error: SidecarError = new Error(remainder.slice(separator + 1));
+  error.code = remainder.slice(0, separator);
+  return error;
+}
+
+/**
+ * Why the sidecar stopped, as a value the renderer can branch on.
+ *
+ * - `crash`: the process exited on its own, without being signalled.
+ * - `killed`: something outside this bridge signalled it.
+ * - `spawn_failed`: it never started.
+ * - `unresponsive`: this bridge killed it because it stopped answering.
+ *
+ * The renderer previously received only the human-readable string and had to
+ * match on its wording to tell these apart, which broke silently whenever a
+ * message was reworded. The string still travels alongside, as `message`.
+ */
+export type SidecarTerminationReason =
+  | "crash"
+  | "killed"
+  | "spawn_failed"
+  | "unresponsive";
 type SenderValidator = (senderUrl: string) => boolean;
 type LocalCommandResult = { handled: boolean; result?: unknown };
 type LocalCommandCallback = (
@@ -48,7 +97,6 @@ type LocalCommandCallback = (
 
 // Renderer-initiated commands must be explicitly approved here.
 const ALLOWED_RENDERER_COMMANDS = new Set<string>([
-  "__emit__",
   "__overlay_placement__",
   "__overlay_set_display_mode__",
   "__window_hide__",
@@ -57,6 +105,7 @@ const ALLOWED_RENDERER_COMMANDS = new Set<string>([
   "__window_set_size__",
   "__window_show__",
   "__window_start_drag__",
+  "acknowledge_incomplete_transcript",
   "analyze_recording",
   "analyze_recordings",
   "apply_global_shortcuts_now",
@@ -108,6 +157,7 @@ const ALLOWED_RENDERER_COMMANDS = new Set<string>([
   "get_available_space",
   "get_backup_config",
   "get_backup_setup_report",
+  "get_calendar_snapshot",
   "get_default_asr_provider",
   "get_dictation_audio_level",
   "get_dictation_history_details",
@@ -167,6 +217,7 @@ const ALLOWED_RENDERER_COMMANDS = new Set<string>([
   "open_installed_nautilus_app",
   "open_main_window",
   "open_main_window_to",
+  "open_calendar_privacy_settings",
   "open_permission_settings",
   "open_recording_audio",
   "queue_dictation_correction_suggestion",
@@ -181,11 +232,15 @@ const ALLOWED_RENDERER_COMMANDS = new Set<string>([
   "repaste_dictation_result",
   "reprocess_dictation_text",
   "request_apple_speech_permission",
+  "request_calendar_access",
   "request_dictation_permissions",
+  "register_capture_admission",
   "reset_app_state",
   "restore_backup_default",
   "retranscribe_recording",
+  "retry_meeting_analysis",
   "retry_meeting_auto_name",
+  "revalidate_recording_audio",
   "run_diarization",
   "run_storage_retention_maintenance",
   "save_backup_config",
@@ -239,6 +294,9 @@ export class IpcBridge {
   private commandResolvedCallback: CommandResolvedCallback | null = null;
   private localCommandCallback: LocalCommandCallback | null = null;
   private terminatedCallback: TerminatedCallback | null = null;
+  /// Set when this bridge is deliberately killing a sidecar it judged
+  /// unresponsive, so the resulting 'exit' is not misreported as a plain kill.
+  private pendingTerminationReason: SidecarTerminationReason | null = null;
   private senderValidator: SenderValidator | null = null;
   private shuttingDown = false;
   private restartAttempts = 0;
@@ -283,14 +341,10 @@ export class IpcBridge {
       return true;
     }
 
-    let frameUrl: string | undefined;
-    try {
-      frameUrl = event.senderFrame?.url;
-    } catch {
-      // senderFrame throws if the frame was disposed mid-call; treat as untrusted.
-      return false;
-    }
-
+    // Requires the TOP-LEVEL frame, not merely a frame whose URL passes the
+    // predicate: a subframe carries the same preload and the same
+    // `window.electronAPI`. See trusted-sender.ts.
+    const frameUrl = trustedSenderFrameUrl(event);
     if (!frameUrl) {
       return false;
     }
@@ -353,13 +407,24 @@ export class IpcBridge {
 
     this.process.on("exit", (code, signal) => {
       console.warn(`[sidecar] exited: code=${code} signal=${signal}`);
-      this.handleSidecarTermination(`Sidecar process exited (code=${code}, signal=${signal})`);
+      // A recycle we initiated knows why it killed the process; anything else
+      // is classified from how the process actually died. A signal means
+      // something killed it, no signal means it went away on its own.
+      const reason =
+        this.pendingTerminationReason ?? (signal ? "killed" : "crash");
+      this.pendingTerminationReason = null;
+      this.handleSidecarTermination(
+        reason,
+        `Sidecar process exited (code=${code}, signal=${signal})`,
+      );
     });
 
     this.process.on("error", (err) => {
       console.error(`[sidecar] failed to start: path=${this.sidecarPath}`, err);
+      this.pendingTerminationReason = null;
       this.handleSidecarTermination(
-        `Sidecar process failed to start (${this.sidecarPath}): ${err.message}`
+        "spawn_failed",
+        `Sidecar process failed to start (${this.sidecarPath}): ${err.message}`,
       );
     });
 
@@ -382,9 +447,21 @@ export class IpcBridge {
 
   // Shared termination path for both 'exit' and 'error': schedule a backoff
   // restart and reject all pending requests with a clear message.
-  private handleSidecarTermination(reason: string): void {
+  //
+  // `reason` is the typed code the renderer branches on; `message` is the
+  // human-readable string, kept alongside it. The renderer used to receive only
+  // the string and had to match on its wording to tell a crash from a failed
+  // spawn, which broke silently whenever the wording changed.
+  private handleSidecarTermination(
+    reason: SidecarTerminationReason,
+    message: string,
+  ): void {
     this.sidecarHealthy = false;
-    this.eventCallback?.("sidecar-runtime-changed", { ready: false, reason });
+    this.eventCallback?.("sidecar-runtime-changed", {
+      ready: false,
+      reason,
+      message,
+    });
     // A single dead process can emit both 'error' and 'exit'. Without this
     // guard each one schedules its own restart, so the pool of live sidecars
     // grows instead of being replaced.
@@ -411,13 +488,13 @@ export class IpcBridge {
     const pendingCount = this.pending.size;
     for (const [, pending] of this.pending) {
       clearTimeout(pending.timeout);
-      pending.reject(new Error(reason));
+      pending.reject(new Error(message));
     }
     this.pending.clear();
     if (pendingCount > 0) {
-      console.warn(`[sidecar] rejected ${pendingCount} pending request(s): ${reason}`);
+      console.warn(`[sidecar] rejected ${pendingCount} pending request(s): ${message}`);
     }
-    this.terminatedCallback?.(reason);
+    this.terminatedCallback?.(message);
   }
 
   private handleSidecarMessage(msg: JsonRpcResponse): void {
@@ -448,7 +525,7 @@ export class IpcBridge {
       this.pending.delete(msg.id);
       clearTimeout(pending.timeout);
       if (msg.error) {
-        pending.reject(new Error(msg.error.message));
+        pending.reject(sidecarError(msg.error.message));
       } else {
         pending.resolve(msg.result);
         this.commandResolvedCallback?.(pending.command, pending.args, msg.result);
@@ -559,6 +636,9 @@ export class IpcBridge {
       throw new Error("The audio sidecar is not available to restart");
     }
     console.warn(`[sidecar] recycling unhealthy process: ${reason}`);
+    // We are about to SIGTERM it, which would otherwise look like "killed".
+    // The reason we are killing it is that it stopped responding.
+    this.pendingTerminationReason = "unresponsive";
     const replacement = this.waitForReplacementSidecar(
       sidecarProcess,
       Math.max(1, Math.min(4_000, recoveryBudgetMs)),
@@ -577,7 +657,7 @@ export class IpcBridge {
       if (!this.isTrustedSender(event)) {
         console.warn("[security] rejected sidecar command from untrusted sender", {
           command,
-          url: event.senderFrame?.url,
+          url: trustedSenderFrameUrl(event),
         });
         throw new Error("Renderer command rejected: untrusted sender");
       }

@@ -305,7 +305,10 @@ describe("createDictationShortcutSignalRuntime", () => {
       "start_dictation",
       "stop_dictation",
     ]);
-    expect(harness.invocations[1]?.args).toEqual({ stopReason: "release" });
+    expect(harness.invocations[1]?.args).toEqual({
+      stopReason: "release",
+      stopGestureEpochMs: expect.any(Number),
+    });
   });
 
   it("stops a tap whose release lands after the start ack but before the recording phase event", async () => {
@@ -325,7 +328,10 @@ describe("createDictationShortcutSignalRuntime", () => {
       "start_dictation",
       "stop_dictation",
     ]);
-    expect(harness.invocations[1]?.args).toEqual({ stopReason: "release" });
+    expect(harness.invocations[1]?.args).toEqual({
+      stopReason: "release",
+      stopGestureEpochMs: expect.any(Number),
+    });
 
     // The lagging phase events drain afterwards; the watchdog must not fire
     // a second stop.
@@ -353,7 +359,10 @@ describe("createDictationShortcutSignalRuntime", () => {
       "start_dictation",
       "stop_dictation",
     ]);
-    expect(harness.invocations[1]?.args).toEqual({ stopReason: "release" });
+    expect(harness.invocations[1]?.args).toEqual({
+      stopReason: "release",
+      stopGestureEpochMs: expect.any(Number),
+    });
   });
 
   it("keeps the watchdog armed across primed/recording phase events", async () => {
@@ -371,7 +380,10 @@ describe("createDictationShortcutSignalRuntime", () => {
       "start_dictation",
       "stop_dictation",
     ]);
-    expect(harness.invocations[1]?.args).toEqual({ stopReason: "watchdog_timeout" });
+    expect(harness.invocations[1]?.args).toEqual({
+      stopReason: "watchdog_timeout",
+      stopGestureEpochMs: expect.any(Number),
+    });
   });
 
   it("does not issue a buffered stop when the start itself failed", async () => {
@@ -400,7 +412,10 @@ describe("createDictationShortcutSignalRuntime", () => {
       "start_dictation",
       "stop_dictation",
     ]);
-    expect(harness.invocations[1]?.args).toEqual({ stopReason: "release" });
+    expect(harness.invocations[1]?.args).toEqual({
+      stopReason: "release",
+      stopGestureEpochMs: expect.any(Number),
+    });
   });
 
   it("stops a hold whose release never arrives via the watchdog backstop", async () => {
@@ -416,7 +431,10 @@ describe("createDictationShortcutSignalRuntime", () => {
       "start_dictation",
       "stop_dictation",
     ]);
-    expect(harness.invocations[1]?.args).toEqual({ stopReason: "watchdog_timeout" });
+    expect(harness.invocations[1]?.args).toEqual({
+      stopReason: "watchdog_timeout",
+      stopGestureEpochMs: expect.any(Number),
+    });
   });
 
   it("does not fire the watchdog after a normal release already stopped the session", async () => {

@@ -1,7 +1,7 @@
 import { existsSync, readFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { describe, expect, it } from "vitest";
-import type { Settings } from "@/types/settings";
+import type { MeetingCustomTemplate, Settings } from "@/types/settings";
 
 /**
  * The settings bridge is pass-through in both directions: `get_settings` hands
@@ -27,6 +27,7 @@ import type { Settings } from "@/types/settings";
  */
 
 const SETTINGS_RS = resolve(process.cwd(), "rust-sidecar/src/settings.rs");
+const MEETING_TEMPLATES_TS = resolve(process.cwd(), "src/lib/meeting-templates.ts");
 
 /** Field names of a `pub struct`, in declaration order. */
 function rustStructFields(source: string, structName: string): string[] {
@@ -41,6 +42,46 @@ function rustStructFields(source: string, structName: string): string[] {
     throw new Error(`unterminated ${structName} in ${SETTINGS_RS}`);
   }
   return [...source.slice(bodyStart, bodyEnd).matchAll(/^\s*pub (\w+):/gm)].map(
+    (match) => match[1],
+  );
+}
+
+/**
+ * Ids of the `BUILTIN_MEETING_TEMPLATE_IDS` array in settings.rs, in
+ * declaration order. This is Rust's copy of the id list `meeting-templates.ts`
+ * defines authoritatively; the two are read out of source and compared below
+ * rather than trusted to stay in sync by hand.
+ */
+function rustBuiltinMeetingTemplateIds(source: string): string[] {
+  const header = "pub(crate) const BUILTIN_MEETING_TEMPLATE_IDS: &[&str] = &[";
+  const start = source.indexOf(header);
+  if (start === -1) {
+    throw new Error(`BUILTIN_MEETING_TEMPLATE_IDS not found in ${SETTINGS_RS}`);
+  }
+  const bodyStart = start + header.length;
+  const bodyEnd = source.indexOf("];", bodyStart);
+  if (bodyEnd === -1) {
+    throw new Error(`unterminated BUILTIN_MEETING_TEMPLATE_IDS in ${SETTINGS_RS}`);
+  }
+  return [...source.slice(bodyStart, bodyEnd).matchAll(/"([^"]+)"/g)].map(
+    (match) => match[1],
+  );
+}
+
+/** `value` ids of the `MEETING_TEMPLATES` array in meeting-templates.ts, in
+ * declaration order -- the authoritative built-in id list. */
+function tsBuiltinMeetingTemplateIds(source: string): string[] {
+  const header = "export const MEETING_TEMPLATES: MeetingTemplateOption[] = [";
+  const start = source.indexOf(header);
+  if (start === -1) {
+    throw new Error(`MEETING_TEMPLATES not found in ${MEETING_TEMPLATES_TS}`);
+  }
+  const bodyStart = start + header.length;
+  const bodyEnd = source.indexOf("\n];", bodyStart);
+  if (bodyEnd === -1) {
+    throw new Error(`unterminated MEETING_TEMPLATES array in ${MEETING_TEMPLATES_TS}`);
+  }
+  return [...source.slice(bodyStart, bodyEnd).matchAll(/value:\s*"([^"]+)"/g)].map(
     (match) => match[1],
   );
 }
@@ -68,6 +109,37 @@ const AI_LANE_WIRE_SHAPE: Settings["privacy"]["dictationAi"] = {
   modelId: null,
 };
 
+/**
+ * The two correction-learning toggles, pinned by name on both sides.
+ *
+ * `TranscriptionSettings` is too large to mirror field for field, but these two
+ * carry a privacy promise rather than a preference:
+ * `dictationLearnFromExternalCorrections` is what admits Plainsong to another
+ * application's text field. A rename that silently drops the value on the floor
+ * would leave the checkbox reading "off" while the sidecar kept its own default
+ * — which is exactly the failure this file exists to prevent, except pointed at
+ * the one setting where the consequence is reading someone's Slack message.
+ */
+const CORRECTION_LEARNING_WIRE_SHAPE: Pick<
+  Settings["transcription"],
+  "dictationAutoLearnCorrections" | "dictationLearnFromExternalCorrections"
+> = {
+  dictationAutoLearnCorrections: true,
+  dictationLearnFromExternalCorrections: false,
+};
+
+// Extended deliberately alongside the new `meeting_custom_templates`
+// persistence (audit finding ux-12): this pins the third corner of the same
+// three-way contract the two shapes above cover for privacy settings --
+// TypeScript catches a renderer-side rename, and the runtime comparison
+// below catches a Rust-side one.
+const MEETING_CUSTOM_TEMPLATE_WIRE_SHAPE: MeetingCustomTemplate = {
+  id: "custom-1",
+  name: "Board Update",
+  summaryPrompt: "Summarize board sentiment, asks, and follow-ups.",
+  notesOutline: ["Sentiment", "Asks"],
+};
+
 describe("settings wire contract", () => {
   const source = (() => {
     if (!existsSync(SETTINGS_RS)) {
@@ -76,6 +148,15 @@ describe("settings wire contract", () => {
       );
     }
     return readFileSync(SETTINGS_RS, "utf8");
+  })();
+
+  const meetingTemplatesSource = (() => {
+    if (!existsSync(MEETING_TEMPLATES_TS)) {
+      throw new Error(
+        `Expected ${MEETING_TEMPLATES_TS}. Run vitest from the nautilus-bot package root.`,
+      );
+    }
+    return readFileSync(MEETING_TEMPLATES_TS, "utf8");
   })();
 
   it("mirrors every PrivacySettings field Rust serializes", () => {
@@ -88,6 +169,38 @@ describe("settings wire contract", () => {
     expect(rustStructFields(source, "AiLaneSettings").map(toCamelCase)).toEqual(
       Object.keys(AI_LANE_WIRE_SHAPE),
     );
+  });
+
+  it("mirrors both correction-learning toggles Rust serializes", () => {
+    const transcriptionFields = rustStructFields(source, "TranscriptionSettings");
+    for (const key of Object.keys(CORRECTION_LEARNING_WIRE_SHAPE)) {
+      expect(transcriptionFields.map(toCamelCase)).toContain(key);
+    }
+  });
+
+  it("ships the external-correction readback off by default in Rust", () => {
+    // The renderer sends whatever the checkbox says, so the value that decides
+    // whether a fresh install reads another app's field is this one.
+    const defaults = source.slice(source.indexOf("impl Default for TranscriptionSettings"));
+    expect(defaults).toMatch(/dictation_learn_from_external_corrections:\s*false/);
+  });
+
+  it("mirrors every MeetingCustomTemplate field Rust serializes", () => {
+    expect(rustStructFields(source, "MeetingCustomTemplate").map(toCamelCase)).toEqual(
+      Object.keys(MEETING_CUSTOM_TEMPLATE_WIRE_SHAPE),
+    );
+  });
+
+  it("keeps the Rust built-in meeting template id list identical to meeting-templates.ts", () => {
+    // The two sides resolve a template id in opposite priority order (the
+    // renderer's picker looks built-ins up by this exact list; the analysis
+    // resolver in lib.rs now checks it first too -- see FIX 5 in the ux-12
+    // review). A drift here would let a custom id shadow a built-in on one
+    // side while the other still shows the built-in, which is exactly the
+    // failure this comparison exists to catch before it ships.
+    const tsIds = tsBuiltinMeetingTemplateIds(meetingTemplatesSource);
+    expect(tsIds.length).toBeGreaterThan(0);
+    expect(rustBuiltinMeetingTemplateIds(source)).toEqual(tsIds);
   });
 
   it("keeps the retired single-provider keys out of the schema", () => {

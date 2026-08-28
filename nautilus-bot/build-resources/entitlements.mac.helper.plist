@@ -1,0 +1,40 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  The generic "<Product> Helper.app" only — the bundle Chromium launches its
+  UTILITY processes into, including the audio service. Routed here by
+  scripts/sign-macos.mjs; the GPU, Renderer and Plugin helpers keep the
+  narrower entitlements.mac.inherit.plist.
+
+  It is the inherit policy plus audio, and nothing else.
+
+  Audio is here rather than in the inherit file because of where the microphone
+  is actually opened. Plainsong's own capture runs in the Rust sidecar, but the
+  renderer additionally calls `navigator.mediaDevices.getUserMedia` for the
+  microphone test in Settings, and Chromium brokers that through its audio
+  service — which lives in this helper when the service runs out of process.
+  Removing audio from every helper at once would therefore have broken a
+  user-visible feature to protect processes that never touch the device.
+
+  Deliberately absent, matching the inherit file: Apple Events (no child
+  process drives another application) and disabled library validation (the only
+  code loaded here is signed with the same Team ID).
+
+  This is the conservative half of the split and the one to re-examine first: if
+  a packaged build proves the audio service never runs in this bundle, these two
+  keys should go too.
+-->
+<plist version="1.0">
+  <dict>
+    <key>com.apple.security.cs.allow-jit</key>
+    <true/>
+    <key>com.apple.security.cs.allow-unsigned-executable-memory</key>
+    <true/>
+    <key>com.apple.security.inherit</key>
+    <true/>
+    <key>com.apple.security.device.audio-input</key>
+    <true/>
+    <key>com.apple.security.device.microphone</key>
+    <true/>
+  </dict>
+</plist>

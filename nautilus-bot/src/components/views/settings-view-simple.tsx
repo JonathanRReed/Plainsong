@@ -15,10 +15,11 @@ import {
   isRemoteAnalysisProvider,
   type AiLaneKey,
 } from "@/components/models/ai-lanes";
-import { invoke, listen } from "@/lib/electron";
+import { listen } from "@/lib/electron";
 import { Button } from "@/components/ui/button";
 import { Switch } from "@/components/ui/switch";
 import { SettingsSwitch } from "@/components/ui/settings-control";
+import { CalendarSettingsSection } from "@/components/meetings/calendar-settings-section";
 import { Input } from "@/components/ui/input";
 import { Textarea } from "@/components/ui/textarea";
 import { Label } from "@/components/ui/label";
@@ -2160,8 +2161,8 @@ export function SettingsView() {
 
             <SettingsSwitch
               className="py-0"
-              label="Learn from your corrections"
-              description="When you fix a word or short phrase after dictating, remember it for next time."
+              label="Learn from corrections you make in Plainsong"
+              description="When you fix a word or short phrase in a result here, remember it for next time."
               checked={
                 settings.transcription.dictationAutoLearnCorrections ?? true
               }
@@ -2171,6 +2172,25 @@ export function SettingsView() {
                   transcription: {
                     ...settings.transcription,
                     dictationAutoLearnCorrections: checked,
+                  },
+                })
+              }
+            />
+
+            <SettingsSwitch
+              className="py-0"
+              label="Learn from corrections you make in other apps"
+              description="Off by default. Plainsong re-reads the one field it just typed into, only in that app, only for the 8 seconds after the insert. It compares that text with what it typed, on this machine. The only thing written down is the word-level changes it finds — never the sentence they came out of — held for your review under Dictation > Corrections, and deleted within a week if you don't approve them."
+              checked={
+                settings.transcription
+                  .dictationLearnFromExternalCorrections ?? false
+              }
+              onCheckedChange={(checked) =>
+                void updateSettings({
+                  ...settings,
+                  transcription: {
+                    ...settings.transcription,
+                    dictationLearnFromExternalCorrections: checked,
                   },
                 })
               }
@@ -3734,14 +3754,16 @@ export function SettingsView() {
                       label="Keep running after close"
                       description="Closing the window leaves Plainsong running in the menu bar, so shortcuts and recording keep working."
                       checked={settings.ui.minimizeToTray}
+                      // The setting travels on `settings-changed`, which the
+                      // main process already listens for. The extra
+                      // `app:set_minimize_to_tray` call this used to make lost
+                      // its handler and could only ever reject into an empty
+                      // catch.
                       onCheckedChange={(checked) => {
                         void updateSettings({
                           ...settings,
                           ui: { ...settings.ui, minimizeToTray: checked },
                         });
-                        void invoke("app:set_minimize_to_tray", {
-                          enabled: checked,
-                        }).catch(() => {});
                       }}
                     />
 
@@ -3757,6 +3779,14 @@ export function SettingsView() {
                         })
                       }
                     />
+
+                    {/* Renders nothing until macOS has granted calendar
+                        access — including its own heading and rule, so an
+                        unconnected calendar leaves no empty section behind.
+                        The ask lives on the Meetings view, next to the thing
+                        it improves; this is only where a granted calendar gets
+                        narrowed or switched back off. */}
+                    <CalendarSettingsSection />
 
                     <div className="pt-4 border-t space-y-4">
                       <div className="space-y-1">

@@ -18,10 +18,21 @@ const toast = vi.fn();
 const startMeeting = vi.fn();
 const stopMeeting = vi.fn();
 const readinessContext = vi.hoisted(() => ({
+  engineNotice: null as {
+    title: string;
+    message: string;
+    recovering: boolean;
+  } | null,
+  dismissEngineNotice: vi.fn(),
   productReadiness: {
     evidenceObservedAt: 1,
     dictation: { domain: "dictation", state: "ready", cause: null },
     meetings: { domain: "meetings", state: "ready", cause: null },
+    meetingsCapture: {
+      domain: "meetings_capture",
+      state: "ready",
+      cause: null,
+    },
     fullCapture: { domain: "full_capture", state: "ready", cause: null },
     overall: { domain: "overall", state: "ready", cause: null },
   } as ProductReadinessSnapshot,
@@ -243,6 +254,15 @@ vi.mock("@/components/ai-analysis-panel", () => ({
   ),
 }));
 
+const customMeetingTemplatesState = vi.hoisted(() => ({
+  templates: [] as Array<{
+    id: string;
+    name: string;
+    summaryPrompt: string;
+    notesOutline: string[];
+  }>,
+}));
+
 vi.mock("@/lib/backend", () => ({
   getRecording: vi.fn(async () => ({})) as any,
   getRecordingWaveform: vi.fn() as any,
@@ -255,7 +275,10 @@ vi.mock("@/lib/backend", () => ({
   deleteRecording: vi.fn() as any,
   renameRecording: vi.fn() as any,
   retranscribeRecording: vi.fn() as any,
+  retryMeetingAnalysis: vi.fn(async () => {}) as any,
   retryMeetingAutoName: vi.fn() as any,
+  revalidateRecordingAudio: vi.fn(async () => ({})) as any,
+  acknowledgeIncompleteTranscript: vi.fn(async () => ({})) as any,
   setRecordingSourceType: vi.fn() as any,
   isDiarizationModelAvailable: vi.fn(async () => false) as any,
   getMeetingChatMessages: vi.fn(async () => []) as any,
@@ -272,6 +295,33 @@ vi.mock("@/lib/backend", () => ({
   exportRecordingV2: vi.fn(async () => ({})) as any,
   openExportPath: vi.fn() as any,
   searchTranscripts: vi.fn(async () => []) as any,
+  openPermissionSettings: vi.fn(async () => {}) as any,
+  getSettings: vi.fn(async () => ({
+    transcription: { meetingCustomTemplates: customMeetingTemplatesState.templates },
+  })) as any,
+  saveSettings: vi.fn(async (settings: any) => {
+    customMeetingTemplatesState.templates =
+      settings.transcription.meetingCustomTemplates ?? [];
+  }) as any,
+}));
+
+// The calendar affordance in the Meetings header. Mocked at the backend rather
+// than at the component so the view is exercised through the real cue: the
+// thing under test is what the view does with the prefill the cue hands it.
+const calendarSnapshot = vi.hoisted(() => ({
+  current: {
+    authorization: "unknown",
+    observedAt: 0,
+    events: [] as any[],
+    calendars: [] as any[],
+    errorCode: null,
+  },
+}));
+
+vi.mock("@/lib/backend/calendar", () => ({
+  getCalendarSnapshot: vi.fn(async () => calendarSnapshot.current),
+  requestCalendarAccess: vi.fn(async () => calendarSnapshot.current),
+  openCalendarPrivacySettings: vi.fn(async () => {}),
 }));
 
 function deferred<T>() {
@@ -287,14 +337,26 @@ function deferred<T>() {
 describe("RecordingsView", () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    // No calendar unless a test says otherwise: the header affordance must be
+    // invisible to every other test in this file.
+    calendarSnapshot.current = {
+      authorization: "unknown",
+      observedAt: 0,
+      events: [],
+      calendars: [],
+      errorCode: null,
+    };
     eventListeners.clear();
+    customMeetingTemplatesState.templates = [];
     transcriptViewerProps.current = null;
     speechSynthesisMock.speak.mockClear();
     speechSynthesisMock.cancel.mockClear();
-    Object.assign(navigator, {
-      clipboard: {
-        writeText: vi.fn(async () => {}),
-      },
+    // `userEvent.setup()` installs a getter-only clipboard stub on the shared
+    // navigator, so a plain assignment throws once any earlier test has used
+    // it. Redefining the property works either way.
+    Object.defineProperty(navigator, "clipboard", {
+      configurable: true,
+      value: { writeText: vi.fn(async () => {}) },
     });
     Object.assign(globalThis, {
       speechSynthesis: speechSynthesisMock,
@@ -319,10 +381,16 @@ describe("RecordingsView", () => {
     recordingsLoading = false;
     recordingsHaveLoaded = true;
     recordingsError = null;
+    readinessContext.engineNotice = null;
     readinessContext.productReadiness = {
       evidenceObservedAt: 1,
       dictation: { domain: "dictation", state: "ready", cause: null },
       meetings: { domain: "meetings", state: "ready", cause: null },
+      meetingsCapture: {
+        domain: "meetings_capture",
+        state: "ready",
+        cause: null,
+      },
       fullCapture: { domain: "full_capture", state: "ready", cause: null },
       overall: { domain: "overall", state: "ready", cause: null },
     };
@@ -494,6 +562,19 @@ describe("RecordingsView", () => {
       ...readinessContext.productReadiness,
       meetings: {
         domain: "meetings",
+        state: "blocked",
+        cause: {
+          id: "meeting_route",
+          message: "Choose a meeting-ready speech model.",
+          action: {
+            id: "open_models",
+            label: "Review models",
+            destination: "models",
+          },
+        },
+      },
+      meetingsCapture: {
+        domain: "meetings_capture",
         state: "blocked",
         cause: {
           id: "meeting_route",
@@ -1090,6 +1171,299 @@ describe("RecordingsView", () => {
     });
     expect(screen.getByLabelText("Done notes")).toHaveValue("");
     expect(screen.getByLabelText("Blockers notes")).toHaveValue("");
+  });
+
+  describe("user-defined meeting templates", () => {
+    it("lists a saved custom template in the playbook picker, labeled as the user's own", async () => {
+      customMeetingTemplatesState.templates = [
+        {
+          id: "custom-board-update",
+          name: "Board Update",
+          summaryPrompt: "Summarize board sentiment, asks, and follow-ups.",
+          notesOutline: ["Sentiment", "Asks"],
+        },
+      ];
+
+      render(<RecordingsView />);
+
+      fireEvent.click(screen.getByText("Weekly sync"));
+      await screen.findByRole("group", { name: "Meeting notes" });
+
+      const picker = screen.getByLabelText("Playbook") as HTMLSelectElement;
+      expect(
+        within(picker).getByRole("option", { name: "Board Update" })
+      ).toBeInTheDocument();
+
+      fireEvent.pointerDown(
+        screen.getByRole("button", { name: "Regenerate summary with a different playbook" }),
+        { button: 0 }
+      );
+      expect(
+        await screen.findByRole("menuitem", { name: "Board Update (yours)" })
+      ).toBeInTheDocument();
+    });
+
+    it("falls back to the active playbook's outline when saving as a template with no note text", async () => {
+      render(<RecordingsView />);
+
+      fireEvent.click(screen.getByText("Weekly sync"));
+      await screen.findByRole("group", { name: "Meeting notes" });
+
+      fireEvent.click(screen.getByRole("button", { name: "Save as a template" }));
+      const dialog = await screen.findByRole("dialog", { name: "Save as a template" });
+
+      fireEvent.change(within(dialog).getByLabelText("Name"), {
+        target: { value: "Weekly Recipe" },
+      });
+      fireEvent.click(within(dialog).getByRole("button", { name: "Save template" }));
+
+      await waitFor(() => {
+        expect(backend.saveSettings).toHaveBeenCalled();
+      });
+      expect(customMeetingTemplatesState.templates).toHaveLength(1);
+      expect(customMeetingTemplatesState.templates[0]).toMatchObject({
+        name: "Weekly Recipe",
+        // "Weekly sync" has no meetingNotes, so there is no note structure to
+        // capture -- the active ("auto") playbook's outline is the only
+        // sensible seed.
+        notesOutline: ["Goals", "Key discussion points", "Decisions", "Follow-ups"],
+      });
+      expect(
+        within(screen.getByLabelText("Playbook") as HTMLSelectElement).getByRole("option", {
+          name: "Weekly Recipe",
+        })
+      ).toBeInTheDocument();
+    });
+
+    it("captures the note's own section structure, not just the playbook outline, when notes are not empty", async () => {
+      render(<RecordingsView />);
+
+      fireEvent.click(screen.getByText("Weekly sync"));
+      await screen.findByRole("button", { name: "Add section" });
+
+      // A section the user added by hand -- absent from the "auto" playbook's
+      // fixed four headings.
+      fireEvent.click(screen.getByRole("button", { name: "Add section" }));
+      fireEvent.change(screen.getByDisplayValue("Custom section"), {
+        target: { value: "Budget ask" },
+      });
+      await waitFor(() => {
+        expect(backend.updateRecordingNotes).toHaveBeenCalled();
+      });
+
+      fireEvent.click(screen.getByRole("button", { name: "Save as a template" }));
+      const dialog = await screen.findByRole("dialog", { name: "Save as a template" });
+      const outlineField = within(dialog).getByLabelText(
+        "Notes outline"
+      ) as HTMLTextAreaElement;
+      const outlineLines = outlineField.value.split("\n");
+
+      // The user's own section made it into the seed...
+      expect(outlineLines).toContain("Budget ask");
+      // ...alongside the playbook's own headings, not instead of them -- a
+      // bug that fell back to the static playbook outline unconditionally
+      // would never include "Budget ask" at all.
+      expect(outlineLines.length).toBeGreaterThan(4);
+
+      fireEvent.change(within(dialog).getByLabelText("Name"), {
+        target: { value: "My Recipe" },
+      });
+      fireEvent.click(within(dialog).getByRole("button", { name: "Save template" }));
+
+      await waitFor(() => {
+        expect(customMeetingTemplatesState.templates[0]?.notesOutline).toContain(
+          "Budget ask"
+        );
+      });
+    });
+
+    it("re-reads persisted settings after saving and warns instead of trusting the optimistic value", async () => {
+      // Simulate Rust's save-time sanitization actually changing what was
+      // sent (a name too long, in this case) -- the client's own maxLength
+      // is a UX nicety, not the only line of defense, so this view must not
+      // report success on the optimistic value without checking.
+      backend.saveSettings.mockImplementationOnce(async (settings: any) => {
+        customMeetingTemplatesState.templates =
+          settings.transcription.meetingCustomTemplates.map((template: any) => ({
+            ...template,
+            name: template.name.slice(0, 5),
+          }));
+      });
+
+      render(<RecordingsView />);
+      fireEvent.click(screen.getByText("Weekly sync"));
+      await screen.findByRole("group", { name: "Meeting notes" });
+
+      fireEvent.click(screen.getByRole("button", { name: "Save as a template" }));
+      const dialog = await screen.findByRole("dialog", { name: "Save as a template" });
+      fireEvent.change(within(dialog).getByLabelText("Name"), {
+        target: { value: "A Very Long Template Name" },
+      });
+      fireEvent.click(within(dialog).getByRole("button", { name: "Save template" }));
+
+      await waitFor(() => {
+        expect(customMeetingTemplatesState.templates[0]?.name).toBe("A Ver");
+      });
+      // This view's own state reflects what actually got persisted, not the
+      // optimistic value it sent -- the picker offers the trimmed name.
+      await waitFor(() => {
+        expect(
+          within(screen.getByLabelText("Playbook") as HTMLSelectElement).getByRole(
+            "option",
+            { name: "A Ver" }
+          )
+        ).toBeInTheDocument();
+      });
+      expect(toast).toHaveBeenCalledWith(
+        expect.stringMatching(/too long or otherwise invalid and got trimmed/i),
+        "info"
+      );
+    });
+
+    it("caps the name and summary prompt fields to the same limits Rust enforces on save", async () => {
+      render(<RecordingsView />);
+      fireEvent.click(screen.getByText("Weekly sync"));
+      await screen.findByRole("group", { name: "Meeting notes" });
+
+      fireEvent.click(screen.getByRole("button", { name: "Save as a template" }));
+      const dialog = await screen.findByRole("dialog", { name: "Save as a template" });
+
+      expect(within(dialog).getByLabelText("Name")).toHaveAttribute("maxLength", "80");
+      expect(within(dialog).getByLabelText("Summary prompt")).toHaveAttribute(
+        "maxLength",
+        "4000"
+      );
+    });
+
+    it("warns softly about a duplicate template name without blocking the save", async () => {
+      customMeetingTemplatesState.templates = [
+        {
+          id: "custom-existing",
+          name: "Board Update",
+          summaryPrompt: "Summarize.",
+          notesOutline: ["Notes"],
+        },
+      ];
+
+      render(<RecordingsView />);
+      fireEvent.click(screen.getByText("Weekly sync"));
+      await screen.findByRole("group", { name: "Meeting notes" });
+
+      fireEvent.click(screen.getByRole("button", { name: "Save as a template" }));
+      const dialog = await screen.findByRole("dialog", { name: "Save as a template" });
+      fireEvent.change(within(dialog).getByLabelText("Name"), {
+        target: { value: "Board Update" },
+      });
+
+      expect(
+        within(dialog).getByText(/already have a template named/i)
+      ).toBeInTheDocument();
+
+      // A soft warning, not a block -- two templates sharing a name still
+      // both save; only their ids need to be unique.
+      fireEvent.click(within(dialog).getByRole("button", { name: "Save template" }));
+      await waitFor(() => {
+        expect(customMeetingTemplatesState.templates).toHaveLength(2);
+      });
+    });
+
+    it("edits and deletes a saved custom template from the manage dialog", async () => {
+      customMeetingTemplatesState.templates = [
+        {
+          id: "custom-board-update",
+          name: "Board Update",
+          summaryPrompt: "Summarize board sentiment, asks, and follow-ups.",
+          notesOutline: ["Sentiment", "Asks"],
+        },
+      ];
+
+      render(<RecordingsView />);
+
+      fireEvent.click(screen.getByText("Weekly sync"));
+      await screen.findByRole("group", { name: "Meeting notes" });
+
+      fireEvent.click(screen.getByRole("button", { name: "Manage templates" }));
+      const manageDialog = await screen.findByRole("dialog", {
+        name: "Your meeting templates",
+      });
+      fireEvent.click(within(manageDialog).getByRole("button", { name: "Edit Board Update" }));
+
+      const editDialog = await screen.findByRole("dialog", { name: "Edit template" });
+      fireEvent.change(within(editDialog).getByLabelText("Name"), {
+        target: { value: "Board Update v2" },
+      });
+      fireEvent.click(within(editDialog).getByRole("button", { name: "Save changes" }));
+
+      await waitFor(() => {
+        expect(customMeetingTemplatesState.templates[0]?.name).toBe("Board Update v2");
+      });
+
+      fireEvent.click(screen.getByRole("button", { name: "Manage templates" }));
+      const reopenedManageDialog = await screen.findByRole("dialog", {
+        name: "Your meeting templates",
+      });
+      fireEvent.click(
+        within(reopenedManageDialog).getByRole("button", { name: "Delete Board Update v2" })
+      );
+      const confirmDialog = await screen.findByRole("dialog", {
+        name: "Delete this template?",
+      });
+      fireEvent.click(within(confirmDialog).getByRole("button", { name: "Delete" }));
+
+      await waitFor(() => {
+        expect(customMeetingTemplatesState.templates).toHaveLength(0);
+      });
+    });
+
+    it("does not break a past meeting's display after its custom template is deleted through the manage dialog", async () => {
+      customMeetingTemplatesState.templates = [
+        {
+          id: "custom-deleted-later",
+          name: "Retiring Soon",
+          summaryPrompt: "Summarize this.",
+          notesOutline: ["Notes"],
+        },
+      ];
+      backend.getRecording.mockResolvedValue({
+        ...recordings[0],
+        meetingTemplateId: "custom-deleted-later",
+      });
+
+      render(<RecordingsView />);
+      fireEvent.click(screen.getByText("Weekly sync"));
+      await screen.findByRole("group", { name: "Meeting notes" });
+      const picker = screen.getByLabelText("Playbook") as HTMLSelectElement;
+      expect(picker).toHaveValue("custom-deleted-later");
+      expect(
+        within(picker).getByRole("option", { name: "Retiring Soon" })
+      ).toBeInTheDocument();
+
+      // Driven through the manager dialog's own delete button and its
+      // confirmation step -- not by mutating the mock directly -- so this
+      // proves the delete affordance itself does the right thing, not just
+      // that the workspace tolerates an externally-vanished template.
+      fireEvent.click(screen.getByRole("button", { name: "Manage templates" }));
+      fireEvent.click(
+        await screen.findByRole("button", { name: "Delete Retiring Soon" })
+      );
+      fireEvent.click(await screen.findByRole("button", { name: "Delete" }));
+
+      await waitFor(() => {
+        expect(customMeetingTemplatesState.templates).toHaveLength(0);
+      });
+
+      // Back to the still-open meeting: its picker no longer offers the
+      // deleted template -- it falls back to a resolvable value instead of
+      // showing a phantom selection -- and the workspace itself never
+      // stopped displaying.
+      fireEvent.click(screen.getByRole("button", { name: "Close" }));
+      await waitFor(() => {
+        expect(
+          within(picker).queryByRole("option", { name: "Retiring Soon" })
+        ).not.toBeInTheDocument();
+      });
+      expect(screen.getByRole("group", { name: "Meeting notes" })).toBeInTheDocument();
+    });
   });
 
   it("keeps the meeting's working groups without the workflow narration", async () => {
@@ -2890,5 +3264,534 @@ describe("RecordingsView", () => {
       expect(backend.runDiarization).toHaveBeenCalledWith("r1");
     });
     expect(await screen.findByText("Found 2 speakers.")).toBeInTheDocument();
+  });
+
+  it("tells the reader in plain words when the transcription engine is lost", async () => {
+    // ux-10: this used to be a raw "Sidecar process exited (code=…, signal=…)"
+    // line, and only on the Setup view nobody is looking at.
+    readinessContext.engineNotice = {
+      title: "The local transcription engine stopped",
+      message: "Plainsong is restarting it now.",
+      recovering: true,
+    };
+
+    render(<RecordingsView />);
+
+    expect(
+      await screen.findByText("The local transcription engine stopped")
+    ).toBeInTheDocument();
+    expect(screen.queryByText(/code=/)).not.toBeInTheDocument();
+
+    const banner = screen.getByRole("status", {
+      name: "The local transcription engine stopped",
+    });
+    fireEvent.click(within(banner).getByRole("button", { name: "Dismiss" }));
+    expect(readinessContext.dismissEngineNotice).toHaveBeenCalled();
+  });
+
+  describe("meeting start failures", () => {
+    async function failStartWith(error: unknown) {
+      startMeeting.mockRejectedValueOnce(error);
+      render(<RecordingsView />);
+      fireEvent.click(screen.getByRole("button", { name: "New meeting" }));
+      fireEvent.click(
+        await screen.findByRole("button", { name: "Confirm meeting consent" })
+      );
+      return screen.findByText("This meeting did not start");
+    }
+
+    it("offers one action matched to the typed code", async () => {
+      // ux-9: a system-audio failure used to be answered with microphone
+      // permission advice, because the old code substring-matched "audio".
+      await failStartWith(
+        Object.assign(new Error("no eligible route"), {
+          code: "system_audio_unavailable",
+        })
+      );
+
+      expect(
+        screen.getByText(
+          "System audio is not available, so the other side of the call would not be recorded."
+        )
+      ).toBeInTheDocument();
+      expect(
+        screen.queryByText(/microphone permissions/i)
+      ).not.toBeInTheDocument();
+
+      fireEvent.click(screen.getByRole("button", { name: "Set up system audio" }));
+      await waitFor(() => {
+        expect(backend.openPermissionSettings).toHaveBeenCalledWith(
+          "system_audio"
+        );
+      });
+    });
+
+    it("says one sentence, without a second period bolted on", async () => {
+      await failStartWith(
+        Object.assign(new Error("microphone unavailable"), {
+          code: "mic_permission_denied",
+        })
+      );
+
+      const message = screen.getByText(
+        "Plainsong does not have microphone access, so there is nothing to record."
+      );
+      expect(message.textContent).not.toMatch(/\.\s*\./);
+      expect(
+        screen.getByRole("button", { name: "Open Microphone settings" })
+      ).toBeInTheDocument();
+    });
+
+    it("passes a message through when it already carries its own next step", async () => {
+      const message =
+        "Microphone setup stalled. Plainsong restarted audio capture automatically. Retry in a moment, then reconnect or choose another microphone if it happens again.";
+      await failStartWith(new Error(message));
+
+      expect(screen.getByText(message)).toBeInTheDocument();
+    });
+
+    it("can be dismissed", async () => {
+      await failStartWith(
+        Object.assign(new Error("busy"), { code: "already_recording" })
+      );
+
+      fireEvent.click(screen.getByRole("button", { name: "Dismiss" }));
+      await waitFor(() => {
+        expect(
+          screen.queryByText("This meeting did not start")
+        ).not.toBeInTheDocument();
+      });
+    });
+  });
+
+  it("still records a meeting when only the AI notes lane is missing", async () => {
+    // The regression that blocked this branch: consumers read `state !==
+    // "ready"` as "not ready", so the ai_route degradation disabled meeting
+    // capture on every fresh install — while the banner beside the disabled
+    // button claimed meetings still record and transcribe.
+    readinessContext.productReadiness = {
+      ...readinessContext.productReadiness,
+      meetings: {
+        domain: "meetings",
+        state: "degraded",
+        cause: {
+        id: "ai_route",
+        message:
+          "Notes unavailable — Ollama on this machine is not running. Meetings still record and transcribe.",
+        action: {
+          id: "open_ai_settings",
+          label: "Open AI settings",
+          destination: "ai",
+        },
+      },
+      },
+      meetingsCapture: {
+        domain: "meetings_capture",
+        state: "ready",
+        cause: null,
+      },
+    };
+    startMeeting.mockResolvedValueOnce("r-live");
+
+    render(<RecordingsView />);
+
+    const newMeeting = screen.getByRole("button", { name: "New meeting" });
+    expect(newMeeting).toBeEnabled();
+
+    // The message is informational, not an alarm, and does not claim the
+    // meeting needs attention before it can be recorded.
+    const notice = screen.getByRole("status", {
+      name: "Meeting notes are unavailable",
+    });
+    expect(notice).toHaveTextContent("Notes unavailable");
+    expect(notice).toHaveTextContent("Meetings still record and transcribe.");
+    expect(
+      screen.queryByRole("alert", { name: "Meetings need attention" }),
+    ).not.toBeInTheDocument();
+
+    fireEvent.click(newMeeting);
+    fireEvent.click(
+      await screen.findByRole("button", { name: "Confirm meeting consent" }),
+    );
+
+    await waitFor(() => {
+      expect(startMeeting).toHaveBeenCalled();
+    });
+  });
+
+  describe("meeting recovery", () => {
+    const user = () => userEvent.setup();
+
+    async function openDegradedMeeting(extra: Record<string, unknown>) {
+      recordings = [{ ...recordings[0], ...extra } as Recording];
+      backend.getRecording.mockResolvedValue({
+        ...recordings[0],
+        summary: "",
+        actionItems: [],
+      });
+      render(<RecordingsView />);
+      await user().click(screen.getByText("Weekly sync"));
+      return screen.findByText("The record");
+    }
+
+    it("renders the capture caveat on the meeting record", async () => {
+      await openDegradedMeeting({
+        captureDegradedSummary: "System audio recorded nothing for 240s.",
+      });
+
+      expect(
+        await screen.findByText(/System audio recorded nothing for 240s\./)
+      ).toBeInTheDocument();
+      expect(
+        screen.getByText("Some of this meeting was not captured")
+      ).toBeInTheDocument();
+    });
+
+    it("states an incomplete transcript honestly and offers both ways out", async () => {
+      await openDegradedMeeting({
+        transcriptComplete: false,
+        transcriptDegradedReason: "2 of 10 chunk(s) failed.",
+      });
+
+      expect(
+        await screen.findByText(
+          "Transcript incomplete — audio kept for re-transcription"
+        )
+      ).toBeInTheDocument();
+      expect(
+        screen.getByRole("button", { name: /^Re-transcribe$/ })
+      ).toBeInTheDocument();
+      expect(
+        screen.getByRole("button", { name: /accept losing the audio/i })
+      ).toBeInTheDocument();
+    });
+
+    it("asks before acknowledging, and says what acknowledging costs", async () => {
+      await openDegradedMeeting({
+        transcriptComplete: false,
+        transcriptDegradedReason: "2 of 10 chunk(s) failed.",
+      });
+
+      fireEvent.click(
+        screen.getByRole("button", { name: /accept losing the audio/i })
+      );
+
+      expect(
+        await screen.findByText(/storage cleanup delete that audio/i)
+      ).toBeInTheDocument();
+      expect(backend.acknowledgeIncompleteTranscript).not.toHaveBeenCalled();
+
+      fireEvent.click(
+        within(screen.getByRole("dialog")).getByRole("button", {
+          name: /accept losing the audio/i,
+        })
+      );
+
+      await waitFor(() => {
+        expect(backend.acknowledgeIncompleteTranscript).toHaveBeenCalledWith(
+          "r1"
+        );
+      });
+    });
+
+    it("re-checks the saved audio and reports what it found", async () => {
+      backend.revalidateRecordingAudio.mockResolvedValueOnce({
+        recordingId: "r1",
+        recoverable: true,
+        message:
+          "Saved meeting audio was re-checked and is intact. Re-transcribe this meeting to finish it.",
+        assets: [{ role: "primary", lifecycle: "ready", error: null }],
+      });
+      await openDegradedMeeting({ status: "error" });
+
+      fireEvent.pointerDown(
+        screen.getByRole("button", { name: "Meeting options" }),
+        { button: 0 }
+      );
+      fireEvent.click(
+        await screen.findByRole("menuitem", { name: /re-check audio/i })
+      );
+
+      await waitFor(() => {
+        expect(backend.revalidateRecordingAudio).toHaveBeenCalledWith("r1");
+      });
+      expect(
+        await screen.findByText(/re-checked and is intact/i)
+      ).toBeInTheDocument();
+    });
+
+    it("does not claim a repair when the re-check fails", async () => {
+      backend.revalidateRecordingAudio.mockRejectedValueOnce(
+        new Error("Recording storage is busy.")
+      );
+      await openDegradedMeeting({ status: "error" });
+
+      fireEvent.pointerDown(
+        screen.getByRole("button", { name: "Meeting options" }),
+        { button: 0 }
+      );
+      fireEvent.click(
+        await screen.findByRole("menuitem", { name: /re-check audio/i })
+      );
+
+      expect(
+        await screen.findByText("Saved audio could not be fully read")
+      ).toBeInTheDocument();
+      expect(
+        screen.getByText("Recording storage is busy.")
+      ).toBeInTheDocument();
+    });
+
+    it("offers no recovery affordances for a healthy meeting", async () => {
+      await openDegradedMeeting({});
+
+      expect(
+        screen.queryByText(/transcript incomplete/i)
+      ).not.toBeInTheDocument();
+      fireEvent.pointerDown(
+        screen.getByRole("button", { name: "Meeting options" }),
+        { button: 0 }
+      );
+      await screen.findByRole("menuitem", { name: /move to dictation/i });
+      expect(
+        screen.queryByRole("menuitem", { name: /re-check audio/i })
+      ).not.toBeInTheDocument();
+    });
+  });
+
+  describe("meeting notes failures", () => {
+    it("shows a stored analysis failure on the list row with a retry", async () => {
+      // The finding: a meeting whose summary, action items and title all failed
+      // looked exactly like one that had never asked for any.
+      recordings = [
+        {
+          ...recordings[0],
+          analysisError: "Ollama is not running on this machine.",
+        } as Recording,
+      ];
+
+      render(<RecordingsView />);
+
+      expect(
+        await screen.findByText("Meeting notes were not written")
+      ).toBeInTheDocument();
+      expect(
+        screen.getByText("Ollama is not running on this machine.")
+      ).toBeInTheDocument();
+
+      fireEvent.click(screen.getByRole("button", { name: /retry notes/i }));
+
+      await waitFor(() => {
+        expect(backend.retryMeetingAnalysis).toHaveBeenCalledWith("r1");
+      });
+    });
+
+    it("says nothing when the sidecar has no analysis-failure field", async () => {
+      render(<RecordingsView />);
+
+      await screen.findByText("Weekly sync");
+      expect(
+        screen.queryByText("Meeting notes were not written")
+      ).not.toBeInTheDocument();
+      expect(
+        screen.queryByRole("button", { name: /retry notes/i })
+      ).not.toBeInTheDocument();
+    });
+
+    it("follows the live meeting-analysis status through a retry", async () => {
+      recordings = [
+        {
+          ...recordings[0],
+          analysisError: "The analysis provider timed out.",
+        } as Recording,
+      ];
+
+      render(<RecordingsView />);
+      await screen.findByText("Meeting notes were not written");
+
+      await act(async () => {
+        eventListeners.get("meeting-analysis-status")?.({
+          payload: { recordingId: "r1", phase: "running" },
+        });
+      });
+
+      expect(
+        await screen.findByText("Writing meeting notes")
+      ).toBeInTheDocument();
+      expect(
+        screen.queryByRole("button", { name: /retry notes/i })
+      ).not.toBeInTheDocument();
+
+      await act(async () => {
+        eventListeners.get("meeting-analysis-status")?.({
+          payload: {
+            recordingId: "r1",
+            phase: "failed",
+            error: "Ollama refused the connection.",
+          },
+        });
+      });
+
+      expect(
+        await screen.findByText("Ollama refused the connection.")
+      ).toBeInTheDocument();
+
+      await act(async () => {
+        eventListeners.get("meeting-analysis-status")?.({
+          payload: { recordingId: "r1", phase: "completed" },
+        });
+      });
+
+      await waitFor(() => {
+        expect(
+          screen.queryByText("Meeting notes were not written")
+        ).not.toBeInTheDocument();
+      });
+      expect(refetchRecordings).toHaveBeenCalled();
+    });
+
+    it("keeps the failure visible when the retry itself cannot start", async () => {
+      recordings = [
+        {
+          ...recordings[0],
+          analysisError: "The analysis provider timed out.",
+        } as Recording,
+      ];
+      backend.retryMeetingAnalysis.mockRejectedValueOnce(
+        new Error("No AI route is configured.")
+      );
+
+      render(<RecordingsView />);
+      fireEvent.click(await screen.findByRole("button", { name: /retry notes/i }));
+
+      await waitFor(() => {
+        expect(toast).toHaveBeenCalledWith("No AI route is configured.", "error");
+      });
+      expect(
+        await screen.findByText("No AI route is configured.")
+      ).toBeInTheDocument();
+      expect(
+        screen.getByRole("button", { name: /retry notes/i })
+      ).toBeInTheDocument();
+    });
+
+    it("repeats the failure inside the meeting, where the summary is missing", async () => {
+      const user = userEvent.setup();
+      recordings = [
+        {
+          ...recordings[0],
+          analysisError: "The analysis provider timed out.",
+        } as Recording,
+      ];
+      backend.getRecording.mockResolvedValue({
+        ...recordings[0],
+        summary: "",
+        actionItems: [],
+      });
+
+      render(<RecordingsView />);
+      await user.click(screen.getByText("Weekly sync"));
+
+      const banners = await screen.findAllByText(
+        "Meeting notes were not written"
+      );
+      expect(banners.length).toBeGreaterThan(0);
+      expect(
+        screen.getAllByRole("button", { name: /retry notes/i }).length
+      ).toBeGreaterThan(0);
+    });
+  });
+
+  describe("calendar affordance", () => {
+    const startsAt = new Date(Date.now() + 12 * 60_000).toISOString();
+    const endsAt = new Date(Date.now() + 42 * 60_000).toISOString();
+
+    function withUpcomingMeeting(title = "Pricing review") {
+      calendarSnapshot.current = {
+        authorization: "authorized",
+        observedAt: Date.now(),
+        calendars: [{ id: "work", title: "Work", accountName: "iCloud" }],
+        errorCode: null,
+        events: [
+          {
+            id: "cal-1",
+            title,
+            startsAt,
+            endsAt,
+            isAllDay: false,
+            calendarId: "work",
+            calendarName: "Work",
+            videoService: "zoom",
+          },
+        ],
+      };
+    }
+
+    it("names the started meeting after the calendar event", async () => {
+      // The whole payoff: one click, and the recording is already called what
+      // the meeting is called.
+      withUpcomingMeeting();
+      startMeeting.mockResolvedValue("new-recording");
+      backend.renameRecording.mockResolvedValue(undefined);
+
+      render(<RecordingsView />);
+      fireEvent.click(await screen.findByRole("button", { name: "Start capture" }));
+      fireEvent.click(
+        await screen.findByRole("button", { name: "Confirm meeting consent" }),
+      );
+
+      await waitFor(() => {
+        expect(backend.renameRecording).toHaveBeenCalledWith(
+          "new-recording",
+          "Pricing review",
+        );
+      });
+    });
+
+    it("still starts the meeting when the rename fails", async () => {
+      // A lost title is not a reason to lose the recording.
+      withUpcomingMeeting();
+      startMeeting.mockResolvedValue("new-recording");
+      backend.renameRecording.mockRejectedValueOnce(new Error("database is locked"));
+
+      render(<RecordingsView />);
+      fireEvent.click(await screen.findByRole("button", { name: "Start capture" }));
+      fireEvent.click(
+        await screen.findByRole("button", { name: "Confirm meeting consent" }),
+      );
+
+      await waitFor(() => expect(startMeeting).toHaveBeenCalled());
+      await waitFor(() => expect(refetchRecordings).toHaveBeenCalled());
+      expect(toast).not.toHaveBeenCalledWith(
+        expect.stringContaining("database is locked"),
+        "error",
+      );
+    });
+
+    it("leaves an ordinary New meeting unnamed", async () => {
+      // "New meeting" is not a calendar start, and must not inherit a title
+      // from an event the reader did not choose.
+      withUpcomingMeeting();
+      startMeeting.mockResolvedValue("new-recording");
+
+      render(<RecordingsView />);
+      fireEvent.click(await screen.findByRole("button", { name: /new meeting/i }));
+      fireEvent.click(
+        await screen.findByRole("button", { name: "Confirm meeting consent" }),
+      );
+
+      await waitFor(() => expect(startMeeting).toHaveBeenCalled());
+      expect(backend.renameRecording).not.toHaveBeenCalled();
+    });
+
+    it("says nothing when there is no calendar to read", async () => {
+      render(<RecordingsView />);
+
+      await screen.findByRole("heading", { name: "Meetings" });
+      expect(
+        screen.queryByRole("button", { name: "Start capture" }),
+      ).not.toBeInTheDocument();
+      expect(screen.queryByText("Connect your calendar")).not.toBeInTheDocument();
+    });
   });
 });

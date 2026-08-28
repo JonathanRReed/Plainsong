@@ -40,8 +40,54 @@ const candidateIdentity = collectReleaseCandidateIdentity({
   appPath,
 });
 
+/**
+ * The Electron child-process bundles, keyed by the entitlement policy each one
+ * is signed with.
+ *
+ * `electron` is the generic "<Product> Helper", which hosts Chromium's utility
+ * processes including the audio service; scripts/sign-macos.mjs gives it
+ * entitlements.mac.helper.plist, which is the inherit set plus audio. The other
+ * three carry entitlements.mac.inherit.plist and must hold no device or
+ * automation authority at all.
+ */
+const ELECTRON_HELPER_SUFFIXES = {
+  electronHelper: "",
+  electronHelperGpu: " (GPU)",
+  electronHelperRenderer: " (Renderer)",
+  electronHelperPlugin: " (Plugin)",
+};
+
+/** The three helpers with no legitimate use for the device or Apple Events. */
+const RESTRICTED_ELECTRON_HELPERS = [
+  "electronHelperGpu",
+  "electronHelperRenderer",
+  "electronHelperPlugin",
+];
+
+function electronHelperPaths(bundlePath) {
+  const productName = path.basename(bundlePath, ".app");
+  return Object.fromEntries(
+    Object.entries(ELECTRON_HELPER_SUFFIXES).map(([key, suffix]) => {
+      const helperName = `${productName} Helper${suffix}`;
+      return [
+        key,
+        path.join(
+          bundlePath,
+          "Contents",
+          "Frameworks",
+          `${helperName}.app`,
+          "Contents",
+          "MacOS",
+          helperName,
+        ),
+      ];
+    }),
+  );
+}
+
 function appBundlePaths(bundlePath) {
   return {
+    ...electronHelperPaths(bundlePath),
     app: bundlePath,
     mainExecutable: path.join(bundlePath, "Contents", "MacOS", "Plainsong"),
     sidecar: path.join(
@@ -57,6 +103,13 @@ function appBundlePaths(bundlePath) {
       "Resources",
       "shortcut-helper",
       "plainsong-native-shortcut-helper",
+    ),
+    calendarHelper: path.join(
+      bundlePath,
+      "Contents",
+      "Resources",
+      "calendar-helper",
+      "plainsong-native-calendar-helper",
     ),
     speechHelper: path.join(
       bundlePath,
@@ -121,6 +174,7 @@ function signingDetails(targetPath) {
 
 const SPEECH_RECOGNITION_ENTITLEMENT =
   "com.apple.security.personal-information.speech-recognition";
+const CALENDARS_ENTITLEMENT = "com.apple.security.personal-information.calendars";
 const FORBIDDEN_INHERITED_ENTITLEMENTS = [
   "com.apple.security.inherit",
   "com.apple.security.device.audio-input",
@@ -134,10 +188,46 @@ const FORBIDDEN_INHERITED_ENTITLEMENTS = [
 const FORBIDDEN_SIDECAR_ENTITLEMENTS = [
   ...FORBIDDEN_INHERITED_ENTITLEMENTS,
   SPEECH_RECOGNITION_ENTITLEMENT,
+  CALENDARS_ENTITLEMENT,
 ];
 const FORBIDDEN_SHORTCUT_HELPER_ENTITLEMENTS = [
   ...FORBIDDEN_INHERITED_ENTITLEMENTS,
   SPEECH_RECOGNITION_ENTITLEMENT,
+  CALENDARS_ENTITLEMENT,
+];
+// The read-only EventKit helper: calendars, and nothing that would make it a
+// more interesting thing to compromise than a JSON printer. Speech is listed
+// because the two personal-information grants are the ones most likely to be
+// copied across helpers by a careless entitlements edit.
+const FORBIDDEN_CALENDAR_HELPER_ENTITLEMENTS = [
+  ...FORBIDDEN_INHERITED_ENTITLEMENTS,
+  SPEECH_RECOGNITION_ENTITLEMENT,
+];
+
+// The GPU, Renderer and Plugin helpers need JIT, writable-executable memory and
+// `inherit` — and nothing else. They shipped with the microphone, unscoped Apple
+// Events and disabled library validation because they were signed with a copy of
+// the main app's entitlements; none of the three ever opens a device or drives
+// another application.
+const FORBIDDEN_RESTRICTED_HELPER_ENTITLEMENTS = [
+  "com.apple.security.device.audio-input",
+  "com.apple.security.device.microphone",
+  "com.apple.security.automation.apple-events",
+  "com.apple.security.temporary-exception.apple-events",
+  "com.apple.security.cs.disable-library-validation",
+  SPEECH_RECOGNITION_ENTITLEMENT,
+  CALENDARS_ENTITLEMENT,
+];
+
+// The generic helper keeps audio (Chromium's audio service runs there, and the
+// Settings microphone test reaches it through getUserMedia) but has no more
+// business with Apple Events or unsigned libraries than the other three.
+const FORBIDDEN_GENERIC_HELPER_ENTITLEMENTS = [
+  "com.apple.security.automation.apple-events",
+  "com.apple.security.temporary-exception.apple-events",
+  "com.apple.security.cs.disable-library-validation",
+  SPEECH_RECOGNITION_ENTITLEMENT,
+  CALENDARS_ENTITLEMENT,
 ];
 
 function entitlementDetails(targetPath) {
@@ -157,13 +247,32 @@ function entitlementDetails(targetPath) {
   const forbiddenSidecarEntitlements = FORBIDDEN_SIDECAR_ENTITLEMENTS.filter(
     (entitlement) => result.output.includes(entitlement),
   );
+  const forbiddenRestrictedHelperEntitlements =
+    FORBIDDEN_RESTRICTED_HELPER_ENTITLEMENTS.filter((entitlement) =>
+      result.output.includes(entitlement),
+    );
+  const forbiddenGenericHelperEntitlements =
+    FORBIDDEN_GENERIC_HELPER_ENTITLEMENTS.filter((entitlement) =>
+      result.output.includes(entitlement),
+    );
+  const forbiddenCalendarHelperEntitlements =
+    FORBIDDEN_CALENDAR_HELPER_ENTITLEMENTS.filter((entitlement) =>
+      result.output.includes(entitlement),
+    );
   return {
     ...result,
     hasSpeechRecognition:
       result.ok && result.output.includes(SPEECH_RECOGNITION_ENTITLEMENT),
+    hasCalendars: result.ok && result.output.includes(CALENDARS_ENTITLEMENT),
+    hasLibraryValidationDisabled: result.output.includes(
+      "com.apple.security.cs.disable-library-validation",
+    ),
     forbiddenInheritedEntitlements,
     forbiddenSidecarEntitlements,
     forbiddenShortcutHelperEntitlements,
+    forbiddenRestrictedHelperEntitlements,
+    forbiddenGenericHelperEntitlements,
+    forbiddenCalendarHelperEntitlements,
   };
 }
 
@@ -203,10 +312,15 @@ function entitlementDiagnostic(result) {
   return {
     ...commandDiagnostic(result),
     hasSpeechRecognition: result.hasSpeechRecognition,
+    hasLibraryValidationDisabled: result.hasLibraryValidationDisabled,
     forbiddenInheritedEntitlements: result.forbiddenInheritedEntitlements,
     forbiddenSidecarEntitlements: result.forbiddenSidecarEntitlements,
     forbiddenShortcutHelperEntitlements:
       result.forbiddenShortcutHelperEntitlements,
+    forbiddenRestrictedHelperEntitlements:
+      result.forbiddenRestrictedHelperEntitlements,
+    forbiddenGenericHelperEntitlements:
+      result.forbiddenGenericHelperEntitlements,
   };
 }
 
@@ -305,7 +419,14 @@ function inspectAppBundle(bundlePath) {
     mainExecutable: isExecutable(paths.mainExecutable),
     sidecar: isExecutable(paths.sidecar),
     shortcutHelper: isExecutable(paths.shortcutHelper),
+    calendarHelper: isExecutable(paths.calendarHelper),
     speechHelper: isExecutable(paths.speechHelper),
+    ...Object.fromEntries(
+      Object.keys(ELECTRON_HELPER_SUFFIXES).map((key) => [
+        key,
+        isExecutable(paths[key]),
+      ]),
+    ),
   };
   const signatures = {
     app: run("/usr/bin/codesign", [
@@ -327,6 +448,12 @@ function inspectAppBundle(bundlePath) {
       "--verbose=2",
       paths.shortcutHelper,
     ]),
+    calendarHelper: run("/usr/bin/codesign", [
+      "--verify",
+      "--strict",
+      "--verbose=2",
+      paths.calendarHelper,
+    ]),
     speechHelper: run("/usr/bin/codesign", [
       "--verify",
       "--strict",
@@ -338,18 +465,27 @@ function inspectAppBundle(bundlePath) {
     app: signingDetails(paths.app),
     sidecar: signingDetails(paths.sidecar),
     shortcutHelper: signingDetails(paths.shortcutHelper),
+    calendarHelper: signingDetails(paths.calendarHelper),
     speechHelper: signingDetails(paths.speechHelper),
   };
   const entitlements = {
     app: entitlementDetails(paths.app),
     sidecar: entitlementDetails(paths.sidecar),
     shortcutHelper: entitlementDetails(paths.shortcutHelper),
+    calendarHelper: entitlementDetails(paths.calendarHelper),
     speechHelper: entitlementDetails(paths.speechHelper),
+    ...Object.fromEntries(
+      Object.keys(ELECTRON_HELPER_SUFFIXES).map((key) => [
+        key,
+        entitlementDetails(paths[key]),
+      ]),
+    ),
   };
   const architectures = {
     app: architectureDetails(paths.mainExecutable),
     sidecar: architectureDetails(paths.sidecar),
     shortcutHelper: architectureDetails(paths.shortcutHelper),
+    calendarHelper: architectureDetails(paths.calendarHelper),
     speechHelper: architectureDetails(paths.speechHelper),
   };
   const stapler = run("/usr/bin/xcrun", ["stapler", "validate", paths.app]);
@@ -383,25 +519,60 @@ function checksForAppBundle(inspection) {
     mainExecutablePresent: presence.mainExecutable,
     sidecarExecutablePresent: presence.sidecar,
     shortcutHelperExecutablePresent: presence.shortcutHelper,
+    calendarHelperExecutablePresent: presence.calendarHelper,
     speechHelperExecutablePresent: presence.speechHelper,
     appSignatureValid: signatures.app.ok,
     sidecarSignatureValid: signatures.sidecar.ok,
     shortcutHelperSignatureValid: signatures.shortcutHelper.ok,
+    calendarHelperSignatureValid: signatures.calendarHelper.ok,
     speechHelperSignatureValid: signatures.speechHelper.ok,
     appUsesDeveloperId: signing.app.developerId,
     sidecarUsesDeveloperId: signing.sidecar.developerId,
     shortcutHelperUsesDeveloperId: signing.shortcutHelper.developerId,
+    calendarHelperUsesDeveloperId: signing.calendarHelper.developerId,
     speechHelperUsesDeveloperId: signing.speechHelper.developerId,
     appUsesHardenedRuntime: signing.app.hardenedRuntime,
     sidecarUsesHardenedRuntime: signing.sidecar.hardenedRuntime,
     shortcutHelperUsesHardenedRuntime: signing.shortcutHelper.hardenedRuntime,
+    calendarHelperUsesHardenedRuntime: signing.calendarHelper.hardenedRuntime,
     speechHelperUsesHardenedRuntime: signing.speechHelper.hardenedRuntime,
     appHasSecureTimestamp: signing.app.secureTimestamp,
     sidecarHasSecureTimestamp: signing.sidecar.secureTimestamp,
     shortcutHelperHasSecureTimestamp: signing.shortcutHelper.secureTimestamp,
+    calendarHelperHasSecureTimestamp: signing.calendarHelper.secureTimestamp,
     speechHelperHasSecureTimestamp: signing.speechHelper.secureTimestamp,
     appHasNoSpeechEntitlement:
       entitlements.app.ok && !entitlements.app.hasSpeechRecognition,
+    // The app bundle holds the microphone, Apple Events and the Accessibility
+    // grant that lets it inject keystrokes anywhere. Library validation is the
+    // thing that stops that signature also being a loader for someone else's
+    // dylib, and notarization cannot be retracted once it has shipped.
+    appHasLibraryValidationEnabled:
+      entitlements.app.ok && !entitlements.app.hasLibraryValidationDisabled,
+
+    // Every Electron child bundle must exist where sign-macos.mjs expects it —
+    // a productName change that moved these would otherwise leave their
+    // entitlement checks silently unenforced.
+    ...Object.fromEntries(
+      Object.keys(ELECTRON_HELPER_SUFFIXES).map((key) => [
+        `${key}Present`,
+        presence[key],
+      ]),
+    ),
+    // The GPU, Renderer and Plugin helpers hold no device or automation
+    // authority and cannot load unsigned libraries.
+    ...Object.fromEntries(
+      RESTRICTED_ELECTRON_HELPERS.map((key) => [
+        `${key}HasNoDeviceOrAutomationPrivileges`,
+        entitlements[key].ok &&
+          entitlements[key].forbiddenRestrictedHelperEntitlements.length === 0,
+      ]),
+    ),
+    // The generic helper keeps audio (Chromium's audio service runs there) but
+    // nothing else the other three gave up.
+    electronHelperHasNoAutomationPrivileges:
+      entitlements.electronHelper.ok &&
+      entitlements.electronHelper.forbiddenGenericHelperEntitlements.length === 0,
     sidecarHasNoSpeechEntitlement:
       entitlements.sidecar.ok && !entitlements.sidecar.hasSpeechRecognition,
     sidecarHasNoForbiddenPrivileges:
@@ -418,6 +589,18 @@ function checksForAppBundle(inspection) {
     speechHelperHasNoUnrelatedEntitlements:
       entitlements.speechHelper.ok &&
       entitlements.speechHelper.forbiddenInheritedEntitlements.length === 0,
+    // Calendar reading lives in its own binary precisely so the app's
+    // signature — microphone, Apple Events, and the Accessibility grant it
+    // holds at runtime — never has to carry it. A release where the app took
+    // the entitlement back would defeat the split without failing anything
+    // else, so it is checked here rather than assumed from the plist.
+    appHasNoCalendarEntitlement:
+      entitlements.app.ok && !entitlements.app.hasCalendars,
+    calendarHelperHasCalendarEntitlement:
+      entitlements.calendarHelper.hasCalendars,
+    calendarHelperHasNoUnrelatedEntitlements:
+      entitlements.calendarHelper.ok &&
+      entitlements.calendarHelper.forbiddenCalendarHelperEntitlements.length === 0,
     expectedTeamConfigured: Boolean(expectedTeam),
     appTeamMatchesExpected:
       Boolean(expectedTeam) && signing.app.teamIdentifier === expectedTeam,
@@ -427,12 +610,16 @@ function checksForAppBundle(inspection) {
     shortcutHelperTeamMatchesApp:
       Boolean(signing.app.teamIdentifier) &&
       signing.shortcutHelper.teamIdentifier === signing.app.teamIdentifier,
+    calendarHelperTeamMatchesApp:
+      Boolean(signing.app.teamIdentifier) &&
+      signing.calendarHelper.teamIdentifier === signing.app.teamIdentifier,
     speechHelperTeamMatchesApp:
       Boolean(signing.app.teamIdentifier) &&
       signing.speechHelper.teamIdentifier === signing.app.teamIdentifier,
     appIsArm64: architectures.app.arm64,
     sidecarIsArm64: architectures.sidecar.arm64,
     shortcutHelperIsArm64: architectures.shortcutHelper.arm64,
+    calendarHelperIsArm64: architectures.calendarHelper.arm64,
     speechHelperIsArm64: architectures.speechHelper.arm64,
     notarizationTicketStapled: stapler.ok,
     gatekeeperAccepted: gatekeeper.ok,
@@ -473,18 +660,31 @@ function diagnosticsForAppBundle(inspection) {
     shortcutHelperSignature: commandDiagnostic(
       inspection.signatures.shortcutHelper,
     ),
+    calendarHelperSignature: commandDiagnostic(
+      inspection.signatures.calendarHelper,
+    ),
     speechHelperSignature: commandDiagnostic(inspection.signatures.speechHelper),
     appSigning: signingDiagnostic(inspection.signing.app),
     sidecarSigning: signingDiagnostic(inspection.signing.sidecar),
     shortcutHelperSigning: signingDiagnostic(inspection.signing.shortcutHelper),
+    calendarHelperSigning: signingDiagnostic(inspection.signing.calendarHelper),
     speechHelperSigning: signingDiagnostic(inspection.signing.speechHelper),
     appEntitlements: entitlementDiagnostic(inspection.entitlements.app),
     sidecarEntitlements: entitlementDiagnostic(inspection.entitlements.sidecar),
     shortcutHelperEntitlements: entitlementDiagnostic(
       inspection.entitlements.shortcutHelper,
     ),
+    calendarHelperEntitlements: entitlementDiagnostic(
+      inspection.entitlements.calendarHelper,
+    ),
     speechHelperEntitlements: entitlementDiagnostic(
       inspection.entitlements.speechHelper,
+    ),
+    ...Object.fromEntries(
+      Object.keys(ELECTRON_HELPER_SUFFIXES).map((key) => [
+        `${key}Entitlements`,
+        entitlementDiagnostic(inspection.entitlements[key]),
+      ]),
     ),
     appArchitecture: architectureDiagnostic(inspection.architectures.app),
     sidecarArchitecture: architectureDiagnostic(inspection.architectures.sidecar),
@@ -658,6 +858,8 @@ const artifact = {
     sidecarTeamIdentifier: releaseApp.signing.sidecar.teamIdentifier,
     shortcutHelperTeamIdentifier:
       releaseApp.signing.shortcutHelper.teamIdentifier,
+    calendarHelperTeamIdentifier:
+      releaseApp.signing.calendarHelper.teamIdentifier,
     speechHelperTeamIdentifier: releaseApp.signing.speechHelper.teamIdentifier,
     zipAppAuthority: zipVerification.app?.signing.app.authority ?? null,
     zipAppTeamIdentifier:
@@ -666,6 +868,8 @@ const artifact = {
       zipVerification.app?.signing.sidecar.teamIdentifier ?? null,
     zipShortcutHelperTeamIdentifier:
       zipVerification.app?.signing.shortcutHelper.teamIdentifier ?? null,
+    zipCalendarHelperTeamIdentifier:
+      zipVerification.app?.signing.calendarHelper.teamIdentifier ?? null,
     zipSpeechHelperTeamIdentifier:
       zipVerification.app?.signing.speechHelper.teamIdentifier ?? null,
   },
@@ -673,11 +877,14 @@ const artifact = {
     app: releaseApp.architectures.app.architectures,
     sidecar: releaseApp.architectures.sidecar.architectures,
     shortcutHelper: releaseApp.architectures.shortcutHelper.architectures,
+    calendarHelper: releaseApp.architectures.calendarHelper.architectures,
     speechHelper: releaseApp.architectures.speechHelper.architectures,
     zipApp: zipVerification.app?.architectures.app.architectures ?? [],
     zipSidecar: zipVerification.app?.architectures.sidecar.architectures ?? [],
     zipShortcutHelper:
       zipVerification.app?.architectures.shortcutHelper.architectures ?? [],
+    zipCalendarHelper:
+      zipVerification.app?.architectures.calendarHelper.architectures ?? [],
     zipSpeechHelper:
       zipVerification.app?.architectures.speechHelper.architectures ?? [],
   },

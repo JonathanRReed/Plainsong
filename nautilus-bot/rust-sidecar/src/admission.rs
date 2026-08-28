@@ -1,6 +1,8 @@
 use serde_json::Value;
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
 use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 
 const MAX_CONCURRENT_REQUESTS: usize = 32;
@@ -122,6 +124,7 @@ fn classify_command(command: &str) -> CommandClass {
         | "ask_memory"
         | "extract_action_items"
         | "extract_action_items_grounded"
+        | "retry_meeting_analysis"
         | "summarize_recording"
         | "summarize_recording_grounded" => CommandClass::Analysis,
         "create_backup_default"
@@ -190,6 +193,192 @@ impl Drop for AdmissionLease {
     }
 }
 
+/// How long an issued capture-admission nonce stays redeemable.
+///
+/// The nonce is minted the instant the user clicks and redeemed by the very next
+/// `start_recording`, so this only has to cover one IPC hop. Short on purpose: a
+/// nonce that outlives the gesture it represents is no longer evidence that a
+/// human asked for this capture.
+const CAPTURE_ADMISSION_TTL: Duration = Duration::from_secs(30);
+
+/// Why a capture-admission nonce was not accepted.
+///
+/// There is deliberately no distinct "reused" case. Redeeming removes the nonce,
+/// so a replay is indistinguishable from a proof that was never issued -- and
+/// reporting the safer of the two is the right answer either way.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CaptureAdmissionRejection {
+    /// Never issued by the privileged Electron side, or already redeemed.
+    Unknown,
+    /// Issued, but older than [`CAPTURE_ADMISSION_TTL`].
+    Expired,
+}
+
+impl CaptureAdmissionRejection {
+    pub fn message(self) -> &'static str {
+        match self {
+            Self::Unknown => "Meeting capture admission proof was not issued by Plainsong",
+            Self::Expired => "Meeting capture admission proof expired. Start the meeting again.",
+        }
+    }
+}
+
+/// Single-use, short-lived proof that a real user gesture asked for a capture.
+///
+/// The sidecar used to accept any well-formed UUID as admission, which made the
+/// check a formality: anything that could reach the command could mint its own
+/// proof. Registering each issued nonce turns it into something only the
+/// privileged Electron side can produce.
+///
+/// Enforcement is opt-in *by first use*: until Electron registers its first
+/// nonce, a UUID-shaped proof is still accepted, exactly as before. Rejecting
+/// unregistered nonces before the registrar exists would take meeting capture
+/// down entirely. The moment the first nonce is registered, the registry is
+/// authoritative and unknown, expired, and reused nonces are all refused.
+pub struct CaptureAdmissionRegistry {
+    issued: Mutex<HashMap<String, Instant>>,
+    /// Flipped the first time a nonce is registered, and never back.
+    registrar_active: AtomicBool,
+    ttl: Duration,
+}
+
+impl Default for CaptureAdmissionRegistry {
+    fn default() -> Self {
+        Self::with_ttl(CAPTURE_ADMISSION_TTL)
+    }
+}
+
+impl CaptureAdmissionRegistry {
+    pub fn with_ttl(ttl: Duration) -> Self {
+        Self {
+            issued: Mutex::new(HashMap::new()),
+            registrar_active: AtomicBool::new(false),
+            ttl,
+        }
+    }
+
+    /// Whether the privileged registrar has ever registered a nonce.
+    pub fn is_enforcing(&self) -> bool {
+        self.registrar_active.load(Ordering::SeqCst)
+    }
+
+    /// Record a nonce the privileged side just issued.
+    pub fn register(&self, nonce: &str) {
+        let mut issued = self
+            .issued
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        // Sweep on write: the map only ever holds nonces from the last few
+        // seconds, so it never needs its own timer.
+        let ttl = self.ttl;
+        issued.retain(|_, issued_at| issued_at.elapsed() <= ttl);
+        issued.insert(nonce.to_string(), Instant::now());
+        drop(issued);
+        self.registrar_active.store(true, Ordering::SeqCst);
+    }
+
+    /// Redeem a nonce. Succeeds at most once per registered nonce.
+    pub fn consume(&self, nonce: &str) -> Result<(), CaptureAdmissionRejection> {
+        let mut issued = self
+            .issued
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        match issued.remove(nonce) {
+            Some(issued_at) if issued_at.elapsed() <= self.ttl => Ok(()),
+            Some(_) => Err(CaptureAdmissionRejection::Expired),
+            None => {
+                if self.registrar_active.load(Ordering::SeqCst) {
+                    // Once the registrar is live, an unrecognised nonce is
+                    // either forged or already spent. Both are refusals; the
+                    // registry cannot tell them apart after removal, and
+                    // "unknown" is the safer thing to report.
+                    Err(CaptureAdmissionRejection::Unknown)
+                } else {
+                    Ok(())
+                }
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod capture_admission_tests {
+    use super::*;
+
+    #[test]
+    fn an_unregistered_nonce_is_accepted_until_the_registrar_appears() {
+        // Compatibility path: rejecting before Electron registers anything
+        // would take meeting capture down outright.
+        let registry = CaptureAdmissionRegistry::default();
+        assert!(!registry.is_enforcing());
+        assert!(registry.consume("any-uuid").is_ok());
+    }
+
+    #[test]
+    fn registering_a_nonce_turns_on_enforcement() {
+        let registry = CaptureAdmissionRegistry::default();
+        registry.register("nonce-1");
+
+        assert!(registry.is_enforcing());
+        assert_eq!(
+            registry.consume("never-issued"),
+            Err(CaptureAdmissionRejection::Unknown)
+        );
+    }
+
+    #[test]
+    fn a_registered_nonce_is_accepted_exactly_once() {
+        let registry = CaptureAdmissionRegistry::default();
+        registry.register("nonce-1");
+
+        assert!(registry.consume("nonce-1").is_ok());
+        // Single use: a replayed proof is no proof.
+        assert_eq!(
+            registry.consume("nonce-1"),
+            Err(CaptureAdmissionRejection::Unknown)
+        );
+    }
+
+    #[test]
+    fn an_expired_nonce_is_rejected() {
+        let registry = CaptureAdmissionRegistry::with_ttl(Duration::from_millis(0));
+        registry.register("nonce-1");
+        std::thread::sleep(Duration::from_millis(5));
+
+        assert_eq!(
+            registry.consume("nonce-1"),
+            Err(CaptureAdmissionRejection::Expired)
+        );
+    }
+
+    #[test]
+    fn registering_sweeps_nonces_that_outlived_their_ttl() {
+        // The map must not grow for the life of the process just because some
+        // gestures never turned into a capture.
+        let registry = CaptureAdmissionRegistry::with_ttl(Duration::from_millis(0));
+        registry.register("stale-1");
+        std::thread::sleep(Duration::from_millis(5));
+        registry.register("fresh-1");
+
+        let issued = registry
+            .issued
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        assert!(!issued.contains_key("stale-1"));
+        assert!(issued.contains_key("fresh-1"));
+    }
+
+    #[test]
+    fn every_rejection_explains_itself() {
+        for rejection in [
+            CaptureAdmissionRejection::Unknown,
+            CaptureAdmissionRejection::Expired,
+        ] {
+            assert!(!rejection.message().is_empty());
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -235,6 +424,28 @@ mod tests {
             )
             .expect("different model can use the second slot");
         drop(first);
+    }
+
+    #[test]
+    fn a_manual_retry_is_admitted_as_analysis_work() {
+        // A retry that raced the automatic post-stop pass must share the
+        // analysis semaphore and the per-recording duplicate key, or two full
+        // LLM passes run and last-write-wins on the results.
+        let admission = AdmissionController::default();
+        let _first = admission
+            .admit(
+                "retry_meeting_analysis",
+                &serde_json::json!({"recordingId": "recording-1"}),
+            )
+            .expect("first retry");
+        let error = admission
+            .admit(
+                "retry_meeting_analysis",
+                &serde_json::json!({"recordingId": "recording-1"}),
+            )
+            .err()
+            .expect("concurrent retry for the same recording must be rejected");
+        assert!(error.starts_with("SIDECAR_DUPLICATE:"));
     }
 
     #[test]

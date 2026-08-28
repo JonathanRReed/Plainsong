@@ -18,8 +18,9 @@ use crate::audio::system_capture::{
 use crate::audio::vad::{VadBackendKind, VadConfig, VadEdge, VadGate};
 use crate::models::RecordingOptions;
 use crate::recording_audio::{
-    create_new_file, sync_file, sync_parent_directory, validate_plaintext_wav, RecordingAudioRole,
-    RecordingAudioValidation, RecordingCapturePlan, ValidatedRecordingAudio,
+    available_space_bytes, create_new_file, sync_file, sync_parent_directory,
+    validate_plaintext_wav, RecordingAudioRole, RecordingAudioValidation, RecordingCapturePlan,
+    ValidatedRecordingAudio,
 };
 use crate::settings;
 use crate::sidecar_handle::SidecarHandle;
@@ -51,7 +52,15 @@ use std::time::{Duration, Instant};
 /// wait, so there is no quiet period to detect. Anything faster here is a real
 /// trade against clipping the end of the last word, and needs testing against
 /// human speech rather than a `say` fixture.
-const DICTATION_STOP_CAPTURE_TAIL_MS: u64 = 120;
+///
+/// The wait itself belongs to the *caller*, not to `stop_dictation`: it used to
+/// be a `std::thread::sleep` at the top of the stop body, which ran while the
+/// caller held the async `audio_capture` mutex and blocked a tokio worker for
+/// its whole duration. `stop_dictation_for_sidecar` now awaits it before
+/// acquiring the lock, which keeps the ordering identical (capture is still
+/// live, `is_dictating` has not been flipped) without parking a runtime thread
+/// or the mutex.
+pub(crate) const DICTATION_STOP_CAPTURE_TAIL_MS: u64 = 120;
 /// Core Audio can take longer than 1.5 seconds to construct its first input
 /// stream after launch, especially while the audio server is waking. This is
 /// only a failure deadline; successful stream starts still return immediately.
@@ -68,6 +77,214 @@ const DICTATION_AUTO_STOP_FRAME_MS: f32 = 30.0;
 /// Minimum sustained speech before auto-stop-on-silence is allowed to arm, so a
 /// stray cough or click can't immediately end the session once it goes quiet.
 const DICTATION_AUTO_STOP_MIN_SPEECH_SECONDS: f32 = 0.5;
+/// Hard ceiling on how much audio one dictation session may buffer.
+///
+/// The capture buffer is an unbounded `SegQueue<f32>` held entirely in RAM until
+/// stop, so a session that never ends grows without limit: at a 48kHz device
+/// that is 192 KB/s, or roughly 11.5 MB per minute. Nothing bounded it, and a
+/// stuck session (a hands-free mis-trigger, a hotkey that never released, a user
+/// who walked away) would grow until the process died.
+///
+/// Ten minutes caps the worst case near 115 MB at 48kHz while sitting far beyond
+/// any real dictation: this is a short-form modality where hotkey release and
+/// auto-stop-on-silence end typical sessions in seconds. Reaching this ceiling
+/// means something went wrong, so the session is ended and the user is told
+/// rather than left with silently truncated audio.
+const DICTATION_MAX_SESSION_SECONDS: u64 = 10 * 60;
+
+/// Run one realtime audio callback body so a panic inside it cannot take the
+/// process down.
+///
+/// These closures are invoked by cpal from a CoreAudio render thread, through an
+/// `extern "C"` trampoline. An escaping panic would hit that boundary and abort
+/// -- killing an in-progress meeting and its unflushed audio over what is often
+/// a recoverable bug in one callback. Catching here turns that into a single
+/// logged error and an inert stream.
+///
+/// `poisoned` makes the stream inert rather than letting the same panic repeat
+/// hundreds of times a second: whatever invariant the callback broke, it will
+/// keep breaking it, and the log would bury everything else.
+///
+/// `AssertUnwindSafe` is honest here precisely *because* of that latch. The
+/// concern it waives is observing state a panic left half-updated, and after a
+/// panic this callback never runs again, so no later iteration can observe it.
+fn guard_audio_callback<F: FnOnce()>(poisoned: &AtomicBool, label: &str, body: F) {
+    if poisoned.load(Ordering::Relaxed) {
+        return;
+    }
+    if std::panic::catch_unwind(std::panic::AssertUnwindSafe(body)).is_err() {
+        poisoned.store(true, Ordering::Relaxed);
+        tracing::error!(
+            "{} audio callback panicked; this capture stream is now inert",
+            label
+        );
+    }
+}
+
+/// How one capture callback's worth of mono samples fares against the session
+/// length ceiling.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct DictationBufferAdmission {
+    /// Leading samples that still fit and must be buffered.
+    pub accepted: u64,
+    /// True exactly when this callback is the one that fills the buffer, so the
+    /// caller can stop capture and announce the ceiling a single time.
+    pub ceiling_reached: bool,
+}
+
+/// Decide how much of an incoming callback fits under the session ceiling.
+///
+/// Split out of the realtime capture callback so the ceiling arithmetic -- the
+/// part that decides whether a user's audio is kept or dropped -- is testable
+/// without a live input device.
+pub(crate) fn admit_dictation_samples(
+    buffered: u64,
+    incoming: u64,
+    max_session_samples: u64,
+) -> DictationBufferAdmission {
+    let remaining = max_session_samples.saturating_sub(buffered);
+    let accepted = remaining.min(incoming);
+    DictationBufferAdmission {
+        accepted,
+        // Only report the ceiling when this callback actually had audio to
+        // place: an empty callback against a full buffer is not the moment the
+        // limit was hit, and must not re-announce it.
+        ceiling_reached: incoming > 0 && accepted < incoming,
+    }
+}
+
+/// Bytes a mono 16-bit WAV track consumes per second at 48 kHz, the rate every
+/// mixed meeting session lands on.
+pub const MEETING_WAV_BYTES_PER_SECOND_PER_TRACK: u64 = 48_000 * 2;
+/// Recording time a meeting must have room for before it is allowed to start.
+///
+/// Refusing here is recoverable and honest; running out mid-meeting is not — the
+/// writer thread dies on ENOSPC and, until the writer-failure slot existed, the
+/// session kept showing an active recording while every subsequent sample was
+/// discarded.
+pub const MEETING_START_MIN_HEADROOM_SECONDS: u64 = 30 * 60;
+/// Remaining recording time below which a running meeting warns the user:
+/// enough to wrap up or free space before capture has to end.
+pub const MEETING_LOW_SPACE_WARN_SECONDS: u64 = 10 * 60;
+/// Remaining recording time below which a running meeting is stopped on
+/// purpose, so the clean stop path (flush, finalize, fsync, hash) can land the
+/// audio already captured. Stopping here trades the last minute of a meeting
+/// for keeping the rest.
+///
+/// Scoped to capture only. Vault encryption at stop writes a full second copy
+/// of the bundle and needs headroom of its own, which nothing checks yet.
+pub const MEETING_CRITICAL_SPACE_STOP_SECONDS: u64 = 60;
+
+/// Free bytes one meeting needs to record for `seconds`.
+///
+/// Every threshold below scales with the number of WAV tracks the session
+/// actually writes: a mic-only meeting writes one, "me and them" writes three
+/// (mixed, mic, system). Charging every meeting the three-track price refused
+/// mic-only meetings on volumes that could comfortably hold ~50 minutes of
+/// them, and warned and auto-stopped the ones that did start three times too
+/// early.
+pub fn meeting_headroom_bytes(track_count: u64, seconds: u64) -> u64 {
+    track_count
+        .max(1)
+        .saturating_mul(MEETING_WAV_BYTES_PER_SECOND_PER_TRACK)
+        .saturating_mul(seconds)
+}
+
+/// What a running meeting's capture threads have reported about themselves.
+///
+/// Polled by the meeting lifecycle loop: both failure slots are written by
+/// threads that then exit, so nothing else would ever notice they are gone
+/// until stop.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RecordingCaptureHealth {
+    /// Set when a WAV writer thread returned an error and stopped consuming
+    /// samples. Everything recorded after this point is discarded.
+    pub writer_failure: Option<String>,
+    /// Set when the OS reported the input stream itself failed.
+    pub capture_failure: Option<String>,
+    /// How many WAV tracks this session writes, so the polling loop can size the
+    /// free-space thresholds to what the meeting actually consumes.
+    pub track_count: u64,
+}
+
+/// Decide what a free-space reading means for a running meeting.
+///
+/// Split out from the polling loop so the thresholds are testable without a
+/// filesystem that can be filled on demand.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MeetingSpacePressure {
+    Ok,
+    Low,
+    Critical,
+}
+
+pub fn meeting_space_pressure(available_bytes: u64, track_count: u64) -> MeetingSpacePressure {
+    if available_bytes <= meeting_headroom_bytes(track_count, MEETING_CRITICAL_SPACE_STOP_SECONDS) {
+        MeetingSpacePressure::Critical
+    } else if available_bytes <= meeting_headroom_bytes(track_count, MEETING_LOW_SPACE_WARN_SECONDS)
+    {
+        MeetingSpacePressure::Low
+    } else {
+        MeetingSpacePressure::Ok
+    }
+}
+
+/// `Some(needed_bytes)` when a volume with this much free space must not be
+/// asked to hold a meeting writing `track_count` tracks.
+pub fn meeting_start_space_shortfall(available_bytes: u64, track_count: u64) -> Option<u64> {
+    let needed = meeting_headroom_bytes(track_count, MEETING_START_MIN_HEADROOM_SECONDS);
+    (available_bytes < needed).then_some(needed)
+}
+
+/// Record the first writer failure for a session.
+///
+/// First writer to die wins: a three-track bundle shares one writer thread, but
+/// keeping the earliest cause is what explains where the audio stops.
+fn record_writer_failure(slot: &Arc<std::sync::Mutex<Option<String>>>, reason: String) {
+    if let Ok(mut failure) = slot.lock() {
+        if failure.is_none() {
+            *failure = Some(reason);
+        }
+    }
+}
+
+/// Convert a mixed session's padded-frame counts into seconds of source silence.
+///
+/// A zero sample rate would be a bug elsewhere, but reporting infinite silence
+/// because of it would be worse than reporting none.
+pub fn source_degradation_from_outcome(
+    outcome: &crate::audio::system_capture::MixedCaptureOutcome,
+    sample_rate: u32,
+) -> RecordingSourceDegradation {
+    if sample_rate == 0 {
+        return RecordingSourceDegradation::default();
+    }
+    let rate = f64::from(sample_rate);
+    RecordingSourceDegradation {
+        mic_silent_seconds: outcome.mic_padded_frames as f64 / rate,
+        system_silent_seconds: outcome.system_padded_frames as f64 / rate,
+        captured_seconds: outcome.mixed_frames as f64 / rate,
+    }
+}
+
+/// Run one WAV writer to completion and publish its failure before exiting.
+///
+/// The publish has to happen inside the writer thread. Once it returns, its
+/// receiver is dropped: the mic-only capture callback's `Disconnected` arm then
+/// discards every remaining sample in silence, and the mixed capture thread
+/// shuts itself down. This slot is the only evidence that the recording stopped
+/// being written, and it has to exist before anything else can notice.
+fn run_wav_writer_thread(
+    failure_slot: Arc<std::sync::Mutex<Option<String>>>,
+    write: impl FnOnce() -> Result<()>,
+) -> Result<()> {
+    let result = write();
+    if let Err(error) = result.as_ref() {
+        tracing::error!("Meeting WAV writer stopped: {error:#}");
+        record_writer_failure(&failure_slot, format!("{error:#}"));
+    }
+    result
+}
 
 fn to_f32_sample<T>(sample: T) -> f32
 where
@@ -204,6 +421,15 @@ pub struct AudioCapture {
     /// the old thread's parking loop or its callbacks, so a stale stream can
     /// never push interleaved samples into a new session's buffer.
     dictation_capture_stop: Option<Arc<AtomicBool>>,
+    /// Mono samples currently held in `dictation_buffer` for the active session.
+    /// The queue itself has no cheap length, and the capture callback must decide
+    /// whether it is still under the session ceiling without walking it, so the
+    /// count is maintained alongside.
+    dictation_buffered_samples: Arc<AtomicU64>,
+    /// Set once when the active session hits `DICTATION_MAX_SESSION_SECONDS`, so
+    /// the ceiling is announced exactly once and `stop_dictation` can explain the
+    /// truncation instead of silently returning a clipped recording.
+    dictation_max_duration_reached: Arc<AtomicBool>,
     /// UI-only accumulator of mono dictation samples for streaming partials.
     /// Never feeds the final transcription; only read by the partial-decode task.
     dictation_partial_buffer: Arc<std::sync::Mutex<DictationPartialBuffer>>,
@@ -322,6 +548,41 @@ struct ActiveRecordingSession {
     /// the timer running and the badge lit while nothing reached the WAV. The
     /// stop path reads this so the recording can be reported honestly.
     capture_failure: Arc<std::sync::Mutex<Option<String>>>,
+    /// Set when a WAV writer thread returned an error and exited — a full disk,
+    /// an IO error, a mismatched aligned chunk.
+    ///
+    /// A dead writer is silent by construction: the mic-only callback's
+    /// `TrySendError::Disconnected` arm discards samples without a word, and the
+    /// mixed path just shuts capture down. The overlay kept showing an active
+    /// recording either way and the user learned nothing until stop. The meeting
+    /// lifecycle loop polls this so the failure surfaces while there is still a
+    /// meeting to salvage.
+    writer_failure: Arc<std::sync::Mutex<Option<String>>>,
+}
+
+impl ActiveRecordingSession {
+    /// How many WAV tracks this session writes concurrently.
+    ///
+    /// One for a mic-only meeting; three for "me and them" (mixed, mic,
+    /// system). The free-space thresholds scale by this, so a mic-only meeting
+    /// is not warned and auto-stopped at three times the space it needs.
+    fn track_count(&self) -> u64 {
+        1 + u64::from(self.mic_audio_path.is_some()) + u64::from(self.system_audio_path.is_some())
+    }
+}
+
+/// How much of a finished meeting each source actually contributed.
+///
+/// A starved source is padded with silence so the mixed and per-source WAVs stay
+/// frame-aligned, which means the file itself cannot distinguish "nobody spoke"
+/// from "the microphone was gone". These counts are the difference, and they are
+/// persisted on the recording so the meeting record carries the caveat rather
+/// than presenting half-silence as a complete capture.
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
+pub struct RecordingSourceDegradation {
+    pub mic_silent_seconds: f64,
+    pub system_silent_seconds: f64,
+    pub captured_seconds: f64,
 }
 
 #[expect(
@@ -343,6 +604,9 @@ pub struct RecordingStopResult {
     /// `Some` means audio stopped arriving before the user pressed stop, so the
     /// saved file is shorter than the elapsed session.
     pub capture_failure: Option<String>,
+    /// Per-source silence padding for a mixed session; `None` for a mic-only
+    /// meeting, which has nothing to pad against.
+    pub source_degradation: Option<RecordingSourceDegradation>,
 }
 
 /// Feed this callback's mono samples through the active dictation auto-stop VAD
@@ -522,6 +786,8 @@ impl AudioCapture {
             dictation_audio_level: Arc::new(std::sync::atomic::AtomicU32::new(0)),
             dictation_callback_count: Arc::new(AtomicU64::new(0)),
             dictation_capture_stop: None,
+            dictation_buffered_samples: Arc::new(AtomicU64::new(0)),
+            dictation_max_duration_reached: Arc::new(AtomicBool::new(false)),
             dictation_partial_buffer: Arc::new(std::sync::Mutex::new(
                 DictationPartialBuffer::default(),
             )),
@@ -539,6 +805,74 @@ impl AudioCapture {
 
     pub fn plan_recording(&self, options: &RecordingOptions) -> Result<RecordingCapturePlan> {
         RecordingCapturePlan::new(&self.recordings_dir, options.mic, options.system_audio)
+    }
+
+    /// Refuse to start a meeting on a volume that cannot hold one.
+    ///
+    /// Running out of space mid-meeting kills the WAV writer thread, and the
+    /// capture side is silent about it by construction. Refusing up front is
+    /// the only outcome here the user can actually act on, so it is worth one
+    /// `statvfs` before any file exists.
+    ///
+    /// Fails open: a platform or filesystem that cannot report free space must
+    /// not block the meeting. An unmeasurable disk is not a full disk.
+    fn ensure_recording_start_has_disk_headroom(&self, plan: &RecordingCapturePlan) -> Result<()> {
+        let Some(directory) = plan.primary_path.parent() else {
+            return Ok(());
+        };
+        let available = match available_space_bytes(directory) {
+            Ok(available) => available,
+            Err(error) => {
+                tracing::warn!(
+                    "Could not measure free space for '{}': {}. Starting the meeting anyway.",
+                    directory.display(),
+                    error
+                );
+                return Ok(());
+            }
+        };
+        // The plan already knows whether this is a one-track mic-only meeting or
+        // a three-track "me and them" bundle, so the requirement is what this
+        // meeting will actually write rather than the worst case.
+        let track_count = plan.paths().count() as u64;
+        let Some(needed) = meeting_start_space_shortfall(available, track_count) else {
+            return Ok(());
+        };
+        anyhow::bail!(
+            "Not enough free disk space to record a meeting ({} MB free, {} MB needed). Free some space and start again.",
+            available / (1024 * 1024),
+            needed / (1024 * 1024)
+        )
+    }
+
+    /// Free bytes on the volume that holds this session's recordings, or `None`
+    /// when the platform cannot report it (callers must fail open).
+    pub fn recordings_available_space_bytes(&self) -> Option<u64> {
+        available_space_bytes(&self.recordings_dir).ok()
+    }
+
+    /// What the active session's capture and writer threads have reported.
+    ///
+    /// `None` when `recording_id` is not the live session, which is also how the
+    /// polling loop learns the meeting ended.
+    pub fn recording_capture_health(&self, recording_id: &str) -> Option<RecordingCaptureHealth> {
+        let session = self.active_recording.as_ref()?;
+        if session.id != recording_id {
+            return None;
+        }
+        Some(RecordingCaptureHealth {
+            writer_failure: session
+                .writer_failure
+                .lock()
+                .ok()
+                .and_then(|slot| slot.clone()),
+            capture_failure: session
+                .capture_failure
+                .lock()
+                .ok()
+                .and_then(|slot| slot.clone()),
+            track_count: session.track_count(),
+        })
     }
 
     fn ensure_microphone_preparation_retry_is_safe(
@@ -734,6 +1068,9 @@ impl AudioCapture {
         }
 
         while self.dictation_buffer.pop().is_some() {}
+        self.dictation_buffered_samples.store(0, Ordering::SeqCst);
+        self.dictation_max_duration_reached
+            .store(false, Ordering::SeqCst);
         if let Ok(mut partial) = self.dictation_partial_buffer.lock() {
             partial.samples.clear();
             partial.total_samples = 0;
@@ -754,9 +1091,12 @@ impl AudioCapture {
                 pre_roll_samples.len(),
                 pre_roll_samples.len() as f32 / sample_rate.max(1) as f32 * 1000.0
             );
+            let seeded = pre_roll_samples.len() as u64;
             for sample in pre_roll_samples {
                 self.dictation_buffer.push(sample);
             }
+            self.dictation_buffered_samples
+                .fetch_add(seeded, Ordering::SeqCst);
         }
 
         tracing::info!(
@@ -824,6 +1164,11 @@ impl AudioCapture {
         self.dictation_capture_stop = Some(Arc::clone(&capture_stop));
 
         let buffer = Arc::clone(&self.dictation_buffer);
+        let buffered_samples = Arc::clone(&self.dictation_buffered_samples);
+        let max_duration_reached = Arc::clone(&self.dictation_max_duration_reached);
+        // Latched by `guard_audio_callback` if this session's realtime callback
+        // ever panics, so the stream goes quiet instead of aborting the process.
+        let callback_poisoned = Arc::new(AtomicBool::new(false));
         let callback_count = Arc::clone(&self.dictation_callback_count);
         let (startup_tx, startup_rx) = bounded::<Result<(), String>>(1);
         let audio_level = Arc::clone(&self.dictation_audio_level);
@@ -857,14 +1202,25 @@ impl AudioCapture {
             // Trim lazily (only past 2x the window) so the front-drain memmove is
             // amortized to roughly once per window rather than every callback.
             let max_partial_samples = (config.sample_rate() as usize).saturating_mul(30);
+            // Ceiling for the *transcription* buffer, in mono samples at this
+            // device's real rate. Unlike the partial buffer above this one may
+            // not slide: dropping the oldest audio would silently rewrite what
+            // the user said. It stops instead, and says so.
+            let max_session_samples = u64::from(config.sample_rate())
+                .saturating_mul(DICTATION_MAX_SESSION_SECONDS)
+                .max(1);
             let sample_format = config.sample_format();
             let stream_config = config.config();
 
             macro_rules! build_dictation_stream {
                 ($sample_type:ty) => {{
                     let capture_stop = Arc::clone(&capture_stop);
+                    let callback_poisoned = Arc::clone(&callback_poisoned);
                     let callback_count = Arc::clone(&callback_count);
                     let buffer = Arc::clone(&buffer);
+                    let buffered_samples = Arc::clone(&buffered_samples);
+                    let max_duration_reached = Arc::clone(&max_duration_reached);
+                    let limit_event_handle = vad_event_handle.clone();
                     let audio_level = Arc::clone(&audio_level);
                     let partial_buffer = Arc::clone(&partial_buffer);
                     let streaming_active = Arc::clone(&streaming_active);
@@ -877,6 +1233,7 @@ impl AudioCapture {
                     device.build_input_stream(
                         stream_config.clone(),
                         move |data: &[$sample_type], _: &cpal::InputCallbackInfo| {
+                          guard_audio_callback(&callback_poisoned, "Dictation", || {
                             if !capture_stop.load(Ordering::SeqCst) {
                                 return;
                             }
@@ -911,14 +1268,59 @@ impl AudioCapture {
                             let mut sum_sq = 0.0_f64;
                             let mut mono_len = 0_usize;
 
+                            // Room left under this session's ceiling. Decided
+                            // once per callback and committed with a single
+                            // atomic add: a per-sample atomic on the realtime
+                            // thread would cost more than the push it guards.
+                            let admission = admit_dictation_samples(
+                                buffered_samples.load(Ordering::Relaxed),
+                                capacity as u64,
+                                max_session_samples,
+                            );
+                            let mut accepted_remaining = admission.accepted;
+
                             for_each_mono_sample(data, num_channels, |sample| {
-                                buffer.push(sample);
+                                if accepted_remaining > 0 {
+                                    buffer.push(sample);
+                                    accepted_remaining -= 1;
+                                }
                                 if need_mono_scratch {
                                     mono_scratch.push(sample);
                                 }
                                 sum_sq += (sample as f64) * (sample as f64);
                                 mono_len += 1;
                             });
+
+                            if admission.accepted > 0 {
+                                buffered_samples
+                                    .fetch_add(admission.accepted, Ordering::Relaxed);
+                            }
+
+                            if admission.ceiling_reached
+                                && !max_duration_reached.swap(true, Ordering::SeqCst)
+                            {
+                                // End capture here rather than letting the mic
+                                // run on producing audio that can no longer be
+                                // stored. Announced once; `stop_dictation` also
+                                // reports it, so the user is never handed a
+                                // silently truncated transcript.
+                                tracing::warn!(
+                                    "Dictation session {} reached the {}s maximum length; capture stopped",
+                                    session_id,
+                                    DICTATION_MAX_SESSION_SECONDS
+                                );
+                                capture_stop.store(false, Ordering::SeqCst);
+                                if let Some(handle) = limit_event_handle.as_ref() {
+                                    handle.emit(
+                                        "dictation-vad-signal",
+                                        serde_json::json!({
+                                            "signal": "max_duration_stop",
+                                            "sessionId": session_id,
+                                            "maxDurationSeconds": DICTATION_MAX_SESSION_SECONDS,
+                                        }),
+                                    );
+                                }
+                            }
 
                             if streaming {
                                 if let Ok(mut shared) = partial_buffer.lock() {
@@ -946,6 +1348,7 @@ impl AudioCapture {
                                     vad_event_handle.as_ref(),
                                 );
                             }
+                          });
                         },
                         |err| tracing::error!("Dictation stream error: {}", err),
                         None,
@@ -1149,13 +1552,17 @@ impl AudioCapture {
         *gate_slot = None;
     }
 
+    /// Ends capture and returns the encoded WAV.
+    ///
+    /// The caller is responsible for having already waited
+    /// `DICTATION_STOP_CAPTURE_TAIL_MS` so the speaker's final consonant is
+    /// captured; see that constant for why the wait does not live here.
     pub fn stop_dictation(&mut self) -> Result<Vec<u8>> {
         if !self.is_dictating.load(Ordering::SeqCst) {
             return Err(anyhow::anyhow!("No dictation in progress"));
         }
 
         tracing::info!("Stopping dictation capture...");
-        std::thread::sleep(Duration::from_millis(DICTATION_STOP_CAPTURE_TAIL_MS));
         self.is_dictating.store(false, Ordering::SeqCst);
         self.signal_capture_stop();
         self.clear_dictation_vad_gate();
@@ -1179,6 +1586,7 @@ impl AudioCapture {
         while let Some(sample) = self.dictation_buffer.pop() {
             samples.push(sample);
         }
+        self.dictation_buffered_samples.store(0, Ordering::SeqCst);
 
         // The partial buffer is UI-only and never contributes to `samples`.
         // Stop streaming and release its memory now that capture has ended.
@@ -1279,10 +1687,25 @@ impl AudioCapture {
         }
 
         while self.dictation_buffer.pop().is_some() {}
+        self.dictation_buffered_samples.store(0, Ordering::SeqCst);
+        self.dictation_max_duration_reached
+            .store(false, Ordering::SeqCst);
         if let Ok(mut partial) = self.dictation_partial_buffer.lock() {
             partial.samples.clear();
             partial.total_samples = 0;
         }
+    }
+
+    /// Whether the session that just ended was cut short by the maximum-length
+    /// ceiling. Read after `stop_dictation` so the caller can tell the user the
+    /// recording was truncated rather than presenting it as complete.
+    pub fn dictation_hit_max_duration(&self) -> bool {
+        self.dictation_max_duration_reached.load(Ordering::SeqCst)
+    }
+
+    /// Longest single dictation session, in seconds, before capture is stopped.
+    pub fn dictation_max_session_seconds() -> u64 {
+        DICTATION_MAX_SESSION_SECONDS
     }
 
     /// Get the current audio level for dictation (0.0 to 1.0)
@@ -1327,10 +1750,19 @@ impl AudioCapture {
             ));
         }
 
+        self.ensure_recording_start_has_disk_headroom(&plan)?;
+
         let id = plan.recording_id.clone();
         let audio_path = plan.primary_path.clone();
         let mic_audio_path = plan.mic_path.clone();
         let system_audio_path = plan.system_path.clone();
+        let writer_failure: Arc<std::sync::Mutex<Option<String>>> =
+            Arc::new(std::sync::Mutex::new(None));
+        // One slot for both capture paths. The mixed path used to build its own
+        // and never write it, so only a mic-only meeting could report an input
+        // stream that died mid-session.
+        let capture_failure: Arc<std::sync::Mutex<Option<String>>> =
+            Arc::new(std::sync::Mutex::new(None));
         let waveform_buffer = Arc::new(std::sync::Mutex::new(Vec::with_capacity(4410)));
         let streaming_queue: Arc<crossbeam::queue::ArrayQueue<Vec<f32>>> =
             Arc::new(crossbeam::queue::ArrayQueue::new(256));
@@ -1359,6 +1791,7 @@ impl AudioCapture {
                     preferred_mic_device,
                     Arc::clone(&waveform_buffer),
                     Some(Arc::clone(&streaming_queue)),
+                    Arc::clone(&capture_failure),
                     event_handle.map(|handle| MixedCaptureEvents {
                         handle,
                         recording_id: id.clone(),
@@ -1380,8 +1813,11 @@ impl AudioCapture {
                 }
             };
             let writer_log_path = audio_path.clone();
+            let writer_failure_for_thread = Arc::clone(&writer_failure);
             let writer_handle = std::thread::spawn(move || {
-                write_aligned_wav_files(prepared_writers, writer_receiver, &writer_log_path)
+                run_wav_writer_thread(writer_failure_for_thread, || {
+                    write_aligned_wav_files(prepared_writers, writer_receiver, &writer_log_path)
+                })
             });
 
             self.active_recording = Some(ActiveRecordingSession {
@@ -1399,7 +1835,8 @@ impl AudioCapture {
                 sample_rate,
                 dropped_stream_chunks: Arc::new(AtomicU64::new(0)),
                 dropped_writer_chunks: Arc::new(AtomicU64::new(0)),
-                capture_failure: Arc::new(std::sync::Mutex::new(None)),
+                capture_failure,
+                writer_failure,
             });
         } else {
             let device = preferred_mic_device
@@ -1416,18 +1853,22 @@ impl AudioCapture {
             let prepared_writer = prepare_mono_wav_writer(&audio_path, sample_rate)?;
             let (samples_sender, samples_receiver) = bounded::<Vec<f32>>(256);
             let writer_log_path = audio_path.clone();
+            let writer_failure_for_thread = Arc::clone(&writer_failure);
             let writer_handle = std::thread::spawn(move || {
-                write_wav_file(prepared_writer, samples_receiver, &writer_log_path)
+                run_wav_writer_thread(writer_failure_for_thread, || {
+                    write_wav_file(prepared_writer, samples_receiver, &writer_log_path)
+                })
             });
 
             let capture_stop_flag = Arc::new(AtomicBool::new(true));
             let capture_flag = Arc::clone(&capture_stop_flag);
+            // Latched if this recording's realtime callback ever panics, so the
+            // stream goes inert instead of aborting the process mid-meeting.
+            let callback_poisoned = Arc::new(AtomicBool::new(false));
             let dropped_stream_chunks = Arc::new(AtomicU64::new(0));
             let dropped_writer_chunks = Arc::new(AtomicU64::new(0));
             let dropped_stream_chunks_for_session = Arc::clone(&dropped_stream_chunks);
             let dropped_writer_chunks_for_session = Arc::clone(&dropped_writer_chunks);
-            let capture_failure: Arc<std::sync::Mutex<Option<String>>> =
-                Arc::new(std::sync::Mutex::new(None));
             let capture_failure_for_stream = Arc::clone(&capture_failure);
             let capture_failure_for_session = Arc::clone(&capture_failure);
             let wf_buffer = Arc::clone(&waveform_buffer);
@@ -1440,6 +1881,7 @@ impl AudioCapture {
                 macro_rules! build_recording_stream {
                     ($sample_type:ty) => {{
                         let stream_queue = Arc::clone(&stream_queue_clone);
+                        let callback_poisoned = Arc::clone(&callback_poisoned);
                         let waveform_buffer = Arc::clone(&wf_buffer);
                         let samples_sender = samples_sender.clone();
                         let dropped_stream_chunks = Arc::clone(&dropped_stream_chunks);
@@ -1448,33 +1890,35 @@ impl AudioCapture {
                         device.build_input_stream(
                             stream_config.clone(),
                             move |data: &[$sample_type], _: &cpal::InputCallbackInfo| {
-                                let chunk = downmix_to_mono(data, num_channels);
+                                guard_audio_callback(&callback_poisoned, "Recording", || {
+                                    let chunk = downmix_to_mono(data, num_channels);
 
-                                if let Ok(mut waveform) = waveform_buffer.lock() {
-                                    for &sample in
-                                        chunk.iter().step_by(chunk.len() / 100 + 1).take(100)
-                                    {
-                                        waveform.push(sample);
+                                    if let Ok(mut waveform) = waveform_buffer.lock() {
+                                        for &sample in
+                                            chunk.iter().step_by(chunk.len() / 100 + 1).take(100)
+                                        {
+                                            waveform.push(sample);
+                                        }
+                                        if waveform.len() > 4410 {
+                                            let drop_count = waveform.len() - 4410;
+                                            waveform.drain(0..drop_count);
+                                        }
                                     }
-                                    if waveform.len() > 4410 {
-                                        let drop_count = waveform.len() - 4410;
-                                        waveform.drain(0..drop_count);
-                                    }
-                                }
 
-                                if stream_queue.push(chunk.clone()).is_err() {
-                                    let _ = stream_queue.pop();
-                                    let _ = stream_queue.push(chunk.clone());
-                                    dropped_stream_chunks.fetch_add(1, Ordering::Relaxed);
-                                }
-
-                                match samples_sender.try_send(chunk) {
-                                    Ok(()) => {}
-                                    Err(TrySendError::Full(_)) => {
-                                        dropped_writer_chunks.fetch_add(1, Ordering::Relaxed);
+                                    if stream_queue.push(chunk.clone()).is_err() {
+                                        let _ = stream_queue.pop();
+                                        let _ = stream_queue.push(chunk.clone());
+                                        dropped_stream_chunks.fetch_add(1, Ordering::Relaxed);
                                     }
-                                    Err(TrySendError::Disconnected(_)) => {}
-                                }
+
+                                    match samples_sender.try_send(chunk) {
+                                        Ok(()) => {}
+                                        Err(TrySendError::Full(_)) => {
+                                            dropped_writer_chunks.fetch_add(1, Ordering::Relaxed);
+                                        }
+                                        Err(TrySendError::Disconnected(_)) => {}
+                                    }
+                                });
                             },
                             {
                                 let capture_failure = Arc::clone(&capture_failure_for_stream);
@@ -1600,6 +2044,7 @@ impl AudioCapture {
                 dropped_stream_chunks: dropped_stream_chunks_for_session,
                 dropped_writer_chunks: dropped_writer_chunks_for_session,
                 capture_failure: capture_failure_for_session,
+                writer_failure,
             });
         }
 
@@ -1718,12 +2163,17 @@ impl AudioCapture {
         let mut dropped_mic_samples = 0_u64;
         let mut dropped_system_samples = 0_u64;
         let mut dropped_mixed_chunks = 0_u64;
+        let mut source_degradation = None;
         if let Some(mut mixed_capture) = session.mixed_capture.take() {
             mixed_capture.stop();
-            let (mic_samples, system_samples, mixed_chunks) = mixed_capture.drop_counts();
-            dropped_mic_samples = mic_samples;
-            dropped_system_samples = system_samples;
-            dropped_mixed_chunks = mixed_chunks;
+            let outcome = mixed_capture.outcome();
+            dropped_mic_samples = outcome.dropped_mic_samples;
+            dropped_system_samples = outcome.dropped_system_samples;
+            dropped_mixed_chunks = outcome.dropped_mixed_chunks;
+            source_degradation = Some(source_degradation_from_outcome(
+                &outcome,
+                session.sample_rate,
+            ));
         }
 
         for handle in session.writer_handles.drain(..) {
@@ -1819,6 +2269,7 @@ impl AudioCapture {
             dropped_system_samples,
             dropped_mixed_chunks,
             capture_failure,
+            source_degradation,
         })
     }
 
@@ -2048,12 +2499,16 @@ impl AudioCapture {
                 edge
             }
 
+            // Latched if this monitor's realtime callback ever panics, so it
+            // goes inert instead of aborting the process.
+            let callback_poisoned = Arc::new(AtomicBool::new(false));
             let sample_format = config.sample_format();
             let stream_config = config.config();
 
             macro_rules! build_hands_free_stream {
                 ($sample_type:ty) => {{
                     let running = Arc::clone(&monitor_active);
+                    let callback_poisoned = Arc::clone(&callback_poisoned);
                     let gate = Arc::clone(&gate);
                     let handle = event_handle.clone();
                     let err_active = Arc::clone(&monitor_active);
@@ -2062,31 +2517,33 @@ impl AudioCapture {
                     device.build_input_stream(
                         stream_config.clone(),
                         move |data: &[$sample_type], _: &cpal::InputCallbackInfo| {
-                            if !running.load(Ordering::SeqCst) {
-                                return;
-                            }
-                            let mono = downmix_to_mono(data, num_channels);
-                            // The frame is already downmixed for the gate; keep
-                            // it in the ring instead of dropping it, so the
-                            // session this monitor is about to trigger starts
-                            // with the user's opening words.
-                            if let Ok(mut slot) = pre_roll.lock() {
-                                if let Some(buffer) = slot.as_mut() {
-                                    buffer.push(&mono);
+                            guard_audio_callback(&callback_poisoned, "Hands-free monitor", || {
+                                if !running.load(Ordering::SeqCst) {
+                                    return;
                                 }
-                            }
-                            // Mark where speech actually began (the gate latches
-                            // well after the fact) so the hand-off is the user's
-                            // opening words, not the whole ring.
-                            if handle_frame(&mono, &gate, &running, &handle)
-                                == VadEdge::SpeechStarted
-                            {
+                                let mono = downmix_to_mono(data, num_channels);
+                                // The frame is already downmixed for the gate; keep
+                                // it in the ring instead of dropping it, so the
+                                // session this monitor is about to trigger starts
+                                // with the user's opening words.
                                 if let Ok(mut slot) = pre_roll.lock() {
                                     if let Some(buffer) = slot.as_mut() {
-                                        buffer.mark_speech_onset(speech_onset_lookback);
+                                        buffer.push(&mono);
                                     }
                                 }
-                            }
+                                // Mark where speech actually began (the gate latches
+                                // well after the fact) so the hand-off is the user's
+                                // opening words, not the whole ring.
+                                if handle_frame(&mono, &gate, &running, &handle)
+                                    == VadEdge::SpeechStarted
+                                {
+                                    if let Ok(mut slot) = pre_roll.lock() {
+                                        if let Some(buffer) = slot.as_mut() {
+                                            buffer.mark_speech_onset(speech_onset_lookback);
+                                        }
+                                    }
+                                }
+                            });
                         },
                         move |err| {
                             tracing::error!("Hands-free monitor stream error: {}", err);
@@ -2664,6 +3121,203 @@ mod recording_writer_tests {
 }
 
 #[cfg(test)]
+mod recording_capture_health_tests {
+    use super::{
+        meeting_headroom_bytes, meeting_space_pressure, meeting_start_space_shortfall,
+        run_wav_writer_thread, write_aligned_wav_files, MeetingSpacePressure,
+        MEETING_CRITICAL_SPACE_STOP_SECONDS, MEETING_LOW_SPACE_WARN_SECONDS,
+        MEETING_START_MIN_HEADROOM_SECONDS,
+    };
+    use std::sync::{Arc, Mutex};
+
+    /// A mic-only meeting writes one WAV; "me and them" writes mixed + mic +
+    /// system.
+    const MIC_ONLY_TRACKS: u64 = 1;
+    const ME_AND_THEM_TRACKS: u64 = 3;
+
+    #[test]
+    fn a_dead_writer_publishes_its_reason_before_the_thread_exits() {
+        let slot: Arc<Mutex<Option<String>>> = Arc::new(Mutex::new(None));
+        let observer = Arc::clone(&slot);
+        let handle = std::thread::spawn(move || {
+            run_wav_writer_thread(slot, || Err(anyhow::anyhow!("No space left on device")))
+        });
+
+        assert!(handle.join().expect("writer thread joins").is_err());
+        assert!(
+            observer
+                .lock()
+                .unwrap()
+                .as_deref()
+                .is_some_and(|reason| reason.contains("No space left on device")),
+            "a writer that dies must leave the reason where the lifecycle loop can find it"
+        );
+    }
+
+    #[test]
+    fn only_the_first_writer_failure_is_kept() {
+        let slot: Arc<Mutex<Option<String>>> = Arc::new(Mutex::new(None));
+        let _ = run_wav_writer_thread(Arc::clone(&slot), || Err(anyhow::anyhow!("first cause")));
+        let _ = run_wav_writer_thread(Arc::clone(&slot), || Err(anyhow::anyhow!("later noise")));
+
+        assert_eq!(slot.lock().unwrap().as_deref(), Some("first cause"));
+    }
+
+    #[test]
+    fn a_healthy_writer_leaves_the_failure_slot_empty() {
+        let root = std::env::temp_dir().join(format!(
+            "plainsong-writer-health-test-{}",
+            uuid::Uuid::new_v4()
+        ));
+        std::fs::create_dir_all(&root).unwrap();
+        let path = root.join("recording.wav");
+        let writers =
+            super::prepare_aligned_wav_writers(&path, None, None, 16_000).expect("prepare writers");
+        let (sender, receiver) = crossbeam::channel::bounded(1);
+        drop(sender);
+
+        let slot: Arc<Mutex<Option<String>>> = Arc::new(Mutex::new(None));
+        run_wav_writer_thread(Arc::clone(&slot), || {
+            write_aligned_wav_files(writers, receiver, &path)
+        })
+        .expect("an empty but well-formed session finalizes cleanly");
+
+        assert!(slot.lock().unwrap().is_none());
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn free_space_thresholds_leave_room_to_land_the_audio() {
+        const _: () = {
+            assert!(
+                MEETING_CRITICAL_SPACE_STOP_SECONDS < MEETING_LOW_SPACE_WARN_SECONDS,
+                "the stop threshold must trip after the warning, not before it"
+            );
+            assert!(
+                MEETING_LOW_SPACE_WARN_SECONDS < MEETING_START_MIN_HEADROOM_SECONDS,
+                "a meeting must not start already inside the warning band"
+            );
+        };
+
+        for tracks in [MIC_ONLY_TRACKS, ME_AND_THEM_TRACKS] {
+            assert_eq!(
+                meeting_space_pressure(
+                    meeting_headroom_bytes(tracks, MEETING_START_MIN_HEADROOM_SECONDS),
+                    tracks
+                ),
+                MeetingSpacePressure::Ok
+            );
+            assert_eq!(
+                meeting_space_pressure(
+                    meeting_headroom_bytes(tracks, MEETING_LOW_SPACE_WARN_SECONDS),
+                    tracks
+                ),
+                MeetingSpacePressure::Low
+            );
+            assert_eq!(
+                meeting_space_pressure(
+                    meeting_headroom_bytes(tracks, MEETING_CRITICAL_SPACE_STOP_SECONDS),
+                    tracks
+                ),
+                MeetingSpacePressure::Critical
+            );
+            assert_eq!(
+                meeting_space_pressure(0, tracks),
+                MeetingSpacePressure::Critical
+            );
+        }
+    }
+
+    #[test]
+    fn thresholds_scale_with_the_tracks_a_meeting_actually_writes() {
+        // The regression: every threshold charged the three-track price, so a
+        // mic-only meeting with ~50 minutes of room was refused outright, and
+        // one that did start was warned and auto-stopped three times too early.
+        let room_for_fifty_mic_only_minutes = meeting_headroom_bytes(MIC_ONLY_TRACKS, 50 * 60);
+        assert_eq!(
+            meeting_start_space_shortfall(room_for_fifty_mic_only_minutes, MIC_ONLY_TRACKS),
+            None,
+            "a mic-only meeting with 50 minutes of room must be allowed to start"
+        );
+        assert!(
+            meeting_start_space_shortfall(room_for_fifty_mic_only_minutes, ME_AND_THEM_TRACKS)
+                .is_some(),
+            "the same volume cannot hold a three-track meeting for 30 minutes"
+        );
+
+        // 20 mic-only minutes is comfortable for one track and inside the
+        // warning band for three.
+        let room_for_twenty_mic_only_minutes = meeting_headroom_bytes(MIC_ONLY_TRACKS, 20 * 60);
+        assert_eq!(
+            meeting_space_pressure(room_for_twenty_mic_only_minutes, MIC_ONLY_TRACKS),
+            MeetingSpacePressure::Ok
+        );
+        assert_eq!(
+            meeting_space_pressure(room_for_twenty_mic_only_minutes, ME_AND_THEM_TRACKS),
+            MeetingSpacePressure::Low
+        );
+
+        // And the auto-stop band: enough for a minute of one track, not three.
+        let room_for_two_mic_only_minutes = meeting_headroom_bytes(MIC_ONLY_TRACKS, 2 * 60);
+        assert_eq!(
+            meeting_space_pressure(room_for_two_mic_only_minutes, MIC_ONLY_TRACKS),
+            MeetingSpacePressure::Low
+        );
+        assert_eq!(
+            meeting_space_pressure(room_for_two_mic_only_minutes, ME_AND_THEM_TRACKS),
+            MeetingSpacePressure::Critical
+        );
+
+        // A zero track count would be a bug elsewhere; charging nothing for it
+        // would disable the check entirely, so it is floored at one track.
+        assert_eq!(meeting_headroom_bytes(0, 60), meeting_headroom_bytes(1, 60));
+    }
+
+    #[test]
+    fn padded_source_frames_become_seconds_of_reportable_silence() {
+        use crate::audio::system_capture::MixedCaptureOutcome;
+
+        let outcome = MixedCaptureOutcome {
+            mic_padded_frames: 48_000 * 320,
+            system_padded_frames: 0,
+            mixed_frames: 48_000 * 3_600,
+            ..MixedCaptureOutcome::default()
+        };
+        let degradation = super::source_degradation_from_outcome(&outcome, 48_000);
+
+        assert!((degradation.mic_silent_seconds - 320.0).abs() < 0.001);
+        assert_eq!(degradation.system_silent_seconds, 0.0);
+        assert!((degradation.captured_seconds - 3_600.0).abs() < 0.001);
+    }
+
+    #[test]
+    fn a_zero_sample_rate_reports_no_silence_rather_than_infinite_silence() {
+        use crate::audio::system_capture::MixedCaptureOutcome;
+
+        let outcome = MixedCaptureOutcome {
+            mic_padded_frames: 1_000,
+            ..MixedCaptureOutcome::default()
+        };
+        assert_eq!(
+            super::source_degradation_from_outcome(&outcome, 0),
+            super::RecordingSourceDegradation::default()
+        );
+    }
+
+    #[test]
+    fn start_preflight_refuses_only_a_volume_that_cannot_hold_a_meeting() {
+        for tracks in [MIC_ONLY_TRACKS, ME_AND_THEM_TRACKS] {
+            let needed = meeting_headroom_bytes(tracks, MEETING_START_MIN_HEADROOM_SECONDS);
+            assert_eq!(meeting_start_space_shortfall(needed, tracks), None);
+            assert_eq!(
+                meeting_start_space_shortfall(needed - 1, tracks),
+                Some(needed)
+            );
+        }
+    }
+}
+
+#[cfg(test)]
 mod recording_preparation_timeout_tests {
     use super::{
         retire_recording_preparation_threads, AudioCapture, MICROPHONE_STREAM_PREPARATION_TIMEOUT,
@@ -2771,7 +3425,7 @@ mod system_audio_test_guard_tests {
 
 #[cfg(test)]
 mod dictation_capture_lifecycle_tests {
-    use super::AudioCapture;
+    use super::{admit_dictation_samples, AudioCapture};
     use crate::audio::vad::{EnergyThresholdVadGate, VadConfig, VadGate};
     use std::sync::atomic::{AtomicBool, Ordering};
     use std::sync::Arc;
@@ -2813,6 +3467,144 @@ mod dictation_capture_lifecycle_tests {
 
         assert!(!session_flag.load(Ordering::SeqCst));
         assert!(audio.dictation_capture_stop.is_none());
+    }
+
+    #[test]
+    fn a_panicking_audio_callback_does_not_escape_to_the_c_boundary() {
+        // Escaping here would hit cpal's `extern "C"` trampoline and abort the
+        // process, killing an in-progress meeting over one bad callback.
+        let poisoned = AtomicBool::new(false);
+        super::guard_audio_callback(&poisoned, "test", || panic!("callback exploded"));
+        assert!(poisoned.load(Ordering::Relaxed));
+    }
+
+    #[test]
+    fn a_poisoned_audio_callback_goes_inert_instead_of_repeating() {
+        // The same panic would otherwise recur hundreds of times a second and
+        // bury every other log line.
+        let poisoned = AtomicBool::new(false);
+        super::guard_audio_callback(&poisoned, "test", || panic!("first"));
+
+        let mut ran_again = false;
+        super::guard_audio_callback(&poisoned, "test", || ran_again = true);
+        assert!(!ran_again, "a poisoned callback must not run again");
+    }
+
+    #[test]
+    fn a_healthy_audio_callback_runs_and_stays_unpoisoned() {
+        let poisoned = AtomicBool::new(false);
+        let mut ran = false;
+        super::guard_audio_callback(&poisoned, "test", || ran = true);
+
+        assert!(ran);
+        assert!(!poisoned.load(Ordering::Relaxed));
+    }
+
+    #[test]
+    fn worker_thread_panics_are_recoverable_rather_than_fatal() {
+        // The whole point of `panic = "unwind"`: the sidecar's `handle.join()`
+        // recovery arms were dead code under abort, because a worker panic took
+        // the process with it. This is the behaviour those arms depend on.
+        let handle = std::thread::spawn(|| panic!("worker exploded"));
+        assert!(
+            handle.join().is_err(),
+            "a worker panic must be observable by its joiner, not fatal"
+        );
+    }
+
+    #[test]
+    fn the_release_profile_unwinds_so_recovery_paths_can_run() {
+        const CARGO_TOML: &str = include_str!("../Cargo.toml");
+        let release = CARGO_TOML
+            .split_once("[profile.release]")
+            .expect("a release profile must exist")
+            .1;
+        let release = release
+            .split_once("\n[")
+            .map(|parts| parts.0)
+            .unwrap_or(release);
+        // Settings only: the profile's comment explains what `abort` used to do
+        // and would otherwise trip a naive scan of the whole block.
+        let panic_setting = release
+            .lines()
+            .map(str::trim)
+            .filter(|line| !line.starts_with('#'))
+            .find_map(|line| line.strip_prefix("panic ="))
+            .map(str::trim)
+            .expect("the release profile must state a panic strategy");
+        assert_eq!(
+            panic_setting, "\"unwind\"",
+            "release must unwind: abort makes every panic-recovery branch dead code"
+        );
+    }
+
+    #[test]
+    fn dictation_admits_samples_until_the_session_ceiling() {
+        // Ordinary callback, plenty of headroom: everything is kept and nothing
+        // is announced.
+        let admission = admit_dictation_samples(0, 480, 48_000);
+        assert_eq!(admission.accepted, 480);
+        assert!(!admission.ceiling_reached);
+
+        // Exactly filling the buffer is still a complete accept: no audio was
+        // lost, so the user has nothing to be told about yet.
+        let admission = admit_dictation_samples(47_520, 480, 48_000);
+        assert_eq!(admission.accepted, 480);
+        assert!(!admission.ceiling_reached);
+    }
+
+    #[test]
+    fn dictation_truncates_the_callback_that_overruns_the_ceiling() {
+        // Partial fit: keep the leading samples that still fit, and report the
+        // ceiling so capture stops and the user is told.
+        let admission = admit_dictation_samples(47_800, 480, 48_000);
+        assert_eq!(admission.accepted, 200);
+        assert!(admission.ceiling_reached);
+    }
+
+    #[test]
+    fn dictation_admits_nothing_once_the_buffer_is_full() {
+        let admission = admit_dictation_samples(48_000, 480, 48_000);
+        assert_eq!(admission.accepted, 0);
+        assert!(admission.ceiling_reached);
+
+        // An empty callback against a full buffer is not the moment the limit
+        // was hit; re-announcing it would stop a session twice.
+        let admission = admit_dictation_samples(48_000, 0, 48_000);
+        assert_eq!(admission.accepted, 0);
+        assert!(!admission.ceiling_reached);
+    }
+
+    #[test]
+    fn dictation_session_ceiling_bounds_worst_case_capture_memory() {
+        // The ceiling exists to bound RAM. Pin the arithmetic so a future bump
+        // cannot quietly reintroduce an unbounded-in-practice buffer: f32 mono
+        // at a 48kHz device.
+        let max_samples = 48_000_u64 * AudioCapture::dictation_max_session_seconds();
+        let worst_case_bytes = max_samples * std::mem::size_of::<f32>() as u64;
+        assert!(
+            worst_case_bytes <= 192 * 1024 * 1024,
+            "dictation capture may buffer at most 192 MiB, got {worst_case_bytes} bytes"
+        );
+    }
+
+    #[test]
+    fn a_fresh_dictation_session_clears_the_previous_ceiling_flag() {
+        // The truncation notice is per session. A session that hit the ceiling
+        // must not make the next one report truncation it never suffered.
+        let mut audio = AudioCapture::new();
+        audio
+            .dictation_max_duration_reached
+            .store(true, Ordering::SeqCst);
+        audio
+            .dictation_buffered_samples
+            .store(999, Ordering::SeqCst);
+        audio.is_dictating.store(true, Ordering::SeqCst);
+
+        audio.abort_dictation();
+
+        assert!(!audio.dictation_hit_max_duration());
+        assert_eq!(audio.dictation_buffered_samples.load(Ordering::SeqCst), 0);
     }
 
     /// Both stop paths must clear the auto-stop VAD gate slot so a finished

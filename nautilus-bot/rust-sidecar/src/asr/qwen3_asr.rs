@@ -1060,7 +1060,7 @@ impl AsrProvider for Qwen3AsrProvider {
                 .download_verified_model_asset(
                     &url,
                     &destination,
-                    sha256,
+                    Some(sha256),
                     qwen3_asr_artifact_max_bytes(local_name),
                     move |p| {
                         cb((i as f32 / n_files + p.percentage as f32 / 100.0 / n_files) * 100.0);

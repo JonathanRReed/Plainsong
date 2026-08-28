@@ -46,6 +46,9 @@ const popupMocks = vi.hoisted(() => {
       void recordingId;
       void meetingNotes;
     }),
+    getSettings: vi.fn(async () => ({
+      transcription: { meetingCustomTemplates: [] },
+    })),
     windowHandle: {
       setSize: vi.fn(async () => {}),
       show: vi.fn(async () => {}),
@@ -78,6 +81,7 @@ vi.mock("@/lib/backend", () => ({
   getWaveformData: popupMocks.getWaveformData,
   stopRecording: popupMocks.stopRecording,
   updateRecordingNotes: popupMocks.updateRecordingNotes,
+  getSettings: popupMocks.getSettings,
 }));
 
 describe("RecordingPopup", () => {
@@ -89,6 +93,7 @@ describe("RecordingPopup", () => {
     popupMocks.stopRecording.mockReset();
     popupMocks.stopRecording.mockResolvedValue(undefined);
     popupMocks.updateRecordingNotes.mockClear();
+    popupMocks.getSettings.mockClear();
     popupMocks.windowHandle.setSize.mockClear();
     popupMocks.windowHandle.show.mockClear();
     popupMocks.windowHandle.hide.mockClear();
@@ -379,6 +384,131 @@ describe("RecordingPopup", () => {
 
       await waitFor(() => {
         expect(screen.getByText("Microphone has gone silent")).toBeInTheDocument();
+      });
+    });
+
+    it("keeps the live preview and source warning when a mid-meeting warning re-asserts the recording phase", async () => {
+      await act(async () => {
+        render(<RecordingPopup />);
+      });
+      await screen.findByText("Board sync");
+
+      const streamHandler = popupMocks.listeners.get(
+        "recording-transcription-stream",
+      );
+      const warningHandler = popupMocks.listeners.get(
+        "meeting-audio-source-warning",
+      );
+      const lifecycleHandler = popupMocks.listeners.get(
+        "meeting-recording-state-changed",
+      );
+      expect(lifecycleHandler).toBeTruthy();
+
+      await act(async () => {
+        streamHandler?.({
+          payload: streamSegment({
+            text: "Everyone can hear me now.",
+            segmentText: "Everyone can hear me now.",
+          }),
+        });
+        // `text` is the whole running preview, so the gap segment carries the
+        // earlier words along with it.
+        streamHandler?.({
+          payload: streamSegment({
+            kind: "gap",
+            segmentText: "[12s not transcribed]",
+            text: "Everyone can hear me now. [12s not transcribed]",
+            startTime: 60,
+            endTime: 72,
+          }),
+        });
+        warningHandler?.({
+          payload: {
+            recordingId: "r1",
+            source: "mic",
+            reason: "silence",
+            silentSeconds: 20,
+          },
+        });
+      });
+
+      await waitFor(() => {
+        expect(screen.getByText("Microphone has gone silent")).toBeInTheDocument();
+      });
+
+      // The sidecar re-emits `recording` mid-meeting purely to carry an
+      // advisory message. This used to run the full "capture started" reset:
+      // it blanked the preview, zeroed the lost-audio counter and dismissed the
+      // source warning at the exact moment the warning arrived.
+      await act(async () => {
+        lifecycleHandler?.({
+          payload: {
+            phase: "recording",
+            recordingId: "r1",
+            message:
+              "Plainsong stopped being able to save this meeting's audio, so nothing recorded from now on is kept.",
+          },
+        });
+      });
+
+      await waitFor(() => {
+        expect(
+          screen.getByText(/Plainsong stopped being able to save/),
+        ).toBeInTheDocument();
+      });
+      expect(screen.getByText("Microphone has gone silent")).toBeInTheDocument();
+      expect(screen.getByText(/Everyone can hear me now/)).toBeInTheDocument();
+      expect(screen.getByText("12s not transcribed")).toBeInTheDocument();
+    });
+
+    it("still resets the preview when a different meeting takes over", async () => {
+      await act(async () => {
+        render(<RecordingPopup />);
+      });
+      await screen.findByText("Board sync");
+
+      const streamHandler = popupMocks.listeners.get(
+        "recording-transcription-stream",
+      );
+      const lifecycleHandler = popupMocks.listeners.get(
+        "meeting-recording-state-changed",
+      );
+
+      await act(async () => {
+        streamHandler?.({
+          payload: streamSegment({
+            text: "Words from the first meeting.",
+            segmentText: "Words from the first meeting.",
+          }),
+        });
+      });
+      await waitFor(() => {
+        expect(
+          screen.getByText(/Words from the first meeting/),
+        ).toBeInTheDocument();
+      });
+
+      // A genuinely new capture must not inherit its predecessor's preview.
+      await act(async () => {
+        lifecycleHandler?.({
+          payload: {
+            phase: "ready",
+            recordingId: "r1",
+          },
+        });
+        lifecycleHandler?.({
+          payload: {
+            phase: "recording",
+            recordingId: "r2",
+            startedAtMs: Date.now(),
+          },
+        });
+      });
+
+      await waitFor(() => {
+        expect(
+          screen.queryByText(/Words from the first meeting/),
+        ).not.toBeInTheDocument();
       });
     });
   });

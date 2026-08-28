@@ -1,3 +1,5 @@
+import { readFileSync } from "node:fs";
+import { resolve } from "node:path";
 import { describe, expect, it } from "vitest";
 import {
   allowUpdaterDowngrade,
@@ -13,6 +15,9 @@ import {
   resolveUpdaterChannel,
   updaterResultHasAvailableUpdate,
   updaterChannelManifestFilename,
+  updaterFeedOptions,
+  updaterFeedUrl,
+  UPDATE_FEED_BASE_URL,
 } from "../../electron/updater-channel";
 
 describe("resolveUpdaterChannel", () => {
@@ -232,5 +237,77 @@ describe("updaterChannelManifestFilename", () => {
 
   it("stable on Windows requests latest.yml", () => {
     expect(updaterChannelManifestFilename("stable", "win32")).toBe("latest.yml");
+  });
+});
+
+describe("channel-derived update feed", () => {
+  it("gives each channel its own feed directory", () => {
+    // The finding: electron-builder.yml bakes ONE feed into app-update.yml, and
+    // it is the beta one. Since resolveUpdaterChannel("stable") is "latest", a
+    // stable install would have requested latest-mac.yml out of the beta
+    // bucket — a hard ERR_UPDATER_CHANNEL_FILE_NOT_FOUND, or a beta build
+    // served silently to stable users once such a file existed there.
+    expect(updaterFeedUrl("stable")).toBe(`${UPDATE_FEED_BASE_URL}/stable/`);
+    expect(updaterFeedUrl("beta")).toBe(`${UPDATE_FEED_BASE_URL}/beta/`);
+    expect(updaterFeedUrl("stable")).not.toBe(updaterFeedUrl("beta"));
+  });
+
+  it("resolves to a distinct manifest URL per channel", () => {
+    expect(
+      new URL(updaterChannelManifestFilename("stable", "darwin"), updaterFeedUrl("stable"))
+        .href,
+    ).toBe(`${UPDATE_FEED_BASE_URL}/stable/latest-mac.yml`);
+    expect(
+      new URL(updaterChannelManifestFilename("beta", "darwin"), updaterFeedUrl("beta")).href,
+    ).toBe(`${UPDATE_FEED_BASE_URL}/beta/beta-mac.yml`);
+  });
+
+  it("builds complete generic-provider options for setFeedURL", () => {
+    expect(updaterFeedOptions("beta")).toEqual({
+      provider: "generic",
+      url: `${UPDATE_FEED_BASE_URL}/beta/`,
+      channel: "beta",
+      useMultipleRangeRequest: false,
+    });
+    expect(updaterFeedOptions("stable")).toEqual({
+      provider: "generic",
+      url: `${UPDATE_FEED_BASE_URL}/stable/`,
+      // Not "stable": electron-builder publishes no stable-mac.yml.
+      channel: "latest",
+      useMultipleRangeRequest: false,
+    });
+  });
+
+  it("keeps the packaged default coherent with this beta candidate", () => {
+    const builderConfig = readFileSync(
+      resolve(process.cwd(), "electron-builder.yml"),
+      "utf8",
+    );
+    const packageJson = JSON.parse(
+      readFileSync(resolve(process.cwd(), "package.json"), "utf8"),
+    ) as { version: string };
+
+    // A prerelease build is pinned to beta regardless of the configured
+    // setting, so the baked-in default and the runtime resolution agree for
+    // every install of this build.
+    const channel = effectiveUpdaterChannel("stable", packageJson.version);
+    expect(channel).toBe("beta");
+    expect(builderConfig).toContain(`url: ${updaterFeedUrl(channel)}`);
+    expect(builderConfig).toContain("channel: beta");
+  });
+
+  it("sets the feed URL from the resolved channel on every check", () => {
+    const source = readFileSync(resolve(process.cwd(), "electron/main.ts"), "utf8");
+    const check = source.slice(
+      source.indexOf("async function checkForUpdatesInElectron"),
+      source.indexOf("async function installUpdateInElectron"),
+    );
+
+    expect(check).toContain("autoUpdater.setFeedURL(updaterFeedOptions(channel))");
+    // allowDowngrade must be assigned after `channel`, whose setter in
+    // electron-updater also sets allowDowngrade to true.
+    expect(check.indexOf("autoUpdater.channel =")).toBeLessThan(
+      check.indexOf("autoUpdater.allowDowngrade ="),
+    );
   });
 });

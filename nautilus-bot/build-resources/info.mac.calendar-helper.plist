@@ -1,0 +1,41 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  Embedded into the calendar helper's __TEXT,__info_plist section by
+  scripts/build-native-calendar-helper.mjs, the same way the Speech helper
+  embeds rust-sidecar/native/macos_speech_helper.Info.plist.
+
+  BOTH calendar usage keys are present on purpose. macOS 13 — the app's stated
+  support floor — reads NSCalendarsUsageDescription; macOS 14 replaced it with
+  NSCalendarsFullAccessUsageDescription and terminates a process that asks for
+  full access without it. A build carrying only one of the two either crashes
+  on half the supported range or shows the reader an empty prompt. The same
+  pair is repeated in electron-builder.yml's extendInfo, because TCC attributes
+  a spawned helper's prompt to the responsible process — the app — and reads
+  the string from ITS Info.plist.
+
+  The two strings say the same thing in the same words for that reason: which
+  one a reader sees depends on their macOS version, not on what Plainsong does.
+-->
+<plist version="1.0">
+<dict>
+  <key>CFBundleDisplayName</key>
+  <string>Plainsong Calendar Helper</string>
+  <key>CFBundleIdentifier</key>
+  <string>com.plainsong.app.calendar-helper</string>
+  <key>CFBundleName</key>
+  <string>Plainsong Calendar Helper</string>
+  <key>CFBundlePackageType</key>
+  <string>APPL</string>
+  <key>CFBundleShortVersionString</key>
+  <string>1.0</string>
+  <key>CFBundleVersion</key>
+  <string>1</string>
+  <key>LSMinimumSystemVersion</key>
+  <string>13.0</string>
+  <key>NSCalendarsUsageDescription</key>
+  <string>Plainsong reads your calendar on this Mac so it can offer to start capturing the meeting you are about to join. Nothing is written to your calendar and nothing leaves your Mac.</string>
+  <key>NSCalendarsFullAccessUsageDescription</key>
+  <string>Plainsong reads your calendar on this Mac so it can offer to start capturing the meeting you are about to join. Nothing is written to your calendar and nothing leaves your Mac.</string>
+</dict>
+</plist>

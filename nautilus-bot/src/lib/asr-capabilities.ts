@@ -122,10 +122,18 @@ export function isMeetingEligibleModel(providerType: AsrProviderType, modelId: s
       // a short-form English model and stays out of the meeting lane.
       return normalizedModelId.startsWith("parakeet-tdt-0.6b");
     case "groq":
-    case "openai_cloud":
     case "elevenlabs_scribe":
     case "cohere_transcribe":
       return true;
+    case "openai_cloud":
+      // Only whisper-1 requests verbose_json from the transcriptions
+      // endpoint (openai_cloud.rs's uses_verbose_json()), which is what
+      // actually returns segment timestamps. gpt-transcribe (the dictation
+      // default) and the gpt-4o-*-transcribe models return a single
+      // un-timed block, which breaks seek/timeline/diarization alignment
+      // for a meeting -- so they stay dictation-only and the meeting lane
+      // always resolves openai_cloud to whisper-1.
+      return normalizedModelId === "whisper-1";
     case "qwen3_asr":
       // Qwen3-ASR is an encoder-decoder model capable of long-form transcription.
       // Mark as experimental — the decoder loop is implemented but not yet
@@ -551,6 +559,176 @@ export function describePauseBehavior(behavior: AsrPauseBehavior): string {
   return behavior === "transducer"
     ? "Stays quiet through pauses: silence produces no text."
     : "Its decoder keeps emitting through long pauses, so silence can become invented words.";
+}
+
+// ---------------------------------------------------------------------------
+// Which languages a route actually accepts
+//
+// The dictation language picker used to be a hardcoded list of seven, offered
+// against models that accept anywhere from one language to a hundred. Seven was
+// neither the truth for Whisper (which loses 92 of them) nor for base.en (which
+// accepts none of the other six and returns English-sounding nonsense instead of
+// refusing). The lists below are the model's own coverage, so the picker's
+// boundary is the model's boundary.
+// ---------------------------------------------------------------------------
+
+/**
+ * Whisper's multilingual token set, in the order the upstream tokenizer
+ * declares it (`whisper/tokenizer.py`'s `LANGUAGES`).
+ */
+const WHISPER_LANGUAGE_CODES: readonly string[] = [
+  "en", "zh", "de", "es", "ru", "ko", "fr", "ja", "pt", "tr",
+  "pl", "ca", "nl", "ar", "sv", "it", "id", "hi", "fi", "vi",
+  "he", "uk", "el", "ms", "cs", "ro", "da", "hu", "ta", "no",
+  "th", "ur", "hr", "bg", "lt", "la", "mi", "ml", "cy", "sk",
+  "te", "fa", "lv", "bn", "sr", "az", "sl", "kn", "et", "mk",
+  "br", "eu", "is", "hy", "ne", "mn", "bs", "kk", "sq", "sw",
+  "gl", "mr", "pa", "si", "km", "sn", "yo", "so", "af", "oc",
+  "ka", "be", "tg", "sd", "gu", "am", "yi", "lo", "uz", "fo",
+  "ht", "ps", "tk", "nn", "mt", "sa", "lb", "my", "bo", "tl",
+  "mg", "as", "tt", "haw", "ln", "ha", "ba", "jw", "su",
+];
+
+/** large-v3 and its turbo distillation add Cantonese to the set above. */
+const WHISPER_LARGE_V3_LANGUAGE_CODES: readonly string[] = [
+  ...WHISPER_LANGUAGE_CODES,
+  "yue",
+];
+
+/**
+ * Parakeet TDT 0.6B v3's 25 languages: the 23 official EU languages the model
+ * card lists, plus Russian and Ukrainian. Mandarin, Hindi and Arabic are absent
+ * — the same absence the route's `tradeoff` names in words.
+ */
+const PARAKEET_V3_LANGUAGE_CODES: readonly string[] = [
+  "bg", "hr", "cs", "da", "nl", "en", "et", "fi", "fr", "de",
+  "el", "hu", "it", "lv", "lt", "mt", "pl", "pt", "ro", "sk",
+  "sl", "es", "sv", "ru", "uk",
+];
+
+/** Language codes per route, where Plainsong can name the set. */
+const LANGUAGE_CODES_BY_ROUTE = new Map<string, readonly string[]>([
+  ["whisper:tiny", WHISPER_LANGUAGE_CODES],
+  ["whisper:base", WHISPER_LANGUAGE_CODES],
+  ["whisper:small", WHISPER_LANGUAGE_CODES],
+  ["whisper:medium", WHISPER_LANGUAGE_CODES],
+  ["whisper:large-v3", WHISPER_LARGE_V3_LANGUAGE_CODES],
+  ["whisper:large-v3-turbo", WHISPER_LARGE_V3_LANGUAGE_CODES],
+  ["whisper_candle:whisper-large-v3-turbo", WHISPER_LARGE_V3_LANGUAGE_CODES],
+  ["parakeet:parakeet-tdt-0.6b-v3", PARAKEET_V3_LANGUAGE_CODES],
+]);
+
+/**
+ * Cloud routes carry no capability entry (they have no download to measure),
+ * but they still have a language boundary — and it is per *model*, not per
+ * provider. `openai_cloud` serves both `whisper-1` and the GPT-4o transcribe
+ * family, which this file already documents as behaving differently; keying by
+ * provider gave the GPT-4o models Whisper's list, which is an assumption no
+ * provider doc supports.
+ *
+ * A cloud model is listed here only when its coverage is the published coverage
+ * of a Whisper release. Everything else — the GPT-4o transcribe models,
+ * ElevenLabs Scribe, Cohere — resolves to `unenumerated`, so the picker says it
+ * does not know rather than offering ~100 languages on an inherited guess.
+ */
+const CLOUD_LANGUAGE_CODES_BY_ROUTE = new Map<string, readonly string[]>([
+  // OpenAI's whisper-1 is the hosted Whisper large-v2 checkpoint, which
+  // predates the large-v3 addition of Cantonese.
+  ["openai_cloud:whisper-1", WHISPER_LANGUAGE_CODES],
+  ["groq:whisper-large-v3", WHISPER_LARGE_V3_LANGUAGE_CODES],
+  ["groq:whisper-large-v3-turbo", WHISPER_LARGE_V3_LANGUAGE_CODES],
+]);
+
+/** The English name of every code the lists above can produce. */
+export const ASR_LANGUAGE_NAMES: Readonly<Record<string, string>> = {
+  af: "Afrikaans", am: "Amharic", ar: "Arabic", as: "Assamese", az: "Azerbaijani",
+  ba: "Bashkir", be: "Belarusian", bg: "Bulgarian", bn: "Bengali", bo: "Tibetan",
+  br: "Breton", bs: "Bosnian", ca: "Catalan", cs: "Czech", cy: "Welsh",
+  da: "Danish", de: "German", el: "Greek", en: "English", es: "Spanish",
+  et: "Estonian", eu: "Basque", fa: "Persian", fi: "Finnish", fo: "Faroese",
+  fr: "French", gl: "Galician", gu: "Gujarati", ha: "Hausa", haw: "Hawaiian",
+  he: "Hebrew", hi: "Hindi", hr: "Croatian", ht: "Haitian Creole", hu: "Hungarian",
+  hy: "Armenian", id: "Indonesian", is: "Icelandic", it: "Italian", ja: "Japanese",
+  jw: "Javanese", ka: "Georgian", kk: "Kazakh", km: "Khmer", kn: "Kannada",
+  ko: "Korean", la: "Latin", lb: "Luxembourgish", ln: "Lingala", lo: "Lao",
+  lt: "Lithuanian", lv: "Latvian", mg: "Malagasy", mi: "Māori", mk: "Macedonian",
+  ml: "Malayalam", mn: "Mongolian", mr: "Marathi", ms: "Malay", mt: "Maltese",
+  my: "Burmese", ne: "Nepali", nl: "Dutch", nn: "Norwegian Nynorsk", no: "Norwegian",
+  oc: "Occitan", pa: "Punjabi", pl: "Polish", ps: "Pashto", pt: "Portuguese",
+  ro: "Romanian", ru: "Russian", sa: "Sanskrit", sd: "Sindhi", si: "Sinhala",
+  sk: "Slovak", sl: "Slovenian", sn: "Shona", so: "Somali", sq: "Albanian",
+  sr: "Serbian", su: "Sundanese", sv: "Swedish", sw: "Swahili", ta: "Tamil",
+  te: "Telugu", tg: "Tajik", th: "Thai", tk: "Turkmen", tl: "Tagalog",
+  tr: "Turkish", tt: "Tatar", uk: "Ukrainian", ur: "Urdu", uz: "Uzbek",
+  vi: "Vietnamese", yi: "Yiddish", yo: "Yoruba", yue: "Cantonese", zh: "Chinese",
+};
+
+/** The English name of a language code, or the code itself when unnamed. */
+export function asrLanguageName(code: string): string {
+  return ASR_LANGUAGE_NAMES[code] ?? code;
+}
+
+export type AsrLanguageBoundary =
+  /** One language, and switching is not possible on this model. */
+  | { kind: "english_only"; label: string }
+  /** Exactly these languages, named. */
+  | { kind: "enumerated"; codes: readonly string[]; label: string }
+  /** More than one language, but Plainsong cannot name which. */
+  | { kind: "unenumerated"; label: string };
+
+/**
+ * What the selected route will actually accept.
+ *
+ * Returns `unenumerated` rather than a guess when the model is multilingual but
+ * Plainsong has no verified list for it — the picker then says so instead of
+ * presenting a fabricated set as the boundary.
+ */
+export function resolveAsrLanguageBoundary(
+  providerType: AsrProviderType | null | undefined,
+  modelId: string | null | undefined
+): AsrLanguageBoundary {
+  if (!providerType) {
+    return { kind: "unenumerated", label: "the selected model's languages" };
+  }
+
+  const capability = getAsrModelCapability(providerType, modelId);
+  if (capability?.languages.englishOnly) {
+    return { kind: "english_only", label: capability.languages.label };
+  }
+
+  const route = `${providerType}:${(modelId ?? "").trim()}`;
+  const codes =
+    LANGUAGE_CODES_BY_ROUTE.get(route) ??
+    CLOUD_LANGUAGE_CODES_BY_ROUTE.get(route) ??
+    null;
+  if (codes) {
+    return {
+      kind: "enumerated",
+      codes,
+      label: capability?.languages.label ?? `${codes.length} languages`,
+    };
+  }
+
+  if (capability) {
+    return { kind: "unenumerated", label: capability.languages.label };
+  }
+  return { kind: "unenumerated", label: "the selected model's languages" };
+}
+
+/**
+ * The picker's option list for a route: `null` when the model is English-only,
+ * because a one-item picker is not a choice and the caller says so in words
+ * instead. `codes` is empty for an unenumerated route.
+ */
+export function asrLanguageOptions(
+  boundary: AsrLanguageBoundary
+): Array<{ value: string; label: string }> {
+  if (boundary.kind !== "enumerated") {
+    return [];
+  }
+  return [...boundary.codes]
+    .map((code) => ({ value: code, label: asrLanguageName(code) }))
+    .sort((left, right) => left.label.localeCompare(right.label));
 }
 
 /**

@@ -32,12 +32,14 @@ import {
   type NativeShortcutRawEvent,
 } from "./native-macos-shortcut";
 import { startNativeMacosShortcutController } from "./native-macos-shortcut-runtime";
+import { createMacosCalendarRuntime, type MacosCalendarRuntime } from "./macos-calendar-runtime";
 import {
   convertShortcutToAccelerator,
   findConflictingShortcuts,
   type ShortcutConflictInfo,
 } from "./shortcut-registration";
 import {
+  clampOverlaySize,
   resolveInitialOverlayAnchor,
   resolveOverlayBounds,
   resolveSavedOverlayAnchor,
@@ -53,6 +55,7 @@ import {
   macosUpdateRelauncherArgs,
   resolveUpdaterChannel,
   type UpdateChannel,
+  updaterFeedOptions,
   updaterInstallBlockedByActiveMeeting,
   updaterResultHasAvailableUpdate,
 } from "./updater-channel";
@@ -61,13 +64,23 @@ import {
   waitForMacosUpdateStaging,
 } from "./macos-updater-staging";
 import { runExplicitUpdaterInstallFlow } from "./updater-install-flow";
-import { resolveWindowUiSettings } from "./window-ui-settings";
+import {
+  macAppSignatureIsUpdatable,
+  parseCodesignTeamIdentifier,
+  PLAINSONG_RELEASE_TEAM_ID,
+} from "./macos-code-signature";
+import { overlayVisibilityAllowed, resolveWindowUiSettings } from "./window-ui-settings";
+import {
+  clampWindowSizeToWorkArea,
+  isFiniteWindowNumber,
+} from "./window-bounds-policy";
 import {
   isRendererUrl,
   RENDERER_HOST,
   RENDERER_SCHEME,
   rendererUrl,
   resolveRendererAssetPath,
+  withRendererSecurityHeaders,
 } from "./renderer-protocol";
 import {
   RENDERER_READY_LOG_MESSAGE,
@@ -83,6 +96,8 @@ import {
   observeCaptureAdmissionForWindow,
 } from "./capture-admission";
 import { rendererPermissionAllowed } from "./renderer-permission-policy";
+import { isAllowedExternalUrl } from "./external-url-policy";
+import { trustedSenderFrameUrl } from "./trusted-sender";
 import {
   finalizeMeetingWithinBudget,
   nextActiveMeetingRecordingId,
@@ -574,21 +589,48 @@ function configureAutoUpdater(updater: AppUpdater): void {
 // releases are a supported configuration (no Developer ID secrets in CI). An
 // ad-hoc signature (what electron-builder applies on arm64 when no identity is
 // available) cannot be updated either, so it counts as unsigned here.
+//
+// `codesign -dv` only DISPLAYS a signature and exits 0 for a broken or foreign
+// one, so it was never evidence of anything: verify the seal, then require the
+// team identifier to be ours. See macos-code-signature.ts.
 let codeSignatureCheck: Promise<boolean> | null = null;
 
-function isMacAppCodeSigned(): Promise<boolean> {
+function runCodesign(args: string[]): Promise<{ ok: boolean; output: string }> {
+  return new Promise((resolve) => {
+    // `codesign` writes its display output to stderr, so both streams matter.
+    execFile("/usr/bin/codesign", args, (error, stdout, stderr) => {
+      resolve({ ok: !error, output: `${stdout}\n${stderr}` });
+    });
+  });
+}
+
+function isMacAppUpdatable(): Promise<boolean> {
   if (process.platform !== "darwin" || !app.isPackaged) {
     return Promise.resolve(true);
   }
 
   if (!codeSignatureCheck) {
-    codeSignatureCheck = new Promise((resolve) => {
-      const bundlePath = path.resolve(app.getPath("exe"), "..", "..", "..");
-      execFile("codesign", ["-dv", "--verbose=2", bundlePath], (error, stdout, stderr) => {
-        const output = `${stdout}\n${stderr}`;
-        resolve(!error && !output.includes("Signature=adhoc"));
+    const bundlePath = path.resolve(app.getPath("exe"), "..", "..", "..");
+    // `--deep` walks every nested helper, which takes a moment on an Electron
+    // bundle. It runs at most once per process and only on the update path.
+    codeSignatureCheck = (async () => {
+      const [verification, display] = await Promise.all([
+        runCodesign(["--verify", "--strict", "--deep", bundlePath]),
+        runCodesign(["-dv", "--verbose=4", bundlePath]),
+      ]);
+      const updatable = macAppSignatureIsUpdatable({
+        verified: verification.ok,
+        displayOutput: display.output,
       });
-    });
+      if (!updatable) {
+        console.warn("[updater] refusing to treat this bundle as updatable", {
+          verified: verification.ok,
+          teamIdentifier: parseCodesignTeamIdentifier(display.output),
+          expectedTeamIdentifier: PLAINSONG_RELEASE_TEAM_ID,
+        });
+      }
+      return updatable;
+    })();
   }
 
   return codeSignatureCheck;
@@ -601,7 +643,7 @@ async function checkForUpdatesInElectron(): Promise<UpdateInfoPayload | null> {
     throw new Error(error);
   }
 
-  updateInstallBlockedReason = (await isMacAppCodeSigned()) ? undefined : "unsigned";
+  updateInstallBlockedReason = (await isMacAppUpdatable()) ? undefined : "unsigned";
 
   const configuredChannel = await getUpdateChannelFromSidecar();
   const channel = effectiveUpdaterChannel(configuredChannel, app.getVersion());
@@ -609,7 +651,13 @@ async function checkForUpdatesInElectron(): Promise<UpdateInfoPayload | null> {
   // requesting `stable-mac.yml` 404s with no fallback. See updater-channel.ts.
   autoUpdater.channel = resolveUpdaterChannel(channel);
   autoUpdater.allowPrerelease = channel === "beta";
+  // Set AFTER `channel`: electron-updater's channel setter also sets
+  // allowDowngrade to true.
   autoUpdater.allowDowngrade = allowUpdaterDowngrade(channel);
+  // The packaged app-update.yml can only name one feed, and it names the beta
+  // one. Point the updater at the directory for the channel actually in effect
+  // so a stable install never reads a manifest out of the beta bucket.
+  autoUpdater.setFeedURL(updaterFeedOptions(channel));
 
   const result = await autoUpdater.checkForUpdates();
   if (!updaterResultHasAvailableUpdate(result)) {
@@ -646,9 +694,10 @@ async function installUpdateInElectron(): Promise<void> {
     throw new Error(error);
   }
 
-  if (!(await isMacAppCodeSigned())) {
+  if (!(await isMacAppUpdatable())) {
     const error =
-      "This build is not code-signed, so the updater cannot install updates. " +
+      "This build's code signature is not a verified Plainsong release, so the " +
+      "updater cannot install updates. " +
       "Download the new version from GitHub Releases instead.";
     setUpdateStatus({
       status: "error",
@@ -880,6 +929,9 @@ function positionOverlayOnActiveDisplay(win: BrowserWindow): void {
 // edge stays fixed and the window can never grow past the bottom of the work
 // area. Setting the size alone grows the HUD downward off screen while the user
 // is still speaking.
+// The requested size is clamped to the per-kind maximum FIRST: resolveOverlayBounds
+// only clamps to the work area, which for a renderer asking for 5000x5000 means a
+// full-screen always-on-top window rather than an overlay.
 function resizeOverlayKeepingBottomEdge(
   win: BrowserWindow,
   kind: OverlayKind,
@@ -896,7 +948,7 @@ function resizeOverlayKeepingBottomEdge(
       kind,
       resolveOverlayBounds({
         workArea,
-        size,
+        size: clampOverlaySize(kind, size),
         anchor: { bottom: current.y + current.height, left: current.x },
       }),
     );
@@ -1004,15 +1056,39 @@ async function handleLocalCommand(
 ): Promise<{ handled: boolean; result?: unknown }> {
   const senderWindow = BrowserWindow.fromWebContents(event.sender);
 
-  const chooseDirectory = async (title: string): Promise<string | null> => {
-    const options: Electron.OpenDialogOptions = {
+  /**
+   * Gate every native modal this handler can open.
+   *
+   * A modal is parented to the window that asked for it and blocks that window
+   * until it is dismissed, and neither fact was checked here. Any window could
+   * ask — including a hidden, non-focusable overlay, which parents a modal to a
+   * window the user cannot see or dismiss — and nothing required a user
+   * gesture, so a renderer could put an unprompted folder picker carrying
+   * Plainsong's name in front of the user at any moment. `begin_meeting_capture`
+   * already had both guards; the storage-location commands, which are the ones
+   * that hand a directory to a privileged sidecar approval, did not.
+   *
+   * The gesture is consumed BEFORE the dialog opens, and is single-use: two
+   * dialogs need two clicks.
+   */
+  const requireMainWindowGesture = (action: string): BrowserWindow => {
+    if (!senderWindow || senderWindow !== mainWindow) {
+      throw new Error(`${action} can only be requested from the main Plainsong window`);
+    }
+    const route = event.senderFrame?.url ?? senderWindow.webContents.getURL();
+    captureAdmission.consume(senderWindow.id, route);
+    return senderWindow;
+  };
+
+  const chooseDirectory = async (
+    parent: BrowserWindow,
+    title: string,
+  ): Promise<string | null> => {
+    const result = await dialog.showOpenDialog(parent, {
       title,
       buttonLabel: "Choose folder",
       properties: ["openDirectory", "createDirectory"],
-    };
-    const result = senderWindow
-      ? await dialog.showOpenDialog(senderWindow, options)
-      : await dialog.showOpenDialog(options);
+    });
     return result.canceled ? null : (result.filePaths[0] ?? null);
   };
 
@@ -1022,14 +1098,30 @@ async function handleLocalCommand(
         return { handled: true, result: null };
       }
       const payload = (args ?? {}) as { width?: unknown; height?: unknown };
-      if (typeof payload.width === "number" && typeof payload.height === "number") {
-        const size = { width: payload.width, height: payload.height };
-        const overlayKind = getOverlayKind(senderWindow);
-        if (overlayKind) {
-          resizeOverlayKeepingBottomEdge(senderWindow, overlayKind, size);
-        } else {
-          senderWindow.setSize(Math.round(size.width), Math.round(size.height), true);
-        }
+      // NaN and Infinity both satisfy `typeof x === "number"`, which was the
+      // only guard here.
+      if (
+        !isFiniteWindowNumber(payload.width) ||
+        !isFiniteWindowNumber(payload.height)
+      ) {
+        return { handled: true, result: null };
+      }
+      const size = { width: payload.width, height: payload.height };
+      const overlayKind = getOverlayKind(senderWindow);
+      if (overlayKind) {
+        resizeOverlayKeepingBottomEdge(senderWindow, overlayKind, size);
+      } else {
+        // The main window is resizable and has no persisted bounds, so a size
+        // larger than the display it is on cannot be recovered from without a
+        // relaunch. Clamp to the work area of the display the window actually
+        // occupies, not the primary display.
+        const [minWidth, minHeight] = senderWindow.getMinimumSize();
+        const { workArea } = screen.getDisplayMatching(senderWindow.getBounds());
+        const clamped = clampWindowSizeToWorkArea(size, workArea, {
+          width: minWidth,
+          height: minHeight,
+        });
+        senderWindow.setSize(clamped.width, clamped.height, true);
       }
       return { handled: true, result: null };
     }
@@ -1070,29 +1162,64 @@ async function handleLocalCommand(
       return { handled: true, result: null };
     }
     case "__window_set_position__": {
-      if (!senderWindow) {
+      // Only the overlays move themselves — they are the windows this process
+      // positions programmatically anyway. The main window's position belongs
+      // to the user: it is not persisted, so a renderer that could park it
+      // off-screen made the app unusable until it was quit and relaunched, and
+      // no renderer code has ever needed to move it.
+      const overlayKind = senderWindow ? getOverlayKind(senderWindow) : null;
+      if (!senderWindow || !overlayKind) {
         return { handled: true, result: null };
       }
       const payload = (args ?? {}) as { x?: unknown; y?: unknown };
-      if (typeof payload.x === "number" && typeof payload.y === "number") {
-        senderWindow.setPosition(Math.round(payload.x), Math.round(payload.y), true);
+      if (!isFiniteWindowNumber(payload.x) || !isFiniteWindowNumber(payload.y)) {
+        return { handled: true, result: null };
       }
+      // Route through the same bottom-anchored clamp every other overlay move
+      // uses, so the window stays inside the work area of the display it is
+      // being moved to and `moved` is not mistaken for a user drag.
+      const x = Math.round(payload.x);
+      const y = Math.round(payload.y);
+      const current = senderWindow.getBounds();
+      const { workArea } = screen.getDisplayNearestPoint({ x, y });
+      applyOverlayBounds(
+        senderWindow,
+        overlayKind,
+        resolveOverlayBounds({
+          workArea,
+          size: { width: current.width, height: current.height },
+          anchor: { bottom: y + current.height, left: x },
+        }),
+      );
       return { handled: true, result: null };
     }
     case "__window_hide__":
       senderWindow?.hide();
       return { handled: true, result: null };
-    case "__window_show__":
-      senderWindow?.showInactive();
+    case "__window_show__": {
+      if (!senderWindow) {
+        return { handled: true, result: null };
+      }
+      // An overlay may only put itself on screen while the main process still
+      // believes that overlay is enabled. Honoring the renderer unconditionally
+      // made showInactive() an always-on-top, visible-on-full-screen window the
+      // user had explicitly turned off — see overlayVisibilityAllowed.
+      const overlayKind = getOverlayKind(senderWindow);
+      if (
+        overlayKind &&
+        !overlayVisibilityAllowed(overlayKind, {
+          showDictationOverlay: showDictationOverlayEnabled,
+          showRecordingOverlay: showRecordingOverlayEnabled,
+        })
+      ) {
+        return { handled: true, result: null };
+      }
+      senderWindow.showInactive();
       return { handled: true, result: null };
+    }
     case "__window_start_drag__":
       // Dragging is handled through CSS app-region on Electron.
       return { handled: true, result: null };
-    case "app:set_minimize_to_tray": {
-      const payload = (args ?? {}) as { enabled?: unknown };
-      minimizeToTrayEnabled = payload.enabled === true;
-      return { handled: true, result: null };
-    }
     case "check_for_updates":
       return { handled: true, result: await checkForUpdatesInElectron() };
     case "install_update":
@@ -1110,8 +1237,59 @@ async function handleLocalCommand(
         handled: true,
         result: { conflicts: shortcutConflicts },
       };
+    case "get_calendar_snapshot": {
+      // Reads the stored TCC answer and, only if it is already "authorized",
+      // the events. It cannot prompt — see macos-calendar-runtime.ts — so it is
+      // safe for the Meetings view to call on mount, which is what lets the
+      // "Connect your calendar" card know it has something to offer.
+      const payload = (args ?? {}) as { forceRefresh?: unknown };
+      return {
+        handled: true,
+        result: await getMacosCalendarRuntime().readSnapshot({
+          forceRefresh: payload.forceRefresh === true,
+        }),
+      };
+    }
+    case "request_calendar_access": {
+      // The one path that can raise the macOS calendar prompt, so it is gated
+      // the same way the folder pickers are: it must come from the main window
+      // and it consumes a real user gesture. Calendar access is additive
+      // convenience; asking for it unprompted at launch is exactly the
+      // behaviour this feature was scoped to avoid.
+      requireMainWindowGesture("Connecting your calendar");
+      return {
+        handled: true,
+        result: await getMacosCalendarRuntime().requestAccess(),
+      };
+    }
+    case "open_calendar_privacy_settings": {
+      // Deliberately not routed through the sidecar's open_permission_settings:
+      // that helper falls back to the Accessibility pane for a section it does
+      // not know, and sending someone looking for the Calendars switch to the
+      // Accessibility list is worse than offering no button at all.
+      //
+      // Gated like the dialogs above it, and for the same reason. This does not
+      // open a modal, but it does yank System Settings to the foreground, and
+      // an ungated version could be driven from a hidden overlay to do that
+      // repeatedly — the unprompted-native-surface failure Wave 1 closed for
+      // the folder pickers. It is also the only direct `shell.openExternal`
+      // call outside the vetted https egress path (external-url-policy.ts), so
+      // it needs to be provably reachable by a person and nothing else.
+      requireMainWindowGesture("Opening calendar privacy settings");
+      if (process.platform !== "darwin") {
+        return { handled: true, result: false };
+      }
+      await shell.openExternal(
+        "x-apple.systempreferences:com.apple.preference.security?Privacy_Calendars",
+      );
+      return { handled: true, result: true };
+    }
     case "select_export_location": {
-      const selectedPath = await chooseDirectory("Choose a dedicated export folder");
+      const parent = requireMainWindowGesture("Choosing an export folder");
+      const selectedPath = await chooseDirectory(
+        parent,
+        "Choose a dedicated export folder",
+      );
       if (!selectedPath) {
         return { handled: true, result: null };
       }
@@ -1126,7 +1304,11 @@ async function handleLocalCommand(
       };
     }
     case "select_backup_location": {
-      const selectedPath = await chooseDirectory("Choose a dedicated backup folder");
+      const parent = requireMainWindowGesture("Choosing a backup folder");
+      const selectedPath = await chooseDirectory(
+        parent,
+        "Choose a dedicated backup folder",
+      );
       if (!selectedPath) {
         return { handled: true, result: null };
       }
@@ -1145,8 +1327,13 @@ async function handleLocalCommand(
       if (!ipcBridge) {
         throw new Error("Storage approval service is not ready");
       }
+      // One gesture for this command, whichever of the two dialogs it opens.
+      const parent = requireMainWindowGesture("Choosing a cloud backup destination");
       if (request.provider === "i_cloud") {
-        const selectedPath = await chooseDirectory("Choose an iCloud backup folder");
+        const selectedPath = await chooseDirectory(
+          parent,
+          "Choose an iCloud backup folder",
+        );
         if (!selectedPath) {
           return { handled: true, result: null };
         }
@@ -1173,9 +1360,7 @@ async function handleLocalCommand(
         cancelId: 0,
         noLink: true,
       };
-      const confirmation = senderWindow
-        ? await dialog.showMessageBox(senderWindow, messageOptions)
-        : await dialog.showMessageBox(messageOptions);
+      const confirmation = await dialog.showMessageBox(parent, messageOptions);
       if (confirmation.response !== 1) {
         return { handled: true, result: null };
       }
@@ -1200,6 +1385,10 @@ async function handleLocalCommand(
       }
       const route = event.senderFrame?.url ?? senderWindow.webContents.getURL();
       const grant = captureAdmission.consume(senderWindow.id, route);
+      // Registering the nonce is what makes the sidecar's admission check
+      // real: from the first registered nonce onward it refuses any proof it
+      // did not mint here, single-use, within the TTL.
+      await ipcBridge.invoke("register_capture_admission", { nonce: grant.nonce });
       const payload = (args ?? {}) as { options?: unknown };
       const suppliedOptions =
         payload.options && typeof payload.options === "object"
@@ -1619,6 +1808,37 @@ function getNativeShortcutHelperPath(): string {
   return path.join(process.resourcesPath, "shortcut-helper", binaryName);
 }
 
+function getNativeCalendarHelperPath(): string {
+  const binaryName = "plainsong-native-calendar-helper";
+
+  if (isDev) {
+    return path.join(__dirname, "../dist-native", binaryName);
+  }
+
+  return path.join(process.resourcesPath, "calendar-helper", binaryName);
+}
+
+/**
+ * Lazily built so the helper path is resolved once, and so a build with no
+ * calendar helper (or a non-macOS build) answers "unavailable" rather than
+ * throwing at import time.
+ *
+ * Nothing constructs this during bootstrap. It comes into existence the first
+ * time the renderer asks about the calendar, which is itself only after the
+ * Meetings view is on screen.
+ */
+let macosCalendarRuntime: MacosCalendarRuntime | null = null;
+
+function getMacosCalendarRuntime(): MacosCalendarRuntime {
+  if (!macosCalendarRuntime) {
+    macosCalendarRuntime = createMacosCalendarRuntime({
+      platform: process.platform,
+      helperPath: getNativeCalendarHelperPath(),
+    });
+  }
+  return macosCalendarRuntime;
+}
+
 function getSidecarBinaryName(): string {
   return process.platform === "win32" ? "plainsong-sidecar.exe" : "plainsong-sidecar";
 }
@@ -1651,15 +1871,6 @@ function isRendererAppUrl(rawUrl: string): boolean {
     }
 
     return false;
-  } catch {
-    return false;
-  }
-}
-
-function isAllowedExternalUrl(rawUrl: string): boolean {
-  try {
-    const url = new URL(rawUrl);
-    return url.protocol === "https:" || url.protocol === "mailto:";
   } catch {
     return false;
   }
@@ -1717,10 +1928,19 @@ function installRendererPermissionHandlers(): void {
 function configureWindowSecurity(win: BrowserWindow): void {
   observeCaptureAdmissionForWindow(win, captureAdmission);
 
-  win.webContents.setWindowOpenHandler(({ url }) => {
-    if (isAllowedExternalUrl(url)) {
-      void shell.openExternal(url);
+  // Both of these hand a renderer-supplied URL to the user's browser, which is
+  // the only egress the renderer controls. `isAllowedExternalUrl` is a host
+  // allowlist, not a protocol check — see external-url-policy.ts.
+  const openExternalIfAllowed = (url: string, source: string): void => {
+    if (!isAllowedExternalUrl(url)) {
+      console.warn("[security] refused to open an external URL", { source, url });
+      return;
     }
+    void shell.openExternal(url);
+  };
+
+  win.webContents.setWindowOpenHandler(({ url }) => {
+    openExternalIfAllowed(url, "window-open");
 
     return { action: "deny" };
   });
@@ -1731,10 +1951,7 @@ function configureWindowSecurity(win: BrowserWindow): void {
     }
 
     event.preventDefault();
-
-    if (isAllowedExternalUrl(url)) {
-      void shell.openExternal(url);
-    }
+    openExternalIfAllowed(url, "will-navigate");
   });
 
   win.webContents.on("will-attach-webview", (event) => {
@@ -1966,7 +2183,17 @@ app.on("activate", () => {
   }
 });
 
+// The one ipcMain handler that ran no sender check. It leaks little on its own
+// — a window label — but "every ipcMain handler validates its sender" is the
+// property worth holding, not "every handler that returns something sensitive".
 ipcMain.handle("window:get-label", (event) => {
+  const frameUrl = trustedSenderFrameUrl(event);
+  if (!isTrustedRendererOrigin(frameUrl)) {
+    console.warn("[security] rejected window:get-label from untrusted sender", {
+      url: frameUrl,
+    });
+    return null;
+  }
   const win = BrowserWindow.fromWebContents(event.sender);
   if (!win) {
     return null;
@@ -1991,21 +2218,28 @@ async function bootstrap() {
   installRendererPermissionHandlers();
 
   if (!devServerUrlIsUsable) {
-    await protocol.handle(RENDERER_SCHEME, (request) => {
+    await protocol.handle(RENDERER_SCHEME, async (request) => {
       try {
         const rendererRoot = path.join(__dirname, "../dist");
         const assetPath = resolveRendererAssetPath(rendererRoot, request.url);
-        return net.fetch(pathToFileURL(assetPath).toString());
+        // Headers, not just the index.html meta tag: a meta CSP is parsed by
+        // the document that carries it and covers nothing else the handler
+        // serves, and `frame-ancestors` has no effect in a meta tag at all.
+        return withRendererSecurityHeaders(
+          await net.fetch(pathToFileURL(assetPath).toString()),
+        );
       } catch (error) {
         console.error("[renderer] refused packaged asset request", {
           host: RENDERER_HOST,
           url: request.url,
           error,
         });
-        return new Response("Not found", {
-          status: 404,
-          headers: { "content-type": "text/plain; charset=utf-8" },
-        });
+        return withRendererSecurityHeaders(
+          new Response("Not found", {
+            status: 404,
+            headers: { "content-type": "text/plain; charset=utf-8" },
+          }),
+        );
       }
     });
   }

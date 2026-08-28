@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
   buildProductReadinessSnapshot,
+  meetingCaptureIsReady,
   selectReadinessForSurface,
   updateProductReadinessSnapshot,
   type ProductReadinessEvidence,
@@ -24,6 +25,8 @@ function evidence(
     cursorInsertionReady: true,
     meetingRouteReady: true,
     meetingRouteReason: null,
+    meetingNotesRoute: "ready",
+    meetingNotesRouteReason: null,
     systemAudioState: "ready",
     ...overrides,
   };
@@ -139,6 +142,12 @@ describe("product readiness", () => {
       buildProductReadinessSnapshot(
         evidence({ settingsLoaded: false }),
       ),
+      buildProductReadinessSnapshot(
+        evidence({
+          meetingNotesRoute: "unconfigured",
+          meetingNotesRouteReason: "Ollama on this machine is not running.",
+        }),
+      ),
     ];
 
     for (const snapshot of snapshots) {
@@ -151,6 +160,96 @@ describe("product readiness", () => {
         expectActionable(assessment);
       }
     }
+  });
+
+  it("degrades meetings when the AI lane cannot write notes", () => {
+    const snapshot = buildProductReadinessSnapshot(
+      evidence({
+        meetingNotesRoute: "unconfigured",
+        meetingNotesRouteReason: "Ollama on this machine is not running.",
+      }),
+    );
+
+    expect(snapshot.meetings.state).toBe("degraded");
+    expect(snapshot.meetings.cause?.id).toBe("ai_route");
+    expect(snapshot.meetings.cause?.message).toContain("Notes unavailable");
+    expect(snapshot.meetings.cause?.message).toContain(
+      "Ollama on this machine is not running.",
+    );
+    expect(snapshot.meetings.cause?.action.id).toBe("open_ai_settings");
+    expect(snapshot.meetings.cause?.action.destination).toBe("ai");
+    // Capture is the fact Me + Them depends on, so the notes lane must not
+    // become the stated reason system audio is unavailable.
+    expect(snapshot.fullCapture.state).toBe("ready");
+  });
+
+  it("keeps capture readiness separate from the notes lane", () => {
+    const snapshot = buildProductReadinessSnapshot(
+      evidence({
+        meetingNotesRoute: "unconfigured",
+        meetingNotesRouteReason: "Ollama on this machine is not running.",
+      }),
+    );
+
+    // The assessment every capture action is gated on is untouched...
+    expect(snapshot.meetingsCapture.state).toBe("ready");
+    expect(snapshot.meetingsCapture.cause).toBeNull();
+    expect(meetingCaptureIsReady(snapshot)).toBe(true);
+    // ...and the sitewide badge stays quiet, because nothing is broken.
+    expect(snapshot.overall.state).toBe("ready");
+    // ...while the reader is still told about the notes.
+    expect(snapshot.meetings.state).toBe("degraded");
+  });
+
+  it("still reports a real capture blocker through both readings", () => {
+    const snapshot = buildProductReadinessSnapshot(
+      evidence({
+        meetingRouteReady: false,
+        meetingRouteReason: "Choose a meeting engine.",
+        meetingNotesRoute: "unconfigured",
+        meetingNotesRouteReason: "Ollama on this machine is not running.",
+      }),
+    );
+
+    expect(snapshot.meetingsCapture.state).toBe("blocked");
+    expect(snapshot.meetingsCapture.cause?.id).toBe("meeting_route");
+    expect(meetingCaptureIsReady(snapshot)).toBe(false);
+    expect(snapshot.overall.state).toBe("blocked");
+  });
+
+  it("respects a remembered transcripts-only choice", () => {
+    const snapshot = buildProductReadinessSnapshot(
+      evidence({
+        meetingNotesRoute: "opted_out",
+        meetingNotesRouteReason:
+          "Meeting notes are off. Plainsong keeps transcripts only.",
+      }),
+    );
+
+    expect(snapshot.meetings.state).toBe("ready");
+    expect(snapshot.meetings.cause).toBeNull();
+  });
+
+  it("never lets an unanswered AI probe read as ready", () => {
+    const snapshot = buildProductReadinessSnapshot(
+      evidence({ meetingNotesRoute: "unknown" }),
+    );
+
+    expect(snapshot.meetings.state).toBe("degraded");
+    expect(snapshot.meetings.cause?.id).toBe("ai_route");
+  });
+
+  it("keeps a capture blocker ahead of a missing AI route", () => {
+    const snapshot = buildProductReadinessSnapshot(
+      evidence({
+        microphonePermissionReady: false,
+        meetingNotesRoute: "unconfigured",
+        meetingNotesRouteReason: "Ollama on this machine is not running.",
+      }),
+    );
+
+    expect(snapshot.meetings.state).toBe("needs_action");
+    expect(snapshot.meetings.cause?.id).toBe("microphone_permission");
   });
 
   it("does not let stale evidence replace a newer snapshot", () => {

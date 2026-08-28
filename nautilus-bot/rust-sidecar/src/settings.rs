@@ -171,6 +171,15 @@ pub struct TranscriptionSettings {
     pub dictation_snippets_enabled: bool,
     /// Dictation: learn safe confirmed text corrections into the dictionary automatically.
     pub dictation_auto_learn_corrections: bool,
+    /// Dictation: after inserting into another app, read that one field back
+    /// briefly to notice corrections the user made there.
+    ///
+    /// Off by default and deliberately not covered by any "turn everything on"
+    /// preset: this is the only dictation setting that reads text back out of
+    /// another application, so it stays an explicit choice the user makes once,
+    /// having read what it does. See `dictation_correction_capture` for the
+    /// window, the abort conditions and the filters.
+    pub dictation_learn_from_external_corrections: bool,
     /// Custom system prompt for Smart Format
     pub dictation_custom_prompt: Option<String>,
     /// Custom system prompt for Meeting Summaries
@@ -220,6 +229,12 @@ pub struct TranscriptionSettings {
     /// User-defined per-app category overrides, checked before the built-in
     /// bundle-id/name classifier. First match wins.
     pub dictation_app_category_overrides: Vec<DictationAppCategoryOverride>,
+    /// User-saved meeting templates ("recipes"), alongside the built-in set
+    /// in `meeting-templates.ts`. Mirrors `dictation_custom_modes` -- same
+    /// storage shape, same load/save sanitization discipline -- because a
+    /// meeting template is a name plus a couple of prompts, exactly like a
+    /// dictation mode is a name plus a prompt.
+    pub meeting_custom_templates: Vec<MeetingCustomTemplate>,
 }
 
 /// A user-defined override that pins a destination app (matched by substring,
@@ -232,6 +247,22 @@ pub struct DictationAppCategoryOverride {
     pub app_matcher: String,
     pub category: String,
     pub enabled: bool,
+}
+
+/// A user-saved meeting template ("recipe"): a name plus the two prompts a
+/// built-in `MeetingTemplateOption` carries in `meeting-templates.ts` --
+/// the summary instruction handed to the analysis pass, and the notes
+/// outline seeded into a fresh meeting's notes. Unlike a built-in, this has
+/// no fixed `value` enum member -- `id` is a generated string, checked
+/// against the built-in id list at sanitization time so a custom template
+/// can never shadow one.
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(default, rename_all = "camelCase")]
+pub struct MeetingCustomTemplate {
+    pub id: String,
+    pub name: String,
+    pub summary_prompt: String,
+    pub notes_outline: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -262,17 +293,20 @@ pub struct DictationCustomMode {
 impl Default for TranscriptionSettings {
     fn default() -> Self {
         Self {
-            // Default to whisper.cpp (Metal/CoreML-accelerated on Apple Silicon)
-            // with the small, fast base.en model. The previous default routed
-            // through a 756M Candle model on CPU in F32 — multi-second latency
-            // on the dictation hot path. whisper.cpp base.en is the fast,
-            // production-quality default; larger/multilingual models are one
-            // setting away.
-            default_provider: "whisper".to_string(),
-            selected_model_id: "base.en".to_string(),
+            // Default to Parakeet TDT 0.6B v3, already fully integrated and
+            // used as the recommended meeting-lane route. This repo's own
+            // benchmark shows whisper.cpp base.en mis-transcribing words it
+            // hasn't seen before -- including "Plainsong" itself -- so it is
+            // offered as the small-download alternative (142 MB vs
+            // Parakeet's 640 MB) rather than the out-of-the-box default.
+            // (An earlier default routed through a 756M Candle model on CPU
+            // in F32 -- multi-second latency on the dictation hot path --
+            // which whisper.cpp base.en replaced before this change.)
+            default_provider: "parakeet".to_string(),
+            selected_model_id: "parakeet-tdt-0.6b-v3".to_string(),
             use_shared_asr_selection: true,
-            dictation_provider: "whisper".to_string(),
-            dictation_model_id: "base.en".to_string(),
+            dictation_provider: "parakeet".to_string(),
+            dictation_model_id: "parakeet-tdt-0.6b-v3".to_string(),
             meeting_provider: "whisper".to_string(),
             meeting_model_id: "base.en".to_string(),
             meeting_route_policy: "prefer_local".to_string(),
@@ -311,6 +345,7 @@ impl Default for TranscriptionSettings {
             dictation_active_languages: Vec::new(),
             dictation_snippets_enabled: true,
             dictation_auto_learn_corrections: true,
+            dictation_learn_from_external_corrections: false,
             dictation_custom_prompt: None,
             meeting_custom_prompt: None,
             meeting_auto_name_enabled: true,
@@ -332,6 +367,7 @@ impl Default for TranscriptionSettings {
             platform_optimization: PlatformOptimizationSettings::default(),
             dictation_category_formatting_enabled: true,
             dictation_app_category_overrides: Vec::new(),
+            meeting_custom_templates: Vec::new(),
         }
     }
 }
@@ -656,7 +692,10 @@ fn normalize_transcription_model_id(provider: &str, model_id: &str) -> String {
             value => value.to_string(),
         },
         "openai_cloud" => match model_id.trim() {
-            "" => "whisper-1".to_string(),
+            // Must track asr/mod.rs's AsrProviderType::OpenAiCloud::default_model_id()
+            // and openai_cloud.rs's sanitize_openai_asr_model_id() empty-case default,
+            // or this normalizer and those two disagree about the actual default.
+            "" => "gpt-transcribe".to_string(),
             value => value.to_string(),
         },
         "groq" => match model_id.trim() {
@@ -703,20 +742,151 @@ fn normalize_dictation_insertion_mode(value: &str) -> String {
     }
 }
 
-fn normalize_dictation_active_languages(languages: &[String]) -> Vec<String> {
-    let mut normalized = Vec::new();
+/// Every language the multilingual Whisper family can transcribe.
+///
+/// Whisper's own published set; the `ModelInfo::languages` shown in the model
+/// picker is a curated "most common" subset for display and is not a statement
+/// of what the model can decode.
+pub const WHISPER_MULTILINGUAL_LANGUAGES: &[&str] = &[
+    "af", "am", "ar", "as", "az", "ba", "be", "bg", "bn", "bo", "br", "bs", "ca", "cs", "cy", "da",
+    "de", "el", "en", "es", "et", "eu", "fa", "fi", "fo", "fr", "gl", "gu", "ha", "haw", "he",
+    "hi", "hr", "ht", "hu", "hy", "id", "is", "it", "ja", "jw", "ka", "kk", "km", "kn", "ko", "la",
+    "lb", "ln", "lo", "lt", "lv", "mg", "mi", "mk", "ml", "mn", "mr", "ms", "mt", "my", "ne", "nl",
+    "nn", "no", "oc", "pa", "pl", "ps", "pt", "ro", "ru", "sa", "sd", "si", "sk", "sl", "sn", "so",
+    "sq", "sr", "su", "sv", "sw", "ta", "te", "tg", "th", "tk", "tl", "tr", "tt", "uk", "ur", "uz",
+    "vi", "yi", "yo", "yue", "zh",
+];
+
+/// The 25 European languages Parakeet TDT v3 documents.
+pub const PARAKEET_V3_LANGUAGES: &[&str] = &[
+    "bg", "cs", "da", "de", "el", "en", "es", "et", "fi", "fr", "hr", "hu", "it", "lt", "lv", "mt",
+    "nl", "pl", "pt", "ro", "ru", "sk", "sl", "sv", "uk",
+];
+
+const ENGLISH_ONLY_LANGUAGES: &[&str] = &["en"];
+
+/// Which languages the *selected* dictation model can actually transcribe.
+///
+/// `None` means the model imposes no set Plainsong can enumerate -- a cloud
+/// endpoint, or a platform recognizer that follows the OS language list -- so
+/// any well-formed tag is accepted rather than guessed at.
+///
+/// This replaces a hardcoded twelve-language allowlist that silently dropped
+/// everything else. It rejected Polish and Turkish on a Whisper large model that
+/// handles both, and it equally accepted languages the selected model could not
+/// decode at all. Driving the check from the model is what makes it correct in
+/// both directions.
+pub fn dictation_supported_languages(
+    provider: &str,
+    model_id: &str,
+) -> Option<&'static [&'static str]> {
+    let model = model_id.trim().to_ascii_lowercase();
+    match provider.trim().to_ascii_lowercase().as_str() {
+        "whisper" | "whisper_candle" => {
+            // The `.en` builds are single-language by construction.
+            if model.contains(".en") || model.ends_with("-en") {
+                Some(ENGLISH_ONLY_LANGUAGES)
+            } else {
+                Some(WHISPER_MULTILINGUAL_LANGUAGES)
+            }
+        }
+        // Distil-Whisper's shipped builds are English-only.
+        "distil_whisper" => Some(ENGLISH_ONLY_LANGUAGES),
+        "parakeet" => {
+            if model.contains("v3") {
+                Some(PARAKEET_V3_LANGUAGES)
+            } else {
+                // The TDT/CTC 110m and v2 builds are English-only.
+                Some(ENGLISH_ONLY_LANGUAGES)
+            }
+        }
+        "moonshine" => Some(ENGLISH_ONLY_LANGUAGES),
+        "qwen3_asr" => Some(WHISPER_MULTILINGUAL_LANGUAGES),
+        // Cloud and platform routes follow their own service/OS language list,
+        // which Plainsong cannot enumerate locally.
+        _ => None,
+    }
+}
+
+/// Whether a string is a plausible BCP-47 primary language subtag.
+///
+/// Deliberately shape-only: the authority on what is *supported* is
+/// `dictation_supported_languages`, and inventing a second opinion here is how
+/// the old allowlist ended up rejecting real languages.
+fn is_language_tag_shaped(value: &str) -> bool {
+    let length = value.len();
+    (2..=8).contains(&length) && value.bytes().all(|byte| byte.is_ascii_lowercase())
+}
+
+/// Strict validation for a user-initiated save.
+///
+/// Returns a clear error naming the languages the selected model cannot handle,
+/// rather than dropping them and leaving the user staring at a picker that
+/// forgot what they chose.
+pub fn validate_dictation_active_languages(
+    provider: &str,
+    model_id: &str,
+    languages: &[String],
+) -> Result<Vec<String>, String> {
+    let supported = dictation_supported_languages(provider, model_id);
+    let mut normalized: Vec<String> = Vec::new();
+    let mut unsupported: Vec<String> = Vec::new();
+
     for language in languages {
         let trimmed = language.trim().to_ascii_lowercase();
-        let canonical = match trimmed.as_str() {
-            "en" | "es" | "fr" | "de" | "it" | "pt" | "ja" | "ko" | "zh" | "ru" | "ar" | "hi" => {
-                Some(trimmed)
+        if trimmed.is_empty() {
+            continue;
+        }
+        if !is_language_tag_shaped(&trimmed) {
+            unsupported.push(trimmed);
+            continue;
+        }
+        if let Some(supported) = supported {
+            if !supported.contains(&trimmed.as_str()) {
+                unsupported.push(trimmed);
+                continue;
             }
-            _ => None,
-        };
-        if let Some(language) = canonical {
-            if !normalized.contains(&language) {
-                normalized.push(language);
+        }
+        if !normalized.contains(&trimmed) {
+            normalized.push(trimmed);
+        }
+    }
+
+    if unsupported.is_empty() {
+        return Ok(normalized);
+    }
+    Err(format!(
+        "The selected dictation model ({}) cannot transcribe: {}. Choose a different model or remove those languages.",
+        model_id.trim(),
+        unsupported.join(", ")
+    ))
+}
+
+/// Lenient normalization for the load path.
+///
+/// Load must not fail: a settings file can legitimately name a language the
+/// *currently* selected model does not handle, because the user switched models
+/// after choosing it. Dropping is right here and wrong on save, which is why the
+/// strict variant above exists separately.
+fn normalize_dictation_active_languages(
+    provider: &str,
+    model_id: &str,
+    languages: &[String],
+) -> Vec<String> {
+    let supported = dictation_supported_languages(provider, model_id);
+    let mut normalized: Vec<String> = Vec::new();
+    for language in languages {
+        let trimmed = language.trim().to_ascii_lowercase();
+        if trimmed.is_empty() || !is_language_tag_shaped(&trimmed) {
+            continue;
+        }
+        if let Some(supported) = supported {
+            if !supported.contains(&trimmed.as_str()) {
+                continue;
             }
+        }
+        if !normalized.contains(&trimmed) {
+            normalized.push(trimmed);
         }
     }
     normalized
@@ -791,8 +961,11 @@ fn normalize_loaded_transcription_settings(transcription: &mut TranscriptionSett
 
     transcription.dictation_keep_warm =
         normalize_dictation_keep_warm(&transcription.dictation_keep_warm);
-    transcription.dictation_active_languages =
-        normalize_dictation_active_languages(&transcription.dictation_active_languages);
+    transcription.dictation_active_languages = normalize_dictation_active_languages(
+        &transcription.dictation_provider,
+        &transcription.dictation_model_id,
+        &transcription.dictation_active_languages,
+    );
 
     for mode in &mut transcription.dictation_custom_modes {
         mode.base_mode_preset = mode.base_mode_preset.clone().and_then(|value| {
@@ -852,6 +1025,130 @@ fn normalize_loaded_transcription_settings(transcription: &mut TranscriptionSett
         "best_available" => "best_available".to_string(),
         _ => "prefer_local".to_string(),
     };
+
+    // Loaded straight from disk, so a hand-edited or pre-upgrade settings.json
+    // gets the same treatment `save_settings` gives a fresh write -- see
+    // `sanitize_meeting_custom_templates` for why.
+    transcription.meeting_custom_templates = sanitize_meeting_custom_templates(std::mem::take(
+        &mut transcription.meeting_custom_templates,
+    ));
+}
+
+/// Ids of the built-in `MEETING_TEMPLATES` entries in
+/// `src/lib/meeting-templates.ts`. A custom template can never take one of
+/// these ids -- if it did, it would silently replace a built-in everywhere
+/// the built-in is resolved by id (the picker, the analysis pass, note
+/// parsing), which is a much stranger failure than just refusing the save.
+pub(crate) const BUILTIN_MEETING_TEMPLATE_IDS: &[&str] = &[
+    "auto",
+    "1on1",
+    "standup",
+    "sales",
+    "interview",
+    "brainstorm",
+    "coaching",
+    "doctor",
+    "legal",
+    "research",
+    "personal_admin",
+];
+
+/// A saved template list beyond this is almost certainly a bug (a sync loop,
+/// a corrupted file) rather than a user with 50 genuine playbooks.
+const MAX_MEETING_CUSTOM_TEMPLATES: usize = 50;
+/// Generous for a template name, which is meant to read as a short label in
+/// a picker list.
+const MAX_MEETING_TEMPLATE_NAME_LEN: usize = 80;
+/// The summary prompt is handed to the analysis LLM verbatim (see
+/// `resolve_meeting_template_summary_instruction` in `lib.rs`), so it gets
+/// the same generous ceiling as the existing free-text custom prompt fields.
+const MAX_MEETING_TEMPLATE_PROMPT_LEN: usize = 4000;
+/// A notes outline is a handful of section headings, not a document.
+const MAX_MEETING_TEMPLATE_OUTLINE_SECTIONS: usize = 12;
+const MAX_MEETING_TEMPLATE_OUTLINE_SECTION_LEN: usize = 80;
+
+/// Sanitize a saved (or about-to-be-saved) meeting template list, mirroring
+/// the discipline `normalize_dictation_custom_mode` applies to dictation
+/// modes: trim and cap every free-text field, and never let a malformed or
+/// oversized entry -- however it got there -- reach either the renderer's
+/// picker or the analysis pass.
+///
+/// Called on both load (`normalize_loaded_transcription_settings`) and save
+/// (`update_settings` in `lib.rs`), so a template that fails one of these
+/// checks is dropped once and stays dropped rather than round-tripping back
+/// in from whichever path didn't just sanitize it.
+pub(crate) fn sanitize_meeting_custom_templates(
+    templates: Vec<MeetingCustomTemplate>,
+) -> Vec<MeetingCustomTemplate> {
+    let mut seen_ids = std::collections::HashSet::new();
+    let mut sanitized = Vec::new();
+
+    for mut template in templates {
+        template.id = template.id.trim().to_string();
+        template.name = template.name.trim().to_string();
+
+        // Malformed: no identity, no label, or an id that collides with a
+        // built-in template -- any of these would make the entry unusable or
+        // dangerous to resolve by id, so it is dropped rather than repaired.
+        if template.id.is_empty()
+            || template.name.is_empty()
+            || BUILTIN_MEETING_TEMPLATE_IDS.contains(&template.id.as_str())
+        {
+            continue;
+        }
+        // First occurrence wins; a duplicate id is as unresolvable as a
+        // missing one, so keeping only one copy is the safe choice.
+        if !seen_ids.insert(template.id.clone()) {
+            continue;
+        }
+
+        template
+            .name
+            .truncate_to_char_count(MAX_MEETING_TEMPLATE_NAME_LEN);
+        template.summary_prompt = template.summary_prompt.trim().to_string();
+        template
+            .summary_prompt
+            .truncate_to_char_count(MAX_MEETING_TEMPLATE_PROMPT_LEN);
+
+        template.notes_outline = template
+            .notes_outline
+            .into_iter()
+            .map(|section| section.trim().to_string())
+            .filter(|section| !section.is_empty())
+            .take(MAX_MEETING_TEMPLATE_OUTLINE_SECTIONS)
+            .map(|mut section| {
+                section.truncate_to_char_count(MAX_MEETING_TEMPLATE_OUTLINE_SECTION_LEN);
+                section
+            })
+            .collect();
+
+        sanitized.push(template);
+        if sanitized.len() >= MAX_MEETING_CUSTOM_TEMPLATES {
+            break;
+        }
+    }
+
+    sanitized
+}
+
+/// Caps by *character* count, not byte length. The renderer's editor dialog
+/// enforces the same ceilings with a plain HTML `maxLength`, which counts
+/// UTF-16 code units -- for any non-ASCII text (accented names, CJK, emoji
+/// within the BMP, etc.) a byte-length cap would truncate far short of what
+/// the client already accepted, silently discarding content the user was
+/// told fit. Counting characters here is what keeps the two ceilings in
+/// agreement.
+trait TruncateToCharCount {
+    fn truncate_to_char_count(&mut self, max_chars: usize);
+}
+
+impl TruncateToCharCount for String {
+    fn truncate_to_char_count(&mut self, max_chars: usize) {
+        if self.chars().count() <= max_chars {
+            return;
+        }
+        *self = self.chars().take(max_chars).collect();
+    }
 }
 
 fn normalize_ai_lane_settings(lane: &mut AiLaneSettings) {
@@ -1324,12 +1621,19 @@ impl Default for SettingsManager {
 mod tests {
     use super::{
         dictation_app_category_from_key, dictation_app_category_to_key,
-        migrate_legacy_ai_lane_settings, normalize_audio_input_device_preference,
+        dictation_supported_languages, migrate_legacy_ai_lane_settings,
+        normalize_audio_input_device_preference, validate_dictation_active_languages,
+        ENGLISH_ONLY_LANGUAGES, PARAKEET_V3_LANGUAGES, WHISPER_MULTILINGUAL_LANGUAGES,
+    };
+    use super::{
         normalize_dictation_active_languages, normalize_loaded_privacy_settings,
-        normalize_loaded_transcription_settings, resolve_dictation_app_category_with_overrides,
-        AiLane, AiLaneSettings, AudioInputDevicePreference, DictationAppCategoryOverride,
-        DictationCustomMode, PlatformOptimizationSettings, PrivacySettings, Settings,
-        SettingsManager, TranscriptionSettings,
+        normalize_loaded_transcription_settings, normalize_transcription_model_id,
+        resolve_dictation_app_category_with_overrides, sanitize_meeting_custom_templates, AiLane,
+        AiLaneSettings, AudioInputDevicePreference, DictationAppCategoryOverride,
+        DictationCustomMode, MeetingCustomTemplate, PlatformOptimizationSettings, PrivacySettings,
+        Settings, SettingsManager, TranscriptionSettings, MAX_MEETING_CUSTOM_TEMPLATES,
+        MAX_MEETING_TEMPLATE_NAME_LEN, MAX_MEETING_TEMPLATE_OUTLINE_SECTIONS,
+        MAX_MEETING_TEMPLATE_OUTLINE_SECTION_LEN, MAX_MEETING_TEMPLATE_PROMPT_LEN,
     };
     use crate::text::format::DictationAppCategory;
     use std::fs;
@@ -1409,6 +1713,101 @@ mod tests {
             transcription.provider_model_ids.get("cohere_transcribe"),
             Some(&"cohere-transcribe-03-2026".to_string())
         );
+    }
+
+    #[test]
+    fn every_provider_model_option_survives_normalization_unchanged() {
+        // Regression coverage for the scribe_v2_realtime three-way disagreement:
+        // the picker offered it labeled "recommended", the provider accepted
+        // it, and this same normalizer silently rewrote it to scribe_v2 on
+        // every launch -- so a user's explicit choice never stuck. Every id a
+        // provider's own ModelOption list offers must be a fixed point of
+        // `normalize_transcription_model_id`, or the picker is lying about
+        // what happens when you pick it.
+        let providers: &[(&str, crate::asr::AsrProviderType)] = &[
+            ("whisper", crate::asr::AsrProviderType::Whisper),
+            ("parakeet", crate::asr::AsrProviderType::Parakeet),
+            ("whisper_candle", crate::asr::AsrProviderType::WhisperCandle),
+            ("distil_whisper", crate::asr::AsrProviderType::DistilWhisper),
+            (
+                "macos_apple_speech",
+                crate::asr::AsrProviderType::MacosAppleSpeech,
+            ),
+            ("moonshine", crate::asr::AsrProviderType::Moonshine),
+            (
+                "windows_sdk_dictation",
+                crate::asr::AsrProviderType::WindowsSdkDictation,
+            ),
+            (
+                "elevenlabs_scribe",
+                crate::asr::AsrProviderType::ElevenLabsScribe,
+            ),
+            ("openai_cloud", crate::asr::AsrProviderType::OpenAiCloud),
+            ("groq", crate::asr::AsrProviderType::Groq),
+            (
+                "cohere_transcribe",
+                crate::asr::AsrProviderType::CohereTranscribe,
+            ),
+            ("qwen3_asr", crate::asr::AsrProviderType::Qwen3Asr),
+        ];
+
+        for (key, provider_type) in providers {
+            for option in provider_type.model_options() {
+                assert_eq!(
+                    normalize_transcription_model_id(key, &option.id),
+                    option.id,
+                    "provider '{key}' offers model option '{}' that normalization rewrites to something else",
+                    option.id
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn every_provider_empty_string_default_matches_its_asr_provider_type_default() {
+        // Regression coverage for the openai_cloud drift this guards against:
+        // settings.rs's normalize_transcription_model_id(provider, "") used to
+        // disagree with AsrProviderType::default_model_id() (asr/mod.rs) and
+        // the provider's own sanitizer default (e.g. openai_cloud.rs's
+        // sanitize_openai_asr_model_id empty-case arm) about what an
+        // unset/empty model id actually resolves to. All three must always
+        // name the same model, or a user with no explicit model id ends up on
+        // a different one every time settings.json is normalized.
+        let providers: &[(&str, crate::asr::AsrProviderType)] = &[
+            ("whisper", crate::asr::AsrProviderType::Whisper),
+            ("parakeet", crate::asr::AsrProviderType::Parakeet),
+            ("whisper_candle", crate::asr::AsrProviderType::WhisperCandle),
+            ("distil_whisper", crate::asr::AsrProviderType::DistilWhisper),
+            (
+                "macos_apple_speech",
+                crate::asr::AsrProviderType::MacosAppleSpeech,
+            ),
+            ("moonshine", crate::asr::AsrProviderType::Moonshine),
+            (
+                "windows_sdk_dictation",
+                crate::asr::AsrProviderType::WindowsSdkDictation,
+            ),
+            (
+                "elevenlabs_scribe",
+                crate::asr::AsrProviderType::ElevenLabsScribe,
+            ),
+            ("openai_cloud", crate::asr::AsrProviderType::OpenAiCloud),
+            ("groq", crate::asr::AsrProviderType::Groq),
+            (
+                "cohere_transcribe",
+                crate::asr::AsrProviderType::CohereTranscribe,
+            ),
+            ("qwen3_asr", crate::asr::AsrProviderType::Qwen3Asr),
+        ];
+
+        for (key, provider_type) in providers {
+            assert_eq!(
+                normalize_transcription_model_id(key, ""),
+                provider_type.default_model_id(),
+                "provider '{key}': normalize_transcription_model_id(_, \"\") disagrees with \
+                 AsrProviderType::default_model_id()",
+            );
+        }
     }
 
     #[test]
@@ -1758,13 +2157,30 @@ mod tests {
     fn dictation_command_defaults_are_stable() {
         let settings = Settings::default();
         assert!(settings.transcription.use_shared_asr_selection);
-        assert_eq!(settings.transcription.dictation_provider, "whisper");
+        assert_eq!(settings.transcription.dictation_provider, "parakeet");
         assert_eq!(settings.transcription.meeting_provider, "whisper");
         assert!(settings.transcription.dictation_command_mode_enabled);
         assert_eq!(settings.transcription.dictation_command_prefix, "command");
         assert_eq!(settings.transcription.dictation_insertion_mode, "auto");
         assert!(settings.transcription.dictation_snippets_enabled);
         assert!(settings.transcription.dictation_auto_learn_corrections);
+    }
+
+    #[test]
+    fn reading_other_apps_fields_back_is_off_until_the_user_asks_for_it() {
+        // Both a fresh install and a settings file written before this
+        // setting existed must land on "off". Serde fills a missing field
+        // from `Default`, so these two assertions are the same guarantee
+        // seen from the two directions users actually arrive from.
+        assert!(
+            !Settings::default()
+                .transcription
+                .dictation_learn_from_external_corrections
+        );
+
+        let upgraded: TranscriptionSettings =
+            serde_json::from_str("{}").expect("transcription settings should deserialize");
+        assert!(!upgraded.dictation_learn_from_external_corrections);
     }
 
     #[test]
@@ -1864,14 +2280,300 @@ mod tests {
     }
 
     #[test]
-    fn dictation_active_languages_are_normalized() {
-        let normalized = normalize_dictation_active_languages(&[
-            " EN ".to_string(),
-            "es".to_string(),
-            "ES".to_string(),
-            "bogus".to_string(),
+    fn meeting_custom_templates_round_trip_through_load_normalization() {
+        // A well-formed template, loaded from a settings.json that a previous
+        // save already sanitized, must survive `get_settings` unchanged --
+        // the same round-trip guarantee `dictation_custom_modes` gets.
+        let mut transcription = TranscriptionSettings {
+            meeting_custom_templates: vec![MeetingCustomTemplate {
+                id: "custom-1".to_string(),
+                name: "Board Update".to_string(),
+                summary_prompt: "Summarize board sentiment, asks, and follow-ups.".to_string(),
+                notes_outline: vec!["Sentiment".to_string(), "Asks".to_string()],
+            }],
+            ..Default::default()
+        };
+
+        normalize_loaded_transcription_settings(&mut transcription);
+
+        assert_eq!(transcription.meeting_custom_templates.len(), 1);
+        let template = &transcription.meeting_custom_templates[0];
+        assert_eq!(template.id, "custom-1");
+        assert_eq!(template.name, "Board Update");
+        assert_eq!(
+            template.summary_prompt,
+            "Summarize board sentiment, asks, and follow-ups."
+        );
+        assert_eq!(template.notes_outline, vec!["Sentiment", "Asks"]);
+    }
+
+    #[test]
+    fn meeting_custom_templates_drop_malformed_entries() {
+        let sanitized = sanitize_meeting_custom_templates(vec![
+            // No id: unresolvable by any picker or analysis lookup.
+            MeetingCustomTemplate {
+                id: String::new(),
+                name: "No id".to_string(),
+                ..Default::default()
+            },
+            // No name: nothing to show in a picker.
+            MeetingCustomTemplate {
+                id: "custom-blank-name".to_string(),
+                name: "   ".to_string(),
+                ..Default::default()
+            },
+            // Collides with a built-in id -- would shadow "standup" everywhere
+            // templates are resolved by id.
+            MeetingCustomTemplate {
+                id: "standup".to_string(),
+                name: "Impostor Standup".to_string(),
+                ..Default::default()
+            },
+            // A genuinely valid entry, to prove the sweep is selective.
+            MeetingCustomTemplate {
+                id: "custom-valid".to_string(),
+                name: "Valid Template".to_string(),
+                summary_prompt: "Summarize this.".to_string(),
+                notes_outline: vec!["Notes".to_string()],
+            },
+            // Duplicate id of the valid entry above: first occurrence wins.
+            MeetingCustomTemplate {
+                id: "custom-valid".to_string(),
+                name: "Duplicate Id".to_string(),
+                ..Default::default()
+            },
         ]);
+
+        assert_eq!(
+            sanitized.len(),
+            1,
+            "only the one well-formed entry survives"
+        );
+        assert_eq!(sanitized[0].id, "custom-valid");
+        assert_eq!(sanitized[0].name, "Valid Template");
+    }
+
+    #[test]
+    fn meeting_custom_templates_cap_lengths_and_count() {
+        let oversized_name = "n".repeat(500);
+        let oversized_prompt = "p".repeat(10_000);
+        let sanitized = sanitize_meeting_custom_templates(vec![MeetingCustomTemplate {
+            id: "custom-oversized".to_string(),
+            name: oversized_name.clone(),
+            summary_prompt: oversized_prompt.clone(),
+            notes_outline: (0..30)
+                .map(|index| format!("Section {index}: {}", "x".repeat(200)))
+                .collect(),
+        }]);
+
+        assert_eq!(sanitized.len(), 1);
+        let template = &sanitized[0];
+        assert!(template.name.len() <= MAX_MEETING_TEMPLATE_NAME_LEN);
+        assert!(template.summary_prompt.len() <= MAX_MEETING_TEMPLATE_PROMPT_LEN);
+        assert!(template.notes_outline.len() <= MAX_MEETING_TEMPLATE_OUTLINE_SECTIONS);
+        for section in &template.notes_outline {
+            assert!(section.len() <= MAX_MEETING_TEMPLATE_OUTLINE_SECTION_LEN);
+        }
+
+        // Whole-list cap: a settings file with more templates than any user
+        // plausibly created (a sync bug, a corrupted file) is truncated
+        // rather than trusted wholesale.
+        let too_many: Vec<MeetingCustomTemplate> = (0..(MAX_MEETING_CUSTOM_TEMPLATES + 10))
+            .map(|index| MeetingCustomTemplate {
+                id: format!("custom-{index}"),
+                name: format!("Template {index}"),
+                ..Default::default()
+            })
+            .collect();
+        let sanitized = sanitize_meeting_custom_templates(too_many);
+        assert_eq!(sanitized.len(), MAX_MEETING_CUSTOM_TEMPLATES);
+    }
+
+    #[test]
+    fn meeting_custom_templates_cap_by_character_count_not_byte_length() {
+        // Every character here is 3 bytes in UTF-8 ("日" U+65E5). The
+        // renderer's editor enforces the same ceiling with a plain
+        // `maxLength`, which counts characters (UTF-16 code units), not
+        // bytes -- a byte-length cap here would truncate this name to far
+        // fewer characters than the client already accepted as valid,
+        // silently discarding content the user was told fit.
+        let non_ascii_name: String = "日".repeat(100);
+        assert_eq!(non_ascii_name.chars().count(), 100);
+        assert_eq!(non_ascii_name.len(), 300, "sanity: 3 bytes per character");
+
+        let sanitized = sanitize_meeting_custom_templates(vec![MeetingCustomTemplate {
+            id: "custom-non-ascii".to_string(),
+            name: non_ascii_name,
+            summary_prompt: String::new(),
+            notes_outline: Vec::new(),
+        }]);
+
+        assert_eq!(sanitized.len(), 1);
+        assert_eq!(
+            sanitized[0].name.chars().count(),
+            MAX_MEETING_TEMPLATE_NAME_LEN,
+            "capped by character count, matching the client's maxLength"
+        );
+    }
+
+    #[test]
+    fn dictation_active_languages_are_normalized() {
+        let normalized = normalize_dictation_active_languages(
+            "whisper",
+            "large-v3",
+            &[
+                " EN ".to_string(),
+                "es".to_string(),
+                "ES".to_string(),
+                "not-a-language".to_string(),
+            ],
+        );
         assert_eq!(normalized, vec!["en".to_string(), "es".to_string()]);
+    }
+
+    #[test]
+    fn multilingual_whisper_accepts_languages_the_old_allowlist_dropped() {
+        // The hardcoded twelve-language list silently discarded these, on a
+        // model that transcribes every one of them.
+        for language in ["pl", "tr", "uk", "vi", "th", "he", "cs", "ro", "id", "ms"] {
+            let normalized = normalize_dictation_active_languages(
+                "whisper",
+                "large-v3",
+                &[language.to_string()],
+            );
+            assert_eq!(
+                normalized,
+                vec![language.to_string()],
+                "{language} must be accepted on multilingual Whisper"
+            );
+        }
+    }
+
+    #[test]
+    fn whisper_language_coverage_matches_the_published_set() {
+        // ~99 languages, not the curated display subset in the model picker.
+        assert!(
+            WHISPER_MULTILINGUAL_LANGUAGES.len() >= 98,
+            "expected the full Whisper language set, got {}",
+            WHISPER_MULTILINGUAL_LANGUAGES.len()
+        );
+        let mut sorted = WHISPER_MULTILINGUAL_LANGUAGES.to_vec();
+        sorted.sort_unstable();
+        sorted.dedup();
+        assert_eq!(
+            sorted.len(),
+            WHISPER_MULTILINGUAL_LANGUAGES.len(),
+            "the Whisper language set must not contain duplicates"
+        );
+    }
+
+    #[test]
+    fn english_only_models_reject_other_languages() {
+        // `.en` Whisper builds, Distil-Whisper, and Moonshine are single-language
+        // by construction: accepting Spanish there would produce nonsense.
+        for (provider, model) in [
+            ("whisper", "base.en"),
+            ("whisper", "small.en"),
+            ("distil_whisper", "distil-large-v3.5"),
+            ("moonshine", "moonshine-base"),
+        ] {
+            assert_eq!(
+                dictation_supported_languages(provider, model),
+                Some(ENGLISH_ONLY_LANGUAGES),
+                "{provider}/{model} must be English-only"
+            );
+            let error = validate_dictation_active_languages(
+                provider,
+                model,
+                &["en".to_string(), "es".to_string()],
+            )
+            .expect_err("an English-only model must refuse Spanish");
+            assert!(error.contains("es"), "the error must name the language");
+            assert!(error.contains(model), "the error must name the model");
+        }
+    }
+
+    #[test]
+    fn parakeet_v3_accepts_its_documented_european_set_only() {
+        assert_eq!(
+            dictation_supported_languages("parakeet", "parakeet-tdt-0.6b-v3"),
+            Some(PARAKEET_V3_LANGUAGES)
+        );
+        // In its documented set...
+        assert!(validate_dictation_active_languages(
+            "parakeet",
+            "parakeet-tdt-0.6b-v3",
+            &["pl".to_string(), "sv".to_string(), "mt".to_string()],
+        )
+        .is_ok());
+        // ...but Japanese is not, even though Whisper handles it.
+        assert!(validate_dictation_active_languages(
+            "parakeet",
+            "parakeet-tdt-0.6b-v3",
+            &["ja".to_string()],
+        )
+        .is_err());
+
+        // The legacy Parakeet builds are English-only.
+        assert_eq!(
+            dictation_supported_languages("parakeet", "parakeet-tdt-ctc-110m"),
+            Some(ENGLISH_ONLY_LANGUAGES)
+        );
+    }
+
+    #[test]
+    fn cloud_and_platform_routes_impose_no_local_language_list() {
+        // Their language coverage is the service's or the OS's, and guessing at
+        // it locally is how real languages got rejected before.
+        for provider in ["openai_cloud", "groq", "elevenlabs_scribe", "apple_speech"] {
+            assert!(dictation_supported_languages(provider, "any-model").is_none());
+        }
+        assert!(validate_dictation_active_languages(
+            "elevenlabs_scribe",
+            "scribe-v2",
+            &["sw".to_string(), "yo".to_string()],
+        )
+        .is_ok());
+    }
+
+    #[test]
+    fn saving_an_unsupported_language_explains_itself() {
+        let error = validate_dictation_active_languages(
+            "parakeet",
+            "parakeet-tdt-0.6b-v3",
+            &["en".to_string(), "ja".to_string(), "ko".to_string()],
+        )
+        .expect_err("unsupported languages must be refused, not dropped");
+
+        assert!(error.contains("ja") && error.contains("ko"));
+        assert!(
+            error.contains("Choose a different model"),
+            "the error must tell the user what to do: {error}"
+        );
+    }
+
+    #[test]
+    fn loading_settings_drops_rather_than_fails_on_a_model_switch() {
+        // A saved file may legitimately name a language the *currently* selected
+        // model cannot handle, because the user switched models afterwards.
+        // Load must survive that; only save is strict.
+        let normalized = normalize_dictation_active_languages(
+            "parakeet",
+            "parakeet-tdt-0.6b-v3",
+            &["en".to_string(), "ja".to_string()],
+        );
+        assert_eq!(normalized, vec!["en".to_string()]);
+    }
+
+    #[test]
+    fn malformed_language_tags_are_refused_on_save() {
+        for bogus in ["e", "toolongtag", "en-US", "12", "EN!"] {
+            assert!(
+                validate_dictation_active_languages("whisper", "large-v3", &[bogus.to_string()])
+                    .is_err(),
+                "{bogus} must not be accepted as a language tag"
+            );
+        }
     }
 
     #[test]

@@ -236,6 +236,28 @@ fn resolve_backtrack_command(
     None
 }
 
+/// Apply the learned dictionary to a block of transcribed text.
+///
+/// Public because the dictation pipeline is no longer the only consumer: a term
+/// the user taught Plainsong ("Kubernetes", a colleague's name) was corrected on
+/// the dictation path and nowhere else, so meeting transcripts re-mangled it in
+/// every segment, and every summary and action item derived from them. Meeting
+/// post-processing runs this over each segment before persistence so the
+/// correction is in place before anything reads the transcript.
+///
+/// Snippet expansion is deliberately *not* shared this way. A snippet is a
+/// typing shortcut bound to a destination app ("sig" -> a signature block);
+/// firing one because a meeting participant happened to say the trigger word
+/// would rewrite what a person actually said.
+pub fn apply_learned_dictionary(
+    input: &str,
+    entries: &[DictationDictionaryEntry],
+    app_target: Option<&str>,
+    destination_category: DictationAppCategory,
+) -> (String, usize) {
+    apply_dictionary_entries(input, entries, app_target, destination_category)
+}
+
 fn apply_dictionary_entries(
     input: &str,
     entries: &[DictationDictionaryEntry],

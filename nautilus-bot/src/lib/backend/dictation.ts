@@ -6,6 +6,7 @@ export {
   deleteDictationCommandPreset,
   deleteDictationDictionaryEntry,
   deleteDictationSnippet,
+  EXTERNAL_APP_CORRECTION_SOURCE,
   exportDictationDictionaryCsv,
   getDictationAudioLevel,
   getDictationHistoryDetails,

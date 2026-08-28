@@ -99,6 +99,43 @@ describe("ConsentDialog", () => {
     expect(standupTemplate).toHaveAttribute("aria-pressed", "true");
   });
 
+  it("lists user-saved templates alongside the built-ins, labeled as theirs", async () => {
+    backendMocks.getSystemAudioCapability.mockResolvedValue(capability());
+    const onStart = vi.fn(async () => {});
+
+    render(
+      <ConsentDialog
+        open
+        onOpenChange={vi.fn()}
+        onStart={onStart}
+        customTemplates={[
+          {
+            id: "custom-board-update",
+            name: "Board Update",
+            summaryPrompt: "Summarize board sentiment.",
+            notesOutline: ["Sentiment", "Asks"],
+          },
+        ]}
+      />,
+    );
+
+    const customButton = screen.getByRole("button", { name: /Board Update/ });
+    expect(customButton).toHaveTextContent("Yours");
+    // A built-in stays unlabeled.
+    expect(screen.getByRole("button", { name: "Standup" })).not.toHaveTextContent(
+      "Yours",
+    );
+
+    fireEvent.click(customButton);
+    fireEvent.click(screen.getByRole("button", { name: "Start Meeting" }));
+
+    await waitFor(() => {
+      expect(onStart).toHaveBeenCalledWith(
+        expect.objectContaining({ template: "custom-board-update" }),
+      );
+    });
+  });
+
   it("announces asynchronous system-audio capability changes", async () => {
     const pendingCapability = deferred<SystemAudioCapability>();
     backendMocks.getSystemAudioCapability.mockReturnValueOnce(

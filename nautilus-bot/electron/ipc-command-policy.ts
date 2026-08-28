@@ -10,17 +10,27 @@ const ANALYSIS_COMMANDS = new Set<string>([
   "ask_memory",
   "extract_action_items",
   "extract_action_items_grounded",
+  // Re-runs the whole meeting analysis pass (summary, action items, title), so
+  // it needs the analysis timeout. Membership here also gives it a
+  // recordingId-scoped work key, which is what stops a second retry from
+  // running concurrently against the same meeting.
+  "retry_meeting_analysis",
   "summarize_recording",
   "summarize_recording_grounded",
 ]);
 
 const FAST_COMMANDS = new Set<string>([
+  "acknowledge_incomplete_transcript",
   "cancel_analysis_run",
   "check_for_updates",
   "check_system_audio_availability",
   "get_asr_provider_model",
   "get_available_space",
   "get_backup_config",
+  // Spawns a local helper that prints JSON and exits. If that is slow, the Mac
+  // is in trouble; the Meetings header should show nothing rather than sit on
+  // a pending request.
+  "get_calendar_snapshot",
   "get_default_asr_provider",
   "get_dictation_audio_level",
   "get_dictation_overlay_state",
@@ -38,6 +48,9 @@ const FAST_COMMANDS = new Set<string>([
   "is_diarization_model_available",
   "list_audio_input_devices",
   "list_diarization_models",
+  // Sits directly in front of a user-initiated capture start: a slow registry
+  // write must fail fast rather than delay the meeting behind it.
+  "register_capture_admission",
 ]);
 
 const EXTENDED_COMMANDS = new Set<string>([
@@ -80,9 +93,15 @@ const LONG_COMMANDS = new Set<string>([
   "repair_cursor_insert_permissions",
   "reprocess_dictation_text",
   "request_apple_speech_permission",
+  // Blocks on a macOS permission dialog the reader has to read and answer, so
+  // it gets the long timeout every other TCC prompt here gets.
+  "request_calendar_access",
   "request_dictation_permissions",
   "reset_app_state",
   "retry_meeting_auto_name",
+  // Re-hashes every owned audio file for one meeting; a long meeting's WAV
+  // bundle takes real time to read end to end.
+  "revalidate_recording_audio",
   "smoke_test_cursor_insert",
   "start_dictation",
   "start_recording",

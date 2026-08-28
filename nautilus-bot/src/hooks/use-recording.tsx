@@ -19,10 +19,14 @@ import {
   stopRecording,
 } from "@/lib/backend/recordings";
 import { logger } from "@/lib/logger";
-import { formatMeetingStartError } from "@/lib/meeting-start-error";
+import {
+  describeMeetingStartFailure,
+  MeetingStartError,
+} from "@/lib/meeting-start-error";
 import type { DictationStateChangedEvent as SharedDictationStateChangedEvent } from "@/features/dictation/runtime";
 import {
   INITIAL_MEETING_LIFECYCLE_STATE,
+  meetingCaptureRestarted,
   meetingPhaseIsCapturing,
   reduceMeetingLifecycleState,
   type MeetingLifecycleEvent,
@@ -196,7 +200,9 @@ export function RecordingProvider({ children }: { children: ReactNode }) {
         return recordingId;
       } catch (error) {
         console.error("Failed to start meeting:", error);
-        throw new Error(formatMeetingStartError(error));
+        // Rethrown as the typed failure so the view can offer the one action
+        // that matches the code, not just print the sentence.
+        throw new MeetingStartError(describeMeetingStartFailure(error));
       }
     },
     [startTimer]
@@ -308,10 +314,16 @@ export function RecordingProvider({ children }: { children: ReactNode }) {
           if (!mounted) return;
 
           const payload = event.payload;
+          const previous = lifecycleFromRecordingState(stateRef.current);
+          const next = reduceMeetingLifecycleState(previous, payload);
           setState((prev) => reconcileMeetingState(prev, payload));
-          if (payload.phase === "recording" && payload.recordingId) {
-            startTimer(payload.startedAtMs);
-          } else {
+          // Restarting the timer on every `recording` event would zero the
+          // meeting clock each time the sidecar re-emits that phase to carry a
+          // mid-meeting warning. Only an actual entry into capture starts it;
+          // a meeting that is still recording keeps the clock it has.
+          if (meetingCaptureRestarted(previous, next)) {
+            startTimer(next.startedAtMs);
+          } else if (next.phase !== "recording") {
             clearTimer();
           }
         }

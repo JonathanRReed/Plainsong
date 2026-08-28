@@ -32,7 +32,10 @@ impl PlatformEngine {
         match id.trim() {
             "provider_default" => Some(Self::ProviderDefault),
             "macos_apple_speech" => Some(Self::MacosAppleSpeech),
-            "macos_mlx_sidecar" => Some(Self::MacosMlxSidecar),
+            // macos_mlx_sidecar is a retired stub engine (no production
+            // runtime ever shipped behind it) and is intentionally rejected
+            // here so it can no longer be selected from settings; see
+            // `mlx_sidecar::probe`, which now always reports not-ready.
             "windows_foundry_local" => Some(Self::WindowsFoundryLocal),
             "windows_sdk_dictation" => Some(Self::WindowsSdkDictation),
             _ => None,

@@ -25,6 +25,54 @@ export function allowUpdaterDowngrade(_channel: UpdateChannel): boolean {
   return false;
 }
 
+/**
+ * The public update feed's origin. The repository is private during the limited
+ * beta, so installed apps read a credential-free R2 custom domain rather than
+ * GitHub Releases.
+ */
+export const UPDATE_FEED_BASE_URL = "https://updates.plainsong.jonathanrreed.com";
+
+/**
+ * The feed DIRECTORY for a channel.
+ *
+ * electron-builder.yml can only bake one `publish.url` into `app-update.yml`,
+ * and it is `/beta/` — correct for this beta, and wrong the moment a stable
+ * build ships. `resolveUpdaterChannel("stable")` returns `"latest"`, so a
+ * stable install would have requested `latest-mac.yml` out of the BETA bucket:
+ * either a hard ERR_UPDATER_CHANNEL_FILE_NOT_FOUND, or — once a `latest-mac.yml`
+ * exists there for any reason — a beta build served silently to stable users.
+ *
+ * Separating the channels by directory rather than by filename means the two
+ * feeds cannot be confused for each other even when their manifest names
+ * coincide, and it is what makes the packaged default a default rather than the
+ * only answer: the app calls `setFeedURL` with this before every check.
+ */
+export function updaterFeedUrl(channel: UpdateChannel): string {
+  return `${UPDATE_FEED_BASE_URL}/${channel}/`;
+}
+
+/**
+ * The complete generic-provider options for a channel, ready for
+ * `autoUpdater.setFeedURL`.
+ *
+ * `useMultipleRangeRequest: false` mirrors electron-builder.yml: R2 supports
+ * ordinary byte ranges, and multipart range behavior varies between object
+ * stores.
+ */
+export function updaterFeedOptions(channel: UpdateChannel): {
+  provider: "generic";
+  url: string;
+  channel: string;
+  useMultipleRangeRequest: false;
+} {
+  return {
+    provider: "generic",
+    url: updaterFeedUrl(channel),
+    channel: resolveUpdaterChannel(channel),
+    useMultipleRangeRequest: false,
+  };
+}
+
 export function updaterResultHasAvailableUpdate(result: {
   isUpdateAvailable?: boolean | null;
   updateInfo?: unknown;

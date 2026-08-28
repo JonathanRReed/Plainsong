@@ -366,6 +366,34 @@ describe("SettingsView performance behavior", () => {
     expect(getSettings).toHaveBeenCalledTimes(2);
   });
 
+  it("saves Keep running after close through settings alone", async () => {
+    // The toggle used to fire `app:set_minimize_to_tray` alongside the save.
+    // Its handler was deleted, so the call could only ever reject into an
+    // empty catch; the setting already travels on `settings-changed`.
+    const electron = await import("@/lib/electron");
+    const backend = await import("@/lib/backend");
+    const invoke = vi.mocked(electron.invoke);
+    const saveSettings = vi.mocked(backend.saveSettings);
+
+    render(<ToastProvider><SettingsView /></ToastProvider>);
+    await screen.findByText("How Plainsong listens, writes, and what it keeps.");
+
+    fireEvent.click(
+      screen.getByRole("switch", { name: "Keep running after close" }),
+    );
+
+    await waitFor(() => {
+      expect(saveSettings).toHaveBeenCalled();
+    });
+    const saved = saveSettings.mock.calls[
+      saveSettings.mock.calls.length - 1
+    ][0] as { ui: { minimizeToTray: boolean } };
+    expect(saved.ui.minimizeToTray).toBe(false);
+    for (const [command] of invoke.mock.calls) {
+      expect(command).not.toBe("app:set_minimize_to_tray");
+    }
+  });
+
   it("gives visible settings controls accessible names", async () => {
     render(<ToastProvider><SettingsView /></ToastProvider>);
 
@@ -396,7 +424,11 @@ describe("SettingsView performance behavior", () => {
       "Smart Format",
       "Spoken commands",
       "Snippets",
-      "Learn from your corrections",
+      // Two correction-learning switches, named for where each one looks.
+      // The old single "Learn from your corrections" claimed both and only
+      // ever did the first.
+      "Learn from corrections you make in Plainsong",
+      "Learn from corrections you make in other apps",
       "Name meetings for me",
       "Also copy dictated text to the clipboard",
       "Skip silence",

@@ -46,12 +46,23 @@ struct OpenAiTranscriptionResponse {
     language: Option<String>,
 }
 
+/// Verified live against
+/// https://developers.openai.com/api/docs/guides/speech-to-text on
+/// 2026-08-27: `gpt-transcribe` is OpenAI's current recommended default for
+/// transcribing recorded speech, superseding `whisper-1` as the out-of-the-box
+/// choice. `whisper-1`, `gpt-4o-mini-transcribe`, and `gpt-4o-transcribe`
+/// remain live, documented models (whisper-1 is still recommended for
+/// timestamps/subtitles/translation), so existing user selections keep
+/// working unchanged -- only the empty/unrecognized fallback moved.
+/// `gpt-live-transcribe` is deliberately excluded: it is a realtime/streaming
+/// model for the websocket API, not this file-upload endpoint.
 fn sanitize_openai_asr_model_id(model_id: &str) -> &'static str {
     match model_id {
         "whisper-1" => "whisper-1",
         "gpt-4o-mini-transcribe" => "gpt-4o-mini-transcribe",
         "gpt-4o-transcribe" => "gpt-4o-transcribe",
-        _ => "whisper-1",
+        "gpt-transcribe" => "gpt-transcribe",
+        _ => "gpt-transcribe",
     }
 }
 
@@ -71,7 +82,7 @@ impl Default for OpenAiCloudWhisperProvider {
 impl OpenAiCloudWhisperProvider {
     pub fn new(selected_model_id: Option<&str>) -> Self {
         Self {
-            model_id: sanitize_openai_asr_model_id(selected_model_id.unwrap_or("whisper-1"))
+            model_id: sanitize_openai_asr_model_id(selected_model_id.unwrap_or("gpt-transcribe"))
                 .to_string(),
             client: build_cloud_asr_client(OPENAI_HTTP_TIMEOUTS),
         }
@@ -94,7 +105,8 @@ impl OpenAiCloudWhisperProvider {
         match self.model_id.as_str() {
             "gpt-4o-mini-transcribe" => "GPT-4o Mini Transcribe",
             "gpt-4o-transcribe" => "GPT-4o Transcribe",
-            _ => "Whisper-1",
+            "whisper-1" => "Whisper-1",
+            _ => "GPT Transcribe",
         }
     }
 
@@ -258,5 +270,46 @@ mod tests {
 
         assert_eq!(info.name, "OpenAI GPT-4o Mini Transcribe");
         assert_eq!(info.version, "gpt-4o-mini-transcribe");
+    }
+
+    #[test]
+    fn default_and_unrecognized_selections_land_on_gpt_transcribe_not_whisper_1() {
+        // Regression coverage for the 2026-08-27 model-currency audit:
+        // gpt-transcribe is OpenAI's current recommended default, so an
+        // absent or garbage selection must not silently coerce to the older
+        // whisper-1 model.
+        assert_eq!(
+            OpenAiCloudWhisperProvider::new(None).model_info().version,
+            "gpt-transcribe"
+        );
+        assert_eq!(
+            OpenAiCloudWhisperProvider::default().model_info().version,
+            "gpt-transcribe"
+        );
+        assert_eq!(
+            OpenAiCloudWhisperProvider::new(Some("some-future-model"))
+                .model_info()
+                .version,
+            "gpt-transcribe"
+        );
+        assert!(!OpenAiCloudWhisperProvider::new(Some("gpt-transcribe")).uses_verbose_json());
+    }
+
+    #[test]
+    fn legacy_whisper_1_and_gpt4o_transcribe_selections_still_pass_through() {
+        // Existing user settings pointing at these documented, still-live
+        // models must survive unchanged.
+        assert_eq!(
+            OpenAiCloudWhisperProvider::new(Some("whisper-1"))
+                .model_info()
+                .version,
+            "whisper-1"
+        );
+        assert_eq!(
+            OpenAiCloudWhisperProvider::new(Some("gpt-4o-transcribe"))
+                .model_info()
+                .version,
+            "gpt-4o-transcribe"
+        );
     }
 }
