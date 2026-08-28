@@ -1,6 +1,6 @@
 [package]
 name = "plainsong"
-version = "0.9.0-beta.2"
+version = "0.9.0-beta.3"
 description = "Plainsong - free, open-source, local-first dictation and meeting capture"
 authors = ["Jonathan Reed"]
 edition = "2021"
