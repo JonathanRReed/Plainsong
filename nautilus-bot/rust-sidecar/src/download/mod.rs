@@ -360,43 +360,72 @@ pub(crate) struct ModelIntegrityMigrationReport {
 pub(crate) async fn migrate_legacy_model_integrity_receipts(
     artifacts: &[(PathBuf, String)],
 ) -> ModelIntegrityMigrationReport {
+    use futures_util::StreamExt;
+
+    // Hashing the artifacts one after another held the sidecar's first
+    // post-upgrade launch hostage for over a minute on a full model library --
+    // long enough for the packaged smoke harness (and a person) to decide the
+    // engine was dead. The hash loop is streaming-async, so a few artifacts in
+    // flight genuinely overlap; four keeps the disk busy without turning
+    // startup into an I/O stampede. Trust semantics are unchanged: every
+    // artifact is still verified before anything relies on it.
+    const MAX_CONCURRENT_VERIFICATIONS: usize = 4;
+
+    enum Outcome {
+        Skipped,
+        Migrated,
+        Rejected(PathBuf),
+        Error(PathBuf, String),
+    }
+
+    let outcomes =
+        futures_util::stream::iter(artifacts.iter().map(|(path, expected_sha256)| async move {
+            // An empty string is never a legitimate "not yet pinned" entry here
+            // (every hand-written table caller passes a real 64-hex-char digest;
+            // see `managed_model_integrity_artifacts` and its per-provider
+            // equivalents). Rather than silently trusting the file as-is -- the
+            // exact foot-gun this migration exists to close -- treat it as a
+            // hard failure so a future accidentally-blank table entry is loud.
+            if expected_sha256.is_empty() {
+                return Outcome::Error(
+                    path.clone(),
+                    "expected_sha256 is an empty string; refusing to skip integrity verification. \
+                     Pin a real digest for this artifact."
+                        .to_string(),
+                );
+            }
+
+            if !path.is_file() || is_model_artifact_trusted(path, Some(expected_sha256)) {
+                return Outcome::Skipped;
+            }
+
+            match verify_or_record_model_integrity(path, Some(expected_sha256)).await {
+                Ok(true) => Outcome::Migrated,
+                Ok(false) => {
+                    tokio::fs::remove_file(model_integrity_receipt_path(path))
+                        .await
+                        .ok();
+                    Outcome::Rejected(path.clone())
+                }
+                Err(error) => {
+                    tokio::fs::remove_file(model_integrity_receipt_path(path))
+                        .await
+                        .ok();
+                    Outcome::Error(path.clone(), error.to_string())
+                }
+            }
+        }))
+        .buffer_unordered(MAX_CONCURRENT_VERIFICATIONS)
+        .collect::<Vec<_>>()
+        .await;
+
     let mut report = ModelIntegrityMigrationReport::default();
-
-    for (path, expected_sha256) in artifacts {
-        // An empty string is never a legitimate "not yet pinned" entry here
-        // (every hand-written table caller passes a real 64-hex-char digest;
-        // see `managed_model_integrity_artifacts` and its per-provider
-        // equivalents). Rather than silently trusting the file as-is -- the
-        // exact foot-gun this migration exists to close -- treat it as a
-        // hard failure so a future accidentally-blank table entry is loud.
-        if expected_sha256.is_empty() {
-            report.errors.push((
-                path.clone(),
-                "expected_sha256 is an empty string; refusing to skip integrity verification. \
-                 Pin a real digest for this artifact."
-                    .to_string(),
-            ));
-            continue;
-        }
-
-        if !path.is_file() || is_model_artifact_trusted(path, Some(expected_sha256)) {
-            continue;
-        }
-
-        match verify_or_record_model_integrity(path, Some(expected_sha256)).await {
-            Ok(true) => report.migrated_count += 1,
-            Ok(false) => {
-                tokio::fs::remove_file(model_integrity_receipt_path(path))
-                    .await
-                    .ok();
-                report.rejected_paths.push(path.clone());
-            }
-            Err(error) => {
-                tokio::fs::remove_file(model_integrity_receipt_path(path))
-                    .await
-                    .ok();
-                report.errors.push((path.clone(), error.to_string()));
-            }
+    for outcome in outcomes {
+        match outcome {
+            Outcome::Skipped => {}
+            Outcome::Migrated => report.migrated_count += 1,
+            Outcome::Rejected(path) => report.rejected_paths.push(path),
+            Outcome::Error(path, error) => report.errors.push((path, error)),
         }
     }
 
