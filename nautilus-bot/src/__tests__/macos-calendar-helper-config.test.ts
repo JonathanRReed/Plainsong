@@ -212,6 +212,19 @@ describe("scripts/verify-packaged-native-helpers.mjs", () => {
     expect(gate).toContain('["calendar helper", paths.calendarHelper]');
   });
 
+  it("requires an empty entitlement set for the packaged plainsong CLI", () => {
+    // The `plainsong` CLI is a separate signature for the same reason the
+    // shortcut helper is: it must not inherit the app's microphone, Apple
+    // Events or library-validation entitlements. It is invokable by anything
+    // on the machine and only ever reads the database read-only, so an
+    // entitlement leaking into its signature would be handing out the app's
+    // own privileges.
+    expect(gate).toContain('requireEmptyEntitlements(paths.cli, "plainsong CLI")');
+    expect(gate).toContain('requireEmptyEntitlements(paths.shortcutHelper, "shortcut helper")');
+    expect(gate).toContain("must have an empty entitlement set");
+    expect(gate).toContain('["plainsong CLI", paths.cli]');
+  });
+
   it("checks the helper's entitlement set in both directions", () => {
     expect(gate).toContain("requireCalendarHelperEntitlements(paths.calendarHelper)");
     expect(gate).toContain("CALENDAR_HELPER_REQUIRED_ENTITLEMENT");

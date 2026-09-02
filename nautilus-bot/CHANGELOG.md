@@ -33,7 +33,9 @@ evidence is stale and must be recaptured before this becomes a candidate.
   password. Deep links are registered with macOS, so a web page can trigger
   one exactly as a script can, and macOS does not say which app sent it; the
   switch and the doc say so, and a link that starts dictation shows the
-  dictation window with "Recording from a link" on it. See docs/automation.md.
+  dictation window with "Recording from a link" on it. The packaged
+  `plainsong-cli` is signed with an empty entitlement set, and the packaging
+  gate now checks that. See docs/automation.md.
 - Onboarding now asks how meeting notes get written: local Ollama (with live
   detection), bring-your-own-key cloud AI, or transcripts only — instead of
   silently defaulting to an Ollama install that usually isn't there.
