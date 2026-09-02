@@ -259,6 +259,37 @@ describe("App shell", () => {
     expect(await screen.findByText("Local model is unavailable")).toBeInTheDocument();
   });
 
+  it("surfaces the startup vault encryption repair as a toast", async () => {
+    // The database is opened before the sidecar can emit anything, so this is
+    // the only place the person is told that their database was (or was not)
+    // encrypted at launch.
+    localStorage.setItem(ONBOARDING_STORAGE_KEY, "true");
+
+    render(<App />);
+    await screen.findByText("Mock dictation workspace");
+    await waitFor(() => {
+      expect(electronMocks.listeners["vault-database-encryption-notice"]).toBeDefined();
+    });
+
+    act(() => {
+      electronMocks.listeners["vault-database-encryption-notice"]({
+        payload: { message: "Plainsong finished encrypting its database.", encrypted: true },
+      });
+    });
+    expect(
+      await screen.findByText("Plainsong finished encrypting its database."),
+    ).toBeInTheDocument();
+
+    act(() => {
+      electronMocks.listeners["vault-database-encryption-notice"]({
+        payload: { message: "Plainsong could not encrypt its database.", encrypted: false },
+      });
+    });
+    expect(
+      await screen.findByText("Plainsong could not encrypt its database."),
+    ).toBeInTheDocument();
+  });
+
   it("shows a recoverable error boundary when a child view crashes", async () => {
     function CrashOnDemand() {
       const [crashed, setCrashed] = useState(false);

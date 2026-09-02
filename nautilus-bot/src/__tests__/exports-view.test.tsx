@@ -157,6 +157,60 @@ describe("ExportsView", () => {
     });
   });
 
+  it("offers the subtitle and Word formats and says what each one writes", async () => {
+    render(<ExportsView />);
+
+    await selectRecording();
+    // The format dropdown is the second combobox on the page.
+    fireEvent.click(screen.getAllByRole("combobox")[1]);
+
+    for (const label of [
+      "Markdown (.md)",
+      "Word document (.docx)",
+      "Plain text (.txt)",
+      "JSON (.json)",
+      "Subtitles (SRT)",
+      "Subtitles (WebVTT)",
+    ]) {
+      expect(await screen.findByRole("option", { name: label })).toBeInTheDocument();
+    }
+
+    fireEvent.click(screen.getByRole("option", { name: "Subtitles (SRT)" }));
+    expect(
+      await screen.findByText(/One cue per transcript segment\. Needs a transcript\./)
+    ).toBeInTheDocument();
+
+    exportsMocks.exportRecordingV2.mockResolvedValueOnce({
+      format: "srt",
+      redactionLevel: "basic",
+      preview: false,
+      exportPath: "/tmp/acme-pricing-review.srt",
+      content: null,
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Export" }));
+
+    await waitFor(() => {
+      expect(exportsMocks.exportRecordingV2).toHaveBeenCalledWith("rec-1", "srt", {
+        redactionLevel: "basic",
+        target: undefined,
+        preview: false,
+      });
+    });
+    expect(await screen.findByText("/tmp/acme-pricing-review.srt")).toBeInTheDocument();
+  });
+
+  it("says a Word preview shows the Markdown the file is built from", async () => {
+    render(<ExportsView />);
+
+    await selectRecording();
+    fireEvent.click(screen.getAllByRole("combobox")[1]);
+    fireEvent.click(await screen.findByRole("option", { name: "Word document (.docx)" }));
+
+    expect(
+      await screen.findByText(/preview below shows the Markdown it is built from/)
+    ).toBeInTheDocument();
+  });
+
   it("routes users to meetings when there are no recordings to export", async () => {
     recordingsMock.recordings = [];
 

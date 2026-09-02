@@ -7,6 +7,7 @@ import type { Recording } from "@/types";
 import * as backend from "@/lib/backend";
 import type { ProductReadinessSnapshot } from "@/features/readiness/product-readiness";
 import { OPEN_SETTINGS_TAB_EVENT } from "@/lib/navigation";
+import { publishCallCaptureRequest } from "@/lib/call-capture-request";
 
 const speechSynthesisMock = {
   speak: vi.fn(),
@@ -267,6 +268,14 @@ vi.mock("@/lib/backend", () => ({
   getRecording: vi.fn(async () => ({})) as any,
   getRecordingWaveform: vi.fn() as any,
   openRecordingAudio: vi.fn() as any,
+  prepareRecordingPlayback: vi.fn(async (recordingId: string) => ({
+    token: "0123456789abcdef0123456789abcdef",
+    url: "plainsong://playback/0123456789abcdef0123456789abcdef",
+    recordingId,
+    protection: "plaintext",
+    durationSeconds: 14,
+  })) as any,
+  releaseRecordingPlayback: vi.fn(async () => {}) as any,
   getSpeakers: vi.fn() as any,
   getTranscript: vi.fn(async () => ({})) as any,
   getMeetingTranscriptDetails: vi.fn(async () => ({})) as any,
@@ -2210,6 +2219,48 @@ describe("RecordingsView", () => {
     expect(screen.getByLabelText("Meeting title")).toHaveValue("Weekly sync");
   });
 
+  it("carries the accepted call offer's id and service into the capture", async () => {
+    // The sidecar binds this meeting's auto-stop to exactly this call. A
+    // capture that arrived without the id would let any call that happened to
+    // be live when it started stop it later.
+    startMeeting.mockResolvedValueOnce("r-live");
+    publishCallCaptureRequest({
+      callId: 12,
+      app: "zoom",
+      appLabel: "Zoom",
+      videoService: "zoom",
+      detectedAtMs: new Date(2026, 8, 2, 14, 5, 0).getTime(),
+    });
+
+    render(<RecordingsView />);
+
+    fireEvent.click(await screen.findByRole("button", { name: "Confirm meeting consent" }));
+
+    await waitFor(() => {
+      expect(startMeeting).toHaveBeenCalledWith(
+        expect.objectContaining({ detectedCallId: 12, videoService: "zoom" }),
+      );
+    });
+    await waitFor(() => {
+      expect(backend.renameRecording).toHaveBeenCalledWith("r-live", "Zoom call, 14:05");
+    });
+  });
+
+  it("starts a meeting nobody offered without binding it to a call", async () => {
+    startMeeting.mockResolvedValueOnce("r-live");
+
+    render(<RecordingsView />);
+
+    fireEvent.click(screen.getByRole("button", { name: "New meeting" }));
+    fireEvent.click(await screen.findByRole("button", { name: "Confirm meeting consent" }));
+
+    await waitFor(() => {
+      expect(startMeeting).toHaveBeenCalledWith(
+        expect.objectContaining({ detectedCallId: undefined, videoService: undefined }),
+      );
+    });
+  });
+
   it("starts meeting capture after consent and stops an active meeting", async () => {
     startMeeting.mockResolvedValueOnce("r-live");
 
@@ -2516,7 +2567,7 @@ describe("RecordingsView", () => {
 
       // The banner used to live only in the list branch, so the workspace's own
       // Play audio failed with nothing on screen but a toast.
-      fireEvent.click(screen.getByRole("button", { name: "Play audio" }));
+      fireEvent.click(screen.getByRole("button", { name: "Open audio file" }));
 
       expect(
         await screen.findByText(
@@ -2539,7 +2590,7 @@ describe("RecordingsView", () => {
 
     fireEvent.click(screen.getByText("Weekly sync"));
     await screen.findByText("The record");
-    fireEvent.click(screen.getByRole("button", { name: "Play audio" }));
+    fireEvent.click(screen.getByRole("button", { name: "Open audio file" }));
     expect(await screen.findByText("Audio file is missing.")).toBeInTheDocument();
 
     fireEvent.click(screen.getByRole("button", { name: "All meetings" }));

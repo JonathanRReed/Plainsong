@@ -104,6 +104,13 @@ const PRIVACY_WIRE_SHAPE: Settings["privacy"] = {
   vaultSalt: null,
 };
 
+// The one switch that admits other processes to meeting data. Off is the only
+// acceptable default, and the field name is what the CLI reads out of
+// settings.json (`local_tools_enabled_in` in rust-sidecar/src/local_tools).
+const AUTOMATION_WIRE_SHAPE: NonNullable<Settings["automation"]> = {
+  localToolsEnabled: false,
+};
+
 const AI_LANE_WIRE_SHAPE: Settings["privacy"]["dictationAi"] = {
   provider: "ollama",
   modelId: null,
@@ -163,6 +170,18 @@ describe("settings wire contract", () => {
     expect(rustStructFields(source, "PrivacySettings").map(toCamelCase)).toEqual(
       Object.keys(PRIVACY_WIRE_SHAPE),
     );
+  });
+
+  it("mirrors every AutomationSettings field Rust serializes, off by default", () => {
+    expect(rustStructFields(source, "AutomationSettings").map(toCamelCase)).toEqual(
+      Object.keys(AUTOMATION_WIRE_SHAPE),
+    );
+    // `#[derive(Default)]` on a bool field is `false`; make sure nobody adds a
+    // `#[serde(default = "...")]` that flips it.
+    const section = source.slice(source.indexOf("pub struct AutomationSettings {"));
+    const body = section.slice(0, section.indexOf("\n}"));
+    expect(body).not.toMatch(/serde\(default\s*=/);
+    expect(section).toMatch(/pub struct Settings|impl Default for Settings/);
   });
 
   it("mirrors every AiLaneSettings field Rust serializes", () => {

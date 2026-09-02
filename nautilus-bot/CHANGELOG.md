@@ -39,6 +39,112 @@ evidence is stale and must be recaptured before this becomes a candidate.
   but not deleted, because they would only come back. Manage them from
   Settings → AI or the picker's own footer. They live in your settings file
   on this Mac and choosing one only fills the box.
+- Plainsong now notices a live call and offers to record it. Every few
+  seconds the sidecar checks, locally, which apps are running; when Zoom,
+  Microsoft Teams, Webex, FaceTime, Slack, Discord, or a browser window
+  titled for Google Meet (Accessibility permission needed) has a second sign
+  of a call — its call window, or the microphone open by another app — a
+  macOS notification asks "Zoom call started. Record it with Plainsong?" and
+  the Meetings header shows the same offer beside the calendar cue. Clicking
+  either opens the usual consent sheet with the title prefilled ("Zoom call,
+  14:05"); nothing records without that click, and dismissing is per call.
+  Off switch and copy in Settings › General › Meetings.
+- A meeting recorded alongside a detected call stops on its own when that
+  app quits or its call window closes, and any meeting stops after 15
+  minutes with nothing audible on every captured source (Settings › General
+  › Meetings; 0 turns the silence stop off). Both go through the normal stop
+  path, so the audio is saved, hashed and transcribed, and a notification
+  says why ("Meeting stopped: Zoom closed").
+- Pause and resume a meeting from the recording mini window, the Meetings
+  header, or the live meeting card (⌘⇧P). The microphone and system audio
+  stay open, so resume is instant, but nothing captured while paused reaches
+  the file, the live preview, or the silence watchdogs; the clock stands
+  still, the saved audio skips the gap, and the transcript timeline marks it
+  as "[Paused 2 min 10 s]". Pauses are recorded on the meeting and in the
+  audit log.
+- macOS notifications for meeting events (started, stopped, stopped on its
+  own, transcript ready, notes ready or failed) and for a dictation that was
+  refused or could not be delivered while the dictation mini window is
+  hidden. One sentence each; clicking one opens the meeting or the dictation
+  view. Both classes have a switch in Settings › General › Notifications.
+- A local command-line tool, a read-only MCP server, and `plainsong://` deep
+  links, all behind one off-by-default switch (Settings > General > Local
+  tools). `plainsong list / search / show / transcript / export / dictations
+  / stats` read the same SQLCipher database the app uses, opened with
+  SQLite's read-only flag from a separate `plainsong-cli` binary packaged
+  beside the sidecar; there is no write command. `plainsong mcp` serves six
+  read-only tools over stdio to Claude Desktop, Claude Code or Cursor,
+  answers both the 2025 `initialize` handshake and the 2026-07-28
+  per-request protocol, caps and paginates results, and wraps every
+  transcript, note, summary, action item and dictation string in an
+  `<untrusted_content>` frame whose close tag cannot be forged from inside.
+  `plainsong://record`, `stop`, `mode?key=…`, `meeting/start` (opens the
+  consent sheet, never records), `meeting/stop` and `open` are the only
+  links; they carry no text, are rate-limited, and are written to the audit
+  log by action and outcome. "Install command-line tool" in Settings links
+  `/usr/local/bin/plainsong` or, when that directory is not writable, shows
+  the one command to paste rather than asking for an administrator
+  password. Deep links are registered with macOS, so a web page can trigger
+  one exactly as a script can, and macOS does not say which app sent it; the
+  switch and the doc say so, and a link that starts dictation shows the
+  dictation window with "Recording from a link" on it. The packaged
+  `plainsong-cli` is signed with an empty entitlement set, and the packaging
+  gate now checks that. See docs/automation.md.
+- Exports can now be written as subtitles or as a Word document. "Subtitles
+  (SRT)" and "Subtitles (WebVTT)" build cues from the transcript's timed
+  segments — lines wrapped at 42 characters over at most two lines, speaker
+  aliases as the cue prefix, and sub-half-second segments folded into the
+  neighbouring turn so a cue is readable before it goes. "Word document
+  (.docx)" writes the Markdown export as a real Office package (headings,
+  bullets, numbered lists, bold), and there is a matching "Meeting Notes
+  (Word)" export template. The chosen redaction level applies to all of them,
+  because every format is redacted as text before the file is encoded; a
+  .docx preview shows the Markdown the document is built from and says so.
+  Asking for subtitles on a recording that has no transcript says that
+  instead of writing an empty file.
+- Action-item owners and due dates are now shown as their own chips beside the
+  task in the meeting workspace, instead of being left inside the sentence as
+  "(Owner: … · Due: …)", and the JSON export carries each item split into
+  task, owner, and due date alongside the verbatim line. Plainsong only fills
+  an owner it can point at: the model is told to set one solely from a line it
+  cites, and an owner that neither the cited lines nor a speaker alias names
+  is dropped while the task itself is kept.
+- Meetings now play their own audio in the app, in step with the transcript:
+  play/pause, a scrubber drawn over the stored waveform, 1×/1.5×/2× speed,
+  ← → to skip five seconds, and Space to play or pause with the transcript
+  focused. Clicking a transcript line seeks the audio there, the line under
+  the playhead carries the gold reading mark, and the transcript follows
+  playback unless you scrolled it yourself in the last few seconds. A
+  vault-encrypted recording is decrypted frame by frame into an app-owned,
+  owner-only temporary file that is deleted when you leave the meeting, when
+  the vault locks, and at every sidecar start and stop; the renderer never
+  receives a file path, only a single-use token that the privileged
+  `plainsong://playback` route resolves per request (with HTTP Range support,
+  so seeking does not wait on a full download). "Open audio file", which
+  hands the recording to the system player, stays as the secondary action.
+- **More than one dictation shortcut.** Settings → Shortcuts now holds a list
+  of dictation bindings instead of a single hotkey. A binding can be a key
+  chord, an extra mouse button (3–5), or a modifier on its own (Fn, Cmd), and
+  it can start dictation in the current profile, start it in one named
+  profile for that session only, move to the next profile, or cancel. Each
+  binding chooses hold-to-talk or press-to-toggle, or follows the activation
+  setting. Mouse buttons and lone modifiers need the native shortcut helper
+  and say so in the row when it is not running; key bindings still fall back
+  to Electron's press-only registration, where hold degrades to toggle as
+  before. Existing settings migrate: the old `toggleDictation` key becomes
+  the first binding and is kept written for one release so a downgrade still
+  has a hotkey.
+- **Translate to English, per profile.** A dictation profile (and the
+  built-in profiles as a group) can now deliver English whatever language was
+  spoken. Multilingual whisper.cpp models translate inside their own decode
+  with nothing else running; every other recognizer transcribes in the spoken
+  language and the dictation AI provider translates before formatting and
+  insert, inside the same timeout the formatting pass gets. A translation
+  that fails or times out inserts the words as spoken and says so rather than
+  losing them. The switch is disabled with the reason when the model cannot
+  translate (`.en` whisper builds) or when no AI provider can answer. The
+  language the recognizer detected, the route, and whether the translation
+  actually landed are recorded in the dictation history details.
 - Onboarding now asks how meeting notes get written: local Ollama (with live
   detection), bring-your-own-key cloud AI, or transcripts only — instead of
   silently defaulting to an Ollama install that usually isn't there.
@@ -175,6 +281,192 @@ evidence is stale and must be recaptured before this becomes a candidate.
   files that still carry it load cleanly and are rewritten without it.
 
 ### Fixed
+- A meeting only stops itself for a call ending when it is the call whose
+  offer was actually accepted. A recording started any other way, or started
+  from an offer that was waved away, is no longer ended because some
+  unrelated conferencing app quit.
+- Call detection no longer announces "Google Meet call started" for a
+  browser tab that merely has the word "Meet" in its title. It now matches
+  Google's own title shapes and, for the browser route, also requires the
+  microphone to be open by another process.
+- A browser is only asked for its window titles when the microphone is
+  already open elsewhere or when it is where the current call was found;
+  reading them every few seconds switched Chromium into full accessibility
+  mode for good. Each window read now carries its own quarter-second
+  timeout, so an unresponsive browser costs a poll a fraction of a second
+  rather than a minute.
+- A meeting going quiet is now warned about at half the silence fuse ("No
+  audio for 7 minutes; Plainsong stops this meeting in 8 unless sound
+  resumes") instead of only in the sentence that announces the stop.
+- Pauses are written to the meeting as they happen rather than only at stop,
+  so a crash mid-meeting keeps the markers of where the gaps are.
+- Stopping a meeting while it is paused no longer appends the audio the
+  mixer was holding back from during the pause, and time spent paused no
+  longer counts toward the "captured seconds" a degraded meeting reports.
+- The "Zoom call started" notification no longer fires while Plainsong is
+  the frontmost app, where the Meetings header already shows the same offer;
+  and a shown notification is kept alive until it is clicked or dismissed,
+  so its click still opens the consent sheet minutes later.
+- A meeting recorded alongside a detected call, and one started from a
+  calendar event, now both carry that call's or event's conferencing service
+  on the recording.
+- Onboarding's line about call detection now names Slack and Discord, which
+  detection has always matched.
+- **The vault's database encryption step did not encrypt the database.**
+  Turning the vault on generated a key, stored it durably in the macOS
+  Keychain, reported "database encrypted", and left `plainsong.db` readable
+  by anything that could open the file: the step used `PRAGMA rekey`, which
+  SQLCipher documents as a no-op on a connection that was never keyed, and it
+  returns success either way. Encrypted meeting audio and Keychain storage
+  were not affected. The migration is real now — `sqlcipher_export` into a
+  fresh keyed database beside the original, the schema version carried across
+  by hand (the export does not carry it), fsync, a check that the new file
+  opens with the key and does *not* open without it, then an atomic rename
+  over the original; any failure before that rename removes the staging file
+  and leaves the plaintext original intact and open. Every install that
+  turned the vault on is in the "key stored, database plaintext" state, so
+  the app detects it at launch and runs the migration then, holding the same
+  vault-migration exclusion the Settings path holds, writing an audit event,
+  and telling you in the app that it happened. A migration that cannot finish
+  no longer stops the app from launching: it keeps working on the plaintext
+  database and reports the database as not encrypted, which is the truth. The
+  `plainsong` CLI now probes rather than trusting the Keychain, so it opens
+  either kind of database and its `stats` reports the file's real state.
+  Note the one thing an atomic rename cannot do: it unlinks the old plaintext
+  pages rather than overwriting them, so they stay recoverable on the volume
+  until reused. See docs/beta/PRIVACY-AND-CLOUD.md.
+- The `plainsong` command read its Local tools switch through a path that
+  honours `PLAINSONG_CONFIG_DIR`, so anything that could set that variable
+  could point the gate at a settings file it wrote itself while the database
+  path and its Keychain key stayed real. The gate now reads only the file the
+  app writes.
+- A meeting note, transcript or dictation containing a multi-byte character
+  immediately before the text `untrusted_content` crashed the MCP server
+  mid-response (a byte-offset slice landing inside the character). The frame
+  neutraliser also missed `</ untrusted_content>` — whitespace inside the tag
+  punctuation — which a lenient reader would still take as the frame ending.
+- The `plainsong` CLI's `stats` read and parsed every transcript in the
+  database to count how many recordings had one; it is a single query now.
+- The read-only database open sets its busy timeout before the first statement
+  that touches the file rather than after, so a reader started while the app
+  is mid-write waits instead of failing.
+- `get_meeting` over MCP capped only the notes field, so a long summary, a
+  wall of action items, or a provider's error message pasted into the meeting
+  could each blow past the 60k result budget on their own. Every field is
+  capped now, with one `truncated` flag and the real action-item count. The
+  provider error text and the meeting template id are also wrapped in
+  `<untrusted_content>` frames like the rest of the meeting's text.
+- The MCP server now enforces the 2026-07-28 revision's per-request rule that
+  a client declaring that version also sends its capabilities (`-32602`
+  otherwise), and answers `server/discover` in the modern shape even when the
+  request carries no `_meta` at all, which is how a client that does not yet
+  know a version has to ask.
+- An over-long MCP request line was refused and then drained through the
+  unbounded reader, which handed back exactly the allocation the size cap
+  exists to refuse. It is drained through the bounded reader now.
+- "Install command-line tool" treated any symlink at `/usr/local/bin/plainsong`
+  as one of Plainsong's own and replaced it; a link pointing at anything but a
+  `plainsong-cli` binary is now left alone and reported as occupied. The
+  install also no longer unlinks before it symlinks — it writes the link under
+  a temporary name and renames it into place, so a failure can no longer leave
+  the machine with no `plainsong` command.
+- Opening an encrypted (SQLCipher) database failed every time with "Execute
+  returned results": the key check ran a `SELECT` through rusqlite's
+  `execute`, which refuses any statement that returns rows. No install had a
+  vault key yet, so nothing caught it until the read-only CLI open was tested
+  against a keyed file. The open and rekey paths now verify the key with a
+  query. Found while adding the local tools; regression-tested in
+  `db::tests::keyed_open_round_trip`.
+- Opening the same meeting's audio repeatedly no longer decrypts it again
+  every time: each open used to write another full-length plaintext copy that
+  stayed on disk until the vault locked (twenty opens of a two-hour meeting
+  left roughly fourteen gigabytes behind). Players for one meeting now share
+  the one decrypted copy, playback decrypts only the track it actually plays
+  instead of all three of a dual-track meeting, and a fourth meeting opened
+  for playback at once is refused with a message that says to close one.
+  Reloading the window, a renderer crash, a preparation that timed out, and
+  "Reset app state" all release the tokens they leave behind, so the
+  decrypted audio goes with them.
+- A subtitle cue for a very short turn no longer runs over the top of the
+  next cue: it is still held long enough to read, but never past the moment
+  the next speaker starts.
+- The Word export no longer italicises identifiers: `file_name_here` keeps
+  its underscores, because `_` now marks emphasis only at a word boundary.
+- An action item whose owner the meeting called by their first name is no
+  longer dropped when the speaker alias or the transcript spells the name out
+  in full ("Priya" against "Priya Raman", "Jon" against "Jonathan").
+- Following the audio no longer re-renders the whole Meetings view about four
+  times a second, and the up and down arrow keys inside the transcript no
+  longer move the reading position while a control in it has focus.
+- "Open audio file" and the stored waveform could not open a recording
+  encrypted by the streaming vault writer: the runtime decrypt path still
+  ran the pre-streaming whole-file decoder on every file, which fails the
+  integrity check on a PSVAULT1 payload. It now streams PSVAULT1 frames into
+  the temporary file and uses the whole-file decoder only for legacy
+  payloads, which is also what keeps a long meeting out of memory.
+- Dictation bindings refuse the chords macOS owns (Cmd+Q, Cmd+W, Cmd+Tab,
+  Cmd+Space, Cmd+H, Cmd+M), and a modifier on its own can only be Fn — a lone
+  Cmd would have started dictation from an ordinary pause mid-chord. Both the
+  sidecar and the Settings screen say so in the same words.
+- A shortcut written with the macOS symbols kept its modifiers. The sidecar
+  was deleting them when it normalized a trigger, so a symbol chord read as
+  its bare key: it could fail validation as "ordinary typing", and two
+  different chords could look like the same trigger.
+- A binding whose activation behavior was missing or unrecognised is now read
+  as "follows the setting above" instead of being dropped, matching what the
+  sidecar already did — the two sides could otherwise register different
+  hotkeys from the same file. Only F1 through F24 count as a function key.
+- The first click of an extra mouse button on a binding's recorder now
+  registers. It was discarded because the click had not focused the field
+  yet, so binding a mouse button took two clicks.
+- The "next profile" notice reaches a dictation overlay that had to be
+  created to show it, instead of arriving before that window could listen.
+- The dictation HUD's "next profile" notice is rust and neutral instead of
+  gilded. Picking a profile is a mode selector, and gilding it competed with
+  the live recording moment gold is reserved for.
+- "Next profile" now walks the profiles in the order their tiles are shown,
+  so the ready-made Coding and Quiet profiles land where you see them rather
+  than behind whatever you built yourself.
+- A binding saved as hold-to-talk on a machine where the native shortcut
+  helper is not running no longer reads as "Follows the setting above". The
+  hold option is shown, disabled, with the reason, and the row says the
+  binding presses to start and presses again to stop until the helper is
+  available.
+- Editing a dictation binding while recording no longer strands the
+  recording. Each edit saves immediately, and the native shortcut helper takes
+  its whole binding table on launch, so the save killed and respawned it —
+  swallowing the key release of a hold in progress and leaving the session to
+  run until the 10-minute watchdog. A new table is now held back while a
+  session or a held key is in flight and applied the moment things go idle,
+  and a helper that is replaced anyway hands over the release it owes.
+- "Add binding" no longer creates a row that disappears. The new row was
+  saved immediately with no keys recorded, and the sidecar drops a binding
+  with no trigger, so it survived on screen only until the next reload. The
+  row is now held unsaved until the recorder captures a trigger, and written
+  the moment it does.
+- A dictation binding on the same keys as Open window (or either recovery
+  shortcut) now says so in Settings. Dictation bindings are registered first
+  and take the keys, so the other shortcut silently stopped working with only
+  a line in the console; the conflict check walked the four legacy shortcut
+  fields and could not see the binding table at all.
+- Two dictation bindings on the same trigger no longer fail the whole
+  settings save. The sidecar rejected the entire payload — losing every
+  unrelated edit saved with it — where the app's own Settings screen only
+  warned in the row. The later of two identical triggers is now dropped on
+  save, which is all that could ever have happened anyway, and the row says
+  so.
+- The wait in front of an insert is now capped once, not once per pass. A
+  dictation that both translates to English and then formats used to take a
+  full formatting timeout for each, so the real worst case before a word
+  appeared was twice the stated budget (12 s on the local split). Both passes
+  now share one budget; whatever the first spends is taken off the second.
+- Translate to English no longer runs a hidden AI pass on an English-only
+  whisper model. Turning the switch on under a multilingual model and then
+  switching to a `.en` build left the setting stored as on while the switch
+  showed off and disabled, so every English dictation paid for a second model
+  call before insertion. The stored flag (built-in profiles and each saved
+  profile) is now cleared on save, and the runtime route refuses the case
+  independently.
 - A mic failure mid-meeting in a "me and them" (microphone plus system
   audio) recording is now detected and noted on the meeting instead of being
   silently padded with silence and presented as a complete recording; a
@@ -228,6 +520,11 @@ evidence is stale and must be recaptured before this becomes a candidate.
   download existed to fix a problem no route has.
 
 ### Security
+- The window title a call was detected through no longer leaves the sidecar.
+  It was broadcast to every app window on `meeting-call-detected`, and for
+  Google Meet that title is the meeting's own name; only whether a window
+  was involved travels now. `docs/beta/PRIVACY-AND-CLOUD.md` says exactly
+  what detection reads and what it keeps.
 - Dictation now refuses to deliver into password boxes and other secure
   inputs. Before the direct Accessibility write, before the clipboard +
   Cmd+V fallback, and before the Cmd+C used to read a selection, the sidecar

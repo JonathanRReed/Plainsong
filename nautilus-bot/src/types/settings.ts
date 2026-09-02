@@ -13,6 +13,19 @@ export interface Settings {
   privacy: PrivacySettings;
   shortcuts: KeyboardShortcuts;
   updates: UpdateSettings;
+  /**
+   * Optional on the wire because a sidecar that predates them omits them;
+   * read through `resolveMeetingsSettings` / `resolveNotificationsSettings`
+   * in `src/lib/settings-sections.ts`, never directly.
+   */
+  meetings?: MeetingsSettings;
+  notifications?: NotificationsSettings;
+  /**
+   * Local automation surfaces (the `plainsong` CLI, its read-only MCP server,
+   * and `plainsong://` deep links). Optional on the wire only because older
+   * settings files predate the section; Rust always serializes it.
+   */
+  automation?: AutomationSettings;
   theme: "light" | "dark" | "system";
   /**
    * Optional on this side only. The Rust struct always serializes it, so a
@@ -66,6 +79,30 @@ export interface AiSettings {
   savedPrompts?: SavedPrompt[];
 }
 
+/**
+ * Meeting behaviours that live around a capture. Mirrors `MeetingsSettings`
+ * in rust-sidecar/src/settings.rs.
+ */
+export interface MeetingsSettings {
+  /** Notice a conferencing app with a call in progress and offer to record it. Local only. */
+  callDetectionEnabled: boolean;
+  /** End a meeting when the call app it was recorded alongside quits. */
+  autoStopWhenCallAppQuits: boolean;
+  /** End a meeting after this many minutes with nothing audible; 0 turns it off. */
+  autoStopAfterSilenceMinutes: number;
+}
+
+/** Which events may become an OS notification. Mirrors `NotificationsSettings` in settings.rs. */
+export interface NotificationsSettings {
+  meetingEvents: boolean;
+  dictationFailures: boolean;
+}
+
+export interface AutomationSettings {
+  /** Off by default. Mirrors `AutomationSettings` in rust-sidecar/src/settings.rs. */
+  localToolsEnabled: boolean;
+}
+
 export type DictationAppCategoryKey =
   | "other"
   | "messaging"
@@ -103,6 +140,12 @@ export interface DictationCustomMode {
   aiModelId?: string | null;
   activationAppMatcher?: string | null;
   activationDomainMatcher?: string | null;
+  /**
+   * Translate the spoken words into English for this profile. Mirrors
+   * `translate_to_english` in rust-sidecar/src/settings.rs; the built-in
+   * modes use `TranscriptionSettings.dictationTranslateToEnglish` instead.
+   */
+  translateToEnglish?: boolean;
 }
 
 /**
@@ -163,6 +206,13 @@ export interface TranscriptionSettings {
   dictationKeepWarm?: "off" | "on";
   dictationLivePreviewEnabled?: boolean;
   dictationAiFormatting: boolean;
+  /**
+   * Translate-to-English for the built-in modes (a saved custom mode carries
+   * its own `translateToEnglish`). Mirrors `dictation_translate_to_english`
+   * in rust-sidecar/src/settings.rs. How it runs depends on the model: see
+   * `resolveTranslateToEnglishAvailability` in src/lib/dictation-translation.ts.
+   */
+  dictationTranslateToEnglish?: boolean;
   dictationModePreset?:
     | "voice"
     | "messages"
@@ -275,10 +325,43 @@ interface UpdateSettings {
   lastSeenVersion: string | null;
 }
 
+/**
+ * What physically fires a dictation binding. Mirrors `DictationBindingTrigger`
+ * in rust-sidecar/src/settings.rs. A `key` accelerator may be a lone modifier
+ * ("Fn", "Cmd"); that and every `mouse` trigger need the native macOS helper.
+ */
+export type DictationBindingTrigger =
+  | { kind: "key"; accelerator: string }
+  | { kind: "mouse"; button: 3 | 4 | 5; modifiers?: string[] };
+
+/**
+ * What a dictation binding does. `dictation` with `modeId: null` runs the
+ * selected mode; a built-in preset id or a saved custom mode id runs that
+ * mode for the one session. `behavior: "inherit"` follows the activation
+ * setting (toggle / hold / hands-free); `toggle` and `hold` pin it.
+ */
+export type DictationBindingAction =
+  | { kind: "dictation"; modeId: string | null; behavior: "toggle" | "hold" | "inherit" }
+  | { kind: "cycleMode" }
+  | { kind: "cancel" };
+
+export interface DictationBinding {
+  id: string;
+  trigger: DictationBindingTrigger;
+  action: DictationBindingAction;
+}
+
 interface KeyboardShortcuts {
+  /**
+   * The primary dictation binding's accelerator, kept in step with
+   * `dictationBindings` by the sidecar so an older build still has a hotkey.
+   * Read it for display; write `dictationBindings` to change it.
+   */
   toggleDictation: string;
   openWindow: string;
   // Recovery bindings for the last dictation result. Empty string = unbound.
   repasteLastDictation?: string;
   recopyLastDictation?: string;
+  /** The dictation binding table (roadmap item B4). Absent on older files. */
+  dictationBindings?: DictationBinding[];
 }

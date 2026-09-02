@@ -8,6 +8,7 @@ import { ScrollArea } from "@/components/ui/scroll-area";
 import { Input } from "@/components/ui/input";
 import { Badge } from "@/components/ui/badge";
 import { useSavedPromptChat } from "@/components/prompts/use-saved-prompt-chat";
+import { ActionItemChip } from "@/components/views/meetings/action-item-list";
 import {
   analyzeRecording,
   cancelAnalysisRun,
@@ -810,12 +811,12 @@ export function AiAnalysisPanel({
                   <div className="flex-1">
                     <p className="text-sm">{item.task}</p>
                     {(item.assignee || item.deadline) && (
-                      <div className="flex items-center gap-2 mt-1 text-xs text-muted-foreground">
+                      <div className="mt-1 flex flex-wrap items-center gap-2">
                         {item.assignee && (
-                          <span>Assigned: {item.assignee}</span>
+                          <ActionItemChip label="Owner" value={item.assignee} />
                         )}
                         {item.deadline && (
-                          <span>Due: {item.deadline}</span>
+                          <ActionItemChip label="Due" value={item.deadline} />
                         )}
                       </div>
                     )}

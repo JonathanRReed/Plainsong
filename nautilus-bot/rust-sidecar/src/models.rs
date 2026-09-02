@@ -124,6 +124,17 @@ pub struct Recording {
     /// this column existed.
     #[serde(default)]
     pub attendees: Vec<MeetingAttendee>,
+    /// Every pause taken while this meeting was recording, in order. The
+    /// saved audio does not contain the pauses; `at_seconds` on each span is
+    /// where the gap sits in it. Serialized as `pauseSpans`; empty for a
+    /// meeting that was never paused or predates the feature.
+    #[serde(default)]
+    pub pause_spans: Vec<crate::recording_pause::PauseSpan>,
+    /// The conferencing service this meeting was on ("zoom", "google_meet",
+    /// …), when the calendar event or the detected call it started from named
+    /// one. Serialized as `videoService`; `None` for every other meeting.
+    #[serde(default)]
+    pub video_service: Option<String>,
 }
 
 /// One person in a meeting. Mirrors `MeetingAttendee` in
@@ -228,6 +239,32 @@ pub fn attendee_names_for_context(attendees: &[MeetingAttendee]) -> Vec<String> 
         .collect()
 }
 
+
+/// The conferencing services a recording may be tagged with.
+///
+/// The same keys the calendar reader and the call detector already produce, so
+/// a meeting that began from an event and one that began from a detected call
+/// carry the same tag. Renderer-supplied text is matched against this list and
+/// dropped when it is not on it: the column is a tag, not a free-text field.
+pub const RECORDING_VIDEO_SERVICES: &[&str] = &[
+    "zoom",
+    "google_meet",
+    "microsoft_teams",
+    "webex",
+    "whereby",
+    "gotomeeting",
+    "bluejeans",
+    "jitsi",
+];
+
+/// `value` if it names a service Plainsong knows, otherwise nothing.
+pub fn known_video_service(value: Option<&str>) -> Option<String> {
+    let value = value?.trim();
+    RECORDING_VIDEO_SERVICES
+        .contains(&value)
+        .then(|| value.to_string())
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Transcript {
@@ -298,6 +335,17 @@ pub struct RecordingOptions {
     pub meeting_capture_mode: Option<String>,
     #[serde(default)]
     pub admission_nonce: Option<String>,
+    /// The `callId` of the detected call whose offer the reader accepted, when
+    /// this capture began that way. Nothing else may bind a meeting's
+    /// auto-stop to a call — see `meeting_detect::bind_detected_call`.
+    #[serde(default)]
+    pub detected_call_id: Option<u64>,
+    /// The conferencing service this meeting is on, when the calendar event or
+    /// the detected call that started it knew. Stored with the recording so
+    /// both routes leave the same tag; anything unrecognized is dropped rather
+    /// than stored, since this is renderer-supplied text.
+    #[serde(default)]
+    pub video_service: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -374,6 +422,22 @@ pub struct DictationStartOptions {
     /// user never meant to dictate at their cursor.
     #[serde(default)]
     pub hands_free_trigger: bool,
+    /// A mode chosen for this session only, by a per-mode dictation binding
+    /// (roadmap item B4). `None` means "whatever mode is selected in
+    /// Settings". The selected mode in Settings is never changed by this.
+    #[serde(default)]
+    pub mode_override: Option<DictationSessionModeOverride>,
+}
+
+/// The mode a single dictation session runs under when a binding named one.
+/// `preset` is a built-in preset id (`voice`, `messages`, ...) or `custom`
+/// with `custom_mode_id` naming the saved mode.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct DictationSessionModeOverride {
+    pub preset: String,
+    #[serde(default)]
+    pub custom_mode_id: Option<String>,
 }
 
 impl Default for DictationStartOptions {
@@ -403,6 +467,7 @@ impl Default for DictationStartOptions {
             preferred_input_device_id: None,
             delivery_mode: DictationDeliveryMode::System,
             hands_free_trigger: false,
+            mode_override: None,
         }
     }
 }
@@ -437,6 +502,21 @@ pub struct DictationHistoryDetails {
     pub transcription_latency_ms: Option<u64>,
     pub insert_latency_ms: Option<u64>,
     pub end_to_end_ms: Option<u64>,
+    /// BCP-47 primary tag the recognizer reported for the spoken audio
+    /// (`en` for an English-only model, which cannot detect anything else).
+    #[serde(default)]
+    pub detected_language: Option<String>,
+    /// How translate-to-English ran for this session: `whisper_native`
+    /// (the multilingual whisper.cpp translate task), `ai_lane` (a second
+    /// pass through the dictation AI provider), or absent when translation
+    /// was off.
+    #[serde(default)]
+    pub translation_route: Option<String>,
+    /// Whether the delivered text is the translated one. `false` with a
+    /// route set means the pass failed or timed out and the source-language
+    /// words were inserted instead.
+    #[serde(default)]
+    pub translation_applied: Option<bool>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -818,5 +898,45 @@ mod attendee_tests {
         ]);
         assert_eq!(names, vec!["Alice Brown", "Bob"]);
         assert!(!names.join(" ").contains('@'));
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn only_a_known_video_service_key_is_kept_as_a_tag() {
+        assert_eq!(known_video_service(Some("zoom")).as_deref(), Some("zoom"));
+        assert_eq!(
+            known_video_service(Some("  google_meet ")).as_deref(),
+            Some("google_meet")
+        );
+        // Renderer-supplied text that is not one of the known keys is dropped
+        // rather than stored: the column is a tag, not a free-text field.
+        assert_eq!(known_video_service(Some("carrier_pigeon")), None);
+        assert_eq!(known_video_service(Some("")), None);
+        assert_eq!(known_video_service(None), None);
+    }
+
+    #[test]
+    fn a_recording_serializes_its_tag_as_video_service() {
+        let json = serde_json::json!({
+            "id": "r1",
+            "title": "Design review",
+            "projectId": "default",
+            "duration": 0,
+            "createdAt": "2026-09-02T10:00:00Z",
+            "updatedAt": "2026-09-02T10:00:00Z",
+            "sourceType": "meeting",
+            "audioPath": "/tmp/r1.wav",
+            "status": "recording",
+            "videoService": "zoom"
+        });
+        let recording: Recording = serde_json::from_value(json).expect("deserialize");
+        assert_eq!(recording.video_service.as_deref(), Some("zoom"));
+        let back = serde_json::to_value(&recording).expect("serialize");
+        assert_eq!(back["videoService"], "zoom");
+        assert_eq!(back["pauseSpans"], serde_json::json!([]));
     }
 }
