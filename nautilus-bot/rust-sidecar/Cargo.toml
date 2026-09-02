@@ -66,6 +66,16 @@ candle-transformers = { version = "0.10", optional = true }
 # Tokenizers for HuggingFace models
 tokenizers = { version = "0.23", optional = true }
 
+# transcribe.cpp: one ggml runtime that hosts Parakeet TDT, Whisper, Nemotron
+# streaming, Qwen3-ASR, Cohere Transcribe, Voxtral and Moonshine v2 from a
+# single GGUF loader, with Metal on by default on Apple targets. Pulled in only
+# by the `asr-transcribe-cpp` spike feature (OFF by default, not in the release
+# feature list) so the shipped binary is unchanged; see
+# artifacts/qa/transcribe-cpp-spike-2026-09-02.md for the measurement and the
+# adopt/defer recommendation. Pinned to the v0.2.3 release commit rather than a
+# branch so the build is reproducible; MIT-licensed, same as this crate.
+transcribe-cpp = { git = "https://github.com/handy-computer/transcribe.cpp", rev = "63a44d9239d610b3908e8a66b384924cd4a77217", default-features = false, features = ["metal"], optional = true }
+
 # Audio preprocessing. Not optional: the mixed ("Me + Them") capture path
 # resamples whichever of the mic/loopback devices is running at the lower rate
 # onto the session's target rate, so this has to be present in every build, not
@@ -134,6 +144,14 @@ asr-whisper = ["whisper-rs", "download-manager"]
 asr-parakeet = ["ort", "ndarray", "download-manager", "audio-processing", "rustfft", "tokenizers"]
 asr-canary = ["candle-core", "candle-nn", "candle-transformers", "tokenizers", "download-manager", "audio-processing"]
 asr-all = ["asr-whisper", "asr-parakeet", "asr-canary", "diarization"]
+
+# transcribe.cpp spike (OFF by default, and deliberately NOT in
+# scripts/sidecar-cargo-features.mjs, so neither the release build nor the
+# default `cargo build` compiles a byte of it). Adds one experimental local
+# route: Parakeet TDT 0.6B v3 in GGUF on Metal, through the same ggml runtime
+# Handy ships. Evidence lives in
+# artifacts/qa/transcribe-cpp-spike-2026-09-02.md.
+asr-transcribe-cpp = ["transcribe-cpp", "download-manager"]
 
 # Whisper GPU acceleration (Metal — macOS only). No CUDA feature is wired;
 # non-macOS builds must use --no-default-features and re-enable

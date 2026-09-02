@@ -673,6 +673,11 @@ fn normalize_transcription_provider_value(provider: &str) -> String {
         "groq" => "groq".to_string(),
         "cohere_transcribe" => "cohere_transcribe".to_string(),
         "qwen3_asr" => "qwen3_asr".to_string(),
+        // Only when the spike is compiled in. A default build has no engine
+        // that answers to this name, so it must land on `whisper` through the
+        // fallback below rather than become a ghost route in the settings file.
+        #[cfg(feature = "asr-transcribe-cpp")]
+        "transcribe_cpp" => "transcribe_cpp".to_string(),
         _ => "whisper".to_string(),
     }
 }
@@ -724,6 +729,10 @@ fn normalize_transcription_model_id(provider: &str, model_id: &str) -> String {
             "" | "qwen3-asr-0.6b" => "qwen3-asr-0.6b".to_string(),
             value => value.to_string(),
         },
+        #[cfg(feature = "asr-transcribe-cpp")]
+        "transcribe_cpp" => crate::asr::transcribe_cpp::spec_for(model_id)
+            .model_id
+            .to_string(),
         _ => "base.en".to_string(),
     }
 }
@@ -1827,6 +1836,56 @@ mod tests {
             &["uk".to_string()]
         )
         .is_err());
+    }
+
+    /// A settings file that names the transcribe.cpp spike must survive a
+    /// reload on a build that has it, and must NOT resurrect a route on a
+    /// build that does not -- the same rule that keeps `mlx_audio` from
+    /// coming back as a ghost.
+    #[test]
+    fn transcribe_cpp_is_kept_only_by_a_build_that_can_run_it() {
+        let mut settings = TranscriptionSettings {
+            default_provider: "transcribe_cpp".to_string(),
+            dictation_provider: "transcribe_cpp".to_string(),
+            meeting_provider: "transcribe_cpp".to_string(),
+            selected_model_id: "parakeet-tdt-0.6b-v3-q8_0".to_string(),
+            dictation_model_id: "parakeet-tdt-0.6b-v3-q8_0".to_string(),
+            meeting_model_id: "totally-unknown".to_string(),
+            ..Default::default()
+        };
+        normalize_loaded_transcription_settings(&mut settings);
+
+        #[cfg(feature = "asr-transcribe-cpp")]
+        {
+            assert_eq!(settings.default_provider, "transcribe_cpp");
+            assert_eq!(settings.dictation_provider, "transcribe_cpp");
+            assert_eq!(settings.meeting_provider, "transcribe_cpp");
+            assert_eq!(settings.selected_model_id, "parakeet-tdt-0.6b-v3-q8_0");
+            assert_eq!(settings.dictation_model_id, "parakeet-tdt-0.6b-v3-q8_0");
+            // An unknown model id falls back to the one offered route rather
+            // than being persisted verbatim.
+            assert_eq!(settings.meeting_model_id, "parakeet-tdt-0.6b-v3-q8_0");
+        }
+        #[cfg(not(feature = "asr-transcribe-cpp"))]
+        {
+            assert_eq!(settings.default_provider, "whisper");
+            assert_eq!(settings.dictation_provider, "whisper");
+            assert_eq!(settings.selected_model_id, "base.en");
+            assert_eq!(settings.dictation_model_id, "base.en");
+            // The meeting slot lands on the shipped meeting route rather than
+            // whisper/base.en, through the existing dead-slot migration --
+            // exactly what any other unrunnable provider name gets.
+            assert_eq!(settings.meeting_provider, "parakeet");
+            assert_eq!(settings.meeting_model_id, "parakeet-tdt-0.6b-v3");
+        }
+    }
+
+    #[test]
+    fn the_shipped_default_provider_is_never_the_transcribe_cpp_spike() {
+        let settings = TranscriptionSettings::default();
+        assert_ne!(settings.default_provider, "transcribe_cpp");
+        assert_ne!(settings.dictation_provider, "transcribe_cpp");
+        assert_ne!(settings.meeting_provider, "transcribe_cpp");
     }
 
     #[test]

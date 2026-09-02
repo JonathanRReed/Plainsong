@@ -173,7 +173,88 @@ const qwen3Provider: AsrProviderInfo = {
   runtimeDetails: {},
 };
 
+// The transcribe.cpp spike route, as the sidecar reports it when it was built
+// with `--features asr-transcribe-cpp`. No shipped build sends this; the
+// renderer still has to place it honestly when a developer build does.
+const transcribeCppProvider: AsrProviderInfo = {
+  providerType: "transcribe_cpp",
+  name: "transcribe.cpp (experimental)",
+  description: "Parakeet TDT 0.6B v3 GGUF on Metal via transcribe.cpp",
+  isAvailable: true,
+  inferenceEnabled: true,
+  modelInfo: {
+    name: "Parakeet TDT 0.6B v3 (GGUF Q8_0)",
+    version: "q8_0",
+    sizeMb: 705,
+    parameters: "600M",
+    languages: ["en", "de", "fr"],
+    license: "CC-BY-4.0",
+    sourceUrl: "https://example.com/transcribe-cpp",
+  },
+  selectedModelId: "parakeet-tdt-0.6b-v3-q8_0",
+  modelOptions: [
+    { id: "parakeet-tdt-0.6b-v3-q8_0", label: "Parakeet TDT 0.6B v3 GGUF Q8_0" },
+  ],
+  downloadStatus: "Downloaded",
+  runtimeStatus: "ready",
+  runtimeDetails: {},
+};
+
 describe("asr-route-catalog", () => {
+  it("offers the transcribe.cpp spike as an experimental route that never outranks the shipped Parakeet one", () => {
+    const routes = buildAsrRouteCatalog(
+      [...providers, transcribeCppProvider],
+      "prefer_local",
+    );
+    const spike = routes.find((route) => route.providerType === "transcribe_cpp");
+
+    expect(spike).toBeDefined();
+    expect(spike?.experimental).toBe(true);
+    expect(spike?.readiness).toBe("ready");
+    expect(spike?.hosting).toBe("local");
+    expect(spike?.downloadable).toBe(true);
+    // Same weights as the shipped Parakeet meeting route, so the same lanes.
+    expect(spike?.laneCompatibility).toEqual({
+      dictation: true,
+      meeting: true,
+      shared: true,
+    });
+    expect(spike?.summary).toContain("transcribe.cpp");
+    // Honest about the cost: it is a second download of a model you may
+    // already have.
+    expect(spike?.capabilitySummary).toContain("second");
+
+    for (const lane of ["dictation", "meeting", "shared"] as const) {
+      const laneRoutes = getLaneRoutes(routes, lane, "prefer_local");
+      expect(
+        laneRoutes.some((route) => route.providerType === "transcribe_cpp"),
+      ).toBe(true);
+      expect(
+        getRecommendedLaneRoute(routes, lane, "prefer_local")?.providerType,
+      ).not.toBe("transcribe_cpp");
+      const parakeetIndex = laneRoutes.findIndex(
+        (route) => route.providerType === "parakeet",
+      );
+      const spikeIndex = laneRoutes.findIndex(
+        (route) => route.providerType === "transcribe_cpp",
+      );
+      expect(parakeetIndex).toBeLessThan(spikeIndex);
+    }
+  });
+
+  it("recommends nothing rather than the transcribe.cpp spike when it is the only ready route", () => {
+    const routes = buildAsrRouteCatalog([transcribeCppProvider], "prefer_local");
+    for (const lane of ["dictation", "meeting", "shared"] as const) {
+      expect(
+        getLaneRoutes(routes, lane, "prefer_local").map(
+          (route) => route.providerType,
+        ),
+      ).toEqual(["transcribe_cpp"]);
+      expect(getRecommendedLaneRoute(routes, lane, "prefer_local")).toBeNull();
+      expect(getRecommendedLaneRoute(routes, lane, "best_available")).toBeNull();
+    }
+  });
+
   it("offers a ready Qwen3-ASR route for both lanes as experimental and never recommends it over Parakeet", () => {
     const routes = buildAsrRouteCatalog([...providers, qwen3Provider], "prefer_local");
     const qwen3 = routes.find((route) => route.providerType === "qwen3_asr");

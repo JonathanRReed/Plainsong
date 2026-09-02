@@ -28,6 +28,7 @@ const ASR_PROVIDER_TYPE_FLAGS = {
   groq: true,
   cohere_transcribe: true,
   qwen3_asr: true,
+  transcribe_cpp: true,
 } satisfies Record<AsrProviderType, true>;
 
 export const ASR_PROVIDER_TYPES = Object.keys(
@@ -51,6 +52,7 @@ const DOWNLOADABLE_PROVIDER_SET = new Set<AsrProviderType>([
   "distil_whisper",
   "moonshine",
   "qwen3_asr",
+  "transcribe_cpp",
 ]);
 
 const MEETING_GRADE_PROVIDER_SET = new Set<AsrProviderType>([
@@ -61,6 +63,7 @@ const MEETING_GRADE_PROVIDER_SET = new Set<AsrProviderType>([
   "elevenlabs_scribe",
   "cohere_transcribe",
   "qwen3_asr",
+  "transcribe_cpp",
 ]);
 
 const DICTATION_ONLY_PROVIDER_SET = new Set<AsrProviderType>([
@@ -134,6 +137,11 @@ export function isMeetingEligibleModel(providerType: AsrProviderType, modelId: s
       // for a meeting -- so they stay dictation-only and the meeting lane
       // always resolves openai_cloud to whisper-1.
       return normalizedModelId === "whisper-1";
+    case "transcribe_cpp":
+      // Same Parakeet TDT 0.6B v3 weights as the shipped meeting route, so
+      // the long-form property is the same one; only the runtime differs.
+      // Experimental, so the catalog sorts it last and never recommends it.
+      return normalizedModelId.startsWith("parakeet-tdt-0.6b-v3");
     case "qwen3_asr":
       // Qwen3-ASR is an encoder-decoder model that transcribes a whole
       // recording in one pass (the meeting lane chunks it). Experimental:
@@ -475,6 +483,18 @@ const ASR_MODEL_CAPABILITIES_WITHOUT_LANGUAGE_EVIDENCE: readonly Omit<
     tradeoff:
       "experimental — English is the only language verified in Plainsong, and the int4 decoders run on the CPU at anywhere from a quarter of real time to slower than real time depending on load (11-59 s to transcribe 44 s of speech on an M4 Pro across quiet and shared-CPU runs), so a meeting can take longer to transcribe than it took to hold.",
   },
+  {
+    providerType: "transcribe_cpp",
+    modelId: "parakeet-tdt-0.6b-v3-q8_0",
+    languages: PARAKEET_V3_LANGUAGES,
+    // 739,508,576 bytes for the single GGUF = 705.3 MiB. Mirrors
+    // `size_bytes` in rust-sidecar/src/asr/transcribe_cpp.rs.
+    sizeMib: 705,
+    tier: "more",
+    pauseBehavior: "transducer",
+    tradeoff:
+      "experimental — the same Parakeet weights the recommended route already runs, re-quantized to GGUF and run through a second inference runtime, so it is a second copy of a model you may already have downloaded.",
+  },
 ];
 
 const LANGUAGE_EVIDENCE_BY_ROUTE = new Map<
@@ -491,6 +511,16 @@ const LANGUAGE_EVIDENCE_BY_ROUTE = new Map<
   [
     "parakeet:parakeet-tdt-0.6b-v3",
     {
+      basis: "upstream_listed",
+      verifiedLanguages: ["English"],
+    },
+  ],
+  [
+    "transcribe_cpp:parakeet-tdt-0.6b-v3-q8_0",
+    {
+      // English only, on the two repo fixtures, in the spike receipt
+      // artifacts/qa/transcribe-cpp-spike-2026-09-02.md. The other 24
+      // languages are an upstream claim this build never exercised.
       basis: "upstream_listed",
       verifiedLanguages: ["English"],
     },
@@ -632,6 +662,7 @@ const LANGUAGE_CODES_BY_ROUTE = new Map<string, readonly string[]>([
   ["whisper:large-v3-turbo", WHISPER_LARGE_V3_LANGUAGE_CODES],
   ["whisper_candle:whisper-large-v3-turbo", WHISPER_LARGE_V3_LANGUAGE_CODES],
   ["parakeet:parakeet-tdt-0.6b-v3", PARAKEET_V3_LANGUAGE_CODES],
+  ["transcribe_cpp:parakeet-tdt-0.6b-v3-q8_0", PARAKEET_V3_LANGUAGE_CODES],
   ["qwen3_asr:qwen3-asr-0.6b", QWEN3_ASR_LANGUAGE_CODES],
 ]);
 

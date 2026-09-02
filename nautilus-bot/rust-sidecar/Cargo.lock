@@ -3077,6 +3077,7 @@ dependencies = [
  "tokio",
  "tracing",
  "tracing-subscriber",
+ "transcribe-cpp",
  "urlencoding",
  "uuid",
  "walkdir",
@@ -4376,6 +4377,25 @@ dependencies = [
  "tracing",
  "tracing-core",
  "tracing-log",
+]
+
+[[package]]
+name = "transcribe-cpp"
+version = "0.2.3"
+source = "git+https://github.com/handy-computer/transcribe.cpp?rev=63a44d9239d610b3908e8a66b384924cd4a77217#63a44d9239d610b3908e8a66b384924cd4a77217"
+dependencies = [
+ "log",
+ "thiserror 2.0.20",
+ "transcribe-cpp-sys",
+]
+
+[[package]]
+name = "transcribe-cpp-sys"
+version = "0.2.3"
+source = "git+https://github.com/handy-computer/transcribe.cpp?rev=63a44d9239d610b3908e8a66b384924cd4a77217#63a44d9239d610b3908e8a66b384924cd4a77217"
+dependencies = [
+ "cmake",
+ "serde_json",
 ]
 
 [[package]]
