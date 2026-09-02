@@ -383,6 +383,38 @@ export function registrableDictationBindings(
   return bindings.filter((binding) => !blocked.has(binding.id));
 }
 
+/**
+ * The binding rows that can collide with an Electron `globalShortcut`
+ * registration: every key trigger, named the way the Settings list names it.
+ *
+ * Mouse triggers are left out because nothing else in the app can bind a
+ * mouse button, so they cannot collide with a shortcut field. Feed the result
+ * to `findConflictingShortcuts` so a binding that takes Open window's keys is
+ * reported in Settings instead of only failing `globalShortcut.register` with
+ * a console error.
+ */
+export function dictationBindingConflictSources(
+  bindings: DictationBinding[],
+  customModes: DictationBindingCustomMode[] = [],
+): Array<{ bindingId: string; label: string; accelerator: string }> {
+  const sources: Array<{ bindingId: string; label: string; accelerator: string }> = [];
+  for (const binding of bindings) {
+    if (binding.trigger.kind !== "key") {
+      continue;
+    }
+    const accelerator = binding.trigger.accelerator.trim();
+    if (!accelerator) {
+      continue;
+    }
+    sources.push({
+      bindingId: binding.id,
+      label: describeDictationBindingAction(binding.action, customModes),
+      accelerator,
+    });
+  }
+  return sources;
+}
+
 /** Short label for an action, for the Settings list and conflict copy. */
 function describeDictationBindingAction(
   action: DictationBindingAction,

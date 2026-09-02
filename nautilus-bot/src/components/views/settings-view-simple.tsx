@@ -120,6 +120,7 @@ import {
 import {
   describeDictationBindingTrigger,
   DICTATION_MODE_CYCLE_ORDER,
+  dictationBindingConflictSources,
   dictationModeLabelFor,
   findPrimaryDictationBinding,
   resolveDictationBindings,
@@ -129,10 +130,7 @@ import {
   type DictationBindingIssue,
   type DictationBindingTrigger,
 } from "../../../electron/dictation-bindings";
-import {
-  normalizeShortcutAccelerator,
-  SHORTCUT_FIELD_PRECEDENCE,
-} from "../../../electron/shortcut-registration";
+import { findConflictingShortcuts } from "../../../electron/shortcut-registration";
 import { ONBOARDING_STORAGE_KEY, requestOnboarding } from "@/lib/onboarding";
 import {
   consumePendingSettingsTab,
@@ -1919,12 +1917,12 @@ export function SettingsView() {
     }, 3000);
   }, [micTestPlaybackUrl]);
 
-  // Instant, local mirror of electron/shortcut-registration.ts's
-  // partitionUniqueShortcutRegistrations: it iterates the shared
-  // SHORTCUT_FIELD_PRECEDENCE (imported from the electron module, so the two
-  // layers cannot drift) and uses the same accelerator normalization, so the
-  // field electron actually keeps registered is the one reported as the
-  // winner here. Recomputed on every render so a freshly-typed shortcut is
+  // The live answer, from the same `findConflictingShortcuts` Electron runs
+  // at registration time (imported from the electron module, so the two
+  // layers cannot drift) — including the dictation binding table, which
+  // Electron registers *first*, so a binding on Open window's keys shows up
+  // here as Open window losing rather than as nothing at all. Recomputed on
+  // every render so a freshly-typed shortcut or a just-recorded binding is
   // flagged immediately, without waiting on a save round-trip. The backend's
   // get_shortcut_conflicts result (fetched once above) is merged in as a
   // fallback so a conflict the server already knows about (e.g. detected at
@@ -1936,32 +1934,21 @@ export function SettingsView() {
     if (!settings) {
       return byField;
     }
-
-    const owners = new Map<string, { key: ShortcutFieldKey; label: string }>();
-
-    for (const { key, label } of SHORTCUT_FIELD_PRECEDENCE) {
-      const raw = settings.shortcuts[key];
-      if (!raw) {
-        continue;
+    const conflicts = findConflictingShortcuts(
+      settings.shortcuts,
+      dictationBindingConflictSources(
+        resolveDictationBindings(settings.shortcuts),
+        (settings.transcription.dictationCustomModes ?? []).map((mode) => ({
+          id: mode.id,
+          name: mode.name,
+        })),
+      ),
+    );
+    for (const conflict of conflicts) {
+      if (!byField.has(conflict.field)) {
+        byField.set(conflict.field, conflict);
       }
-      const normalized = normalizeShortcutAccelerator(raw);
-      if (!normalized) {
-        continue;
-      }
-      const owner = owners.get(normalized);
-      if (owner) {
-        byField.set(key, {
-          field: key,
-          label,
-          shortcut: raw,
-          conflictsWith: owner.label,
-          conflictsWithField: owner.key,
-        });
-        continue;
-      }
-      owners.set(normalized, { key, label });
     }
-
     return byField;
   }, [settings]);
 

@@ -21,6 +21,7 @@ import { autoUpdater, type AppUpdater } from "electron-updater";
 import {
   buildNativeHelperBindingTable,
   cycleDictationMode,
+  dictationBindingConflictSources,
   electronFallbackDictationBindings,
   registrableDictationBindings,
   resolveDictationBindingBehavior,
@@ -1835,21 +1836,6 @@ async function applyElectronGlobalShortcuts(reason: string): Promise<void> {
   latestShortcutSettings = settings;
   startNativeShortcutControllerIfNeeded(settings);
 
-  const conflicts = findConflictingShortcuts(settings.shortcuts ?? {});
-  shortcutConflicts = conflicts;
-  if (conflicts.length > 0) {
-    for (const conflict of conflicts) {
-      console.warn("[shortcuts] conflict detected, skipping registration", {
-        reason,
-        skipped: conflict.label,
-        shortcut: conflict.shortcut,
-        keptOwner: conflict.conflictsWith,
-      });
-    }
-  }
-  broadcastRendererEvent("shortcut-conflicts-changed", { conflicts });
-  const skippedFields = new Set(conflicts.map((conflict) => conflict.field));
-
   // The dictation binding table (B4). Issues are computed against the helper
   // that actually came up, so a mouse-button binding on a machine without
   // Accessibility reads "needs the native helper" in Settings instead of
@@ -1868,6 +1854,30 @@ async function applyElectronGlobalShortcuts(reason: string): Promise<void> {
     bindingIssues: dictationBindingIssues,
   });
   const registrableBindings = registrableDictationBindings(allBindings, bindingContext);
+
+  // Conflicts are computed against the bindings that will actually be
+  // registered, not just the four legacy shortcut fields. The registration
+  // loop below takes the bindings first, so a binding on Open window's keys
+  // silently won and left nothing but a `console.error`; now Settings shows
+  // Open window losing, and names the binding it lost to.
+  const conflicts = findConflictingShortcuts(
+    settings.shortcuts ?? {},
+    dictationBindingConflictSources(registrableBindings, bindingContext.customModes),
+  );
+  shortcutConflicts = conflicts;
+  if (conflicts.length > 0) {
+    for (const conflict of conflicts) {
+      console.warn("[shortcuts] conflict detected, skipping registration", {
+        reason,
+        skipped: conflict.label,
+        shortcut: conflict.shortcut,
+        keptOwner: conflict.conflictsWith,
+      });
+    }
+  }
+  broadcastRendererEvent("shortcut-conflicts-changed", { conflicts });
+  const skippedFields = new Set(conflicts.map((conflict) => conflict.field));
+
   // Electron's globalShortcut stands in for key bindings when the helper is
   // not delivering (press-only, so hold degrades to toggle exactly as
   // before). These are registered whether or not the helper is up, as they
@@ -1875,17 +1885,12 @@ async function applyElectronGlobalShortcuts(reason: string): Promise<void> {
   // press while the helper is delivering, so a helper that dies mid-session
   // leaves a working hotkey behind instead of nothing until the next restart.
   // Mouse buttons and lone modifiers have no Electron equivalent and are
-  // filtered out by `electronFallbackDictationBindings`. The legacy
-  // `toggleDictation` conflict entry still governs the primary binding, so
-  // "Open window" on the same keys keeps losing to dictation.
-  const fallbackBindings = electronFallbackDictationBindings(registrableBindings).filter(
-    ({ binding }) =>
-      !(
-        skippedFields.has("toggleDictation") &&
-        binding.action.kind === "dictation" &&
-        binding.action.modeId === null
-      ),
-  );
+  // filtered out by `electronFallbackDictationBindings`. No conflict filter
+  // is applied to them: the bindings are first in the precedence list above,
+  // so dictation always wins its keys and it is the other field that gets
+  // skipped -- which is the documented rule ("Dictation is the app's primary
+  // interaction").
+  const fallbackBindings = electronFallbackDictationBindings(registrableBindings);
   const openWindowShortcut = skippedFields.has("openWindow")
     ? null
     : convertShortcutToAccelerator(settings.shortcuts?.openWindow);

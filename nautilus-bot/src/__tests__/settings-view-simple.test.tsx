@@ -1490,6 +1490,48 @@ describe("SettingsView performance behavior", () => {
   });
 
   // ── Dictation binding table (roadmap item B4) ──────────────────────────
+  // Electron registers the dictation bindings before Open window, so a
+  // per-profile binding on Open window's keys took them and left only a
+  // console error. The row now says so, naming the binding that won.
+  it("warns that a non-primary dictation binding takes another shortcut's keys", async () => {
+    const backend = await import("@/lib/backend");
+    vi.mocked(backend.getSettings).mockResolvedValue({
+      ...baseSettings,
+      shortcuts: {
+        ...baseSettings.shortcuts,
+        toggleDictation: "Ctrl+Shift+Space",
+        openWindow: "Ctrl+Alt+E",
+        dictationBindings: [
+          {
+            id: "primary",
+            trigger: { kind: "key", accelerator: "Ctrl+Shift+Space" },
+            action: { kind: "dictation", modeId: null, behavior: "inherit" },
+          },
+          {
+            id: "email",
+            trigger: { kind: "key", accelerator: "Ctrl+Alt+E" },
+            action: { kind: "dictation", modeId: "email", behavior: "inherit" },
+          },
+        ],
+      },
+    } as unknown as Awaited<ReturnType<typeof backend.getSettings>>);
+
+    render(
+      <ToastProvider>
+        <SettingsView />
+      </ToastProvider>,
+    );
+
+    await screen.findByText("How Plainsong listens, writes, and what it keeps.");
+    await screen.findByText("Keyboard shortcuts");
+
+    expect(
+      await screen.findByText(
+        /Same keys as Dictation \u00b7 Writing \u2014 only one of them will work\./,
+      ),
+    ).toBeInTheDocument();
+  });
+
   it("lists every dictation binding with its action and flags a duplicate trigger", async () => {
     const backend = await import("@/lib/backend");
     vi.mocked(backend.getDictationShortcutCapabilityStatus).mockResolvedValue({

@@ -172,6 +172,11 @@ evidence is stale and must be recaptured before this becomes a candidate.
   files that still carry it load cleanly and are rewritten without it.
 
 ### Fixed
+- A dictation binding on the same keys as Open window (or either recovery
+  shortcut) now says so in Settings. Dictation bindings are registered first
+  and take the keys, so the other shortcut silently stopped working with only
+  a line in the console; the conflict check walked the four legacy shortcut
+  fields and could not see the binding table at all.
 - Two dictation bindings on the same trigger no longer fail the whole
   settings save. The sidecar rejected the entire payload — losing every
   unrelated edit saved with it — where the app's own Settings screen only

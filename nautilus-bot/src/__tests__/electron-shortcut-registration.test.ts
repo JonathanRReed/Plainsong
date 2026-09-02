@@ -1,6 +1,7 @@
 import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { describe, expect, it } from "vitest";
+import { dictationBindingConflictSources } from "../../electron/dictation-bindings";
 import {
   convertShortcutToAccelerator,
   findConflictingShortcuts,
@@ -189,6 +190,95 @@ describe("findConflictingShortcuts", () => {
     });
 
     expect(conflicts).toEqual([]);
+  });
+
+  // The regression: only the four legacy fields were walked, and only the
+  // *primary* binding is mirrored into `toggleDictation`. A per-profile
+  // binding on Open window's keys was therefore invisible here, while
+  // `applyElectronGlobalShortcuts` registers the bindings first and takes
+  // the keys \u2014 leaving a `console.error` as the only trace.
+  it("flags a shortcut field that a non-primary dictation binding takes", () => {
+    const conflicts = findConflictingShortcuts(
+      { toggleDictation: "Cmd+Shift+Space", openWindow: "Ctrl+Alt+E" },
+      [
+        { bindingId: "primary", label: "Dictation", accelerator: "Cmd+Shift+Space" },
+        { bindingId: "email", label: "Dictation \u00b7 Writing", accelerator: "Control+Alt+E" },
+      ],
+    );
+
+    expect(conflicts).toEqual([
+      {
+        field: "openWindow",
+        label: "Open window",
+        shortcut: "Ctrl+Alt+E",
+        conflictsWith: "Dictation \u00b7 Writing",
+        conflictsWithField: "toggleDictation",
+      },
+    ]);
+  });
+
+  it("does not make the primary binding collide with its own toggleDictation mirror", () => {
+    expect(
+      findConflictingShortcuts({ toggleDictation: "Cmd+Shift+Space", openWindow: "Ctrl+Alt+O" }, [
+        { bindingId: "primary", label: "Dictation", accelerator: "Cmd+Shift+Space" },
+      ]),
+    ).toEqual([]);
+  });
+
+  // Two bindings on one trigger are the binding table's business:
+  // `validateDictationBindings` reports them per row and names the row, which
+  // this field-oriented list cannot.
+  it("leaves binding-versus-binding collisions to the binding table", () => {
+    expect(
+      findConflictingShortcuts({ toggleDictation: "Cmd+Shift+Space" }, [
+        { bindingId: "a", label: "Dictation", accelerator: "Cmd+Shift+Space" },
+        { bindingId: "b", label: "Next mode", accelerator: "Shift+Cmd+Space" },
+      ]),
+    ).toEqual([]);
+  });
+
+  it("still walks the legacy fields when no binding table is supplied", () => {
+    expect(
+      findConflictingShortcuts({
+        toggleDictation: "Control+Alt+D",
+        openWindow: "Control+Alt+D",
+      }),
+    ).toHaveLength(1);
+  });
+});
+
+describe("dictationBindingConflictSources", () => {
+  it("names each key binding the way the Settings list does and skips mouse triggers", () => {
+    expect(
+      dictationBindingConflictSources(
+        [
+          {
+            id: "primary",
+            trigger: { kind: "key", accelerator: "Cmd+Shift+Space" },
+            action: { kind: "dictation", modeId: null, behavior: "inherit" },
+          },
+          {
+            id: "email",
+            trigger: { kind: "key", accelerator: "Ctrl+Alt+E" },
+            action: { kind: "dictation", modeId: "email", behavior: "inherit" },
+          },
+          {
+            id: "blank",
+            trigger: { kind: "key", accelerator: "  " },
+            action: { kind: "cycleMode" },
+          },
+          {
+            id: "mouse",
+            trigger: { kind: "mouse", button: 4 },
+            action: { kind: "cancel" },
+          },
+        ],
+        [],
+      ),
+    ).toEqual([
+      { bindingId: "primary", label: "Dictation", accelerator: "Cmd+Shift+Space" },
+      { bindingId: "email", label: "Dictation \u00b7 Writing", accelerator: "Ctrl+Alt+E" },
+    ]);
   });
 });
 
