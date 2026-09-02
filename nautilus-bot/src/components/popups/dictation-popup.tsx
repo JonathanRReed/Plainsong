@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { LogicalSize, invoke, getCurrentWindow } from "@/lib/electron";
+import { LogicalSize, invoke, getCurrentWindow, listen } from "@/lib/electron";
 import {
   AppWindow,
   CheckCircle2,
@@ -643,6 +643,42 @@ export function DictationPopup() {
     }
   };
 
+  // A dictation that a `plainsong://record` link started, not a keypress.
+  // Any web page can send that link (see electron/deep-link-policy.ts), so the
+  // microphone opening has to be attributable on screen rather than silent.
+  const [sourceNotice, setSourceNotice] = useState<string | null>(null);
+  useEffect(() => {
+    let unlisten: (() => void) | undefined;
+    let clearTimer: ReturnType<typeof setTimeout> | undefined;
+    void listen<{ message?: unknown; durationMs?: unknown }>(
+      "dictation-source-notice",
+      (event) => {
+        const message =
+          typeof event.payload?.message === "string" ? event.payload.message.trim() : "";
+        if (!message) {
+          return;
+        }
+        const durationMs =
+          typeof event.payload?.durationMs === "number" && event.payload.durationMs > 0
+            ? event.payload.durationMs
+            : 1000;
+        setSourceNotice(message);
+        if (clearTimer) {
+          clearTimeout(clearTimer);
+        }
+        clearTimer = setTimeout(() => setSourceNotice(null), durationMs);
+      },
+    ).then((fn) => {
+      unlisten = fn;
+    });
+    return () => {
+      unlisten?.();
+      if (clearTimer) {
+        clearTimeout(clearTimer);
+      }
+    };
+  }, []);
+
   useEffect(() => {
     void refreshPopupSettings().catch(() => {
       // Keep default mode if settings are temporarily unavailable.
@@ -1088,8 +1124,11 @@ export function DictationPopup() {
             barCount={11}
             barColor={phase === "recording" ? "var(--brand-warm)" : "var(--muted-foreground)"}
           />
-          <span className="whitespace-nowrap text-xs font-medium tracking-[0.08em] text-foreground">
-            {statusLabel}
+          <span
+            className="whitespace-nowrap text-xs font-medium tracking-[0.08em] text-foreground"
+            data-testid="dictation-hud-status"
+          >
+            {sourceNotice ?? statusLabel}
           </span>
           {/* The pill has no room for a separate Stop, so while capture is
               live this button stops the session instead of only hiding the
@@ -1161,6 +1200,17 @@ export function DictationPopup() {
             <span className="text-xs font-medium text-muted-foreground">{phaseLabel}</span>
             <span className="text-muted-foreground">·</span>
             <span className="text-xs text-muted-foreground">{selectedModeLabel}</span>
+            {sourceNotice && (
+              <>
+                <span className="text-muted-foreground">·</span>
+                <span
+                  className="text-xs font-medium text-gold-text"
+                  data-testid="dictation-source-notice"
+                >
+                  {sourceNotice}
+                </span>
+              </>
+            )}
           </div>
           <div className="flex items-center gap-0.5">
             <button

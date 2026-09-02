@@ -24,6 +24,9 @@ const FAST_COMMANDS = new Set<string>([
   "cancel_analysis_run",
   "check_for_updates",
   "check_system_audio_availability",
+  // Flips one flag on the call detector; the cue that sent it is waiting to
+  // disappear.
+  "dismiss_detected_call",
   "get_asr_provider_model",
   "get_available_space",
   "get_backup_config",
@@ -36,6 +39,8 @@ const FAST_COMMANDS = new Set<string>([
   "get_dictation_overlay_state",
   "get_dictation_shortcut_capability_status",
   "get_loopback_device_name",
+  // Reads the detector's in-memory state; the Meetings header polls it.
+  "get_meeting_call_status",
   "get_system_audio_capability",
   "get_permission_diagnostics",
   "get_recording_overlay_state",
@@ -48,9 +53,13 @@ const FAST_COMMANDS = new Set<string>([
   "is_diarization_model_available",
   "list_audio_input_devices",
   "list_diarization_models",
+  // Flip an atomic on the live capture session and record the span. Pause is
+  // pressed mid-sentence; a slow answer here reads as a stuck button.
+  "pause_recording",
   // Sits directly in front of a user-initiated capture start: a slow registry
   // write must fail fast rather than delay the meeting behind it.
   "register_capture_admission",
+  "resume_recording",
 ]);
 
 const EXTENDED_COMMANDS = new Set<string>([
@@ -99,6 +108,10 @@ const LONG_COMMANDS = new Set<string>([
   "repair_cursor_insert_permissions",
   "reprocess_dictation_text",
   "request_apple_speech_permission",
+  // Decrypts a whole meeting's audio into the runtime directory before the
+  // first byte can play; a long, vault-protected meeting on a busy machine
+  // takes real time.
+  "prepare_recording_playback",
   // Blocks on a macOS permission dialog the reader has to read and answer, so
   // it gets the long timeout every other TCC prompt here gets.
   "request_calendar_access",

@@ -118,6 +118,22 @@ vi.mock("@/lib/electron", () => ({
 }));
 
 vi.mock("@/lib/backend", () => ({
+  getCliToolStatus: vi.fn(async () => ({
+    binaryPath: "/Applications/Plainsong.app/Contents/Resources/sidecar/plainsong-cli",
+    binaryPresent: true,
+    linkPath: "/usr/local/bin/plainsong",
+    installed: false,
+    stale: false,
+    occupied: false,
+    manualCommand:
+      "sudo ln -sfn '/Applications/Plainsong.app/Contents/Resources/sidecar/plainsong-cli' /usr/local/bin/plainsong",
+  })),
+  installCliTool: vi.fn(async () => ({
+    status: "manual",
+    reason: "Plainsong cannot write to /usr/local/bin without administrator rights.",
+    command:
+      "sudo ln -sfn '/Applications/Plainsong.app/Contents/Resources/sidecar/plainsong-cli' /usr/local/bin/plainsong",
+  })),
   createBackupDefault: vi.fn(),
   createSettingsBackupDefault: vi.fn(),
   clearProviderSecret: vi.fn(),
@@ -1091,6 +1107,59 @@ describe("SettingsView performance behavior", () => {
     const calls = vi.mocked(backend.saveSettings).mock.calls;
     const lastCall = calls[calls.length - 1];
     expect(lastCall?.[0]?.ui?.alwaysOnTop).toBe(true);
+  });
+
+  it("renders Local tools in General, off, with the sentence that says what it allows", async () => {
+    render(
+      <ToastProvider>
+        <SettingsView />
+      </ToastProvider>
+    );
+
+    await screen.findByText("How Plainsong listens, writes, and what it keeps.");
+    expect(screen.getByText("Local tools")).toBeInTheDocument();
+    expect(
+      screen.getByText(
+        /Apps you run on this Mac, such as a terminal or an AI assistant, can read your meeting notes and transcripts\. Nothing leaves the machine unless that app sends it\./,
+      ),
+    ).toBeInTheDocument();
+    expect(screen.getByRole("switch", { name: "Allow local tools" })).toHaveAttribute(
+      "aria-checked",
+      "false",
+    );
+    // The install action is a real button, not a link, and the status line
+    // names the next action.
+    expect(screen.getByRole("button", { name: "Install command-line tool" })).toBeInTheDocument();
+    await screen.findByText(/Not installed\. Installing adds \/usr\/local\/bin\/plainsong/);
+  });
+
+  it("persists the Local tools switch as automation.localToolsEnabled", async () => {
+    const backend = await import("@/lib/backend");
+
+    render(
+      <ToastProvider>
+        <SettingsView />
+      </ToastProvider>
+    );
+
+    await screen.findByText("How Plainsong listens, writes, and what it keeps.");
+    vi.useFakeTimers();
+
+    fireEvent.click(screen.getByRole("switch", { name: "Allow local tools" }));
+
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(400);
+    });
+    await act(async () => {
+      await Promise.resolve();
+    });
+
+    expect(backend.saveSettings).toHaveBeenCalled();
+    const calls = vi.mocked(backend.saveSettings).mock.calls;
+    const lastCall = calls[calls.length - 1];
+    expect(lastCall?.[0]?.automation?.localToolsEnabled).toBe(true);
+    // Nothing else in the payload moved.
+    expect(lastCall?.[0]?.ui?.minimizeToTray).toBe(true);
   });
 
   it("merges another writer's settings-changed broadcast without clobbering an unsaved local edit", async () => {

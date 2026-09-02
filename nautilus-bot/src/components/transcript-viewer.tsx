@@ -1,6 +1,7 @@
-import { useCallback, useEffect, useRef, useState, useMemo, memo } from "react";
+import { Fragment, useCallback, useEffect, useRef, useState, useMemo, memo } from "react";
 import { cn } from "@/lib/utils";
 import { formatTimeWithMs } from "@/lib/format-time";
+import { rangeIndexAtTime, SEEK_STEP_SECONDS } from "@/lib/playback";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { Button } from "@/components/ui/button";
 import {
@@ -13,7 +14,8 @@ import {
 } from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
 import { Edit2, Check, ChevronDown, ChevronUp, Trash2, User, X } from "lucide-react";
-import type { TranscriptSegment } from "@/types";
+import type { PauseSpan, TranscriptSegment } from "@/types";
+import { placePauseMarkers, type PauseMarker } from "@/lib/pause-markers";
 
 /**
  * Where this transcript was set down. A local claim has to be earned: the
@@ -32,11 +34,21 @@ export interface TranscriptMatch {
   startTime: number;
 }
 
-interface TranscriptViewerProps {
+export interface TranscriptViewerProps {
   segments: TranscriptSegment[];
+  /**
+   * Pauses taken while recording. The audio skips them, so the timeline
+   * marks where each one sat: "[Paused 2 min 10 s]" before the first turn
+   * that starts at or after the pause.
+   */
+  pauseSpans?: PauseSpan[] | null;
   className?: string;
   onSegmentClick?: (segment: TranscriptSegment) => void;
   currentTime?: number;
+  /** Play or pause the meeting audio; bound to Space over the transcript. */
+  onTogglePlayback?: () => void;
+  /** Skip the meeting audio; bound to ← → over the transcript. */
+  onSeekBy?: (deltaSeconds: number) => void;
   speakerNames?: Record<string, string>;
   /** Provenance of the transcript; reported as unknown when omitted. */
   provenance?: TranscriptProvenance;
@@ -83,6 +95,16 @@ interface SpeakerBadgeProps {
   isActive?: boolean;
   isFirstMention?: boolean;
   onRename?: (newName: string) => Promise<void> | void;
+}
+
+/** How long the reader's own scroll holds off the playhead's auto-scroll. */
+const USER_SCROLL_HOLD_MS = 4000;
+
+function isInteractiveTarget(target: EventTarget | null): boolean {
+  return (
+    target instanceof HTMLElement &&
+    target.closest("button, a, input, textarea, select, [contenteditable=true]") !== null
+  );
 }
 
 function normalizePersistedSpeakerId(speakerId: string | null | undefined): string | null {
@@ -223,11 +245,21 @@ function splitOnQuery(
   return parts;
 }
 
-export function TranscriptViewer({
+/**
+ * Memoized: the meetings view around it re-renders for reasons that have
+ * nothing to do with the transcript, and re-rendering hundreds of speaker
+ * turns to redraw a toolbar is work nobody asked for. The playhead reaches it
+ * through `PlayheadTranscriptViewer`, so following the audio does not depend
+ * on the parent re-rendering either.
+ */
+export const TranscriptViewer = memo(function TranscriptViewer({
   segments,
+  pauseSpans,
   className,
   onSegmentClick,
   currentTime,
+  onTogglePlayback,
+  onSeekBy,
   speakerNames: externalSpeakerNames,
   provenance,
   highlightQuery,
@@ -406,6 +438,39 @@ export function TranscriptViewer({
     }, [] as TranscriptSegment[][]);
   }, [segments]);
 
+  // Where the pause markers go, keyed by the turn they precede. A pause past
+  // the last turn is keyed by `groupedSegments.length` and rendered after it.
+  const pauseMarkersByGroup = useMemo(() => {
+    const byGroup = new Map<number, PauseMarker[]>();
+    for (const marker of placePauseMarkers(
+      groupedSegments.map((group) => group[0].startTime),
+      pauseSpans,
+    )) {
+      const list = byGroup.get(marker.beforeGroupIndex) ?? [];
+      list.push(marker);
+      byGroup.set(marker.beforeGroupIndex, list);
+    }
+    return byGroup;
+  }, [groupedSegments, pauseSpans]);
+
+  const renderPauseMarkers = (beforeGroupIndex: number) => {
+    const markers = pauseMarkersByGroup.get(beforeGroupIndex);
+    if (!markers || markers.length === 0) return null;
+    return markers.map((marker) => (
+      // The apparatus, not the manuscript: mono, muted, a hollow neume for a
+      // gap that was chosen. It is a fact about the record, so it reads as a
+      // status line, never as a speaker turn.
+      <p
+        key={`pause-${marker.atSeconds}-${marker.durationMs}`}
+        role="status"
+        className="rubric-muted my-1 inline-flex items-center gap-2 px-3"
+      >
+        <span className="neume neume-hollow" aria-hidden="true" />
+        [{marker.label}]
+      </p>
+    ));
+  };
+
   // Track which group indices are the FIRST appearance of each speaker, so the
   // first badge of a voice may be gilded once and later mentions stay neutral.
   const firstSpeakerGroupIndices = useMemo(() => {
@@ -448,16 +513,22 @@ export function TranscriptViewer({
   // Which turn the reading position sits in. Resolved here rather than per
   // group so the scroll effect can depend on it: a deep link cues a time before
   // the transcript has loaded, and the group only exists on a later render.
+  const groupRanges = useMemo(
+    () =>
+      groupedSegments.map((group) => ({
+        start: group[0].startTime,
+        end: group[group.length - 1].endTime,
+      })),
+    [groupedSegments]
+  );
   const activeGroupIndex = useMemo(() => {
     if (currentTime === undefined) {
       return -1;
     }
-    return groupedSegments.findIndex(
-      (group) =>
-        currentTime >= group[0].startTime &&
-        currentTime <= group[group.length - 1].endTime
-    );
-  }, [currentTime, groupedSegments]);
+    // Binary search: the playhead reports a few times a second, and a long
+    // meeting has hundreds of turns.
+    return rangeIndexAtTime(groupRanges, currentTime);
+  }, [currentTime, groupRanges]);
 
   // Scroll targets: the current search hit, and the group the reading position
   // sits in. `block: "nearest"` so a target already on screen never jumps.
@@ -468,12 +539,25 @@ export function TranscriptViewer({
     activeMatchRef.current?.scrollIntoView({ block: "nearest" });
   }, [activeMatchIndex, matches]);
 
+  // The reader's own scrolling wins over the playhead for a few seconds: a
+  // transcript that snaps back to the current line every time the reader
+  // wheels up to check something earlier is unreadable while audio plays.
+  const lastUserScrollAtRef = useRef(0);
+  const markUserScroll = useCallback(() => {
+    lastUserScrollAtRef.current = Date.now();
+  }, []);
+
   useEffect(() => {
     if (matches.length > 0) {
       return;
     }
+    if (Date.now() - lastUserScrollAtRef.current < USER_SCROLL_HOLD_MS) {
+      return;
+    }
+    // Instant, not smooth: the same move under reduced motion, and a turn that
+    // is already on screen does not move at all (`nearest`).
     activeGroupRef.current?.scrollIntoView({ block: "nearest" });
-  }, [activeGroupIndex, currentTime, matches.length]);
+  }, [activeGroupIndex, matches.length]);
 
   // Reading position moves turn by turn from the keyboard, so a transcript can
   // be walked without a mouse. Callers use it to jump other surfaces in step.
@@ -582,17 +666,47 @@ export function TranscriptViewer({
           role="group"
           aria-label="Transcript turns"
           tabIndex={0}
+          onWheel={markUserScroll}
+          onTouchMove={markUserScroll}
           onKeyDown={(event) => {
             if (editingSegmentId) {
+              return;
+            }
+            if (
+              event.key === "PageUp" ||
+              event.key === "PageDown" ||
+              event.key === "Home" ||
+              event.key === "End"
+            ) {
+              markUserScroll();
+              return;
+            }
+            // Reading and playback keys act only when focus is on the
+            // transcript itself, not on a button, badge, or field inside it:
+            // ↑/↓ move a listbox or a menu that has focus, and stealing them
+            // there breaks the control the reader is actually using.
+            if (isInteractiveTarget(event.target)) {
               return;
             }
             if (event.key === "ArrowDown") {
               event.preventDefault();
               moveReadingPosition(1);
+              return;
             }
             if (event.key === "ArrowUp") {
               event.preventDefault();
               moveReadingPosition(-1);
+              return;
+            }
+            if ((event.key === " " || event.key === "Spacebar") && onTogglePlayback) {
+              event.preventDefault();
+              onTogglePlayback();
+            } else if (event.key === "ArrowLeft" && onSeekBy) {
+              event.preventDefault();
+              onSeekBy(-SEEK_STEP_SECONDS);
+            } else if (event.key === "ArrowRight" && onSeekBy) {
+              event.preventDefault();
+              onSeekBy(SEEK_STEP_SECONDS);
             }
           }}
         >
@@ -628,8 +742,9 @@ export function TranscriptViewer({
               const isLastRead = lastReadSegmentId === firstSegment.id;
 
               return (
+                <Fragment key={groupIndex}>
+                {renderPauseMarkers(groupIndex)}
                 <div
-                  key={groupIndex}
                   ref={isActive ? activeGroupRef : undefined}
                   className={cn(
                     "group relative flex gap-3 rounded-lg p-3 transition-colors",
@@ -825,9 +940,11 @@ export function TranscriptViewer({
                     )}
                   </div>
                 </div>
+                </Fragment>
               );
             })
           )}
+          {groupedSegments.length > 0 ? renderPauseMarkers(groupedSegments.length) : null}
         </div>
       </ScrollArea>
 
@@ -879,7 +996,7 @@ export function TranscriptViewer({
       </Dialog>
     </div>
   );
-}
+});
 
 interface TranscriptSearchProps {
   query: string;

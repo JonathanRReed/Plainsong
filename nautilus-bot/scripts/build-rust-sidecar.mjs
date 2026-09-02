@@ -29,6 +29,9 @@ const result = spawnSync(
     ...sidecarCargoFeatureArgs(),
     "--bin",
     "plainsong-sidecar",
+    // The `plainsong` command-line tool / MCP server ships beside the sidecar.
+    "--bin",
+    "plainsong-cli",
   ],
   {
     cwd: repoRoot,

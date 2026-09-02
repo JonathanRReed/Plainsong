@@ -233,6 +233,15 @@ async fn run_sidecar() -> Result<(), String> {
         Err(error) => return Err(format!("Failed to initialize state: {error}")),
     };
 
+    // A previous process that crashed mid-playback can leave decrypted audio
+    // in the app-owned runtime directory. Nothing else owns those files, so
+    // they go before the first command is read.
+    match plainsong_lib::sweep_runtime_playback_audio_for_sidecar() {
+        Ok(true) => tracing::info!("Removed leftover decrypted playback audio from a prior run"),
+        Ok(false) => {}
+        Err(error) => tracing::warn!("Playback audio sweep at startup failed: {}", error),
+    }
+
     let (event_tx, mut event_rx) = mpsc::unbounded_channel::<String>();
     let handle = SidecarHandle::new(event_tx);
     let active_requests: ActiveRequests = Arc::new(Mutex::new(HashMap::new()));
@@ -259,6 +268,10 @@ async fn run_sidecar() -> Result<(), String> {
         Err(error) => tracing::warn!("Recording audio backfill failed: {}", error),
     }
 
+    // The database is opened before the event channel exists, so a vault
+    // repair that ran at startup has had nowhere to say so until now.
+    plainsong_lib::announce_vault_startup_migration(&state, &handle);
+
     // If hands-free dictation is enabled, start the idle-time monitor right away so
     // hands-free listening is live as soon as the app launches, not just after the
     // first settings save. No-op (stays stopped) if the setting is off.
@@ -269,6 +282,10 @@ async fn run_sidecar() -> Result<(), String> {
     // retention settings are honored without requiring new recordings.
     plainsong_lib::reconcile_interrupted_recordings_for_sidecar(&state, &handle).await;
     plainsong_lib::spawn_storage_retention_maintenance(Arc::clone(&state), handle.clone());
+
+    // Watch for a live call and offer to record it. It only ever emits
+    // events; the recording itself waits for the user to accept the offer.
+    plainsong_lib::spawn_meeting_call_detection(Arc::clone(&state), handle.clone());
 
     // Signal readiness to Electron
     eprintln!("[sidecar] ready");
@@ -333,6 +350,9 @@ async fn run_sidecar() -> Result<(), String> {
                 tracing::info!("Cancelled {aborted} active request(s) during shutdown");
             }
             plainsong_lib::shutdown_for_sidecar().await;
+            if let Err(error) = plainsong_lib::sweep_runtime_playback_audio_for_sidecar() {
+                tracing::warn!("Playback audio sweep at shutdown failed: {}", error);
+            }
             tracing::info!("Received shutdown command, exiting cleanly");
             break;
         }

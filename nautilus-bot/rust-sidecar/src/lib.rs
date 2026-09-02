@@ -17,11 +17,15 @@ mod download;
 mod events;
 mod export;
 mod llm;
+pub mod local_tools;
+pub mod meeting_detect;
 mod models;
 mod operation_coordinator;
 mod ort_utils;
 mod paths;
+mod playback;
 mod recording_audio;
+pub mod recording_pause;
 mod remote_processing;
 mod safe_fs;
 mod secrets;
@@ -29,6 +33,8 @@ pub mod settings;
 pub mod sidecar_handle;
 mod store;
 mod streaming;
+#[cfg(test)]
+mod test_fs;
 pub mod text;
 mod transcription;
 
@@ -99,6 +105,11 @@ pub struct AppState {
     recent_dictation_delivery: Arc<Mutex<Option<RecentDictationDelivery>>>,
     streaming_transcriber: Arc<streaming::StreamingTranscriber>,
     vault_state: Arc<Mutex<VaultRuntimeState>>,
+    /// What the startup vault check found: whether a plaintext database that
+    /// already had a durable key was encrypted just now, or why it could not
+    /// be. Read once by the sidecar to raise the notice, so it is a plain
+    /// value rather than a lock.
+    vault_startup_migration: VaultStartupMigration,
     /// Serializes recording file ownership transitions across capture, vault
     /// migration, deletion, and retention.
     audio_storage_gate: Arc<Mutex<()>>,
@@ -115,6 +126,8 @@ pub struct AppState {
     /// Registered by the privileged Electron side and redeemed by
     /// `authorize_meeting_capture_options`.
     capture_admission: Arc<admission::CaptureAdmissionRegistry>,
+    /// Prepared in-app playbacks, keyed by token. See `playback.rs`.
+    playback_registry: Arc<playback::PlaybackRegistry>,
     active_capture_lease: Arc<Mutex<Option<(String, operation_coordinator::OperationLease)>>>,
     /// Set as soon as the sidecar accepts a shutdown request. Meeting
     /// post-processing failures caused by runtime teardown must remain
@@ -127,6 +140,10 @@ pub struct AppState {
     /// seconds of speech, so it is kept in memory even when history retention
     /// is set to discard transcripts.
     recent_dictation_results: Arc<StdMutex<Vec<RecentDictationResult>>>,
+    /// The live-call detector's debounced state. Polled by
+    /// `spawn_meeting_call_detection`, read by `get_meeting_call_status` and
+    /// by the meeting capture monitor's call-ended auto-stop.
+    meeting_call_detector: Arc<StdMutex<meeting_detect::CallDetector>>,
 }
 
 struct MeetingAudioPostprocessingGuard {
@@ -880,6 +897,11 @@ struct RecordingOverlayState {
     system_audio_active: Option<bool>,
     consent_prompt_shown: Option<bool>,
     message: Option<String>,
+    /// Pause state, mirrored from the capture session so a renderer that
+    /// hydrates from this snapshot can freeze its clock at the right second.
+    paused: bool,
+    closed_paused_ms: i64,
+    pause_started_at_ms: Option<i64>,
 }
 
 #[cfg(target_os = "macos")]
@@ -909,6 +931,9 @@ impl Default for RecordingOverlayState {
             system_audio_active: None,
             consent_prompt_shown: None,
             message: None,
+            paused: false,
+            closed_paused_ms: 0,
+            pause_started_at_ms: None,
         }
     }
 }
@@ -1950,12 +1975,28 @@ async fn run_grounded_response_for_segments(
         .map_err(|error| error.to_string())
 }
 
+/// Speaker aliases a person set for this recording, as plain names. An action
+/// item may be owned by one of them even when the transcript never spells the
+/// name out, because the alias is the person's own labelling of that voice.
+async fn speaker_names_for_recording(state: &AppState, recording_id: &str) -> Vec<String> {
+    let db = state.db.lock().await;
+    db.get_speaker_aliases(recording_id)
+        .unwrap_or_default()
+        .into_values()
+        .filter_map(|(name, _, _)| {
+            let name = name?.trim().to_string();
+            (!name.is_empty()).then_some(name)
+        })
+        .collect()
+}
+
 async fn run_grounded_action_items_for_segments(
     state: &AppState,
     segments: Vec<AnalysisContextSegment>,
     notes: Option<&str>,
     model: Option<&str>,
     progress: Option<llm::OrchestrationProgressCallback>,
+    speaker_names: Vec<String>,
 ) -> Result<llm::GroundedActionItemsOutput, String> {
     let context = llm::GroundingContext::new(segments)?;
     let runtime = selected_analysis_runtime(state, settings::AiLane::Meetings, model, None).await?;
@@ -1967,7 +2008,8 @@ async fn run_grounded_action_items_for_segments(
         timeouts.request,
         timeouts.job,
         llm::OrchestrationOptions::default(),
-    );
+    )
+    .with_speaker_names(speaker_names);
     let orchestrator = match progress {
         Some(callback) => orchestrator.with_progress_callback(callback),
         None => orchestrator,
@@ -2177,29 +2219,15 @@ fn resolve_meeting_template_summary_instruction(
     meeting_template_summary_query(None).to_string()
 }
 
+/// The stored one-line form of a grounded item. `export::action_items` owns
+/// the shape so the exports and the workspace read back exactly what was
+/// written.
 fn format_grounded_action_item_for_storage(item: &GroundedActionItem) -> String {
-    let mut details = Vec::new();
-    if let Some(assignee) = item
-        .assignee
-        .as_deref()
-        .map(str::trim)
-        .filter(|v| !v.is_empty())
-    {
-        details.push(format!("Owner: {}", assignee));
-    }
-    if let Some(deadline) = item
-        .deadline
-        .as_deref()
-        .map(str::trim)
-        .filter(|v| !v.is_empty())
-    {
-        details.push(format!("Due: {}", deadline));
-    }
-    if details.is_empty() {
-        item.task.trim().to_string()
-    } else {
-        format!("{} ({})", item.task.trim(), details.join(" · "))
-    }
+    export::action_items::format_action_item_for_storage(
+        &item.task,
+        item.assignee.as_deref(),
+        item.deadline.as_deref(),
+    )
 }
 
 async fn extract_action_items_grounded_internal(
@@ -2209,9 +2237,16 @@ async fn extract_action_items_grounded_internal(
     progress: Option<llm::OrchestrationProgressCallback>,
 ) -> Result<GroundedActionItemsResult, String> {
     let (segments, notes, _, snapshot) = load_recording_analysis_input(state, recording_id).await?;
-    let output =
-        run_grounded_action_items_for_segments(state, segments, notes.as_deref(), model, progress)
-            .await?;
+    let speaker_names = speaker_names_for_recording(state, recording_id).await;
+    let output = run_grounded_action_items_for_segments(
+        state,
+        segments,
+        notes.as_deref(),
+        model,
+        progress,
+        speaker_names,
+    )
+    .await?;
     let items: Vec<GroundedActionItem> = output
         .items
         .into_iter()
@@ -4010,6 +4045,8 @@ async fn reprocess_dictation_impl(
         consent_notice_message: None,
         consent_notice_updated_at: None,
         analysis_failure: None,
+        pause_spans: Vec::new(),
+        video_service: None,
     };
     let history_text = crate::store::DictationHistoryTextRecord {
         recording_id: recording_id.clone(),
@@ -6963,9 +7000,47 @@ where
 
 #[cfg(test)]
 mod vault_key_migration_tests {
-    use super::{install_vault_database_key, persist_and_verify_vault_db_key};
+    use super::{
+        install_vault_database_key, persist_and_verify_vault_db_key, VaultStartupMigration,
+    };
     use std::cell::RefCell;
     use std::rc::Rc;
+
+    #[test]
+    fn startup_repair_says_nothing_unless_something_happened() {
+        assert_eq!(VaultStartupMigration::default().notice(), None);
+    }
+
+    #[test]
+    fn a_completed_startup_repair_says_so_without_blaming_the_user() {
+        let notice = VaultStartupMigration {
+            encrypted_now: true,
+            failure: None,
+        }
+        .notice()
+        .expect("a repair that ran must be reported");
+        assert!(
+            notice.contains("finished encrypting its database"),
+            "{notice}"
+        );
+        assert!(notice.contains("nothing was lost"), "{notice}");
+    }
+
+    /// The failure notice has to say the state (not encrypted), the cause, and
+    /// what to do — and it must not imply the data is gone, because it is not.
+    #[test]
+    fn a_failed_startup_repair_states_the_state_cause_and_next_action() {
+        let notice = VaultStartupMigration {
+            encrypted_now: false,
+            failure: Some("No space left on device.".to_string()),
+        }
+        .notice()
+        .expect("a failed repair must be reported");
+        assert!(notice.contains("still readable without your"), "{notice}");
+        assert!(notice.contains("No space left on device."), "{notice}");
+        assert!(notice.contains("Your meetings are unchanged."), "{notice}");
+        assert!(notice.contains("Settings > Privacy"), "{notice}");
+    }
 
     #[test]
     fn crash_after_verified_key_write_leaves_recoverable_key() {
@@ -7103,40 +7178,63 @@ async fn migrate_storage_encryption(state: &AppState, password: &str) -> Result<
 
     let existing_db_key =
         secrets::get_internal_secret(VAULT_DB_KEY_SECRET).map_err(|e| e.to_string())?;
-    if existing_db_key.is_none() {
-        let mut db_key_bytes = [0u8; 32];
-        rand::rng().fill_bytes(&mut db_key_bytes);
-        let db_key = hex::encode(db_key_bytes);
+    match existing_db_key.as_deref() {
+        None => {
+            let mut db_key_bytes = [0u8; 32];
+            rand::rng().fill_bytes(&mut db_key_bytes);
+            let db_key = hex::encode(db_key_bytes);
 
-        #[cfg(feature = "sqlcipher")]
-        {
-            // The irreversible rekey happens only after Keychain persistence has
-            // been read back byte-for-byte. If rekey itself fails, remove the
-            // orphaned key so the next startup still opens the plaintext file.
-            let mut db = state.db.lock().await;
-            install_vault_database_key(
-                &db_key,
-                |value| {
-                    secrets::set_internal_secret(VAULT_DB_KEY_SECRET, value)
-                        .map_err(|error| error.to_string())
-                },
-                || {
-                    secrets::get_internal_secret(VAULT_DB_KEY_SECRET)
-                        .map_err(|error| error.to_string())
-                },
-                || {
-                    secrets::clear_internal_secret(VAULT_DB_KEY_SECRET)
-                        .map_err(|error| error.to_string())
-                },
-                || db.change_key(&db_key).map_err(|error| error.to_string()),
-            )?;
+            #[cfg(feature = "sqlcipher")]
+            {
+                // The irreversible encryption happens only after Keychain
+                // persistence has been read back byte-for-byte. If it fails,
+                // remove the orphaned key so the next startup still opens the
+                // plaintext file.
+                let mut db = state.db.lock().await;
+                install_vault_database_key(
+                    &db_key,
+                    |value| {
+                        secrets::set_internal_secret(VAULT_DB_KEY_SECRET, value)
+                            .map_err(|error| error.to_string())
+                    },
+                    || {
+                        secrets::get_internal_secret(VAULT_DB_KEY_SECRET)
+                            .map_err(|error| error.to_string())
+                    },
+                    || {
+                        secrets::clear_internal_secret(VAULT_DB_KEY_SECRET)
+                            .map_err(|error| error.to_string())
+                    },
+                    || db.change_key(&db_key).map_err(|error| error.to_string()),
+                )?;
+            }
+            #[cfg(not(feature = "sqlcipher"))]
+            {
+                let _ = &db_key;
+                tracing::warn!(
+                    "sqlcipher feature is disabled in this build; database encryption migration skipped"
+                );
+            }
         }
-        #[cfg(not(feature = "sqlcipher"))]
-        {
-            let _ = &db_key;
-            tracing::warn!(
-                "sqlcipher feature is disabled in this build; database encryption migration skipped"
-            );
+        Some(existing_key) => {
+            let _ = existing_key;
+            // A stored key is not proof the database is encrypted. Storing the
+            // key and encrypting the file are two steps, and for every install
+            // that turned the vault on before the `sqlcipher_export` fix the
+            // second one silently did nothing. Startup repairs that; retrying
+            // here means a user who reaches this screen after a failed repair
+            // gets another attempt instead of a permanent no-op.
+            #[cfg(feature = "sqlcipher")]
+            {
+                let mut db = state.db.lock().await;
+                if !db.is_encrypted().map_err(|error| error.to_string())? {
+                    db.change_key(existing_key).map_err(|error| {
+                        format!(
+                            "The database key is already stored, but encrypting the database failed: {error}"
+                        )
+                    })?;
+                }
+            }
         }
     }
     if existing_verifier.is_none() {
@@ -7211,21 +7309,6 @@ async fn migrate_storage_encryption(state: &AppState, password: &str) -> Result<
     }
     vault_state.recording_key = Some(recording_key);
 
-    Ok(())
-}
-
-fn validate_wav_bytes(bytes: &[u8], label: &str) -> Result<(), String> {
-    let mut reader = hound::WavReader::new(std::io::Cursor::new(bytes))
-        .map_err(|error| format!("{} is not a readable WAV: {}", label, error))?;
-    if reader.duration() == 0 || reader.spec().sample_rate == 0 {
-        return Err(format!("{} contains zero audio frames", label));
-    }
-    if let Some(error) = reader.samples::<i16>().find_map(Result::err) {
-        return Err(format!(
-            "{} contains unreadable WAV samples: {}",
-            label, error
-        ));
-    }
     Ok(())
 }
 
@@ -8119,11 +8202,38 @@ fn validate_runtime_recording_audio_metadata(
     Ok(())
 }
 
+/// What a runtime resolve has to produce, and how hard it has to look.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RuntimeAudioResolveMode {
+    /// Post-processing, diarization and export: every ready track, each one
+    /// re-decoded and re-hashed against what the database recorded.
+    Full,
+    /// Playback: the primary mix alone, and a temporary this process just
+    /// decrypted from an authenticated stream is checked by header and length
+    /// instead of by decoding and hashing every sample.
+    ///
+    /// Serving only the primary is not a shortcut — `prepare_recording_playback`
+    /// never used any other track. Resolving all three on a dual-track meeting
+    /// meant three decryptions and three full-length plaintext files on disk to
+    /// play one of them.
+    PlaybackPrimary,
+}
+
+impl RuntimeAudioResolveMode {
+    fn wants(self, role: recording_audio::RecordingAudioRole) -> bool {
+        match self {
+            Self::Full => true,
+            Self::PlaybackPrimary => role == recording_audio::RecordingAudioRole::Primary,
+        }
+    }
+}
+
 fn resolve_recording_audio_bundle_in_directory(
     bundle: &recording_audio::RecordingAudioBundle,
     key: Option<&[u8; 32]>,
     runtime_dir: &Path,
     approved_roots: &[PathBuf],
+    mode: RuntimeAudioResolveMode,
 ) -> Result<recording_audio::ResolvedRecordingAudioBundle, String> {
     let primary_asset = bundle.primary.as_ref().ok_or_else(|| {
         format!(
@@ -8143,6 +8253,9 @@ fn resolve_recording_audio_bundle_in_directory(
     let mut mic = None;
     let mut system = None;
     for asset in bundle.assets() {
+        if !mode.wants(asset.role) {
+            continue;
+        }
         if asset.lifecycle != recording_audio::RecordingAudioLifecycle::Ready {
             return Err(format!(
                 "Recording '{}' '{}' audio is not ready",
@@ -8180,65 +8293,68 @@ fn resolve_recording_audio_bundle_in_directory(
                 let key = key.ok_or_else(|| {
                     "Vault is locked. Unlock vault before opening encrypted recordings.".to_string()
                 })?;
-                let ciphertext = std::fs::read(&canonical).map_err(|error| {
-                    format!(
-                        "Failed to read encrypted recording audio '{}': {}",
-                        canonical.display(),
-                        error
-                    )
-                })?;
-                let plaintext = crate::crypto::ProjectKeyManager::decrypt(&ciphertext, key)
-                    .map_err(|_| {
-                        format!(
-                            "Failed to decrypt recording '{}' '{}' audio. Verify the vault password and retry.",
-                            bundle.recording_id,
-                            asset.role.as_str()
-                        )
-                    })?;
-                validate_wav_bytes(
-                    &plaintext,
-                    &format!(
-                        "Decrypted recording '{}' '{}' audio",
-                        bundle.recording_id,
-                        asset.role.as_str()
-                    ),
-                )?;
                 let temp_path = runtime_dir.join(format!(
                     "{}-{}.wav",
                     uuid::Uuid::new_v4(),
                     asset.role.as_str()
                 ));
-                let mut temp_file = recording_audio::create_new_file(&temp_path)
-                    .map_err(|error| error.to_string())?;
-                let temp_guard = recording_audio::DurableTempFile::new(temp_path.clone());
-                temp_file.write_all(&plaintext).map_err(|error| {
-                    format!(
-                        "Failed to write runtime decrypted audio '{}': {}",
-                        temp_path.display(),
-                        error
-                    )
-                })?;
-                temp_file.sync_all().map_err(|error| {
-                    format!(
-                        "Failed to sync runtime decrypted audio '{}': {}",
-                        temp_path.display(),
-                        error
-                    )
-                })?;
-                drop(temp_file);
-                let metadata = match recording_audio::validate_plaintext_wav(&temp_path) {
-                    recording_audio::RecordingAudioValidation::Ready(metadata) => metadata,
-                    recording_audio::RecordingAudioValidation::Missing(error)
-                    | recording_audio::RecordingAudioValidation::Failed(error) => {
-                        return Err(format!(
-                            "Decrypted recording '{}' '{}' audio is invalid: {}",
+                // Streams PSVAULT1 frames straight into the owner-only temp
+                // file (a legacy whole-file payload is read whole, the only
+                // way that layout can be read), so a long meeting is never held
+                // in memory as ciphertext and plaintext at once. Before this
+                // the runtime path used the legacy decoder for every file and
+                // could not open a recording encrypted by the streaming writer.
+                playback::decrypt_vault_file_to_path(&canonical, &temp_path, key).map_err(
+                    |error| {
+                        format!(
+                            "Failed to decrypt recording '{}' '{}' audio. Verify the vault password and retry. ({})",
                             bundle.recording_id,
                             asset.role.as_str(),
                             error
-                        ))
+                        )
+                    },
+                )?;
+                let temp_guard = recording_audio::DurableTempFile::new(temp_path.clone());
+                match mode {
+                    RuntimeAudioResolveMode::Full => {
+                        let metadata = match recording_audio::validate_plaintext_wav(&temp_path) {
+                            recording_audio::RecordingAudioValidation::Ready(metadata) => metadata,
+                            recording_audio::RecordingAudioValidation::Missing(error)
+                            | recording_audio::RecordingAudioValidation::Failed(error) => {
+                                return Err(format!(
+                                    "Decrypted recording '{}' '{}' audio is invalid: {}",
+                                    bundle.recording_id,
+                                    asset.role.as_str(),
+                                    error
+                                ))
+                            }
+                        };
+                        validate_runtime_recording_audio_metadata(asset, &metadata)?;
                     }
-                };
-                validate_runtime_recording_audio_metadata(asset, &metadata)?;
+                    RuntimeAudioResolveMode::PlaybackPrimary => {
+                        let plaintext_bytes = recording_audio::measure_plaintext_wav_header(
+                            &temp_path,
+                        )
+                        .map_err(|error| {
+                            format!(
+                                "Decrypted recording '{}' '{}' audio is invalid: {}",
+                                bundle.recording_id,
+                                asset.role.as_str(),
+                                error
+                            )
+                        })?;
+                        if asset
+                            .plaintext_bytes
+                            .is_some_and(|expected| expected != plaintext_bytes)
+                        {
+                            return Err(format!(
+                                "Recording '{}' '{}' audio plaintext length does not match stored metadata",
+                                bundle.recording_id,
+                                asset.role.as_str()
+                            ));
+                        }
+                    }
+                }
                 temporary_files.push(temp_guard);
                 temp_path
             }
@@ -8263,6 +8379,14 @@ async fn resolve_recording_audio_bundle_for_runtime(
     state: &AppState,
     recording_id: &str,
 ) -> Result<recording_audio::ResolvedRecordingAudioBundle, String> {
+    resolve_recording_audio_for_runtime(state, recording_id, RuntimeAudioResolveMode::Full).await
+}
+
+async fn resolve_recording_audio_for_runtime(
+    state: &AppState,
+    recording_id: &str,
+    mode: RuntimeAudioResolveMode,
+) -> Result<recording_audio::ResolvedRecordingAudioBundle, String> {
     let bundle = {
         let db = state.db.lock().await;
         db.load_recording_audio_bundle(recording_id)
@@ -8270,6 +8394,7 @@ async fn resolve_recording_audio_bundle_for_runtime(
     };
     let has_encrypted = bundle
         .assets()
+        .filter(|asset| mode.wants(asset.role))
         .any(|asset| asset.protection == recording_audio::RecordingAudioProtection::Encrypted);
     let key = if has_encrypted {
         let vault_state = state.vault_state.lock().await;
@@ -8286,12 +8411,21 @@ async fn resolve_recording_audio_bundle_for_runtime(
     };
     let runtime_dir = prepare_decrypted_recording_audio_directory()?;
     let approved_roots = approved_path_roots()?;
-    resolve_recording_audio_bundle_in_directory(
-        &bundle,
-        key.as_ref(),
-        &runtime_dir,
-        &approved_roots,
-    )
+    // Streaming decrypt and WAV validation are both blocking file work that
+    // runs for tens of seconds on a long meeting. On a tokio worker that
+    // stalled every other task sharing the thread — transcription progress,
+    // the next command — for as long as it took.
+    tokio::task::spawn_blocking(move || {
+        resolve_recording_audio_bundle_in_directory(
+            &bundle,
+            key.as_ref(),
+            &runtime_dir,
+            &approved_roots,
+            mode,
+        )
+    })
+    .await
+    .map_err(|error| format!("Preparing recording audio did not finish: {error}"))?
 }
 
 fn schedule_recording_audio_bundle_cleanup(
@@ -8307,6 +8441,189 @@ fn schedule_recording_audio_bundle_cleanup(
         drop(bundle);
         drop(runtime_audio_lease);
     });
+}
+
+/// What `prepare_recording_playback` answers. The privileged Electron process
+/// keeps `path` for itself and hands the renderer only the token: the renderer
+/// never learns where audio lives on disk.
+#[derive(Debug, Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct PreparedRecordingPlayback {
+    token: String,
+    recording_id: String,
+    path: String,
+    protection: playback::PlaybackProtection,
+    duration_seconds: i64,
+}
+
+async fn prepare_recording_playback_impl(
+    state: &Arc<AppState>,
+    handle: &sidecar_handle::SidecarHandle,
+    recording_id: &str,
+) -> Result<PreparedRecordingPlayback, String> {
+    let recording = {
+        let db = state.db.lock().await;
+        db.get_recording(recording_id)
+            .map_err(|e| e.to_string())?
+            .ok_or("Recording not found")?
+    };
+    if recording.audio_path.trim().is_empty() {
+        return Err("Recording has no audio file path".to_string());
+    }
+
+    // Held for as long as the token lives: a vault lock revokes it (and with
+    // it the decrypted temp), and a restore or vault migration cannot start
+    // underneath an open player.
+    let lease = state
+        .operation_coordinator
+        .try_acquire(operation_coordinator::OperationKind::RuntimeAudio)?;
+    // A meeting that is already open is served from the plaintext already on
+    // disk. Without this, every prepare decrypted the whole file again and
+    // pinned another full-length copy until the vault locked: twenty opens of
+    // a two-hour meeting left roughly fourteen gigabytes of plaintext behind.
+    let (resolved, reused) = match state.playback_registry.live_audio(recording_id) {
+        Some(shared) => (shared, true),
+        None => {
+            state.playback_registry.admit(recording_id)?;
+            let bundle = resolve_recording_audio_for_runtime(
+                state,
+                recording_id,
+                RuntimeAudioResolveMode::PlaybackPrimary,
+            )
+            .await?;
+            (Arc::new(bundle), false)
+        }
+    };
+    let protection = if resolved.holds_temporary_files() {
+        playback::PlaybackProtection::Decrypted
+    } else {
+        playback::PlaybackProtection::Plaintext
+    };
+    let path = resolved.primary.clone();
+
+    let token = playback::PlaybackRegistry::new_token();
+    let (release_tx, release_rx) = tokio::sync::oneshot::channel();
+    state.playback_registry.register(
+        token.clone(),
+        recording_id.to_string(),
+        Arc::clone(&resolved),
+        protection,
+        release_tx,
+    );
+    spawn_playback_holder(
+        Arc::clone(&state.playback_registry),
+        handle.clone(),
+        token.clone(),
+        recording_id.to_string(),
+        resolved,
+        lease,
+        release_rx,
+    );
+
+    let mut db = state.db.lock().await;
+    let details = serde_json::json!({
+        "recording_id": recording_id,
+        "protection": protection.as_str(),
+        "reused_decrypted_audio": reused,
+    });
+    if let Err(e) = db.log_audit_event("recording_playback_prepared", Some(details), "info") {
+        tracing::warn!("Failed to log audit event: {}", e);
+    }
+
+    Ok(PreparedRecordingPlayback {
+        token,
+        recording_id: recording_id.to_string(),
+        path: path.to_string_lossy().to_string(),
+        protection,
+        duration_seconds: recording.duration,
+    })
+}
+
+/// Owns one token's share of the decrypted audio and its coordinator lease.
+/// Ends on release (the reader moved on) or on revoke (the vault locked).
+/// The temp-file guard sits behind the `Arc` every token for this recording
+/// shares, so the plaintext is deleted when the last of them lets go.
+fn spawn_playback_holder(
+    registry: Arc<playback::PlaybackRegistry>,
+    handle: sidecar_handle::SidecarHandle,
+    token: String,
+    recording_id: String,
+    bundle: Arc<recording_audio::ResolvedRecordingAudioBundle>,
+    mut lease: operation_coordinator::OperationLease,
+    release_rx: tokio::sync::oneshot::Receiver<()>,
+) {
+    tokio::spawn(async move {
+        let revoked = tokio::select! {
+            _ = release_rx => false,
+            _ = lease.cancelled() => true,
+        };
+        drop(bundle);
+        drop(lease);
+        if revoked {
+            registry.forget(&token);
+            handle.emit(
+                "recording-playback-revoked",
+                serde_json::json!({
+                    "token": token,
+                    "recordingId": recording_id,
+                    "reason": "vault_locked",
+                }),
+            );
+        }
+    });
+}
+
+async fn release_recording_playback_impl(state: &AppState, token: &str) -> Result<bool, String> {
+    let Some(released) = state.playback_registry.release(token) else {
+        return Ok(false);
+    };
+    let mut db = state.db.lock().await;
+    let details = serde_json::json!({
+        "recording_id": released.recording_id,
+        "protection": released.protection.as_str(),
+    });
+    if let Err(e) = db.log_audit_event("recording_playback_released", Some(details), "info") {
+        tracing::warn!("Failed to log audit event: {}", e);
+    }
+    Ok(true)
+}
+
+/// Release every token a recording holds, whatever they are.
+///
+/// The privileged Electron process calls this when its own prepare failed
+/// after the sidecar had already registered a token — a five-minute timeout on
+/// a long decrypt is the case that happens — because that token's id never
+/// reached anyone who could release it, and the plaintext behind it would sit
+/// on disk until the vault locked.
+async fn release_recording_playback_for_recording_impl(
+    state: &AppState,
+    recording_id: &str,
+) -> Result<usize, String> {
+    let released = state.playback_registry.release_recording(recording_id);
+    if released.is_empty() {
+        return Ok(0);
+    }
+    let mut db = state.db.lock().await;
+    for entry in &released {
+        let details = serde_json::json!({
+            "recording_id": entry.recording_id,
+            "protection": entry.protection.as_str(),
+            "reason": "abandoned_preparation",
+        });
+        if let Err(e) = db.log_audit_event("recording_playback_released", Some(details), "info") {
+            tracing::warn!("Failed to log audit event: {}", e);
+        }
+    }
+    Ok(released.len())
+}
+
+/// Delete every decrypted playback temporary the app owns. The sidecar binary
+/// calls this at startup (a crash can leave plaintext behind) and at shutdown
+/// (nothing may outlive the process that decrypted it).
+pub fn sweep_runtime_playback_audio_for_sidecar() -> Result<bool, String> {
+    let data_dir = crate::paths::data_dir()
+        .ok_or("Could not find data directory while sweeping playback audio")?;
+    remove_decrypted_runtime_audio_directory(&data_dir)
 }
 
 #[cfg(all(
@@ -8859,6 +9176,26 @@ mod tests {
     }
 
     #[test]
+    fn a_capture_carries_the_call_id_of_the_offer_it_came_from() {
+        // "New meeting" sends no call id, so nothing binds its auto-stop; the
+        // accepted offer sends exactly the call the reader clicked.
+        let plain = meeting_options_from_json(serde_json::json!({
+            "mic": true,
+            "systemAudio": false,
+            "projectId": "default"
+        }));
+        assert_eq!(plain.detected_call_id, None);
+
+        let from_offer = meeting_options_from_json(serde_json::json!({
+            "mic": true,
+            "systemAudio": false,
+            "projectId": "default",
+            "detectedCallId": 7
+        }));
+        assert_eq!(from_offer.detected_call_id, Some(7));
+    }
+
+    #[test]
     fn a_registered_capture_nonce_cannot_be_replayed() {
         // A well-formed UUID used to be accepted on its own, so anything that
         // could reach the command could mint its own admission. A registered
@@ -9025,6 +9362,26 @@ mod tests {
         assert!(
             typed >= failures,
             "every meeting-start failure must be classified: {failures} returns, {typed} typed"
+        );
+    }
+
+    #[test]
+    fn the_pause_path_persists_the_span_ledger_itself() {
+        // The stop path used to be the only writer, so a crash mid-meeting
+        // lost every marker. The pause path already holds the DB lock for its
+        // audit event; this pins the write to it rather than to a comment.
+        const SOURCE: &str = include_str!("lib.rs");
+        let start = SOURCE
+            .find("\nasync fn set_recording_paused_for_sidecar(")
+            .expect("the pause path must exist");
+        let body = &SOURCE[start + 1..];
+        let body = body
+            .split_once("\n/// Why the capture monitor")
+            .map(|parts| parts.0)
+            .unwrap_or(body);
+        assert!(
+            body.contains("set_recording_pause_spans("),
+            "pausing or resuming must persist the span ledger"
         );
     }
 
@@ -9732,6 +10089,43 @@ mod tests {
         assert_eq!(parsed, vec![0, 1, 127, 255]);
     }
 
+    #[tokio::test]
+    async fn reset_revokes_open_playback_before_deleting_its_plaintext() {
+        let coordinator = operation_coordinator::OperationCoordinator::new();
+        let mut playback = coordinator
+            .try_acquire(operation_coordinator::OperationKind::RuntimeAudio)
+            .expect("a meeting is open for playback");
+
+        let lease = revoke_runtime_audio_for_vault_lock(&coordinator)
+            .await
+            .expect("an idle app resets");
+        // The holder is cancelled, so it deletes its decrypted temporary and
+        // tells the renderer the vault locked, rather than leaving a live token
+        // pointing at a file the reset is about to remove.
+        tokio::time::timeout(Duration::from_millis(100), playback.cancelled())
+            .await
+            .expect("open playback must be revoked by the reset");
+        // And the lease is still held, so nothing else may start mid-reset.
+        assert!(
+            coordinator
+                .try_acquire(operation_coordinator::OperationKind::Backup)
+                .is_err(),
+            "a backup must not start inside a reset"
+        );
+        drop(playback);
+        drop(lease);
+
+        let backup = coordinator
+            .try_acquire(operation_coordinator::OperationKind::Backup)
+            .expect("backup lease");
+        let error = revoke_runtime_audio_for_vault_lock(&coordinator)
+            .await
+            .err()
+            .expect("a reset must not run under a backup");
+        assert!(error.contains("backup"), "{error}");
+        drop(backup);
+    }
+
     #[test]
     fn reset_locks_runtime_vault_without_forgetting_database_encryption() {
         let mut vault_state = VaultRuntimeState {
@@ -9942,6 +10336,8 @@ mod tests {
             consent_notice_message: None,
             consent_notice_updated_at: None,
             analysis_failure: None,
+            pause_spans: Vec::new(),
+            video_service: None,
         }
     }
 
@@ -12876,6 +13272,8 @@ mod tests {
             consent_notice_message: None,
             consent_notice_updated_at: None,
             analysis_failure: None,
+            pause_spans: Vec::new(),
+            video_service: None,
         };
         let entry = models::Recording {
             id: "entry".to_string(),
@@ -15131,6 +15529,26 @@ fn reset_settings_preserving_encrypted_database_state(
         settings.privacy.vault_initialized = true;
         settings.privacy.vault_salt = vault_salt;
     }
+}
+
+/// Take the vault-lock lease before anything deletes decrypted runtime audio,
+/// and give the revoked holders a turn to drop their file guards.
+///
+/// Acquiring `VaultLock` is what cancels every live `RuntimeAudio` lease: each
+/// playback holder deletes its decrypted temporary, forgets its token and
+/// tells the renderer the vault locked. `lock_vault` already did this; the
+/// reset path did not, so it removed the runtime directory underneath open
+/// players and left their tokens registered — the reader got a generic read
+/// failure instead of the message that says the vault is locked.
+///
+/// The lease must outlive the caller's work: holding it also stops a backup,
+/// restore or migration from starting on top of a half-locked vault.
+async fn revoke_runtime_audio_for_vault_lock(
+    coordinator: &Arc<operation_coordinator::OperationCoordinator>,
+) -> Result<operation_coordinator::OperationLease, String> {
+    let lease = coordinator.try_acquire(operation_coordinator::OperationKind::VaultLock)?;
+    tokio::task::yield_now().await;
+    Ok(lease)
 }
 
 fn lock_vault_runtime_after_reset(vault_state: &mut VaultRuntimeState, database_encrypted: bool) {
@@ -18425,6 +18843,22 @@ fn persisted_template_analysis(
     (summary, action_items)
 }
 
+/// Speaker names an export may show, read from the aliases a person set in
+/// the transcript viewer. A speaker with no alias is left out: subtitles then
+/// fall back to the capture side (`Me`/`Them`) rather than invent a name.
+fn export_context_for_recording(db: &db::Database, recording_id: &str) -> export::ExportContext {
+    let speaker_names = db
+        .get_speaker_aliases(recording_id)
+        .unwrap_or_default()
+        .into_iter()
+        .filter_map(|(speaker_id, (name, _, _))| {
+            let name = name?.trim().to_string();
+            (!name.is_empty()).then_some((speaker_id, name))
+        })
+        .collect();
+    export::ExportContext { speaker_names }
+}
+
 fn write_template_export(path: &std::path::Path, contents: &[u8]) -> Result<(), String> {
     if let Some(parent) = path.parent() {
         safe_fs::ensure_directory_without_links(parent).map_err(|error| {
@@ -18452,6 +18886,7 @@ fn template_format_extension(format: &export::templates::ExportFormat) -> &'stat
         export::templates::ExportFormat::Json => "json",
         export::templates::ExportFormat::Csv => "csv",
         export::templates::ExportFormat::Pdf => "pdf",
+        export::templates::ExportFormat::Docx => "docx",
     }
 }
 
@@ -21298,29 +21733,89 @@ fn preserve_privileged_privacy_after_restore(
     restored.vault_salt = current.vault_salt.clone();
 }
 
+/// What the startup vault check found and did, so the sidecar can tell the
+/// person rather than only the log.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct VaultStartupMigration {
+    /// A plaintext database was found beside a durable key and encrypted.
+    pub encrypted_now: bool,
+    /// The migration was needed and did not finish. The database is still
+    /// plaintext and still open; this is the reason.
+    pub failure: Option<String>,
+}
+
+impl VaultStartupMigration {
+    /// The sentence the renderer shows, or `None` when nothing happened.
+    pub fn notice(&self) -> Option<String> {
+        if let Some(reason) = &self.failure {
+            return Some(format!(
+                "Plainsong could not encrypt its database, so it is still readable without your \
+                 vault key. Cause: {reason} Your meetings are unchanged. Try Settings > Privacy > \
+                 turn the vault on again, and if it keeps failing, check free disk space."
+            ));
+        }
+        self.encrypted_now.then(|| {
+            "Plainsong finished encrypting its database with your vault key. An earlier version \
+             stored the key but left the database unencrypted; that is now fixed and nothing was \
+             lost."
+                .to_string()
+        })
+    }
+}
+
+/// Open the database, and repair the one inconsistent state the vault can
+/// leave behind: a durable key in the keychain and a plaintext file on disk.
+///
+/// That state was not rare. `PRAGMA rekey` is a no-op on a connection that was
+/// never keyed, so *every* install that turned the vault on stored a key and
+/// kept a plaintext database while the app reported it as encrypted. The same
+/// state can also be reached honestly, by stopping between the key's verified
+/// keychain write and the encryption step.
+///
+/// Either way the recovery is the same and it is now real: prove the file is
+/// still plaintext, then run the `sqlcipher_export` migration with the
+/// already-durable key. A wrong key for a genuinely encrypted file cannot pass
+/// the plaintext open, so an encrypted database is never overwritten.
+///
+/// A migration that fails does not stop the app. The alternative is refusing
+/// to launch, which would leave someone with a readable database and no way to
+/// reach it; the honest answer is to open the plaintext file, report
+/// `database_encrypted: false` everywhere it is asked, and say plainly what
+/// went wrong.
 fn open_database_with_vault_key_recovery(
     initial_db_key: Option<&str>,
-) -> Result<db::Database, String> {
+) -> Result<(db::Database, VaultStartupMigration), String> {
     match db::Database::new_with_key(initial_db_key) {
-        Ok(database) => Ok(database),
+        Ok(database) => Ok((database, VaultStartupMigration::default())),
         #[cfg(feature = "sqlcipher")]
         Err(keyed_error) if initial_db_key.is_some() => {
-            // A process can stop after the key's verified Keychain write but
-            // before PRAGMA rekey. The persisted key makes that window
-            // recoverable: prove the file is still plaintext, then finish the
-            // rekey using the already-durable key. A wrong key for an encrypted
-            // file cannot pass the plaintext open and is never overwritten.
             let mut plaintext = db::Database::new_with_key(None).map_err(|plaintext_error| {
                 format!(
                     "Failed to initialize encrypted database ({keyed_error}); plaintext recovery also failed ({plaintext_error})"
                 )
             })?;
-            plaintext
-                .change_key(initial_db_key.expect("guarded by is_some"))
-                .map_err(|error| {
-                    format!("Failed to finish interrupted database encryption: {error}")
-                })?;
-            Ok(plaintext)
+            tracing::warn!(
+                "A vault key is stored but the database is plaintext; encrypting it now"
+            );
+            match plaintext.change_key(initial_db_key.expect("guarded by is_some")) {
+                Ok(()) => Ok((
+                    plaintext,
+                    VaultStartupMigration {
+                        encrypted_now: true,
+                        failure: None,
+                    },
+                )),
+                Err(error) => {
+                    tracing::error!("Startup database encryption failed: {error:#}");
+                    Ok((
+                        plaintext,
+                        VaultStartupMigration {
+                            encrypted_now: false,
+                            failure: Some(format!("{error}.")),
+                        },
+                    ))
+                }
+            }
         }
         Err(error) => Err(format!("Failed to initialize local database: {error}")),
     }
@@ -21373,7 +21868,37 @@ pub async fn build_app_state() -> Result<AppState, String> {
     let initial_db_key = secrets::get_internal_secret(VAULT_DB_KEY_SECRET)
         .map_err(|e| format!("Could not read secure database key: {}", e))?;
 
-    let database = open_database_with_vault_key_recovery(initial_db_key.as_deref())?;
+    // Built before the database so the startup encryption repair below holds
+    // the same `VaultMigration` exclusion the Settings-driven migration does.
+    // Nothing else has a handle on this coordinator yet, so the lease can only
+    // succeed; taking it anyway is what keeps the two paths from diverging if
+    // startup ever grows a concurrent step.
+    let operation_coordinator = operation_coordinator::OperationCoordinator::new();
+    let (mut database, vault_startup_migration) = {
+        let _vault_lease = operation_coordinator
+            .try_acquire(operation_coordinator::OperationKind::VaultMigration)?;
+        open_database_with_vault_key_recovery(initial_db_key.as_deref())?
+    };
+    if vault_startup_migration != VaultStartupMigration::default() {
+        // Recorded even when it failed: "we tried and could not" is the part a
+        // support bundle needs. No key material, no paths.
+        let outcome = if vault_startup_migration.encrypted_now {
+            "encrypted"
+        } else {
+            "failed"
+        };
+        if let Err(error) = database.log_audit_event(
+            "vault_database_encryption_repair",
+            Some(serde_json::json!({ "outcome": outcome })),
+            if vault_startup_migration.encrypted_now {
+                "info"
+            } else {
+                "warn"
+            },
+        ) {
+            tracing::warn!("Could not record the vault repair audit event: {}", error);
+        }
+    }
 
     let settings_manager = settings::SettingsManager::new()
         .map_err(|e| format!("Failed to initialize settings: {}", e))?;
@@ -21465,15 +21990,18 @@ pub async fn build_app_state() -> Result<AppState, String> {
         recent_dictation_delivery: Arc::new(Mutex::new(None)),
         streaming_transcriber,
         vault_state: Arc::new(Mutex::new(VaultRuntimeState::default())),
+        vault_startup_migration,
         audio_storage_gate: Arc::new(Mutex::new(())),
         recording_stream_stop: Arc::new(AtomicBool::new(false)),
         recording_templates: Arc::new(StdMutex::new(std::collections::HashMap::new())),
         active_meeting_audio_postprocessing: Arc::new(StdMutex::new(HashMap::new())),
-        operation_coordinator: operation_coordinator::OperationCoordinator::new(),
+        operation_coordinator,
         capture_admission: Arc::new(admission::CaptureAdmissionRegistry::default()),
+        playback_registry: Arc::new(playback::PlaybackRegistry::default()),
         active_capture_lease: Arc::new(Mutex::new(None)),
         sidecar_shutting_down: Arc::new(AtomicBool::new(false)),
         recent_dictation_results: Arc::new(StdMutex::new(Vec::new())),
+        meeting_call_detector: Arc::new(StdMutex::new(meeting_detect::CallDetector::default())),
     })
 }
 
@@ -21795,6 +22323,10 @@ async fn reset_app_state_for_sidecar(
         ));
     }
 
+    let _vault_lock_lease = revoke_runtime_audio_for_vault_lock(&state.operation_coordinator)
+        .await
+        .map_err(|error| format!("Resetting app state locks the vault first. {error}"))?;
+
     let data_dir = crate::paths::data_dir().ok_or_else(|| {
         "Could not determine the application data directory for reset".to_string()
     })?;
@@ -21973,6 +22505,27 @@ pub async fn reconcile_hands_free_monitor_for_sidecar(
     handle: &crate::sidecar_handle::SidecarHandle,
 ) {
     reconcile_hands_free_monitor(state, handle).await;
+}
+
+/// Tell the person what the startup vault check did, once, after the event
+/// channel exists.
+///
+/// The repair itself has to run before anything can open the database, which
+/// is well before there is anywhere to send a message; this is the other half.
+/// Silent when nothing happened.
+pub fn announce_vault_startup_migration(
+    state: &AppState,
+    handle: &crate::sidecar_handle::SidecarHandle,
+) {
+    if let Some(notice) = state.vault_startup_migration.notice() {
+        handle.emit_event(
+            "vault-database-encryption-notice",
+            serde_json::json!({
+                "message": notice,
+                "encrypted": state.vault_startup_migration.encrypted_now,
+            }),
+        );
+    }
 }
 
 /// Release process-global model caches before the sidecar exits.
@@ -24027,6 +24580,8 @@ async fn stop_dictation_for_sidecar(
         consent_notice_message: None,
         consent_notice_updated_at: None,
         analysis_failure: None,
+        pause_spans: Vec::new(),
+        video_service: None,
     };
 
     // Cursor delivery crosses native process and accessibility boundaries.
@@ -25635,6 +26190,8 @@ async fn start_recording_for_sidecar(
         consent_notice_message: None,
         consent_notice_updated_at: None,
         analysis_failure: None,
+        pause_spans: Vec::new(),
+        video_service: models::known_video_service(options.video_service.as_deref()),
     };
 
     {
@@ -25863,6 +26420,9 @@ async fn start_recording_for_sidecar(
         overlay.system_audio_active = Some(options.system_audio);
         overlay.consent_prompt_shown = Some(options.consent_prompt_shown);
         overlay.message = None;
+        overlay.paused = false;
+        overlay.closed_paused_ms = 0;
+        overlay.pause_started_at_ms = None;
     }
 
     handle.emit_event(
@@ -25886,7 +26446,12 @@ async fn start_recording_for_sidecar(
     // Tell Electron to show the recording overlay window.
     handle.window_command("show-recording-overlay", &serde_json::Value::Null);
 
-    spawn_meeting_capture_monitor(Arc::clone(state), handle.clone(), recording_id.clone());
+    spawn_meeting_capture_monitor(
+        Arc::clone(state),
+        handle.clone(),
+        recording_id.clone(),
+        options.detected_call_id,
+    );
 
     Ok(recording_id)
 }
@@ -25897,6 +26462,319 @@ async fn start_recording_for_sidecar(
 /// salvage, slow enough that the `statvfs` and the audio-capture lock are noise
 /// next to the capture threads themselves.
 const MEETING_CAPTURE_MONITOR_INTERVAL: Duration = Duration::from_secs(5);
+
+/// Pause or resume the active meeting on behalf of a renderer.
+///
+/// The capture streams are not touched (see `AudioCapture::pause_recording`);
+/// what changes here is everything that reads the pause: the overlay snapshot
+/// a reopened window hydrates from, the lifecycle event every live window
+/// listens to, and the audit log.
+async fn set_recording_paused_for_sidecar(
+    state: &Arc<AppState>,
+    handle: &crate::sidecar_handle::SidecarHandle,
+    recording_id: &str,
+    pause: bool,
+) -> Result<serde_json::Value, String> {
+    let snapshot = {
+        let mut audio = state.audio_capture.lock().await;
+        if pause {
+            audio.pause_recording(recording_id)
+        } else {
+            audio.resume_recording(recording_id)
+        }
+    }
+    .map_err(|error| error.to_string())?;
+
+    if let Ok(mut overlay) = state.recording_overlay_state.lock() {
+        overlay.paused = snapshot.paused;
+        overlay.closed_paused_ms = snapshot.closed_paused_ms;
+        overlay.pause_started_at_ms = snapshot.pause_started_at_ms;
+    }
+    // Phase stays `recording`: capture is still the live session, the device
+    // is still held, and the renderer's reducer keys everything else off the
+    // pause fields. A new phase would put every window into a state nothing
+    // renders.
+    handle.emit_event(
+        "meeting-recording-state-changed",
+        serde_json::json!({
+            "phase": "recording",
+            "recordingId": recording_id,
+            "paused": snapshot.paused,
+            "closedPausedMs": snapshot.closed_paused_ms,
+            "pauseStartedAtMs": snapshot.pause_started_at_ms,
+        }),
+    );
+    {
+        let mut db = state.db.lock().await;
+        // Written on every pause and resume, not only at stop: the audio file
+        // skips the pauses, so these spans are the only record of where the
+        // gaps are, and a crash mid-meeting used to lose all of them. The
+        // ledger is small and the DB lock is already held for the audit event.
+        // A failure costs the timeline markers and nothing else, so it does
+        // not fail the pause.
+        if let Err(error) = db.set_recording_pause_spans(recording_id, &snapshot.spans) {
+            tracing::warn!(
+                "Failed to persist pause spans for {}: {}",
+                recording_id,
+                error
+            );
+        }
+        let details = serde_json::json!({
+            "recording_id": recording_id,
+            "pause_count": snapshot.spans.len(),
+            "at_seconds": snapshot.spans.last().map(|span| span.at_seconds),
+            "closed_paused_ms": snapshot.closed_paused_ms,
+        });
+        let event = if pause {
+            "recording_paused"
+        } else {
+            "recording_resumed"
+        };
+        if let Err(error) = db.log_audit_event(event, Some(details), "info") {
+            tracing::warn!("Failed to log audit event: {}", error);
+        }
+    }
+    serde_json::to_value(snapshot).map_err(|error| error.to_string())
+}
+
+/// Why the capture monitor ended a meeting on its own.
+enum MeetingAutoStopReason {
+    CallEnded { app: &'static str },
+    Silence { minutes: u32 },
+}
+
+/// End a running meeting for `reason`, saying so on every surface first.
+///
+/// The `meeting-auto-stopped` event goes out before the stop so the shell can
+/// post its notification against a meeting that is still the active one; the
+/// stop itself is the ordinary stop path, so the audio lands, is hashed, and
+/// goes to transcription exactly as a click on Stop would have it.
+async fn auto_stop_meeting(
+    state: &Arc<AppState>,
+    handle: &crate::sidecar_handle::SidecarHandle,
+    recording_id: &str,
+    reason: MeetingAutoStopReason,
+) {
+    let (reason_key, message, app, silence_minutes) = match reason {
+        MeetingAutoStopReason::CallEnded { app } => (
+            "call_ended",
+            format!("{app} closed, so Plainsong stopped the meeting and is saving what it captured."),
+            Some(app),
+            None,
+        ),
+        MeetingAutoStopReason::Silence { minutes } => (
+            "silence",
+            format!("Nothing audible for {minutes} minutes, so Plainsong stopped the meeting and is saving what it captured."),
+            None,
+            Some(minutes),
+        ),
+    };
+    tracing::info!("Auto-stopping meeting {}: {}", recording_id, message);
+    handle.emit_event(
+        "meeting-auto-stopped",
+        serde_json::json!({
+            "recordingId": recording_id,
+            "reason": reason_key,
+            "app": app,
+            "silenceMinutes": silence_minutes,
+            "message": &message,
+        }),
+    );
+    emit_meeting_capture_warning(state.as_ref(), handle, recording_id, &message);
+    {
+        let mut db = state.db.lock().await;
+        let _ = db.log_audit_event(
+            "recording_auto_stopped",
+            Some(serde_json::json!({
+                "recording_id": recording_id,
+                "reason": reason_key,
+                "app": app,
+                "silence_minutes": silence_minutes,
+            })),
+            "info",
+        );
+    }
+    if let Err(error) = stop_recording_for_sidecar(state, handle, recording_id.to_string()).await {
+        tracing::error!(
+            "Failed to auto-stop meeting {} ({}): {}",
+            recording_id,
+            reason_key,
+            error
+        );
+    }
+}
+
+/// How often the running applications are looked at for a live call.
+const MEETING_CALL_DETECTION_INTERVAL: Duration = Duration::from_secs(5);
+
+#[cfg(target_os = "macos")]
+fn accessibility_granted_for_call_detection() -> bool {
+    check_accessibility_permission()
+}
+
+#[cfg(not(target_os = "macos"))]
+fn accessibility_granted_for_call_detection() -> bool {
+    false
+}
+
+async fn meeting_call_status_for_sidecar(state: &AppState) -> serde_json::Value {
+    let enabled = state
+        .settings_manager
+        .lock()
+        .await
+        .settings()
+        .meetings
+        .call_detection_enabled;
+    let active_call = state
+        .meeting_call_detector
+        .lock()
+        .ok()
+        .and_then(|detector| detector.active().cloned());
+    let status = meeting_detect::MeetingCallStatus {
+        supported: cfg!(target_os = "macos"),
+        enabled,
+        accessibility_granted: accessibility_granted_for_call_detection(),
+        active_call,
+    };
+    serde_json::to_value(status).unwrap_or(serde_json::Value::Null)
+}
+
+fn emit_meeting_call_ended(
+    handle: &crate::sidecar_handle::SidecarHandle,
+    call: &meeting_detect::ActiveCall,
+    reason: meeting_detect::CallEndReason,
+) {
+    let mut payload = serde_json::to_value(call).unwrap_or_default();
+    if let serde_json::Value::Object(map) = &mut payload {
+        map.insert(
+            "reason".to_string(),
+            serde_json::to_value(reason).unwrap_or_default(),
+        );
+        map.insert(
+            "endedAt".to_string(),
+            serde_json::Value::String(chrono::Utc::now().to_rfc3339()),
+        );
+    }
+    tracing::info!(
+        "Detected {} call {} ended ({:?})",
+        call.app_label,
+        call.call_id,
+        reason
+    );
+    handle.emit_event("meeting-call-ended", payload);
+}
+
+/// One poll's worth of evidence, gathered off the async runtime because the
+/// Accessibility reads can block on an unresponsive app.
+#[cfg(target_os = "macos")]
+async fn sample_call_detection(state: &AppState) -> Option<meeting_detect::DetectorSample> {
+    // While Plainsong itself holds the microphone, "the input device is open
+    // somewhere" is true because of us, and says nothing about anyone else.
+    let self_holds_microphone = {
+        let audio = state.audio_capture.lock().await;
+        audio.is_dictating() || audio.is_recording() || audio.is_hands_free_monitor_active()
+    };
+    let accessibility_granted = check_accessibility_permission();
+    // The browser whose window a call was already found in, so this poll can
+    // still see that window close. Every other browser is left alone unless
+    // the microphone says something is going on — reading a Chromium browser's
+    // windows switches it into full accessibility mode for good.
+    let active_call_bundle_id = state
+        .meeting_call_detector
+        .lock()
+        .ok()
+        .and_then(|detector| detector.active().map(|call| call.bundle_id.clone()));
+    tokio::task::spawn_blocking(move || {
+        // The microphone answer comes first: it is what decides whether this
+        // poll touches Accessibility at all.
+        let mic_running_elsewhere = if self_holds_microphone {
+            None
+        } else {
+            meeting_detect::default_input_device_running_somewhere()
+        };
+        let apps = meeting_detect::sample_running_apps(
+            accessibility_granted,
+            mic_running_elsewhere,
+            active_call_bundle_id.as_deref(),
+        );
+        meeting_detect::DetectorSample {
+            apps,
+            mic_running_elsewhere,
+        }
+    })
+    .await
+    .ok()
+}
+
+#[cfg(not(target_os = "macos"))]
+async fn sample_call_detection(_state: &AppState) -> Option<meeting_detect::DetectorSample> {
+    None
+}
+
+/// Watch for a live call and say so. Never starts a recording: every event
+/// this emits ends in an offer the user has to accept.
+///
+/// Reads the setting on every pass so turning detection off takes effect
+/// within one interval, and reports the call it was tracking as ended for
+/// that reason — which no auto-stop acts on.
+pub fn spawn_meeting_call_detection(
+    state: Arc<AppState>,
+    handle: crate::sidecar_handle::SidecarHandle,
+) {
+    tokio::spawn(async move {
+        loop {
+            tokio::time::sleep(MEETING_CALL_DETECTION_INTERVAL).await;
+            if state.sidecar_shutting_down.load(Ordering::SeqCst) {
+                return;
+            }
+            let enabled = state
+                .settings_manager
+                .lock()
+                .await
+                .settings()
+                .meetings
+                .call_detection_enabled;
+            if !enabled || !cfg!(target_os = "macos") {
+                let cleared = state
+                    .meeting_call_detector
+                    .lock()
+                    .ok()
+                    .and_then(|mut detector| detector.clear());
+                if let Some(call) = cleared {
+                    emit_meeting_call_ended(
+                        &handle,
+                        &call,
+                        meeting_detect::CallEndReason::DetectionDisabled,
+                    );
+                }
+                continue;
+            }
+            let Some(sample) = sample_call_detection(state.as_ref()).await else {
+                continue;
+            };
+            let now_ms = chrono::Utc::now().timestamp_millis();
+            let event = state
+                .meeting_call_detector
+                .lock()
+                .ok()
+                .and_then(|mut detector| detector.observe(&sample, now_ms));
+            match event {
+                Some(meeting_detect::DetectorEvent::Detected(call)) => {
+                    tracing::info!(
+                        "Detected a {} call ({:?} confidence)",
+                        call.app_label,
+                        call.confidence
+                    );
+                    handle.emit_event("meeting-call-detected", &call);
+                }
+                Some(meeting_detect::DetectorEvent::Ended { call, reason }) => {
+                    emit_meeting_call_ended(&handle, &call, reason);
+                }
+                None => {}
+            }
+        }
+    });
+}
 
 /// Announce a mid-meeting problem on both channels the user can actually see.
 ///
@@ -25936,10 +26814,23 @@ fn spawn_meeting_capture_monitor(
     state: Arc<AppState>,
     handle: crate::sidecar_handle::SidecarHandle,
     recording_id: String,
+    detected_call_id: Option<u64>,
 ) {
+    // The call this meeting is recorded alongside: the one whose offer the
+    // reader accepted, and only that one. Bound once, by exact id — a call
+    // that merely happens to be live when capture begins is somebody else's
+    // call, and its ending must not end this meeting.
+    let bound_call = state
+        .meeting_call_detector
+        .lock()
+        .ok()
+        .and_then(|detector| {
+            meeting_detect::bind_detected_call(detector.active(), detected_call_id)
+        });
     tokio::spawn(async move {
         let mut writer_failure_reported = false;
         let mut low_space_reported = false;
+        let mut silence_warning_reported = false;
         loop {
             tokio::time::sleep(MEETING_CAPTURE_MONITOR_INTERVAL).await;
 
@@ -25952,6 +26843,70 @@ fn spawn_meeting_capture_monitor(
             let Some(health) = health else {
                 return;
             };
+
+            let meetings_settings = state
+                .settings_manager
+                .lock()
+                .await
+                .settings()
+                .meetings
+                .clone();
+            if let Some((call_id, app)) = bound_call {
+                let ended = state
+                    .meeting_call_detector
+                    .lock()
+                    .ok()
+                    .and_then(|detector| detector.ended_reason(call_id));
+                if meeting_detect::auto_stop_for_call_end(
+                    meetings_settings.auto_stop_when_call_app_quits,
+                    ended,
+                ) {
+                    auto_stop_meeting(
+                        &state,
+                        &handle,
+                        &recording_id,
+                        MeetingAutoStopReason::CallEnded { app },
+                    )
+                    .await;
+                    return;
+                }
+            }
+            let silence_minutes = meetings_settings.auto_stop_after_silence_minutes;
+            if audio::silence_auto_stop_due(&health, silence_minutes) {
+                auto_stop_meeting(
+                    &state,
+                    &handle,
+                    &recording_id,
+                    MeetingAutoStopReason::Silence {
+                        minutes: silence_minutes,
+                    },
+                )
+                .await;
+                return;
+            }
+            // Said at half the fuse rather than only as the meeting ends: the
+            // threshold is a heuristic about room tone, and a quiet lecture
+            // deserves the chance to answer it while there is still a meeting
+            // to save. Re-arms whenever sound comes back, so a second quiet
+            // stretch is announced too.
+            if let Some(warn_after) = audio::silence_auto_stop_warning_minutes(silence_minutes) {
+                if audio::silence_auto_stop_warning_due(&health, silence_minutes) {
+                    if !silence_warning_reported {
+                        silence_warning_reported = true;
+                        emit_meeting_capture_warning(
+                            state.as_ref(),
+                            &handle,
+                            &recording_id,
+                            &format!(
+                                "No audio for {warn_after} minutes; Plainsong stops this meeting in {} unless sound resumes.",
+                                silence_minutes - warn_after
+                            ),
+                        );
+                    }
+                } else {
+                    silence_warning_reported = false;
+                }
+            }
 
             if !writer_failure_reported {
                 if let Some(reason) = health.writer_failure.as_deref() {
@@ -26288,11 +27243,26 @@ async fn stop_recording_for_sidecar_inner(
             capture_degradation.as_deref(),
         )
         .map_err(|error| error.to_string())?;
+        // The audio skips every pause, so this is the only record of where
+        // the gaps are; a failure to write it costs the timeline markers and
+        // nothing else, so it does not fail the stop.
+        if let Err(error) = db.set_recording_pause_spans(&recording_id, &stop_result.pause_spans) {
+            tracing::warn!(
+                "Failed to persist pause spans for {}: {}",
+                recording_id,
+                error
+            );
+        }
         let details = serde_json::json!({
             "recording_id": &recording_id, "audio_path": &audio_path,
             "duration_seconds": duration_seconds,
             "dropped_stream_chunks": stop_result.dropped_stream_chunks,
             "capture_degraded_summary": &capture_degradation,
+            "pause_count": stop_result.pause_spans.len(),
+            "paused_ms": recording_pause::paused_total_ms(
+                &stop_result.pause_spans,
+                chrono::Utc::now().timestamp_millis(),
+            ),
         });
         if let Err(error) = db.log_audit_event("recording_stopped", Some(details), "info") {
             tracing::warn!("Failed to log audit event: {}", error);
@@ -26558,6 +27528,8 @@ fn imported_recording_row(
         consent_notice_message: None,
         consent_notice_updated_at: None,
         analysis_failure: None,
+        pause_spans: Vec::new(),
+        video_service: None,
     }
 }
 
@@ -27558,6 +28530,33 @@ pub async fn dispatch_command(
             stop_recording_for_sidecar(state, handle, recording_id).await?;
             Ok(serde_json::Value::Null)
         }
+        "pause_recording" => {
+            let recording_id: String =
+                serde_json::from_value(params["recordingId"].clone()).map_err(|e| e.to_string())?;
+            set_recording_paused_for_sidecar(state, handle, &recording_id, true).await
+        }
+        "resume_recording" => {
+            let recording_id: String =
+                serde_json::from_value(params["recordingId"].clone()).map_err(|e| e.to_string())?;
+            set_recording_paused_for_sidecar(state, handle, &recording_id, false).await
+        }
+        "get_meeting_call_status" => Ok(meeting_call_status_for_sidecar(state).await),
+        "dismiss_detected_call" => {
+            // Scoped to one call: the detector only marks the call whose id
+            // this is, so a stale dismissal (the call already ended) changes
+            // nothing and the next call in the same app is offered again.
+            let call_id: u64 =
+                serde_json::from_value(params["callId"].clone()).map_err(|e| e.to_string())?;
+            let dismissed = state
+                .meeting_call_detector
+                .lock()
+                .map(|mut detector| detector.dismiss(call_id))
+                .unwrap_or(false);
+            if dismissed {
+                tracing::info!("Detected call {} dismissed by the user", call_id);
+            }
+            Ok(meeting_call_status_for_sidecar(state).await)
+        }
         "acknowledge_incomplete_transcript" => {
             // Storage policy holds a meeting's audio back while its transcript
             // is known incomplete, because that audio is the only complete
@@ -28056,6 +29055,34 @@ pub async fn dispatch_command(
                 serde_json::from_value(params["recordingId"].clone()).map_err(|e| e.to_string())?;
             open_recording_audio_impl(state.as_ref(), &recording_id).await?;
             Ok(serde_json::Value::Null)
+        }
+        "prepare_recording_playback" => {
+            let recording_id: String =
+                serde_json::from_value(params["recordingId"].clone()).map_err(|e| e.to_string())?;
+            let prepared = prepare_recording_playback_impl(state, handle, &recording_id).await?;
+            serde_json::to_value(prepared).map_err(|e| e.to_string())
+        }
+        "release_recording_playback" => {
+            // Two shapes: a token the reader is done with, or — from the
+            // privileged process alone, whose prepare failed after the token
+            // was minted — every token one recording holds.
+            if let Some(recording_id) = params
+                .get("recordingId")
+                .and_then(|value| value.as_str())
+                .filter(|value| !value.trim().is_empty())
+            {
+                let released =
+                    release_recording_playback_for_recording_impl(state.as_ref(), recording_id)
+                        .await?;
+                return Ok(serde_json::json!({
+                    "released": released > 0,
+                    "releasedCount": released,
+                }));
+            }
+            let token: String =
+                serde_json::from_value(params["token"].clone()).map_err(|e| e.to_string())?;
+            let released = release_recording_playback_impl(state.as_ref(), &token).await?;
+            Ok(serde_json::json!({ "released": released }))
         }
         "open_export_path" => {
             let target_path: String =
@@ -29635,6 +30662,49 @@ pub async fn dispatch_command(
             let result = db.get_audit_log().map_err(|e| e.to_string())?;
             serde_json::to_value(result).map_err(|e| e.to_string())
         }
+        // Main-process only (see `intentionallyUnreachableSidecarCommands` in
+        // scripts/verify-ipc-contract.mjs): records what a `plainsong://` deep
+        // link asked for and what the app did about it, so the audit log shows
+        // every external trigger next to the recordings it touched. The
+        // payload is a fixed set of short enum-like strings chosen by
+        // main.ts; no URL text or query payload is ever written here.
+        "record_automation_audit_event" => {
+            let action = params
+                .get("action")
+                .and_then(|v| v.as_str())
+                .map(str::trim)
+                .filter(|v| !v.is_empty() && v.len() <= 64)
+                .ok_or_else(|| "record_automation_audit_event needs an action".to_string())?;
+            let outcome = params
+                .get("outcome")
+                .and_then(|v| v.as_str())
+                .map(str::trim)
+                .filter(|v| !v.is_empty() && v.len() <= 64)
+                .ok_or_else(|| "record_automation_audit_event needs an outcome".to_string())?;
+            let source = params
+                .get("source")
+                .and_then(|v| v.as_str())
+                .map(str::trim)
+                .filter(|v| !v.is_empty() && v.len() <= 32)
+                .unwrap_or("deep_link");
+            let severity = if outcome == "performed" {
+                "info"
+            } else {
+                "warning"
+            };
+            let mut db = state.db.lock().await;
+            db.log_audit_event(
+                "automation.deep_link",
+                Some(serde_json::json!({
+                    "source": source,
+                    "action": action,
+                    "outcome": outcome,
+                })),
+                severity,
+            )
+            .map_err(|e| e.to_string())?;
+            Ok(serde_json::Value::Null)
+        }
         "get_dictation_history_details" => {
             let recording_id: String = serde_json::from_value(
                 params
@@ -30281,7 +31351,7 @@ pub async fn dispatch_command(
                 .get("target")
                 .and_then(|v| v.as_str())
                 .map(str::to_string);
-            let (recording, transcript) = {
+            let (recording, transcript, export_context) = {
                 let db = state.db.lock().await;
                 let recording = db
                     .get_recording(&recording_id)
@@ -30290,7 +31360,8 @@ pub async fn dispatch_command(
                 let transcript = db
                     .get_transcript(&recording_id)
                     .map_err(|e| e.to_string())?;
-                (recording, transcript)
+                let context = export_context_for_recording(&db, &recording_id);
+                (recording, transcript, context)
             };
             let validated_target = match target.as_deref() {
                 Some(path) => Some(validate_export_target_path(state.as_ref(), path).await?),
@@ -30301,6 +31372,7 @@ pub async fn dispatch_command(
                 transcript.as_ref(),
                 &format,
                 validated_target.as_deref(),
+                &export_context,
             )
             .map_err(|e| e.to_string())?;
             let mut db = state.db.lock().await;
@@ -30325,7 +31397,7 @@ pub async fn dispatch_command(
                 .get("preview")
                 .and_then(|v| v.as_bool())
                 .unwrap_or(false);
-            let (recording, transcript) = {
+            let (recording, transcript, export_context) = {
                 let db = state.db.lock().await;
                 let recording = db
                     .get_recording(&recording_id)
@@ -30334,7 +31406,8 @@ pub async fn dispatch_command(
                 let transcript = db
                     .get_transcript(&recording_id)
                     .map_err(|e| e.to_string())?;
-                (recording, transcript)
+                let context = export_context_for_recording(&db, &recording_id);
+                (recording, transcript, context)
             };
             let validated_target = match target.as_deref() {
                 Some(path) => Some(validate_export_target_path(state.as_ref(), path).await?),
@@ -30347,6 +31420,7 @@ pub async fn dispatch_command(
                 validated_target.as_deref(),
                 &redaction_level,
                 preview_mode,
+                &export_context,
             )
             .map_err(|e| e.to_string())?;
             let mut db = state.db.lock().await;
@@ -30466,7 +31540,14 @@ pub async fn dispatch_command(
                 }
             };
             let export_path_buf = std::path::PathBuf::from(&export_path);
-            write_template_export(&export_path_buf, rendered.as_bytes())?;
+            // A Docx template renders Markdown like the others; only the file
+            // it is written into differs.
+            let bytes = if template.format.is_binary() {
+                export::docx::markdown_to_docx(&rendered).map_err(|error| error.to_string())?
+            } else {
+                rendered.as_bytes().to_vec()
+            };
+            write_template_export(&export_path_buf, &bytes)?;
             let mut db = state.db.lock().await;
             let _ = db.log_audit_event("recording_template_exported", Some(serde_json::json!({"recording_id": &recording_id, "template_id": &template_id, "target": &export_path})), "info");
             serde_json::to_value(models::TemplateExportResponse {
@@ -30753,4 +31834,290 @@ pub async fn dispatch_command(
 
 pub fn audio_system_test_worker() -> audio::system_capture::SystemAudioTestResult {
     audio::system_capture::run_system_audio_test_worker(std::time::Duration::from_secs(45))
+}
+
+#[cfg(test)]
+mod playback_preparation_tests {
+    use super::*;
+
+    fn scratch_dir(label: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!(
+            "plainsong-playback-prep-{}-{}",
+            label,
+            uuid::Uuid::new_v4()
+        ));
+        std::fs::create_dir_all(&dir).expect("create scratch dir");
+        dir
+    }
+
+    fn write_wav(path: &Path) {
+        let mut writer = hound::WavWriter::create(
+            path,
+            hound::WavSpec {
+                channels: 1,
+                sample_rate: 16_000,
+                bits_per_sample: 16,
+                sample_format: hound::SampleFormat::Int,
+            },
+        )
+        .expect("create wav");
+        for index in 0..16_000_i32 {
+            writer
+                .write_sample(((index % 200) as i16 - 100) * 50)
+                .expect("write sample");
+        }
+        writer.finalize().expect("finalize wav");
+    }
+
+    fn asset(
+        path: PathBuf,
+        protection: recording_audio::RecordingAudioProtection,
+    ) -> recording_audio::RecordingAudioAsset {
+        asset_for_role(
+            path,
+            protection,
+            recording_audio::RecordingAudioRole::Primary,
+        )
+    }
+
+    fn asset_for_role(
+        path: PathBuf,
+        protection: recording_audio::RecordingAudioProtection,
+        role: recording_audio::RecordingAudioRole,
+    ) -> recording_audio::RecordingAudioAsset {
+        recording_audio::RecordingAudioAsset {
+            recording_id: "rec-playback".to_string(),
+            role,
+            path,
+            lifecycle: recording_audio::RecordingAudioLifecycle::Ready,
+            protection,
+            plaintext_bytes: None,
+            plaintext_sha256: None,
+            last_error: None,
+        }
+    }
+
+    fn encrypt_wav(dir: &Path, name: &str, key: &[u8; 32]) -> PathBuf {
+        let plain = dir.join(format!("{name}.wav"));
+        write_wav(&plain);
+        let encrypted = dir.join(format!("{name}.wav.enc"));
+        {
+            let mut reader = std::fs::File::open(&plain).expect("open plaintext");
+            let mut writer = std::fs::File::create(&encrypted).expect("create ciphertext");
+            crate::crypto::ProjectKeyManager::encrypt_stream(&mut reader, &mut writer, key, |_| {})
+                .expect("encrypt stream");
+        }
+        std::fs::remove_file(&plain).expect("remove plaintext source");
+        encrypted
+    }
+
+    fn encrypted_bundle(dir: &Path, key: &[u8; 32]) -> recording_audio::RecordingAudioBundle {
+        let encrypted = encrypt_wav(dir, "recording", key);
+        let mut bundle = recording_audio::RecordingAudioBundle::empty("rec-playback");
+        bundle
+            .insert(asset(
+                encrypted,
+                recording_audio::RecordingAudioProtection::Encrypted,
+            ))
+            .expect("insert asset");
+        bundle
+    }
+
+    #[test]
+    fn locked_vault_refuses_encrypted_playback_without_touching_disk() {
+        let dir = scratch_dir("locked");
+        let runtime = dir.join("runtime");
+        std::fs::create_dir_all(&runtime).expect("create runtime dir");
+        let bundle = encrypted_bundle(&dir, &[5u8; 32]);
+
+        let error = resolve_recording_audio_bundle_in_directory(
+            &bundle,
+            None,
+            &runtime,
+            std::slice::from_ref(&dir),
+            RuntimeAudioResolveMode::PlaybackPrimary,
+        )
+        .expect_err("locked vault must refuse");
+        assert!(error.contains("Vault is locked"), "{error}");
+        assert_eq!(
+            std::fs::read_dir(&runtime)
+                .expect("list runtime dir")
+                .count(),
+            0,
+            "no plaintext may be written while the vault is locked"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn encrypted_playback_decrypts_to_an_owner_only_temp_that_release_removes() {
+        let dir = scratch_dir("decrypt");
+        let runtime = dir.join("runtime");
+        std::fs::create_dir_all(&runtime).expect("create runtime dir");
+        let key = [5u8; 32];
+        let bundle = encrypted_bundle(&dir, &key);
+
+        let resolved = resolve_recording_audio_bundle_in_directory(
+            &bundle,
+            Some(&key),
+            &runtime,
+            std::slice::from_ref(&dir),
+            RuntimeAudioResolveMode::PlaybackPrimary,
+        )
+        .expect("unlocked vault resolves");
+        assert!(resolved.holds_temporary_files());
+        let temp = resolved.primary.clone();
+        assert!(temp.starts_with(&runtime), "temp lives in the runtime dir");
+        assert!(temp.exists());
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = std::fs::metadata(&temp)
+                .expect("stat temp")
+                .permissions()
+                .mode();
+            assert_eq!(mode & 0o777, 0o600);
+        }
+        let reader = hound::WavReader::open(&temp).expect("decrypted temp is a WAV");
+        assert_eq!(reader.duration(), 16_000);
+
+        drop(resolved);
+        assert!(!temp.exists(), "releasing the playback deletes the temp");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn playback_decrypts_only_the_primary_track_of_a_dual_track_meeting() {
+        let dir = scratch_dir("dual");
+        let runtime = dir.join("runtime");
+        std::fs::create_dir_all(&runtime).expect("create runtime dir");
+        let key = [6u8; 32];
+        let mut bundle = recording_audio::RecordingAudioBundle::empty("rec-playback");
+        for (name, role) in [
+            ("primary", recording_audio::RecordingAudioRole::Primary),
+            ("mic", recording_audio::RecordingAudioRole::Mic),
+            ("system", recording_audio::RecordingAudioRole::System),
+        ] {
+            bundle
+                .insert(asset_for_role(
+                    encrypt_wav(&dir, name, &key),
+                    recording_audio::RecordingAudioProtection::Encrypted,
+                    role,
+                ))
+                .expect("insert asset");
+        }
+
+        let resolved = resolve_recording_audio_bundle_in_directory(
+            &bundle,
+            Some(&key),
+            &runtime,
+            std::slice::from_ref(&dir),
+            RuntimeAudioResolveMode::PlaybackPrimary,
+        )
+        .expect("dual-track meeting resolves for playback");
+        assert!(
+            resolved.mic.is_none(),
+            "playback never serves the mic track"
+        );
+        assert!(resolved.system.is_none(), "nor the system track");
+        assert_eq!(
+            std::fs::read_dir(&runtime)
+                .expect("list runtime dir")
+                .count(),
+            1,
+            "one decrypted file, not one per track"
+        );
+        assert!(resolved.primary.starts_with(&runtime));
+
+        // The full mode still resolves every track, for post-processing.
+        let all = resolve_recording_audio_bundle_in_directory(
+            &bundle,
+            Some(&key),
+            &runtime,
+            std::slice::from_ref(&dir),
+            RuntimeAudioResolveMode::Full,
+        )
+        .expect("post-processing resolves every track");
+        assert!(all.mic.is_some() && all.system.is_some());
+        drop(all);
+        drop(resolved);
+        assert_eq!(
+            std::fs::read_dir(&runtime)
+                .expect("list runtime dir")
+                .count(),
+            0,
+            "every temporary is deleted on release"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn playback_refuses_a_decrypted_track_whose_length_contradicts_the_database() {
+        let dir = scratch_dir("length");
+        let runtime = dir.join("runtime");
+        std::fs::create_dir_all(&runtime).expect("create runtime dir");
+        let key = [8u8; 32];
+        let mut primary = asset(
+            encrypt_wav(&dir, "primary", &key),
+            recording_audio::RecordingAudioProtection::Encrypted,
+        );
+        primary.plaintext_bytes = Some(17);
+        let mut bundle = recording_audio::RecordingAudioBundle::empty("rec-playback");
+        bundle.insert(primary).expect("insert asset");
+
+        let error = resolve_recording_audio_bundle_in_directory(
+            &bundle,
+            Some(&key),
+            &runtime,
+            std::slice::from_ref(&dir),
+            RuntimeAudioResolveMode::PlaybackPrimary,
+        )
+        .expect_err("a length that contradicts the database must fail");
+        assert!(error.contains("does not match stored metadata"), "{error}");
+        assert_eq!(
+            std::fs::read_dir(&runtime)
+                .expect("list runtime dir")
+                .count(),
+            0,
+            "the rejected plaintext is removed"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn plaintext_playback_serves_the_stored_file_without_a_temp() {
+        let dir = scratch_dir("plain");
+        let runtime = dir.join("runtime");
+        std::fs::create_dir_all(&runtime).expect("create runtime dir");
+        let stored = dir.join("recording.wav");
+        write_wav(&stored);
+        let mut bundle = recording_audio::RecordingAudioBundle::empty("rec-playback");
+        bundle
+            .insert(asset(
+                stored.clone(),
+                recording_audio::RecordingAudioProtection::Plaintext,
+            ))
+            .expect("insert asset");
+
+        let resolved = resolve_recording_audio_bundle_in_directory(
+            &bundle,
+            None,
+            &runtime,
+            std::slice::from_ref(&dir),
+            RuntimeAudioResolveMode::PlaybackPrimary,
+        )
+        .expect("plaintext resolves without a key");
+        assert!(!resolved.holds_temporary_files());
+        assert_eq!(
+            resolved.primary,
+            stored.canonicalize().expect("canonical stored path")
+        );
+        assert_eq!(
+            std::fs::read_dir(&runtime)
+                .expect("list runtime dir")
+                .count(),
+            0
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 }

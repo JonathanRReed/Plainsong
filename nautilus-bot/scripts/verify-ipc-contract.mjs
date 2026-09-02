@@ -103,6 +103,7 @@ const intentionallyUnreachableSidecarCommands = new Set([
   // Takes a filesystem path, so only the Electron main process may call it —
   // and only with a path the user just chose in a native open dialog.
   "import_audio_file",
+  "record_automation_audit_event",
   "start_recording",
   "stop_recording",
 ]);

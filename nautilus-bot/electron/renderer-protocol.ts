@@ -1,18 +1,34 @@
 import path from "path";
+import { PLAYBACK_TOKEN_PATTERN } from "./playback-tokens";
 
 export const RENDERER_SCHEME = "plainsong";
 export const RENDERER_HOST = "bundle";
+
+/**
+ * Host of the in-app audio playback route, `plainsong://playback/<token>`.
+ *
+ * Deliberately not `bundle`: playback is not an asset of the renderer but a
+ * token-gated stream the main process resolves per request. Its own origin
+ * means `media-src` has to name it explicitly (below), and nothing under the
+ * bundle host can ever be mistaken for a playback route.
+ */
+const PLAYBACK_HOST = "playback";
 
 /**
  * The renderer's Content-Security-Policy, exactly as index.html carries it.
  *
  * Kept here so the meta tag and the response header cannot drift: the test
  * beside this module reads index.html and asserts the two agree.
+ *
+ * `media-src` names `plainsong://playback` on purpose: the in-app player
+ * streams from that origin, which is not `'self'` for a document served from
+ * `plainsong://bundle` (nor for the dev server). Nothing else may be a media
+ * source.
  */
 export const RENDERER_CSP_META_DIRECTIVES =
   "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; " +
   "img-src 'self' data: blob:; font-src 'self' data:; connect-src 'self'; " +
-  "media-src 'self' data: blob:; object-src 'none'; base-uri 'self'; " +
+  "media-src 'self' plainsong://playback data: blob:; object-src 'none'; base-uri 'self'; " +
   "frame-src 'none'; form-action 'self'";
 
 /**
@@ -108,4 +124,30 @@ export function resolveRendererAssetPath(rendererRoot: string, rawUrl: string): 
   }
 
   return resolvedAsset;
+}
+
+export function playbackUrl(token: string): string {
+  return `${RENDERER_SCHEME}://${PLAYBACK_HOST}/${token}`;
+}
+
+/**
+ * The token a playback URL names, or null unless the URL is exactly
+ * `plainsong://playback/<32 hex characters>`: no query, no fragment, no
+ * extra path. Anything looser is refused before it reaches the token map.
+ */
+export function playbackTokenFromUrl(rawUrl: string): string | null {
+  let url: URL;
+  try {
+    url = new URL(rawUrl);
+  } catch {
+    return null;
+  }
+  if (url.protocol !== `${RENDERER_SCHEME}:` || url.host !== PLAYBACK_HOST) {
+    return null;
+  }
+  if (url.search || url.hash) {
+    return null;
+  }
+  const token = url.pathname.replace(/^\/+/, "");
+  return PLAYBACK_TOKEN_PATTERN.test(token) ? token : null;
 }

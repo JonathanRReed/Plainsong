@@ -73,6 +73,19 @@ export function videoServiceLabel(service: CalendarVideoService): string {
 }
 
 /**
+ * The label for a service key that came back from storage, or nothing.
+ *
+ * A recording carries the same key a calendar event does, but it arrives as a
+ * plain string from a database that may predate the column or hold a key this
+ * build no longer knows. Saying nothing is the right answer for both.
+ */
+export function storedVideoServiceLabel(service: string | null | undefined): string | null {
+  return service && Object.prototype.hasOwnProperty.call(VIDEO_SERVICE_LABELS, service)
+    ? VIDEO_SERVICE_LABELS[service as CalendarVideoService]
+    : null;
+}
+
+/**
  * How far ahead an event is worth mentioning.
  *
  * A meeting three hours away is not something to put a button in front of; the

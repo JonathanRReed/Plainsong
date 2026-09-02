@@ -11,7 +11,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, VecDeque};
 #[cfg(target_os = "macos")]
 use std::process::{Command, Stdio};
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
@@ -35,6 +35,15 @@ const SOURCE_RMS_WINDOW_SECONDS: f32 = 1.0;
 /// (or a loopback with nothing playing) sits at or near zero.
 const SOURCE_SILENCE_RMS_THRESHOLD: f32 = 1.0e-4;
 
+/// RMS below which a window counts as *nothing audible* (about -45 dBFS): a
+/// live microphone in a quiet room, a loopback with nobody talking. Distinct
+/// from digital silence above, which is the fault signal for a device that
+/// went away. Speech at any normal distance from a microphone sits well above
+/// this over a one-second window; what falls under it is room tone. This is a
+/// heuristic, and the meeting monitor treats it as one: it drives an
+/// auto-stop with a fuse measured in minutes, never anything faster.
+const SOURCE_INACTIVITY_RMS_THRESHOLD: f32 = 5.6e-3;
+
 /// How many consecutive [`SOURCE_RMS_WINDOW_SECONDS`] windows must be mostly
 /// padded before starvation counts as corroboration.
 ///
@@ -54,7 +63,7 @@ const SOURCE_STARVATION_CORROBORATION_WINDOWS: u64 = 5;
 /// signal. A loopback device legitimately reads as exact zeros the entire time
 /// nobody on the far side is playing audio — which is most of a meeting where
 /// you are the one talking — so silence there says nothing on its own.
-struct SourceSilenceProfile {
+pub(crate) struct SourceSilenceProfile {
     /// How long a previously-active source must stay digitally silent before
     /// the capture thread warns the UI.
     warn_after_seconds: f32,
@@ -72,7 +81,7 @@ struct SourceSilenceProfile {
 
 /// Digital silence from a microphone is itself the fault signal, so 30s of it
 /// is warned about on its own.
-const MIC_SILENCE_PROFILE: SourceSilenceProfile = SourceSilenceProfile {
+pub(crate) const MIC_SILENCE_PROFILE: SourceSilenceProfile = SourceSilenceProfile {
     warn_after_seconds: 30.0,
     require_starvation_evidence: false,
 };
@@ -292,6 +301,65 @@ impl SourceResampler {
     }
 }
 
+/// Mixed frames the capture thread drained and then threw away because the
+/// meeting was paused.
+///
+/// The mixer keeps counting through a pause — the devices are still open so
+/// resume is instant, and the frames are dropped after they are drained, not
+/// before. `captured_seconds` in the degradation sentence is derived from that
+/// count, so without this a meeting paused for twenty minutes claimed twenty
+/// minutes of captured audio the file does not contain.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub(crate) struct DiscardedPausedFrames(u64);
+
+impl DiscardedPausedFrames {
+    pub(crate) fn discard(&mut self, frames: u64) {
+        self.0 = self.0.saturating_add(frames);
+    }
+
+    /// Of `total_mixed` frames the mixer emitted, the ones that were kept.
+    pub(crate) fn captured(self, total_mixed: u64) -> u64 {
+        total_mixed.saturating_sub(self.0)
+    }
+}
+
+/// Release the mixer's alignment hold-back at teardown, and report how many
+/// frames it produced.
+///
+/// Both devices are gone by the time this runs, so whatever the mixer is still
+/// holding back has to be flushed and padded rather than truncating one track
+/// relative to the others — unless the meeting is stopping *while paused*. The
+/// hold-back is then audio the devices delivered during the pause, and
+/// appending it would put the paused sound at the end of the file the pause
+/// promised to keep it out of. It is drained either way, because the mixer's
+/// counters are what the degradation summary reads; only the samples are
+/// dropped.
+fn release_alignment_holdback(
+    mixer: &mut FrameMixer,
+    paused: bool,
+    mixed_out: &mut Vec<f32>,
+    mic_out: &mut Vec<f32>,
+    system_out: &mut Vec<f32>,
+) -> u64 {
+    let mixed_before = mixed_out.len();
+    let mic_before = mic_out.len();
+    let system_before = system_out.len();
+    let mut frames = 0u64;
+    loop {
+        let drained = mixer.drain_into(true, true, mixed_out, mic_out, system_out);
+        if drained == 0 {
+            break;
+        }
+        frames += drained as u64;
+    }
+    if paused {
+        mixed_out.truncate(mixed_before);
+        mic_out.truncate(mic_before);
+        system_out.truncate(system_before);
+    }
+    frames
+}
+
 /// Rolling-RMS silence watchdog for one capture source.
 ///
 /// cpal only reports device failures through the stream error callback, and a
@@ -303,7 +371,12 @@ impl SourceResampler {
 /// What counts as "a while", and whether silence alone is enough, comes from
 /// the source's [`SourceSilenceProfile`] — see there for why a loopback cannot
 /// be judged by the same rule as a microphone.
-struct SourceSilenceWatchdog {
+///
+/// The same RMS windows also track *inactivity* — how long the source has
+/// carried nothing audible, see [`SOURCE_INACTIVITY_RMS_THRESHOLD`] — which
+/// the meeting monitor reads to end a meeting nobody is in any more. One
+/// detector, two thresholds, so the two never disagree about what they heard.
+pub(crate) struct SourceSilenceWatchdog {
     sample_rate: f32,
     window_frames: u64,
     warn_after_frames: u64,
@@ -311,6 +384,10 @@ struct SourceSilenceWatchdog {
     frames_in_window: u64,
     window_sum_squares: f64,
     silent_frames: u64,
+    /// Consecutive frames under the inactivity threshold, counted from the
+    /// first window (a source that never carried anything audible is inactive
+    /// from the start).
+    inactive_frames: u64,
     /// Frames the mixer had to pad for this source within the window currently
     /// being filled.
     starved_frames_in_window: u64,
@@ -323,7 +400,7 @@ struct SourceSilenceWatchdog {
 }
 
 impl SourceSilenceWatchdog {
-    fn new(sample_rate: u32, profile: &SourceSilenceProfile) -> Self {
+    pub(crate) fn new(sample_rate: u32, profile: &SourceSilenceProfile) -> Self {
         let sample_rate = sample_rate.max(1);
         let window_frames = ((sample_rate as f32) * SOURCE_RMS_WINDOW_SECONDS)
             .round()
@@ -339,11 +416,19 @@ impl SourceSilenceWatchdog {
             frames_in_window: 0,
             window_sum_squares: 0.0,
             silent_frames: 0,
+            inactive_frames: 0,
             starved_frames_in_window: 0,
             consecutive_starved_windows: 0,
             was_active: false,
             warned: false,
         }
+    }
+
+    /// How long the source has carried nothing audible, in seconds; zero the
+    /// moment a window crosses the inactivity threshold. Whole windows only,
+    /// so it lags real time by under a second.
+    pub(crate) fn inactive_seconds(&self) -> f32 {
+        self.inactive_frames as f32 / self.sample_rate
     }
 
     /// Feed the frames just written for this source, along with how many of
@@ -353,7 +438,7 @@ impl SourceSilenceWatchdog {
     /// crosses its warning threshold after having been active; `None`
     /// otherwise. Re-arms once the source carries audio again, so a second
     /// dropout warns again.
-    fn observe(&mut self, samples: &[f32], padded_frames: u64) -> Option<f32> {
+    pub(crate) fn observe(&mut self, samples: &[f32], padded_frames: u64) -> Option<f32> {
         // Drains are far shorter than a window, so attributing a drain's
         // padding to the window it lands in is exact in practice and never off
         // by more than one drain at a boundary.
@@ -372,6 +457,12 @@ impl SourceSilenceWatchdog {
             let starved_frames = std::mem::take(&mut self.starved_frames_in_window);
             self.window_sum_squares = 0.0;
             self.frames_in_window = 0;
+
+            if rms < SOURCE_INACTIVITY_RMS_THRESHOLD {
+                self.inactive_frames = self.inactive_frames.saturating_add(window_frames);
+            } else {
+                self.inactive_frames = 0;
+            }
 
             if rms >= SOURCE_SILENCE_RMS_THRESHOLD {
                 self.was_active = true;
@@ -950,6 +1041,14 @@ pub struct MixedAudioCapture {
     dropped_mic_samples: Arc<AtomicU64>,
     dropped_system_samples: Arc<AtomicU64>,
     dropped_mixed_chunks: Arc<AtomicU64>,
+    /// Which sources this session captures, so the inactivity readout can say
+    /// "not captured" rather than "silent" for a source that was never asked
+    /// for.
+    sources: (bool, bool),
+    /// Whole seconds each source has carried nothing audible, published out of
+    /// the capture thread for the meeting monitor's silence auto-stop.
+    mic_inactive_seconds: Arc<AtomicU32>,
+    system_inactive_seconds: Arc<AtomicU32>,
     /// Frames the mixer had to invent because a source delivered nothing,
     /// published out of the capture thread so the stop path can say which
     /// sources were silent and for how long. Without these the mixed WAV is
@@ -973,6 +1072,14 @@ pub struct MixedCaptureOutcome {
     pub mic_padded_frames: u64,
     pub system_padded_frames: u64,
     pub mixed_frames: u64,
+}
+
+/// How long each captured source has carried nothing audible. `None` for a
+/// source this session does not capture.
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
+pub struct SourceInactivity {
+    pub mic_seconds: Option<f32>,
+    pub system_seconds: Option<f32>,
 }
 
 pub struct MixedAudioChunk {
@@ -2272,6 +2379,9 @@ fn run_system_audio_test_process(
 impl MixedAudioCapture {
     pub fn new() -> Self {
         Self {
+            sources: (false, false),
+            mic_inactive_seconds: Arc::new(AtomicU32::new(0)),
+            system_inactive_seconds: Arc::new(AtomicU32::new(0)),
             is_capturing: Arc::new(AtomicBool::new(false)),
             capture_thread: None,
             dropped_mic_samples: Arc::new(AtomicU64::new(0)),
@@ -2297,6 +2407,8 @@ impl MixedAudioCapture {
         streaming_queue: Option<Arc<crossbeam::queue::ArrayQueue<Vec<f32>>>>,
         capture_failure: Arc<Mutex<Option<String>>>,
         events: Option<MixedCaptureEvents>,
+        paused: Arc<AtomicBool>,
+        recorded_frames: Arc<AtomicU64>,
     ) -> Result<MixedAudioCaptureStart> {
         if !capture_mic && !capture_system {
             return Err(anyhow::anyhow!("Must capture at least one audio source"));
@@ -2307,12 +2419,17 @@ impl MixedAudioCapture {
         }
 
         self.is_capturing.store(true, Ordering::SeqCst);
+        self.sources = (capture_mic, capture_system);
         self.dropped_mic_samples.store(0, Ordering::SeqCst);
         self.dropped_system_samples.store(0, Ordering::SeqCst);
         self.dropped_mixed_chunks.store(0, Ordering::SeqCst);
         self.mic_padded_frames.store(0, Ordering::SeqCst);
         self.system_padded_frames.store(0, Ordering::SeqCst);
         self.mixed_frames.store(0, Ordering::SeqCst);
+        self.mic_inactive_seconds.store(0, Ordering::SeqCst);
+        self.system_inactive_seconds.store(0, Ordering::SeqCst);
+        let published_mic_inactive = Arc::clone(&self.mic_inactive_seconds);
+        let published_system_inactive = Arc::clone(&self.system_inactive_seconds);
 
         let (aligned_sender, aligned_receiver) =
             crossbeam::channel::bounded::<MixedAudioChunk>(100);
@@ -2487,6 +2604,7 @@ impl MixedAudioCapture {
             let _ = activated_tx.send(Ok(()));
 
             let mut mixer = FrameMixer::new(capture_mic, capture_system);
+            let mut discarded_paused_frames = DiscardedPausedFrames::default();
             let mut mic_watchdog = capture_mic
                 .then(|| SourceSilenceWatchdog::new(target_sample_rate, &MIC_SILENCE_PROFILE));
             let mut system_watchdog = capture_system
@@ -2905,14 +3023,37 @@ impl MixedAudioCapture {
                 // every pass so the stop path still gets a truthful summary if
                 // the capture thread has to be abandoned at teardown.
                 let padded_now = mixer.counts();
+                // Paused: the devices keep running so resume is instant and
+                // the mixer's alignment survives, but the frames just drained
+                // go nowhere — not the file, not the preview, not the
+                // watchdogs (a pause is not a device that died, and it must
+                // not count toward the silence auto-stop either), and not
+                // toward the captured seconds the degradation sentence quotes.
+                let is_paused = paused.load(Ordering::Relaxed);
+                if is_paused {
+                    discarded_paused_frames.discard(padded_now.mixed - padded_before.mixed);
+                }
                 published_mic_padded.store(padded_now.mic_padded, Ordering::Relaxed);
                 published_system_padded.store(padded_now.system_padded, Ordering::Relaxed);
-                published_mixed_frames.store(padded_now.mixed, Ordering::Relaxed);
+                published_mixed_frames.store(
+                    discarded_paused_frames.captured(padded_now.mixed),
+                    Ordering::Relaxed,
+                );
+
+                if is_paused {
+                    output.truncate(mixed_before);
+                    mic_output.truncate(mic_before);
+                    system_output.truncate(system_before);
+                    continue;
+                }
+
                 if let Some(watchdog) = mic_watchdog.as_mut() {
                     let padded = padded_now.mic_padded - padded_before.mic_padded;
                     if let Some(seconds) = watchdog.observe(&mic_output[mic_before..], padded) {
                         emit_source_silence_warning(events.as_ref(), "mic", seconds);
                     }
+                    published_mic_inactive
+                        .store(watchdog.inactive_seconds() as u32, Ordering::Relaxed);
                 }
                 if let Some(watchdog) = system_watchdog.as_mut() {
                     let padded = padded_now.system_padded - padded_before.system_padded;
@@ -2920,6 +3061,8 @@ impl MixedAudioCapture {
                     {
                         emit_source_silence_warning(events.as_ref(), "system", seconds);
                     }
+                    published_system_inactive
+                        .store(watchdog.inactive_seconds() as u32, Ordering::Relaxed);
                 }
 
                 if let Ok(mut waveform) = waveform_buffer.lock() {
@@ -2932,6 +3075,7 @@ impl MixedAudioCapture {
 
                 if output.len() >= 512 {
                     let mixed = std::mem::take(&mut output);
+                    recorded_frames.fetch_add(mixed.len() as u64, Ordering::Relaxed);
                     if let Some(queue) = streaming_queue.as_ref() {
                         if queue.push(mixed.clone()).is_err() {
                             let _ = queue.pop();
@@ -2950,14 +3094,23 @@ impl MixedAudioCapture {
                 }
             }
 
-            // Both devices are gone by now, so release whatever was still held
-            // back for alignment and pad the tail rather than truncating one
-            // track relative to the others.
-            while mixer.drain_into(true, true, &mut output, &mut mic_output, &mut system_output) > 0
-            {
+            // Release whatever the mixer was still holding back for alignment.
+            // A stop that lands while the meeting is paused keeps none of it:
+            // that hold-back is paused audio.
+            let stopped_while_paused = paused.load(Ordering::Relaxed);
+            let tail_frames = release_alignment_holdback(
+                &mut mixer,
+                stopped_while_paused,
+                &mut output,
+                &mut mic_output,
+                &mut system_output,
+            );
+            if stopped_while_paused {
+                discarded_paused_frames.discard(tail_frames);
             }
 
             if !output.is_empty() {
+                recorded_frames.fetch_add(output.len() as u64, Ordering::Relaxed);
                 if let Some(queue) = streaming_queue.as_ref() {
                     if queue.push(output.clone()).is_err() {
                         let _ = queue.pop();
@@ -2975,7 +3128,10 @@ impl MixedAudioCapture {
             let counts = mixer.counts();
             published_mic_padded.store(counts.mic_padded, Ordering::Relaxed);
             published_system_padded.store(counts.system_padded, Ordering::Relaxed);
-            published_mixed_frames.store(counts.mixed, Ordering::Relaxed);
+            published_mixed_frames.store(
+                discarded_paused_frames.captured(counts.mixed),
+                Ordering::Relaxed,
+            );
             if counts.mic_padded > 0 || counts.system_padded > 0 {
                 tracing::warn!(
                     "Mixed audio capture padded starved sources with silence (mic={}, system={}, of {} mixed frames)",
@@ -3042,6 +3198,21 @@ impl MixedAudioCapture {
             }
         }
         tracing::info!("Mixed audio capture stopped");
+    }
+
+    /// How long each captured source has carried nothing audible, as last
+    /// published by the capture thread.
+    pub fn source_inactivity(&self) -> SourceInactivity {
+        SourceInactivity {
+            mic_seconds: self
+                .sources
+                .0
+                .then(|| self.mic_inactive_seconds.load(Ordering::Relaxed) as f32),
+            system_seconds: self
+                .sources
+                .1
+                .then(|| self.system_inactive_seconds.load(Ordering::Relaxed) as f32),
+        }
     }
 
     pub fn outcome(&self) -> MixedCaptureOutcome {
@@ -3896,6 +4067,60 @@ mod tests {
     }
 
     #[test]
+    fn stopping_while_paused_keeps_none_of_the_alignment_hold_back() {
+        // Both sources have delivered, so the mixer is holding frames back for
+        // alignment. A stop that lands while the meeting is paused must not
+        // append them: they are audio the devices delivered during the pause.
+        let mut mixer = FrameMixer::new(true, true);
+        mixer.push_mic(&[0.4; 512]);
+        mixer.push_system(&[0.2; 128]);
+        let mut mixed = vec![0.9; 8];
+        let mut mic = vec![0.9; 8];
+        let mut system = vec![0.9; 8];
+
+        let frames =
+            release_alignment_holdback(&mut mixer, true, &mut mixed, &mut mic, &mut system);
+        assert_eq!(frames, 512, "the hold-back is still drained");
+        assert_eq!(mixed.len(), 8, "and then dropped, keeping what came before");
+        assert_eq!(mic.len(), 8);
+        assert_eq!(system.len(), 8);
+
+        // The same teardown on a meeting that was not paused keeps every frame.
+        let mut mixer = FrameMixer::new(true, true);
+        mixer.push_mic(&[0.4; 512]);
+        mixer.push_system(&[0.2; 128]);
+        let mut mixed = vec![0.9; 8];
+        let mut mic = vec![0.9; 8];
+        let mut system = vec![0.9; 8];
+        let frames =
+            release_alignment_holdback(&mut mixer, false, &mut mixed, &mut mic, &mut system);
+        assert_eq!(frames, 512);
+        assert_eq!(mixed.len(), 8 + 512);
+        assert_eq!(mic.len(), 8 + 512);
+        assert_eq!(system.len(), 8 + 512);
+    }
+
+    #[test]
+    fn paused_frames_do_not_count_toward_the_captured_seconds() {
+        // The mixer counts through a pause because the frames are dropped
+        // after they are drained. `captured_seconds` is what landed in the
+        // file, so the paused ones have to come back off.
+        let mut discarded = DiscardedPausedFrames::default();
+        assert_eq!(discarded.captured(48_000 * 600), 48_000 * 600);
+
+        discarded.discard(48_000 * 120);
+        discarded.discard(48_000 * 60);
+        assert_eq!(
+            discarded.captured(48_000 * 600),
+            48_000 * 420,
+            "ten minutes of mixed frames, three of them paused"
+        );
+
+        // Never negative, however the counters are read.
+        assert_eq!(discarded.captured(0), 0);
+    }
+
+    #[test]
     fn mixer_passes_a_single_enabled_source_through_unchanged() {
         let mut mixer = FrameMixer::new(false, true);
         mixer.push_system(&[0.9; 32]);
@@ -3969,6 +4194,36 @@ mod tests {
         let expected = (partial.len() as f64 * 48_000.0 / 44_100.0).ceil() as usize;
         assert_eq!(output.len(), expected);
         assert!(resampler.pending.is_empty());
+    }
+
+    #[test]
+    fn watchdog_counts_inactivity_from_the_first_quiet_window_and_resets_on_speech() {
+        let sample_rate = 100;
+        let window = sample_rate as usize;
+        let mut watchdog = SourceSilenceWatchdog::new(sample_rate, &MIC_SILENCE_PROFILE);
+        assert_eq!(watchdog.inactive_seconds(), 0.0);
+
+        // Room tone: above digital silence, below anything audible. Counts as
+        // inactive from the very first window, without ever having been
+        // active — a meeting nobody spoke in is still a meeting nobody is in.
+        for _ in 0..3 {
+            assert!(watchdog.observe(&vec![1.0e-3; window], 0).is_none());
+        }
+        assert_eq!(watchdog.inactive_seconds(), 3.0);
+        // A partial window changes nothing until it fills.
+        assert!(watchdog.observe(&vec![1.0e-3; window / 2], 0).is_none());
+        assert_eq!(watchdog.inactive_seconds(), 3.0);
+
+        // Speech resets the run to zero at once.
+        assert!(watchdog
+            .observe(&vec![0.3; window - window / 2], 0)
+            .is_none());
+        assert_eq!(watchdog.inactive_seconds(), 0.0);
+
+        // And digital silence counts as inactive too (it is quieter still),
+        // while the fault warning keeps its own, separate rule.
+        assert!(watchdog.observe(&vec![0.0; window], 0).is_none());
+        assert_eq!(watchdog.inactive_seconds(), 1.0);
     }
 
     #[test]
