@@ -3,6 +3,7 @@ import crypto from "node:crypto";
 import { spawnSync } from "node:child_process";
 import fs from "node:fs";
 import path from "node:path";
+import { sidecarCargoFeatureArgs } from "./sidecar-cargo-features.mjs";
 
 const appRoot = path.resolve(import.meta.dirname, "..");
 const repositoryRoot = path.resolve(appRoot, "..");
@@ -131,6 +132,10 @@ function cargoMetadata() {
       "--locked",
       "--manifest-path",
       cargoManifestPath,
+      // Resolve the same feature set scripts/build-rust-sidecar.mjs ships on
+      // this host, so crates pulled in only by the macOS acceleration
+      // features (Metal, CoreML) get their notices too.
+      ...sidecarCargoFeatureArgs(),
     ],
     {
       cwd: appRoot,

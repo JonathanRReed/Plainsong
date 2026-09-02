@@ -15,14 +15,27 @@ All 742 tests pass.
 
 ### Candle Metal (item 4)
 Added `candle-metal` Cargo feature. `select_best_device()` tries Metal
-first with CPU fallback. Not in `default` or `asr-all` — opt-in for
-macOS builds.
+first with CPU fallback. Not in `default` or `asr-all`; since 2026-09-01
+the macOS release build enables it through
+`scripts/sidecar-cargo-features.mjs`, the one list shared by
+`build-rust-sidecar.mjs`, `lint:rust` / `test:rust` / `benchmark:latency`,
+CI, and the third-party notices generator. Measured on an M4 Pro with
+distil-large-v3.5: 0.96 s p50 on Metal vs 32.8 s on CPU F32 for a 5.3 s
+utterance, 2.6 s vs 55.5 s for 44 s of audio. Receipt:
+`artifacts/qa/acceleration-receipt-2026-09-01.md`.
 
 ### ONNX Runtime CoreML EP (item 5)
 Added `ort-coreml` Cargo feature and `ort_utils::build_session` helper
 with CoreML EP + CPU fallback. Applied to Silero VAD, diarization
 embedder, and Moonshine. NOT applied to Parakeet (known unstable with
-CoreML EP).
+CoreML EP). **Not shipped.** Measured 2026-09-01 on Moonshine base it is
+a regression: ~24 s of CoreML model compilation on first load (4.5 s on
+later launches vs 0.7 s CPU), the encoder split into 75 CoreML partitions,
+the merged decoder rejected by CoreML entirely (a single `If` node), and a
+slower steady state than plain CPU (1.7 s p50 CPU vs 2.1 s p50 / 5.6 s p95
+CoreML on the 44 s fixture). `scripts/sidecar-cargo-features.mjs` leaves it
+out of the release build; details and the Silero VAD numbers are in the
+receipt above.
 
 ### Qwen3-ASR 0.6B (item 7)
 New ONNX-based ASR provider. Encoder-decoder architecture with

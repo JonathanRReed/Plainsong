@@ -33,6 +33,16 @@ evidence is stale and must be recaptured before this becomes a candidate.
   replaces clipboard contents on every dictation and does not restore them.
 
 ### Changed
+- **The macOS sidecar now ships Candle's Metal backend** (`candle-metal`),
+  so the Distil-Whisper and Whisper large-v3-turbo providers run on the GPU
+  instead of CPU F32: distil-large-v3.5 goes from 32.8 s to 0.96 s p50 for a
+  5.3 s utterance on an M4 Pro. `scripts/sidecar-cargo-features.mjs` is now
+  the one list of macOS-only sidecar features, shared by the release build,
+  `lint:rust` / `test:rust` / `benchmark:latency`, CI, and the third-party
+  notices. The `ort-coreml` CoreML execution provider was measured as well
+  and deliberately left out: it regressed Moonshine (24 s first-load
+  compile, slower steady state). Receipt:
+  `artifacts/qa/acceleration-receipt-2026-09-01.md`.
 - **Parakeet TDT 0.6B v3 is now the default and recommended dictation
   model** (640 MB), because this repo's own benchmark shows whisper.cpp
   `base.en` mis-transcribing words it hasn't seen before — including

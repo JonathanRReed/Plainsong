@@ -710,6 +710,22 @@ fn main() {
         }
     };
 
+    // Route the providers' `tracing` lines to stderr (the sidecar's sink too)
+    // so a receipt captured from this binary also shows which compute path
+    // ran: "Candle using Metal GPU device", "Registering CoreML EP for ...",
+    // or the CPU fallback warnings. Without a subscriber those lines are
+    // dropped and an acceleration regression is invisible in the output.
+    // ONNX Runtime's per-graph-transformer INFO chatter (hundreds of lines per
+    // session) is muted by default; its WARN-level partition report still
+    // shows. `RUST_LOG` overrides the default filter.
+    tracing_subscriber::fmt()
+        .with_writer(std::io::stderr)
+        .with_env_filter(
+            tracing_subscriber::EnvFilter::try_from_default_env()
+                .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info,ort::logging=warn")),
+        )
+        .init();
+
     let runtime = tokio::runtime::Runtime::new().expect("tokio runtime");
     runtime.block_on(async move {
         let provider = AsrProviderFactory::create_with_model(args.provider_type, Some(&args.model));
