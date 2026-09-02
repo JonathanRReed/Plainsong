@@ -27474,7 +27474,13 @@ fn run_afconvert(
     }
     let mut child = std::process::Command::new("/usr/bin/afconvert")
         .args(audio_import::afconvert_args(source, destination))
-        .stdout(std::process::Stdio::piped())
+        // stdout is discarded rather than piped: nothing reads it until the
+        // child exits, and an unread pipe that fills would hang the very wait
+        // this function exists to bound. afconvert says nothing there anyway --
+        // verified that its refusals ("Error: Couldn't open input file") go to
+        // stderr, which stays piped because that sentence is what the reader
+        // needs.
+        .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::piped())
         .spawn()
         .map_err(|error| format!("Plainsong could not run the macOS audio converter: {error}"))?;
