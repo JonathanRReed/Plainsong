@@ -74,12 +74,15 @@ const AUDIT_LOG_APPEND_ONLY_TRIGGER_SQL: &str = "CREATE TRIGGER IF NOT EXISTS au
 /// Every application-owned table whose rows Reset Everything must remove.
 /// The delete SQL lives beside the classification so the schema-coverage test
 /// cannot classify a table as reset-scoped without also wiring it into purge.
-const RESET_SCOPED_TABLE_DELETES: [(&str, &str); 22] = [
+const RESET_SCOPED_TABLE_DELETES: [(&str, &str); 23] = [
     ("speaker_aliases", "DELETE FROM speaker_aliases"),
     ("transcript_fts", "DELETE FROM transcript_fts"),
     ("transcript_embeddings", "DELETE FROM transcript_embeddings"),
     ("transcript_artifacts", "DELETE FROM transcript_artifacts"),
     ("meeting_artifacts", "DELETE FROM meeting_artifacts"),
+    // A cached brief is model-written text about the reader's meetings. It
+    // has to go with them.
+    ("meeting_briefs", "DELETE FROM meeting_briefs"),
     ("insertion_actions", "DELETE FROM insertion_actions"),
     ("transcripts", "DELETE FROM transcripts"),
     (
@@ -1657,6 +1660,23 @@ impl Database {
         // already loaded. NULL for every meeting recorded before this existed,
         // which reads back as an empty list.
         self.ensure_table_column("recordings", "attendees", "TEXT")?;
+
+        // Cached pre-meeting briefs, one row per calendar event.
+        //
+        // `cache_key` is a hash of everything that went into the answer (see
+        // `meeting_brief::brief_cache_key`), so a row whose key no longer
+        // matches the current inputs is simply not returned -- there is no
+        // expiry to tune and no way to hand back a brief written from
+        // evidence that has since changed.
+        self.conn.execute(
+            "CREATE TABLE IF NOT EXISTS meeting_briefs (
+                event_id TEXT PRIMARY KEY,
+                cache_key TEXT NOT NULL,
+                payload TEXT NOT NULL,
+                created_at TEXT NOT NULL
+            )",
+            [],
+        )?;
 
         // Chunked meeting transcription survives per-chunk ASR failures and
         // still returns a transcript, so "completed" alone never meant "the
@@ -3888,6 +3908,38 @@ impl Database {
             params![meeting_template_id, now.to_rfc3339(), recording_id],
         )?;
         tx.commit()?;
+        Ok(())
+    }
+
+    /// The cached brief for an event, but only when it was written from the
+    /// same inputs. A key mismatch reads as "no cached brief".
+    pub fn get_meeting_brief(&self, event_id: &str, cache_key: &str) -> Result<Option<String>> {
+        let mut stmt = self
+            .conn
+            .prepare("SELECT payload FROM meeting_briefs WHERE event_id = ?1 AND cache_key = ?2")?;
+        let result = stmt.query_row(params![event_id, cache_key], |row| row.get::<_, String>(0));
+        match result {
+            Ok(payload) => Ok(Some(payload)),
+            Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
+            Err(error) => Err(error.into()),
+        }
+    }
+
+    pub fn save_meeting_brief(
+        &mut self,
+        event_id: &str,
+        cache_key: &str,
+        payload: &str,
+    ) -> Result<()> {
+        self.conn.execute(
+            "INSERT INTO meeting_briefs (event_id, cache_key, payload, created_at)
+             VALUES (?1, ?2, ?3, ?4)
+             ON CONFLICT(event_id) DO UPDATE SET
+                 cache_key = excluded.cache_key,
+                 payload = excluded.payload,
+                 created_at = excluded.created_at",
+            params![event_id, cache_key, payload, Utc::now().to_rfc3339()],
+        )?;
         Ok(())
     }
 
@@ -8468,6 +8520,32 @@ mod tests {
             .unwrap()
             .attendees
             .is_empty());
+    }
+
+    #[test]
+    fn a_cached_brief_only_comes_back_for_the_inputs_it_was_written_from() {
+        let mut db = in_memory_db();
+        assert!(db.get_meeting_brief("event-1", "key-a").unwrap().is_none());
+
+        db.save_meeting_brief("event-1", "key-a", "{\"brief\":\"first\"}")
+            .unwrap();
+        assert_eq!(
+            db.get_meeting_brief("event-1", "key-a").unwrap().as_deref(),
+            Some("{\"brief\":\"first\"}")
+        );
+        // A different input hash is a different brief, so the stored one is
+        // simply not offered -- there is no expiry to tune and no way to hand
+        // back an answer written from evidence that has since changed.
+        assert!(db.get_meeting_brief("event-1", "key-b").unwrap().is_none());
+
+        db.save_meeting_brief("event-1", "key-b", "{\"brief\":\"second\"}")
+            .unwrap();
+        assert_eq!(
+            db.get_meeting_brief("event-1", "key-b").unwrap().as_deref(),
+            Some("{\"brief\":\"second\"}"),
+            "one row per event; a refresh replaces rather than accumulates"
+        );
+        assert!(db.get_meeting_brief("event-1", "key-a").unwrap().is_none());
     }
 
     #[test]

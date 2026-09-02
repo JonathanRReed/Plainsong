@@ -13,6 +13,15 @@ changed underneath `0.9.0-beta.2`. See `LAUNCH.md` for which qualification
 evidence is stale and must be recaptured before this becomes a candidate.
 
 ### Added
+- A local pre-meeting brief. "Prepare" on a calendar cue reads meetings
+  already on this Mac that share an attendee or a normalized meeting name with
+  the one you are about to join, and writes a short brief — what was last
+  agreed, what is still open, what you owe anyone — citing the meetings it
+  came from. Related meetings are found and ranked locally; the only thing
+  that leaves the Mac is the prompt, down whichever AI lane you already chose
+  for meetings. With no analysis provider configured it shows the related
+  meetings and their open items instead of an error. Cached per event and
+  input, with a "Refresh".
 - Meetings started from a calendar cue now record who was invited. The macOS
   calendar helper reports each attendee's name (and the address the calendar
   had for them, when it had one); the meeting header shows them as chips with

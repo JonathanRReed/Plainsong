@@ -1,5 +1,6 @@
 import { invoke } from "@/lib/electron";
 import type { CalendarSnapshot } from "@/lib/calendar-events";
+import type { MeetingAttendee } from "@/lib/attendees";
 
 /**
  * The three calendar commands, and the line between them.
@@ -71,4 +72,76 @@ export async function openCalendarPrivacySettings(): Promise<void> {
   } catch (error) {
     console.warn("Could not open the calendar privacy settings:", error);
   }
+}
+
+/**
+ * Why a prior meeting is in a brief. Mirrors `RelatedMeetingReason` in
+ * rust-sidecar/src/meeting_brief.rs.
+ */
+export interface RelatedMeetingReason {
+  sharedAttendees: number;
+  titleMatch: boolean;
+}
+
+export interface RelatedMeeting {
+  recordingId: string;
+  title: string;
+  createdAt: string;
+  reason: RelatedMeetingReason;
+  /** Names only. The sidecar never puts an address in this. */
+  sharedAttendeeNames: string[];
+  summary: string | null;
+  openItems: string[];
+  decisions: string[];
+}
+
+export interface MeetingBriefCitation {
+  text: string;
+  lineId?: string | null;
+  segmentId?: string | null;
+  recordingId?: string | null;
+  certainty?: number | null;
+}
+
+export interface MeetingBriefResult {
+  eventId: string;
+  /**
+   * `ready` — a written brief with citations.
+   * `sources_only` — related meetings found, but no brief; `unavailableReason`
+   *   says why. This is what a Mac with no analysis provider gets, and the
+   *   panel shows the raw list instead of an error.
+   * `no_sources` — nothing on this Mac relates to this event.
+   */
+  state: "ready" | "sources_only" | "no_sources";
+  related: RelatedMeeting[];
+  brief: string | null;
+  citations: MeetingBriefCitation[];
+  grounded: boolean;
+  model: string | null;
+  actualProvider: string | null;
+  unavailableReason: string | null;
+  generatedAt: string | null;
+  cached: boolean;
+}
+
+/**
+ * Build (or re-read) the pre-meeting brief for a calendar event.
+ *
+ * Local data only: prior meetings on this Mac that share an attendee or a
+ * normalized title with this event. `refresh` skips the cache; without it a
+ * brief written from the same evidence comes straight back without a model
+ * call.
+ */
+export async function prepareMeetingBrief(request: {
+  eventId: string;
+  title: string;
+  attendees: MeetingAttendee[];
+  refresh?: boolean;
+}): Promise<MeetingBriefResult> {
+  return await invoke("prepare_meeting_brief", {
+    eventId: request.eventId,
+    title: request.title,
+    attendees: request.attendees,
+    refresh: request.refresh === true,
+  });
 }

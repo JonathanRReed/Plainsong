@@ -16,6 +16,7 @@ mod download;
 mod events;
 mod export;
 mod llm;
+pub mod meeting_brief;
 mod models;
 mod operation_coordinator;
 mod ort_utils;
@@ -1958,6 +1959,228 @@ async fn run_meeting_analysis_pass(
         );
         record_meeting_analysis_outcome(state, handle, recording_id, Some(&reason)).await;
     }
+}
+
+/// How far back the brief looks for related meetings.
+///
+/// The scan loads recordings newest-first and stops here, so the cost of
+/// "Prepare" does not grow with a lifetime meeting library. Six sources come
+/// out of it at most; a related meeting older than this is unlikely to have
+/// an item that is still open.
+const MEETING_BRIEF_SCAN_LIMIT: usize = 200;
+
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct MeetingBriefResult {
+    event_id: String,
+    /// "ready" — a written brief with citations.
+    /// "sources_only" — related meetings found, but no brief could be
+    ///   written; `unavailableReason` says why, and the renderer shows the
+    ///   raw list. This is the state a Mac with no AI route lands in.
+    /// "no_sources" — nothing on this Mac relates to this event.
+    state: String,
+    related: Vec<meeting_brief::RelatedMeeting>,
+    brief: Option<String>,
+    citations: Vec<llm::Citation>,
+    grounded: bool,
+    model: Option<String>,
+    actual_provider: Option<String>,
+    unavailable_reason: Option<String>,
+    generated_at: Option<chrono::DateTime<chrono::Utc>>,
+    /// True when this answer came back from the cache rather than a model.
+    cached: bool,
+}
+
+/// A pre-meeting brief, from local data only.
+///
+/// The only thing that leaves this Mac is the prompt, and only down the AI
+/// route the reader already chose for meetings. The evidence is prior
+/// recordings' own summaries, decisions and action items -- text that is
+/// already on disk -- and it travels as grounded lines, which `grounded.rs`
+/// fences and the shared system prompt declares untrusted. The instruction is
+/// the fixed `BRIEF_INSTRUCTION`; nothing the reader or a transcript wrote is
+/// ever concatenated into it.
+///
+/// A failure to reach a model is not an error here. It is the
+/// `sources_only` state, which still carries the related meetings and their
+/// open items -- which is most of what a brief is, and all of it on a Mac
+/// with no analysis provider configured.
+async fn prepare_meeting_brief(
+    state: &AppState,
+    params: serde_json::Value,
+) -> Result<serde_json::Value, String> {
+    let event_id: String =
+        serde_json::from_value(params["eventId"].clone()).map_err(|e| e.to_string())?;
+    let title: String =
+        serde_json::from_value(params["title"].clone()).map_err(|e| e.to_string())?;
+    let attendees: Vec<models::MeetingAttendee> = match params.get("attendees") {
+        None | Some(serde_json::Value::Null) => Vec::new(),
+        Some(value) => serde_json::from_value(value.clone()).map_err(|e| e.to_string())?,
+    };
+    let refresh = params
+        .get("refresh")
+        .and_then(serde_json::Value::as_bool)
+        .unwrap_or(false);
+
+    let target = meeting_brief::BriefTarget {
+        event_id: event_id.clone(),
+        title,
+        attendees: models::sanitize_meeting_attendees(attendees),
+    };
+
+    // Phase 1: rank on what a recording row already carries. Decisions live
+    // on the meeting artifact, which is a second query per meeting, so they
+    // are loaded only for the handful that survive the relation test.
+    let mut related = {
+        let db = state.db.lock().await;
+        let recordings = db.get_recordings(None).map_err(|e| e.to_string())?;
+        let candidates: Vec<meeting_brief::BriefCandidate> = recordings
+            .into_iter()
+            .take(MEETING_BRIEF_SCAN_LIMIT)
+            .map(|recording| meeting_brief::BriefCandidate {
+                recording_id: recording.id,
+                title: recording.title,
+                created_at: recording.created_at,
+                summary: recording.summary,
+                action_items: recording.action_items.unwrap_or_default(),
+                decisions: Vec::new(),
+                attendees: recording.attendees,
+            })
+            .collect();
+        let mut related = meeting_brief::related_meetings(&target, &candidates);
+        for meeting in &mut related {
+            if let Ok(Some(artifact)) = db.get_meeting_artifact(&meeting.recording_id) {
+                meeting.decisions = meeting_brief::clip_brief_items(&artifact.decisions);
+            }
+        }
+        related
+    };
+    // Decisions arrived after the ranking, so the clip is the only thing left
+    // to do; the order is already settled and must not shift under the reader
+    // between a Prepare and a Refresh.
+    related.truncate(meeting_brief::MAX_BRIEF_SOURCES);
+
+    let attendee_names = models::attendee_names_for_context(&target.attendees);
+
+    if related.is_empty() {
+        return serde_json::to_value(MeetingBriefResult {
+            event_id,
+            state: "no_sources".to_string(),
+            related,
+            brief: None,
+            citations: Vec::new(),
+            grounded: false,
+            model: None,
+            actual_provider: None,
+            unavailable_reason: None,
+            generated_at: None,
+            cached: false,
+        })
+        .map_err(|e| e.to_string());
+    }
+
+    let evidence = meeting_brief::brief_evidence_lines(&related);
+    let cache_key = meeting_brief::brief_cache_key(&target, &attendee_names, &evidence);
+
+    if !refresh {
+        let cached = {
+            let db = state.db.lock().await;
+            db.get_meeting_brief(&event_id, &cache_key)
+                .map_err(|e| e.to_string())?
+        };
+        if let Some(payload) = cached {
+            if let Ok(mut value) = serde_json::from_str::<serde_json::Value>(&payload) {
+                // The list is re-derived rather than cached with the answer:
+                // a related meeting could have been deleted since, and a
+                // panel offering a link to a row that is gone is worse than
+                // a slightly slower render.
+                value["related"] = serde_json::to_value(&related).map_err(|e| e.to_string())?;
+                value["cached"] = serde_json::Value::Bool(true);
+                return Ok(value);
+            }
+        }
+    }
+
+    let segments: Vec<AnalysisContextSegment> = evidence
+        .iter()
+        .map(|line| AnalysisContextSegment {
+            recording_id: line.recording_id.clone(),
+            segment_id: line.segment_id.clone(),
+            text: line.text.clone(),
+            // A brief cites a prior MEETING, not a moment inside one, so
+            // there is no timestamp to claim. Zero here rather than a
+            // fabricated offset the renderer would render as "0.0s - 0.0s"
+            // in a transcript that has no such line.
+            start_time: 0.0,
+            end_time: 0.0,
+        })
+        .collect();
+
+    let notes = meeting_brief::brief_context_notes(&target.title, &attendee_names);
+    let output = run_grounded_response_for_segments(
+        state,
+        segments,
+        meeting_brief::BRIEF_INSTRUCTION,
+        Some(&notes),
+        None,
+        llm::CompletionPurpose::Ask,
+        None,
+    )
+    .await;
+
+    let result = match output {
+        Ok(output) if !output.response.trim().is_empty() => MeetingBriefResult {
+            event_id: event_id.clone(),
+            state: "ready".to_string(),
+            related: related.clone(),
+            brief: Some(output.response),
+            citations: output.citations,
+            grounded: output.grounded,
+            model: Some(output.model),
+            actual_provider: Some(output.actual_provider),
+            unavailable_reason: None,
+            generated_at: Some(chrono::Utc::now()),
+            cached: false,
+        },
+        Ok(_) => MeetingBriefResult {
+            event_id: event_id.clone(),
+            state: "sources_only".to_string(),
+            related: related.clone(),
+            brief: None,
+            citations: Vec::new(),
+            grounded: false,
+            model: None,
+            actual_provider: None,
+            unavailable_reason: Some("The analysis provider returned an empty brief.".to_string()),
+            generated_at: None,
+            cached: false,
+        },
+        Err(error) => MeetingBriefResult {
+            event_id: event_id.clone(),
+            state: "sources_only".to_string(),
+            related: related.clone(),
+            brief: None,
+            citations: Vec::new(),
+            grounded: false,
+            model: None,
+            actual_provider: None,
+            unavailable_reason: Some(error),
+            generated_at: None,
+            cached: false,
+        },
+    };
+
+    let value = serde_json::to_value(&result).map_err(|e| e.to_string())?;
+    // Only a real brief is worth caching. Caching a failure would make a
+    // fixed AI route look broken until the evidence happened to change.
+    if result.state == "ready" {
+        let payload = value.to_string();
+        let mut db = state.db.lock().await;
+        if let Err(error) = db.save_meeting_brief(&event_id, &cache_key, &payload) {
+            tracing::warn!("Failed to cache the pre-meeting brief: {}", error);
+        }
+    }
+    Ok(value)
 }
 
 async fn run_grounded_response_for_segments(
@@ -26557,6 +26780,7 @@ pub async fn dispatch_command(
             }
             Ok(serde_json::Value::Null)
         }
+        "prepare_meeting_brief" => prepare_meeting_brief(state.as_ref(), params).await,
         "update_recording_attendees" => {
             let recording_id: String =
                 serde_json::from_value(params["recordingId"].clone()).map_err(|e| e.to_string())?;

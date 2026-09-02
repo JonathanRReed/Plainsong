@@ -82,6 +82,14 @@ Addresses are visible to you on hover in the meeting header, are included in a
 meeting export the same way the rest of the meeting is, and are deleted with
 the meeting.
 
+The pre-meeting brief follows the same rule. "Prepare" on a calendar cue
+searches only meetings already on this Mac — ones sharing an attendee or a
+meeting name — and sends their summaries, decisions and open items, plus the
+upcoming meeting's name and the invitees' NAMES, to the analysis provider you
+chose. No addresses, no calendar beyond that one event, and nothing fetched
+from anywhere. With no analysis provider configured, nothing is sent at all
+and the panel shows the related meetings it found locally.
+
 ## Permissions
 
 - Calendar is optional and only used to offer to start capture for a meeting

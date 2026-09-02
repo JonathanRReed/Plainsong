@@ -220,6 +220,7 @@ const ALLOWED_RENDERER_COMMANDS = new Set<string>([
   "open_calendar_privacy_settings",
   "open_permission_settings",
   "open_recording_audio",
+  "prepare_meeting_brief",
   "queue_dictation_correction_suggestion",
   "recopy_dictation_result",
   "refresh_asr_runtime_probes",

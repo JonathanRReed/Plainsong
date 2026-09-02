@@ -5941,6 +5941,12 @@ export function RecordingsView() {
         <CalendarMeetingCue
           captureInProgress={isRecording}
           onStartCapture={(prefill) => openMeetingCapture(prefill)}
+          onOpenMeeting={(recordingId) => {
+            const cited = recordings.find((entry) => entry.id === recordingId);
+            if (cited) {
+              openMeetingWorkspace(cited);
+            }
+          }}
         />
       </div>
 
