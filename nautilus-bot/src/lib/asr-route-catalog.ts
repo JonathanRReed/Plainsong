@@ -463,12 +463,23 @@ export function getLaneRoutes(
   );
 }
 
+/**
+ * The route the app recommends for a lane, or null when only experimental
+ * routes are compatible. Sorting already pushes experimental routes to the
+ * back, but a Qwen-only (or Candle-only) inventory would still surface one
+ * as "recommended" -- and the first-run wizard saves this as the meeting
+ * route -- so experimental routes are excluded outright rather than ranked.
+ */
 export function getRecommendedLaneRoute(
   routes: AsrRouteCatalogEntry[],
   lane: AsrRouteLane,
   meetingRoutePolicy: MeetingRoutePolicy,
 ) {
-  return getLaneRoutes(routes, lane, meetingRoutePolicy)[0] ?? null;
+  return (
+    getLaneRoutes(routes, lane, meetingRoutePolicy).find(
+      (route) => !route.experimental,
+    ) ?? null
+  );
 }
 
 export function buildAsrRouteCatalog(
