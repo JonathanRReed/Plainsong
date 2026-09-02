@@ -297,14 +297,43 @@ fn name_tokens(value: &str) -> Vec<String> {
         .collect()
 }
 
+/// The words of a line that are shaped like names: capitalized, and returned
+/// lowercased so they can be compared with `name_tokens`. Used only to decide
+/// whether a shortened first name may stand for a longer one, which is why the
+/// bar is "the transcript wrote it as a name", not "the transcript said it".
+fn capitalized_tokens(value: &str) -> Vec<String> {
+    value
+        .split(|character: char| !character.is_alphanumeric())
+        .filter(|token| {
+            token
+                .chars()
+                .next()
+                .is_some_and(|first| first.is_uppercase())
+        })
+        .map(|token| token.to_lowercase())
+        .collect()
+}
+
+/// The shortest owner token that may stand as a prefix of a longer name.
+/// Two characters ("Al", "Jo") match far too much to be evidence of anything.
+const MIN_PREFIX_OWNER_CHARS: usize = 3;
+
 /// Whether an owner the model proposed is actually supported.
 ///
 /// The model is told to fill `assignee` only from what the transcript states,
 /// but a model can still hand back a plausible name that nobody said. An owner
-/// counts as supported when it matches a speaker alias the person set, or when
-/// every word of it appears in the text of a line the item cites. Anything
-/// else is dropped: an invented owner on a real task is worse than no owner,
-/// because it reads as a commitment somebody made.
+/// counts as supported when:
+///
+/// - every word of it appears in a speaker alias the person set — "Priya"
+///   against the alias "Priya Raman" is the same person, and dropping it lost
+///   a correct owner; or
+/// - every word of it appears in the text of a line the item cites; or
+/// - it is a single word of at least three characters that begins a
+///   capitalized word in a cited line — "Jon" where the transcript says
+///   "Jonathan", the shortening people actually speak.
+///
+/// Anything else is dropped: an invented owner on a real task is worse than no
+/// owner, because it reads as a commitment somebody made.
 pub(crate) fn owner_is_supported(
     owner: &str,
     citations: &[Citation],
@@ -314,15 +343,29 @@ pub(crate) fn owner_is_supported(
     if owner_tokens.is_empty() {
         return false;
     }
-    let alias_match = speaker_names
-        .iter()
-        .any(|name| name_tokens(name) == owner_tokens);
+    let alias_match = speaker_names.iter().any(|name| {
+        let alias: HashSet<String> = name_tokens(name).into_iter().collect();
+        !alias.is_empty() && owner_tokens.iter().all(|token| alias.contains(token))
+    });
     if alias_match {
         return true;
     }
-    citations.iter().any(|citation| {
+    if citations.iter().any(|citation| {
         let cited: HashSet<String> = name_tokens(&citation.text).into_iter().collect();
         owner_tokens.iter().all(|token| cited.contains(token))
+    }) {
+        return true;
+    }
+    let [single] = owner_tokens.as_slice() else {
+        return false;
+    };
+    if single.chars().count() < MIN_PREFIX_OWNER_CHARS {
+        return false;
+    }
+    citations.iter().any(|citation| {
+        capitalized_tokens(&citation.text)
+            .iter()
+            .any(|token| token.len() > single.len() && token.starts_with(single.as_str()))
     })
 }
 
@@ -2464,6 +2507,47 @@ mod tests {
         ));
         // With no citations at all there is nothing to support an owner.
         assert!(!owner_is_supported("Priya", &[], &[]));
+    }
+
+    #[test]
+    fn a_first_name_matches_the_alias_and_the_transcript_that_spell_it_out() {
+        // The alias is the full name the person set; the model answers with the
+        // first name, which is what the meeting actually called them.
+        assert!(owner_is_supported(
+            "Priya",
+            &[cited("I will send the deck.")],
+            &["Priya Raman".to_string()]
+        ));
+        // And the shortening people speak, against a name the transcript writes
+        // in full.
+        assert!(owner_is_supported(
+            "Jon",
+            &[cited("Jonathan takes the migration.")],
+            &[]
+        ));
+        // Still nobody: a prefix has to be of a name, not of any word, and a
+        // two-letter fragment matches too much to be evidence.
+        assert!(!owner_is_supported(
+            "Pri",
+            &[cited("We will send the deck on Friday.")],
+            &[]
+        ));
+        assert!(!owner_is_supported(
+            "Jo",
+            &[cited("Jonathan takes the migration.")],
+            &[]
+        ));
+        assert!(!owner_is_supported(
+            "Dana",
+            &[cited("Danielle takes the migration.")],
+            &[]
+        ));
+        // An owner with more words than the alias is not that person.
+        assert!(!owner_is_supported(
+            "Priya Raman",
+            &[cited("I will send the deck.")],
+            &["Priya".to_string()]
+        ));
     }
 
     #[test]
