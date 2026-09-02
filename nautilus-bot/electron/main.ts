@@ -19,6 +19,7 @@ import {
   lstatSync,
   readFileSync,
   readlinkSync,
+  renameSync,
   symlinkSync,
   unlinkSync,
   writeFileSync,
@@ -115,8 +116,11 @@ import {
 } from "./meeting-lifecycle";
 import {
   DeepLinkRateLimiter,
+  LINK_RECORDING_NOTICE,
+  LINK_RECORDING_NOTICE_MS,
   deepLinkActionName,
   deepLinkFromArgv,
+  deepLinkNeedsRecordingNotice,
   parseDeepLink,
   resolveDictationModeSelection,
   type DeepLinkCommand,
@@ -1952,11 +1956,31 @@ function installCliTool(): CliInstallResult {
       return { status: "unavailable", reason: "The command-line tool installs on macOS and Linux only." };
     case "link":
     case "replace_link": {
+      // Never unlink-then-symlink. That left two problems: a failure between
+      // the two steps leaves the machine with no `plainsong` command at all,
+      // and the gap between deciding (lstat) and acting (unlink) is a window
+      // where the path can become something else. Writing the link under a
+      // temporary name in the same directory and renaming it over the old one
+      // closes both: rename(2) replaces a symlink atomically and operates on
+      // the link itself, never following it.
+      const stagingPath = `${CLI_LINK_PATH}.plainsong-install-${process.pid}`;
       try {
-        if (plan.action === "replace_link") {
-          unlinkSync(CLI_LINK_PATH);
+        try {
+          unlinkSync(stagingPath);
+        } catch {
+          // Nothing there, which is the normal case.
         }
-        symlinkSync(binaryPath, CLI_LINK_PATH);
+        symlinkSync(binaryPath, stagingPath);
+        try {
+          renameSync(stagingPath, CLI_LINK_PATH);
+        } catch (error) {
+          try {
+            unlinkSync(stagingPath);
+          } catch {
+            // Best effort; the staging name is ours and unused.
+          }
+          throw error;
+        }
         return { status: "installed", linkPath: CLI_LINK_PATH };
       } catch (error) {
         const code = (error as NodeJS.ErrnoException).code;
@@ -2351,6 +2375,22 @@ function recordAutomationAudit(action: string, outcome: string): void {
     });
 }
 
+/**
+ * Put the dictation HUD on screen carrying "Recording from a link" for a
+ * second. The overlay is shown here rather than waiting for the sidecar's own
+ * show command so the notice is up before the microphone is.
+ */
+function announceLinkStartedRecording(): void {
+  if (showDictationOverlayEnabled) {
+    showOverlayWindow(getOrCreateOverlayWindow("dictation"));
+  }
+  broadcastRendererEvent("dictation-source-notice", {
+    source: "deep_link",
+    message: LINK_RECORDING_NOTICE,
+    durationMs: LINK_RECORDING_NOTICE_MS,
+  });
+}
+
 async function performDeepLink(command: DeepLinkCommand): Promise<string> {
   switch (command.kind) {
     case "open":
@@ -2363,6 +2403,13 @@ async function performDeepLink(command: DeepLinkCommand): Promise<string> {
       // The same toggle the menu-bar item performs: a link never chooses a
       // hold-to-talk or hands-free behaviour on the user's behalf.
       const live = isDictationLive();
+      if (deepLinkNeedsRecordingNotice(command, live)) {
+        // A `plainsong://` link is reachable from any web page, and this is
+        // the one command that opens the microphone. Show the HUD with the
+        // reason on it before the capture starts, so the microphone never
+        // comes on without something on screen saying why.
+        announceLinkStartedRecording();
+      }
       await ipcBridge.invoke(
         live ? "stop_dictation" : "start_dictation",
         live ? { stopReason: "deep_link" } : {},

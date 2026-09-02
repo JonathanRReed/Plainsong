@@ -58,6 +58,12 @@ describe("LocalToolsSection", () => {
         /Apps you run on this Mac, such as a terminal or an AI assistant, can read your meeting notes and transcripts\. Nothing leaves the machine unless that app sends it\./,
       ),
     ).toBeInTheDocument();
+    // A plainsong:// link is reachable from any web page and macOS does not
+    // say who sent it, so the switch says so rather than implying a check.
+    expect(
+      screen.getByText(/a web page you open can\s+trigger one just as a script can/),
+    ).toBeInTheDocument();
+    expect(screen.getByText(/Recording from a link/)).toBeInTheDocument();
     const toggle = screen.getByRole("switch", { name: "Allow local tools" });
     expect(toggle).toHaveAttribute("aria-checked", "false");
     fireEvent.click(toggle);

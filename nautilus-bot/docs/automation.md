@@ -142,6 +142,27 @@ Six URLs, no others, no text. Each one is checked against the Local tools
 switch, rate-limited to five per ten seconds, and written to the audit log as
 `automation.deep_link` with the action and outcome (never the URL).
 
+**Anything that can ask macOS to open a URL can send one, including a web
+page.** Turning Local tools on registers `plainsong://` with the system, and a
+link or a redirect in a browser reaches the app the same way a Raycast script
+or `open` in a terminal does. macOS does not tell the app which application
+asked, so Plainsong cannot distinguish the two and does not pretend to. What
+it does instead:
+
+- No link carries text, and `mode` can only select a mode that already exists,
+  so a link cannot put words into a document or invent a configuration.
+- `meeting/start` opens the consent sheet; recording begins only when someone
+  clicks Start there.
+- `record` runs through the same guarded start as the hotkey, including the
+  refusal to dictate into a password field, and it shows the dictation window
+  with "Recording from a link" on it for a second, so a microphone that opened
+  without a keypress is never silent.
+- Everything is behind the off-by-default Local tools switch and the rate
+  limit, and every attempt is in the audit log.
+
+If that trade is not one you want, leave Local tools off; the CLI and MCP
+server are gated by the same switch.
+
 | URL | Does |
 | --- | --- |
 | `plainsong://record` | Toggle dictation, exactly like the hotkey's toggle |

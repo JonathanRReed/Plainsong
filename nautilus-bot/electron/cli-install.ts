@@ -12,6 +12,31 @@
 
 export const CLI_LINK_PATH = "/usr/local/bin/plainsong";
 
+/**
+ * What a link Plainsong made points at. Every Plainsong build's CLI is named
+ * `plainsong-cli`, whatever bundle it lives in.
+ */
+const CLI_BINARY_BASENAMES: readonly string[] = ["plainsong-cli", "plainsong-cli.exe"];
+
+/** The last path segment of a symlink target, for either separator. */
+function targetBasename(target: string): string {
+  const segments = target.replace(/[/\\]+$/, "").split(/[/\\]/);
+  return segments[segments.length - 1] ?? "";
+}
+
+/**
+ * Is this symlink one of ours?
+ *
+ * "It is a symlink" was the whole test, which made every symlink at
+ * `/usr/local/bin/plainsong` fair game to delete and replace — including one a
+ * user pointed at their own script, or at something else entirely. A link
+ * Plainsong wrote ends in `plainsong-cli`; anything else belongs to somebody
+ * else and is left where it is.
+ */
+export function isPlainsongCliLink(target: string): boolean {
+  return CLI_BINARY_BASENAMES.includes(targetBasename(target));
+}
+
 export type ExistingLinkPath =
   | null
   | { kind: "symlink"; target: string }
@@ -43,8 +68,13 @@ export function planCliInstall(input: {
     if (input.existing.target === input.binaryPath) {
       return { action: "already_installed" };
     }
-    // A link we (or a previous version) made, now pointing at an old bundle.
-    return { action: "replace_link", previousTarget: input.existing.target };
+    if (isPlainsongCliLink(input.existing.target)) {
+      // A link we (or a previous version) made, now pointing at an old bundle.
+      return { action: "replace_link", previousTarget: input.existing.target };
+    }
+    // A symlink pointing at something that is not a Plainsong CLI is somebody
+    // else's, exactly like a regular file is.
+    return { action: "refuse", reason: "path_occupied" };
   }
   // A real file or directory is somebody else's; never delete it.
   return { action: "refuse", reason: "path_occupied" };
@@ -81,13 +111,17 @@ export function describeCliToolStatus(input: {
 }): CliToolStatus {
   const installed =
     input.existing?.kind === "symlink" && input.existing.target === input.binaryPath;
+  const ourLink =
+    input.existing?.kind === "symlink" && isPlainsongCliLink(input.existing.target);
   return {
     binaryPath: input.binaryPath,
     binaryPresent: input.binaryExists,
     linkPath: CLI_LINK_PATH,
     installed,
-    stale: input.existing?.kind === "symlink" && !installed,
-    occupied: input.existing !== null && input.existing.kind !== "symlink",
+    // Only a link we would actually replace counts as stale; one pointing
+    // somewhere else is occupied, and the row says so.
+    stale: ourLink && !installed,
+    occupied: input.existing !== null && (input.existing.kind !== "symlink" || !ourLink),
     manualCommand: manualInstallCommand(input.binaryPath),
   };
 }

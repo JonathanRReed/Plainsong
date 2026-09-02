@@ -25,6 +25,28 @@
  *
  * No text payloads, no other query parameters, no fragments, no userinfo, no
  * port. Anything else is ignored, not guessed at.
+ *
+ * Who can send one: anybody who can get the OS to open a URL. That includes a
+ * web page, because `app.setAsDefaultProtocolClient("plainsong")` registers
+ * the scheme system-wide and a link or a redirect in any browser reaches it.
+ * There is no source information in an `open-url` event — macOS does not say
+ * which application asked — so the app cannot tell a Raycast script from a
+ * page the user happened to load, and any check that claimed to would be
+ * pretending.
+ *
+ * What is done about it instead, since the capability is the point of the
+ * feature and refusing it would remove it:
+ *
+ * - Say so. The Settings switch and docs/automation.md both state plainly
+ *   that a web page can trigger these links.
+ * - Keep the blast radius at "a gesture the user could have made themselves".
+ *   No link carries text, `mode` can only select a mode that already exists,
+ *   `meeting/start` opens the consent sheet and never records, and everything
+ *   is behind an off-by-default switch and a rate limit.
+ * - Make `record` visible. A link-started dictation shows the HUD with
+ *   [`LINK_RECORDING_NOTICE`] on it, so a recording that began without a
+ *   keypress is never silent. It also runs through the same guarded
+ *   `start_dictation` as the hotkey, so the secure-field refusal still applies.
  */
 
 const DEEP_LINK_SCHEME = "plainsong";
@@ -55,6 +77,30 @@ export type DeepLinkRejection =
 export type DeepLinkParse =
   | { ok: true; command: DeepLinkCommand }
   | { ok: false; reason: DeepLinkRejection };
+
+/**
+ * What the HUD says when a link, not a keypress, started the dictation.
+ *
+ * Short enough to read at a glance and gone in a second: the point is that the
+ * microphone opening is attributable, not that the user reads a paragraph.
+ */
+export const LINK_RECORDING_NOTICE = "Recording from a link";
+/** How long that notice stays on the HUD. */
+export const LINK_RECORDING_NOTICE_MS = 1000;
+
+/**
+ * Should this deep link announce itself on the dictation HUD?
+ *
+ * Only `record`, and only when it is starting rather than stopping: a link
+ * that stops a running dictation removes the microphone rather than opening
+ * it, and the HUD is already on screen saying so.
+ */
+export function deepLinkNeedsRecordingNotice(
+  command: DeepLinkCommand,
+  dictationLive: boolean,
+): boolean {
+  return command.kind === "record" && !dictationLive;
+}
 
 /** Human-readable name for logs and the audit trail. */
 export function deepLinkActionName(command: DeepLinkCommand): string {

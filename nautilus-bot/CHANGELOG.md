@@ -30,7 +30,10 @@ evidence is stale and must be recaptured before this becomes a candidate.
   log by action and outcome. "Install command-line tool" in Settings links
   `/usr/local/bin/plainsong` or, when that directory is not writable, shows
   the one command to paste rather than asking for an administrator
-  password. See docs/automation.md.
+  password. Deep links are registered with macOS, so a web page can trigger
+  one exactly as a script can, and macOS does not say which app sent it; the
+  switch and the doc say so, and a link that starts dictation shows the
+  dictation window with "Recording from a link" on it. See docs/automation.md.
 - Onboarding now asks how meeting notes get written: local Ollama (with live
   detection), bring-your-own-key cloud AI, or transcripts only — instead of
   silently defaulting to an Ollama install that usually isn't there.
@@ -219,6 +222,12 @@ evidence is stale and must be recaptured before this becomes a candidate.
 - An over-long MCP request line was refused and then drained through the
   unbounded reader, which handed back exactly the allocation the size cap
   exists to refuse. It is drained through the bounded reader now.
+- "Install command-line tool" treated any symlink at `/usr/local/bin/plainsong`
+  as one of Plainsong's own and replaced it; a link pointing at anything but a
+  `plainsong-cli` binary is now left alone and reported as occupied. The
+  install also no longer unlinks before it symlinks — it writes the link under
+  a temporary name and renames it into place, so a failure can no longer leave
+  the machine with no `plainsong` command.
 - Opening an encrypted (SQLCipher) database failed every time with "Execute
   returned results": the key check ran a `SELECT` through rusqlite's
   `execute`, which refuses any statement that returns rows. No install had a

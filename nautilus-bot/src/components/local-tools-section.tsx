@@ -118,6 +118,18 @@ export function LocalToolsSection({ enabled, onEnabledChange }: LocalToolsSectio
         onCheckedChange={onEnabledChange}
       />
 
+      {/* The plainsong:// scheme is registered with macOS, so a link on a web
+          page reaches it exactly like a Raycast script does, and macOS does not
+          say which app opened the URL. The app cannot tell them apart, so it
+          says so instead of implying a check it does not make. */}
+      <p className="text-sm text-muted-foreground">
+        plainsong:// links are registered with macOS, so a web page you open can
+        trigger one just as a script can — Plainsong cannot tell where a link came
+        from. A link never carries text and never starts a meeting recording on its
+        own, and a link that starts dictation shows the dictation window with
+        &ldquo;Recording from a link&rdquo; on it.
+      </p>
+
       <div className="space-y-3">
         <div className="flex flex-col gap-3 lg:flex-row lg:items-start lg:justify-between">
           <div className="space-y-1">
