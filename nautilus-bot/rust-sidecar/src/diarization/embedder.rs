@@ -480,11 +480,11 @@ fn finalize_embedding(array: ArrayViewD<'_, f32>) -> Result<Array1<f32>> {
 pub struct SpeakerEmbeddingExtractor;
 
 #[cfg(not(feature = "diarization"))]
-#[expect(
-    dead_code,
-    reason = "stub for builds without the diarization feature: `new` and `is_model_available` are only called from the feature-gated availability probe in diarization/mod.rs"
-)]
 impl SpeakerEmbeddingExtractor {
+    #[expect(
+        dead_code,
+        reason = "only called from the feature-gated availability probe in diarization/mod.rs; the stub keeps the feature-on API shape"
+    )]
     pub fn new() -> Result<Self> {
         Ok(Self)
     }
@@ -493,6 +493,10 @@ impl SpeakerEmbeddingExtractor {
         Ok(Self)
     }
 
+    #[expect(
+        dead_code,
+        reason = "only called from the feature-gated availability probe in diarization/mod.rs; the stub keeps the feature-on API shape"
+    )]
     pub fn is_model_available(&self) -> bool {
         false
     }
