@@ -323,6 +323,12 @@ export function notificationForSidecarEvent(
 export interface CallDetectedContext {
   /** A meeting already recording means there is nothing to offer. */
   activeMeetingRecordingId: string | null;
+  /**
+   * Whether the reader is looking at Plainsong. The Meetings header renders
+   * its own cue for the same call, so a banner would be the second copy of
+   * one offer.
+   */
+  mainWindowFocused: boolean;
 }
 
 /**
@@ -331,7 +337,8 @@ export interface CallDetectedContext {
  * Not gated on the notification settings: this is the feature the reader
  * turned on with `meetings.callDetectionEnabled`, and the sidecar already
  * emits nothing when that is off. A call the reader dismissed stays quiet
- * until it ends.
+ * until it ends, and a reader who is already in the app gets the in-app cue
+ * instead of both at once — the same rule "meeting started" follows.
  */
 export function notificationForCallDetected(
   rawPayload: unknown,
@@ -339,6 +346,7 @@ export function notificationForCallDetected(
 ): PlainsongNotification | null {
   const payload = record(rawPayload);
   if (context.activeMeetingRecordingId) return null;
+  if (context.mainWindowFocused) return null;
   if (payload.dismissed === true) return null;
   const callId = typeof payload.callId === "number" ? payload.callId : null;
   const appLabel = stringField(payload, "appLabel");

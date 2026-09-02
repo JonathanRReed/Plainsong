@@ -357,8 +357,10 @@ describe("call detected offer", () => {
     dismissed: false,
   };
 
+  const away = { activeMeetingRecordingId: null, mainWindowFocused: false };
+
   it("offers to record a call, carrying what the consent dialog needs", () => {
-    const offer = notificationForCallDetected(detected, { activeMeetingRecordingId: null });
+    const offer = notificationForCallDetected(detected, away);
     expect(offer?.kind).toBe("call_detected");
     expect(offer?.title).toBe("Zoom call started");
     expect(offer?.body).toBe("Record it with Plainsong?");
@@ -377,18 +379,21 @@ describe("call detected offer", () => {
 
   it("stays quiet while a meeting records, after a dismissal, or on a malformed payload", () => {
     expect(
-      notificationForCallDetected(detected, { activeMeetingRecordingId: "rec-1" }),
+      notificationForCallDetected(detected, { ...away, activeMeetingRecordingId: "rec-1" }),
     ).toBeNull();
+    expect(notificationForCallDetected({ ...detected, dismissed: true }, away)).toBeNull();
+    expect(notificationForCallDetected({ appLabel: "Zoom" }, away)).toBeNull();
+    expect(notificationForCallDetected(null, away)).toBeNull();
+  });
+
+  it("leaves the offer to the in-app cue while the reader is in Plainsong", () => {
+    // The Meetings header renders the same offer. Two copies of one offer,
+    // one of them an OS banner over the window that already shows it, is the
+    // thing every other notification here is careful not to do.
     expect(
-      notificationForCallDetected(
-        { ...detected, dismissed: true },
-        { activeMeetingRecordingId: null },
-      ),
+      notificationForCallDetected(detected, { ...away, mainWindowFocused: true }),
     ).toBeNull();
-    expect(
-      notificationForCallDetected({ appLabel: "Zoom" }, { activeMeetingRecordingId: null }),
-    ).toBeNull();
-    expect(notificationForCallDetected(null, { activeMeetingRecordingId: null })).toBeNull();
+    expect(notificationForCallDetected(detected, away)?.kind).toBe("call_detected");
   });
 });
 

@@ -222,6 +222,11 @@ let notificationMemory: Pick<
 // it first. Bounded, oldest first.
 const recentNotificationKeys: string[] = [];
 const RECENT_NOTIFICATION_KEYS_MAX = 32;
+// Notifications currently on screen. A shown `Notification` has no other owner
+// in this process, and a collected one takes its click handler with it — so a
+// banner the reader comes back to minutes later would do nothing. Emptied as
+// each one is clicked, closed or fails.
+const liveNotifications = new Set<Notification>();
 
 function qaLog(message: string, payload?: unknown): void {
   if (process.env.PLAINSONG_QA_PACKAGED_HOTKEY === "1") {
@@ -1044,18 +1049,30 @@ function presentNotification(notification: PlainsongNotification): void {
       title: notification.title,
       body: notification.body,
     });
+    // Held until the banner is done with. Nothing else in the main process
+    // refers to a shown notification, so without this the object — and the
+    // click handler that is the whole point of a "Zoom call started" banner —
+    // is eligible for collection the moment `presentNotification` returns.
+    liveNotifications.add(note);
+    const release = () => {
+      liveNotifications.delete(note);
+    };
     note.on("click", () => {
       showAndFocusMainWindow();
       const focus = notification.focus;
       if (focus.view === "recordings" && focus.callCapture) {
         broadcastRendererEvent("meeting-call-capture-requested", focus.callCapture);
+        release();
         return;
       }
       broadcastRendererEvent("main-view-requested", {
         view: focus.view,
         recordingId: focus.view === "recordings" ? focus.recordingId : null,
       });
+      release();
     });
+    note.on("close", release);
+    note.on("failed", release);
     note.show();
   } catch (error) {
     console.warn("[main] could not show a notification", error);
@@ -2496,6 +2513,7 @@ async function bootstrap() {
       // nothing to be offered.
       const offer = notificationForCallDetected(payload, {
         activeMeetingRecordingId,
+        mainWindowFocused: mainWindowIsFocused(),
       });
       if (offer) {
         presentNotification(offer);
