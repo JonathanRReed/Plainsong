@@ -48,8 +48,12 @@ evidence is stale and must be recaptured before this becomes a candidate.
 ### Changed
 - **The macOS sidecar now ships Candle's Metal backend** (`candle-metal`),
   so the Distil-Whisper and Whisper large-v3-turbo providers run on the GPU
-  instead of CPU F32: distil-large-v3.5 goes from 32.8 s to 0.96 s p50 for a
-  5.3 s utterance on an M4 Pro. `scripts/sidecar-cargo-features.mjs` is now
+  instead of CPU F32. Measured on an M4 Pro with a combined
+  `candle-metal,ort-coreml` dev binary on a loaded shared machine (two usable
+  processes): distil-large-v3.5 went from 32.8 s to 0.96 s p50 for a 5.3 s
+  utterance; the as-shipped binary itself was not re-measured (a keychain
+  prompt blocked it) and a quiet-machine re-run is still owed, so treat the
+  figures as provisional. `scripts/sidecar-cargo-features.mjs` is now
   the one list of macOS-only sidecar features, shared by the release build,
   `lint:rust` / `test:rust` / `benchmark:latency`, CI, and the third-party
   notices. The `ort-coreml` CoreML execution provider was measured as well

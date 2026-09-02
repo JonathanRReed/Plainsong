@@ -105,9 +105,18 @@ src-tauri/Cargo.lock
 tmp/
 temp/
 
-# Generated QA/benchmark evidence (never commit) — belt-and-suspenders with
-# nautilus-bot/.gitignore in case a build/rename experiment lands outside it
-artifacts/
+# Generated QA/benchmark evidence — belt-and-suspenders with
+# nautilus-bot/.gitignore in case a build/rename experiment lands outside it.
+# Mirrors that file: raw captures stay out, the Markdown/JSON receipts under
+# artifacts/qa/ are tracked so cited evidence is not silently dropped, and the
+# two per-machine dictation-latency JSON receipts stay ignored on purpose.
+**/artifacts/**
+!**/artifacts/qa/
+!**/artifacts/qa/**/
+!**/artifacts/qa/**/*.md
+!**/artifacts/qa/**/*.json
+**/artifacts/qa/dictation-latency.json
+**/artifacts/qa/dictation-latency-e2e.json
 dist-electron/
 dist-native/
 release/

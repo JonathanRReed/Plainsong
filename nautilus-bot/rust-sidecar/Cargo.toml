@@ -153,11 +153,13 @@ whisper-gpu = ["whisper-rs?/metal"]
 # SHIPPED on macOS: scripts/sidecar-cargo-features.mjs adds it to the release
 # build, to lint/test/benchmark, to CI, and to the third-party notices. Kept
 # out of `default` because it only compiles against Apple frameworks.
-# Measured on an M4 Pro with distil-large-v3.5
-# (artifacts/qa/acceleration-receipt-2026-09-01.md): CPU F32 takes 32.8 s p50
-# for a 5.3 s utterance and 55.5 s for 44 s of audio; Metal takes 0.96 s and
-# 2.6 s. The first inference in a fresh process pays a Metal shader compile
-# (1.1 s with a warm shader cache, ~60 s observed under heavy memory pressure).
+# Measured on an M4 Pro with distil-large-v3.5, using a combined
+# candle-metal+ort-coreml dev binary on a loaded shared machine
+# (artifacts/qa/acceleration-receipt-2026-09-01.md; the shipped binary itself
+# still owes a quiet-machine re-run): CPU F32 takes 32.8 s p50 for a 5.3 s
+# utterance and 55.5 s for 44 s of audio; Metal takes 0.96 s and 2.6 s. The
+# first inference in a fresh process pays a Metal shader compile (1.1 s with a
+# warm shader cache, ~60 s observed under heavy memory pressure).
 candle-metal = ["candle-core/metal", "candle-nn/metal", "candle-transformers/metal"]
 
 # ONNX Runtime CoreML Execution Provider (macOS only). Registers the CoreML EP

@@ -87,8 +87,9 @@ Options:
 Output:
   Two JSON objects on stdout (provider-only, then pipeline), one per line.
   Progress and the human summary are written to stderr. Neither receipt is
-  committed to source control -- see artifacts/qa/'s intentionally blanket
-  .gitignore and attach receipts to release evidence by hand instead.";
+  committed to source control -- artifacts/qa/'s .gitignore names both
+  dictation-latency JSON files explicitly (other qa receipts are tracked) --
+  so attach them to release evidence by hand instead.";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct BenchmarkArgs {

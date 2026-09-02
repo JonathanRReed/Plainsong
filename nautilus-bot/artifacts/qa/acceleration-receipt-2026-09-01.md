@@ -11,7 +11,7 @@ encoder) never shipped. Compile them, measure them, decide per feature.
 
 | Feature | Decision | Why (measured, this machine) |
 | --- | --- | --- |
-| `candle-metal` | **Ship on macOS** | Distil-Whisper distil-large-v3.5: 5.3 s utterance 32.8 s p50 on CPU F32 vs 0.96 s p50 on Metal; 44 s fixture 55.5 s vs 2.6 s. Stable across three processes; no fallback warnings. |
+| `candle-metal` | **Ship on macOS** | Distil-Whisper distil-large-v3.5, measured with the combined `candle-metal,ort-coreml` dev binary on a loaded shared machine: 5.3 s utterance 32.8 s p50 on CPU F32 vs 0.96 s p50 on Metal; 44 s fixture 55.5 s vs 2.6 s. Two usable Metal processes (a third was paged out and is discarded); no fallback warnings in any. The as-shipped `candle-metal`-only binary was not re-measured (keychain prompt, see below); a quiet-machine re-run is owed. |
 | `ort-coreml` | **Leave off** | Moonshine base regresses: ~24 s CoreML compile on first load (4.5 s on later launches vs 0.7 s CPU), encoder split into 75 CoreML partitions (393/743 nodes), decoder rejected outright (0/1 nodes: a single `If`), steady state slower and erratic (44 s fixture 1.7 s p50 CPU vs 2.1 s p50 / 5.6 s p95 CoreML). Silero VAD: CoreML supports 0/2 nodes, runs on CPU either way, ~6% per-chunk overhead with the EP registered. |
 
 The list now lives in `scripts/sidecar-cargo-features.mjs`
@@ -242,8 +242,12 @@ through the wrapper (`node scripts/cargo-sidecar.mjs build --locked --release
 `prewarm()` reads the same keychain-backed receipt MAC and blocked on the
 same prompt, so **no as-shipped latency numbers were captured**. The numbers
 that stand for `candle-metal` are the (d) rows above, taken with the
-`candle-metal,ort-coreml` binary; the Candle code path is the same with
-`ort-coreml` off (the feature only touches `ort_utils::build_session`).
+`candle-metal,ort-coreml` dev binary under load (two usable processes); the
+Candle code path is the same with `ort-coreml` off (the feature only touches
+`ort_utils::build_session`), but that equivalence is by inspection, not by
+measurement. A quiet-machine `bun run benchmark:latency --provider
+distil_whisper` with the shipped binary is owed before these figures are
+quoted as release numbers.
 
 Gates run through the wrapper with the shipped feature set
 (`--features candle-metal`), from `nautilus-bot/`:

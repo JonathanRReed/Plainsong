@@ -13,7 +13,8 @@
  *   providers (Whisper large-v3-turbo, Distil-Whisper). The Metal kernels only
  *   build against Apple frameworks. Without it those models run F32 on the CPU:
  *   Distil-Whisper distil-large-v3.5 measured 32.8 s p50 for a 5.3 s utterance
- *   on CPU versus 0.96 s on Metal (M4 Pro).
+ *   on CPU versus 0.96 s on Metal (M4 Pro, combined dev binary under load;
+ *   the shipped binary still owes a quiet-machine re-run).
  * - `ort-coreml` (deliberately NOT shipped): ONNX Runtime's CoreML execution
  *   provider for the ONNX providers that opt in through
  *   `ort_utils::build_session` (Silero VAD, diarization embedders, Moonshine,

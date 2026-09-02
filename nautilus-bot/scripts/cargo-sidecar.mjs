@@ -17,6 +17,7 @@
  * flags).
  */
 import { spawnSync } from "node:child_process";
+import os from "node:os";
 import path from "node:path";
 import { sidecarCargoFeatureArgs } from "./sidecar-cargo-features.mjs";
 
@@ -55,5 +56,14 @@ const result = spawnSync(
 if (result.error) {
   console.error(`Failed to launch cargo: ${result.error.message}`);
   process.exit(1);
+}
+if (result.signal) {
+  // cargo died from a signal (Ctrl-C, a cancelled CI job): re-raise it so the
+  // caller sees the same termination instead of a generic exit 1, and fall
+  // back to the shell convention of 128 + signal number if the re-raise is
+  // caught or ignored.
+  console.error(`cargo terminated by ${result.signal}`);
+  process.kill(process.pid, result.signal);
+  process.exit(128 + (os.constants.signals[result.signal] ?? 0));
 }
 process.exit(result.status ?? 1);
