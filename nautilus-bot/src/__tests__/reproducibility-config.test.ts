@@ -90,13 +90,19 @@ describe("reproducible package and release configuration", () => {
     };
     const sidecarBuild = readRepoFile("scripts/build-rust-sidecar.mjs");
 
+    // Contributor cargo commands go through scripts/cargo-sidecar.mjs so they
+    // compile the same feature set the release sidecar ships on this host;
+    // that wrapper's feature handling is pinned in
+    // sidecar-cargo-features.test.ts. Here: still `--locked`.
     expect(packageJson.scripts["lint:rust"]).toContain(
-      "cargo clippy --locked",
+      "node scripts/cargo-sidecar.mjs clippy --locked",
     );
-    expect(packageJson.scripts["test:rust"]).toContain("cargo test --locked");
+    expect(packageJson.scripts["test:rust"]).toContain(
+      "node scripts/cargo-sidecar.mjs test --locked",
+    );
     expect(packageJson.scripts["test:rust"]).toContain("--bins");
     expect(packageJson.scripts["benchmark:latency"]).toContain(
-      "cargo run --release --locked",
+      "node scripts/cargo-sidecar.mjs run --release --locked",
     );
     expect(packageJson.scripts["gate:dictation-latency"]).toContain(
       "verify-dictation-latency.mjs",

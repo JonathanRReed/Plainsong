@@ -147,17 +147,39 @@ whisper-gpu = ["whisper-rs?/metal"]
 
 # Candle Metal GPU acceleration (macOS only). Routes Candle-based models
 # (Whisper Large V3 Turbo, Distil Whisper) through the Metal backend instead
-# of CPU F32. Without this, Candle falls back to CPU which is multi-second
-# for large models. Note: candle-nn MUST also get the `metal` feature —
+# of CPU F32. Note: candle-nn MUST also get the `metal` feature —
 # without it, the Metal rms-norm kernel isn't compiled and inference crashes.
+#
+# SHIPPED on macOS: scripts/sidecar-cargo-features.mjs adds it to the release
+# build, to lint/test/benchmark, to CI, and to the third-party notices. Kept
+# out of `default` because it only compiles against Apple frameworks.
+# Measured on an M4 Pro with distil-large-v3.5, using a combined
+# candle-metal+ort-coreml dev binary on a loaded shared machine
+# (artifacts/qa/acceleration-receipt-2026-09-01.md; the shipped binary itself
+# still owes a quiet-machine re-run): CPU F32 takes 32.8 s p50 for a 5.3 s
+# utterance and 55.5 s for 44 s of audio; Metal takes 0.96 s and 2.6 s. The
+# first inference in a fresh process pays a Metal shader compile (1.1 s with a
+# warm shader cache, ~60 s observed under heavy memory pressure).
 candle-metal = ["candle-core/metal", "candle-nn/metal", "candle-transformers/metal"]
 
-# ONNX Runtime CoreML Execution Provider (macOS only). Enables CoreML EP for
-# ONNX-based models (Silero VAD, Wespeaker diarization, Moonshine) on Apple
-# Silicon, routing eligible ops to the Neural Engine/GPU. CoreML is NOT
-# enabled for Parakeet (known to be unstable for transducer models). The EP
-# gracefully falls back to CPU if the prebuilt ONNX Runtime binary does not
-# include CoreML support or if CoreML initialization fails.
+# ONNX Runtime CoreML Execution Provider (macOS only). Registers the CoreML EP
+# on the ONNX sessions built through `ort_utils::build_session` (Silero VAD,
+# Wespeaker diarization, Moonshine, the Qwen3 encoder). Parakeet and the Qwen3
+# decoders bypass it (unstable / int4). The EP falls back to CPU if the
+# prebuilt ONNX Runtime binary lacks CoreML or initialization fails.
+#
+# Deliberately NOT shipped: scripts/sidecar-cargo-features.mjs leaves it out.
+# Measured on an M4 Pro with Moonshine base
+# (artifacts/qa/acceleration-receipt-2026-09-01.md): the encoder graph gets
+# split into 75 CoreML partitions (393 of 743 nodes supported), the merged
+# decoder is a single `If` node CoreML rejects outright, the first load spends
+# ~24 s compiling CoreML models (4.5 s on later launches, versus 0.7 s on CPU),
+# and steady state is slower than plain CPU (44 s fixture: 1.7 s p50 on CPU
+# versus 2.1 s p50 / 5.6 s p95 with CoreML). Silero VAD gains nothing either:
+# CoreML supports 0 of its 2 graph nodes (an `If` over the 8k/16k subgraphs),
+# so it stays on CPU with ~6% extra per-chunk overhead from the registered EP.
+# Re-enable only behind per-session opt-outs (plus `ModelCacheDirectory`,
+# `EnableOnSubgraphs`, `RequireStaticInputShapes`) and a new measurement.
 ort-coreml = ["ort/coreml"]
 
 # SQLCipher for encrypted SQLite (optional, requires OpenSSL)
