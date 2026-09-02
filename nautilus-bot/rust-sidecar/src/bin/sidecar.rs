@@ -270,6 +270,10 @@ async fn run_sidecar() -> Result<(), String> {
     plainsong_lib::reconcile_interrupted_recordings_for_sidecar(&state, &handle).await;
     plainsong_lib::spawn_storage_retention_maintenance(Arc::clone(&state), handle.clone());
 
+    // Watch for a live call and offer to record it. It only ever emits
+    // events; the recording itself waits for the user to accept the offer.
+    plainsong_lib::spawn_meeting_call_detection(Arc::clone(&state), handle.clone());
+
     // Signal readiness to Electron
     eprintln!("[sidecar] ready");
 

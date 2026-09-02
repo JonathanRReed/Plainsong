@@ -35,6 +35,19 @@ export interface Recording {
   transcriptDegradedReason?: string | null;
   transcriptIncompleteAcknowledgedAt?: string | null;
   captureDegradedSummary?: string | null;
+  /**
+   * Every pause taken while recording, in order. The saved audio skips the
+   * pauses; `atSeconds` is where each gap sits in it. Absent or empty for a
+   * meeting that was never paused or that predates the feature.
+   */
+  pauseSpans?: PauseSpan[];
+}
+
+/** Mirrors `PauseSpan` in rust-sidecar/src/recording_pause.rs. */
+export interface PauseSpan {
+  startedAtMs: number;
+  endedAtMs: number | null;
+  atSeconds: number;
 }
 
 interface RecordingMetadata {

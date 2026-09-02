@@ -281,6 +281,14 @@ fn normalize_category_scope(value: Option<&str>) -> Result<Option<String>> {
     ))
 }
 
+/// The `pause_spans` column, parsed. Unreadable JSON is an empty list: a
+/// meeting whose pause record is corrupt is still a meeting, and a read must
+/// not fail over a marker the timeline can simply omit.
+fn parse_pause_spans(raw: Option<String>) -> Vec<crate::recording_pause::PauseSpan> {
+    raw.and_then(|json| serde_json::from_str(&json).ok())
+        .unwrap_or_default()
+}
+
 fn validated_summary_provenance(
     raw: Option<String>,
     summary: Option<&str>,
@@ -1650,6 +1658,10 @@ impl Database {
         // install pointed at an uninstalled Ollama produced no summary, no
         // action items, and no title, and the app said nothing at all.
         self.ensure_table_column("recordings", "analysis_failure", "TEXT")?;
+        // The pauses taken during capture, as a JSON list of spans. The audio
+        // file skips them, so this is the only record of where the gaps are
+        // and how long they were.
+        self.ensure_table_column("recordings", "pause_spans", "TEXT")?;
 
         // Chunked meeting transcription survives per-chunk ASR failures and
         // still returns a transcript, so "completed" alone never meant "the
@@ -2148,7 +2160,8 @@ impl Database {
                     recordings.consent_notice_updated_at,
                     meeting_artifacts.summary_provenance,
                     meeting_artifacts.action_items_provenance,
-                    recordings.analysis_failure
+                    recordings.analysis_failure,
+                    recordings.pause_spans
              FROM recordings
              LEFT JOIN meeting_artifacts ON meeting_artifacts.recording_id = recordings.id
              WHERE (?1 IS NULL OR recordings.project_id = ?1)
@@ -2206,6 +2219,7 @@ impl Database {
                     .get::<_, Option<String>>(22)?
                     .map(|value| value.trim().to_string())
                     .filter(|value| !value.is_empty()),
+                pause_spans: parse_pause_spans(row.get::<_, Option<String>>(23)?),
             })
         })?;
 
@@ -2244,7 +2258,8 @@ impl Database {
                     recordings.consent_notice_updated_at,
                     meeting_artifacts.summary_provenance,
                     meeting_artifacts.action_items_provenance,
-                    recordings.analysis_failure
+                    recordings.analysis_failure,
+                    recordings.pause_spans
              FROM recordings
              LEFT JOIN meeting_artifacts ON meeting_artifacts.recording_id = recordings.id
              WHERE recordings.id = ?1",
@@ -2299,6 +2314,7 @@ impl Database {
                     .get::<_, Option<String>>(22)?
                     .map(|value| value.trim().to_string())
                     .filter(|value| !value.is_empty()),
+                pause_spans: parse_pause_spans(row.get::<_, Option<String>>(23)?),
             })
         });
 
@@ -3480,6 +3496,24 @@ impl Database {
     /// `updated_at` is deliberately left alone: a failed analysis pass does not
     /// change the recording's own content, and bumping it would reorder the
     /// user's library on a background failure they did not cause.
+    /// Persist the pauses taken during a meeting's capture.
+    pub fn set_recording_pause_spans(
+        &mut self,
+        recording_id: &str,
+        spans: &[crate::recording_pause::PauseSpan],
+    ) -> Result<()> {
+        let json = if spans.is_empty() {
+            None
+        } else {
+            Some(serde_json::to_string(spans)?)
+        };
+        self.conn.execute(
+            "UPDATE recordings SET pause_spans = ?1 WHERE id = ?2",
+            params![json, recording_id],
+        )?;
+        Ok(())
+    }
+
     pub fn set_recording_analysis_failure(
         &mut self,
         recording_id: &str,
@@ -5806,6 +5840,55 @@ mod tests {
     }
 
     #[test]
+    fn pause_spans_round_trip_through_list_and_detail_reads() {
+        let mut db = in_memory_db();
+        db.create_recording(&sample_recording("meeting-paused", "inbox"))
+            .unwrap();
+        assert!(db
+            .get_recording("meeting-paused")
+            .expect("read")
+            .expect("row")
+            .pause_spans
+            .is_empty());
+
+        let spans = vec![
+            crate::recording_pause::PauseSpan {
+                started_at_ms: 1_000,
+                ended_at_ms: Some(4_000),
+                at_seconds: 1.0,
+            },
+            crate::recording_pause::PauseSpan {
+                started_at_ms: 9_000,
+                ended_at_ms: Some(9_500),
+                at_seconds: 6.0,
+            },
+        ];
+        db.set_recording_pause_spans("meeting-paused", &spans)
+            .expect("persist spans");
+        assert_eq!(
+            db.get_recording("meeting-paused")
+                .expect("read")
+                .expect("row")
+                .pause_spans,
+            spans
+        );
+        let listed = db.get_recordings(None).expect("list");
+        assert_eq!(listed[0].pause_spans, spans);
+
+        // Clearing writes NULL, not "[]", and reads back as no spans.
+        db.set_recording_pause_spans("meeting-paused", &[])
+            .expect("clear spans");
+        assert!(db
+            .get_recording("meeting-paused")
+            .expect("read")
+            .expect("row")
+            .pause_spans
+            .is_empty());
+        // Garbage in the column is treated as no spans rather than a failed read.
+        assert!(parse_pause_spans(Some("not json".to_string())).is_empty());
+    }
+
+    #[test]
     fn analysis_failure_round_trips_through_list_and_detail_reads() {
         let mut db = in_memory_db();
         db.create_recording(&sample_recording("meeting-1", "inbox"))
@@ -5925,6 +6008,7 @@ mod tests {
             consent_notice_message: None,
             consent_notice_updated_at: None,
             analysis_failure: None,
+            pause_spans: Vec::new(),
         }
     }
 

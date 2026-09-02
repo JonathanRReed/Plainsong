@@ -118,6 +118,12 @@ pub struct Recording {
     /// say so and offer a retry.
     #[serde(default)]
     pub analysis_failure: Option<String>,
+    /// Every pause taken while this meeting was recording, in order. The
+    /// saved audio does not contain the pauses; `at_seconds` on each span is
+    /// where the gap sits in it. Serialized as `pauseSpans`; empty for a
+    /// meeting that was never paused or predates the feature.
+    #[serde(default)]
+    pub pause_spans: Vec<crate::recording_pause::PauseSpan>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

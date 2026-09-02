@@ -16,11 +16,13 @@ mod download;
 mod events;
 mod export;
 mod llm;
+pub mod meeting_detect;
 mod models;
 mod operation_coordinator;
 mod ort_utils;
 mod paths;
 mod recording_audio;
+pub mod recording_pause;
 mod remote_processing;
 mod safe_fs;
 mod secrets;
@@ -126,6 +128,10 @@ pub struct AppState {
     /// seconds of speech, so it is kept in memory even when history retention
     /// is set to discard transcripts.
     recent_dictation_results: Arc<StdMutex<Vec<RecentDictationResult>>>,
+    /// The live-call detector's debounced state. Polled by
+    /// `spawn_meeting_call_detection`, read by `get_meeting_call_status` and
+    /// by the meeting capture monitor's call-ended auto-stop.
+    meeting_call_detector: Arc<StdMutex<meeting_detect::CallDetector>>,
 }
 
 struct MeetingAudioPostprocessingGuard {
@@ -879,6 +885,11 @@ struct RecordingOverlayState {
     system_audio_active: Option<bool>,
     consent_prompt_shown: Option<bool>,
     message: Option<String>,
+    /// Pause state, mirrored from the capture session so a renderer that
+    /// hydrates from this snapshot can freeze its clock at the right second.
+    paused: bool,
+    closed_paused_ms: i64,
+    pause_started_at_ms: Option<i64>,
 }
 
 #[cfg(target_os = "macos")]
@@ -908,6 +919,9 @@ impl Default for RecordingOverlayState {
             system_audio_active: None,
             consent_prompt_shown: None,
             message: None,
+            paused: false,
+            closed_paused_ms: 0,
+            pause_started_at_ms: None,
         }
     }
 }
@@ -9306,6 +9320,7 @@ mod tests {
             consent_notice_message: None,
             consent_notice_updated_at: None,
             analysis_failure: None,
+            pause_spans: Vec::new(),
         }
     }
 
@@ -20471,6 +20486,7 @@ pub async fn build_app_state() -> Result<AppState, String> {
         active_capture_lease: Arc::new(Mutex::new(None)),
         sidecar_shutting_down: Arc::new(AtomicBool::new(false)),
         recent_dictation_results: Arc::new(StdMutex::new(Vec::new())),
+        meeting_call_detector: Arc::new(StdMutex::new(meeting_detect::CallDetector::default())),
     })
 }
 
@@ -22987,6 +23003,7 @@ async fn stop_dictation_for_sidecar(
         consent_notice_message: None,
         consent_notice_updated_at: None,
         analysis_failure: None,
+        pause_spans: Vec::new(),
     };
 
     // Cursor delivery crosses native process and accessibility boundaries.
@@ -24585,6 +24602,7 @@ async fn start_recording_for_sidecar(
         consent_notice_message: None,
         consent_notice_updated_at: None,
         analysis_failure: None,
+        pause_spans: Vec::new(),
     };
 
     {
@@ -24813,6 +24831,9 @@ async fn start_recording_for_sidecar(
         overlay.system_audio_active = Some(options.system_audio);
         overlay.consent_prompt_shown = Some(options.consent_prompt_shown);
         overlay.message = None;
+        overlay.paused = false;
+        overlay.closed_paused_ms = 0;
+        overlay.pause_started_at_ms = None;
     }
 
     handle.emit_event(
@@ -24847,6 +24868,291 @@ async fn start_recording_for_sidecar(
 /// salvage, slow enough that the `statvfs` and the audio-capture lock are noise
 /// next to the capture threads themselves.
 const MEETING_CAPTURE_MONITOR_INTERVAL: Duration = Duration::from_secs(5);
+
+/// Pause or resume the active meeting on behalf of a renderer.
+///
+/// The capture streams are not touched (see `AudioCapture::pause_recording`);
+/// what changes here is everything that reads the pause: the overlay snapshot
+/// a reopened window hydrates from, the lifecycle event every live window
+/// listens to, and the audit log.
+async fn set_recording_paused_for_sidecar(
+    state: &Arc<AppState>,
+    handle: &crate::sidecar_handle::SidecarHandle,
+    recording_id: &str,
+    pause: bool,
+) -> Result<serde_json::Value, String> {
+    let snapshot = {
+        let mut audio = state.audio_capture.lock().await;
+        if pause {
+            audio.pause_recording(recording_id)
+        } else {
+            audio.resume_recording(recording_id)
+        }
+    }
+    .map_err(|error| error.to_string())?;
+
+    if let Ok(mut overlay) = state.recording_overlay_state.lock() {
+        overlay.paused = snapshot.paused;
+        overlay.closed_paused_ms = snapshot.closed_paused_ms;
+        overlay.pause_started_at_ms = snapshot.pause_started_at_ms;
+    }
+    // Phase stays `recording`: capture is still the live session, the device
+    // is still held, and the renderer's reducer keys everything else off the
+    // pause fields. A new phase would put every window into a state nothing
+    // renders.
+    handle.emit_event(
+        "meeting-recording-state-changed",
+        serde_json::json!({
+            "phase": "recording",
+            "recordingId": recording_id,
+            "paused": snapshot.paused,
+            "closedPausedMs": snapshot.closed_paused_ms,
+            "pauseStartedAtMs": snapshot.pause_started_at_ms,
+        }),
+    );
+    {
+        let mut db = state.db.lock().await;
+        let details = serde_json::json!({
+            "recording_id": recording_id,
+            "pause_count": snapshot.spans.len(),
+            "at_seconds": snapshot.spans.last().map(|span| span.at_seconds),
+            "closed_paused_ms": snapshot.closed_paused_ms,
+        });
+        let event = if pause {
+            "recording_paused"
+        } else {
+            "recording_resumed"
+        };
+        if let Err(error) = db.log_audit_event(event, Some(details), "info") {
+            tracing::warn!("Failed to log audit event: {}", error);
+        }
+    }
+    serde_json::to_value(snapshot).map_err(|error| error.to_string())
+}
+
+/// Why the capture monitor ended a meeting on its own.
+enum MeetingAutoStopReason {
+    CallEnded { app: &'static str },
+    Silence { minutes: u32 },
+}
+
+/// End a running meeting for `reason`, saying so on every surface first.
+///
+/// The `meeting-auto-stopped` event goes out before the stop so the shell can
+/// post its notification against a meeting that is still the active one; the
+/// stop itself is the ordinary stop path, so the audio lands, is hashed, and
+/// goes to transcription exactly as a click on Stop would have it.
+async fn auto_stop_meeting(
+    state: &Arc<AppState>,
+    handle: &crate::sidecar_handle::SidecarHandle,
+    recording_id: &str,
+    reason: MeetingAutoStopReason,
+) {
+    let (reason_key, message, app, silence_minutes) = match reason {
+        MeetingAutoStopReason::CallEnded { app } => (
+            "call_ended",
+            format!("{app} closed, so Plainsong stopped the meeting and is saving what it captured."),
+            Some(app),
+            None,
+        ),
+        MeetingAutoStopReason::Silence { minutes } => (
+            "silence",
+            format!("Nothing audible for {minutes} minutes, so Plainsong stopped the meeting and is saving what it captured."),
+            None,
+            Some(minutes),
+        ),
+    };
+    tracing::info!("Auto-stopping meeting {}: {}", recording_id, message);
+    handle.emit_event(
+        "meeting-auto-stopped",
+        serde_json::json!({
+            "recordingId": recording_id,
+            "reason": reason_key,
+            "app": app,
+            "silenceMinutes": silence_minutes,
+            "message": &message,
+        }),
+    );
+    emit_meeting_capture_warning(state.as_ref(), handle, recording_id, &message);
+    {
+        let mut db = state.db.lock().await;
+        let _ = db.log_audit_event(
+            "recording_auto_stopped",
+            Some(serde_json::json!({
+                "recording_id": recording_id,
+                "reason": reason_key,
+                "app": app,
+                "silence_minutes": silence_minutes,
+            })),
+            "info",
+        );
+    }
+    if let Err(error) = stop_recording_for_sidecar(state, handle, recording_id.to_string()).await {
+        tracing::error!(
+            "Failed to auto-stop meeting {} ({}): {}",
+            recording_id,
+            reason_key,
+            error
+        );
+    }
+}
+
+/// How often the running applications are looked at for a live call.
+const MEETING_CALL_DETECTION_INTERVAL: Duration = Duration::from_secs(5);
+
+#[cfg(target_os = "macos")]
+fn accessibility_granted_for_call_detection() -> bool {
+    check_accessibility_permission()
+}
+
+#[cfg(not(target_os = "macos"))]
+fn accessibility_granted_for_call_detection() -> bool {
+    false
+}
+
+async fn meeting_call_status_for_sidecar(state: &AppState) -> serde_json::Value {
+    let enabled = state
+        .settings_manager
+        .lock()
+        .await
+        .settings()
+        .meetings
+        .call_detection_enabled;
+    let active_call = state
+        .meeting_call_detector
+        .lock()
+        .ok()
+        .and_then(|detector| detector.active().cloned());
+    let status = meeting_detect::MeetingCallStatus {
+        supported: cfg!(target_os = "macos"),
+        enabled,
+        accessibility_granted: accessibility_granted_for_call_detection(),
+        active_call,
+    };
+    serde_json::to_value(status).unwrap_or(serde_json::Value::Null)
+}
+
+fn emit_meeting_call_ended(
+    handle: &crate::sidecar_handle::SidecarHandle,
+    call: &meeting_detect::ActiveCall,
+    reason: meeting_detect::CallEndReason,
+) {
+    let mut payload = serde_json::to_value(call).unwrap_or_default();
+    if let serde_json::Value::Object(map) = &mut payload {
+        map.insert(
+            "reason".to_string(),
+            serde_json::to_value(reason).unwrap_or_default(),
+        );
+        map.insert(
+            "endedAt".to_string(),
+            serde_json::Value::String(chrono::Utc::now().to_rfc3339()),
+        );
+    }
+    tracing::info!(
+        "Detected {} call {} ended ({:?})",
+        call.app_label,
+        call.call_id,
+        reason
+    );
+    handle.emit_event("meeting-call-ended", payload);
+}
+
+/// One poll's worth of evidence, gathered off the async runtime because the
+/// Accessibility reads can block on an unresponsive app.
+#[cfg(target_os = "macos")]
+async fn sample_call_detection(state: &AppState) -> Option<meeting_detect::DetectorSample> {
+    // While Plainsong itself holds the microphone, "the input device is open
+    // somewhere" is true because of us, and says nothing about anyone else.
+    let self_holds_microphone = {
+        let audio = state.audio_capture.lock().await;
+        audio.is_dictating() || audio.is_recording() || audio.is_hands_free_monitor_active()
+    };
+    let accessibility_granted = check_accessibility_permission();
+    tokio::task::spawn_blocking(move || {
+        let apps = meeting_detect::sample_running_apps(accessibility_granted);
+        let mic_running_elsewhere = if self_holds_microphone {
+            None
+        } else {
+            meeting_detect::default_input_device_running_somewhere()
+        };
+        meeting_detect::DetectorSample {
+            apps,
+            mic_running_elsewhere,
+        }
+    })
+    .await
+    .ok()
+}
+
+#[cfg(not(target_os = "macos"))]
+async fn sample_call_detection(_state: &AppState) -> Option<meeting_detect::DetectorSample> {
+    None
+}
+
+/// Watch for a live call and say so. Never starts a recording: every event
+/// this emits ends in an offer the user has to accept.
+///
+/// Reads the setting on every pass so turning detection off takes effect
+/// within one interval, and reports the call it was tracking as ended for
+/// that reason — which no auto-stop acts on.
+pub fn spawn_meeting_call_detection(
+    state: Arc<AppState>,
+    handle: crate::sidecar_handle::SidecarHandle,
+) {
+    tokio::spawn(async move {
+        loop {
+            tokio::time::sleep(MEETING_CALL_DETECTION_INTERVAL).await;
+            if state.sidecar_shutting_down.load(Ordering::SeqCst) {
+                return;
+            }
+            let enabled = state
+                .settings_manager
+                .lock()
+                .await
+                .settings()
+                .meetings
+                .call_detection_enabled;
+            if !enabled || !cfg!(target_os = "macos") {
+                let cleared = state
+                    .meeting_call_detector
+                    .lock()
+                    .ok()
+                    .and_then(|mut detector| detector.clear());
+                if let Some(call) = cleared {
+                    emit_meeting_call_ended(
+                        &handle,
+                        &call,
+                        meeting_detect::CallEndReason::DetectionDisabled,
+                    );
+                }
+                continue;
+            }
+            let Some(sample) = sample_call_detection(state.as_ref()).await else {
+                continue;
+            };
+            let now_ms = chrono::Utc::now().timestamp_millis();
+            let event = state
+                .meeting_call_detector
+                .lock()
+                .ok()
+                .and_then(|mut detector| detector.observe(&sample, now_ms));
+            match event {
+                Some(meeting_detect::DetectorEvent::Detected(call)) => {
+                    tracing::info!(
+                        "Detected a {} call ({:?} confidence)",
+                        call.app_label,
+                        call.confidence
+                    );
+                    handle.emit_event("meeting-call-detected", &call);
+                }
+                Some(meeting_detect::DetectorEvent::Ended { call, reason }) => {
+                    emit_meeting_call_ended(&handle, &call, reason);
+                }
+                None => {}
+            }
+        }
+    });
+}
 
 /// Announce a mid-meeting problem on both channels the user can actually see.
 ///
@@ -24887,6 +25193,14 @@ fn spawn_meeting_capture_monitor(
     handle: crate::sidecar_handle::SidecarHandle,
     recording_id: String,
 ) {
+    // The call this meeting is recorded alongside, if detection had one when
+    // capture began. Bound once: a call that starts later is not this
+    // meeting's call, and its ending must not end this meeting.
+    let bound_call = state
+        .meeting_call_detector
+        .lock()
+        .ok()
+        .and_then(|detector| detector.active().map(|call| (call.call_id, call.app_label)));
     tokio::spawn(async move {
         let mut writer_failure_reported = false;
         let mut low_space_reported = false;
@@ -24902,6 +25216,49 @@ fn spawn_meeting_capture_monitor(
             let Some(health) = health else {
                 return;
             };
+
+            let meetings_settings = state
+                .settings_manager
+                .lock()
+                .await
+                .settings()
+                .meetings
+                .clone();
+            if let Some((call_id, app)) = bound_call {
+                let ended = state
+                    .meeting_call_detector
+                    .lock()
+                    .ok()
+                    .and_then(|detector| detector.ended_reason(call_id));
+                if meeting_detect::auto_stop_for_call_end(
+                    meetings_settings.auto_stop_when_call_app_quits,
+                    ended,
+                ) {
+                    auto_stop_meeting(
+                        &state,
+                        &handle,
+                        &recording_id,
+                        MeetingAutoStopReason::CallEnded { app },
+                    )
+                    .await;
+                    return;
+                }
+            }
+            if audio::silence_auto_stop_due(
+                &health,
+                meetings_settings.auto_stop_after_silence_minutes,
+            ) {
+                auto_stop_meeting(
+                    &state,
+                    &handle,
+                    &recording_id,
+                    MeetingAutoStopReason::Silence {
+                        minutes: meetings_settings.auto_stop_after_silence_minutes,
+                    },
+                )
+                .await;
+                return;
+            }
 
             if !writer_failure_reported {
                 if let Some(reason) = health.writer_failure.as_deref() {
@@ -25238,11 +25595,26 @@ async fn stop_recording_for_sidecar_inner(
             capture_degradation.as_deref(),
         )
         .map_err(|error| error.to_string())?;
+        // The audio skips every pause, so this is the only record of where
+        // the gaps are; a failure to write it costs the timeline markers and
+        // nothing else, so it does not fail the stop.
+        if let Err(error) = db.set_recording_pause_spans(&recording_id, &stop_result.pause_spans) {
+            tracing::warn!(
+                "Failed to persist pause spans for {}: {}",
+                recording_id,
+                error
+            );
+        }
         let details = serde_json::json!({
             "recording_id": &recording_id, "audio_path": &audio_path,
             "duration_seconds": duration_seconds,
             "dropped_stream_chunks": stop_result.dropped_stream_chunks,
             "capture_degraded_summary": &capture_degradation,
+            "pause_count": stop_result.pause_spans.len(),
+            "paused_ms": recording_pause::paused_total_ms(
+                &stop_result.pause_spans,
+                chrono::Utc::now().timestamp_millis(),
+            ),
         });
         if let Err(error) = db.log_audit_event("recording_stopped", Some(details), "info") {
             tracing::warn!("Failed to log audit event: {}", error);
@@ -26079,6 +26451,33 @@ pub async fn dispatch_command(
                 serde_json::from_value(params["recordingId"].clone()).map_err(|e| e.to_string())?;
             stop_recording_for_sidecar(state, handle, recording_id).await?;
             Ok(serde_json::Value::Null)
+        }
+        "pause_recording" => {
+            let recording_id: String =
+                serde_json::from_value(params["recordingId"].clone()).map_err(|e| e.to_string())?;
+            set_recording_paused_for_sidecar(state, handle, &recording_id, true).await
+        }
+        "resume_recording" => {
+            let recording_id: String =
+                serde_json::from_value(params["recordingId"].clone()).map_err(|e| e.to_string())?;
+            set_recording_paused_for_sidecar(state, handle, &recording_id, false).await
+        }
+        "get_meeting_call_status" => Ok(meeting_call_status_for_sidecar(state).await),
+        "dismiss_detected_call" => {
+            // Scoped to one call: the detector only marks the call whose id
+            // this is, so a stale dismissal (the call already ended) changes
+            // nothing and the next call in the same app is offered again.
+            let call_id: u64 =
+                serde_json::from_value(params["callId"].clone()).map_err(|e| e.to_string())?;
+            let dismissed = state
+                .meeting_call_detector
+                .lock()
+                .map(|mut detector| detector.dismiss(call_id))
+                .unwrap_or(false);
+            if dismissed {
+                tracing::info!("Detected call {} dismissed by the user", call_id);
+            }
+            Ok(meeting_call_status_for_sidecar(state).await)
         }
         "acknowledge_incomplete_transcript" => {
             // Storage policy holds a meeting's audio back while its transcript

@@ -13,7 +13,8 @@ use crate::audio::preroll::{
 };
 use crate::audio::silero_vad::build_vad_gate;
 use crate::audio::system_capture::{
-    MixedAudioCapture, MixedAudioChunk, MixedCaptureEvents, SystemAudioCapability,
+    MixedAudioCapture, MixedAudioChunk, MixedCaptureEvents, SourceInactivity,
+    SourceSilenceWatchdog, SystemAudioCapability, MIC_SILENCE_PROFILE,
 };
 use crate::audio::vad::{VadBackendKind, VadConfig, VadEdge, VadGate};
 use crate::models::RecordingOptions;
@@ -22,6 +23,7 @@ use crate::recording_audio::{
     validate_plaintext_wav, RecordingAudioRole, RecordingAudioValidation, RecordingCapturePlan,
     ValidatedRecordingAudio,
 };
+use crate::recording_pause::{PauseLedger, PauseSpan};
 use crate::settings;
 use crate::sidecar_handle::SidecarHandle;
 use anyhow::{Context, Result};
@@ -30,7 +32,7 @@ use cpal::{FromSample, Sample};
 use crossbeam::channel::{bounded, Receiver, RecvTimeoutError, TrySendError};
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::sync::Arc;
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
@@ -195,7 +197,7 @@ pub fn meeting_headroom_bytes(track_count: u64, seconds: u64) -> u64 {
 /// Polled by the meeting lifecycle loop: both failure slots are written by
 /// threads that then exit, so nothing else would ever notice they are gone
 /// until stop.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct RecordingCaptureHealth {
     /// Set when a WAV writer thread returned an error and stopped consuming
     /// samples. Everything recorded after this point is discarded.
@@ -205,6 +207,60 @@ pub struct RecordingCaptureHealth {
     /// How many WAV tracks this session writes, so the polling loop can size the
     /// free-space thresholds to what the meeting actually consumes.
     pub track_count: u64,
+    /// Whether the user has paused capture. Frames are being dropped on
+    /// purpose, so nothing below may be read as a fault or as silence.
+    pub paused: bool,
+    /// How long each captured source has carried nothing audible.
+    pub inactivity: SourceInactivity,
+    /// Seconds since frames last started flowing on purpose: activation, or
+    /// the most recent resume. A silence fuse must never be shorter than this,
+    /// or a meeting resumed into a quiet room would end at once.
+    pub seconds_since_activity_epoch: f32,
+}
+
+/// The pause state of the active meeting, as the renderer needs it.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RecordingPauseSnapshot {
+    pub paused: bool,
+    /// Paused time from spans that have ended, so the renderer can freeze its
+    /// clock without a round trip per tick.
+    pub closed_paused_ms: i64,
+    /// When the open pause began, if paused.
+    pub pause_started_at_ms: Option<i64>,
+    pub spans: Vec<PauseSpan>,
+}
+
+/// Whether a running meeting should end because nobody has been audible on
+/// any captured source for `silence_minutes`.
+///
+/// Every captured source must have been inactive for the whole fuse, and the
+/// fuse must also have elapsed since frames last started flowing on purpose
+/// (activation, or the latest resume) — otherwise a meeting resumed into a
+/// quiet room would end on the first poll. A paused meeting never qualifies:
+/// its watchdogs are not being fed, and a pause is the user's silence, not
+/// the room's. `0` minutes is off. Pure, so the policy is testable without a
+/// device.
+pub fn silence_auto_stop_due(health: &RecordingCaptureHealth, silence_minutes: u32) -> bool {
+    if silence_minutes == 0 || health.paused {
+        return false;
+    }
+    let fuse_seconds = silence_minutes as f32 * 60.0;
+    if health.seconds_since_activity_epoch < fuse_seconds {
+        return false;
+    }
+    let sources = [
+        health.inactivity.mic_seconds,
+        health.inactivity.system_seconds,
+    ];
+    let mut any_source = false;
+    for inactive_seconds in sources.into_iter().flatten() {
+        any_source = true;
+        if inactive_seconds < fuse_seconds {
+            return false;
+        }
+    }
+    any_source
 }
 
 /// Decide what a free-space reading means for a running meeting.
@@ -558,9 +614,38 @@ struct ActiveRecordingSession {
     /// lifecycle loop polls this so the failure surfaces while there is still a
     /// meeting to salvage.
     writer_failure: Arc<std::sync::Mutex<Option<String>>>,
+    /// Set while the user has paused the meeting. Both capture paths read it
+    /// on every callback or drain and drop the frames instead of forwarding
+    /// them, so the streams stay open and resume is instant.
+    paused: Arc<AtomicBool>,
+    /// Frames actually handed to the WAV writer (paused frames excluded), so a
+    /// pause can be placed at its offset in the saved audio.
+    recorded_frames: Arc<AtomicU64>,
+    pause_ledger: PauseLedger,
+    /// Mic-only sessions run the silence watchdog inside the capture callback
+    /// and publish whole seconds of inactivity here; mixed sessions publish
+    /// through `MixedAudioCapture` instead.
+    mic_inactive_seconds: Option<Arc<AtomicU32>>,
+    /// When frames last started flowing on purpose: activation or resume.
+    activity_epoch: Instant,
 }
 
 impl ActiveRecordingSession {
+    /// Seconds of audio forwarded to the file so far.
+    fn recorded_seconds(&self) -> f64 {
+        let frames = self.recorded_frames.load(Ordering::Relaxed) as f64;
+        frames / f64::from(self.sample_rate.max(1))
+    }
+
+    fn pause_snapshot(&self) -> RecordingPauseSnapshot {
+        RecordingPauseSnapshot {
+            paused: self.pause_ledger.is_paused(),
+            closed_paused_ms: self.pause_ledger.closed_paused_ms(),
+            pause_started_at_ms: self.pause_ledger.pause_started_at_ms(),
+            spans: self.pause_ledger.spans().to_vec(),
+        }
+    }
+
     /// How many WAV tracks this session writes concurrently.
     ///
     /// One for a mic-only meeting; three for "me and them" (mixed, mic,
@@ -607,6 +692,9 @@ pub struct RecordingStopResult {
     /// Per-source silence padding for a mixed session; `None` for a mic-only
     /// meeting, which has nothing to pad against.
     pub source_degradation: Option<RecordingSourceDegradation>,
+    /// Every pause of this meeting, the last one closed by the stop if it was
+    /// still open.
+    pub pause_spans: Vec<PauseSpan>,
 }
 
 /// Feed this callback's mono samples through the active dictation auto-stop VAD
@@ -872,7 +960,69 @@ impl AudioCapture {
                 .ok()
                 .and_then(|slot| slot.clone()),
             track_count: session.track_count(),
+            paused: session.paused.load(Ordering::Relaxed),
+            inactivity: match session.mixed_capture.as_ref() {
+                Some(mixed) => mixed.source_inactivity(),
+                None => SourceInactivity {
+                    mic_seconds: session
+                        .mic_inactive_seconds
+                        .as_ref()
+                        .map(|seconds| seconds.load(Ordering::Relaxed) as f32),
+                    system_seconds: None,
+                },
+            },
+            seconds_since_activity_epoch: session.activity_epoch.elapsed().as_secs_f32(),
         })
+    }
+
+    fn active_session_mut(&mut self, recording_id: &str) -> Result<&mut ActiveRecordingSession> {
+        let session = self
+            .active_recording
+            .as_mut()
+            .context("No active recording session")?;
+        if session.id != recording_id {
+            anyhow::bail!(
+                "Recording ID mismatch: active={}, requested={}",
+                session.id,
+                recording_id
+            );
+        }
+        if session.activation.is_some() {
+            anyhow::bail!("Recording session has not been activated");
+        }
+        Ok(session)
+    }
+
+    /// Pause the active meeting. The capture streams stay open; every frame
+    /// from now until `resume_recording` is dropped before it reaches the
+    /// file, the live preview, or the silence watchdogs.
+    pub fn pause_recording(&mut self, recording_id: &str) -> Result<RecordingPauseSnapshot> {
+        let session = self.active_session_mut(recording_id)?;
+        let at_seconds = session.recorded_seconds();
+        session
+            .pause_ledger
+            .pause(unix_now_ms(), at_seconds)
+            .map_err(|error| anyhow::anyhow!(error))?;
+        session.paused.store(true, Ordering::SeqCst);
+        tracing::info!("Recording paused: {} at {:.1}s", recording_id, at_seconds);
+        Ok(session.pause_snapshot())
+    }
+
+    /// Resume a paused meeting. Frames flow again from the next callback.
+    pub fn resume_recording(&mut self, recording_id: &str) -> Result<RecordingPauseSnapshot> {
+        let session = self.active_session_mut(recording_id)?;
+        let span = session
+            .pause_ledger
+            .resume(unix_now_ms())
+            .map_err(|error| anyhow::anyhow!(error))?;
+        session.paused.store(false, Ordering::SeqCst);
+        session.activity_epoch = Instant::now();
+        tracing::info!(
+            "Recording resumed: {} after {}ms",
+            recording_id,
+            span.duration_ms(0)
+        );
+        Ok(session.pause_snapshot())
     }
 
     fn ensure_microphone_preparation_retry_is_safe(
@@ -1766,6 +1916,8 @@ impl AudioCapture {
         let waveform_buffer = Arc::new(std::sync::Mutex::new(Vec::with_capacity(4410)));
         let streaming_queue: Arc<crossbeam::queue::ArrayQueue<Vec<f32>>> =
             Arc::new(crossbeam::queue::ArrayQueue::new(256));
+        let paused = Arc::new(AtomicBool::new(false));
+        let recorded_frames = Arc::new(AtomicU64::new(0));
         let preferred_mic_device = if options.mic {
             Some(
                 self.resolve_input_device_by_id(options.preferred_input_device_id.as_deref())?
@@ -1796,6 +1948,8 @@ impl AudioCapture {
                         handle,
                         recording_id: id.clone(),
                     }),
+                    Arc::clone(&paused),
+                    Arc::clone(&recorded_frames),
                 )
                 .context("Failed to prepare mixed audio capture")?;
             let sample_rate = capture_start.sample_rate;
@@ -1837,6 +1991,11 @@ impl AudioCapture {
                 dropped_writer_chunks: Arc::new(AtomicU64::new(0)),
                 capture_failure,
                 writer_failure,
+                paused,
+                recorded_frames,
+                pause_ledger: PauseLedger::default(),
+                mic_inactive_seconds: None,
+                activity_epoch: Instant::now(),
             });
         } else {
             let device = preferred_mic_device
@@ -1873,6 +2032,10 @@ impl AudioCapture {
             let capture_failure_for_session = Arc::clone(&capture_failure);
             let wf_buffer = Arc::clone(&waveform_buffer);
             let stream_queue_clone = Arc::clone(&streaming_queue);
+            let paused_for_callback = Arc::clone(&paused);
+            let recorded_frames_for_callback = Arc::clone(&recorded_frames);
+            let mic_inactive_seconds = Arc::new(AtomicU32::new(0));
+            let mic_inactive_for_callback = Arc::clone(&mic_inactive_seconds);
             let (ready_tx, ready_rx) = bounded::<Result<(), String>>(1);
             let (activation_tx, activation_rx) = bounded::<()>(1);
             let (activated_tx, activated_rx) = bounded::<Result<(), String>>(1);
@@ -1886,12 +2049,34 @@ impl AudioCapture {
                         let samples_sender = samples_sender.clone();
                         let dropped_stream_chunks = Arc::clone(&dropped_stream_chunks);
                         let dropped_writer_chunks = Arc::clone(&dropped_writer_chunks);
+                        let paused = Arc::clone(&paused_for_callback);
+                        let recorded_frames = Arc::clone(&recorded_frames_for_callback);
+                        let mic_inactive = Arc::clone(&mic_inactive_for_callback);
+                        // The same watchdog the mixed path runs, owned by this
+                        // callback: one RMS pass per chunk, no lock, and its
+                        // inactivity readout feeds the silence auto-stop.
+                        let mut watchdog =
+                            SourceSilenceWatchdog::new(sample_rate, &MIC_SILENCE_PROFILE);
 
                         device.build_input_stream(
                             stream_config.clone(),
                             move |data: &[$sample_type], _: &cpal::InputCallbackInfo| {
                                 guard_audio_callback(&callback_poisoned, "Recording", || {
+                                    // Paused: the stream keeps running so
+                                    // resume is instant, but nothing from this
+                                    // callback reaches the file, the preview,
+                                    // the waveform, or the watchdog.
+                                    if paused.load(Ordering::Relaxed) {
+                                        return;
+                                    }
                                     let chunk = downmix_to_mono(data, num_channels);
+                                    watchdog.observe(&chunk, 0);
+                                    mic_inactive.store(
+                                        watchdog.inactive_seconds() as u32,
+                                        Ordering::Relaxed,
+                                    );
+                                    recorded_frames
+                                        .fetch_add(chunk.len() as u64, Ordering::Relaxed);
 
                                     if let Ok(mut waveform) = waveform_buffer.lock() {
                                         for &sample in
@@ -2045,6 +2230,11 @@ impl AudioCapture {
                 dropped_writer_chunks: dropped_writer_chunks_for_session,
                 capture_failure: capture_failure_for_session,
                 writer_failure,
+                paused,
+                recorded_frames,
+                pause_ledger: PauseLedger::default(),
+                mic_inactive_seconds: Some(mic_inactive_seconds),
+                activity_epoch: Instant::now(),
             });
         }
 
@@ -2095,6 +2285,9 @@ impl AudioCapture {
             return Err(error);
         }
 
+        if let Some(session) = self.active_recording.as_mut() {
+            session.activity_epoch = Instant::now();
+        }
         tracing::info!("Recording activated: {}", recording_id);
         Ok(())
     }
@@ -2155,6 +2348,18 @@ impl AudioCapture {
             ));
         }
 
+        // Stopping while paused finalizes normally: the open pause closes at
+        // the stop, and `paused` is deliberately left set so the frames that
+        // arrive while the streams wind down go the same way as the rest of
+        // the pause — nowhere.
+        if let Some(span) = session.pause_ledger.close_open(unix_now_ms()) {
+            tracing::info!(
+                "Recording {} stopped while paused; closing a {}ms pause",
+                recording_id,
+                span.duration_ms(0)
+            );
+        }
+        let pause_spans = session.pause_ledger.spans().to_vec();
         session.capture_stop_flag.store(false, Ordering::SeqCst);
 
         if let Some(handle) = session.capture_handle.take() {
@@ -2270,6 +2475,7 @@ impl AudioCapture {
             dropped_mixed_chunks,
             capture_failure,
             source_degradation,
+            pause_spans,
         })
     }
 
@@ -2767,13 +2973,33 @@ fn checkpoint_aligned_writers(writers: &mut PreparedAlignedWavWriters) -> Result
     Ok(())
 }
 
+/// How long a writer waits for the next chunk before checking whether a
+/// checkpoint is due anyway. While the meeting is paused no chunk arrives at
+/// all, and a writer that only checkpointed on arrival would leave the last
+/// seconds before the pause unflushed for the whole of it.
+const WAV_WRITER_IDLE_POLL: Duration = Duration::from_secs(1);
+
+/// How often a live WAV's header and buffered samples are pushed to disk.
+const WAV_WRITER_CHECKPOINT_INTERVAL: Duration = Duration::from_secs(5);
+
 fn write_aligned_wav_files(
     mut writers: PreparedAlignedWavWriters,
     receiver: Receiver<MixedAudioChunk>,
     log_path: &Path,
 ) -> Result<()> {
     let mut last_checkpoint = Instant::now();
-    while let Ok(chunk) = receiver.recv() {
+    loop {
+        let chunk = match receiver.recv_timeout(WAV_WRITER_IDLE_POLL) {
+            Ok(chunk) => chunk,
+            Err(RecvTimeoutError::Timeout) => {
+                if last_checkpoint.elapsed() >= WAV_WRITER_CHECKPOINT_INTERVAL {
+                    checkpoint_aligned_writers(&mut writers)?;
+                    last_checkpoint = Instant::now();
+                }
+                continue;
+            }
+            Err(RecvTimeoutError::Disconnected) => break,
+        };
         let frames = chunk.mixed.len();
         if chunk
             .mic
@@ -2798,7 +3024,7 @@ fn write_aligned_wav_files(
         if let (Some(writer), Some(samples)) = (writers.system.as_mut(), chunk.system) {
             write_wav_samples(writer, samples)?;
         }
-        if last_checkpoint.elapsed() >= Duration::from_secs(5) {
+        if last_checkpoint.elapsed() >= WAV_WRITER_CHECKPOINT_INTERVAL {
             checkpoint_aligned_writers(&mut writers)?;
             last_checkpoint = Instant::now();
         }
@@ -2821,9 +3047,20 @@ fn write_wav_file(
     log_path: &Path,
 ) -> Result<()> {
     let mut last_checkpoint = Instant::now();
-    while let Ok(samples) = receiver.recv() {
+    loop {
+        let samples = match receiver.recv_timeout(WAV_WRITER_IDLE_POLL) {
+            Ok(samples) => samples,
+            Err(RecvTimeoutError::Timeout) => {
+                if last_checkpoint.elapsed() >= WAV_WRITER_CHECKPOINT_INTERVAL {
+                    writer.flush()?;
+                    last_checkpoint = Instant::now();
+                }
+                continue;
+            }
+            Err(RecvTimeoutError::Disconnected) => break,
+        };
         write_wav_samples(&mut writer, samples)?;
-        if last_checkpoint.elapsed() >= Duration::from_secs(5) {
+        if last_checkpoint.elapsed() >= WAV_WRITER_CHECKPOINT_INTERVAL {
             writer.flush()?;
             last_checkpoint = Instant::now();
         }
@@ -2832,6 +3069,10 @@ fn write_wav_file(
     writer.finalize()?;
     tracing::info!("WAV file written: {:?}", log_path);
     Ok(())
+}
+
+fn unix_now_ms() -> i64 {
+    chrono::Utc::now().timestamp_millis()
 }
 
 fn join_thread_with_timeout(handle: JoinHandle<()>, timeout: Duration, label: &str) -> Result<()> {
@@ -3124,7 +3365,8 @@ mod recording_writer_tests {
 mod recording_capture_health_tests {
     use super::{
         meeting_headroom_bytes, meeting_space_pressure, meeting_start_space_shortfall,
-        run_wav_writer_thread, write_aligned_wav_files, MeetingSpacePressure,
+        run_wav_writer_thread, silence_auto_stop_due, write_aligned_wav_files,
+        MeetingSpacePressure, RecordingCaptureHealth, SourceInactivity,
         MEETING_CRITICAL_SPACE_STOP_SECONDS, MEETING_LOW_SPACE_WARN_SECONDS,
         MEETING_START_MIN_HEADROOM_SECONDS,
     };
@@ -3271,6 +3513,79 @@ mod recording_capture_health_tests {
         // A zero track count would be a bug elsewhere; charging nothing for it
         // would disable the check entirely, so it is floored at one track.
         assert_eq!(meeting_headroom_bytes(0, 60), meeting_headroom_bytes(1, 60));
+    }
+
+    fn quiet_health(
+        mic: Option<f32>,
+        system: Option<f32>,
+        since_epoch: f32,
+    ) -> RecordingCaptureHealth {
+        RecordingCaptureHealth {
+            writer_failure: None,
+            capture_failure: None,
+            track_count: 1,
+            paused: false,
+            inactivity: SourceInactivity {
+                mic_seconds: mic,
+                system_seconds: system,
+            },
+            seconds_since_activity_epoch: since_epoch,
+        }
+    }
+
+    #[test]
+    fn silence_auto_stop_needs_every_source_quiet_for_the_whole_fuse() {
+        // Mic-only meeting, 15-minute fuse.
+        assert!(silence_auto_stop_due(
+            &quiet_health(Some(900.0), None, 2_000.0),
+            15
+        ));
+        assert!(!silence_auto_stop_due(
+            &quiet_health(Some(899.0), None, 2_000.0),
+            15
+        ));
+        // Me + Them: both sources must be quiet; one talking side keeps it alive.
+        assert!(silence_auto_stop_due(
+            &quiet_health(Some(1_000.0), Some(950.0), 2_000.0),
+            15
+        ));
+        assert!(!silence_auto_stop_due(
+            &quiet_health(Some(1_000.0), Some(10.0), 2_000.0),
+            15
+        ));
+        assert!(!silence_auto_stop_due(
+            &quiet_health(Some(10.0), Some(1_000.0), 2_000.0),
+            15
+        ));
+        // No source at all reports nothing, and cannot end a meeting.
+        assert!(!silence_auto_stop_due(
+            &quiet_health(None, None, 2_000.0),
+            15
+        ));
+    }
+
+    #[test]
+    fn silence_auto_stop_is_off_at_zero_and_while_paused_and_right_after_a_resume() {
+        assert!(!silence_auto_stop_due(
+            &quiet_health(Some(9_999.0), None, 9_999.0),
+            0
+        ));
+
+        let mut paused = quiet_health(Some(9_999.0), None, 9_999.0);
+        paused.paused = true;
+        assert!(!silence_auto_stop_due(&paused, 15));
+
+        // The watchdog's run survives a pause, but the fuse restarts at
+        // resume: 20 minutes of quiet before the pause must not end the
+        // meeting one poll after it resumes.
+        assert!(!silence_auto_stop_due(
+            &quiet_health(Some(1_200.0), None, 5.0),
+            15
+        ));
+        assert!(silence_auto_stop_due(
+            &quiet_health(Some(1_200.0), None, 900.0),
+            15
+        ));
     }
 
     #[test]

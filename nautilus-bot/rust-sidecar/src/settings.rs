@@ -49,6 +49,11 @@ pub struct Settings {
     pub shortcuts: KeyboardShortcuts,
     /// Update preferences
     pub updates: UpdateSettings,
+    /// Meeting behaviours that live around a capture rather than inside it:
+    /// noticing a call, ending a meeting nobody is in any more.
+    pub meetings: MeetingsSettings,
+    /// Which events may reach macOS Notification Center.
+    pub notifications: NotificationsSettings,
     /// Theme
     pub theme: String,
 }
@@ -63,6 +68,8 @@ impl Default for Settings {
             privacy: PrivacySettings::default(),
             shortcuts: KeyboardShortcuts::default(),
             updates: UpdateSettings::default(),
+            meetings: MeetingsSettings::default(),
+            notifications: NotificationsSettings::default(),
             theme: "system".to_string(),
         }
     }
@@ -1255,6 +1262,69 @@ impl Default for UpdateSettings {
     }
 }
 
+/// Longest silence auto-stop a user can configure, in minutes. Four hours is
+/// past any meeting; beyond it the setting is a typo, not an intent.
+pub const MEETING_AUTO_STOP_SILENCE_MINUTES_MAX: u32 = 240;
+
+/// Meeting behaviours that live around a capture. Mirrors `MeetingsSettings`
+/// in `src/types/settings.ts`; every field has a runtime reader
+/// (`meeting_detect.rs` for detection, the meeting capture monitor in lib.rs
+/// for the two auto-stops).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default, rename_all = "camelCase")]
+pub struct MeetingsSettings {
+    /// Poll the running applications on this Mac for a conferencing app with
+    /// a call in progress, and offer to record it. Local only; nothing leaves
+    /// the machine and nothing is recorded until the user says so.
+    pub call_detection_enabled: bool,
+    /// End a running meeting when the call app it was recorded alongside quits
+    /// (or its call window closes).
+    pub auto_stop_when_call_app_quits: bool,
+    /// End a running meeting after this many minutes with nothing audible on
+    /// any captured source. `0` turns it off.
+    pub auto_stop_after_silence_minutes: u32,
+}
+
+impl Default for MeetingsSettings {
+    fn default() -> Self {
+        Self {
+            call_detection_enabled: true,
+            auto_stop_when_call_app_quits: true,
+            auto_stop_after_silence_minutes: 15,
+        }
+    }
+}
+
+/// Which events may become an OS notification. Mirrors `NotificationsSettings`
+/// in `src/types/settings.ts`; read by `electron/notification-policy.ts`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default, rename_all = "camelCase")]
+pub struct NotificationsSettings {
+    /// Meeting started, stopped, auto-stopped, transcript ready, notes ready
+    /// or failed.
+    pub meeting_events: bool,
+    /// A dictation that could not be delivered, shown only while the dictation
+    /// mini window is hidden (when it is visible it already says so).
+    pub dictation_failures: bool,
+}
+
+impl Default for NotificationsSettings {
+    fn default() -> Self {
+        Self {
+            meeting_events: true,
+            dictation_failures: true,
+        }
+    }
+}
+
+/// Keep the silence auto-stop inside the range the UI offers, so a hand-edited
+/// file cannot make the monitor wait for a value it will never reach.
+fn normalize_loaded_meetings_settings(meetings: &mut MeetingsSettings) {
+    meetings.auto_stop_after_silence_minutes = meetings
+        .auto_stop_after_silence_minutes
+        .min(MEETING_AUTO_STOP_SILENCE_MINUTES_MAX);
+}
+
 /// Stable string identifier for a `DictationAppCategory`, used for
 /// serializing user-facing override values (settings JSON + frontend Select).
 pub fn dictation_app_category_to_key(category: DictationAppCategory) -> &'static str {
@@ -1550,6 +1620,7 @@ impl SettingsManager {
         normalize_keyboard_shortcuts(&mut settings.shortcuts);
         normalize_loaded_transcription_settings(&mut settings.transcription);
         normalize_loaded_privacy_settings(&mut settings.privacy);
+        normalize_loaded_meetings_settings(&mut settings.meetings);
 
         let manager = Self {
             settings,
@@ -1663,10 +1734,11 @@ mod tests {
         normalize_loaded_transcription_settings, normalize_transcription_model_id,
         resolve_dictation_app_category_with_overrides, sanitize_meeting_custom_templates, AiLane,
         AiLaneSettings, AudioInputDevicePreference, DictationAppCategoryOverride,
-        DictationCustomMode, MeetingCustomTemplate, PlatformOptimizationSettings, PrivacySettings,
-        Settings, SettingsManager, TranscriptionSettings, MAX_MEETING_CUSTOM_TEMPLATES,
-        MAX_MEETING_TEMPLATE_NAME_LEN, MAX_MEETING_TEMPLATE_OUTLINE_SECTIONS,
-        MAX_MEETING_TEMPLATE_OUTLINE_SECTION_LEN, MAX_MEETING_TEMPLATE_PROMPT_LEN,
+        DictationCustomMode, MeetingCustomTemplate, MeetingsSettings, PlatformOptimizationSettings,
+        PrivacySettings, Settings, SettingsManager, TranscriptionSettings,
+        MAX_MEETING_CUSTOM_TEMPLATES, MAX_MEETING_TEMPLATE_NAME_LEN,
+        MAX_MEETING_TEMPLATE_OUTLINE_SECTIONS, MAX_MEETING_TEMPLATE_OUTLINE_SECTION_LEN,
+        MAX_MEETING_TEMPLATE_PROMPT_LEN, MEETING_AUTO_STOP_SILENCE_MINUTES_MAX,
     };
     use crate::text::format::DictationAppCategory;
     use std::fs;
@@ -2094,6 +2166,59 @@ mod tests {
         .expect("legacy settings should deserialize");
         assert!(!parsed.privacy.vault_initialized);
         assert_eq!(parsed.theme, "system");
+    }
+
+    /// A settings.json written before the `meetings` and `notifications`
+    /// sections existed must load with their defaults: detection on, both
+    /// auto-stops on at 15 minutes, both notification classes on.
+    #[test]
+    fn settings_without_meetings_or_notifications_sections_take_the_defaults() {
+        let parsed: Settings = serde_json::from_str(
+            r#"{
+                "audio": {},
+                "transcription": { "defaultProvider": "parakeet" },
+                "ui": { "minimizeToTray": false },
+                "theme": "dark"
+            }"#,
+        )
+        .expect("pre-meetings settings should deserialize");
+        assert!(parsed.meetings.call_detection_enabled);
+        assert!(parsed.meetings.auto_stop_when_call_app_quits);
+        assert_eq!(parsed.meetings.auto_stop_after_silence_minutes, 15);
+        assert!(parsed.notifications.meeting_events);
+        assert!(parsed.notifications.dictation_failures);
+
+        // And a partial section keeps the defaults for what it does not name.
+        let parsed: Settings = serde_json::from_str(
+            r#"{ "meetings": { "callDetectionEnabled": false }, "notifications": { "meetingEvents": false } }"#,
+        )
+        .expect("partial meetings section should deserialize");
+        assert!(!parsed.meetings.call_detection_enabled);
+        assert!(parsed.meetings.auto_stop_when_call_app_quits);
+        assert_eq!(parsed.meetings.auto_stop_after_silence_minutes, 15);
+        assert!(!parsed.notifications.meeting_events);
+        assert!(parsed.notifications.dictation_failures);
+    }
+
+    #[test]
+    fn silence_auto_stop_minutes_are_capped_on_load() {
+        let mut meetings = MeetingsSettings {
+            auto_stop_after_silence_minutes: 10_000,
+            ..MeetingsSettings::default()
+        };
+        super::normalize_loaded_meetings_settings(&mut meetings);
+        assert_eq!(
+            meetings.auto_stop_after_silence_minutes,
+            MEETING_AUTO_STOP_SILENCE_MINUTES_MAX
+        );
+
+        // Zero means off and must survive untouched.
+        let mut off = MeetingsSettings {
+            auto_stop_after_silence_minutes: 0,
+            ..MeetingsSettings::default()
+        };
+        super::normalize_loaded_meetings_settings(&mut off);
+        assert_eq!(off.auto_stop_after_silence_minutes, 0);
     }
 
     fn lane(provider: &str, model_id: Option<&str>) -> AiLaneSettings {
