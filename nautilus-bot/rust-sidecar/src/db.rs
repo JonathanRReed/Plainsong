@@ -363,6 +363,227 @@ fn preserve_matching_action_item_provenance(
     Some(next)
 }
 
+/// Hex-encode a database key for `PRAGMA key`/`rekey`/`ATTACH ... KEY`.
+///
+/// SQLCipher takes the key as a literal inside the pragma text, which cannot
+/// be a bound parameter, so the encoding is also the injection guard: the
+/// result is checked to be nothing but hex digits before it is interpolated.
+#[cfg(feature = "sqlcipher")]
+fn hex_database_key(key: &str) -> Result<String> {
+    let hex_key = hex::encode(key.as_bytes());
+    if !hex_key.chars().all(|c| c.is_ascii_hexdigit()) {
+        return Err(anyhow::anyhow!("Invalid hex encoding in database key"));
+    }
+    Ok(hex_key)
+}
+
+/// SQLite refuses a bound parameter in `ATTACH`/`VACUUM INTO`, so paths are
+/// inlined as string literals with single quotes doubled.
+#[cfg(feature = "sqlcipher")]
+fn sql_string_literal(path: &Path) -> String {
+    path.to_string_lossy().replace('\'', "''")
+}
+
+/// Delete a database file and the journal/WAL companions SQLite may have left
+/// beside it. Only ever called on a staging file this process created.
+#[cfg(feature = "sqlcipher")]
+fn remove_database_file_set(db_path: &Path) {
+    let _ = fs::remove_file(db_path);
+    if let Some(name) = db_path.file_name().and_then(|name| name.to_str()) {
+        for suffix in ["-journal", "-wal", "-shm"] {
+            let _ = fs::remove_file(db_path.with_file_name(format!("{name}{suffix}")));
+        }
+    }
+}
+
+/// Whether the file at `db_path` opens as a plaintext SQLite database.
+#[cfg(feature = "sqlcipher")]
+fn database_reads_as_plaintext(db_path: &Path) -> bool {
+    Connection::open_with_flags(db_path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)
+        .and_then(|conn| {
+            conn.query_row("SELECT count(*) FROM sqlite_master;", [], |row| {
+                row.get::<_, i64>(0)
+            })
+        })
+        .is_ok()
+}
+
+/// Encrypt the plaintext SQLite database at `db_path` in place.
+///
+/// This is the operation the vault always claimed to perform. `PRAGMA rekey`
+/// does not do it — SQLCipher documents rekey as a no-op on a database that
+/// was never keyed, so the app was setting a durable key in the keychain,
+/// reporting "database encrypted", and leaving every byte in the clear.
+///
+/// The sequence is the one SQLCipher documents for exactly this case, plus the
+/// durability the app owes a file that holds every transcript on the machine:
+///
+/// 1. Prove the file really is plaintext, and read its `user_version`.
+/// 2. `ATTACH` a fresh keyed database beside it and `sqlcipher_export` into it.
+///    `sqlcipher_export` copies schema and rows but not `user_version`, so that
+///    is set explicitly — without it the reopened database looks like schema 0
+///    and migrations would run again.
+/// 3. `DETACH`, close, and fsync the staging file (and its directory) so the
+///    bytes are on the platter before anything replaces the original.
+/// 4. Verify the staging file: it opens with the key, does *not* open without
+///    it, carries the same `user_version`, and has a non-empty schema.
+/// 5. `rename` it over the original. Same directory, so this is atomic: a
+///    crash leaves either the whole old plaintext file or the whole new
+///    encrypted one, never a half-written mixture.
+/// 6. Verify once more through the final path.
+///
+/// Any failure before step 5 removes the staging file and leaves the plaintext
+/// original untouched and openable. What this cannot do is scrub the old
+/// plaintext blocks: `rename` unlinks the previous inode, it does not overwrite
+/// it, so the pre-encryption pages remain unallocated-but-recoverable on the
+/// volume until they are reused. On a FileVault volume they are still covered
+/// by full-disk encryption; the vault's promise from here forward is the
+/// SQLCipher key, and that is what the copy says.
+#[cfg(feature = "sqlcipher")]
+pub(crate) fn encrypt_plaintext_database_file(db_path: &Path, key: &str) -> Result<()> {
+    let hex_key = hex_database_key(key)?;
+    if !db_path.is_file() {
+        anyhow::bail!("No database to encrypt at {}", db_path.display());
+    }
+    let file_name = db_path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .context("Database path has no file name")?;
+    // Beside the original, so the final rename stays inside one directory and
+    // is therefore atomic.
+    let staging = db_path.with_file_name(format!("{file_name}.new"));
+    remove_database_file_set(&staging);
+
+    let export = (|| -> Result<i64> {
+        let conn = Connection::open(db_path)
+            .with_context(|| format!("Failed to open {}", db_path.display()))?;
+        conn.busy_timeout(std::time::Duration::from_secs(30))?;
+        // If this fails the file is already encrypted (or corrupt) and the
+        // export would produce nonsense; refuse before touching anything.
+        conn.query_row("SELECT count(*) FROM sqlite_master;", [], |row| {
+            row.get::<_, i64>(0)
+        })
+        .context("The database did not open as plaintext, so it was left alone")?;
+        let user_version: i64 = conn.query_row("PRAGMA user_version", [], |row| row.get(0))?;
+
+        conn.execute_batch(&format!(
+            "ATTACH DATABASE '{}' AS plainsong_vault KEY \"x'{}'\";",
+            sql_string_literal(&staging),
+            hex_key
+        ))
+        .context("Could not create the encrypted database beside the original")?;
+        // `sqlcipher_export` returns a row, so it has to be a query: rusqlite
+        // refuses any row-returning statement passed to `execute`.
+        let exported = conn
+            .query_row(
+                "SELECT sqlcipher_export('plainsong_vault');",
+                [],
+                |_| Ok(()),
+            )
+            .context("Could not copy the database into its encrypted replacement")
+            .and_then(|()| {
+                conn.execute_batch(&format!(
+                    "PRAGMA plainsong_vault.user_version = {user_version};"
+                ))
+                .context("Could not carry the schema version into the encrypted database")
+            });
+        // Detach whatever happened above, so the staging file is closed and
+        // removable on the failure path.
+        let detached = conn
+            .execute_batch("DETACH DATABASE plainsong_vault;")
+            .context("Could not detach the encrypted database");
+        exported?;
+        detached?;
+        conn.close().map_err(|(_, error)| {
+            anyhow::Error::new(error).context("Could not close the plaintext database")
+        })?;
+        Ok(user_version)
+    })();
+
+    let user_version = match export {
+        Ok(version) => version,
+        Err(error) => {
+            remove_database_file_set(&staging);
+            return Err(error);
+        }
+    };
+
+    let verified = (|| -> Result<()> {
+        fsync_path(&staging).context("Could not flush the encrypted database to disk")?;
+        if let Some(parent) = staging.parent() {
+            // Best effort: some filesystems refuse a directory fsync. The
+            // rename below is still atomic; only its durability across a power
+            // loss is weakened, and that is worth a log line, not a failure.
+            if let Err(error) = fsync_path(parent) {
+                tracing::warn!(
+                    "Could not fsync {} after export: {}",
+                    parent.display(),
+                    error
+                );
+            }
+        }
+        if database_reads_as_plaintext(&staging) {
+            anyhow::bail!("The replacement database is still readable without a key");
+        }
+        let staged = Connection::open(&staging)?;
+        staged.execute_batch(&format!("PRAGMA key = \"x'{}'\";", hex_key))?;
+        let tables: i64 = staged
+            .query_row("SELECT count(*) FROM sqlite_master;", [], |row| row.get(0))
+            .context("The encrypted database did not open with its own key")?;
+        if tables == 0 {
+            anyhow::bail!("The encrypted database came out empty");
+        }
+        let staged_version: i64 = staged.query_row("PRAGMA user_version", [], |row| row.get(0))?;
+        if staged_version != user_version {
+            anyhow::bail!(
+                "The encrypted database reports schema version {staged_version}, not {user_version}"
+            );
+        }
+        staged.close().map_err(|(_, error)| error)?;
+        Ok(())
+    })();
+
+    if let Err(error) = verified {
+        remove_database_file_set(&staging);
+        return Err(error);
+    }
+
+    // The one irreversible step, and the only one after which the plaintext
+    // original no longer has a name.
+    if let Err(error) = fs::rename(&staging, db_path) {
+        remove_database_file_set(&staging);
+        return Err(anyhow::Error::new(error).context(format!(
+            "Could not put the encrypted database in place at {}",
+            db_path.display()
+        )));
+    }
+
+    let final_check = Connection::open(db_path)
+        .context("Could not reopen the database after encrypting it")
+        .and_then(|conn| {
+            conn.execute_batch(&format!("PRAGMA key = \"x'{}'\";", hex_key))?;
+            conn.query_row("SELECT count(*) FROM sqlite_master;", [], |row| {
+                row.get::<_, i64>(0)
+            })
+            .context("The encrypted database did not open with its own key")
+        })?;
+    tracing::info!(
+        "Encrypted {} ({} schema objects, schema version {})",
+        db_path.display(),
+        final_check,
+        user_version
+    );
+    Ok(())
+}
+
+/// fsync one path (file or directory).
+#[cfg(feature = "sqlcipher")]
+fn fsync_path(path: &Path) -> std::io::Result<()> {
+    // A directory cannot be opened for writing, and fsync on a read-only
+    // descriptor is enough to flush metadata on both APFS and ext4.
+    fs::File::open(path)?.sync_all()
+}
+
 pub struct Database {
     conn: Connection,
     encrypted: bool,
@@ -383,21 +604,22 @@ impl Database {
         Self::open_at_path(&app_dir.join("plainsong.db"), key)
     }
 
-    fn open_at_path(db_path: &Path, key: Option<&str>) -> Result<Self> {
+    pub(crate) fn open_at_path(db_path: &Path, key: Option<&str>) -> Result<Self> {
         let conn = Connection::open(db_path)?;
 
         // SQLCipher reports its library version even for an unkeyed plaintext
         // database, so encryption state must come from the successful key path.
         #[cfg(feature = "sqlcipher")]
         let encrypted = if let Some(key) = key {
-            let hex_key = hex::encode(key.as_bytes());
-            // Validate hex encoding to prevent SQL injection
-            if !hex_key.chars().all(|c| c.is_ascii_hexdigit()) {
-                return Err(anyhow::anyhow!("Invalid hex encoding in database key"));
-            }
+            let hex_key = hex_database_key(key)?;
             conn.execute_batch(&format!("PRAGMA key = \"x'{}'\";", hex_key))?;
-            // Reading sqlite_master proves that this key actually opened the file.
-            conn.execute("SELECT count(*) FROM sqlite_master;", [])?;
+            // Reading sqlite_master proves that this key actually opened the
+            // file. It has to be a query: rusqlite's `execute` refuses any
+            // statement that returns rows, so the previous `execute` here made
+            // every keyed open fail before the key was ever tested.
+            conn.query_row("SELECT count(*) FROM sqlite_master;", [], |row| {
+                row.get::<_, i64>(0)
+            })?;
             true
         } else {
             false
@@ -418,6 +640,113 @@ impl Database {
     /// Create new database (default, no encryption)
     pub fn new() -> Result<Self> {
         Self::new_with_key(None)
+    }
+
+    /// The on-disk path `new_with_key` opens, without creating anything.
+    pub(crate) fn default_db_path() -> Result<PathBuf> {
+        Ok(crate::paths::data_dir()
+            .context("Could not find data directory")?
+            .join("Plainsong")
+            .join("plainsong.db"))
+    }
+
+    /// Open an existing database file for reading only.
+    ///
+    /// This is the `plainsong` CLI / MCP path. It differs from `open_at_path`
+    /// in every way that matters for a second process reading beside a live
+    /// sidecar:
+    ///
+    /// - `SQLITE_OPEN_READ_ONLY`: the connection cannot write, so a bug in the
+    ///   reader can never mutate user data, and no migration runs. A file that
+    ///   does not exist is an error rather than a freshly created empty store.
+    /// - `PRAGMA query_only = ON` as a second belt: even a statement that
+    ///   slipped past the flag is refused by SQLite itself.
+    /// - `busy_timeout`: the sidecar's writes hold the rollback journal for a
+    ///   few milliseconds; a reader waits instead of failing with `SQLITE_BUSY`.
+    /// - The schema version is checked but never bumped: a newer schema than
+    ///   this binary knows is refused with a plain message.
+    ///
+    /// The key handling is identical to `open_at_path` so the two paths cannot
+    /// drift: same hex-encoded `PRAGMA key`, same `sqlite_master` read that
+    /// proves the key actually opened the file.
+    pub(crate) fn open_read_only_at_path(db_path: &Path, key: Option<&str>) -> Result<Self> {
+        use rusqlite::OpenFlags;
+
+        if !db_path.is_file() {
+            anyhow::bail!("No Plainsong database at {}", db_path.display());
+        }
+        let conn = Connection::open_with_flags(
+            db_path,
+            OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
+        )
+        .with_context(|| format!("Failed to open {} read-only", db_path.display()))?;
+
+        // Before `PRAGMA key` and the probe, not after: both of those touch the
+        // file, and the sidecar can be holding the rollback journal at exactly
+        // that moment. Set later, the very first statements of a read-only open
+        // were the ones that could still fail with SQLITE_BUSY.
+        conn.busy_timeout(std::time::Duration::from_secs(5))?;
+
+        #[cfg(feature = "sqlcipher")]
+        let encrypted = if let Some(key) = key {
+            conn.execute_batch(&format!("PRAGMA key = \"x'{}'\";", hex_database_key(key)?))?;
+            true
+        } else {
+            false
+        };
+        #[cfg(not(feature = "sqlcipher"))]
+        let encrypted = {
+            let _ = key;
+            false
+        };
+
+        // Proves the key (or its absence) actually opened the file; an
+        // encrypted database read without its key fails here, not on the
+        // first real query.
+        conn.query_row("SELECT count(*) FROM sqlite_master;", [], |row| {
+            row.get::<_, i64>(0)
+        })
+        .context("Could not read the database; is the encryption key right?")?;
+        conn.execute_batch("PRAGMA query_only = ON;")?;
+
+        let schema_version: i64 = conn.query_row("PRAGMA user_version", [], |row| row.get(0))?;
+        if schema_version > CURRENT_SCHEMA_VERSION {
+            anyhow::bail!(
+                "Database schema version {} is newer than this binary supports ({})",
+                schema_version,
+                CURRENT_SCHEMA_VERSION
+            );
+        }
+
+        Ok(Self { conn, encrypted })
+    }
+
+    /// Open read-only, deciding whether the file is encrypted by trying, not
+    /// by asking the keychain.
+    ///
+    /// A key in the keychain is not evidence that the file on disk is
+    /// encrypted: the vault used to store the key and then fail to encrypt
+    /// anything, and even now the two are separate steps that a crash can land
+    /// between. A reader that assumed `key.is_some() == encrypted` therefore
+    /// both refused to open perfectly readable databases and reported
+    /// "encrypted: true" about plaintext ones.
+    ///
+    /// So: try the key if there is one, fall back to an unkeyed open, and let
+    /// [`Database::is_encrypted`] report whichever attempt actually worked.
+    pub(crate) fn open_read_only_probing(db_path: &Path, key: Option<&str>) -> Result<Self> {
+        let Some(key) = key else {
+            return Self::open_read_only_at_path(db_path, None);
+        };
+        match Self::open_read_only_at_path(db_path, Some(key)) {
+            Ok(db) => Ok(db),
+            Err(keyed_error) => {
+                Self::open_read_only_at_path(db_path, None).map_err(|plain_error| {
+                    keyed_error.context(format!(
+                        "and it is not a readable plaintext database either: {plain_error}"
+                    ))
+                })
+            }
+        }
     }
 
     #[cfg(test)]
@@ -456,21 +785,97 @@ impl Database {
         Ok(self.encrypted)
     }
 
-    /// Change database key (encrypt or re-encrypt)
+    /// Encrypt this database, or change the key of one that already is.
+    ///
+    /// The two cases are not the same operation, and conflating them is what
+    /// left the vault unencrypted for every user who turned it on:
+    ///
+    /// - **Already keyed** — `PRAGMA rekey` re-encrypts every page in place.
+    ///   That is what rekey is for and it works.
+    /// - **Plaintext** — `PRAGMA rekey` is a documented no-op on a connection
+    ///   that was never keyed. It returns success, the file stays plaintext,
+    ///   and the caller has no way to tell. The supported route is
+    ///   `sqlcipher_export` into a fresh keyed database; see
+    ///   [`encrypt_plaintext_database_file`].
+    ///
+    /// The branch is taken from `self.encrypted`, which is only ever true when
+    /// a keyed open actually read `sqlite_master`, so no call site can pick the
+    /// wrong one.
     #[cfg(feature = "sqlcipher")]
     pub fn change_key(&mut self, new_key: &str) -> Result<()> {
-        let hex_key = hex::encode(new_key.as_bytes());
-        // Validate hex encoding to prevent SQL injection
-        if !hex_key.chars().all(|c| c.is_ascii_hexdigit()) {
-            return Err(anyhow::anyhow!("Invalid hex encoding in database key"));
+        if !self.encrypted {
+            return self.encrypt_plaintext_file(new_key);
         }
+        let hex_key = hex_database_key(new_key)?;
         self.conn
             .execute_batch(&format!("PRAGMA rekey = \"x'{}'\";", hex_key))?;
+        // A query, not `execute`, for the same reason as in `open_at_path`.
         self.conn
-            .execute("SELECT count(*) FROM sqlite_master;", [])?;
-        self.encrypted = true;
+            .query_row("SELECT count(*) FROM sqlite_master;", [], |row| {
+                row.get::<_, i64>(0)
+            })?;
         tracing::info!("Database encryption key changed");
         Ok(())
+    }
+
+    /// Migrate this handle's plaintext file to an encrypted one and reopen
+    /// against the result.
+    ///
+    /// The live connection is closed first: the migration writes a sibling
+    /// file and then renames it over the original, and an open handle on the
+    /// old inode would keep reading a file that no longer has a name.
+    #[cfg(feature = "sqlcipher")]
+    fn encrypt_plaintext_file(&mut self, key: &str) -> Result<()> {
+        let db_path = self
+            .conn
+            .path()
+            .filter(|path| !path.is_empty())
+            .map(PathBuf::from)
+            .context("Cannot encrypt a database that has no file on disk")?;
+
+        let placeholder = Connection::open_in_memory()
+            .context("Could not prepare the connection swap for encryption")?;
+        let live = std::mem::replace(&mut self.conn, placeholder);
+        if let Err((restored, error)) = live.close() {
+            // Something is still borrowing the connection; nothing has been
+            // touched on disk, so put it back and report.
+            self.conn = restored;
+            return Err(anyhow::Error::new(error)
+                .context("Could not close the database before encrypting it"));
+        }
+
+        match encrypt_plaintext_database_file(&db_path, key) {
+            Ok(()) => {
+                let conn = Connection::open(&db_path)
+                    .with_context(|| format!("Failed to reopen {}", db_path.display()))?;
+                conn.execute_batch(&format!("PRAGMA key = \"x'{}'\";", hex_database_key(key)?))?;
+                conn.query_row("SELECT count(*) FROM sqlite_master;", [], |row| {
+                    row.get::<_, i64>(0)
+                })
+                .context("The encrypted database did not open with its own key")?;
+                conn.execute_batch("PRAGMA foreign_keys = ON;")?;
+                self.conn = conn;
+                self.encrypted = true;
+                tracing::info!("Database encrypted at {}", db_path.display());
+                Ok(())
+            }
+            Err(error) => {
+                // The migration leaves the plaintext original in place on every
+                // failure path, so the app keeps working on it.
+                match Connection::open(&db_path) {
+                    Ok(conn) => {
+                        let _ = conn.execute_batch("PRAGMA foreign_keys = ON;");
+                        self.conn = conn;
+                    }
+                    Err(reopen) => {
+                        return Err(error.context(format!(
+                            "and the plaintext database could not be reopened afterwards: {reopen}"
+                        )));
+                    }
+                }
+                Err(error)
+            }
+        }
     }
 
     /// Log an audit event
@@ -2397,6 +2802,45 @@ impl Database {
         Ok(self
             .get_transcript_with_revision(recording_id)?
             .map(|(transcript, _revision)| transcript))
+    }
+
+    /// Does this recording have a transcript with any text in it?
+    ///
+    /// The predicate mirrors what a loaded [`Transcript`] would report — a
+    /// segment list that is not empty, or a non-blank `full_text` — without
+    /// deserializing the segment JSON. `save_transcript` writes compact
+    /// `serde_json` output, so an empty list is exactly the two characters
+    /// `[]`.
+    ///
+    /// The point of not loading it: the CLI's `stats` asked this about every
+    /// recording on the machine, which meant reading and parsing every
+    /// transcript in the database to answer a question about counts.
+    const TRANSCRIPT_HAS_CONTENT_SQL: &'static str =
+        "(full_text IS NOT NULL AND trim(full_text) <> '') \
+         OR (segments IS NOT NULL AND trim(segments) NOT IN ('', '[]', 'null'))";
+
+    pub(crate) fn has_transcript_content(&self, recording_id: &str) -> Result<bool> {
+        let found: i64 = self.conn.query_row(
+            &format!(
+                "SELECT EXISTS(SELECT 1 FROM transcripts WHERE recording_id = ?1 AND ({}))",
+                Self::TRANSCRIPT_HAS_CONTENT_SQL
+            ),
+            [recording_id],
+            |row| row.get(0),
+        )?;
+        Ok(found != 0)
+    }
+
+    /// Every recording id whose transcript has content, in one query.
+    pub(crate) fn recording_ids_with_transcript_content(&self) -> Result<HashSet<String>> {
+        let mut stmt = self.conn.prepare(&format!(
+            "SELECT DISTINCT recording_id FROM transcripts WHERE {}",
+            Self::TRANSCRIPT_HAS_CONTENT_SQL
+        ))?;
+        let ids = stmt
+            .query_map([], |row| row.get::<_, String>(0))?
+            .collect::<rusqlite::Result<HashSet<String>>>()?;
+        Ok(ids)
     }
 
     pub fn get_transcript_with_revision(
@@ -5758,6 +6202,433 @@ mod tests {
         };
         db.init_tables().expect("init tables");
         db
+    }
+
+    #[test]
+    fn read_only_open_refuses_writes_and_skips_migrations() {
+        let dir = crate::test_fs::TempDir::new("local-tools");
+        let path = dir.path().join("plainsong.db");
+        // A writer creates the schema and one row the reader can see.
+        {
+            let mut db = Database::open_at_path(&path, None).unwrap();
+            let recording = sample_recording("ro-1", "inbox");
+            db.create_recording(&recording).unwrap();
+        }
+
+        let reader = Database::open_read_only_at_path(&path, None).unwrap();
+        assert_eq!(reader.get_recordings(None).unwrap().len(), 1);
+
+        // Every write path is refused by SQLite itself, not only by policy.
+        let insert = reader.conn.execute(
+            "INSERT INTO projects (id, name, created_at, updated_at) VALUES ('p', 'p', '', '')",
+            [],
+        );
+        assert!(
+            insert.is_err(),
+            "insert must fail on a read-only connection"
+        );
+        let bump = reader.conn.execute_batch("PRAGMA user_version = 99;");
+        assert!(
+            bump.is_err(),
+            "pragma write must fail on a read-only connection"
+        );
+        let query_only: i64 = reader
+            .conn
+            .query_row("PRAGMA query_only", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(query_only, 1);
+
+        // The file on disk still carries the writer's schema version.
+        let check = Connection::open(&path).unwrap();
+        let version: i64 = check
+            .query_row("PRAGMA user_version", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(version, CURRENT_SCHEMA_VERSION);
+    }
+
+    #[test]
+    fn read_only_open_refuses_a_missing_file_instead_of_creating_one() {
+        let dir = crate::test_fs::TempDir::new("local-tools");
+        let path = dir.path().join("absent.db");
+        let error = Database::open_read_only_at_path(&path, None)
+            .err()
+            .expect("open must fail");
+        assert!(error.to_string().contains("No Plainsong database"));
+        assert!(
+            !path.exists(),
+            "a read-only open must never create the file"
+        );
+    }
+
+    #[test]
+    fn read_only_open_refuses_a_newer_schema() {
+        let dir = crate::test_fs::TempDir::new("local-tools");
+        let path = dir.path().join("future.db");
+        {
+            let conn = Connection::open(&path).unwrap();
+            conn.execute_batch(&format!(
+                "PRAGMA user_version = {};",
+                CURRENT_SCHEMA_VERSION + 1
+            ))
+            .unwrap();
+        }
+        let error = Database::open_read_only_at_path(&path, None)
+            .err()
+            .expect("open must fail");
+        assert!(error
+            .to_string()
+            .contains("newer than this binary supports"));
+    }
+
+    /// The keyed open used to verify the key with `Connection::execute`,
+    /// which rusqlite rejects for any row-returning statement — so every
+    /// encrypted open failed before the key was tested. Nothing caught it
+    /// because no install had a vault key yet.
+    #[cfg(feature = "sqlcipher")]
+    #[test]
+    fn keyed_open_round_trip() {
+        let dir = crate::test_fs::TempDir::new("local-tools");
+        let path = dir.path().join("keyed.db");
+        let key = "0123456789abcdef0123456789abcdef";
+        {
+            let mut db = Database::open_at_path(&path, Some(key)).expect("keyed create");
+            assert!(db.is_encrypted().unwrap());
+            db.create_recording(&sample_recording("k-1", "inbox"))
+                .unwrap();
+        }
+        let reopened = Database::open_at_path(&path, Some(key)).expect("keyed reopen");
+        assert_eq!(reopened.get_recordings(None).unwrap().len(), 1);
+        assert!(Database::open_at_path(&path, None).is_err());
+        // Not covered here: `change_key` on a database that was opened
+        // WITHOUT a key. SQLCipher's `PRAGMA rekey` is a silent no-op on an
+        // unkeyed connection (the file stays plaintext and a keyed reopen
+        // then fails with "file is not a database"), so the vault's
+        // plaintext-to-encrypted step needs `sqlcipher_export`, not `rekey`.
+        // That is a separate fix with its own migration story; it is
+        // recorded, not papered over, here.
+    }
+
+    /// A second process reading the live database must not leave anything
+    /// behind for the writer to trip over. A `-wal`/`-shm` pair would also
+    /// mean the reader had written to the directory, which the read-only flag
+    /// is supposed to make impossible.
+    #[test]
+    fn read_only_open_creates_no_sidecar_files_and_the_writer_is_not_in_wal_mode() {
+        let dir = crate::test_fs::TempDir::new("local-tools");
+        let path = dir.path().join("plainsong.db");
+        {
+            let mut db = Database::open_at_path(&path, None).unwrap();
+            db.create_recording(&sample_recording("ro-wal", "inbox"))
+                .unwrap();
+            // The read-only open in this repo does not attach to a WAL, so the
+            // writer must not be using one. If that ever changes, this test is
+            // the thing that says so before a user's CLI stops working.
+            let mode: String = db
+                .conn
+                .query_row("PRAGMA journal_mode", [], |row| row.get(0))
+                .unwrap();
+            assert_ne!(mode.to_ascii_lowercase(), "wal", "writer journal_mode");
+        }
+        let before: BTreeSet<String> = std::fs::read_dir(dir.path())
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
+            .collect();
+        assert_eq!(before, BTreeSet::from(["plainsong.db".to_string()]));
+
+        let reader = Database::open_read_only_at_path(&path, None).unwrap();
+        assert_eq!(reader.get_recordings(None).unwrap().len(), 1);
+        assert!(!reader.has_transcript_content("ro-wal").unwrap());
+        assert!(reader
+            .recording_ids_with_transcript_content()
+            .unwrap()
+            .is_empty());
+        drop(reader);
+
+        let after: BTreeSet<String> = std::fs::read_dir(dir.path())
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
+            .collect();
+        assert_eq!(
+            after, before,
+            "a read-only open must not create journal, WAL or shm files"
+        );
+    }
+
+    #[test]
+    fn transcript_content_predicate_matches_the_loaded_transcript() {
+        let dir = crate::test_fs::TempDir::new("local-tools");
+        let path = dir.path().join("plainsong.db");
+        let mut db = Database::open_at_path(&path, None).unwrap();
+        for id in ["with-segments", "text-only", "empty"] {
+            db.create_recording(&sample_recording(id, "inbox")).unwrap();
+        }
+        db.conn
+            .execute(
+                "INSERT INTO transcripts (id, recording_id, segments, full_text, language, confidence, model, created_at)
+                 VALUES ('t1', 'with-segments', '[{\"id\":\"s\",\"start_time\":0.0,\"end_time\":1.0,\"text\":\"hi\",\"speaker_id\":null,\"confidence\":0.9}]', '', 'en', 0.9, 'test', '2026-08-01T00:00:00Z')",
+                [],
+            )
+            .unwrap();
+        db.conn
+            .execute(
+                "INSERT INTO transcripts (id, recording_id, segments, full_text, language, confidence, model, created_at)
+                 VALUES ('t2', 'text-only', '[]', 'a sentence', 'en', 0.9, 'test', '2026-08-01T00:00:00Z')",
+                [],
+            )
+            .unwrap();
+        db.conn
+            .execute(
+                "INSERT INTO transcripts (id, recording_id, segments, full_text, language, confidence, model, created_at)
+                 VALUES ('t3', 'empty', '[]', '   ', 'en', 0.9, 'test', '2026-08-01T00:00:00Z')",
+                [],
+            )
+            .unwrap();
+
+        assert!(db.has_transcript_content("with-segments").unwrap());
+        assert!(db.has_transcript_content("text-only").unwrap());
+        assert!(!db.has_transcript_content("empty").unwrap());
+        assert!(!db.has_transcript_content("no-such-recording").unwrap());
+        assert_eq!(
+            db.recording_ids_with_transcript_content().unwrap(),
+            HashSet::from(["with-segments".to_string(), "text-only".to_string()])
+        );
+    }
+
+    #[cfg(feature = "sqlcipher")]
+    #[test]
+    fn read_only_open_needs_the_same_key_the_writer_used() {
+        let dir = crate::test_fs::TempDir::new("local-tools");
+        let path = dir.path().join("cipher.db");
+        let key = "0123456789abcdef0123456789abcdef";
+        {
+            let mut db = Database::open_at_path(&path, Some(key)).unwrap();
+            db.create_recording(&sample_recording("enc-1", "inbox"))
+                .unwrap();
+        }
+        let keyed = Database::open_read_only_at_path(&path, Some(key)).unwrap();
+        assert!(keyed.is_encrypted().unwrap());
+        assert_eq!(keyed.get_recordings(None).unwrap().len(), 1);
+
+        assert!(Database::open_read_only_at_path(&path, None).is_err());
+        assert!(Database::open_read_only_at_path(&path, Some("wrong-key")).is_err());
+    }
+
+    /// The whole point of item B13. `PRAGMA rekey` on an unkeyed connection is
+    /// a documented no-op: it reported success, the file stayed plaintext, and
+    /// the app told the user "database encrypted". This is the real migration.
+    #[cfg(feature = "sqlcipher")]
+    #[test]
+    fn plaintext_database_is_really_encrypted_and_keeps_its_schema_version() {
+        let dir = crate::test_fs::TempDir::new("vault-migrate");
+        let path = dir.path().join("plainsong.db");
+        let key = "0123456789abcdef0123456789abcdef";
+        {
+            let mut db = Database::open_at_path(&path, None).unwrap();
+            db.create_recording(&sample_recording("v-1", "inbox"))
+                .unwrap();
+            assert!(!db.is_encrypted().unwrap());
+        }
+        // Before: readable by anyone with the file.
+        assert!(Database::open_read_only_at_path(&path, None).is_ok());
+
+        let mut db = Database::open_at_path(&path, None).unwrap();
+        db.change_key(key).expect("plaintext migration");
+        assert!(db.is_encrypted().unwrap());
+        // The handle kept working, against the encrypted file.
+        assert_eq!(db.get_recordings(None).unwrap().len(), 1);
+        db.create_recording(&sample_recording("v-2", "inbox"))
+            .unwrap();
+        drop(db);
+
+        // After: the plaintext open that worked a moment ago now fails, and
+        // the keyed one sees both rows.
+        assert!(
+            Database::open_read_only_at_path(&path, None).is_err(),
+            "the file must no longer open without the key"
+        );
+        let keyed = Database::open_read_only_at_path(&path, Some(key)).unwrap();
+        assert_eq!(keyed.get_recordings(None).unwrap().len(), 2);
+        let version: i64 = keyed
+            .conn
+            .query_row("PRAGMA user_version", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(
+            version, CURRENT_SCHEMA_VERSION,
+            "sqlcipher_export does not carry user_version; it has to be set"
+        );
+
+        // No staging file survives a successful migration.
+        let leftovers: Vec<String> = std::fs::read_dir(dir.path())
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
+            .filter(|name| name != "plainsong.db")
+            .collect();
+        assert!(leftovers.is_empty(), "leftovers: {leftovers:?}");
+    }
+
+    /// Re-keying a database that IS encrypted is the case `PRAGMA rekey` is
+    /// actually for; the branch has to keep working.
+    #[cfg(feature = "sqlcipher")]
+    #[test]
+    fn an_encrypted_database_still_rekeys_in_place() {
+        let dir = crate::test_fs::TempDir::new("vault-rekey");
+        let path = dir.path().join("plainsong.db");
+        let first = "0123456789abcdef0123456789abcdef";
+        let second = "fedcba9876543210fedcba9876543210";
+        {
+            let mut db = Database::open_at_path(&path, Some(first)).unwrap();
+            db.create_recording(&sample_recording("rk-1", "inbox"))
+                .unwrap();
+            db.change_key(second).expect("rekey");
+            assert!(db.is_encrypted().unwrap());
+        }
+        assert!(Database::open_read_only_at_path(&path, Some(first)).is_err());
+        let reopened = Database::open_read_only_at_path(&path, Some(second)).unwrap();
+        assert_eq!(reopened.get_recordings(None).unwrap().len(), 1);
+    }
+
+    /// A migration that cannot finish must leave the user with the database
+    /// they had, not a half-written one and not nothing.
+    #[cfg(feature = "sqlcipher")]
+    #[test]
+    fn a_failed_migration_leaves_the_plaintext_original_intact() {
+        let dir = crate::test_fs::TempDir::new("vault-fail");
+        let path = dir.path().join("plainsong.db");
+        {
+            let mut db = Database::open_at_path(&path, None).unwrap();
+            db.create_recording(&sample_recording("f-1", "inbox"))
+                .unwrap();
+        }
+
+        // A directory where the staging file wants to be: ATTACH cannot create
+        // the database, so the export fails at the first step that touches disk.
+        let staging = dir.path().join("plainsong.db.new");
+        std::fs::create_dir(&staging).unwrap();
+
+        let mut db = Database::open_at_path(&path, None).unwrap();
+        let error = db
+            .change_key("0123456789abcdef0123456789abcdef")
+            .expect_err("migration must fail");
+        assert!(!db.is_encrypted().unwrap(), "{error:#}");
+        // The handle was reopened against the surviving plaintext file and is
+        // still usable, both for reads and for writes.
+        assert_eq!(db.get_recordings(None).unwrap().len(), 1);
+        db.create_recording(&sample_recording("f-2", "inbox"))
+            .unwrap();
+        drop(db);
+
+        // The original is still a plaintext database with the user's rows in
+        // it, and the failure did not put a key on it.
+        let reopened = Database::open_read_only_at_path(&path, None)
+            .expect("the plaintext original must still open");
+        assert_eq!(reopened.get_recordings(None).unwrap().len(), 2);
+        assert!(!reopened.is_encrypted().unwrap());
+        drop(reopened);
+        std::fs::remove_dir(&staging).unwrap();
+    }
+
+    /// The staging file is cleaned up when the export itself fails partway,
+    /// so a retry is not blocked by the previous attempt's leftovers.
+    #[cfg(feature = "sqlcipher")]
+    #[test]
+    fn a_failed_migration_removes_its_staging_file() {
+        let dir = crate::test_fs::TempDir::new("vault-staging");
+        let path = dir.path().join("plainsong.db");
+        {
+            let mut db = Database::open_at_path(&path, None).unwrap();
+            db.create_recording(&sample_recording("s-1", "inbox"))
+                .unwrap();
+        }
+        // An already-encrypted file: the migration refuses at the "prove it is
+        // plaintext" step, which is after the staging path has been chosen.
+        {
+            let mut db = Database::open_at_path(&path, None).unwrap();
+            db.change_key("0123456789abcdef0123456789abcdef").unwrap();
+        }
+        let error = encrypt_plaintext_database_file(&path, "0123456789abcdef0123456789abcdef")
+            .expect_err("an encrypted file must not be exported again");
+        assert!(
+            error.to_string().contains("did not open as plaintext"),
+            "{error:#}"
+        );
+        assert!(
+            !dir.path().join("plainsong.db.new").exists(),
+            "the staging file must not survive a failed migration"
+        );
+        // And the encrypted database is untouched.
+        let keyed =
+            Database::open_read_only_at_path(&path, Some("0123456789abcdef0123456789abcdef"))
+                .unwrap();
+        assert_eq!(keyed.get_recordings(None).unwrap().len(), 1);
+    }
+
+    /// What startup keys off: a keyed open of a plaintext file fails, and a
+    /// plaintext open of the same file succeeds. That pair is the whole
+    /// "key stored, database never encrypted" detection.
+    #[cfg(feature = "sqlcipher")]
+    #[test]
+    fn a_keyed_open_of_a_plaintext_file_fails_and_the_plaintext_open_does_not() {
+        let dir = crate::test_fs::TempDir::new("vault-detect");
+        let path = dir.path().join("plainsong.db");
+        let key = "0123456789abcdef0123456789abcdef";
+        {
+            let mut db = Database::open_at_path(&path, None).unwrap();
+            db.create_recording(&sample_recording("d-1", "inbox"))
+                .unwrap();
+        }
+        assert!(
+            Database::open_at_path(&path, Some(key)).is_err(),
+            "a keyed open of a plaintext file must fail; that failure is the signal"
+        );
+        let mut plaintext =
+            Database::open_at_path(&path, None).expect("the plaintext open must succeed");
+        assert!(!plaintext.is_encrypted().unwrap());
+
+        // Which is exactly what the startup repair then does.
+        plaintext.change_key(key).unwrap();
+        assert!(plaintext.is_encrypted().unwrap());
+        drop(plaintext);
+        assert!(Database::open_at_path(&path, Some(key)).is_ok());
+    }
+
+    /// The state every existing vault user is in: a key in the keychain, a
+    /// plaintext file on disk. The CLI's read-only open has to survive it and
+    /// report it honestly rather than claim encryption that is not there.
+    #[cfg(feature = "sqlcipher")]
+    #[test]
+    fn read_only_probe_reports_the_files_real_state_not_the_keychains() {
+        let dir = crate::test_fs::TempDir::new("vault-probe");
+        let path = dir.path().join("plainsong.db");
+        let key = "0123456789abcdef0123456789abcdef";
+        {
+            let mut db = Database::open_at_path(&path, None).unwrap();
+            db.create_recording(&sample_recording("p-1", "inbox"))
+                .unwrap();
+        }
+        // Key present, file plaintext: opens, and says so.
+        let probed = Database::open_read_only_probing(&path, Some(key)).unwrap();
+        assert!(!probed.is_encrypted().unwrap());
+        assert_eq!(probed.get_recordings(None).unwrap().len(), 1);
+        drop(probed);
+
+        let mut db = Database::open_at_path(&path, None).unwrap();
+        db.change_key(key).unwrap();
+        drop(db);
+
+        // Now genuinely encrypted: the keyed attempt wins.
+        let probed = Database::open_read_only_probing(&path, Some(key)).unwrap();
+        assert!(probed.is_encrypted().unwrap());
+        assert_eq!(probed.get_recordings(None).unwrap().len(), 1);
+        drop(probed);
+
+        // Encrypted file, no key: refused with both reasons, not a silent
+        // empty result.
+        let error = Database::open_read_only_probing(&path, None)
+            .err()
+            .expect("unkeyed open of an encrypted database must fail");
+        assert!(error.to_string().contains("Could not read the database"));
+        // A wrong key falls back to the plaintext attempt, which also fails.
+        assert!(Database::open_read_only_probing(&path, Some("nope")).is_err());
     }
 
     #[test]

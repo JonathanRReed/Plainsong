@@ -54,6 +54,8 @@ pub struct Settings {
     pub meetings: MeetingsSettings,
     /// Which events may reach macOS Notification Center.
     pub notifications: NotificationsSettings,
+    /// Local automation surfaces (command-line tool, MCP server, deep links).
+    pub automation: AutomationSettings,
     /// Theme
     pub theme: String,
 }
@@ -70,9 +72,26 @@ impl Default for Settings {
             updates: UpdateSettings::default(),
             meetings: MeetingsSettings::default(),
             notifications: NotificationsSettings::default(),
+            automation: AutomationSettings::default(),
             theme: "system".to_string(),
         }
     }
+}
+
+/// Local automation surfaces: the `plainsong` command-line tool, the read-only
+/// MCP server it serves, and `plainsong://` deep links.
+///
+/// One switch gates all three because they share one consequence: another
+/// process on this Mac can read meeting notes, transcripts and dictation
+/// history (the CLI/MCP) or trigger a dictation/meeting gesture (deep links).
+/// Off by default; nothing else in the app reads this section, so a fresh
+/// install behaves exactly as it did before the section existed.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default, rename_all = "camelCase")]
+pub struct AutomationSettings {
+    /// Allow the `plainsong` CLI / MCP server to open the local database
+    /// read-only, and the app to act on `plainsong://` deep links.
+    pub local_tools_enabled: bool,
 }
 
 /// Audio recording settings
@@ -1727,7 +1746,8 @@ mod tests {
         dictation_app_category_from_key, dictation_app_category_to_key,
         dictation_supported_languages, migrate_legacy_ai_lane_settings,
         normalize_audio_input_device_preference, validate_dictation_active_languages,
-        ENGLISH_ONLY_LANGUAGES, PARAKEET_V3_LANGUAGES, WHISPER_MULTILINGUAL_LANGUAGES,
+        AutomationSettings, ENGLISH_ONLY_LANGUAGES, PARAKEET_V3_LANGUAGES,
+        WHISPER_MULTILINGUAL_LANGUAGES,
     };
     use super::{
         normalize_dictation_active_languages, normalize_loaded_privacy_settings,
@@ -2219,6 +2239,42 @@ mod tests {
         };
         super::normalize_loaded_meetings_settings(&mut off);
         assert_eq!(off.auto_stop_after_silence_minutes, 0);
+    }
+
+    /// A settings.json written before the `automation` section existed must
+    /// load with local tools OFF: the section gates other processes reading
+    /// meeting data, so its absence has to mean "not granted", never a panic
+    /// or a silently-on default.
+    #[test]
+    fn settings_file_without_automation_section_loads_with_local_tools_off() {
+        let parsed: Settings = serde_json::from_str(
+            r#"{
+                "audio": {},
+                "transcription": {},
+                "ui": { "minimizeToTray": false },
+                "privacy": {},
+                "shortcuts": {},
+                "updates": {},
+                "theme": "dark"
+            }"#,
+        )
+        .expect("pre-automation settings should deserialize");
+        assert!(!parsed.automation.local_tools_enabled);
+        assert_eq!(parsed.theme, "dark");
+        assert_eq!(parsed.automation, AutomationSettings::default());
+    }
+
+    #[test]
+    fn automation_section_round_trips_in_camel_case() {
+        let mut settings = Settings::default();
+        settings.automation.local_tools_enabled = true;
+        let json = serde_json::to_value(&settings).expect("serialize");
+        assert_eq!(
+            json["automation"]["localToolsEnabled"],
+            serde_json::Value::Bool(true)
+        );
+        let parsed: Settings = serde_json::from_value(json).expect("round trip");
+        assert!(parsed.automation.local_tools_enabled);
     }
 
     fn lane(provider: &str, model_id: Option<&str>) -> AiLaneSettings {

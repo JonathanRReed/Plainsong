@@ -174,6 +174,30 @@ function AppRuntimeListeners() {
     };
   }, [toast]);
 
+  // The database is opened before the sidecar has anywhere to send events, so
+  // a vault repair that ran at startup reports itself here. It is a toast and
+  // not a log line because it changes what is true about the user's data:
+  // either the database is encrypted now when it was not before, or it is
+  // still readable and they should know that too.
+  useEffect(() => {
+    let unlisten: (() => void) | undefined;
+    void listen<{ message?: unknown; encrypted?: unknown }>(
+      "vault-database-encryption-notice",
+      (event) => {
+        const message =
+          typeof event.payload?.message === "string" ? event.payload.message.trim() : "";
+        if (message) {
+          toast(message, event.payload?.encrypted === true ? "success" : "error");
+        }
+      },
+    ).then((fn) => {
+      unlisten = fn;
+    });
+    return () => {
+      unlisten?.();
+    };
+  }, [toast]);
+
   useEffect(() => {
     let unlisten: (() => void) | undefined;
     void listen<void>("accessibility-permission-warning", () => {

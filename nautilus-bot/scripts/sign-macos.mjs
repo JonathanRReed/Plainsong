@@ -31,6 +31,9 @@ const calendarHelperEntitlements = path.resolve(
   "entitlements.mac.calendar-helper.plist",
 );
 const sidecarName = "plainsong-sidecar";
+// The command-line tool / MCP server. Same empty entitlement set as the
+// sidecar: it reads the database and talks on stdio, nothing more.
+const cliName = "plainsong-cli";
 const sidecarEntitlements = path.resolve(
   import.meta.dirname,
   "..",
@@ -54,7 +57,7 @@ export function optionsForSignedFile(filePath, inheritedOptionsForFile, signCont
   // 2.x passes a context object as the second argument. Forward it so an
   // inherited callback that reads it sees the same thing osx-sign would.
   const inherited = inheritedOptionsForFile?.(filePath, signContext) ?? {};
-  if (path.basename(filePath) === sidecarName) {
+  if (path.basename(filePath) === sidecarName || path.basename(filePath) === cliName) {
     return {
       ...inherited,
       entitlements: sidecarEntitlements,

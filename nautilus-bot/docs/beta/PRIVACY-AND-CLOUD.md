@@ -16,6 +16,33 @@ analytics SDK, or Plainsong-operated audio relay.
 API keys and internal secrets are stored through the macOS Keychain, not in the
 support bundle or plaintext settings.
 
+## The vault and database encryption
+
+Turning the vault on in Settings > Privacy generates a database key, stores it
+in the macOS Keychain, and encrypts `plainsong.db` with SQLCipher. Meeting
+audio bundles are encrypted separately with a key derived from your vault
+password.
+
+**Correction for anyone who turned the vault on before 0.9.0-beta.3:** the
+database encryption step did not encrypt the database. The key was generated
+and stored correctly, and the app reported "database encrypted", but the
+operation used to perform the encryption is a no-op on a database that was
+never keyed, so the file stayed readable by anything that could open it. Audio
+bundle encryption and Keychain storage were not affected.
+
+This build detects that state at launch — a key in the Keychain, a plaintext
+database — and performs the real migration: it exports the database into a new
+encrypted file, verifies that the new file opens with the key and does not open
+without it, and atomically replaces the original. Nothing is lost, and the app
+tells you it happened. If the migration cannot finish, the app keeps working on
+the plaintext database, says so, and reports the database as not encrypted
+rather than claiming otherwise.
+
+One thing the migration cannot do: the pages of the old plaintext file are
+unlinked, not overwritten, so until the volume reuses those blocks the
+pre-migration contents remain recoverable by forensic tools. On a Mac with
+FileVault on they are still covered by full-disk encryption.
+
 ## Network activity without remote speech processing
 
 - downloading a model from its named upstream host

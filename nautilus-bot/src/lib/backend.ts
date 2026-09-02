@@ -1488,3 +1488,31 @@ export async function listGeminiModels(): Promise<string[]> {
 export async function listDeepSeekModels(): Promise<string[]> {
   return await invoke("list_deepseek_models");
 }
+
+// ── Local tools (CLI / MCP) ─────────────────────────────────────────────────
+
+/** Mirrors `CliToolStatus` in electron/cli-install.ts. */
+export interface CliToolStatus {
+  binaryPath: string;
+  binaryPresent: boolean;
+  linkPath: string;
+  installed: boolean;
+  stale: boolean;
+  occupied: boolean;
+  manualCommand: string;
+}
+
+/** Mirrors `CliInstallResult` in electron/cli-install.ts. */
+export type CliInstallResult =
+  | { status: "installed"; linkPath: string }
+  | { status: "manual"; reason: string; command: string }
+  | { status: "unavailable"; reason: string };
+
+export async function getCliToolStatus(): Promise<CliToolStatus> {
+  return await invoke("get_cli_tool_status");
+}
+
+/** Needs a recent click in the main window; the main process enforces it. */
+export async function installCliTool(): Promise<CliInstallResult> {
+  return await invoke("install_cli_tool");
+}

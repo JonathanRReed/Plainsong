@@ -41,6 +41,29 @@ evidence is stale and must be recaptured before this becomes a candidate.
   refused or could not be delivered while the dictation mini window is
   hidden. One sentence each; clicking one opens the meeting or the dictation
   view. Both classes have a switch in Settings › General › Notifications.
+- A local command-line tool, a read-only MCP server, and `plainsong://` deep
+  links, all behind one off-by-default switch (Settings > General > Local
+  tools). `plainsong list / search / show / transcript / export / dictations
+  / stats` read the same SQLCipher database the app uses, opened with
+  SQLite's read-only flag from a separate `plainsong-cli` binary packaged
+  beside the sidecar; there is no write command. `plainsong mcp` serves six
+  read-only tools over stdio to Claude Desktop, Claude Code or Cursor,
+  answers both the 2025 `initialize` handshake and the 2026-07-28
+  per-request protocol, caps and paginates results, and wraps every
+  transcript, note, summary, action item and dictation string in an
+  `<untrusted_content>` frame whose close tag cannot be forged from inside.
+  `plainsong://record`, `stop`, `mode?key=…`, `meeting/start` (opens the
+  consent sheet, never records), `meeting/stop` and `open` are the only
+  links; they carry no text, are rate-limited, and are written to the audit
+  log by action and outcome. "Install command-line tool" in Settings links
+  `/usr/local/bin/plainsong` or, when that directory is not writable, shows
+  the one command to paste rather than asking for an administrator
+  password. Deep links are registered with macOS, so a web page can trigger
+  one exactly as a script can, and macOS does not say which app sent it; the
+  switch and the doc say so, and a link that starts dictation shows the
+  dictation window with "Recording from a link" on it. The packaged
+  `plainsong-cli` is signed with an empty entitlement set, and the packaging
+  gate now checks that. See docs/automation.md.
 - Onboarding now asks how meeting notes get written: local Ollama (with live
   detection), bring-your-own-key cloud AI, or transcripts only — instead of
   silently defaulting to an Ollama install that usually isn't there.
@@ -208,6 +231,71 @@ evidence is stale and must be recaptured before this becomes a candidate.
   on the recording.
 - Onboarding's line about call detection now names Slack and Discord, which
   detection has always matched.
+- **The vault's database encryption step did not encrypt the database.**
+  Turning the vault on generated a key, stored it durably in the macOS
+  Keychain, reported "database encrypted", and left `plainsong.db` readable
+  by anything that could open the file: the step used `PRAGMA rekey`, which
+  SQLCipher documents as a no-op on a connection that was never keyed, and it
+  returns success either way. Encrypted meeting audio and Keychain storage
+  were not affected. The migration is real now — `sqlcipher_export` into a
+  fresh keyed database beside the original, the schema version carried across
+  by hand (the export does not carry it), fsync, a check that the new file
+  opens with the key and does *not* open without it, then an atomic rename
+  over the original; any failure before that rename removes the staging file
+  and leaves the plaintext original intact and open. Every install that
+  turned the vault on is in the "key stored, database plaintext" state, so
+  the app detects it at launch and runs the migration then, holding the same
+  vault-migration exclusion the Settings path holds, writing an audit event,
+  and telling you in the app that it happened. A migration that cannot finish
+  no longer stops the app from launching: it keeps working on the plaintext
+  database and reports the database as not encrypted, which is the truth. The
+  `plainsong` CLI now probes rather than trusting the Keychain, so it opens
+  either kind of database and its `stats` reports the file's real state.
+  Note the one thing an atomic rename cannot do: it unlinks the old plaintext
+  pages rather than overwriting them, so they stay recoverable on the volume
+  until reused. See docs/beta/PRIVACY-AND-CLOUD.md.
+- The `plainsong` command read its Local tools switch through a path that
+  honours `PLAINSONG_CONFIG_DIR`, so anything that could set that variable
+  could point the gate at a settings file it wrote itself while the database
+  path and its Keychain key stayed real. The gate now reads only the file the
+  app writes.
+- A meeting note, transcript or dictation containing a multi-byte character
+  immediately before the text `untrusted_content` crashed the MCP server
+  mid-response (a byte-offset slice landing inside the character). The frame
+  neutraliser also missed `</ untrusted_content>` — whitespace inside the tag
+  punctuation — which a lenient reader would still take as the frame ending.
+- The `plainsong` CLI's `stats` read and parsed every transcript in the
+  database to count how many recordings had one; it is a single query now.
+- The read-only database open sets its busy timeout before the first statement
+  that touches the file rather than after, so a reader started while the app
+  is mid-write waits instead of failing.
+- `get_meeting` over MCP capped only the notes field, so a long summary, a
+  wall of action items, or a provider's error message pasted into the meeting
+  could each blow past the 60k result budget on their own. Every field is
+  capped now, with one `truncated` flag and the real action-item count. The
+  provider error text and the meeting template id are also wrapped in
+  `<untrusted_content>` frames like the rest of the meeting's text.
+- The MCP server now enforces the 2026-07-28 revision's per-request rule that
+  a client declaring that version also sends its capabilities (`-32602`
+  otherwise), and answers `server/discover` in the modern shape even when the
+  request carries no `_meta` at all, which is how a client that does not yet
+  know a version has to ask.
+- An over-long MCP request line was refused and then drained through the
+  unbounded reader, which handed back exactly the allocation the size cap
+  exists to refuse. It is drained through the bounded reader now.
+- "Install command-line tool" treated any symlink at `/usr/local/bin/plainsong`
+  as one of Plainsong's own and replaced it; a link pointing at anything but a
+  `plainsong-cli` binary is now left alone and reported as occupied. The
+  install also no longer unlinks before it symlinks — it writes the link under
+  a temporary name and renames it into place, so a failure can no longer leave
+  the machine with no `plainsong` command.
+- Opening an encrypted (SQLCipher) database failed every time with "Execute
+  returned results": the key check ran a `SELECT` through rusqlite's
+  `execute`, which refuses any statement that returns rows. No install had a
+  vault key yet, so nothing caught it until the read-only CLI open was tested
+  against a keyed file. The open and rekey paths now verify the key with a
+  query. Found while adding the local tools; regression-tested in
+  `db::tests::keyed_open_round_trip`.
 - A mic failure mid-meeting in a "me and them" (microphone plus system
   audio) recording is now detected and noted on the meeting instead of being
   silently padded with silence and presented as a complete recording; a
