@@ -5914,16 +5914,34 @@ impl DictationTranslationRoute {
     }
 }
 
+/// A whisper.cpp `.en` build: English-only weights, no translate task, and no
+/// language detection. The Settings toggle is disabled for these
+/// (`resolveTranslateToEnglishAvailability` in `src/lib/dictation-translation.ts`
+/// says the same thing in the same words), so a stored `true` on such a
+/// recognizer is always stale state, never a live choice.
+fn dictation_recognizer_is_english_only(provider: asr::AsrProviderType, model_id: &str) -> bool {
+    provider == asr::AsrProviderType::Whisper
+        && model_id.trim().to_ascii_lowercase().ends_with(".en")
+}
+
 /// Pure routing decision for translate-to-English (roadmap item B7a).
 ///
-/// Only whisper.cpp on a multilingual ggml model can translate on its own;
-/// the `.en` builds cannot (the toggle is shown disabled for them, and if a
-/// stale setting still asks, the answer is the AI lane rather than silently
-/// nothing). The Candle whisper route decodes with a hard-wired `<|en|>`
-/// language token and no language detection, so it has no usable translate
-/// task either; Distil-Whisper is English-only by construction. Parakeet,
-/// Qwen3-ASR, Moonshine, Apple Speech and every cloud recognizer transcribe in
-/// the source language, so all of those translate through the AI lane.
+/// Only whisper.cpp on a multilingual ggml model can translate on its own.
+/// The `.en` builds cannot, and they do NOT fall through to the AI lane: the
+/// toggle is disabled for them, so a stored `true` is a leftover from a
+/// multilingual model the user has since switched away from. Routing that to
+/// the AI lane ran a hidden second model pass -- up to the full local format
+/// budget -- on every English dictation while the switch read "off", which is
+/// both a silent latency cost and a silent send of the transcript to the AI
+/// lane. The honest answer is `Off`. (`save_settings_for_sidecar` also clears
+/// the stored flag; this is the runtime half of that, so a settings file
+/// hand-edited between saves cannot reintroduce the pass.)
+///
+/// The Candle whisper route decodes with a hard-wired `<|en|>` language token
+/// and no language detection, so it has no usable translate task either;
+/// Distil-Whisper is English-only by construction. Parakeet, Qwen3-ASR,
+/// Moonshine, Apple Speech and every cloud recognizer transcribe in the source
+/// language, so all of those translate through the AI lane.
 fn resolve_dictation_translation_route(
     provider: asr::AsrProviderType,
     model_id: &str,
@@ -5932,12 +5950,72 @@ fn resolve_dictation_translation_route(
     if !translate_requested {
         return DictationTranslationRoute::Off;
     }
-    if provider == asr::AsrProviderType::Whisper
-        && !model_id.trim().to_ascii_lowercase().ends_with(".en")
-    {
+    if dictation_recognizer_is_english_only(provider, model_id) {
+        return DictationTranslationRoute::Off;
+    }
+    if provider == asr::AsrProviderType::Whisper {
         return DictationTranslationRoute::WhisperNative;
     }
     DictationTranslationRoute::AiLane
+}
+
+/// The recognizer one saved custom dictation mode will actually run on: its
+/// own provider/model override when it has one, else the dictation lane's.
+/// Mirrors the override half of `apply_dictation_session_mode_override`.
+fn custom_mode_dictation_recognizer(
+    transcription: &settings::TranscriptionSettings,
+    mode: &settings::DictationCustomMode,
+) -> (asr::AsrProviderType, String) {
+    let (lane_provider, lane_model) =
+        resolve_transcription_provider_and_model(transcription, TranscriptionScope::Dictation);
+    let provider = mode
+        .dictation_provider
+        .as_deref()
+        .and_then(asr_provider_from_settings_value)
+        .unwrap_or(lane_provider);
+    let model_id = mode
+        .dictation_model_id
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_string)
+        .unwrap_or(lane_model);
+    (provider, model_id)
+}
+
+/// Force `translate_to_english` off wherever the recognizer that will run
+/// cannot translate at all (a whisper `.en` build -- see
+/// `resolve_dictation_translation_route`).
+///
+/// Without this a user who turned the switch on under a multilingual model and
+/// then switched to `base.en` kept a stored `true` that the switch showed as
+/// off-and-disabled, so nothing in the UI could clear it. Clearing it on save
+/// makes the stored state and the visible state agree; the runtime route
+/// refuses the same case independently.
+fn clear_untranslatable_dictation_translate_flags(
+    transcription: &mut settings::TranscriptionSettings,
+) {
+    let (lane_provider, lane_model) =
+        resolve_transcription_provider_and_model(transcription, TranscriptionScope::Dictation);
+    if transcription.dictation_translate_to_english
+        && dictation_recognizer_is_english_only(lane_provider, &lane_model)
+    {
+        transcription.dictation_translate_to_english = false;
+    }
+    let untranslatable: Vec<usize> = transcription
+        .dictation_custom_modes
+        .iter()
+        .enumerate()
+        .filter(|(_, mode)| mode.translate_to_english)
+        .filter(|(_, mode)| {
+            let (provider, model_id) = custom_mode_dictation_recognizer(transcription, mode);
+            dictation_recognizer_is_english_only(provider, &model_id)
+        })
+        .map(|(index, _)| index)
+        .collect();
+    for index in untranslatable {
+        transcription.dictation_custom_modes[index].translate_to_english = false;
+    }
 }
 
 /// The fixed system prompt for the AI-lane translation pass. Nothing from the
@@ -5955,10 +6033,93 @@ only the translated English text with no preamble or notes.";
 #[cfg(test)]
 mod dictation_translation_route_tests {
     use super::{
-        resolve_dictation_translation_route, DictationTranslationRoute,
-        DICTATION_TRANSLATE_TO_ENGLISH_PROMPT,
+        clear_untranslatable_dictation_translate_flags, resolve_dictation_translation_route,
+        DictationTranslationRoute, DICTATION_TRANSLATE_TO_ENGLISH_PROMPT,
     };
     use crate::asr::AsrProviderType;
+    use crate::settings;
+
+    fn transcription_on(provider: &str, model_id: &str) -> settings::TranscriptionSettings {
+        settings::TranscriptionSettings {
+            use_shared_asr_selection: false,
+            dictation_provider: provider.to_string(),
+            dictation_model_id: model_id.to_string(),
+            dictation_translate_to_english: true,
+            ..Default::default()
+        }
+    }
+
+    fn translating_mode(
+        id: &str,
+        provider: Option<&str>,
+        model_id: Option<&str>,
+    ) -> settings::DictationCustomMode {
+        settings::DictationCustomMode {
+            id: id.to_string(),
+            name: id.to_string(),
+            translate_to_english: true,
+            dictation_provider: provider.map(str::to_string),
+            dictation_model_id: model_id.map(str::to_string),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn saving_on_an_english_only_whisper_model_clears_the_stored_translate_flag() {
+        let mut transcription = transcription_on("whisper", "base.en");
+        clear_untranslatable_dictation_translate_flags(&mut transcription);
+        assert!(
+            !transcription.dictation_translate_to_english,
+            "a switch the UI shows disabled must not stay stored as on"
+        );
+    }
+
+    #[test]
+    fn saving_on_a_multilingual_model_leaves_the_translate_flag_alone() {
+        for (provider, model) in [
+            ("whisper", "large-v3-turbo"),
+            ("parakeet", "parakeet-tdt-0.6b-v3"),
+            ("qwen3_asr", "qwen3-asr-0.6b"),
+        ] {
+            let mut transcription = transcription_on(provider, model);
+            clear_untranslatable_dictation_translate_flags(&mut transcription);
+            assert!(
+                transcription.dictation_translate_to_english,
+                "{provider}/{model}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_custom_mode_is_cleared_by_its_own_recognizer_not_the_lane_default() {
+        // Lane is multilingual, so the built-in flag survives; the two custom
+        // modes are judged on their own overrides.
+        let mut transcription = transcription_on("whisper", "large-v3-turbo");
+        transcription.dictation_custom_modes = vec![
+            translating_mode("english-only", Some("whisper"), Some("small.en")),
+            translating_mode("multilingual", Some("whisper"), Some("large-v3")),
+            // No override at all: follows the (multilingual) lane.
+            translating_mode("inherits-lane", None, None),
+        ];
+
+        clear_untranslatable_dictation_translate_flags(&mut transcription);
+
+        assert!(transcription.dictation_translate_to_english);
+        assert!(!transcription.dictation_custom_modes[0].translate_to_english);
+        assert!(transcription.dictation_custom_modes[1].translate_to_english);
+        assert!(transcription.dictation_custom_modes[2].translate_to_english);
+    }
+
+    #[test]
+    fn a_custom_mode_with_no_override_follows_an_english_only_lane() {
+        let mut transcription = transcription_on("whisper", "base.en");
+        transcription.dictation_custom_modes = vec![translating_mode("inherits-lane", None, None)];
+
+        clear_untranslatable_dictation_translate_flags(&mut transcription);
+
+        assert!(!transcription.dictation_translate_to_english);
+        assert!(!transcription.dictation_custom_modes[0].translate_to_english);
+    }
 
     #[test]
     fn translation_is_off_when_not_requested() {
@@ -5984,10 +6145,21 @@ mod dictation_translation_route_tests {
             resolve_dictation_translation_route(AsrProviderType::Whisper, "large-v3-turbo", true),
             DictationTranslationRoute::WhisperNative
         );
-        assert_eq!(
-            resolve_dictation_translation_route(AsrProviderType::Whisper, "base.en", true),
-            DictationTranslationRoute::AiLane
-        );
+    }
+
+    /// The regression this guards: `.en` used to fall through to the AI lane,
+    /// so a stale `true` left over from a multilingual model ran a hidden
+    /// second model pass on every English dictation while the (disabled)
+    /// toggle read off.
+    #[test]
+    fn english_only_whisper_never_translates_even_when_the_flag_is_still_set() {
+        for model in ["base.en", "tiny.en", "small.en", "medium.en", " BASE.EN "] {
+            assert_eq!(
+                resolve_dictation_translation_route(AsrProviderType::Whisper, model, true),
+                DictationTranslationRoute::Off,
+                "{model}"
+            );
+        }
     }
 
     #[test]
@@ -21006,6 +21178,13 @@ async fn save_settings_for_sidecar(
     for mode in &mut settings.transcription.dictation_custom_modes {
         normalize_dictation_custom_mode(mode, &fallback_ai_provider, fallback_ai_model.as_deref());
     }
+    // Translate-to-English cannot run on a whisper `.en` build, and the toggle
+    // is disabled there, so a stored `true` is stale state the UI can no
+    // longer clear. Drop it rather than keep a switch that reads off while a
+    // pass runs. Must follow both `normalize_contextual_asr_settings` (which
+    // settles which recognizer the dictation lane resolves to) and the custom
+    // mode loop above (which settles each mode's own override).
+    clear_untranslatable_dictation_translate_flags(&mut settings.transcription);
     // Same sanitization the load path applies (`normalize_loaded_transcription_settings`
     // calls the same function) -- a save is just as capable of carrying a
     // malformed or oversized template as a hand-edited settings.json is.

@@ -172,6 +172,13 @@ evidence is stale and must be recaptured before this becomes a candidate.
   files that still carry it load cleanly and are rewritten without it.
 
 ### Fixed
+- Translate to English no longer runs a hidden AI pass on an English-only
+  whisper model. Turning the switch on under a multilingual model and then
+  switching to a `.en` build left the setting stored as on while the switch
+  showed off and disabled, so every English dictation paid for a second model
+  call before insertion. The stored flag (built-in profiles and each saved
+  profile) is now cleared on save, and the runtime route refuses the case
+  independently.
 - A mic failure mid-meeting in a "me and them" (microphone plus system
   audio) recording is now detected and noted on the meeting instead of being
   silently padded with silence and presented as a complete recording; a
