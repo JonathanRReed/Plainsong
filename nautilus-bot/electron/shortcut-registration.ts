@@ -191,24 +191,75 @@ export const SHORTCUT_FIELD_PRECEDENCE: Array<{ key: ShortcutFieldKey; label: st
   { key: "recopyLastDictation", label: "Copy last result" },
 ];
 
+/**
+ * One row of the dictation binding table, as this conflict check sees it:
+ * an accelerator plus the name the Settings list shows for it. Built by
+ * `dictationBindingConflictSources` in `dictation-bindings.ts`.
+ */
+export type DictationBindingShortcut = {
+  bindingId: string;
+  label: string;
+  accelerator: string;
+};
+
+/**
+ * Conflicts between the shortcut fields — and, when the binding table is
+ * supplied, between those fields and the dictation bindings.
+ *
+ * `applyElectronGlobalShortcuts` registers the dictation bindings *first*,
+ * so a binding on the same keys as Open window (or either recovery shortcut)
+ * takes them: the later `globalShortcut.register` just returns false and the
+ * only trace was a `console.error` nobody sees. Walking the four legacy
+ * fields alone could not spot that, because the table's non-primary rows are
+ * nowhere in `settings.shortcuts` — only the primary binding is mirrored
+ * into `toggleDictation`.
+ *
+ * Passing `dictationBindings` puts the real rows at the front of the
+ * precedence list, exactly where registration puts them, so the field that
+ * actually loses is the one flagged. The `toggleDictation` field is then
+ * dropped from the list: it is a mirror of the primary binding, and leaving
+ * it in would make the primary binding collide with itself.
+ *
+ * Binding-vs-binding collisions are deliberately NOT returned here — the
+ * binding table reports those per row through `validateDictationBindings`,
+ * which can also name the specific row. This list is about the shortcut
+ * fields.
+ */
 export function findConflictingShortcuts(
   shortcuts: ShortcutFieldSettings,
+  dictationBindings: DictationBindingShortcut[] = [],
 ): ShortcutConflictInfo[] {
-  const definitions = SHORTCUT_FIELD_PRECEDENCE.map(({ key, label }) => ({
+  const bindingDefinitions = dictationBindings.map((binding) => ({
+    // A binding row stands in for the field the table replaced, so a caller
+    // that skips "toggleDictation" on a conflict keeps behaving as before.
+    field: "toggleDictation" as ShortcutFieldKey,
+    label: binding.label,
+    shortcut: binding.accelerator,
+    bindingId: binding.bindingId,
+  }));
+  const fieldDefinitions = SHORTCUT_FIELD_PRECEDENCE.filter(
+    ({ key }) => bindingDefinitions.length === 0 || key !== "toggleDictation",
+  ).map(({ key, label }) => ({
     field: key,
     label,
     shortcut: shortcuts[key],
+    bindingId: undefined as string | undefined,
   }));
 
-  const { conflicts } = partitionUniqueShortcutRegistrations(definitions);
+  const { conflicts } = partitionUniqueShortcutRegistrations([
+    ...bindingDefinitions,
+    ...fieldDefinitions,
+  ]);
 
-  return conflicts.map((conflict) => ({
-    field: conflict.definition.field,
-    label: conflict.label,
-    shortcut: conflict.shortcut,
-    conflictsWith: conflict.conflictsWith,
-    conflictsWithField: conflict.conflictsWithDefinition.field,
-  }));
+  return conflicts
+    .filter((conflict) => conflict.definition.bindingId === undefined)
+    .map((conflict) => ({
+      field: conflict.definition.field,
+      label: conflict.label,
+      shortcut: conflict.shortcut,
+      conflictsWith: conflict.conflictsWith,
+      conflictsWithField: conflict.conflictsWithDefinition.field,
+    }));
 }
 
 export function partitionUniqueShortcutRegistrations<

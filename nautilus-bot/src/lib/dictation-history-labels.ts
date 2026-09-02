@@ -92,6 +92,31 @@ export function historyModeLabel(
   return "Unavailable";
 }
 
+/**
+ * The "Language" tile of the history details: what the recognizer heard and,
+ * when translate-to-English was on, whether the delivered text is the
+ * translation. Mirrors `detected_language` / `translation_route` /
+ * `translation_applied` in the sidecar's `dictation_completed` audit record.
+ */
+export function describeHistoryLanguage(
+  details: Pick<
+    DictationHistoryDetails,
+    "detectedLanguage" | "translationRoute" | "translationApplied"
+  >,
+): string {
+  const detected = details.detectedLanguage?.trim() || null;
+  const heard = detected ? `Heard: ${detected}` : "Heard: unknown";
+  if (!details.translationRoute) {
+    return detected ? heard : "Unavailable";
+  }
+  if (details.translationApplied) {
+    return `${heard} · translated to English${
+      details.translationRoute === "whisper_native" ? " by whisper" : " by the AI provider"
+    }`;
+  }
+  return `${heard} · translation did not run, original words kept`;
+}
+
 export function historyPromptSourceLabel(
   promptSource: string | null | undefined,
 ): string {
@@ -135,6 +160,10 @@ export function historyPipelineStageLabel(stageKey: string): string {
   switch (stageKey) {
     case "dictionary":
       return "Dictionary";
+    case "translate_to_english":
+      return "Translated to English";
+    case "translate_to_english_fallback":
+      return "Translation skipped";
     case "mode_transform":
       return "Mode transform";
     case "mode_transform_fallback":

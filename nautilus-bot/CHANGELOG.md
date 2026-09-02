@@ -96,6 +96,29 @@ evidence is stale and must be recaptured before this becomes a candidate.
   `plainsong://playback` route resolves per request (with HTTP Range support,
   so seeking does not wait on a full download). "Open audio file", which
   hands the recording to the system player, stays as the secondary action.
+- **More than one dictation shortcut.** Settings → Shortcuts now holds a list
+  of dictation bindings instead of a single hotkey. A binding can be a key
+  chord, an extra mouse button (3–5), or a modifier on its own (Fn, Cmd), and
+  it can start dictation in the current profile, start it in one named
+  profile for that session only, move to the next profile, or cancel. Each
+  binding chooses hold-to-talk or press-to-toggle, or follows the activation
+  setting. Mouse buttons and lone modifiers need the native shortcut helper
+  and say so in the row when it is not running; key bindings still fall back
+  to Electron's press-only registration, where hold degrades to toggle as
+  before. Existing settings migrate: the old `toggleDictation` key becomes
+  the first binding and is kept written for one release so a downgrade still
+  has a hotkey.
+- **Translate to English, per profile.** A dictation profile (and the
+  built-in profiles as a group) can now deliver English whatever language was
+  spoken. Multilingual whisper.cpp models translate inside their own decode
+  with nothing else running; every other recognizer transcribes in the spoken
+  language and the dictation AI provider translates before formatting and
+  insert, inside the same timeout the formatting pass gets. A translation
+  that fails or times out inserts the words as spoken and says so rather than
+  losing them. The switch is disabled with the reason when the model cannot
+  translate (`.en` whisper builds) or when no AI provider can answer. The
+  language the recognizer detected, the route, and whether the translation
+  actually landed are recorded in the dictation history details.
 - Onboarding now asks how meeting notes get written: local Ollama (with live
   detection), bring-your-own-key cloud AI, or transcripts only — instead of
   silently defaulting to an Ollama install that usually isn't there.
@@ -355,6 +378,69 @@ evidence is stale and must be recaptured before this becomes a candidate.
   integrity check on a PSVAULT1 payload. It now streams PSVAULT1 frames into
   the temporary file and uses the whole-file decoder only for legacy
   payloads, which is also what keeps a long meeting out of memory.
+- Dictation bindings refuse the chords macOS owns (Cmd+Q, Cmd+W, Cmd+Tab,
+  Cmd+Space, Cmd+H, Cmd+M), and a modifier on its own can only be Fn — a lone
+  Cmd would have started dictation from an ordinary pause mid-chord. Both the
+  sidecar and the Settings screen say so in the same words.
+- A shortcut written with the macOS symbols kept its modifiers. The sidecar
+  was deleting them when it normalized a trigger, so a symbol chord read as
+  its bare key: it could fail validation as "ordinary typing", and two
+  different chords could look like the same trigger.
+- A binding whose activation behavior was missing or unrecognised is now read
+  as "follows the setting above" instead of being dropped, matching what the
+  sidecar already did — the two sides could otherwise register different
+  hotkeys from the same file. Only F1 through F24 count as a function key.
+- The first click of an extra mouse button on a binding's recorder now
+  registers. It was discarded because the click had not focused the field
+  yet, so binding a mouse button took two clicks.
+- The "next profile" notice reaches a dictation overlay that had to be
+  created to show it, instead of arriving before that window could listen.
+- The dictation HUD's "next profile" notice is rust and neutral instead of
+  gilded. Picking a profile is a mode selector, and gilding it competed with
+  the live recording moment gold is reserved for.
+- "Next profile" now walks the profiles in the order their tiles are shown,
+  so the ready-made Coding and Quiet profiles land where you see them rather
+  than behind whatever you built yourself.
+- A binding saved as hold-to-talk on a machine where the native shortcut
+  helper is not running no longer reads as "Follows the setting above". The
+  hold option is shown, disabled, with the reason, and the row says the
+  binding presses to start and presses again to stop until the helper is
+  available.
+- Editing a dictation binding while recording no longer strands the
+  recording. Each edit saves immediately, and the native shortcut helper takes
+  its whole binding table on launch, so the save killed and respawned it —
+  swallowing the key release of a hold in progress and leaving the session to
+  run until the 10-minute watchdog. A new table is now held back while a
+  session or a held key is in flight and applied the moment things go idle,
+  and a helper that is replaced anyway hands over the release it owes.
+- "Add binding" no longer creates a row that disappears. The new row was
+  saved immediately with no keys recorded, and the sidecar drops a binding
+  with no trigger, so it survived on screen only until the next reload. The
+  row is now held unsaved until the recorder captures a trigger, and written
+  the moment it does.
+- A dictation binding on the same keys as Open window (or either recovery
+  shortcut) now says so in Settings. Dictation bindings are registered first
+  and take the keys, so the other shortcut silently stopped working with only
+  a line in the console; the conflict check walked the four legacy shortcut
+  fields and could not see the binding table at all.
+- Two dictation bindings on the same trigger no longer fail the whole
+  settings save. The sidecar rejected the entire payload — losing every
+  unrelated edit saved with it — where the app's own Settings screen only
+  warned in the row. The later of two identical triggers is now dropped on
+  save, which is all that could ever have happened anyway, and the row says
+  so.
+- The wait in front of an insert is now capped once, not once per pass. A
+  dictation that both translates to English and then formats used to take a
+  full formatting timeout for each, so the real worst case before a word
+  appeared was twice the stated budget (12 s on the local split). Both passes
+  now share one budget; whatever the first spends is taken off the second.
+- Translate to English no longer runs a hidden AI pass on an English-only
+  whisper model. Turning the switch on under a multilingual model and then
+  switching to a `.en` build left the setting stored as on while the switch
+  showed off and disabled, so every English dictation paid for a second model
+  call before insertion. The stored flag (built-in profiles and each saved
+  profile) is now cleared on save, and the runtime route refuses the case
+  independently.
 - A mic failure mid-meeting in a "me and them" (microphone plus system
   audio) recording is now detected and noted on the meeting instead of being
   silently padded with silence and presented as a complete recording; a

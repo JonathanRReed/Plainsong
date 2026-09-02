@@ -313,6 +313,22 @@ pub struct DictationStartOptions {
     /// user never meant to dictate at their cursor.
     #[serde(default)]
     pub hands_free_trigger: bool,
+    /// A mode chosen for this session only, by a per-mode dictation binding
+    /// (roadmap item B4). `None` means "whatever mode is selected in
+    /// Settings". The selected mode in Settings is never changed by this.
+    #[serde(default)]
+    pub mode_override: Option<DictationSessionModeOverride>,
+}
+
+/// The mode a single dictation session runs under when a binding named one.
+/// `preset` is a built-in preset id (`voice`, `messages`, ...) or `custom`
+/// with `custom_mode_id` naming the saved mode.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct DictationSessionModeOverride {
+    pub preset: String,
+    #[serde(default)]
+    pub custom_mode_id: Option<String>,
 }
 
 impl Default for DictationStartOptions {
@@ -342,6 +358,7 @@ impl Default for DictationStartOptions {
             preferred_input_device_id: None,
             delivery_mode: DictationDeliveryMode::System,
             hands_free_trigger: false,
+            mode_override: None,
         }
     }
 }
@@ -376,6 +393,21 @@ pub struct DictationHistoryDetails {
     pub transcription_latency_ms: Option<u64>,
     pub insert_latency_ms: Option<u64>,
     pub end_to_end_ms: Option<u64>,
+    /// BCP-47 primary tag the recognizer reported for the spoken audio
+    /// (`en` for an English-only model, which cannot detect anything else).
+    #[serde(default)]
+    pub detected_language: Option<String>,
+    /// How translate-to-English ran for this session: `whisper_native`
+    /// (the multilingual whisper.cpp translate task), `ai_lane` (a second
+    /// pass through the dictation AI provider), or absent when translation
+    /// was off.
+    #[serde(default)]
+    pub translation_route: Option<String>,
+    /// Whether the delivered text is the translated one. `false` with a
+    /// route set means the pass failed or timed out and the source-language
+    /// words were inserted instead.
+    #[serde(default)]
+    pub translation_applied: Option<bool>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]

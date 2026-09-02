@@ -975,4 +975,38 @@ describe("DictationPopup", () => {
       screen.queryByRole("button", { name: "Copy result" }),
     ).not.toBeInTheDocument();
   });
+
+  // STYLE.md \u00a75: mode/template/capture selectors are rubric controls, so
+  // they are rust and neutral. This notice used to be gilded (bg-gold/12,
+  // neume-lit, text-gold-text) while nothing was being recorded, competing
+  // with the one moment on this HUD that earns gold.
+  it("announces the next profile in rust and neutral, never gold", async () => {
+    await act(async () => {
+      render(<DictationPopup />);
+    });
+
+    await waitFor(() => {
+      expect(popupMocks.listeners.get("dictation-mode-cycled")).toBeDefined();
+    });
+
+    await act(async () => {
+      popupMocks.listeners.get("dictation-mode-cycled")?.({
+        payload: {
+          modePreset: "notes",
+          selectedCustomModeId: null,
+          label: "Notes",
+        },
+      });
+    });
+
+    const notice = (await screen.findByText("Next profile")).closest(
+      "[role=\"status\"]",
+    ) as HTMLElement;
+    expect(notice).toBeTruthy();
+    expect(notice.className).not.toMatch(/gold/);
+    expect(notice.innerHTML).not.toMatch(/gold/);
+    expect(notice.innerHTML).not.toMatch(/neume-lit/);
+    expect(notice.querySelector(".neume-rust")).toBeTruthy();
+    expect(screen.getByText("Notes").className).toMatch(/text-foreground/);
+  });
 });

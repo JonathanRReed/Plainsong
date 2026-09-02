@@ -303,6 +303,11 @@ const HUD_STATE_NEUME: Record<HudState, string> = {
   error: "neume neume-rust",
 };
 
+// How long the "next profile" announcement stays on screen. Long enough to
+// read one short name, short enough that a second press reads as a second
+// step rather than the same notice lingering.
+const MODE_CYCLE_NOTICE_MS = 1200;
+
 function resolveHudState(phase: DictationPhase): HudState {
   switch (phase) {
     case "preparing":
@@ -747,6 +752,76 @@ export function DictationPopup() {
     }
   }, [phase, applyIgnoreMouse]);
 
+  // A "next profile" binding (Settings > Shortcuts) announces the profile it
+  // landed on here for a moment, so the user knows what the next dictation
+  // runs as without opening the app. The main process shows this window for
+  // the announcement; when no session is live it is hidden again afterwards.
+  const [cycledModeLabel, setCycledModeLabel] = useState<string | null>(null);
+  const cycledModeTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const cycledNoticeShownRef = useRef(false);
+  useEffect(() => {
+    let disposed = false;
+    let unlisten: (() => void) | undefined;
+    void listen<{ label?: unknown }>("dictation-mode-cycled", (event) => {
+      if (disposed) {
+        return;
+      }
+      const label =
+        typeof event.payload?.label === "string" ? event.payload.label.trim() : "";
+      if (!label) {
+        return;
+      }
+      setCycledModeLabel(label);
+      void refreshPopupSettings().catch(() => {
+        // The label already came with the event; settings only refresh the
+        // rest of the HUD's mode metadata.
+      });
+      if (cycledModeTimerRef.current) {
+        clearTimeout(cycledModeTimerRef.current);
+      }
+      cycledModeTimerRef.current = setTimeout(() => {
+        cycledModeTimerRef.current = null;
+        setCycledModeLabel(null);
+      }, MODE_CYCLE_NOTICE_MS);
+    }).then((dispose) => {
+      if (disposed) {
+        dispose();
+      } else {
+        unlisten = dispose;
+      }
+    });
+    return () => {
+      disposed = true;
+      unlisten?.();
+      if (cycledModeTimerRef.current) {
+        clearTimeout(cycledModeTimerRef.current);
+        cycledModeTimerRef.current = null;
+      }
+    };
+    // refreshPopupSettings reads only setters; it is stable for the window's life.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  // Once the notice has run its course with no session on screen, put the
+  // window away the same way the close button does.
+  const cycledNoticeVisible = cycledModeLabel !== null;
+  useEffect(() => {
+    if (cycledNoticeVisible || phase !== "idle") {
+      return;
+    }
+    if (cycledNoticeShownRef.current) {
+      cycledNoticeShownRef.current = false;
+      void invoke("dismiss_dictation_overlay").catch(() => {
+        // The window simply stays until the next session hides it.
+      });
+    }
+  }, [cycledNoticeVisible, phase]);
+  useEffect(() => {
+    if (cycledNoticeVisible && phase === "idle") {
+      cycledNoticeShownRef.current = true;
+    }
+  }, [cycledNoticeVisible, phase]);
+
   useEffect(() => {
     if (stateEvent) {
       applyOverlaySnapshot(stateEvent);
@@ -1081,6 +1156,37 @@ export function DictationPopup() {
     finalLeftOnClipboard,
   ]);
 
+  // The "next profile" announcement. Picking a profile is a mode selector,
+  // which STYLE.md §5 makes a rubric control: rust and neutral, never gold.
+  // Gilding it competed with the one thing on this HUD that has earned gold
+  // -- the live recording moment -- and this notice fires while nothing is
+  // being recorded at all. Rust neume, rust rubric label, neutral surface,
+  // and the profile name in plain foreground. Lasts MODE_CYCLE_NOTICE_MS.
+  const cycledModeNotice = cycledModeLabel ? (
+    <div
+      role="status"
+      aria-live="polite"
+      className="settle-in flex items-center justify-center gap-2 rounded-2xl border border-foreground/10 bg-foreground/4.5 px-3 py-2"
+    >
+      <span aria-hidden="true" className="neume neume-rust shrink-0" />
+      <span className="rubric">Next profile</span>
+      <span className="text-sm font-medium text-foreground">{cycledModeLabel}</span>
+    </div>
+  ) : null;
+
+  if (phase === "idle" && cycledModeNotice) {
+    return (
+      <div className="h-screen w-screen bg-transparent p-3">
+        <div
+          data-hud-card
+          className="overflow-hidden rounded-[20px] border border-foreground/10 bg-popover/95 px-4 py-3.5 backdrop-blur-xl shadow-[0_20px_60px_hsl(34_26%_4%/0.5)]"
+        >
+          {cycledModeNotice}
+        </div>
+      </div>
+    );
+  }
+
   // ── Minimal pill mode ────────────────────────────────────────────────────
   if (displayMode === "minimal") {
     const statusLabel =
@@ -1189,6 +1295,7 @@ export function DictationPopup() {
         data-hud-card
         className="overflow-hidden rounded-[20px] border border-foreground/10 bg-popover/95 px-4 py-3.5 backdrop-blur-xl shadow-[0_20px_60px_hsl(34_26%_4%/0.5)]"
       >
+        {cycledModeNotice && <div className="mb-3">{cycledModeNotice}</div>}
         {/* Header - Minimal. Also the drag handle: the HUD is a floating pill
             the user is expected to move out of the way of their own writing. */}
         <div data-drag-region className="mb-3 flex items-center justify-between">
