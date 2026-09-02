@@ -46,6 +46,14 @@ using sensitive content.
 - The first local model download and preparation take longer than later
   Dictations and require additional disk space. Ready means the selected model
   is actually present, not merely selected in Settings.
+- Numbers as digits (Dictation › Destinations) is English-only and
+  deliberately conservative: it converts what it can name a rule for and
+  leaves everything else as spoken. It will not turn "two thirty" into a
+  time without "at" or am/pm, will not read "twenty twenty six" as a year
+  outside a date, keeps a bare "one" and simple ordinals ("first" ..
+  "tenth") as words outside a date, writes large values without thousands
+  separators, and never abbreviates units ("25 kilometers", not "25 km").
+  Engines that already emit numerals pass through untouched.
 
 ## Meetings
 

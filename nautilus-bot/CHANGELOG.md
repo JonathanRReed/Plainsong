@@ -13,6 +13,17 @@ changed underneath `0.9.0-beta.2`. See `LAUNCH.md` for which qualification
 evidence is stale and must be recaptured before this becomes a candidate.
 
 ### Added
+- Dictation writes spoken numbers the way they read: "twelve dollars fifty"
+  becomes $12.50, "march third at three thirty pm" becomes March 3 at
+  3:30 pm, "one hundred twenty three" becomes 123, and a run of spoken
+  digits becomes a phone number. It runs locally, after voice commands and
+  before phrase expansions, and never rewrites inside a dictionary
+  correction, a phrase expansion, or a URL or email address. Anything
+  ambiguous is left as you said it — "one of them", "a couple of",
+  "two thirty" without a time, "give me a second". On by default for
+  Slack & Chat, Writing, Notes and Meeting Follow-up; off for the General
+  profile, which keeps your words as spoken. Per-profile switches in
+  Dictation › Destinations.
 - Plainsong now notices a live call and offers to record it. Every few
   seconds the sidecar checks, locally, which apps are running; when Zoom,
   Microsoft Teams, Webex, FaceTime, Slack, Discord, or a browser window

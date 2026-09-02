@@ -24,6 +24,11 @@ pub struct DictationPipelineInput<'a> {
     pub app_target: Option<&'a str>,
     pub mode_preset: &'a str,
     pub smart_formatting_enabled: bool,
+    /// Inverse text normalization: turn spoken numbers into written form
+    /// ("twelve dollars fifty" -> "$12.50"). Resolved per dictation profile
+    /// (`resolve_dictation_numbers_as_digits` in `lib.rs`), which is why it
+    /// arrives as a plain bool rather than being read from settings here.
+    pub numbers_as_digits: bool,
     pub recent_inserted_text: Option<&'a str>,
     /// Resolved destination-app category (via `resolve_dictation_app_category`
     /// or the settings-aware `resolve_dictation_app_category_with_overrides`),
@@ -79,6 +84,29 @@ pub fn apply_dictation_pipeline(input: DictationPipelineInput<'_>) -> DictationP
         text = backtrack_resolution.text;
         recent_insert_reused = backtrack_resolution.used_recent_insert;
         undo_previous_insert = backtrack_resolution.undo_previous_insert;
+    }
+
+    // Inverse text normalization sits between command handling and snippet
+    // expansion. After commands, because "replace two with three" is an
+    // instruction whose operands must still match the words in the previous
+    // insert. Before snippets, because a snippet expansion is a block of text
+    // the user typed once and must come out exactly as written -- running ITN
+    // first is what guarantees the stage can never reach inside one.
+    //
+    // The dictionary stage necessarily runs earlier (a phrase-swap command
+    // matches against an already-corrected previous insert, see
+    // `pipeline_applies_dictionary_before_scratch_that_replacement`), so the
+    // same guarantee for dictionary output is bought explicitly: every
+    // enabled entry's replacement text is handed to the stage as a protected
+    // phrase and is never rewritten.
+    if input.numbers_as_digits && !text.trim().is_empty() {
+        let protected_phrases = dictionary_replacement_phrases(input.dictionary_entries);
+        let normalized_numbers =
+            crate::text::itn::inverse_text_normalize_protecting(text.as_str(), &protected_phrases);
+        if normalized_numbers != text {
+            pipeline_stage_keys.push("itn".to_string());
+            text = normalized_numbers;
+        }
     }
 
     if command_applied.is_none() && !text.trim().is_empty() {
@@ -294,6 +322,20 @@ pub fn vocabulary_candidates_from_entries(
         .collect()
 }
 
+/// The replacement text of every enabled dictionary entry, handed to the ITN
+/// stage as a protected phrase. Scope is deliberately ignored: over-
+/// protecting a phrase only ever leaves the user's own words alone, while
+/// under-protecting one would let the stage rewrite a correction the user
+/// asked for.
+fn dictionary_replacement_phrases(entries: &[DictationDictionaryEntry]) -> Vec<String> {
+    entries
+        .iter()
+        .filter(|entry| entry.enabled)
+        .map(|entry| entry.replacement.trim().to_string())
+        .filter(|replacement| !replacement.is_empty())
+        .collect()
+}
+
 fn apply_dictionary_entries(
     input: &str,
     entries: &[DictationDictionaryEntry],
@@ -425,6 +467,7 @@ mod tests {
             app_target: None,
             mode_preset: "voice",
             smart_formatting_enabled: false,
+            numbers_as_digits: false,
             recent_inserted_text: None,
             destination_category: DictationAppCategory::Other,
         });
@@ -439,6 +482,153 @@ mod tests {
     }
 
     #[test]
+    fn pipeline_normalizes_numbers_when_the_profile_asks_for_digits() {
+        let result = apply_dictation_pipeline(DictationPipelineInput {
+            text: "the invoice came to twelve dollars fifty",
+            dictionary_entries: &[],
+            snippets: &[],
+            app_target: None,
+            mode_preset: "voice",
+            smart_formatting_enabled: false,
+            numbers_as_digits: true,
+            recent_inserted_text: None,
+            destination_category: DictationAppCategory::Other,
+        });
+
+        assert_eq!(result.text, "the invoice came to $12.50");
+        assert_eq!(result.pipeline_stage_keys, vec!["itn"]);
+    }
+
+    #[test]
+    fn pipeline_leaves_numbers_as_words_when_the_profile_does_not() {
+        let result = apply_dictation_pipeline(DictationPipelineInput {
+            text: "the invoice came to twelve dollars fifty",
+            dictionary_entries: &[],
+            snippets: &[],
+            app_target: None,
+            mode_preset: "voice",
+            smart_formatting_enabled: false,
+            numbers_as_digits: false,
+            recent_inserted_text: None,
+            destination_category: DictationAppCategory::Other,
+        });
+
+        assert_eq!(result.text, "the invoice came to twelve dollars fifty");
+        assert!(result.pipeline_stage_keys.is_empty());
+    }
+
+    /// Stage order: dictionary, then ITN, then snippets. The snippet
+    /// expansion is a block of text the user typed once, so it has to reach
+    /// the destination exactly as written -- which is only guaranteed if ITN
+    /// has already run by the time it is substituted in.
+    #[test]
+    fn pipeline_runs_itn_between_the_dictionary_and_snippet_stages() {
+        let result = apply_dictation_pipeline(DictationPipelineInput {
+            text: "open ai eta twenty five minutes",
+            dictionary_entries: &[dictionary_entry("open ai", "OpenAI")],
+            snippets: &[snippet("eta", "back in one two three minutes")],
+            app_target: None,
+            mode_preset: "voice",
+            smart_formatting_enabled: false,
+            numbers_as_digits: true,
+            recent_inserted_text: None,
+            destination_category: DictationAppCategory::Other,
+        });
+
+        assert_eq!(
+            result.pipeline_stage_keys,
+            vec!["dictionary", "itn", "snippets"]
+        );
+        assert_eq!(
+            result.text, "OpenAI back in one two three minutes 25 minutes",
+            "the snippet expansion must arrive verbatim"
+        );
+    }
+
+    /// A dictionary replacement is the user's own spelling. Even though the
+    /// dictionary stage necessarily runs first, ITN must not reach inside
+    /// what it produced.
+    #[test]
+    fn pipeline_never_rewrites_inside_a_dictionary_replacement() {
+        let result = apply_dictation_pipeline(DictationPipelineInput {
+            text: "take the old highway for twenty miles",
+            dictionary_entries: &[dictionary_entry("the old highway", "Route sixty six")],
+            snippets: &[],
+            app_target: None,
+            mode_preset: "voice",
+            smart_formatting_enabled: false,
+            numbers_as_digits: true,
+            recent_inserted_text: None,
+            destination_category: DictationAppCategory::Other,
+        });
+
+        assert_eq!(result.text, "take Route sixty six for 20 miles");
+        assert_eq!(result.pipeline_stage_keys, vec!["dictionary", "itn"]);
+    }
+
+    /// Command handling comes first, so the operands of a phrase swap are
+    /// still the words the user said and still match the previous insert.
+    #[test]
+    fn pipeline_resolves_a_phrase_swap_before_normalizing_numbers() {
+        let result = apply_dictation_pipeline(DictationPipelineInput {
+            text: "replace two with three",
+            dictionary_entries: &[],
+            snippets: &[],
+            app_target: None,
+            mode_preset: "voice",
+            smart_formatting_enabled: false,
+            numbers_as_digits: true,
+            recent_inserted_text: Some("we need two servers"),
+            destination_category: DictationAppCategory::Other,
+        });
+
+        assert_eq!(
+            result.command_applied.as_deref(),
+            Some("backtrack_replace_phrase")
+        );
+        assert_eq!(result.text, "we need 3 servers");
+        assert_eq!(result.pipeline_stage_keys, vec!["backtrack", "itn"]);
+    }
+
+    /// The undo command produces no text, so the stage has nothing to do and
+    /// must not announce itself.
+    #[test]
+    fn pipeline_skips_itn_when_a_command_swallowed_the_utterance() {
+        let result = apply_dictation_pipeline(DictationPipelineInput {
+            text: "scratch that",
+            dictionary_entries: &[],
+            snippets: &[],
+            app_target: None,
+            mode_preset: "voice",
+            smart_formatting_enabled: false,
+            numbers_as_digits: true,
+            recent_inserted_text: Some("we need twenty five servers"),
+            destination_category: DictationAppCategory::Other,
+        });
+
+        assert!(result.text.is_empty());
+        assert_eq!(result.pipeline_stage_keys, vec!["backtrack"]);
+    }
+
+    #[test]
+    fn pipeline_composes_itn_with_smart_formatting() {
+        let result = apply_dictation_pipeline(DictationPipelineInput {
+            text: "we shipped one hundred twenty three builds",
+            dictionary_entries: &[],
+            snippets: &[],
+            app_target: None,
+            mode_preset: "voice",
+            smart_formatting_enabled: true,
+            numbers_as_digits: true,
+            recent_inserted_text: None,
+            destination_category: DictationAppCategory::Other,
+        });
+
+        assert_eq!(result.text, "We shipped 123 builds");
+        assert_eq!(result.pipeline_stage_keys, vec!["itn", "smart_formatting"]);
+    }
+
+    #[test]
     fn pipeline_replaces_last_insert_for_actually_backtrack() {
         let result = apply_dictation_pipeline(DictationPipelineInput {
             text: "actually ship it tomorrow",
@@ -447,6 +637,7 @@ mod tests {
             app_target: None,
             mode_preset: "voice",
             smart_formatting_enabled: false,
+            numbers_as_digits: false,
             recent_inserted_text: Some("ship it today"),
             destination_category: DictationAppCategory::Other,
         });
@@ -470,6 +661,7 @@ mod tests {
             app_target: None,
             mode_preset: "voice",
             smart_formatting_enabled: false,
+            numbers_as_digits: false,
             recent_inserted_text: Some("ship it Friday"),
             destination_category: DictationAppCategory::Other,
         });
@@ -493,6 +685,7 @@ mod tests {
             app_target: None,
             mode_preset: "voice",
             smart_formatting_enabled: false,
+            numbers_as_digits: false,
             recent_inserted_text: Some("ship it tomorrow"),
             destination_category: DictationAppCategory::Other,
         });
@@ -516,6 +709,7 @@ mod tests {
             app_target: None,
             mode_preset: "voice",
             smart_formatting_enabled: false,
+            numbers_as_digits: false,
             recent_inserted_text: None,
             destination_category: DictationAppCategory::Other,
         });
@@ -539,6 +733,7 @@ mod tests {
             app_target: None,
             mode_preset: "voice",
             smart_formatting_enabled: false,
+            numbers_as_digits: false,
             recent_inserted_text: Some("ship it today"),
             destination_category: DictationAppCategory::Other,
         });
@@ -561,6 +756,7 @@ mod tests {
             app_target: None,
             mode_preset: "voice",
             smart_formatting_enabled: false,
+            numbers_as_digits: false,
             recent_inserted_text: Some("sam is ready"),
             destination_category: DictationAppCategory::Other,
         });
@@ -582,6 +778,7 @@ mod tests {
             app_target: None,
             mode_preset: "voice",
             smart_formatting_enabled: false,
+            numbers_as_digits: false,
             recent_inserted_text: Some("ship it tomorrow morning"),
             destination_category: DictationAppCategory::Other,
         });
@@ -608,6 +805,7 @@ mod tests {
             app_target: None,
             mode_preset: "voice",
             smart_formatting_enabled: false,
+            numbers_as_digits: false,
             recent_inserted_text: Some("前のテキスト"),
             destination_category: DictationAppCategory::Other,
         });
@@ -637,6 +835,7 @@ mod tests {
             app_target: None,
             mode_preset: "voice",
             smart_formatting_enabled: false,
+            numbers_as_digits: false,
             recent_inserted_text: Some("ship it tomorrow morning"),
             destination_category: DictationAppCategory::Other,
         });

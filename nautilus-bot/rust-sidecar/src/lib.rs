@@ -5783,6 +5783,32 @@ fn resolved_dictation_mode_preset(settings: &settings::Settings) -> &'static str
     }
 }
 
+/// Whether the inverse-text-normalization stage runs for the profile that is
+/// active right now.
+///
+/// Resolution order, most specific first: the active custom profile's own
+/// `numbers_as_digits`, then the user's override for the mode preset that
+/// profile is built on (or the plain preset when no custom profile is
+/// active), then the preset default from
+/// `settings::default_dictation_numbers_as_digits`. A custom profile saved
+/// before this setting existed carries `None` and therefore inherits, which
+/// is why the field is an `Option<bool>` rather than a `bool`.
+fn resolve_dictation_numbers_as_digits(settings: &settings::Settings) -> bool {
+    if let Some(mode) = active_dictation_custom_mode(settings) {
+        if let Some(explicit) = mode.numbers_as_digits {
+            return explicit;
+        }
+    }
+
+    let preset = resolved_dictation_mode_preset(settings);
+    settings
+        .transcription
+        .dictation_numbers_as_digits
+        .get(preset)
+        .copied()
+        .unwrap_or_else(|| settings::default_dictation_numbers_as_digits(preset))
+}
+
 fn resolved_dictation_base_mode_label(settings: &settings::Settings) -> String {
     dictation_mode_label(
         resolved_dictation_mode_preset(settings),
@@ -11804,6 +11830,7 @@ mod tests {
             route_preference: Some("local".to_string()),
             language_override: None,
             live_preview_enabled: Some(true),
+            numbers_as_digits: None,
             insertion_mode: "paste".to_string(),
             context_source: "selected_text".to_string(),
             save_to_inbox: false,
@@ -12683,6 +12710,7 @@ mod tests {
             route_preference: Some("local".to_string()),
             language_override: None,
             live_preview_enabled: Some(true),
+            numbers_as_digits: None,
             insertion_mode: "paste".to_string(),
             context_source: "selected_text".to_string(),
             save_to_inbox: true,
@@ -12716,6 +12744,7 @@ mod tests {
             route_preference: Some("local".to_string()),
             language_override: None,
             live_preview_enabled: Some(true),
+            numbers_as_digits: None,
             insertion_mode: "paste".to_string(),
             context_source: "application_context".to_string(),
             save_to_inbox: false,
@@ -12743,6 +12772,63 @@ mod tests {
             custom_prompt,
         )];
         settings
+    }
+
+    #[test]
+    fn numbers_as_digits_follows_the_mode_preset_by_default() {
+        let mut settings = settings::Settings::default();
+        // A fresh install is on "voice", the one preset that keeps the words
+        // as spoken.
+        assert!(!resolve_dictation_numbers_as_digits(&settings));
+
+        for preset in ["messages", "email", "notes", "meeting_follow_up"] {
+            settings.transcription.dictation_mode_preset = preset.to_string();
+            assert!(
+                resolve_dictation_numbers_as_digits(&settings),
+                "{preset} should default to digits"
+            );
+        }
+    }
+
+    #[test]
+    fn numbers_as_digits_uses_the_users_per_preset_override() {
+        let mut settings = settings::Settings::default();
+        settings
+            .transcription
+            .dictation_numbers_as_digits
+            .insert("voice".to_string(), true);
+        assert!(resolve_dictation_numbers_as_digits(&settings));
+
+        settings.transcription.dictation_mode_preset = "email".to_string();
+        settings
+            .transcription
+            .dictation_numbers_as_digits
+            .insert("email".to_string(), false);
+        assert!(!resolve_dictation_numbers_as_digits(&settings));
+    }
+
+    #[test]
+    fn numbers_as_digits_lets_a_custom_profile_inherit_or_override() {
+        // Inherits its base preset when it stores nothing (which is what a
+        // profile saved before this setting carries).
+        let mut settings = settings_with_active_custom_mode(Some("voice"), None);
+        assert!(!resolve_dictation_numbers_as_digits(&settings));
+
+        settings.transcription.dictation_custom_modes[0].numbers_as_digits = Some(true);
+        assert!(resolve_dictation_numbers_as_digits(&settings));
+
+        let mut inheriting = settings_with_active_custom_mode(Some("email"), None);
+        assert!(resolve_dictation_numbers_as_digits(&inheriting));
+        inheriting.transcription.dictation_custom_modes[0].numbers_as_digits = Some(false);
+        assert!(!resolve_dictation_numbers_as_digits(&inheriting));
+
+        // Inheritance follows the user's preset override, not only the default.
+        let mut overridden = settings_with_active_custom_mode(Some("voice"), None);
+        overridden
+            .transcription
+            .dictation_numbers_as_digits
+            .insert("voice".to_string(), true);
+        assert!(resolve_dictation_numbers_as_digits(&overridden));
     }
 
     #[test]
@@ -12829,6 +12915,7 @@ mod tests {
             route_preference: Some("local".to_string()),
             language_override: None,
             live_preview_enabled: Some(true),
+            numbers_as_digits: None,
             insertion_mode: "paste".to_string(),
             context_source: "application_context".to_string(),
             save_to_inbox: false,
@@ -21206,6 +21293,9 @@ async fn save_settings_for_sidecar(
     settings.transcription.meeting_custom_templates = settings::sanitize_meeting_custom_templates(
         std::mem::take(&mut settings.transcription.meeting_custom_templates),
     );
+    settings::sanitize_dictation_numbers_as_digits(
+        &mut settings.transcription.dictation_numbers_as_digits,
+    );
     settings.transcription.dictation_command_prefix =
         normalize_dictation_command_prefix(&settings.transcription.dictation_command_prefix)
             .to_string();
@@ -23191,6 +23281,7 @@ async fn stop_dictation_for_sidecar(
                 app_target: app_target.as_deref(),
                 mode_preset: effective_mode.as_str(),
                 smart_formatting_enabled: true,
+                numbers_as_digits: resolve_dictation_numbers_as_digits(&settings_snapshot),
                 recent_inserted_text,
                 destination_category,
             },

@@ -79,6 +79,13 @@ export interface DictationCustomMode {
   routePreference?: "local" | "cloud" | null;
   languageOverride?: string | null;
   livePreviewEnabled?: boolean | null;
+  /**
+   * Inverse text normalization for this profile. `null`/absent inherits the
+   * base style's value, which is what a profile saved before this setting
+   * existed carries. Mirrors `numbers_as_digits` on `DictationCustomMode` in
+   * rust-sidecar/src/settings.rs.
+   */
+  numbersAsDigits?: boolean | null;
   insertionMode: "auto" | "clipboard_only";
   contextSource: "none" | "clipboard" | "selected_text" | "application_context";
   saveToInbox: boolean;
@@ -157,6 +164,14 @@ export interface TranscriptionSettings {
     | "notes"
     | "meeting_follow_up"
     | "custom";
+  /**
+   * Per-preset inverse-text-normalization overrides, sparse: an absent key
+   * means the preset default (see `defaultNumbersAsDigits` in
+   * `src/lib/dictation-numbers.ts`). Mirrors `dictation_numbers_as_digits` in
+   * rust-sidecar/src/settings.rs, which drops keys for unknown presets on
+   * load.
+   */
+  dictationNumbersAsDigits?: Partial<Record<DictationBaseModePreset, boolean>>;
   dictationSelectedCustomModeId?: string | null;
   dictationCustomModes?: DictationCustomMode[];
   dictationContextSource?: "none" | "clipboard" | "selected_text" | "application_context";

@@ -179,6 +179,13 @@ pub struct TranscriptionSettings {
     /// `base_mode_preset`, not as the top-level preset — see
     /// `normalize_dictation_mode_preset` in `lib.rs`.)
     pub dictation_mode_preset: String,
+    /// Dictation: inverse text normalization per mode preset ("voice",
+    /// "messages", "email", "notes", "meeting_follow_up"). Sparse: an absent
+    /// key means the preset default from
+    /// `default_dictation_numbers_as_digits`, so a settings file written
+    /// before this setting existed keeps behaving like a fresh install.
+    /// Unknown keys are dropped on load.
+    pub dictation_numbers_as_digits: HashMap<String, bool>,
     /// Selected saved custom dictation mode id, if any.
     pub dictation_selected_custom_mode_id: Option<String>,
     /// Saved reusable custom dictation modes.
@@ -303,6 +310,9 @@ pub struct DictationCustomMode {
     pub route_preference: Option<String>,
     pub language_override: Option<String>,
     pub live_preview_enabled: Option<bool>,
+    /// `None` inherits the base preset's `dictation_numbers_as_digits` value,
+    /// which is what a profile saved before this setting existed carries.
+    pub numbers_as_digits: Option<bool>,
     pub insertion_mode: String,
     pub context_source: String,
     pub save_to_inbox: bool,
@@ -370,6 +380,7 @@ impl Default for TranscriptionSettings {
             dictation_live_preview_enabled: true,
             dictation_ai_formatting: false,
             dictation_mode_preset: "voice".to_string(),
+            dictation_numbers_as_digits: HashMap::new(),
             dictation_selected_custom_mode_id: None,
             dictation_custom_modes: Vec::new(),
             dictation_context_source: "none".to_string(),
@@ -983,6 +994,37 @@ fn raw_settings_carry_dead_whisper_meeting_slot(raw: &serde_json::Value) -> bool
             == Some("base.en")
 }
 
+/// Mode presets that may carry a `dictation_numbers_as_digits` override.
+/// Mirrors `DICTATION_NUMBER_MODE_IDS` in `src/lib/dictation-numbers.ts`.
+/// "custom" is absent on purpose: a custom profile stores its own
+/// `numbers_as_digits` and inherits its base preset's value when unset.
+pub(crate) const DICTATION_NUMBERS_AS_DIGITS_MODES: &[&str] =
+    &["voice", "messages", "email", "notes", "meeting_follow_up"];
+
+/// Whether a mode preset writes spoken numbers as digits when the user has
+/// not said otherwise.
+///
+/// On for the drafting presets, where "$12.50" and "3:30 pm" are what the
+/// text is going to have to say anyway. Off for the plain Voice preset,
+/// whose promise is that it keeps your words as spoken -- the Settings copy
+/// in `src/lib/dictation-numbers.ts` has to say the same thing.
+pub fn default_dictation_numbers_as_digits(mode_preset: &str) -> bool {
+    match mode_preset.trim() {
+        "messages" | "email" | "notes" | "meeting_follow_up" => true,
+        // "voice", "custom" and anything unrecognized take the conservative
+        // reading.
+        _ => false,
+    }
+}
+
+/// Drops overrides keyed by a mode preset that does not exist -- otherwise
+/// one would sit in the settings file forever. Applied on both load and save
+/// (`update_settings` in `lib.rs`), like every other sanitizer here: a save is
+/// just as capable of carrying a stale key as a hand-edited settings.json is.
+pub(crate) fn sanitize_dictation_numbers_as_digits(map: &mut HashMap<String, bool>) {
+    map.retain(|mode, _| DICTATION_NUMBERS_AS_DIGITS_MODES.contains(&mode.as_str()));
+}
+
 fn normalize_loaded_transcription_settings(transcription: &mut TranscriptionSettings) {
     transcription.default_provider =
         normalize_transcription_provider_value(&transcription.default_provider);
@@ -1072,6 +1114,8 @@ fn normalize_loaded_transcription_settings(transcription: &mut TranscriptionSett
             }
         });
     }
+
+    sanitize_dictation_numbers_as_digits(&mut transcription.dictation_numbers_as_digits);
 
     transcription.dictation_insertion_mode =
         normalize_dictation_insertion_mode(&transcription.dictation_insertion_mode);
@@ -1743,11 +1787,11 @@ impl Default for SettingsManager {
 #[cfg(test)]
 mod tests {
     use super::{
-        dictation_app_category_from_key, dictation_app_category_to_key,
-        dictation_supported_languages, migrate_legacy_ai_lane_settings,
-        normalize_audio_input_device_preference, validate_dictation_active_languages,
-        AutomationSettings, ENGLISH_ONLY_LANGUAGES, PARAKEET_V3_LANGUAGES,
-        WHISPER_MULTILINGUAL_LANGUAGES,
+        default_dictation_numbers_as_digits, dictation_app_category_from_key,
+        dictation_app_category_to_key, dictation_supported_languages,
+        migrate_legacy_ai_lane_settings, normalize_audio_input_device_preference,
+        validate_dictation_active_languages, AutomationSettings, ENGLISH_ONLY_LANGUAGES,
+        PARAKEET_V3_LANGUAGES, WHISPER_MULTILINGUAL_LANGUAGES,
     };
     use super::{
         normalize_dictation_active_languages, normalize_loaded_privacy_settings,
@@ -2262,6 +2306,113 @@ mod tests {
         assert!(!parsed.automation.local_tools_enabled);
         assert_eq!(parsed.theme, "dark");
         assert_eq!(parsed.automation, AutomationSettings::default());
+    }
+
+    /// A settings file written before `numbersAsDigits` existed has to load,
+    /// keep every other value, and behave like a fresh install for the new
+    /// one (empty map, `None` on any saved custom profile).
+    #[test]
+    fn settings_without_numbers_as_digits_still_load() {
+        let parsed: Settings = serde_json::from_str(
+            r#"{
+                "audio": {},
+                "transcription": {
+                    "dictationModePreset": "email",
+                    "dictationCustomModes": [
+                        { "id": "gmail", "name": "Gmail", "baseModePreset": "email" }
+                    ]
+                },
+                "ui": {},
+                "export": {},
+                "privacy": {},
+                "shortcuts": {},
+                "updates": {}
+            }"#,
+        )
+        .expect("pre-ITN settings should deserialize");
+
+        assert!(parsed.transcription.dictation_numbers_as_digits.is_empty());
+        assert_eq!(parsed.transcription.dictation_mode_preset, "email");
+        assert_eq!(
+            parsed.transcription.dictation_custom_modes[0].numbers_as_digits, None,
+            "a profile saved before the setting inherits its base style"
+        );
+    }
+
+    #[test]
+    fn numbers_as_digits_round_trips_in_camel_case() {
+        let mut settings = Settings::default();
+        settings
+            .transcription
+            .dictation_numbers_as_digits
+            .insert("voice".to_string(), true);
+        settings
+            .transcription
+            .dictation_custom_modes
+            .push(DictationCustomMode {
+                id: "gmail".to_string(),
+                name: "Gmail".to_string(),
+                numbers_as_digits: Some(false),
+                ..Default::default()
+            });
+
+        let json = serde_json::to_value(&settings).expect("serialize");
+        assert_eq!(
+            json["transcription"]["dictationNumbersAsDigits"]["voice"],
+            serde_json::Value::Bool(true)
+        );
+        assert_eq!(
+            json["transcription"]["dictationCustomModes"][0]["numbersAsDigits"],
+            serde_json::Value::Bool(false)
+        );
+
+        let parsed: Settings = serde_json::from_value(json).expect("round trip");
+        assert_eq!(
+            parsed
+                .transcription
+                .dictation_numbers_as_digits
+                .get("voice"),
+            Some(&true)
+        );
+        assert_eq!(
+            parsed.transcription.dictation_custom_modes[0].numbers_as_digits,
+            Some(false)
+        );
+    }
+
+    /// The map is keyed by mode preset, so a key for a preset that does not
+    /// exist would sit in the file forever. Load drops it; known keys stay.
+    #[test]
+    fn unknown_numbers_as_digits_mode_keys_are_dropped_on_load() {
+        let mut transcription = TranscriptionSettings {
+            dictation_numbers_as_digits: [
+                ("voice".to_string(), true),
+                ("translate_english".to_string(), true),
+                ("custom".to_string(), false),
+            ]
+            .into_iter()
+            .collect(),
+            ..Default::default()
+        };
+
+        normalize_loaded_transcription_settings(&mut transcription);
+
+        assert_eq!(transcription.dictation_numbers_as_digits.len(), 1);
+        assert_eq!(
+            transcription.dictation_numbers_as_digits.get("voice"),
+            Some(&true)
+        );
+    }
+
+    #[test]
+    fn numbers_as_digits_defaults_are_off_only_for_voice() {
+        assert!(!default_dictation_numbers_as_digits("voice"));
+        assert!(default_dictation_numbers_as_digits("messages"));
+        assert!(default_dictation_numbers_as_digits("email"));
+        assert!(default_dictation_numbers_as_digits("notes"));
+        assert!(default_dictation_numbers_as_digits("meeting_follow_up"));
+        // Unrecognized presets take the conservative reading.
+        assert!(!default_dictation_numbers_as_digits("who_knows"));
     }
 
     #[test]

@@ -66,6 +66,19 @@ import {
   normalizeInsertionMode,
 } from "@/lib/dictation-history-labels";
 import {
+  CUSTOM_MODE_NUMBERS_CHOICE_LABELS,
+  DICTATION_NUMBER_MODE_IDS,
+  DICTATION_NUMBERS_SECTION_DESCRIPTION,
+  DICTATION_NUMBERS_SECTION_HEADING,
+  customModeNumbersChoice,
+  customModeNumbersValue,
+  numbersAsDigitsModeHint,
+  resolveCustomModeNumbersAsDigits,
+  resolveNumbersAsDigits,
+  type CustomModeNumbersChoice,
+  type DictationNumbersAsDigitsMap,
+} from "@/lib/dictation-numbers";
+import {
   CONTEXT_SOURCE_LABELS,
   DICTATION_MODE_DEFINITIONS,
   DICTATION_MODE_DEFINITION_BY_ID,
@@ -320,6 +333,7 @@ type DictationCustomModeDraft = {
   activationDomainMatcher: string;
   languageOverride: string;
   livePreviewEnabled: boolean;
+  numbersAsDigits: CustomModeNumbersChoice;
 };
 
 type DictationRouteReadiness = {
@@ -676,6 +690,7 @@ function createCustomModeDraft(
     activationDomainMatcher: "",
     languageOverride: "",
     livePreviewEnabled: true,
+    numbersAsDigits: "inherit",
     ...overrides,
   };
 }
@@ -923,6 +938,8 @@ export function DictationView() {
     dictationAppCategoryOverrides,
     setDictationAppCategoryOverrides,
   ] = useState<DictationAppCategoryOverride[]>([]);
+  const [dictationNumbersAsDigits, setDictationNumbersAsDigits] =
+    useState<DictationNumbersAsDigitsMap>({});
   const [newCategoryOverrideAppMatcher, setNewCategoryOverrideAppMatcher] =
     useState("");
   const [newCategoryOverrideCategory, setNewCategoryOverrideCategory] =
@@ -1863,6 +1880,9 @@ export function DictationView() {
         setDictationAppCategoryOverrides(
           settings.transcription.dictationAppCategoryOverrides ?? [],
         );
+        setDictationNumbersAsDigits(
+          settings.transcription.dictationNumbersAsDigits ?? {},
+        );
         const shortcut = settings.shortcuts.toggleDictation || defaultShortcut;
         setHotkeyLabel(formatShortcutForDisplay(shortcut));
         setHotkeyShortcut(shortcut);
@@ -2042,6 +2062,7 @@ export function DictationView() {
       retentionCustomHours: number;
       categoryFormattingEnabled: boolean;
       appCategoryOverrides: DictationAppCategoryOverride[];
+      numbersAsDigits: DictationNumbersAsDigitsMap;
     }>,
   ) => {
     try {
@@ -2141,6 +2162,8 @@ export function DictationView() {
         nextCategoryFormattingEnabled;
       settings.transcription.dictationAppCategoryOverrides =
         nextAppCategoryOverrides;
+      settings.transcription.dictationNumbersAsDigits =
+        updates.numbersAsDigits ?? dictationNumbersAsDigits;
       await saveSettings(settings);
     } catch (error) {
       console.warn("Failed to persist dictation preferences:", error);
@@ -2252,6 +2275,9 @@ export function DictationView() {
       (customModeDraft.languageOverride.trim() || null),
     livePreviewEnabled:
       overrides?.livePreviewEnabled ?? customModeDraft.livePreviewEnabled,
+    numbersAsDigits:
+      overrides?.numbersAsDigits ??
+      customModeNumbersValue(customModeDraft.numbersAsDigits),
     insertionMode: overrides?.insertionMode ?? dictationInsertionMode,
     contextSource: overrides?.contextSource ?? dictationContextSource,
     saveToInbox: overrides?.saveToInbox ?? saveToInbox,
@@ -2288,6 +2314,7 @@ export function DictationView() {
         languageOverride: mode.languageOverride ?? "",
         livePreviewEnabled:
           mode.livePreviewEnabled ?? dictationLivePreviewEnabled,
+        numbersAsDigits: customModeNumbersChoice(mode.numbersAsDigits),
       }),
     );
     setDictationProfile(mode.profile);
@@ -2385,6 +2412,7 @@ export function DictationView() {
         languageOverride: nextMode.languageOverride ?? "",
         livePreviewEnabled:
           nextMode.livePreviewEnabled ?? dictationLivePreviewEnabled,
+        numbersAsDigits: customModeNumbersChoice(nextMode.numbersAsDigits),
       }),
     );
     await persistDictationPreferences({
@@ -2472,6 +2500,7 @@ export function DictationView() {
         languageOverride: nextMode.languageOverride ?? "",
         livePreviewEnabled:
           nextMode.livePreviewEnabled ?? dictationLivePreviewEnabled,
+        numbersAsDigits: customModeNumbersChoice(nextMode.numbersAsDigits),
       }),
     );
     setDictationProfile(nextMode.profile);
@@ -2572,6 +2601,9 @@ export function DictationView() {
           livePreviewEnabled:
             selectedCustomMode.livePreviewEnabled ??
             dictationLivePreviewEnabled,
+          numbersAsDigits: customModeNumbersChoice(
+            selectedCustomMode.numbersAsDigits,
+          ),
         }),
       );
       return;
@@ -4562,6 +4594,53 @@ export function DictationView() {
                           own style prompt runs.
                         </p>
                       </div>
+                      <div className="space-y-2">
+                        <label
+                          className="text-sm font-medium"
+                          htmlFor="custom-profile-numbers"
+                        >
+                          {DICTATION_NUMBERS_SECTION_HEADING}
+                        </label>
+                        <select
+                          id="custom-profile-numbers"
+                          aria-label="Numbers as digits"
+                          className="w-full rounded-md border bg-background p-2 text-sm"
+                          value={customModeDraft.numbersAsDigits}
+                          onChange={(event) =>
+                            setCustomModeDraft((current) => ({
+                              ...current,
+                              numbersAsDigits: event.target
+                                .value as CustomModeNumbersChoice,
+                            }))
+                          }
+                        >
+                          {(
+                            Object.keys(
+                              CUSTOM_MODE_NUMBERS_CHOICE_LABELS,
+                            ) as CustomModeNumbersChoice[]
+                          ).map((choice) => (
+                            <option key={choice} value={choice}>
+                              {CUSTOM_MODE_NUMBERS_CHOICE_LABELS[choice]}
+                            </option>
+                          ))}
+                        </select>
+                        <p className="text-sm text-muted-foreground">
+                          {customModeDraft.numbersAsDigits === "inherit"
+                            ? numbersAsDigitsModeHint(
+                                customModeDraft.baseModePreset,
+                              )
+                            : DICTATION_NUMBERS_SECTION_DESCRIPTION}{" "}
+                          {resolveCustomModeNumbersAsDigits(
+                            customModeNumbersValue(
+                              customModeDraft.numbersAsDigits,
+                            ),
+                            customModeDraft.baseModePreset,
+                            dictationNumbersAsDigits,
+                          )
+                            ? "Right now this profile writes numbers as digits."
+                            : "Right now this profile keeps numbers as spoken."}
+                        </p>
+                      </div>
                       <div className="space-y-2 md:col-span-2">
                         <label
                           className="text-sm font-medium"
@@ -6284,6 +6363,54 @@ export function DictationView() {
                       });
                     }}
                   />
+                </div>
+
+                <div
+                  className="space-y-3 border-t pt-4"
+                  data-testid="numbers-as-digits-section"
+                >
+                  <div>
+                    <h4 className="section-heading">
+                      {DICTATION_NUMBERS_SECTION_HEADING}
+                    </h4>
+                    <p className="text-sm text-muted-foreground">
+                      {DICTATION_NUMBERS_SECTION_DESCRIPTION}
+                    </p>
+                  </div>
+                  <div className="space-y-2">
+                    {DICTATION_NUMBER_MODE_IDS.map((modeId) => (
+                      <div
+                        key={modeId}
+                        className="flex items-center justify-between gap-4 rounded-md border bg-background px-3 py-2"
+                      >
+                        <div className="min-w-0 space-y-0.5">
+                          <p className="text-sm font-medium">
+                            {DICTATION_MODE_DEFINITION_BY_ID[modeId].label}
+                          </p>
+                          <p className="text-sm text-muted-foreground">
+                            {numbersAsDigitsModeHint(modeId)}
+                          </p>
+                        </div>
+                        <Switch
+                          aria-label={`${DICTATION_MODE_DEFINITION_BY_ID[modeId].label}: numbers as digits`}
+                          checked={resolveNumbersAsDigits(
+                            modeId,
+                            dictationNumbersAsDigits,
+                          )}
+                          onCheckedChange={(checked) => {
+                            const next = {
+                              ...dictationNumbersAsDigits,
+                              [modeId]: checked,
+                            };
+                            setDictationNumbersAsDigits(next);
+                            void persistDictationPreferences({
+                              numbersAsDigits: next,
+                            });
+                          }}
+                        />
+                      </div>
+                    ))}
+                  </div>
                 </div>
 
                 <div className="space-y-2">
