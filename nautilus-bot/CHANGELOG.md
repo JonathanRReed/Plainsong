@@ -172,6 +172,13 @@ evidence is stale and must be recaptured before this becomes a candidate.
   files that still carry it load cleanly and are rewritten without it.
 
 ### Fixed
+- Editing a dictation binding while recording no longer strands the
+  recording. Each edit saves immediately, and the native shortcut helper takes
+  its whole binding table on launch, so the save killed and respawned it —
+  swallowing the key release of a hold in progress and leaving the session to
+  run until the 10-minute watchdog. A new table is now held back while a
+  session or a held key is in flight and applied the moment things go idle,
+  and a helper that is replaced anyway hands over the release it owes.
 - "Add binding" no longer creates a row that disappears. The new row was
   saved immediately with no keys recorded, and the sidecar drops a binding
   with no trigger, so it survived on screen only until the next reload. The

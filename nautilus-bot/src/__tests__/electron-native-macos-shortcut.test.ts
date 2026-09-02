@@ -1,10 +1,15 @@
+import { readFileSync } from "node:fs";
+import { resolve } from "node:path";
 import { describe, expect, it } from "vitest";
 import {
   buildNativeShortcutHelperArgs,
   isNativeShortcutRawEvent,
   normalizeNativeShortcutHelperShortcut,
   normalizeNativeShortcutEvent,
+  resolveNativeHelperConfigApplication,
   resolveNativeShortcutStatus,
+  synthesizeNativeShortcutRelease,
+  trackNativeShortcutDownBindings,
 } from "../../electron/native-macos-shortcut";
 
 describe("normalizeNativeShortcutEvent", () => {
@@ -90,5 +95,131 @@ describe("normalizeNativeShortcutHelperShortcut", () => {
     expect(normalizeNativeShortcutHelperShortcut("Ctrl+Spacebar")).toBe("Ctrl+Space");
     expect(normalizeNativeShortcutHelperShortcut("Ctrl+Return")).toBe("Ctrl+Enter");
     expect(normalizeNativeShortcutHelperShortcut("Ctrl+Esc")).toBe("Ctrl+Escape");
+  });
+});
+
+describe("resolveNativeHelperConfigApplication", () => {
+  const base = {
+    desiredConfig: "[{\"id\":\"primary\"}]",
+    appliedConfig: "[{\"id\":\"old\"}]",
+    helperAvailable: true,
+    dictationPhase: "idle",
+    bindingsDown: 0,
+  };
+
+  it("does nothing when the running helper already has this table", () => {
+    expect(
+      resolveNativeHelperConfigApplication({
+        ...base,
+        appliedConfig: base.desiredConfig,
+      }),
+    ).toEqual({ action: "unchanged" });
+  });
+
+  it("respawns when the table changed and nothing is in flight", () => {
+    expect(resolveNativeHelperConfigApplication(base)).toEqual({ action: "apply" });
+  });
+
+  it("respawns when the helper died, even though the table is unchanged", () => {
+    expect(
+      resolveNativeHelperConfigApplication({
+        ...base,
+        appliedConfig: base.desiredConfig,
+        helperAvailable: false,
+      }),
+    ).toEqual({ action: "apply" });
+  });
+
+  // The regression: every binding edit saves immediately, so a SIGTERM landed
+  // between `down` and `up`. The release never arrived and the session ran to
+  // the 10-minute watchdog.
+  it("defers while a binding is physically held, whatever the phase says", () => {
+    for (const dictationPhase of ["idle", "preparing", "recording", "done"]) {
+      expect(
+        resolveNativeHelperConfigApplication({ ...base, dictationPhase, bindingsDown: 1 }),
+      ).toEqual({ action: "defer", reason: "binding_held" });
+    }
+  });
+
+  it("defers while a session is live", () => {
+    for (const dictationPhase of ["preparing", "primed", "recording"]) {
+      expect(resolveNativeHelperConfigApplication({ ...base, dictationPhase })).toEqual({
+        action: "defer",
+        reason: "dictation_active",
+      });
+    }
+  });
+
+  it("applies once the session is past the point a stop gesture matters", () => {
+    for (const dictationPhase of ["transcribing", "done", "error", "idle"]) {
+      expect(resolveNativeHelperConfigApplication({ ...base, dictationPhase })).toEqual({
+        action: "apply",
+      });
+    }
+  });
+});
+
+describe("trackNativeShortcutDownBindings / synthesizeNativeShortcutRelease", () => {
+  it("owes an up for every down that has not been released", () => {
+    let down = trackNativeShortcutDownBindings(new Set(), {
+      event: "down",
+      bindingId: "primary",
+    });
+    down = trackNativeShortcutDownBindings(down, { event: "down", bindingId: "email" });
+    expect([...down].sort()).toEqual(["email", "primary"]);
+
+    down = trackNativeShortcutDownBindings(down, { event: "up", bindingId: "primary" });
+    expect([...down]).toEqual(["email"]);
+    expect(synthesizeNativeShortcutRelease(down)).toEqual([
+      { event: "up", bindingId: "email" },
+    ]);
+  });
+
+  it("never mutates the set it was given", () => {
+    const before = new Set(["primary"]);
+    const after = trackNativeShortcutDownBindings(before, {
+      event: "up",
+      bindingId: "primary",
+    });
+    expect([...before]).toEqual(["primary"]);
+    expect([...after]).toEqual([]);
+  });
+
+  // Escape arrives as a bare `down` and is the cancel gesture, not a hold:
+  // synthesizing a release for it would cancel a later session.
+  it("does not track Escape", () => {
+    expect([
+      ...trackNativeShortcutDownBindings(new Set(), { event: "down", bindingId: "escape" }),
+    ]).toEqual([]);
+  });
+
+  it("owes nothing when nothing is held", () => {
+    expect(synthesizeNativeShortcutRelease(new Set())).toEqual([]);
+  });
+});
+
+describe("native helper restart wiring in main.ts", () => {
+  const mainSource = readFileSync(resolve(process.cwd(), "electron/main.ts"), "utf8");
+
+  it("asks the policy before replacing the helper, and defers instead of killing it", () => {
+    expect(mainSource).toContain("resolveNativeHelperConfigApplication({");
+    expect(mainSource).toMatch(
+      /decision\.action === "defer"[\s\S]{0,400}pendingNativeShortcutSettings = settings;[\s\S]{0,40}return;/,
+    );
+  });
+
+  it("synthesizes the owed release before disposing the helper, not after", () => {
+    const release = mainSource.indexOf('releaseHeldNativeShortcutBindings("helper restart")');
+    const dispose = mainSource.indexOf(
+      "disposeNativeShortcutController();",
+      release,
+    );
+    expect(release).toBeGreaterThan(0);
+    expect(dispose).toBeGreaterThan(release);
+  });
+
+  it("applies a deferred table when the session ends or the key comes up", () => {
+    expect(mainSource).toContain('applyDeferredNativeShortcutConfig("binding released")');
+    expect(mainSource).toContain("applyDeferredNativeShortcutConfig(`phase ${nextPhase}`)");
   });
 });

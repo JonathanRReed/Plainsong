@@ -44,6 +44,9 @@ import { IpcBridge } from "./ipc-bridge";
 import {
   normalizeNativeShortcutEvent,
   normalizeNativeShortcutHelperShortcut,
+  resolveNativeHelperConfigApplication,
+  synthesizeNativeShortcutRelease,
+  trackNativeShortcutDownBindings,
   type NativeShortcutController,
   type NativeShortcutRawEvent,
 } from "./native-macos-shortcut";
@@ -203,6 +206,14 @@ const DICTATION_SHORTCUT_FAILURE_VISIBLE_MS = 8_000;
 let nativeShortcutController: NativeShortcutController | null = null;
 let nativeShortcutAvailable = false;
 let appliedNativeShortcutConfig: string | null = null;
+// Bindings the helper reported down and has not reported up. A helper
+// restart owes each of these a synthetic release, otherwise a hold that was
+// in progress never stops and the session runs to the watchdog.
+let nativeShortcutDownBindings: ReadonlySet<string> = new Set<string>();
+// A helper table that could not be applied because a session (or a held
+// binding) was live. Applied on the next idle; see
+// `resolveNativeHelperConfigApplication`.
+let pendingNativeShortcutSettings: AppSettings | null = null;
 // Latest settings snapshot the shortcut handlers should act on. The native
 // helper survives settings saves that don't change its shortcut, so its
 // onEvent closure must not act on the settings captured at spawn time.
@@ -1730,6 +1741,15 @@ async function handleNativeDictationShortcutEvent(
   if (!shouldHandleDictationShortcutSource({ source: "native", nativeShortcutAvailable })) {
     return;
   }
+  // Tracked before any await: a helper restart between here and the release
+  // has to know this binding is owed an `up`.
+  nativeShortcutDownBindings = trackNativeShortcutDownBindings(
+    nativeShortcutDownBindings,
+    rawEvent,
+  );
+  if (rawEvent.event === "up") {
+    applyDeferredNativeShortcutConfig("binding released");
+  }
 
   const { signal, bindingId } = normalizeNativeShortcutEvent(rawEvent);
   if (signal === "cancelled") {
@@ -1768,6 +1788,43 @@ function disposeNativeShortcutController(): void {
   setNativeShortcutAvailable(false);
 }
 
+/**
+ * Deliver the `up` a helper that is about to die will never send. Runs
+ * before the dispose, while `nativeShortcutAvailable` is still true, so the
+ * synthetic release takes the same path a real one would and the session
+ * stops instead of running to the watchdog.
+ */
+function releaseHeldNativeShortcutBindings(reason: string): void {
+  if (nativeShortcutDownBindings.size === 0) {
+    return;
+  }
+  const releases = synthesizeNativeShortcutRelease(nativeShortcutDownBindings);
+  nativeShortcutDownBindings = new Set<string>();
+  for (const release of releases) {
+    console.warn("[shortcuts] synthesizing release for a held binding", {
+      reason,
+      bindingId: release.bindingId,
+    });
+    void handleNativeDictationShortcutEvent(latestShortcutSettings, release).catch((error) => {
+      surfaceDictationShortcutFailure("native dictation shortcut", error);
+    });
+  }
+}
+
+/**
+ * Apply a helper table that was deferred because a session (or a held
+ * binding) was live. Called whenever dictation reaches an idle-ish phase and
+ * whenever the last held binding is released.
+ */
+function applyDeferredNativeShortcutConfig(reason: string): void {
+  const pending = pendingNativeShortcutSettings;
+  if (!pending) {
+    return;
+  }
+  console.log("[shortcuts] applying deferred native helper table", { reason });
+  startNativeShortcutControllerIfNeeded(pending);
+}
+
 function startNativeShortcutControllerIfNeeded(settings: AppSettings): void {
   // Every binding the helper can watch goes into its table. Validation here
   // assumes the helper is present (that is what is being started); a mouse or
@@ -1782,17 +1839,36 @@ function startNativeShortcutControllerIfNeeded(settings: AppSettings): void {
     normalizeNativeShortcutHelperShortcut,
   );
   const desiredConfig = JSON.stringify(helperTable);
-  // Only respawn the helper when its table actually changed (or it died).
-  // An unconditional respawn on every settings save would reset the helper's
-  // key-down tracking, swallowing the release of a hold that is in progress.
-  if (
-    nativeShortcutController &&
-    nativeShortcutController.status.available &&
-    appliedNativeShortcutConfig === desiredConfig
-  ) {
+  // The helper takes its table on argv, so applying a new one means killing
+  // it. Only respawn when the table actually changed (or it died), and never
+  // in the middle of a session or a held key: every binding edit in Settings
+  // saves immediately, and a SIGTERM landing between `down` and `up` left the
+  // release unowed and the session running to the watchdog.
+  const decision = resolveNativeHelperConfigApplication({
+    desiredConfig,
+    appliedConfig: appliedNativeShortcutConfig,
+    helperAvailable: Boolean(nativeShortcutController?.status.available),
+    dictationPhase,
+    bindingsDown: nativeShortcutDownBindings.size,
+  });
+  if (decision.action === "unchanged") {
+    pendingNativeShortcutSettings = null;
     return;
   }
+  if (decision.action === "defer") {
+    // The running helper keeps delivering the OLD table -- the one the
+    // in-flight press came from -- so the release lands on the binding that
+    // started the session. Applied on the next idle.
+    console.log("[shortcuts] deferring native helper table", { reason: decision.reason });
+    pendingNativeShortcutSettings = settings;
+    return;
+  }
+  pendingNativeShortcutSettings = null;
 
+  // Belt and braces for a restart that happens anyway (a helper crash, or a
+  // table change while a stale `down` is still tracked): hand the handler the
+  // `up` the dying helper will never send.
+  releaseHeldNativeShortcutBindings("helper restart");
   disposeNativeShortcutController();
 
   const controller = startNativeMacosShortcutController({
@@ -2540,6 +2616,8 @@ async function bootstrap() {
       }
       dictationPhase = nextPhase;
       refreshTray();
+      // A helper table held back while this session was live can go in now.
+      applyDeferredNativeShortcutConfig(`phase ${nextPhase}`);
       const sessionId = (payload as { sessionId?: unknown }).sessionId;
       if (typeof sessionId === "number") {
         dictationSessionId = sessionId;
