@@ -64,6 +64,13 @@ function appBundlePaths(appPath) {
       "sidecar",
       "plainsong-sidecar",
     ),
+    cli: path.join(
+      appPath,
+      "Contents",
+      "Resources",
+      "sidecar",
+      "plainsong-cli",
+    ),
     shortcutHelper: path.join(
       appPath,
       "Contents",
@@ -189,13 +196,22 @@ function readEntitlements(filePath, label) {
   }
 }
 
-function requireEmptyShortcutHelperEntitlements(filePath) {
-  const entitlements = readEntitlements(filePath, "shortcut helper");
+/**
+ * A helper binary that carries no entitlements at all.
+ *
+ * The shortcut helper and the `plainsong` CLI are both separate signatures for
+ * the same reason: neither should inherit the app's microphone, Apple Events
+ * or library-validation entitlements. The CLI in particular opens the user's
+ * database from a terminal, where it is trivially invokable by anything on the
+ * machine — an entitlement that leaked into its signature would be handing out
+ * the app's own privileges. It reads with SQLite's read-only flag and needs
+ * nothing beyond that.
+ */
+function requireEmptyEntitlements(filePath, label) {
+  const entitlements = readEntitlements(filePath, label);
   const keys = Object.keys(entitlements);
   if (keys.length > 0) {
-    fail(
-      `shortcut helper must have an empty entitlement set, found: ${keys.join(", ")}`,
-    );
+    fail(`${label} must have an empty entitlement set, found: ${keys.join(", ")}`);
   }
 }
 
@@ -351,6 +367,7 @@ function verifyAppBundle(appPath, expectedArchitecture) {
   const executables = [
     ["app executable", paths.mainExecutable],
     ["Rust sidecar", paths.sidecar],
+    ["plainsong CLI", paths.cli],
     ["shortcut helper", paths.shortcutHelper],
     ["calendar helper", paths.calendarHelper],
     ["Apple Foundation Models helper", paths.languageModelHelper],
@@ -366,7 +383,8 @@ function verifyAppBundle(appPath, expectedArchitecture) {
     );
   }
 
-  requireEmptyShortcutHelperEntitlements(paths.shortcutHelper);
+  requireEmptyEntitlements(paths.shortcutHelper, "shortcut helper");
+  requireEmptyEntitlements(paths.cli, "plainsong CLI");
   requireEmptyLanguageModelHelperEntitlements(paths.languageModelHelper);
   requireCalendarHelperEntitlements(paths.calendarHelper);
   requireCalendarHelperEmbeddedUsageDescriptions(paths.calendarHelper);

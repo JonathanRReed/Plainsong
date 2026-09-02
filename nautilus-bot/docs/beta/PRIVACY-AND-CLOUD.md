@@ -21,6 +21,33 @@ analytics SDK, or Plainsong-operated audio relay.
 API keys and internal secrets are stored through the macOS Keychain, not in the
 support bundle or plaintext settings.
 
+## The vault and database encryption
+
+Turning the vault on in Settings > Privacy generates a database key, stores it
+in the macOS Keychain, and encrypts `plainsong.db` with SQLCipher. Meeting
+audio bundles are encrypted separately with a key derived from your vault
+password.
+
+**Correction for anyone who turned the vault on before 0.9.0-beta.3:** the
+database encryption step did not encrypt the database. The key was generated
+and stored correctly, and the app reported "database encrypted", but the
+operation used to perform the encryption is a no-op on a database that was
+never keyed, so the file stayed readable by anything that could open it. Audio
+bundle encryption and Keychain storage were not affected.
+
+This build detects that state at launch — a key in the Keychain, a plaintext
+database — and performs the real migration: it exports the database into a new
+encrypted file, verifies that the new file opens with the key and does not open
+without it, and atomically replaces the original. Nothing is lost, and the app
+tells you it happened. If the migration cannot finish, the app keeps working on
+the plaintext database, says so, and reports the database as not encrypted
+rather than claiming otherwise.
+
+One thing the migration cannot do: the pages of the old plaintext file are
+unlinked, not overwritten, so until the volume reuses those blocks the
+pre-migration contents remain recoverable by forensic tools. On a Mac with
+FileVault on they are still covered by full-disk encryption.
+
 ## Network activity without remote speech processing
 
 - downloading a model from its named upstream host, including the one-time
@@ -57,6 +84,43 @@ not proxy the request.
 Turning remote processing off revokes that authorization for new work. In-flight
 remote requests are cancelled and a result returned after revocation is not
 committed as an accepted local result.
+
+## Call detection and notifications
+
+When "Offer to record a call it notices" is on (the default), the local
+sidecar reads the list of running applications on this Mac every few seconds
+and keeps only the bundle identifiers of known conferencing apps and
+browsers, and asks CoreAudio whether the default microphone is open by
+another process. CoreAudio answers that question without any permission and
+without naming the process.
+
+**What window titles are read.** Only with Accessibility permission, and
+only where a title decides something:
+
+- Zoom's window titles, every poll, to tell an in-call window ("Zoom
+  Meeting") from the home window.
+- A browser's window titles, but only when the microphone is already open by
+  another process, or when that browser is where the call currently being
+  offered was found. Without one of those reasons Plainsong does not ask a
+  browser for its windows at all — partly for your privacy, partly because
+  asking a Chromium browser switches it into full accessibility mode for the
+  rest of its life.
+
+**What is kept, and what leaves the sidecar.** Nothing about which apps you
+run is written to disk or sent anywhere, and nothing is kept beyond the
+current poll except the one call currently being offered, which is held in
+memory until it ends. A window title is used to answer one question — is
+this window still open — and is never included in the notification, in the
+in-app cue, or in the event the sidecar sends to the app's windows. That
+event carries the app (Zoom, Google Meet), its bundle identifier, when the
+call was noticed, and whether a window was involved at all; a Google Meet
+tab's title is the meeting's own name, and it stays in the sidecar. Turning
+the setting off stops the polling within a few seconds.
+
+macOS notifications carry the app name and the meeting's state (started,
+stopped, transcript ready, notes ready or failed) or a one-line reason a
+dictation was not delivered. They never contain transcript text, notes, or
+dictated words.
 
 ## The meeting consent notice
 

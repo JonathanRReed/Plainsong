@@ -10,6 +10,10 @@ import {
   type ReactNode,
 } from "react";
 import { listen } from "@/lib/electron";
+import {
+  normalizeCallCaptureRequest,
+  publishCallCaptureRequest,
+} from "@/lib/call-capture-request";
 import { Sidebar } from "@/components/sidebar";
 import { RecordingProvider } from "@/hooks/use-recording";
 import { DataCacheProvider } from "@/hooks/data-cache-context";
@@ -170,6 +174,30 @@ function AppRuntimeListeners() {
     };
   }, [toast]);
 
+  // The database is opened before the sidecar has anywhere to send events, so
+  // a vault repair that ran at startup reports itself here. It is a toast and
+  // not a log line because it changes what is true about the user's data:
+  // either the database is encrypted now when it was not before, or it is
+  // still readable and they should know that too.
+  useEffect(() => {
+    let unlisten: (() => void) | undefined;
+    void listen<{ message?: unknown; encrypted?: unknown }>(
+      "vault-database-encryption-notice",
+      (event) => {
+        const message =
+          typeof event.payload?.message === "string" ? event.payload.message.trim() : "";
+        if (message) {
+          toast(message, event.payload?.encrypted === true ? "success" : "error");
+        }
+      },
+    ).then((fn) => {
+      unlisten = fn;
+    });
+    return () => {
+      unlisten?.();
+    };
+  }, [toast]);
+
   useEffect(() => {
     let unlisten: (() => void) | undefined;
     void listen<void>("accessibility-permission-warning", () => {
@@ -278,6 +306,27 @@ function App() {
     window.addEventListener(OPEN_ONBOARDING_EVENT, handleOpenOnboarding as EventListener);
     return () => {
       window.removeEventListener(OPEN_ONBOARDING_EVENT, handleOpenOnboarding as EventListener);
+    };
+  }, []);
+
+  // A clicked "Zoom call started" notification: the main process focused the
+  // window and sent the call. Go to Meetings and park the request for the
+  // view, which opens the consent dialog with the call's name on it. Nothing
+  // records until the reader says so there.
+  useEffect(() => {
+    let unlisten: (() => void) | undefined;
+    void listen<unknown>("meeting-call-capture-requested", (event) => {
+      const request = normalizeCallCaptureRequest(event.payload);
+      if (!request) {
+        return;
+      }
+      setActiveView("recordings");
+      publishCallCaptureRequest(request);
+    }).then((fn) => {
+      unlisten = fn;
+    });
+    return () => {
+      unlisten?.();
     };
   }, []);
 

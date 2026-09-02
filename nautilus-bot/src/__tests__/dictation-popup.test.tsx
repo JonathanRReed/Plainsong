@@ -157,6 +157,49 @@ describe("DictationPopup", () => {
     expect(screen.queryByText(/Listening/i)).not.toBeInTheDocument();
   });
 
+  it("shows and then clears the 'Recording from a link' notice", async () => {
+    // `plainsong://record` is reachable from any web page, so a dictation that
+    // a link started has to be visibly attributable rather than silent.
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    await act(async () => {
+      render(<DictationPopup />);
+    });
+
+    await waitFor(() => {
+      expect(popupMocks.listeners.get("dictation-source-notice")).toBeDefined();
+    });
+
+    await act(async () => {
+      popupMocks.listeners.get("dictation-source-notice")?.({
+        payload: { source: "deep_link", message: "Recording from a link", durationMs: 1000 },
+      });
+    });
+    expect(
+      await screen.findByTestId("dictation-source-notice"),
+    ).toHaveTextContent("Recording from a link");
+
+    // It is a one-second notice, not a permanent badge.
+    await act(async () => {
+      vi.advanceTimersByTime(1100);
+    });
+    await waitFor(() => {
+      expect(screen.queryByTestId("dictation-source-notice")).not.toBeInTheDocument();
+    });
+  });
+
+  it("ignores an empty source notice instead of flashing a blank badge", async () => {
+    await act(async () => {
+      render(<DictationPopup />);
+    });
+    await waitFor(() => {
+      expect(popupMocks.listeners.get("dictation-source-notice")).toBeDefined();
+    });
+    await act(async () => {
+      popupMocks.listeners.get("dictation-source-notice")?.({ payload: { message: "   " } });
+    });
+    expect(screen.queryByTestId("dictation-source-notice")).not.toBeInTheDocument();
+  });
+
   it("renders resolved runtime mode metadata from dictation state events", async () => {
     await act(async () => {
       render(<DictationPopup />);

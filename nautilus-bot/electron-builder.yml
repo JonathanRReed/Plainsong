@@ -36,6 +36,17 @@ directories:
   output: release
   buildResources: build-resources
 
+# `plainsong://` deep links (record, stop, mode, meeting/start, meeting/stop,
+# open). This writes CFBundleURLTypes so macOS hands the URL to the running
+# app via `open-url`; the app ignores every link unless Settings > General >
+# Local tools is on, and parses only the six commands above
+# (electron/deep-link-policy.ts). The scheme is the renderer's own privileged
+# scheme on purpose: see the rationale at the top of that file.
+protocols:
+  - name: Plainsong
+    schemes:
+      - plainsong
+
 # Fail packaging before signing if a required native helper is absent, has the
 # wrong deployment target, or no longer matches its Rust protocol.
 afterPack: scripts/verify-packaged-native-helpers.mjs
@@ -60,6 +71,11 @@ extraResources:
     filter:
       - plainsong-sidecar
       - plainsong-sidecar.exe
+      # The `plainsong` command-line tool and read-only MCP server. Same
+      # directory as the sidecar so it is signed under the same rule in
+      # scripts/sign-macos.mjs and checked by verify-packaged-native-helpers.
+      - plainsong-cli
+      - plainsong-cli.exe
 
 mac:
   # The limited beta is arm64 only: the Rust sidecar is compiled for the host arch by

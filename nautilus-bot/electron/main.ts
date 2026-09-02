@@ -6,6 +6,7 @@ import {
   ipcMain,
   Menu,
   net,
+  Notification,
   protocol,
   screen,
   session,
@@ -14,7 +15,19 @@ import {
 } from "electron/main";
 import { nativeImage, shell } from "electron/common";
 import { execFile, spawn } from "child_process";
-import { existsSync, readFileSync, unlinkSync, writeFileSync } from "fs";
+import {
+  createReadStream,
+  existsSync,
+  lstatSync,
+  readFileSync,
+  readlinkSync,
+  renameSync,
+  symlinkSync,
+  unlinkSync,
+  writeFileSync,
+} from "fs";
+import { stat } from "node:fs/promises";
+import { Readable } from "node:stream";
 import path from "path";
 import { pathToFileURL } from "url";
 import { autoUpdater, type AppUpdater } from "electron-updater";
@@ -71,17 +84,30 @@ import {
 } from "./macos-code-signature";
 import { overlayVisibilityAllowed, resolveWindowUiSettings } from "./window-ui-settings";
 import {
+  nextMeetingNotificationMemory,
+  notificationForCallDetected,
+  notificationForSidecarEvent,
+  resolveNotificationSettings,
+  type NotificationContext,
+  type NotificationSettings,
+  type PlainsongNotification,
+} from "./notification-policy";
+import {
   clampWindowSizeToWorkArea,
   isFiniteWindowNumber,
 } from "./window-bounds-policy";
 import {
   isRendererUrl,
+  playbackTokenFromUrl,
+  playbackUrl,
   RENDERER_HOST,
   RENDERER_SCHEME,
   rendererUrl,
   resolveRendererAssetPath,
   withRendererSecurityHeaders,
 } from "./renderer-protocol";
+import { parsePreparedPlayback, PlaybackTokenMap } from "./playback-tokens";
+import { buildPlaybackResponse } from "./playback-range";
 import {
   RENDERER_READY_LOG_MESSAGE,
   shouldForwardRendererConsoleMessage,
@@ -105,6 +131,25 @@ import {
   type MeetingFinalizationOutcome,
   type MeetingLifecycleEvent,
 } from "./meeting-lifecycle";
+import {
+  DeepLinkRateLimiter,
+  LINK_RECORDING_NOTICE,
+  LINK_RECORDING_NOTICE_MS,
+  deepLinkActionName,
+  deepLinkFromArgv,
+  deepLinkNeedsRecordingNotice,
+  parseDeepLink,
+  resolveDictationModeSelection,
+  type DeepLinkCommand,
+} from "./deep-link-policy";
+import {
+  CLI_LINK_PATH,
+  describeCliToolStatus,
+  manualInstallCommand,
+  planCliInstall,
+  type CliInstallResult,
+  type ExistingLinkPath,
+} from "./cli-install";
 
 // Packaging is the only thing that decides development mode. This used to also
 // honour `NODE_ENV=development`, which meant an ambient environment variable
@@ -149,6 +194,9 @@ protocol.registerSchemesAsPrivileged([
       standard: true,
       secure: true,
       supportFetchAPI: true,
+      // The playback route answers `<audio>` with Range responses; media
+      // elements only stream from a scheme registered as streamable.
+      stream: true,
     },
   },
 ]);
@@ -160,6 +208,81 @@ if (isDev) {
 
 let mainWindow: BrowserWindow | null = null;
 let ipcBridge: IpcBridge | null = null;
+
+/**
+ * Live playback tokens. The sidecar's answer to `prepare_recording_playback`
+ * carries a filesystem path; it is kept here and never forwarded, so the
+ * renderer only ever holds a token. See playback-tokens.ts.
+ */
+const playbackTokens = new PlaybackTokenMap();
+
+/**
+ * Forget every playback token. `notifySidecar` is false when the sidecar is
+ * already gone: its restart sweeps the decrypted temporaries itself, and a
+ * release sent to a dead process would only log a rejection.
+ */
+function releaseAllPlayback(reason: string, notifySidecar: boolean): void {
+  const drained = playbackTokens.drain();
+  if (drained.length === 0) {
+    return;
+  }
+  console.log(`[playback] releasing ${drained.length} token(s): ${reason}`);
+  if (!notifySidecar || !ipcBridge) {
+    return;
+  }
+  for (const { token } of drained) {
+    void ipcBridge.invokeSidecar("release_recording_playback", { token }).catch((error) => {
+      console.warn("[playback] release failed", { reason, error });
+    });
+  }
+}
+
+function rendererNotFoundResponse(): Response {
+  return new Response("Not found", {
+    status: 404,
+    headers: { "content-type": "text/plain; charset=utf-8" },
+  });
+}
+
+/**
+ * Answer `plainsong://playback/<token>`. The token must be one this process
+ * registered from a successful prepare; the file is streamed for exactly the
+ * requested byte window so seeking is a Range request, not a full download.
+ */
+async function servePlayback(request: Request, token: string): Promise<Response> {
+  const entry = playbackTokens.resolve(token);
+  if (!entry) {
+    console.warn("[playback] refused unknown token");
+    return withRendererSecurityHeaders(rendererNotFoundResponse());
+  }
+  let size: number;
+  try {
+    const info = await stat(entry.path);
+    if (!info.isFile()) {
+      throw new Error("playback path is not a regular file");
+    }
+    size = info.size;
+  } catch (error) {
+    // The file can vanish under a live token: locking the vault deletes the
+    // decrypted temporary before the revoke event reaches this process.
+    console.warn("[playback] audio file unavailable", {
+      recordingId: entry.recordingId,
+      error,
+    });
+    playbackTokens.release(token);
+    return withRendererSecurityHeaders(rendererNotFoundResponse());
+  }
+  return withRendererSecurityHeaders(
+    buildPlaybackResponse({
+      method: request.method,
+      rangeHeader: request.headers.get("range"),
+      size,
+      contentType: "audio/wav",
+      openStream: (start, end) =>
+        Readable.toWeb(createReadStream(entry.path, { start, end })) as ReadableStream<Uint8Array>,
+    }),
+  );
+}
 let dictationPhase = "idle";
 let dictationShortcutFailureResetTimer: ReturnType<typeof setTimeout> | null = null;
 const captureAdmission = new CaptureAdmissionController();
@@ -180,6 +303,9 @@ let minimizeToTrayEnabled = false;
 let alwaysOnTopEnabled = false;
 let showDictationOverlayEnabled = true;
 let showRecordingOverlayEnabled = true;
+// Mirror of `automation.localToolsEnabled`. Gates every `plainsong://` deep
+// link; the CLI/MCP read the same switch from settings.json themselves.
+let localToolsEnabled = false;
 let isQuitting = false;
 let forcedQuitTimer: ReturnType<typeof setTimeout> | null = null;
 const FORCED_QUIT_TIMEOUT_MS = 5_000;
@@ -196,6 +322,27 @@ let shortcutConflicts: ShortcutConflictInfo[] = [];
 // "Paste" for each without an async round trip while the menu is being built.
 let recentDictationResults: Array<{ text: string }> = [];
 let dictationPermissionSummary: string | null = null;
+// OS notifications. The policy that decides what to say is pure
+// (notification-policy.ts); this is the memory it needs between events and
+// the settings it is gated on.
+let notificationSettings: NotificationSettings = resolveNotificationSettings(null);
+let notificationMemory: Pick<
+  NotificationContext,
+  "previousMeetingPhase" | "previousMeetingRecordingId" | "lastAutoStoppedRecordingId"
+> = {
+  previousMeetingPhase: null,
+  previousMeetingRecordingId: null,
+  lastAutoStoppedRecordingId: null,
+};
+// The same news must reach the reader once, whichever sidecar event carried
+// it first. Bounded, oldest first.
+const recentNotificationKeys: string[] = [];
+const RECENT_NOTIFICATION_KEYS_MAX = 32;
+// Notifications currently on screen. A shown `Notification` has no other owner
+// in this process, and a collected one takes its click handler with it — so a
+// banner the reader comes back to minutes later would do nothing. Emptied as
+// each one is clicked, closed or fails.
+const liveNotifications = new Set<Notification>();
 
 function qaLog(message: string, payload?: unknown): void {
   if (process.env.PLAINSONG_QA_PACKAGED_HOTKEY === "1") {
@@ -237,12 +384,22 @@ type AppSettings = {
   transcription?: {
     dictationPushToTalk?: boolean;
     dictationHandsFreeEnabled?: boolean;
+    dictationModePreset?: string;
+    dictationSelectedCustomModeId?: string | null;
+    dictationCustomModes?: Array<{ id?: unknown }>;
   };
   ui?: {
     minimizeToTray?: boolean;
     alwaysOnTop?: boolean;
     showDictationPopup?: boolean;
     showRecordingPopup?: boolean;
+  };
+  notifications?: {
+    meetingEvents?: boolean;
+    dictationFailures?: boolean;
+  };
+  automation?: {
+    localToolsEnabled?: boolean;
   };
 };
 
@@ -970,8 +1127,78 @@ function applyUiSettings(settings: AppSettings | null | undefined): void {
   alwaysOnTopEnabled = resolved.alwaysOnTop;
   showDictationOverlayEnabled = resolved.showDictationOverlay;
   showRecordingOverlayEnabled = resolved.showRecordingOverlay;
+  notificationSettings = resolveNotificationSettings(settings);
+  localToolsEnabled = settings?.automation?.localToolsEnabled === true;
   if (mainWindow && !mainWindow.isDestroyed()) {
     mainWindow.setAlwaysOnTop(alwaysOnTopEnabled);
+  }
+}
+
+function dictationOverlayIsVisible(): boolean {
+  if (!showDictationOverlayEnabled) {
+    return false;
+  }
+  const overlay = findWindowByLabel("dictation-overlay");
+  return Boolean(overlay && !overlay.isDestroyed() && overlay.isVisible());
+}
+
+function mainWindowIsFocused(): boolean {
+  return Boolean(mainWindow && !mainWindow.isDestroyed() && mainWindow.isFocused());
+}
+
+/**
+ * Show one notification and route its click.
+ *
+ * The first notification an install ever shows is what makes macOS ask the
+ * reader whether Plainsong may notify at all; nothing here asks ahead of
+ * time. A click brings the main window up and asks the renderer for the view
+ * the news is about — the same `main-view-requested` channel the tray uses —
+ * or, for a detected call, hands the renderer the prefill for the consent
+ * dialog.
+ */
+function presentNotification(notification: PlainsongNotification): void {
+  if (recentNotificationKeys.includes(notification.dedupeKey)) {
+    return;
+  }
+  recentNotificationKeys.push(notification.dedupeKey);
+  if (recentNotificationKeys.length > RECENT_NOTIFICATION_KEYS_MAX) {
+    recentNotificationKeys.shift();
+  }
+  if (!Notification.isSupported()) {
+    return;
+  }
+  try {
+    const note = new Notification({
+      title: notification.title,
+      body: notification.body,
+    });
+    // Held until the banner is done with. Nothing else in the main process
+    // refers to a shown notification, so without this the object — and the
+    // click handler that is the whole point of a "Zoom call started" banner —
+    // is eligible for collection the moment `presentNotification` returns.
+    liveNotifications.add(note);
+    const release = () => {
+      liveNotifications.delete(note);
+    };
+    note.on("click", () => {
+      showAndFocusMainWindow();
+      const focus = notification.focus;
+      if (focus.view === "recordings" && focus.callCapture) {
+        broadcastRendererEvent("meeting-call-capture-requested", focus.callCapture);
+        release();
+        return;
+      }
+      broadcastRendererEvent("main-view-requested", {
+        view: focus.view,
+        recordingId: focus.view === "recordings" ? focus.recordingId : null,
+      });
+      release();
+    });
+    note.on("close", release);
+    note.on("failed", release);
+    note.show();
+  } catch (error) {
+    console.warn("[main] could not show a notification", error);
   }
 }
 
@@ -1284,6 +1511,14 @@ async function handleLocalCommand(
       );
       return { handled: true, result: true };
     }
+    case "get_cli_tool_status":
+      return { handled: true, result: currentCliToolStatus() };
+    case "install_cli_tool": {
+      // Writes outside the app's own data: a real click in the main window,
+      // consumed before anything touches /usr/local/bin.
+      requireMainWindowGesture("Installing the command-line tool");
+      return { handled: true, result: installCliTool() };
+    }
     case "select_export_location": {
       const parent = requireMainWindowGesture("Choosing an export folder");
       const selectedPath = await chooseDirectory(
@@ -1425,6 +1660,69 @@ async function handleLocalCommand(
       );
       await ipcBridge.invokeSidecar("stop_recording", { recordingId });
       return { handled: true, result: null };
+    }
+    case "prepare_recording_playback": {
+      // Main window only: the overlays have no transcript to play against, and
+      // a token minted for a hidden window would be a token nobody can see.
+      if (!senderWindow || senderWindow !== mainWindow) {
+        throw new Error("Playback can only be prepared from the main Plainsong window");
+      }
+      if (!ipcBridge) {
+        throw new Error("Playback service is not ready");
+      }
+      const payload = (args ?? {}) as { recordingId?: unknown };
+      if (typeof payload.recordingId !== "string" || !payload.recordingId) {
+        throw new Error("Playback needs a recording id");
+      }
+      let prepared;
+      try {
+        prepared = parsePreparedPlayback(
+          await ipcBridge.invoke("prepare_recording_playback", {
+            recordingId: payload.recordingId,
+          }),
+        );
+      } catch (error) {
+        // The sidecar may have registered a token anyway — a five-minute
+        // timeout on a long decrypt is the case that happens — and its id
+        // never reached anyone who could release it. Ask for the recording's
+        // tokens by name so the plaintext is not pinned until the vault locks.
+        void ipcBridge
+          .invokeSidecar("release_recording_playback", {
+            recordingId: payload.recordingId,
+          })
+          .catch((releaseError) => {
+            console.warn("[playback] abandoned prepare not released", releaseError);
+          });
+        throw error;
+      }
+      playbackTokens.register(prepared.token, {
+        path: prepared.path,
+        recordingId: prepared.recordingId,
+        protection: prepared.protection,
+      });
+      // The path stays in this process. The renderer gets the token and the
+      // URL the protocol handler answers for it, nothing else.
+      return {
+        handled: true,
+        result: {
+          token: prepared.token,
+          url: playbackUrl(prepared.token),
+          recordingId: prepared.recordingId,
+          protection: prepared.protection,
+          durationSeconds: prepared.durationSeconds,
+        },
+      };
+    }
+    case "release_recording_playback": {
+      const payload = (args ?? {}) as { token?: unknown };
+      const released = playbackTokens.release(payload.token);
+      if (!released || !ipcBridge) {
+        return { handled: true, result: { released: false } };
+      }
+      return {
+        handled: true,
+        result: await ipcBridge.invoke("release_recording_playback", { token: payload.token }),
+      };
     }
     default:
       return { handled: false };
@@ -1839,6 +2137,115 @@ function getMacosCalendarRuntime(): MacosCalendarRuntime {
   return macosCalendarRuntime;
 }
 
+function getCliBinaryName(): string {
+  return process.platform === "win32" ? "plainsong-cli.exe" : "plainsong-cli";
+}
+
+/** The `plainsong` command-line tool ships beside the sidecar. */
+function getCliBinaryPath(): string {
+  const binaryName = getCliBinaryName();
+  if (isDev) {
+    const debugPath = path.join(__dirname, "../rust-sidecar/target/debug", binaryName);
+    if (existsSync(debugPath)) {
+      return debugPath;
+    }
+    return path.join(__dirname, "../rust-sidecar/target/release", binaryName);
+  }
+  return path.join(process.resourcesPath, "sidecar", binaryName);
+}
+
+function inspectCliLinkPath(): ExistingLinkPath {
+  try {
+    const stat = lstatSync(CLI_LINK_PATH);
+    if (stat.isSymbolicLink()) {
+      return { kind: "symlink", target: readlinkSync(CLI_LINK_PATH) };
+    }
+    return stat.isDirectory() ? { kind: "directory" } : { kind: "file" };
+  } catch {
+    return null;
+  }
+}
+
+function currentCliToolStatus() {
+  const binaryPath = getCliBinaryPath();
+  return describeCliToolStatus({
+    binaryPath,
+    binaryExists: existsSync(binaryPath),
+    existing: inspectCliLinkPath(),
+  });
+}
+
+/**
+ * Symlink `/usr/local/bin/plainsong` at the packaged CLI. No privilege
+ * escalation: when the directory is not writable (root-owned on a stock
+ * macOS) the answer is the one-line command for the user to run, not an
+ * admin-password prompt carrying Plainsong's name (see cli-install.ts).
+ */
+function installCliTool(): CliInstallResult {
+  const binaryPath = getCliBinaryPath();
+  const plan = planCliInstall({
+    platform: process.platform,
+    binaryPath,
+    binaryExists: existsSync(binaryPath),
+    existing: inspectCliLinkPath(),
+  });
+  switch (plan.action) {
+    case "already_installed":
+      return { status: "installed", linkPath: CLI_LINK_PATH };
+    case "refuse":
+      if (plan.reason === "path_occupied") {
+        return {
+          status: "unavailable",
+          reason: `${CLI_LINK_PATH} already exists and is not a Plainsong link, so it was left alone.`,
+        };
+      }
+      if (plan.reason === "binary_missing") {
+        return {
+          status: "unavailable",
+          reason: "The command-line tool is not part of this build.",
+        };
+      }
+      return { status: "unavailable", reason: "The command-line tool installs on macOS and Linux only." };
+    case "link":
+    case "replace_link": {
+      // Never unlink-then-symlink. That left two problems: a failure between
+      // the two steps leaves the machine with no `plainsong` command at all,
+      // and the gap between deciding (lstat) and acting (unlink) is a window
+      // where the path can become something else. Writing the link under a
+      // temporary name in the same directory and renaming it over the old one
+      // closes both: rename(2) replaces a symlink atomically and operates on
+      // the link itself, never following it.
+      const stagingPath = `${CLI_LINK_PATH}.plainsong-install-${process.pid}`;
+      try {
+        try {
+          unlinkSync(stagingPath);
+        } catch {
+          // Nothing there, which is the normal case.
+        }
+        symlinkSync(binaryPath, stagingPath);
+        try {
+          renameSync(stagingPath, CLI_LINK_PATH);
+        } catch (error) {
+          try {
+            unlinkSync(stagingPath);
+          } catch {
+            // Best effort; the staging name is ours and unused.
+          }
+          throw error;
+        }
+        return { status: "installed", linkPath: CLI_LINK_PATH };
+      } catch (error) {
+        const code = (error as NodeJS.ErrnoException).code;
+        const reason =
+          code === "EACCES" || code === "EPERM"
+            ? `Plainsong cannot write to ${path.dirname(CLI_LINK_PATH)} without administrator rights.`
+            : `Plainsong could not create the link (${code ?? "unknown error"}).`;
+        return { status: "manual", reason, command: manualInstallCommand(binaryPath) };
+      }
+    }
+  }
+}
+
 function getSidecarBinaryName(): string {
   return process.platform === "win32" ? "plainsong-sidecar.exe" : "plainsong-sidecar";
 }
@@ -1977,6 +2384,7 @@ function createMainWindow(): BrowserWindow {
 
   win.on("closed", () => {
     mainWindow = null;
+    releaseAllPlayback("main window closed", true);
     // The overlay windows are created hidden at bootstrap and outlive the main
     // window, so `window-all-closed` never fires; keep the non-macOS "closing
     // the window quits the app" behavior explicit rather than relying on it.
@@ -1991,6 +2399,21 @@ function createMainWindow(): BrowserWindow {
       event.preventDefault();
       win.hide();
     }
+  });
+
+  // A reload or an in-app navigation replaces the renderer that holds the
+  // tokens: it will never release them, and the decrypted audio behind them
+  // would stay on disk until the vault locked. Same for a renderer that dies,
+  // which is why that release is registered here rather than beside the dev
+  // logging it used to sit in.
+  win.webContents.on("did-start-navigation", (details) => {
+    if (!details.isMainFrame || details.isSameDocument) {
+      return;
+    }
+    releaseAllPlayback("renderer navigated", true);
+  });
+  win.webContents.on("render-process-gone", () => {
+    releaseAllPlayback("renderer process gone", true);
   });
 
   win.webContents.on(
@@ -2202,6 +2625,159 @@ ipcMain.handle("window:get-label", (event) => {
 });
 
 
+// ── plainsong:// deep links ─────────────────────────────────────────────────
+
+const deepLinkLimiter = new DeepLinkRateLimiter();
+// Links that arrived before the sidecar was up (a URL that launched the app).
+const pendingDeepLinks: string[] = [];
+const MAX_PENDING_DEEP_LINKS = 4;
+
+function recordAutomationAudit(action: string, outcome: string): void {
+  if (!ipcBridge) {
+    return;
+  }
+  ipcBridge
+    .invokeSidecar("record_automation_audit_event", { source: "deep_link", action, outcome })
+    .catch((error) => {
+      console.warn("[deep-link] audit write failed", { action, outcome, error });
+    });
+}
+
+/**
+ * Put the dictation HUD on screen carrying "Recording from a link" for a
+ * second. The overlay is shown here rather than waiting for the sidecar's own
+ * show command so the notice is up before the microphone is.
+ */
+function announceLinkStartedRecording(): void {
+  if (showDictationOverlayEnabled) {
+    showOverlayWindow(getOrCreateOverlayWindow("dictation"));
+  }
+  broadcastRendererEvent("dictation-source-notice", {
+    source: "deep_link",
+    message: LINK_RECORDING_NOTICE,
+    durationMs: LINK_RECORDING_NOTICE_MS,
+  });
+}
+
+async function performDeepLink(command: DeepLinkCommand): Promise<string> {
+  switch (command.kind) {
+    case "open":
+      showAndFocusMainWindow();
+      return "performed";
+    case "record": {
+      if (!ipcBridge) {
+        return "failed_no_sidecar";
+      }
+      // The same toggle the menu-bar item performs: a link never chooses a
+      // hold-to-talk or hands-free behaviour on the user's behalf.
+      const live = isDictationLive();
+      if (deepLinkNeedsRecordingNotice(command, live)) {
+        // A `plainsong://` link is reachable from any web page, and this is
+        // the one command that opens the microphone. Show the HUD with the
+        // reason on it before the capture starts, so the microphone never
+        // comes on without something on screen saying why.
+        announceLinkStartedRecording();
+      }
+      await ipcBridge.invoke(
+        live ? "stop_dictation" : "start_dictation",
+        live ? { stopReason: "deep_link" } : {},
+      );
+      return "performed";
+    }
+    case "stop": {
+      if (!ipcBridge) {
+        return "failed_no_sidecar";
+      }
+      if (!isDictationLive()) {
+        return "ignored_not_dictating";
+      }
+      await ipcBridge.invoke("stop_dictation", { stopReason: "deep_link" });
+      return "performed";
+    }
+    case "mode": {
+      if (!ipcBridge) {
+        return "failed_no_sidecar";
+      }
+      const settings = (await ipcBridge.invoke("get_settings")) as AppSettings;
+      const resolved = resolveDictationModeSelection(command.key, settings.transcription ?? {});
+      if (!resolved) {
+        return "ignored_unknown_mode";
+      }
+      if (!resolved.changed) {
+        return "performed";
+      }
+      await ipcBridge.invoke("save_settings", {
+        settings: {
+          ...settings,
+          transcription: { ...settings.transcription, ...resolved.selection },
+        },
+      });
+      return "performed";
+    }
+    case "meeting_start":
+      // Opens the consent sheet and nothing more; recording starts only when
+      // the person clicks Start there, exactly as with the New meeting button.
+      showAndFocusMainWindow();
+      broadcastRendererEvent("main-view-requested", { view: "recordings" });
+      broadcastRendererEvent("meeting-start-requested", {});
+      return "performed";
+    case "meeting_stop": {
+      if (!ipcBridge) {
+        return "failed_no_sidecar";
+      }
+      if (!activeMeetingRecordingId) {
+        return "ignored_no_meeting";
+      }
+      await ipcBridge.invokeSidecar("stop_recording", { recordingId: activeMeetingRecordingId });
+      return "performed";
+    }
+  }
+}
+
+/**
+ * Act on one `plainsong://` URL. The URL text itself is never logged or
+ * written to the audit log — only the parsed action and what became of it.
+ */
+async function handleDeepLink(rawUrl: string): Promise<void> {
+  if (!bootstrapComplete) {
+    if (pendingDeepLinks.length < MAX_PENDING_DEEP_LINKS) {
+      pendingDeepLinks.push(rawUrl);
+    }
+    return;
+  }
+  const parsed = parseDeepLink(rawUrl);
+  if (!parsed.ok) {
+    console.warn("[deep-link] ignored", { reason: parsed.reason });
+    return;
+  }
+  const action = deepLinkActionName(parsed.command);
+  if (!localToolsEnabled) {
+    console.warn("[deep-link] refused: Local tools is off in Settings > General", { action });
+    recordAutomationAudit(action, "refused_local_tools_off");
+    return;
+  }
+  if (!deepLinkLimiter.admit()) {
+    console.warn("[deep-link] dropped: too many links in a short time", { action });
+    recordAutomationAudit(action, "rate_limited");
+    return;
+  }
+  let outcome: string;
+  try {
+    outcome = await performDeepLink(parsed.command);
+  } catch (error) {
+    console.error("[deep-link] failed", { action, error });
+    outcome = "failed";
+  }
+  console.log("[deep-link]", { action, outcome });
+  recordAutomationAudit(action, outcome);
+}
+
+function flushPendingDeepLinks(): void {
+  for (const url of pendingDeepLinks.splice(0)) {
+    void handleDeepLink(url);
+  }
+}
+
 async function bootstrap() {
   const gotLock = app.requestSingleInstanceLock();
   if (!gotLock) {
@@ -2209,40 +2785,63 @@ async function bootstrap() {
     return;
   }
 
-  app.on("second-instance", () => {
+  app.on("second-instance", (_event, argv) => {
     showAndFocusMainWindow();
+    // Windows and Linux deliver a protocol launch as a second instance with
+    // the URL in argv; macOS delivers `open-url` below instead.
+    const url = deepLinkFromArgv(argv);
+    if (url) {
+      void handleDeepLink(url);
+    }
+  });
+
+  // Registered before `ready` so a URL that launched the app is caught and
+  // queued until the sidecar is up.
+  app.on("open-url", (event, url) => {
+    event.preventDefault();
+    void handleDeepLink(url);
   });
 
   await app.whenReady();
 
+  if (app.isPackaged) {
+    // Pairs with `protocols:` in electron-builder.yml (CFBundleURLTypes).
+    // Packaged-only: in development this would register the bare Electron
+    // binary as the handler for every `plainsong://` link on the machine.
+    app.setAsDefaultProtocolClient("plainsong");
+  }
+
   installRendererPermissionHandlers();
 
-  if (!devServerUrlIsUsable) {
-    await protocol.handle(RENDERER_SCHEME, async (request) => {
-      try {
-        const rendererRoot = path.join(__dirname, "../dist");
-        const assetPath = resolveRendererAssetPath(rendererRoot, request.url);
-        // Headers, not just the index.html meta tag: a meta CSP is parsed by
-        // the document that carries it and covers nothing else the handler
-        // serves, and `frame-ancestors` has no effect in a meta tag at all.
-        return withRendererSecurityHeaders(
-          await net.fetch(pathToFileURL(assetPath).toString()),
-        );
-      } catch (error) {
-        console.error("[renderer] refused packaged asset request", {
-          host: RENDERER_HOST,
-          url: request.url,
-          error,
-        });
-        return withRendererSecurityHeaders(
-          new Response("Not found", {
-            status: 404,
-            headers: { "content-type": "text/plain; charset=utf-8" },
-          }),
-        );
-      }
-    });
-  }
+  // Registered in every mode: the playback route has to exist when the
+  // renderer comes from the dev server too, or the in-app player would only
+  // work packaged. Bundle assets are still served only when packaged.
+  await protocol.handle(RENDERER_SCHEME, async (request) => {
+    const playbackToken = playbackTokenFromUrl(request.url);
+    if (playbackToken !== null) {
+      return servePlayback(request, playbackToken);
+    }
+    if (devServerUrlIsUsable) {
+      return withRendererSecurityHeaders(rendererNotFoundResponse());
+    }
+    try {
+      const rendererRoot = path.join(__dirname, "../dist");
+      const assetPath = resolveRendererAssetPath(rendererRoot, request.url);
+      // Headers, not just the index.html meta tag: a meta CSP is parsed by
+      // the document that carries it and covers nothing else the handler
+      // serves, and `frame-ancestors` has no effect in a meta tag at all.
+      return withRendererSecurityHeaders(
+        await net.fetch(pathToFileURL(assetPath).toString()),
+      );
+    } catch (error) {
+      console.error("[renderer] refused packaged asset request", {
+        host: RENDERER_HOST,
+        url: request.url,
+        error,
+      });
+      return withRendererSecurityHeaders(rendererNotFoundResponse());
+    }
+  });
 
   if (devServerUrlIsUsable) {
     const timeout = new Promise<never>((_, reject) => {
@@ -2283,6 +2882,9 @@ async function bootstrap() {
   // resolves to a failing stop_dictation, and the hotkey is wedged. Reset the
   // mirror and tell renderers so their UI resyncs too.
   ipcBridge.onTerminated(() => {
+    // The registry died with the process; its restart sweeps the decrypted
+    // temporaries. Tokens minted against it must not resolve any more.
+    releaseAllPlayback("sidecar terminated", false);
     // Any hold-to-talk session died with the process: drop its watchdog even
     // if the cached phase never left "idle" (start acked, recording event
     // never observed before the crash).
@@ -2315,6 +2917,16 @@ async function bootstrap() {
   });
 
   ipcBridge.onEvent((eventName: string, payload: unknown) => {
+    if (
+      eventName === "recording-playback-revoked" &&
+      payload &&
+      typeof payload === "object"
+    ) {
+      // Vault locked: the sidecar already deleted the plaintext, so the token
+      // must stop resolving here as well. The renderer gets the same event.
+      playbackTokens.release((payload as { token?: unknown }).token);
+    }
+
     if (eventName === "settings-changed" && payload && typeof payload === "object") {
       applyUiSettings(payload as AppSettings);
       // The sidecar emits this after both normal saves and backup restores.
@@ -2390,6 +3002,32 @@ async function bootstrap() {
       });
     }
 
+    // Decide against the memory as it was BEFORE this event, then advance it:
+    // "meeting started" is the edge into `recording`, not the state.
+    const notification = notificationForSidecarEvent(eventName, payload, {
+      settings: notificationSettings,
+      mainWindowFocused: mainWindowIsFocused(),
+      dictationOverlayVisible: dictationOverlayIsVisible(),
+      ...notificationMemory,
+    });
+    notificationMemory = nextMeetingNotificationMemory(eventName, payload, notificationMemory);
+    if (notification) {
+      presentNotification(notification);
+    }
+    if (eventName === "meeting-call-detected") {
+      // Never starts anything: the click opens the consent dialog, and the
+      // reader decides there. `activeMeetingRecordingId` was already advanced
+      // above for this event's ordering, and a meeting in progress has
+      // nothing to be offered.
+      const offer = notificationForCallDetected(payload, {
+        activeMeetingRecordingId,
+        mainWindowFocused: mainWindowIsFocused(),
+      });
+      if (offer) {
+        presentNotification(offer);
+      }
+    }
+
     broadcastRendererEvent(eventName, payload);
   });
 
@@ -2441,6 +3079,7 @@ async function bootstrap() {
   prepareOverlayWindows();
   createTray();
   bootstrapComplete = true;
+  flushPendingDeepLinks();
 }
 
 void bootstrap();

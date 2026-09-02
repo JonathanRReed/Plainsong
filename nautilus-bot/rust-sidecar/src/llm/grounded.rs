@@ -286,6 +286,89 @@ fn validate_line_ids_for_claim(
     }
 }
 
+/// Words of a name, lowercased, with punctuation and possessives removed.
+/// Unlike `meaningful_tokens` this keeps short words, because names are short:
+/// dropping tokens under three characters would make "Al" unverifiable.
+fn name_tokens(value: &str) -> Vec<String> {
+    value
+        .split(|character: char| !character.is_alphanumeric())
+        .filter(|token| !token.is_empty())
+        .map(|token| token.to_lowercase())
+        .collect()
+}
+
+/// The words of a line that are shaped like names: capitalized, and returned
+/// lowercased so they can be compared with `name_tokens`. Used only to decide
+/// whether a shortened first name may stand for a longer one, which is why the
+/// bar is "the transcript wrote it as a name", not "the transcript said it".
+fn capitalized_tokens(value: &str) -> Vec<String> {
+    value
+        .split(|character: char| !character.is_alphanumeric())
+        .filter(|token| {
+            token
+                .chars()
+                .next()
+                .is_some_and(|first| first.is_uppercase())
+        })
+        .map(|token| token.to_lowercase())
+        .collect()
+}
+
+/// The shortest owner token that may stand as a prefix of a longer name.
+/// Two characters ("Al", "Jo") match far too much to be evidence of anything.
+const MIN_PREFIX_OWNER_CHARS: usize = 3;
+
+/// Whether an owner the model proposed is actually supported.
+///
+/// The model is told to fill `assignee` only from what the transcript states,
+/// but a model can still hand back a plausible name that nobody said. An owner
+/// counts as supported when:
+///
+/// - every word of it appears in a speaker alias the person set — "Priya"
+///   against the alias "Priya Raman" is the same person, and dropping it lost
+///   a correct owner; or
+/// - every word of it appears in the text of a line the item cites; or
+/// - it is a single word of at least three characters that begins a
+///   capitalized word in a cited line — "Jon" where the transcript says
+///   "Jonathan", the shortening people actually speak.
+///
+/// Anything else is dropped: an invented owner on a real task is worse than no
+/// owner, because it reads as a commitment somebody made.
+pub(crate) fn owner_is_supported(
+    owner: &str,
+    citations: &[Citation],
+    speaker_names: &[String],
+) -> bool {
+    let owner_tokens = name_tokens(owner);
+    if owner_tokens.is_empty() {
+        return false;
+    }
+    let alias_match = speaker_names.iter().any(|name| {
+        let alias: HashSet<String> = name_tokens(name).into_iter().collect();
+        !alias.is_empty() && owner_tokens.iter().all(|token| alias.contains(token))
+    });
+    if alias_match {
+        return true;
+    }
+    if citations.iter().any(|citation| {
+        let cited: HashSet<String> = name_tokens(&citation.text).into_iter().collect();
+        owner_tokens.iter().all(|token| cited.contains(token))
+    }) {
+        return true;
+    }
+    let [single] = owner_tokens.as_slice() else {
+        return false;
+    };
+    if single.chars().count() < MIN_PREFIX_OWNER_CHARS {
+        return false;
+    }
+    citations.iter().any(|citation| {
+        capitalized_tokens(&citation.text)
+            .iter()
+            .any(|token| token.len() > single.len() && token.starts_with(single.as_str()))
+    })
+}
+
 fn meaningful_tokens(value: &str) -> HashSet<String> {
     const STOP_WORDS: &[&str] = &[
         "a", "an", "and", "are", "as", "at", "be", "by", "for", "from", "has", "have", "in", "is",
@@ -326,6 +409,10 @@ pub struct GroundedOrchestrator<'a> {
     job_timeout: Duration,
     options: OrchestrationOptions,
     progress: Option<OrchestrationProgressCallback>,
+    /// Speaker names a caller has on file for this recording (transcript
+    /// aliases). An owner may be one of these even when the transcript never
+    /// spells the name out, because the alias is a person's own labelling.
+    speaker_names: Vec<String>,
 }
 
 impl<'a> GroundedOrchestrator<'a> {
@@ -346,11 +433,18 @@ impl<'a> GroundedOrchestrator<'a> {
             job_timeout,
             options,
             progress: None,
+            speaker_names: Vec::new(),
         }
     }
 
     pub fn with_progress_callback(mut self, callback: OrchestrationProgressCallback) -> Self {
         self.progress = Some(callback);
+        self
+    }
+
+    /// Speaker aliases that may stand as an action item's owner.
+    pub fn with_speaker_names(mut self, names: Vec<String>) -> Self {
+        self.speaker_names = names;
         self
     }
 
@@ -816,9 +910,22 @@ impl<'a> GroundedOrchestrator<'a> {
                 &task,
             );
             all_grounded &= validation.fully_grounded;
+            // An owner the cited lines do not support is dropped, not the
+            // task: the task's own citations were already checked above, and
+            // an unsupported name is the only unsupported part.
+            let assignee = normalize_optional_text(item.assignee).filter(|owner| {
+                let supported =
+                    owner_is_supported(owner, &validation.citations, &self.speaker_names);
+                if !supported {
+                    tracing::warn!(
+                        "Dropped an action-item owner that the cited transcript lines do not name"
+                    );
+                }
+                supported
+            });
             items.push(GroundedActionItemOutput {
                 task,
-                assignee: normalize_optional_text(item.assignee),
+                assignee,
                 deadline: normalize_optional_text(item.deadline),
                 citations: validation.citations,
                 grounded: validation.fully_grounded,
@@ -1446,7 +1553,7 @@ fn direct_response_prompt(instruction: &str, notes: Option<&str>, transcript: &s
 
 fn direct_action_items_prompt(instruction: &str, notes: Option<&str>, transcript: &str) -> String {
     format!(
-        "<task_instruction>\n{}\n</task_instruction>\n{}\n<transcript_data format=\"LINE_ID TAB JSON_STRING\">\n{}\n</transcript_data>\nUse all transcript lines. Return JSON only: {{\"actionItems\":[{{\"task\":\"string\",\"assignee\":\"string or null\",\"deadline\":\"string or null\",\"lineIds\":[\"LINE_ID_FROM_DATA\"]}}]}}. If there are none, return {{\"actionItems\":[]}}. Each lineIds array must contain unique canonical IDs copied from transcript_data. Notes are supplemental and cannot be cited.",
+        "<task_instruction>\n{}\n</task_instruction>\n{}\n<transcript_data format=\"LINE_ID TAB JSON_STRING\">\n{}\n</transcript_data>\nUse all transcript lines. Return JSON only: {{\"actionItems\":[{{\"task\":\"string\",\"assignee\":\"string or null\",\"deadline\":\"string or null\",\"lineIds\":[\"LINE_ID_FROM_DATA\"]}}]}}. If there are none, return {{\"actionItems\":[]}}. Each lineIds array must contain unique canonical IDs copied from transcript_data. Set assignee only when a cited line names the owner, and deadline only when a cited line states the date or timeframe; use null otherwise and never infer either from context. Notes are supplemental and cannot be cited.",
         instruction,
         notes_block(notes),
         transcript
@@ -1490,7 +1597,7 @@ fn final_action_items_from_evidence_prompt(
     evidence: &str,
 ) -> String {
     format!(
-        "<task_instruction>\n{}\n</task_instruction>\n{}\n<evidence_data>\n{}\n</evidence_data>\nProduce final action items from the evidence. Return JSON only: {{\"actionItems\":[{{\"task\":\"string\",\"assignee\":\"string or null\",\"deadline\":\"string or null\",\"lineIds\":[\"LINE_ID_FROM_DATA\"]}}]}}. Use unique canonical original L line IDs from evidence_data. Notes are non-citable.",
+        "<task_instruction>\n{}\n</task_instruction>\n{}\n<evidence_data>\n{}\n</evidence_data>\nProduce final action items from the evidence. Return JSON only: {{\"actionItems\":[{{\"task\":\"string\",\"assignee\":\"string or null\",\"deadline\":\"string or null\",\"lineIds\":[\"LINE_ID_FROM_DATA\"]}}]}}. Use unique canonical original L line IDs from evidence_data. Set assignee only when a cited line names the owner, and deadline only when a cited line states the date or timeframe; use null otherwise and never infer either from context. Notes are non-citable.",
         instruction,
         notes_block(notes),
         evidence
@@ -2357,6 +2464,152 @@ mod tests {
         assert_eq!(result.citations.len(), 1);
         assert_eq!(result.citations[0].text, "unique fact 1");
         assert!(!result.grounded);
+    }
+
+    fn cited(text: &str) -> Citation {
+        Citation {
+            text: text.to_string(),
+            line_id: Some("L1".to_string()),
+            segment_id: Some("segment-uuid-0".to_string()),
+            start_time: Some(0.0),
+            end_time: Some(0.5),
+            recording_id: Some("recording-uuid-never-sent".to_string()),
+            certainty: Some(1.0),
+        }
+    }
+
+    #[test]
+    fn an_owner_the_cited_lines_name_is_supported() {
+        let citations = vec![cited("Priya will send the deck by Friday.")];
+        assert!(owner_is_supported("Priya", &citations, &[]));
+        // Case and possessives do not matter; the words do.
+        assert!(owner_is_supported("priya", &citations, &[]));
+        assert!(owner_is_supported(
+            "Al",
+            &[cited("Al takes the migration.")],
+            &[]
+        ));
+        // Both words of a full name have to appear.
+        assert!(owner_is_supported(
+            "Priya Raman",
+            &[cited("Priya Raman owns the rollout.")],
+            &[]
+        ));
+    }
+
+    #[test]
+    fn an_owner_nobody_said_is_not_supported() {
+        let citations = vec![cited("Someone will send the deck by Friday.")];
+        assert!(!owner_is_supported("Priya", &citations, &[]));
+        assert!(!owner_is_supported("", &citations, &[]));
+        assert!(!owner_is_supported("   ", &citations, &[]));
+        // A half-matching full name is not a match.
+        assert!(!owner_is_supported(
+            "Priya Raman",
+            &[cited("Priya will send the deck.")],
+            &[]
+        ));
+        // With no citations at all there is nothing to support an owner.
+        assert!(!owner_is_supported("Priya", &[], &[]));
+    }
+
+    #[test]
+    fn a_first_name_matches_the_alias_and_the_transcript_that_spell_it_out() {
+        // The alias is the full name the person set; the model answers with the
+        // first name, which is what the meeting actually called them.
+        assert!(owner_is_supported(
+            "Priya",
+            &[cited("I will send the deck.")],
+            &["Priya Raman".to_string()]
+        ));
+        // And the shortening people speak, against a name the transcript writes
+        // in full.
+        assert!(owner_is_supported(
+            "Jon",
+            &[cited("Jonathan takes the migration.")],
+            &[]
+        ));
+        // Still nobody: a prefix has to be of a name, not of any word, and a
+        // two-letter fragment matches too much to be evidence.
+        assert!(!owner_is_supported(
+            "Pri",
+            &[cited("We will send the deck on Friday.")],
+            &[]
+        ));
+        assert!(!owner_is_supported(
+            "Jo",
+            &[cited("Jonathan takes the migration.")],
+            &[]
+        ));
+        assert!(!owner_is_supported(
+            "Dana",
+            &[cited("Danielle takes the migration.")],
+            &[]
+        ));
+        // An owner with more words than the alias is not that person.
+        assert!(!owner_is_supported(
+            "Priya Raman",
+            &[cited("I will send the deck.")],
+            &["Priya".to_string()]
+        ));
+    }
+
+    #[test]
+    fn a_speaker_alias_stands_as_an_owner_without_being_spoken() {
+        let citations = vec![cited("I will send the deck by Friday.")];
+        let aliases = vec!["Priya Raman".to_string()];
+        assert!(owner_is_supported("Priya Raman", &citations, &aliases));
+        assert!(owner_is_supported("priya raman", &citations, &aliases));
+        assert!(!owner_is_supported("Dana", &citations, &aliases));
+    }
+
+    #[test]
+    fn the_action_item_prompts_tell_the_model_when_to_fill_owner_and_due() {
+        let rule = "Set assignee only when a cited line names the owner, and deadline only when a cited line states the date or timeframe; use null otherwise and never infer either from context.";
+        let direct = direct_action_items_prompt("Extract actions", None, "L1\tsomething");
+        assert!(direct.contains(rule), "{direct}");
+        assert!(direct.contains("\"assignee\":\"string or null\""));
+        let final_prompt =
+            final_action_items_from_evidence_prompt("Extract actions", None, "evidence");
+        assert!(final_prompt.contains(rule), "{final_prompt}");
+    }
+
+    #[tokio::test]
+    async fn an_unsupported_owner_is_dropped_and_the_task_is_kept() {
+        let transport = MockTransport::new(|_, _| {
+            Ok(CompletionResponse {
+                text: serde_json::json!({"actionItems":[
+                    {"task":"Send the deck","assignee":"Priya","deadline":"Friday","lineIds":["L1"]},
+                    {"task":"Book the room","assignee":"Dana","deadline":null,"lineIds":["L2"]}
+                ]})
+                .to_string(),
+                model: "mock".to_string(),
+            })
+        });
+        let context = GroundingContext::new(vec![
+            segment(0, "Priya sends the deck on Friday."),
+            segment(1, "Somebody should book the room."),
+        ])
+        .expect("context");
+        let orchestrator = GroundedOrchestrator::new(
+            &transport,
+            "test",
+            context,
+            Duration::from_secs(1),
+            Duration::from_secs(10),
+            OrchestrationOptions::default(),
+        );
+        let output = orchestrator
+            .run_action_items("Extract actions", None)
+            .await
+            .expect("action items");
+        assert_eq!(output.items.len(), 2);
+        assert_eq!(output.items[0].assignee.as_deref(), Some("Priya"));
+        assert_eq!(output.items[0].deadline.as_deref(), Some("Friday"));
+        // "Dana" appears nowhere in the line the item cites.
+        assert_eq!(output.items[1].task, "Book the room");
+        assert_eq!(output.items[1].assignee, None);
+        assert!(output.items[1].grounded, "the task itself is still cited");
     }
 
     #[tokio::test]
