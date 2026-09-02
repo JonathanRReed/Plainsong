@@ -102,19 +102,29 @@ pub fn browser_for_bundle(bundle_id: &str) -> Option<&'static str> {
     }
 }
 
-/// Whether a browser window title is a Google Meet call.
+/// The dashes browsers and Google put between a title and what follows it.
+const TITLE_SEPARATORS: [&str; 3] = ["-", "–", "—"];
+
+/// Whether a browser window title has the shape of a Google Meet call.
 ///
-/// "Meet" as a word, not a prefix: Google's own titles are "Meet – abc-defg-hij"
-/// and "Google Meet", while a document called "Meeting notes" open in the same
-/// browser must not count. The check is case-sensitive for the same reason —
-/// "meet.google.com" is a URL, not a title, and lowercase "meet" in a page
-/// title is prose.
+/// Not the word "Meet" anywhere in the title — that matched "Meet the team —
+/// Acme", so an open marketing tab announced a Google Meet call. What is
+/// matched is the shapes Google's own pages actually produce: "Meet – code" or
+/// "Meet - code" for a call, "Google Meet" for the lobby, and the same with a
+/// browser's name appended ("Weekly sync - Meet - Google Chrome").
+///
+/// Case-sensitive on purpose — "meet.google.com" is a URL, not a title, and
+/// lowercase "meet" in a page title is prose. Even so, a title is written by
+/// whoever wrote the page, so it is never the only signal the browser path
+/// asks for: see `candidate_for`.
 pub fn title_mentions_meet(title: &str) -> bool {
-    title.match_indices("Meet").any(|(index, _)| {
-        title[index + "Meet".len()..]
-            .chars()
-            .next()
-            .is_none_or(|next| !next.is_alphabetic())
+    if title.contains("Google Meet") {
+        return true;
+    }
+    TITLE_SEPARATORS.iter().any(|separator| {
+        title.starts_with(&format!("Meet {separator} "))
+            || title.contains(&format!(" {separator} Meet {separator} "))
+            || title.ends_with(&format!(" {separator} Meet"))
     })
 }
 
@@ -122,6 +132,33 @@ pub fn title_mentions_meet(title: &str) -> bool {
 /// window or a settings sheet.
 pub fn zoom_call_window_title(title: &str) -> bool {
     title.contains("Zoom Meeting") || title.contains("Zoom Webinar")
+}
+
+/// Whether this poll should read `bundle_id`'s window titles at all.
+///
+/// Zoom's are always worth reading: its in-call window title is the only thing
+/// that separates a meeting from the home window, and Zoom is not left running
+/// with an accessibility cost the way a browser is.
+///
+/// A browser's are not. Asking Chromium for `AXWindows` switches it into full
+/// accessibility mode for the rest of its life — a standing CPU and memory
+/// cost — so every five seconds forever is the wrong price for a signal that
+/// only matters when something else already suggests a call. It is asked when
+/// another process holds the microphone, or when that browser is where the
+/// active call was found and the poll has to know whether its window is still
+/// there.
+pub fn should_read_window_titles(
+    bundle_id: &str,
+    mic_running_elsewhere: Option<bool>,
+    active_call_bundle_id: Option<&str>,
+) -> bool {
+    if call_app_for_bundle(bundle_id) == Some(CallApp::Zoom) {
+        return true;
+    }
+    if browser_for_bundle(bundle_id).is_none() {
+        return false;
+    }
+    mic_running_elsewhere == Some(true) || active_call_bundle_id == Some(bundle_id)
 }
 
 /// One running application, as much of it as detection needs.
@@ -236,6 +273,7 @@ fn candidate_for(
     active: Option<&ActiveCall>,
     mic: Option<bool>,
 ) -> Option<CallCandidate> {
+    let is_active_app = active.is_some_and(|call| call.bundle_id == app.bundle_id);
     let (kind, window_title) = if let Some(kind) = call_app_for_bundle(&app.bundle_id) {
         let window_title = match kind {
             CallApp::Zoom => app
@@ -247,6 +285,16 @@ fn candidate_for(
         };
         (kind, window_title)
     } else if browser_for_bundle(&app.bundle_id).is_some() {
+        // A page title is written by whoever wrote the page, so a tab that
+        // looks like Meet is not on its own evidence of a call: the browser
+        // path needs the microphone to be open by another process before it
+        // will announce anything. Once a call IS the active one this drops
+        // away — Plainsong recording it makes the microphone signal unknown,
+        // and unknown is not "gone", so the title alone keeps it alive and
+        // the window closing is still what ends it.
+        if !is_active_app && mic != Some(true) {
+            return None;
+        }
         let title = app
             .window_titles
             .iter()
@@ -257,7 +305,6 @@ fn candidate_for(
         return None;
     };
 
-    let is_active_app = active.is_some_and(|call| call.bundle_id == app.bundle_id);
     let present = if is_active_app {
         // A call that was found through its window ends when the window
         // goes. One found through the microphone persists while the app runs
@@ -459,7 +506,7 @@ pub use macos::{default_input_device_running_somewhere, sample_running_apps};
 
 #[cfg(target_os = "macos")]
 mod macos {
-    use super::{browser_for_bundle, call_app_for_bundle, CallApp, RunningApp};
+    use super::{browser_for_bundle, call_app_for_bundle, RunningApp};
     use core_foundation::base::{CFRelease, TCFType};
     use core_foundation::string::CFString;
     use core_foundation_sys::array::{CFArrayGetCount, CFArrayGetTypeID, CFArrayGetValueAtIndex};
@@ -585,6 +632,13 @@ mod macos {
                     if window.is_null() {
                         continue;
                     }
+                    // The timeout set on the application element does not
+                    // propagate to the window elements it hands back, so each
+                    // of these reads ran at the 6 s default: an unresponsive
+                    // browser with ten windows stalled the poll for a minute
+                    // on a blocking thread. Every element that is messaged
+                    // gets its own quarter second.
+                    unsafe { AXUIElementSetMessagingTimeout(window, AX_MESSAGING_TIMEOUT_SECONDS) };
                     if let Some(title) = ax_string(window, "AXTitle") {
                         if !title.trim().is_empty() {
                             titles.push(title);
@@ -601,7 +655,15 @@ mod macos {
     /// The running apps detection cares about. Only conferencing apps and the
     /// known browsers are returned; everything else on the machine is never
     /// looked at beyond its bundle id, and nothing is retained between polls.
-    pub fn sample_running_apps(accessibility_granted: bool) -> Vec<RunningApp> {
+    ///
+    /// `mic_running_elsewhere` and `active_call_bundle_id` are this poll's
+    /// reasons to touch Accessibility at all — see
+    /// [`super::should_read_window_titles`].
+    pub fn sample_running_apps(
+        accessibility_granted: bool,
+        mic_running_elsewhere: Option<bool>,
+        active_call_bundle_id: Option<&str>,
+    ) -> Vec<RunningApp> {
         use objc2_app_kit::NSWorkspace;
 
         let workspace = NSWorkspace::sharedWorkspace();
@@ -617,9 +679,11 @@ mod macos {
                 continue;
             }
             let pid = app.processIdentifier();
-            // Titles are only worth reading where they decide something: the
-            // Zoom in-call window, and a browser's Meet tab.
-            let wants_titles = is_browser || kind == Some(CallApp::Zoom);
+            let wants_titles = super::should_read_window_titles(
+                &bundle_id,
+                mic_running_elsewhere,
+                active_call_bundle_id,
+            );
             let titles = if accessibility_granted && wants_titles && pid > 0 {
                 window_titles(pid)
             } else {
@@ -700,18 +764,135 @@ mod tests {
     }
 
     #[test]
-    fn meet_is_matched_as_a_word_not_a_prefix() {
+    fn browser_windows_are_only_read_when_something_already_suggests_a_call() {
+        // Zoom always: its in-call window title is the whole signal, and it is
+        // not a process that pays a standing cost for being asked.
+        assert!(should_read_window_titles("us.zoom.xos", Some(false), None));
+        assert!(should_read_window_titles("us.zoom.xos", None, None));
+
+        // A browser only with a reason. Reading Chromium's windows every five
+        // seconds forever is what flips it into full accessibility mode.
+        assert!(!should_read_window_titles(
+            "com.google.Chrome",
+            Some(false),
+            None
+        ));
+        assert!(!should_read_window_titles("com.google.Chrome", None, None));
+        assert!(should_read_window_titles(
+            "com.google.Chrome",
+            Some(true),
+            None
+        ));
+        // The browser the active call was found in stays readable, so the poll
+        // can still see its window close while Plainsong holds the microphone.
+        assert!(should_read_window_titles(
+            "com.google.Chrome",
+            None,
+            Some("com.google.Chrome")
+        ));
+        assert!(!should_read_window_titles(
+            "com.apple.Safari",
+            None,
+            Some("com.google.Chrome")
+        ));
+
+        // Everything else is never asked at all.
+        assert!(!should_read_window_titles(
+            "com.microsoft.teams2",
+            Some(true),
+            None
+        ));
+        assert!(!should_read_window_titles(
+            "com.plainsong.app",
+            Some(true),
+            None
+        ));
+    }
+
+    #[test]
+    fn only_googles_own_meet_title_shapes_match() {
+        // The shapes Google's pages and the browsers that host them produce.
         assert!(title_mentions_meet("Meet – abc-defg-hij"));
+        assert!(title_mentions_meet("Meet - abc-defg-hij"));
         assert!(title_mentions_meet("Google Meet"));
+        assert!(title_mentions_meet("Meet — Google Meet"));
         assert!(title_mentions_meet("Weekly sync - Meet - Google Chrome"));
+        assert!(title_mentions_meet("Weekly sync – Meet – Arc"));
+        assert!(title_mentions_meet("Weekly sync - Meet"));
+
+        // The word "Meet" in prose is not a call. "Meet the team" is what made
+        // an open marketing tab announce a Google Meet call after ten seconds.
+        assert!(!title_mentions_meet("Meet the team — Acme"));
+        assert!(!title_mentions_meet("Meet our engineers"));
+        assert!(!title_mentions_meet("Come Meet us - Acme Corp"));
         assert!(!title_mentions_meet("Meeting notes - Google Docs"));
         assert!(!title_mentions_meet("meet.google.com"));
         assert!(!title_mentions_meet("Meetup Berlin"));
         assert!(!title_mentions_meet(""));
+
         assert!(zoom_call_window_title("Zoom Meeting"));
         assert!(zoom_call_window_title("Zoom Webinar - Q3 results"));
         assert!(!zoom_call_window_title("Zoom"));
         assert!(!zoom_call_window_title("Zoom Workplace Settings"));
+    }
+
+    #[test]
+    fn a_browser_tab_alone_is_never_a_call() {
+        // The mic is closed: a real Meet tab title is still not enough on its
+        // own, because the title is written by whoever wrote the page.
+        let idle = sample(
+            vec![app("com.google.Chrome", &["Meet – abc-defg-hij"])],
+            Some(false),
+        );
+        assert_eq!(select_candidate(&idle, None), None);
+        // Unknown (Plainsong holds the device) is not evidence either.
+        let unknown = sample(
+            vec![app("com.google.Chrome", &["Meet – abc-defg-hij"])],
+            None,
+        );
+        assert_eq!(select_candidate(&unknown, None), None);
+
+        // With the microphone open elsewhere it is a call.
+        let live = sample(
+            vec![app("com.google.Chrome", &["Meet – abc-defg-hij"])],
+            Some(true),
+        );
+        let candidate = select_candidate(&live, None).expect("meet tab plus microphone");
+        assert_eq!(candidate.app, CallApp::GoogleMeet);
+        assert_eq!(candidate.confidence, CallConfidence::High);
+    }
+
+    #[test]
+    fn a_meet_call_being_recorded_survives_the_unknown_microphone() {
+        // Plainsong recording the call makes the mic signal unknown; the tab is
+        // still open, so the call must not end (and must not auto-stop the
+        // meeting). Closing the tab still ends it.
+        let mut detector = CallDetector::default();
+        let live = sample(
+            vec![app("com.google.Chrome", &["Meet – abc-defg-hij"])],
+            Some(true),
+        );
+        let recording = sample(
+            vec![app("com.google.Chrome", &["Meet – abc-defg-hij"])],
+            None,
+        );
+        let tab_closed = sample(vec![app("com.google.Chrome", &["Inbox"])], None);
+        detector.observe(&live, 1);
+        detector.observe(&live, 2);
+        assert!(detector.active().is_some());
+        for now in 3..12 {
+            assert_eq!(detector.observe(&recording, now), None);
+        }
+        assert!(detector.active().is_some());
+
+        detector.observe(&tab_closed, 12);
+        assert!(matches!(
+            detector.observe(&tab_closed, 13),
+            Some(DetectorEvent::Ended {
+                reason: CallEndReason::WindowClosed,
+                ..
+            })
+        ));
     }
 
     #[test]
@@ -754,7 +935,7 @@ mod tests {
 
         let meet = sample(
             vec![app("com.apple.Safari", &["Inbox", "Meet – abc-defg-hij"])],
-            Some(false),
+            Some(true),
         );
         let candidate = select_candidate(&meet, None).expect("meet tab");
         assert_eq!(candidate.app, CallApp::GoogleMeet);

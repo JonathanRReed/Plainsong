@@ -25068,13 +25068,28 @@ async fn sample_call_detection(state: &AppState) -> Option<meeting_detect::Detec
         audio.is_dictating() || audio.is_recording() || audio.is_hands_free_monitor_active()
     };
     let accessibility_granted = check_accessibility_permission();
+    // The browser whose window a call was already found in, so this poll can
+    // still see that window close. Every other browser is left alone unless
+    // the microphone says something is going on — reading a Chromium browser's
+    // windows switches it into full accessibility mode for good.
+    let active_call_bundle_id = state
+        .meeting_call_detector
+        .lock()
+        .ok()
+        .and_then(|detector| detector.active().map(|call| call.bundle_id.clone()));
     tokio::task::spawn_blocking(move || {
-        let apps = meeting_detect::sample_running_apps(accessibility_granted);
+        // The microphone answer comes first: it is what decides whether this
+        // poll touches Accessibility at all.
         let mic_running_elsewhere = if self_holds_microphone {
             None
         } else {
             meeting_detect::default_input_device_running_somewhere()
         };
+        let apps = meeting_detect::sample_running_apps(
+            accessibility_granted,
+            mic_running_elsewhere,
+            active_call_bundle_id.as_deref(),
+        );
         meeting_detect::DetectorSample {
             apps,
             mic_running_elsewhere,
