@@ -7685,7 +7685,6 @@ async fn prepare_recording_playback_impl(
     state.playback_registry.register(
         token.clone(),
         recording_id.to_string(),
-        path.clone(),
         protection,
         release_tx,
     );

@@ -13,7 +13,7 @@
 
 use std::collections::HashMap;
 use std::io::{BufReader, BufWriter, Read, Seek, SeekFrom, Write};
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::sync::Mutex;
 
 use tokio::sync::oneshot;
@@ -39,9 +39,12 @@ impl PlaybackProtection {
 }
 
 /// One prepared playback, addressable by its token.
+///
+/// The file's path is deliberately absent: only the privileged Electron
+/// process needs it, and it receives it once from the prepare response. The
+/// sidecar keeps the release channel and the two facts an audit line needs.
 pub(crate) struct PlaybackEntry {
     pub recording_id: String,
-    pub path: PathBuf,
     pub protection: PlaybackProtection,
     /// Fires on release. The task holding the decrypted temp-file guard and the
     /// coordinator lease drops both when it receives this.
@@ -72,7 +75,6 @@ impl PlaybackRegistry {
         &self,
         token: String,
         recording_id: String,
-        path: PathBuf,
         protection: PlaybackProtection,
         release: oneshot::Sender<()>,
     ) {
@@ -81,7 +83,6 @@ impl PlaybackRegistry {
             token,
             PlaybackEntry {
                 recording_id,
-                path,
                 protection,
                 release: Some(release),
             },
@@ -106,32 +107,6 @@ impl PlaybackRegistry {
         let mut entry = entries.remove(token)?;
         entry.release.take();
         Self::finish(token, entry)
-    }
-
-    pub(crate) fn release_all(&self) -> Vec<ReleasedPlayback> {
-        let drained: Vec<(String, PlaybackEntry)> = {
-            let mut entries = self.entries.lock().unwrap_or_else(|e| e.into_inner());
-            entries.drain().collect()
-        };
-        drained
-            .into_iter()
-            .filter_map(|(token, entry)| Self::finish(&token, entry))
-            .collect()
-    }
-
-    pub(crate) fn describe(&self, token: &str) -> Option<(String, PathBuf, PlaybackProtection)> {
-        let entries = self.entries.lock().unwrap_or_else(|e| e.into_inner());
-        entries.get(token).map(|entry| {
-            (
-                entry.recording_id.clone(),
-                entry.path.clone(),
-                entry.protection,
-            )
-        })
-    }
-
-    pub(crate) fn len(&self) -> usize {
-        self.entries.lock().unwrap_or_else(|e| e.into_inner()).len()
     }
 
     fn finish(token: &str, mut entry: PlaybackEntry) -> Option<ReleasedPlayback> {
@@ -226,7 +201,7 @@ fn write_decrypted<R: Read>(
 mod tests {
     use super::*;
 
-    fn scratch_dir(label: &str) -> PathBuf {
+    fn scratch_dir(label: &str) -> std::path::PathBuf {
         let dir = std::env::temp_dir().join(format!(
             "plainsong-playback-{}-{}",
             label,
@@ -251,19 +226,14 @@ mod tests {
         registry.register(
             "tok".to_string(),
             "rec-1".to_string(),
-            PathBuf::from("/tmp/a.wav"),
             PlaybackProtection::Decrypted,
             tx,
         );
-        assert_eq!(registry.len(), 1);
-        let (recording_id, path, protection) = registry.describe("tok").expect("registered");
-        assert_eq!(recording_id, "rec-1");
-        assert_eq!(path, PathBuf::from("/tmp/a.wav"));
-        assert_eq!(protection, PlaybackProtection::Decrypted);
 
         let released = registry.release("tok").expect("release known token");
+        assert_eq!(released.token, "tok");
         assert_eq!(released.recording_id, "rec-1");
-        assert_eq!(registry.len(), 0);
+        assert_eq!(released.protection, PlaybackProtection::Decrypted);
         // The holder task receives the signal exactly once.
         assert!(rx.blocking_recv().is_ok());
         // Releasing again is a no-op, not an error.
@@ -278,7 +248,6 @@ mod tests {
         registry.register(
             "tok".to_string(),
             "rec-1".to_string(),
-            PathBuf::from("/tmp/a.wav"),
             PlaybackProtection::Plaintext,
             tx,
         );
@@ -289,21 +258,27 @@ mod tests {
     }
 
     #[test]
-    fn release_all_drains_every_token() {
+    fn every_registered_token_releases_independently() {
         let registry = PlaybackRegistry::default();
+        let mut receivers = Vec::new();
         for index in 0..3 {
-            let (tx, _rx) = oneshot::channel();
+            let (tx, rx) = oneshot::channel();
             registry.register(
                 format!("tok-{index}"),
                 "rec".to_string(),
-                PathBuf::from("/tmp/a.wav"),
                 PlaybackProtection::Plaintext,
                 tx,
             );
+            receivers.push(rx);
         }
-        let released = registry.release_all();
-        assert_eq!(released.len(), 3);
-        assert_eq!(registry.len(), 0);
+        for (index, mut receiver) in receivers.into_iter().enumerate() {
+            let released = registry
+                .release(&format!("tok-{index}"))
+                .expect("release known token");
+            assert_eq!(released.token, format!("tok-{index}"));
+            assert!(receiver.try_recv().is_ok(), "holder {index} was signalled");
+        }
+        assert!(registry.release("tok-0").is_none(), "tokens are gone");
     }
 
     #[test]

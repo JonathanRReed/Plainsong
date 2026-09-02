@@ -9,7 +9,7 @@ export type PlaybackStatus = "idle" | "preparing" | "ready" | "playing" | "pause
 
 export type PlaybackRate = 1 | 1.5 | 2;
 
-export const PLAYBACK_RATES: readonly PlaybackRate[] = [1, 1.5, 2];
+const PLAYBACK_RATES: readonly PlaybackRate[] = [1, 1.5, 2];
 
 /** How far the ← → keys and the skip buttons move, in seconds. */
 export const SEEK_STEP_SECONDS = 5;
