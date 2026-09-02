@@ -61,6 +61,10 @@ import { SearchableSelect } from "@/components/ui/searchable-select";
 import { StatusBanner } from "@/components/ui/status-banner";
 import { formatAppliedDictationCommandLabel } from "@/lib/dictation-command-labels";
 import {
+  probeDictationAiLane,
+  resolveTranslateToEnglishAvailability,
+} from "@/lib/dictation-translation";
+import {
   INSERTION_MODE_LABELS,
   formatInsertionModeLabel,
   normalizeInsertionMode,
@@ -334,6 +338,12 @@ type DictationCustomModeDraft = {
   languageOverride: string;
   livePreviewEnabled: boolean;
   numbersAsDigits: CustomModeNumbersChoice;
+  /**
+   * Deliver English however the words were spoken. Mirrors
+   * `translateToEnglish` on the saved profile; whether it can be switched on
+   * depends on the model (see `resolveTranslateToEnglishAvailability`).
+   */
+  translateToEnglish: boolean;
 };
 
 type DictationRouteReadiness = {
@@ -691,6 +701,7 @@ function createCustomModeDraft(
     languageOverride: "",
     livePreviewEnabled: true,
     numbersAsDigits: "inherit",
+    translateToEnglish: false,
     ...overrides,
   };
 }
@@ -1041,6 +1052,13 @@ export function DictationView() {
     string | null
   >(null);
   const [useSharedAsrSelection, setUseSharedAsrSelection] = useState(true);
+  // Whether cloud AI is allowed at all, and whether the dictation AI lane can
+  // actually answer right now (`null` until the probe returns). Only the
+  // profile's translate-to-English switch reads them.
+  const [remoteProcessingEnabled, setRemoteProcessingEnabled] = useState(false);
+  const [dictationAiLaneReady, setDictationAiLaneReady] = useState<
+    boolean | null
+  >(null);
   const [dictationRouteReadiness, setDictationRouteReadiness] =
     useState<DictationRouteReadiness | null>(null);
   const [routeDownloadBusy, setRouteDownloadBusy] = useState(false);
@@ -1270,6 +1288,34 @@ export function DictationView() {
   const dictationLanguageChoices = useMemo(
     () => asrLanguageOptions(dictationLanguageBoundary),
     [dictationLanguageBoundary],
+  );
+  // Translate-to-English for a saved profile (roadmap item B7a). Multilingual
+  // whisper.cpp translates inside its own decode; every other recognizer needs
+  // the dictation AI lane, so the switch is only offered when that lane can
+  // answer. Re-probed whenever the lane's provider or the remote-processing
+  // switch changes.
+  useEffect(() => {
+    let mounted = true;
+    void probeDictationAiLane({
+      dictationAi: { provider: currentAiProvider ?? "", modelId: null },
+      remoteProcessingEnabled,
+    }).then((ready) => {
+      if (mounted) {
+        setDictationAiLaneReady(ready);
+      }
+    });
+    return () => {
+      mounted = false;
+    };
+  }, [currentAiProvider, remoteProcessingEnabled]);
+  const profileTranslateAvailability = useMemo(
+    () =>
+      resolveTranslateToEnglishAvailability({
+        provider: currentDictationProvider,
+        modelId: currentDictationModelId,
+        aiLaneReady: dictationAiLaneReady,
+      }),
+    [currentDictationModelId, currentDictationProvider, dictationAiLaneReady],
   );
   const dictationLanguageCodes = useMemo(
     () =>
@@ -1822,6 +1868,9 @@ export function DictationView() {
         // Dictation cleanup runs on the dictation lane, never the meetings one.
         setCurrentAiProvider(settings.privacy.dictationAi?.provider ?? null);
         setCurrentAiModelId(settings.privacy.dictationAi?.modelId ?? null);
+        setRemoteProcessingEnabled(
+          settings.privacy.remoteProcessingEnabled ?? false,
+        );
         setDefaultProjectId(
           settings.transcription.dictationProjectId || "inbox",
         );
@@ -2278,6 +2327,11 @@ export function DictationView() {
     numbersAsDigits:
       overrides?.numbersAsDigits ??
       customModeNumbersValue(customModeDraft.numbersAsDigits),
+    // A model that cannot translate must not save a profile claiming it will.
+    translateToEnglish:
+      overrides?.translateToEnglish ??
+      (profileTranslateAvailability.enabled &&
+        customModeDraft.translateToEnglish),
     insertionMode: overrides?.insertionMode ?? dictationInsertionMode,
     contextSource: overrides?.contextSource ?? dictationContextSource,
     saveToInbox: overrides?.saveToInbox ?? saveToInbox,
@@ -2315,6 +2369,7 @@ export function DictationView() {
         livePreviewEnabled:
           mode.livePreviewEnabled ?? dictationLivePreviewEnabled,
         numbersAsDigits: customModeNumbersChoice(mode.numbersAsDigits),
+        translateToEnglish: mode.translateToEnglish ?? false,
       }),
     );
     setDictationProfile(mode.profile);
@@ -4835,6 +4890,30 @@ export function DictationView() {
                             {currentDictationProvider === "macos_apple_speech"
                               ? "Unavailable with Apple Speech, which waits for the final on-device result."
                               : "Turn this off when watching partial text is distracting."}
+                          </p>
+                        </div>
+                        <div className="space-y-2">
+                          <p className="text-sm font-medium">Translate to English</p>
+                          <label className="inline-flex items-center gap-2 rounded-md border bg-background px-3 py-2 text-sm">
+                            <input
+                              type="checkbox"
+                              aria-label="Translate to English"
+                              checked={
+                                profileTranslateAvailability.enabled &&
+                                customModeDraft.translateToEnglish
+                              }
+                              disabled={!profileTranslateAvailability.enabled}
+                              onChange={(event) =>
+                                setCustomModeDraft((current) => ({
+                                  ...current,
+                                  translateToEnglish: event.target.checked,
+                                }))
+                              }
+                            />
+                            Deliver English whatever language you speak
+                          </label>
+                          <p className="text-sm text-muted-foreground">
+                            {profileTranslateAvailability.description}
                           </p>
                         </div>
                       </div>

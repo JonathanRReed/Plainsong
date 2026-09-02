@@ -32,15 +32,34 @@ import path from "path";
 import { pathToFileURL } from "url";
 import { autoUpdater, type AppUpdater } from "electron-updater";
 import {
+  buildNativeHelperBindingTable,
+  cycleDictationMode,
+  dictationBindingConflictSources,
+  electronFallbackDictationBindings,
+  registrableDictationBindings,
+  resolveDictationBindingBehavior,
+  resolveDictationBindings,
+  resolveDictationModeOverride,
+  routeDictationBindingEvent,
+  validateDictationBindings,
+  type DictationBinding,
+  type DictationBindingIssue,
+} from "./dictation-bindings";
+import {
   createDictationShortcutSignalRuntime,
   dictationShortcutFailureMessage,
   resolveDictationShortcutBehavior,
   resolveDictationShortcutCapability,
   shouldHandleDictationShortcutSource,
+  type DictationShortcutStartOptions,
 } from "./dictation-shortcut-controller";
 import { IpcBridge } from "./ipc-bridge";
 import {
   normalizeNativeShortcutEvent,
+  normalizeNativeShortcutHelperShortcut,
+  resolveNativeHelperConfigApplication,
+  synthesizeNativeShortcutRelease,
+  trackNativeShortcutDownBindings,
   type NativeShortcutController,
   type NativeShortcutRawEvent,
 } from "./native-macos-shortcut";
@@ -313,11 +332,23 @@ const DICTATION_SHORTCUT_FAILURE_VISIBLE_MS = 8_000;
 let nativeShortcutController: NativeShortcutController | null = null;
 let nativeShortcutAvailable = false;
 let appliedNativeShortcutConfig: string | null = null;
+// Bindings the helper reported down and has not reported up. A helper
+// restart owes each of these a synthetic release, otherwise a hold that was
+// in progress never stops and the session runs to the watchdog.
+let nativeShortcutDownBindings: ReadonlySet<string> = new Set<string>();
+// A helper table that could not be applied because a session (or a held
+// binding) was live. Applied on the next idle; see
+// `resolveNativeHelperConfigApplication`.
+let pendingNativeShortcutSettings: AppSettings | null = null;
 // Latest settings snapshot the shortcut handlers should act on. The native
 // helper survives settings saves that don't change its shortcut, so its
 // onEvent closure must not act on the settings captured at spawn time.
 let latestShortcutSettings: AppSettings = {};
 let shortcutConflicts: ShortcutConflictInfo[] = [];
+// Per-binding problems from the last registration pass (a mouse button with
+// no helper, two bindings on one trigger, ...). Mirrored to the Settings
+// screen alongside the helper availability flag.
+let dictationBindingIssues: DictationBindingIssue[] = [];
 // Mirrors the sidecar's recent-result list so the menu-bar menu can offer
 // "Paste" for each without an async round trip while the menu is being built.
 let recentDictationResults: Array<{ text: string }> = [];
@@ -380,13 +411,14 @@ type AppSettings = {
     openWindow?: string;
     repasteLastDictation?: string;
     recopyLastDictation?: string;
+    dictationBindings?: DictationBinding[];
   };
   transcription?: {
     dictationPushToTalk?: boolean;
     dictationHandsFreeEnabled?: boolean;
     dictationModePreset?: string;
     dictationSelectedCustomModeId?: string | null;
-    dictationCustomModes?: Array<{ id?: unknown }>;
+    dictationCustomModes?: Array<{ id: string; name: string }>;
   };
   ui?: {
     minimizeToTray?: boolean;
@@ -564,6 +596,33 @@ function createTray(): void {
   // A menu (not a popover) on click, per Apple HIG for menu-bar extras.
   refreshTray();
   void refreshDictationPermissionSummary();
+}
+
+// `did-finish-load` fires before React has mounted and subscribed, so a
+// window that was still loading gets the event once on load and once a beat
+// later. The popup's handlers are idempotent (the same label re-sets the same
+// state), so a duplicate costs nothing and a miss costs the whole notice.
+const OVERLAY_EVENT_SETTLE_MS = 200;
+
+/**
+ * Deliver an event again to a window that was still loading when it was
+ * first broadcast. Only for that case -- an already-loaded window has its
+ * listeners and needs no duplicate.
+ */
+function resendOverlayEventWhenReady(
+  window: BrowserWindow,
+  eventName: string,
+  payload: unknown,
+): void {
+  const send = () => {
+    if (!window.isDestroyed()) {
+      window.webContents.send(`sidecar:event:${eventName}`, payload);
+    }
+  };
+  window.webContents.once("did-finish-load", () => {
+    send();
+    setTimeout(send, OVERLAY_EVENT_SETTLE_MS);
+  });
 }
 
 function broadcastRendererEvent(eventName: string, payload: unknown): void {
@@ -1457,7 +1516,7 @@ async function handleLocalCommand(
     case "get_dictation_shortcut_capability_status":
       return {
         handled: true,
-        result: { nativeShortcutAvailable },
+        result: { nativeShortcutAvailable, bindingIssues: dictationBindingIssues },
       };
     case "get_shortcut_conflicts":
       return {
@@ -1765,17 +1824,115 @@ const dictationShortcutSignalRuntime = createDictationShortcutSignalRuntime({
 async function handleDictationShortcutSignal(
   settings: AppSettings,
   signal: DictationShortcutSignal,
+  binding?: DictationBinding,
 ): Promise<void> {
   if (!ipcBridge) {
     return;
   }
 
-  const behavior = resolveDictationShortcutBehavior(settings.transcription ?? {});
+  const settingsBehavior = resolveDictationShortcutBehavior(settings.transcription ?? {});
+  // A binding may pin its own activation behavior (hold / toggle); "inherit"
+  // and every non-binding signal (Escape, the VAD watchdog) use the setting.
+  const behavior =
+    binding?.action.kind === "dictation"
+      ? resolveDictationBindingBehavior(binding.action.behavior, settingsBehavior)
+      : settingsBehavior;
   const capability = resolveDictationShortcutCapability({
     nativeShortcutAvailable,
     behavior,
   });
-  await dictationShortcutSignalRuntime.handleSignal({ behavior, capability, signal });
+  // A per-mode binding runs this one session under its mode; the selected
+  // mode in Settings is left alone.
+  const modeOverride =
+    binding?.action.kind === "dictation"
+      ? resolveDictationModeOverride(
+          binding.action.modeId,
+          settings.transcription?.dictationCustomModes ?? [],
+        )
+      : null;
+  const startOptions: DictationShortcutStartOptions | undefined = modeOverride
+    ? { modeOverride: { preset: modeOverride.preset, customModeId: modeOverride.customModeId } }
+    : undefined;
+  await dictationShortcutSignalRuntime.handleSignal({
+    behavior,
+    capability,
+    signal,
+    startOptions,
+  });
+}
+
+/**
+ * The mode a `cycleMode` binding lands on is persisted through the sidecar
+ * (it is the same setting the Dictation view's profile tiles write), then
+ * announced to the popup for a moment so the user knows what the next
+ * dictation will run as.
+ */
+async function handleCycleDictationModeBinding(settings: AppSettings): Promise<void> {
+  if (!ipcBridge) {
+    return;
+  }
+  const transcription = settings.transcription ?? {};
+  const next = cycleDictationMode(
+    {
+      modePreset: transcription.dictationModePreset ?? "voice",
+      selectedCustomModeId: transcription.dictationSelectedCustomModeId ?? null,
+    },
+    transcription.dictationCustomModes ?? [],
+  );
+  const fresh = (await ipcBridge.invoke("get_settings")) as AppSettings & {
+    transcription?: Record<string, unknown>;
+  };
+  const updated = {
+    ...fresh,
+    transcription: {
+      ...(fresh.transcription ?? {}),
+      dictationModePreset: next.modePreset,
+      dictationSelectedCustomModeId: next.selectedCustomModeId,
+    },
+  };
+  await ipcBridge.invoke("save_settings", { settings: updated });
+  qaLog("dictation mode cycled", next);
+  // A dictation overlay that had to be created for this notice has not
+  // loaded its renderer yet, so a broadcast in the same tick lands before
+  // `listen()` has registered anything and is simply dropped -- the notice
+  // never appears, on exactly the launch where the user needs it most.
+  let freshOverlay: BrowserWindow | null = null;
+  if (showDictationOverlayEnabled) {
+    const overlay = getOrCreateOverlayWindow("dictation");
+    freshOverlay = overlay.webContents.isLoadingMainFrame() ? overlay : null;
+    showOverlayWindow(overlay);
+  }
+  const payload = {
+    modePreset: next.modePreset,
+    selectedCustomModeId: next.selectedCustomModeId,
+    label: next.label,
+  };
+  broadcastRendererEvent("dictation-mode-cycled", payload);
+  if (freshOverlay) {
+    resendOverlayEventWhenReady(freshOverlay, "dictation-mode-cycled", payload);
+  }
+}
+
+async function handleDictationBindingTransition(
+  settings: AppSettings,
+  binding: DictationBinding,
+  event: "down" | "up",
+): Promise<void> {
+  const route = routeDictationBindingEvent({ binding, event });
+  qaLog("dictation binding routed", { bindingId: binding.id, event, route });
+  switch (route.kind) {
+    case "dictation":
+      await handleDictationShortcutSignal(settings, route.signal, binding);
+      return;
+    case "cycleMode":
+      await handleCycleDictationModeBinding(settings);
+      return;
+    case "cancel":
+      await handleDictationShortcutSignal(settings, "cancelled");
+      return;
+    case "ignore":
+      return;
+  }
 }
 
 function scheduleDictationErrorReset(): void {
@@ -1893,11 +2050,15 @@ async function handleDictationVadSignal(payload: unknown): Promise<void> {
   }
 }
 
-async function handleDictationGlobalShortcut(settings: AppSettings): Promise<void> {
+async function handleDictationGlobalShortcut(
+  settings: AppSettings,
+  binding: DictationBinding,
+): Promise<void> {
   if (!shouldHandleDictationShortcutSource({ source: "electron", nativeShortcutAvailable })) {
     return;
   }
-  await handleDictationShortcutSignal(settings, "pressed");
+  // Electron only reports presses, so a fallback registration is press-only.
+  await handleDictationBindingTransition(settings, binding, "down");
 }
 
 async function handleNativeDictationShortcutEvent(
@@ -1905,17 +2066,39 @@ async function handleNativeDictationShortcutEvent(
   rawEvent: NativeShortcutRawEvent,
 ): Promise<void> {
   qaLog("dictation native shortcut event", {
-    type: rawEvent.type,
-    key: rawEvent.key,
+    event: rawEvent.event,
+    bindingId: rawEvent.bindingId,
     phase: dictationPhase,
     nativeShortcutAvailable,
   });
   if (!shouldHandleDictationShortcutSource({ source: "native", nativeShortcutAvailable })) {
     return;
   }
+  // Tracked before any await: a helper restart between here and the release
+  // has to know this binding is owed an `up`.
+  nativeShortcutDownBindings = trackNativeShortcutDownBindings(
+    nativeShortcutDownBindings,
+    rawEvent,
+  );
+  if (rawEvent.event === "up") {
+    applyDeferredNativeShortcutConfig("binding released");
+  }
 
-  const { signal } = normalizeNativeShortcutEvent(rawEvent);
-  await handleDictationShortcutSignal(settings, signal);
+  const { signal, bindingId } = normalizeNativeShortcutEvent(rawEvent);
+  if (signal === "cancelled") {
+    await handleDictationShortcutSignal(settings, "cancelled");
+    return;
+  }
+  const binding = resolveDictationBindings(settings.shortcuts).find(
+    (candidate) => candidate.id === bindingId,
+  );
+  if (!binding) {
+    // The helper was spawned with an older table; the next registration pass
+    // replaces it. Nothing to act on.
+    qaLog("dictation native event for unknown binding", { bindingId });
+    return;
+  }
+  await handleDictationBindingTransition(settings, binding, rawEvent.event);
 }
 
 // Keeps the flag and the renderers in sync: Settings copy (e.g. the
@@ -1938,25 +2121,93 @@ function disposeNativeShortcutController(): void {
   setNativeShortcutAvailable(false);
 }
 
-function startNativeShortcutControllerIfNeeded(settings: AppSettings): void {
-  const desiredConfig = settings.shortcuts?.toggleDictation ?? null;
-  // Only respawn the helper when its shortcut actually changed (or it died).
-  // An unconditional respawn on every settings save would reset the helper's
-  // key-down tracking, swallowing the release of a hold that is in progress.
-  if (
-    nativeShortcutController &&
-    nativeShortcutController.status.available &&
-    appliedNativeShortcutConfig === desiredConfig
-  ) {
+/**
+ * Deliver the `up` a helper that is about to die will never send. Runs
+ * before the dispose, while `nativeShortcutAvailable` is still true, so the
+ * synthetic release takes the same path a real one would and the session
+ * stops instead of running to the watchdog.
+ */
+function releaseHeldNativeShortcutBindings(reason: string): void {
+  if (nativeShortcutDownBindings.size === 0) {
     return;
   }
+  const releases = synthesizeNativeShortcutRelease(nativeShortcutDownBindings);
+  nativeShortcutDownBindings = new Set<string>();
+  for (const release of releases) {
+    console.warn("[shortcuts] synthesizing release for a held binding", {
+      reason,
+      bindingId: release.bindingId,
+    });
+    void handleNativeDictationShortcutEvent(latestShortcutSettings, release).catch((error) => {
+      surfaceDictationShortcutFailure("native dictation shortcut", error);
+    });
+  }
+}
 
+/**
+ * Apply a helper table that was deferred because a session (or a held
+ * binding) was live. Called whenever dictation reaches an idle-ish phase and
+ * whenever the last held binding is released.
+ */
+function applyDeferredNativeShortcutConfig(reason: string): void {
+  const pending = pendingNativeShortcutSettings;
+  if (!pending) {
+    return;
+  }
+  console.log("[shortcuts] applying deferred native helper table", { reason });
+  startNativeShortcutControllerIfNeeded(pending);
+}
+
+function startNativeShortcutControllerIfNeeded(settings: AppSettings): void {
+  // Every binding the helper can watch goes into its table. Validation here
+  // assumes the helper is present (that is what is being started); a mouse or
+  // lone-modifier binding is only dropped later, by the Electron fallback,
+  // when the helper turns out not to run.
+  const bindings = registrableDictationBindings(resolveDictationBindings(settings.shortcuts), {
+    nativeShortcutAvailable: true,
+    customModes: settings.transcription?.dictationCustomModes ?? [],
+  });
+  const helperTable = buildNativeHelperBindingTable(
+    bindings,
+    normalizeNativeShortcutHelperShortcut,
+  );
+  const desiredConfig = JSON.stringify(helperTable);
+  // The helper takes its table on argv, so applying a new one means killing
+  // it. Only respawn when the table actually changed (or it died), and never
+  // in the middle of a session or a held key: every binding edit in Settings
+  // saves immediately, and a SIGTERM landing between `down` and `up` left the
+  // release unowed and the session running to the watchdog.
+  const decision = resolveNativeHelperConfigApplication({
+    desiredConfig,
+    appliedConfig: appliedNativeShortcutConfig,
+    helperAvailable: Boolean(nativeShortcutController?.status.available),
+    dictationPhase,
+    bindingsDown: nativeShortcutDownBindings.size,
+  });
+  if (decision.action === "unchanged") {
+    pendingNativeShortcutSettings = null;
+    return;
+  }
+  if (decision.action === "defer") {
+    // The running helper keeps delivering the OLD table -- the one the
+    // in-flight press came from -- so the release lands on the binding that
+    // started the session. Applied on the next idle.
+    console.log("[shortcuts] deferring native helper table", { reason: decision.reason });
+    pendingNativeShortcutSettings = settings;
+    return;
+  }
+  pendingNativeShortcutSettings = null;
+
+  // Belt and braces for a restart that happens anyway (a helper crash, or a
+  // table change while a stale `down` is still tracked): hand the handler the
+  // `up` the dying helper will never send.
+  releaseHeldNativeShortcutBindings("helper restart");
   disposeNativeShortcutController();
 
   const controller = startNativeMacosShortcutController({
     platform: process.platform,
     helperPath: getNativeShortcutHelperPath(),
-    shortcut: settings.shortcuts?.toggleDictation,
+    helperBindings: helperTable,
     onEvent: (event) => {
       void handleNativeDictationShortcutEvent(latestShortcutSettings, event).catch((error) => {
         surfaceDictationShortcutFailure("native dictation shortcut", error);
@@ -1994,7 +2245,34 @@ async function applyElectronGlobalShortcuts(reason: string): Promise<void> {
   latestShortcutSettings = settings;
   startNativeShortcutControllerIfNeeded(settings);
 
-  const conflicts = findConflictingShortcuts(settings.shortcuts ?? {});
+  // The dictation binding table (B4). Issues are computed against the helper
+  // that actually came up, so a mouse-button binding on a machine without
+  // Accessibility reads "needs the native helper" in Settings instead of
+  // silently doing nothing.
+  const allBindings = resolveDictationBindings(settings.shortcuts);
+  const bindingContext = {
+    nativeShortcutAvailable,
+    customModes: settings.transcription?.dictationCustomModes ?? [],
+  };
+  dictationBindingIssues = validateDictationBindings(allBindings, bindingContext);
+  for (const issue of dictationBindingIssues) {
+    console.warn("[shortcuts] dictation binding skipped", { reason, ...issue });
+  }
+  broadcastRendererEvent("dictation-shortcut-capability-changed", {
+    nativeShortcutAvailable,
+    bindingIssues: dictationBindingIssues,
+  });
+  const registrableBindings = registrableDictationBindings(allBindings, bindingContext);
+
+  // Conflicts are computed against the bindings that will actually be
+  // registered, not just the four legacy shortcut fields. The registration
+  // loop below takes the bindings first, so a binding on Open window's keys
+  // silently won and left nothing but a `console.error`; now Settings shows
+  // Open window losing, and names the binding it lost to.
+  const conflicts = findConflictingShortcuts(
+    settings.shortcuts ?? {},
+    dictationBindingConflictSources(registrableBindings, bindingContext.customModes),
+  );
   shortcutConflicts = conflicts;
   if (conflicts.length > 0) {
     for (const conflict of conflicts) {
@@ -2009,9 +2287,19 @@ async function applyElectronGlobalShortcuts(reason: string): Promise<void> {
   broadcastRendererEvent("shortcut-conflicts-changed", { conflicts });
   const skippedFields = new Set(conflicts.map((conflict) => conflict.field));
 
-  const dictationShortcut = skippedFields.has("toggleDictation")
-    ? null
-    : convertShortcutToAccelerator(settings.shortcuts?.toggleDictation);
+  // Electron's globalShortcut stands in for key bindings when the helper is
+  // not delivering (press-only, so hold degrades to toggle exactly as
+  // before). These are registered whether or not the helper is up, as they
+  // always were: `shouldHandleDictationShortcutSource` ignores the Electron
+  // press while the helper is delivering, so a helper that dies mid-session
+  // leaves a working hotkey behind instead of nothing until the next restart.
+  // Mouse buttons and lone modifiers have no Electron equivalent and are
+  // filtered out by `electronFallbackDictationBindings`. No conflict filter
+  // is applied to them: the bindings are first in the precedence list above,
+  // so dictation always wins its keys and it is the other field that gets
+  // skipped -- which is the documented rule ("Dictation is the app's primary
+  // interaction").
+  const fallbackBindings = electronFallbackDictationBindings(registrableBindings);
   const openWindowShortcut = skippedFields.has("openWindow")
     ? null
     : convertShortcutToAccelerator(settings.shortcuts?.openWindow);
@@ -2028,9 +2316,9 @@ async function applyElectronGlobalShortcuts(reason: string): Promise<void> {
 
   globalShortcut.unregisterAll();
 
-  if (dictationShortcut) {
-    const registered = globalShortcut.register(dictationShortcut, () => {
-      void handleDictationGlobalShortcut(settings).catch((error) => {
+  for (const { binding, accelerator } of fallbackBindings) {
+    const registered = globalShortcut.register(accelerator, () => {
+      void handleDictationGlobalShortcut(latestShortcutSettings, binding).catch((error) => {
         surfaceDictationShortcutFailure("dictation shortcut", error);
       });
     });
@@ -2038,12 +2326,14 @@ async function applyElectronGlobalShortcuts(reason: string): Promise<void> {
     if (!registered) {
       console.error("[shortcuts] failed to register dictation shortcut", {
         reason,
-        dictationShortcut,
+        bindingId: binding.id,
+        accelerator,
       });
     } else {
       console.log("[shortcuts] registered dictation shortcut", {
         reason,
-        dictationShortcut,
+        bindingId: binding.id,
+        accelerator,
         usesPressOnlyElectronFallback,
       });
     }
@@ -2973,6 +3263,8 @@ async function bootstrap() {
       }
       dictationPhase = nextPhase;
       refreshTray();
+      // A helper table held back while this session was live can go in now.
+      applyDeferredNativeShortcutConfig(`phase ${nextPhase}`);
       const sessionId = (payload as { sessionId?: unknown }).sessionId;
       if (typeof sessionId === "number") {
         dictationSessionId = sessionId;

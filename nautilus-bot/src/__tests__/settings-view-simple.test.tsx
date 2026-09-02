@@ -1557,4 +1557,371 @@ describe("SettingsView performance behavior", () => {
 
     expect(screen.queryByText(/Same keys as/)).not.toBeInTheDocument();
   });
+
+  // ── Dictation binding table (roadmap item B4) ──────────────────────────
+  // Electron registers the dictation bindings before Open window, so a
+  // per-profile binding on Open window's keys took them and left only a
+  // console error. The row now says so, naming the binding that won.
+  it("warns that a non-primary dictation binding takes another shortcut's keys", async () => {
+    const backend = await import("@/lib/backend");
+    vi.mocked(backend.getSettings).mockResolvedValue({
+      ...baseSettings,
+      shortcuts: {
+        ...baseSettings.shortcuts,
+        toggleDictation: "Ctrl+Shift+Space",
+        openWindow: "Ctrl+Alt+E",
+        dictationBindings: [
+          {
+            id: "primary",
+            trigger: { kind: "key", accelerator: "Ctrl+Shift+Space" },
+            action: { kind: "dictation", modeId: null, behavior: "inherit" },
+          },
+          {
+            id: "email",
+            trigger: { kind: "key", accelerator: "Ctrl+Alt+E" },
+            action: { kind: "dictation", modeId: "email", behavior: "inherit" },
+          },
+        ],
+      },
+    } as unknown as Awaited<ReturnType<typeof backend.getSettings>>);
+
+    render(
+      <ToastProvider>
+        <SettingsView />
+      </ToastProvider>,
+    );
+
+    await screen.findByText("How Plainsong listens, writes, and what it keeps.");
+    await screen.findByText("Keyboard shortcuts");
+
+    expect(
+      await screen.findByText(
+        /Same keys as Dictation \u00b7 Writing \u2014 only one of them will work\./,
+      ),
+    ).toBeInTheDocument();
+  });
+
+  it("lists every dictation binding with its action and flags a duplicate trigger", async () => {
+    const backend = await import("@/lib/backend");
+    vi.mocked(backend.getDictationShortcutCapabilityStatus).mockResolvedValue({
+      nativeShortcutAvailable: true,
+    });
+    vi.mocked(backend.getSettings).mockResolvedValue({
+      ...baseSettings,
+      shortcuts: {
+        ...baseSettings.shortcuts,
+        toggleDictation: "Ctrl+Shift+Space",
+        dictationBindings: [
+          {
+            id: "primary",
+            trigger: { kind: "key", accelerator: "Ctrl+Shift+Space" },
+            action: { kind: "dictation", modeId: null, behavior: "inherit" },
+          },
+          {
+            id: "email",
+            trigger: { kind: "key", accelerator: "Ctrl+Alt+E" },
+            action: { kind: "dictation", modeId: "email", behavior: "hold" },
+          },
+          {
+            id: "clash",
+            trigger: { kind: "key", accelerator: "Shift+Ctrl+Space" },
+            action: { kind: "cycleMode" },
+          },
+        ],
+      },
+    } as unknown as Awaited<ReturnType<typeof backend.getSettings>>);
+
+    render(
+      <ToastProvider>
+        <SettingsView />
+      </ToastProvider>,
+    );
+
+    await screen.findByText("How Plainsong listens, writes, and what it keeps.");
+    await screen.findByText("Dictation bindings");
+
+    const primaryAction = (await screen.findByLabelText(
+      "Dictation action",
+    )) as HTMLSelectElement;
+    expect(primaryAction.value).toBe("dictation");
+    const secondAction = (await screen.findByLabelText(
+      "Binding 2 action",
+    )) as HTMLSelectElement;
+    expect(secondAction.value).toBe("dictation:email");
+    expect(
+      (screen.getByLabelText("Binding 2 behavior") as HTMLSelectElement).value,
+    ).toBe("hold");
+    const thirdAction = (await screen.findByLabelText(
+      "Binding 3 action",
+    )) as HTMLSelectElement;
+    expect(thirdAction.value).toBe("cycleMode");
+
+    // The third binding is Ctrl+Shift+Space written in a different order, so
+    // it collides with the primary one and says so in the row.
+    expect(
+      await screen.findByText(
+        /Same trigger as Dictation — this one is removed when settings save\./,
+      ),
+    ).toBeInTheDocument();
+  });
+
+  it("says a mouse binding needs the native helper while the helper is down", async () => {
+    const backend = await import("@/lib/backend");
+    vi.mocked(backend.getDictationShortcutCapabilityStatus).mockResolvedValue({
+      nativeShortcutAvailable: false,
+    });
+    vi.mocked(backend.getSettings).mockResolvedValue({
+      ...baseSettings,
+      shortcuts: {
+        ...baseSettings.shortcuts,
+        dictationBindings: [
+          {
+            id: "mouse",
+            trigger: { kind: "mouse", button: 4 },
+            action: { kind: "dictation", modeId: null, behavior: "hold" },
+          },
+        ],
+      },
+    } as unknown as Awaited<ReturnType<typeof backend.getSettings>>);
+
+    render(
+      <ToastProvider>
+        <SettingsView />
+      </ToastProvider>,
+    );
+
+    await screen.findByText("How Plainsong listens, writes, and what it keeps.");
+    await screen.findByText("Dictation bindings");
+
+    expect(
+      await screen.findByText(
+        /Mouse buttons need the native shortcut helper, which is not running\./,
+      ),
+    ).toBeInTheDocument();
+  });
+
+  // A row with an empty accelerator is dropped by the sidecar's
+  // `reconcile_keyboard_shortcuts`, so writing one produced a row that
+  // showed in the draft settings, never reached the file, and disappeared on
+  // the next reload with no explanation. "Add binding" now holds the row in
+  // local state until the recorder captures a trigger.
+  it("keeps a new binding unsaved until the recorder captures a trigger, then saves it", async () => {
+    const backend = await import("@/lib/backend");
+    vi.mocked(backend.getDictationShortcutCapabilityStatus).mockResolvedValue({
+      nativeShortcutAvailable: true,
+    });
+    vi.mocked(backend.getSettings).mockResolvedValue({
+      ...baseSettings,
+      shortcuts: {
+        ...baseSettings.shortcuts,
+        toggleDictation: "Ctrl+Shift+Space",
+      },
+    } as unknown as Awaited<ReturnType<typeof backend.getSettings>>);
+
+    render(
+      <ToastProvider>
+        <SettingsView />
+      </ToastProvider>,
+    );
+
+    await screen.findByText("How Plainsong listens, writes, and what it keeps.");
+    await screen.findByText("Dictation bindings");
+    vi.mocked(backend.saveSettings).mockClear();
+
+    fireEvent.click(screen.getByRole("button", { name: "Add binding" }));
+
+    // The row is on screen and listening, and nothing was written.
+    const recorder = await screen.findByLabelText("Binding 2 trigger");
+    expect(recorder).toHaveValue("Listening...");
+    await screen.findByText("No keys recorded yet.");
+    expect(backend.saveSettings).not.toHaveBeenCalled();
+
+    fireEvent.keyDown(recorder, {
+      key: "E",
+      code: "KeyE",
+      ctrlKey: true,
+      altKey: true,
+    });
+
+    await waitFor(() => {
+      expect(backend.saveSettings).toHaveBeenCalled();
+    });
+    const saveCalls = vi.mocked(backend.saveSettings).mock.calls;
+    const saved = saveCalls[saveCalls.length - 1]?.[0] as unknown as {
+      shortcuts: {
+        toggleDictation: string;
+        dictationBindings: Array<{ trigger: { accelerator?: string } }>;
+      };
+    };
+    expect(saved.shortcuts.dictationBindings).toHaveLength(2);
+    expect(saved.shortcuts.dictationBindings[0].trigger.accelerator).toBe(
+      "Ctrl+Shift+Space",
+    );
+    expect(saved.shortcuts.dictationBindings[1].trigger.accelerator).toBe(
+      "Ctrl+Alt+E",
+    );
+    expect(saved.shortcuts.toggleDictation).toBe("Ctrl+Shift+Space");
+    // No save anywhere in this flow may carry a triggerless row.
+    for (const [payload] of saveCalls) {
+      const bindings =
+        (payload as unknown as {
+          shortcuts?: { dictationBindings?: Array<{ trigger: { accelerator?: string } }> };
+        }).shortcuts?.dictationBindings ?? [];
+      for (const binding of bindings) {
+        expect(binding.trigger.accelerator?.trim()).not.toBe("");
+      }
+    }
+  });
+
+  it("drops an abandoned new binding without saving anything", async () => {
+    const backend = await import("@/lib/backend");
+    vi.mocked(backend.getDictationShortcutCapabilityStatus).mockResolvedValue({
+      nativeShortcutAvailable: true,
+    });
+    vi.mocked(backend.getSettings).mockResolvedValue({
+      ...baseSettings,
+      shortcuts: {
+        ...baseSettings.shortcuts,
+        toggleDictation: "Ctrl+Shift+Space",
+      },
+    } as unknown as Awaited<ReturnType<typeof backend.getSettings>>);
+
+    render(
+      <ToastProvider>
+        <SettingsView />
+      </ToastProvider>,
+    );
+
+    await screen.findByText("How Plainsong listens, writes, and what it keeps.");
+    await screen.findByText("Dictation bindings");
+    vi.mocked(backend.saveSettings).mockClear();
+
+    fireEvent.click(screen.getByRole("button", { name: "Add binding" }));
+    await screen.findByLabelText("Binding 2 trigger");
+    fireEvent.click(
+      screen.getByRole("button", { name: "Remove binding 2 binding" }),
+    );
+
+    await waitFor(() => {
+      expect(screen.queryByLabelText("Binding 2 trigger")).not.toBeInTheDocument();
+    });
+    expect(backend.saveSettings).not.toHaveBeenCalled();
+  });
+
+  // Hiding the "hold" option left a saved hold row rendering a <select> with
+  // no matching option, which browsers show as the first one -- so the row
+  // read "Follows the setting above" while the stored behavior was hold.
+  it("keeps a saved hold binding readable on a machine with no native helper", async () => {
+    const backend = await import("@/lib/backend");
+    vi.mocked(backend.getDictationShortcutCapabilityStatus).mockResolvedValue({
+      nativeShortcutAvailable: false,
+    });
+    vi.mocked(backend.getSettings).mockResolvedValue({
+      ...baseSettings,
+      shortcuts: {
+        ...baseSettings.shortcuts,
+        toggleDictation: "Ctrl+Shift+Space",
+        dictationBindings: [
+          {
+            id: "primary",
+            trigger: { kind: "key", accelerator: "Ctrl+Shift+Space" },
+            action: { kind: "dictation", modeId: null, behavior: "hold" },
+          },
+        ],
+      },
+    } as unknown as Awaited<ReturnType<typeof backend.getSettings>>);
+
+    render(
+      <ToastProvider>
+        <SettingsView />
+      </ToastProvider>,
+    );
+
+    await screen.findByText("How Plainsong listens, writes, and what it keeps.");
+    await screen.findByText("Dictation bindings");
+
+    const behavior = (await screen.findByLabelText(
+      "Dictation behavior",
+    )) as HTMLSelectElement;
+    // The stored value is still what the row shows, and the option it names
+    // exists -- disabled, saying why.
+    expect(behavior.value).toBe("hold");
+    const holdOption = within(behavior).getByRole("option", {
+      name: "Hold to record (needs the native helper)",
+    }) as HTMLOptionElement;
+    expect(holdOption.disabled).toBe(true);
+    expect(
+      screen.getByText(
+        /Hold needs the native shortcut helper, which is not running, so this binding presses to start and presses again to stop until it is\./,
+      ),
+    ).toBeInTheDocument();
+  });
+
+  // `mousedown` fires before `focus`, so requiring the recorder to already be
+  // listening threw away the first click on an unfocused row: the user had to
+  // click once to focus and again to bind.
+  it("binds an extra mouse button on the first click, without focusing first", async () => {
+    const backend = await import("@/lib/backend");
+    vi.mocked(backend.getDictationShortcutCapabilityStatus).mockResolvedValue({
+      nativeShortcutAvailable: true,
+    });
+    vi.mocked(backend.getSettings).mockResolvedValue({
+      ...baseSettings,
+      shortcuts: {
+        ...baseSettings.shortcuts,
+        toggleDictation: "Ctrl+Shift+Space",
+      },
+    } as unknown as Awaited<ReturnType<typeof backend.getSettings>>);
+
+    render(
+      <ToastProvider>
+        <SettingsView />
+      </ToastProvider>,
+    );
+
+    await screen.findByText("How Plainsong listens, writes, and what it keeps.");
+    await screen.findByText("Dictation bindings");
+    vi.mocked(backend.saveSettings).mockClear();
+
+    const recorder = await screen.findByLabelText("Dictation shortcut");
+    // No focus event first: this is the very first interaction with the row.
+    fireEvent.mouseDown(recorder, { button: 3 });
+
+    await waitFor(() => {
+      expect(backend.saveSettings).toHaveBeenCalled();
+    });
+    const saveCalls = vi.mocked(backend.saveSettings).mock.calls;
+    const saved = saveCalls[saveCalls.length - 1]?.[0] as unknown as {
+      shortcuts: { dictationBindings: Array<{ trigger: Record<string, unknown> }> };
+    };
+    expect(saved.shortcuts.dictationBindings[0].trigger).toEqual({
+      kind: "mouse",
+      button: 4,
+      modifiers: [],
+    });
+  });
+
+  // ── Translate to English (roadmap item B7a) ────────────────────────────
+  it("refuses translate-to-English on an English-only whisper model and says why", async () => {
+    render(
+      <ToastProvider>
+        <SettingsView />
+      </ToastProvider>,
+    );
+
+    await screen.findByText("How Plainsong listens, writes, and what it keeps.");
+    fireEvent.click(screen.getByText("Transcription"));
+    await screen.findByText("Microphones");
+
+    // baseSettings selects whisper `base.en`, which has no translate task.
+    const toggle = await screen.findByRole("switch", {
+      name: "Translate to English",
+    });
+    expect(toggle).toBeDisabled();
+    expect(
+      screen.getByText(
+        /This model is English-only and cannot translate\./,
+      ),
+    ).toBeInTheDocument();
+  });
 });
