@@ -289,16 +289,9 @@ const captureAdmission = new CaptureAdmissionController();
 // The containers "Import audio…" offers in the open dialog. Mirrors
 // SUPPORTED_IMPORT_EXTENSIONS in rust-sidecar/src/audio_import.rs, which is
 // what actually enforces the list — this only shapes the picker.
-const IMPORTABLE_AUDIO_EXTENSIONS = [
-  "wav",
-  "mp3",
-  "m4a",
-  "aac",
-  "mp4",
-  "webm",
-  "ogg",
-  "flac",
-];
+// .webm is absent on purpose: CoreAudio has no Matroska demuxer, so afconvert
+// answers "Couldn't open input file" for every one of them.
+const IMPORTABLE_AUDIO_EXTENSIONS = ["wav", "mp3", "m4a", "aac", "mp4", "ogg", "flac"];
 // Session id from the most recent `dictation-state-changed` event, used to
 // drop stale VAD `silence_stop` signals emitted for an earlier session.
 let dictationSessionId: number | null = null;

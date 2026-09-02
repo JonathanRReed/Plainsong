@@ -72,10 +72,13 @@ using sensitive content.
   audio). whisper.cpp tiny, base and every `.en` build stay dictation-only, and
   whisper.cpp is never chosen for meetings on its own: it runs a meeting only
   when you pick one of those models for the meeting lane in Settings.
-- "Import audio…" accepts .wav, .mp3, .m4a, .aac, .mp4, .webm, .ogg and .flac
-  up to 2 GB and 4 hours. It uses macOS' own audio converter, so it is macOS
-  only in this beta, and a file macOS cannot decode (a DRM-protected purchase,
-  an unusual codec) is refused with the converter's own reason. The file you
+- "Import audio…" accepts .wav, .mp3, .m4a, .aac, .mp4, .ogg and .flac up to
+  2 GB and 4 hours. It uses macOS' own audio converter, so it is macOS only in
+  this beta, and a file macOS cannot decode (a DRM-protected purchase, an
+  unusual codec, a .webm — macOS cannot read Matroska at all) is refused with
+  the converter's own reason. A file whose length macOS will not report is
+  refused rather than decoded, because the 4-hour limit cannot be checked
+  without it. The file you
   pick is only read: Plainsong copies the decoded audio into its recordings
   folder and never moves, changes or deletes your original. An imported
   meeting has no microphone and system-audio sides, so speaker separation is

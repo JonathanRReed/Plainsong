@@ -17,8 +17,15 @@ use std::path::Path;
 
 /// The container extensions "Import audio…" accepts, matching the file
 /// dialog's filter in `electron/main.ts`.
+///
+/// `.webm` is deliberately absent: CoreAudio has no Matroska demuxer, so
+/// `afinfo` answers "AudioFileOpenURL failed" and `afconvert` answers
+/// "Couldn't open input file" for every one of them. Advertising a format the
+/// decoder cannot open only moves the refusal from the picker to a failed
+/// import. `.ogg` stays because CoreAudio does read Ogg (verified with an
+/// Opus-in-Ogg file).
 pub(crate) const SUPPORTED_IMPORT_EXTENSIONS: &[&str] =
-    &["wav", "mp3", "m4a", "aac", "mp4", "webm", "ogg", "flac"];
+    &["wav", "mp3", "m4a", "aac", "mp4", "ogg", "flac"];
 
 /// 2 GB. Larger than any plausible meeting recording, and small enough that
 /// the converted 16 kHz mono WAV still fits comfortably on disk.
@@ -32,6 +39,22 @@ pub(crate) const MAX_IMPORT_DURATION_SECONDS: f64 = 4.0 * 60.0 * 60.0;
 
 /// The sample rate every ASR route here expects.
 pub(crate) const IMPORT_SAMPLE_RATE_HZ: u32 = 16_000;
+
+/// Bytes one second of the converted file occupies: 16 kHz, mono, 16-bit.
+pub(crate) const IMPORT_WAV_BYTES_PER_SECOND: u64 = IMPORT_SAMPLE_RATE_HZ as u64 * 2;
+
+/// Free space kept beyond the converted WAV itself.
+///
+/// The conversion is not the only writer on this volume — a meeting may be
+/// recording into the same folder while an import runs — so filling the disk
+/// to the last byte of the converted file would break the recording rather
+/// than the import.
+pub(crate) const IMPORT_SPACE_MARGIN_BYTES: u64 = 256 * 1024 * 1024;
+
+/// The shortest conversion timeout, for a file too short for `2x duration` to
+/// mean anything. `afconvert` on a few seconds of audio finishes in
+/// milliseconds; a minute is spent only when something is genuinely wrong.
+pub(crate) const MIN_IMPORT_CONVERSION_TIMEOUT_SECONDS: u64 = 60;
 
 /// The lowercase extension of `path`, if it is one Plainsong can import.
 pub(crate) fn validate_import_extension(path: &Path) -> Result<String, String> {
@@ -111,21 +134,122 @@ pub(crate) fn afconvert_args(input: &Path, output: &Path) -> Vec<OsString> {
 
 /// Pulls the duration out of `afinfo` output.
 ///
-/// `afinfo` prints a human report, not JSON; the one line worth reading is
-/// `estimated duration: 2.000000 sec`. Returning `None` for anything else
-/// keeps a format change from being read as "zero seconds".
+/// `afinfo` prints a human report, not JSON, and it prints two different
+/// reports. Plain `afinfo` has the line worth reading,
+/// `estimated duration: 2.000000 sec`. `afinfo --brief` has no such line at
+/// all -- it states the length in the head of its format line,
+/// `1.492 sec, format:   1 ch,  16000 Hz, Int16`. Both are parsed here, so
+/// neither invocation silently reports "unknown length" and skips the guard
+/// that keeps a nine-hour file from being decoded in full.
+///
+/// Returning `None` for anything else keeps a format change from being read
+/// as "zero seconds"; the caller treats `None` as a refusal, not a pass.
 pub(crate) fn parse_afinfo_duration_seconds(output: &str) -> Option<f64> {
     for line in output.lines() {
         let lowered = line.trim().to_ascii_lowercase();
-        let Some(rest) = lowered.strip_prefix("estimated duration:") else {
+        if let Some(rest) = lowered.strip_prefix("estimated duration:") {
+            let value = rest.trim().trim_end_matches("sec").trim();
+            if let Ok(seconds) = value.parse::<f64>() {
+                return Some(seconds);
+            }
             continue;
-        };
-        let value = rest.trim().trim_end_matches("sec").trim();
-        if let Ok(seconds) = value.parse::<f64>() {
+        }
+        if let Some(seconds) = parse_afinfo_brief_duration_line(&lowered) {
             return Some(seconds);
         }
     }
     None
+}
+
+/// The `--brief` report's one duration line: `1.492 sec, format:   1 ch, ...`.
+///
+/// The `format:` tail is required, so a number that happens to sit in front of
+/// the word "sec" in a file name or an error sentence is never read as a
+/// length.
+fn parse_afinfo_brief_duration_line(lowered_line: &str) -> Option<f64> {
+    let (seconds, rest) = lowered_line.split_once(" sec,")?;
+    if !rest.trim_start().starts_with("format:") {
+        return None;
+    }
+    seconds.trim().parse::<f64>().ok()
+}
+
+/// What to say when macOS could not tell Plainsong how long a file is.
+///
+/// This is a refusal, not a warning. The length check is the only thing
+/// standing between a nine-hour file and a full decode, so a length nobody can
+/// read means the file does not get decoded. `afinfo` names the reason on
+/// stderr ("Fail: AudioFileOpenURL failed"), and that sentence is the useful
+/// half of the message.
+pub(crate) fn unreadable_duration_message(stderr: &str) -> String {
+    match stderr.lines().map(str::trim).find(|line| !line.is_empty()) {
+        Some(detail) => format!(
+            "Plainsong could not determine the length of that audio file, so it will not decode it: {detail}"
+        ),
+        None => "Plainsong could not determine the length of that audio file, so it will not decode it."
+            .to_string(),
+    }
+}
+
+/// How long the conversion of a file this long is allowed to take.
+///
+/// `afconvert` decodes far faster than real time, so twice the source duration
+/// is generous for any file that is being read at all. What this bounds is the
+/// case the multiplier cannot help with: a source on a network volume that
+/// stops answering, where `afconvert` blocks in a read forever while the
+/// import holds the audio storage gate and the post-processing lease, wedging
+/// retention, vault migration and backup until the sidecar restarts.
+pub(crate) fn import_conversion_timeout(duration_seconds: f64) -> std::time::Duration {
+    let doubled = if duration_seconds.is_finite() && duration_seconds > 0.0 {
+        (duration_seconds * 2.0).ceil() as u64
+    } else {
+        0
+    };
+    std::time::Duration::from_secs(doubled.max(MIN_IMPORT_CONVERSION_TIMEOUT_SECONDS))
+}
+
+/// Bytes that must be free before a file this long is converted: the converted
+/// 16 kHz mono WAV, plus a fixed margin for everything else writing here.
+pub(crate) fn import_conversion_bytes_needed(duration_seconds: f64) -> u64 {
+    let seconds = if duration_seconds.is_finite() && duration_seconds > 0.0 {
+        duration_seconds.ceil() as u64
+    } else {
+        0
+    };
+    seconds
+        .saturating_mul(IMPORT_WAV_BYTES_PER_SECOND)
+        .saturating_add(IMPORT_SPACE_MARGIN_BYTES)
+}
+
+/// `Some(needed)` when a volume with `available` free bytes must not be asked
+/// to hold the conversion of a file this long.
+///
+/// `None` for an unmeasurable volume: a filesystem that cannot report free
+/// space must leave the import unpreflighted, not impossible. That matches
+/// what capture does in `audio.rs`.
+pub(crate) fn import_space_shortfall(
+    duration_seconds: f64,
+    available: Option<u64>,
+) -> Option<u64> {
+    let needed = import_conversion_bytes_needed(duration_seconds);
+    match available {
+        Some(available) if available < needed => Some(needed),
+        _ => None,
+    }
+}
+
+pub(crate) fn insufficient_space_message(needed_bytes: u64) -> String {
+    format!(
+        "There is not enough free space to decode that audio file. Plainsong needs about {:.1} GB free.",
+        needed_bytes as f64 / (1024.0 * 1024.0 * 1024.0)
+    )
+}
+
+pub(crate) fn conversion_timeout_message(timeout: std::time::Duration) -> String {
+    format!(
+        "Decoding that audio file took longer than {} seconds, so Plainsong stopped it. If the file is on a network volume or an external disk, copy it to this Mac and try again.",
+        timeout.as_secs()
+    )
 }
 
 /// The meeting title for an imported file: the file's own name without its
@@ -232,18 +356,166 @@ mod tests {
         assert_eq!(args[7].to_string_lossy(), "/in/two channel.m4a");
     }
 
+    /// Verbatim `afinfo <file>` output, captured on macOS 27 from a 16 kHz
+    /// mono WAV written by `afconvert`.
+    const REAL_AFINFO_FULL_WAV: &str = "\
+File:           /tmp/probe.wav
+File type ID:   WAVE
+Num Tracks:     1
+----
+Data format:     1 ch,  16000 Hz, Int16
+                no channel layout.
+estimated duration: 1.492438 sec
+audio bytes: 47758
+audio packets: 23879
+bit rate: 256000 bits per second
+packet size upper bound: 2
+maximum packet size: 2
+audio data file offset: 4096
+optimized
+source bit depth: I16
+----
+";
+
+    /// Verbatim `afinfo --brief <file>` output for the same file. Note that
+    /// there is no `estimated duration:` line anywhere in it: this is the
+    /// report the probe used to run, which is why the length guard never fired.
+    const REAL_AFINFO_BRIEF_WAV: &str = "\
+/tmp/probe.wav, WAVE, Num Tracks:     1
+----
+1.492 sec, format:   1 ch,  16000 Hz, Int16
+";
+
+    /// Verbatim `afinfo --brief <file>` output for an AAC-in-MP4 file, whose
+    /// format tail is much longer than the WAV one.
+    const REAL_AFINFO_BRIEF_M4A: &str = "\
+/tmp/probe.m4a, m4af, Num Tracks:     1
+----
+1.492 sec, format:   1 ch,  16000 Hz, aac  (0x00000000) 0 bits/channel, 0 bytes/packet, 1024 frames/packet, 0 bytes/frame
+";
+
+    /// Verbatim `afinfo` stderr for a file CoreAudio cannot open — here a real
+    /// Opus-in-WebM file, which is exactly why .webm is no longer offered.
+    const REAL_AFINFO_UNOPENABLE_STDERR: &str = "Fail: AudioFileOpenURL failed\n";
+
     #[test]
-    fn afinfo_duration_is_read_from_the_line_that_states_it() {
-        let output = "File:           sample.wav\n\
-             File type ID:   WAVE\n\
-             ----\n\
-             Data format:     2 ch,  44100 Hz, Int16, interleaved\n\
-             estimated duration: 3721.500000 sec\n\
-             audio bytes: 352800\n";
-        assert_eq!(parse_afinfo_duration_seconds(output), Some(3721.5));
-        // A report without the line is unknown, not zero.
+    fn afinfo_duration_is_read_from_both_reports_macos_actually_prints() {
+        // The plain report states it outright.
+        assert_eq!(
+            parse_afinfo_duration_seconds(REAL_AFINFO_FULL_WAV),
+            Some(1.492438)
+        );
+        // The brief report states it only in the head of the format line.
+        assert_eq!(
+            parse_afinfo_duration_seconds(REAL_AFINFO_BRIEF_WAV),
+            Some(1.492)
+        );
+        assert_eq!(
+            parse_afinfo_duration_seconds(REAL_AFINFO_BRIEF_M4A),
+            Some(1.492)
+        );
+
+        // A synthetic long file, to show the value that reaches the 4-hour
+        // guard is the number of seconds and not a rounded minute count.
+        let long = "File:           sample.wav\n\
+             estimated duration: 3721.500000 sec\n";
+        assert_eq!(parse_afinfo_duration_seconds(long), Some(3721.5));
+
+        // A report without either shape is unknown, not zero.
+        assert_eq!(
+            parse_afinfo_duration_seconds(REAL_AFINFO_UNOPENABLE_STDERR),
+            None
+        );
         assert_eq!(parse_afinfo_duration_seconds("File: broken.mp3\n"), None);
         assert_eq!(parse_afinfo_duration_seconds(""), None);
+        // " sec," without a format tail is prose, not a duration.
+        assert_eq!(
+            parse_afinfo_duration_seconds("gave up after 30 sec, sorry\n"),
+            None
+        );
+        // A file name that reads like the brief line still does not parse.
+        assert_eq!(
+            parse_afinfo_duration_seconds("/tmp/12 sec, format: notes.wav, WAVE\n"),
+            None
+        );
+    }
+
+    #[test]
+    fn a_length_macos_will_not_state_is_a_refusal_and_names_the_reason() {
+        let refusal = unreadable_duration_message(REAL_AFINFO_UNOPENABLE_STDERR);
+        assert!(refusal.contains("could not determine the length"), "{refusal}");
+        assert!(refusal.contains("will not decode it"), "{refusal}");
+        assert!(refusal.contains("AudioFileOpenURL failed"), "{refusal}");
+        // Nothing on stderr still refuses; it just has less to say.
+        let quiet = unreadable_duration_message("   \n\n");
+        assert!(quiet.contains("could not determine the length"), "{quiet}");
+        assert!(quiet.ends_with("will not decode it."), "{quiet}");
+    }
+
+    #[test]
+    fn webm_is_no_longer_offered_because_coreaudio_cannot_open_it() {
+        assert!(!SUPPORTED_IMPORT_EXTENSIONS.contains(&"webm"));
+        let refused = validate_import_extension(Path::new("/tmp/call.webm")).unwrap_err();
+        assert!(refused.contains(".webm"), "{refused}");
+        assert!(!supported_extensions_sentence().contains("webm"));
+        // Ogg stays: CoreAudio does read it.
+        assert!(SUPPORTED_IMPORT_EXTENSIONS.contains(&"ogg"));
+    }
+
+    #[test]
+    fn the_conversion_timeout_scales_with_the_source_but_never_goes_below_a_minute() {
+        use std::time::Duration;
+        // Short files get the floor, not two seconds.
+        assert_eq!(import_conversion_timeout(1.0), Duration::from_secs(60));
+        assert_eq!(import_conversion_timeout(29.9), Duration::from_secs(60));
+        // At 30 s the doubling takes over exactly.
+        assert_eq!(import_conversion_timeout(30.0), Duration::from_secs(60));
+        assert_eq!(import_conversion_timeout(45.0), Duration::from_secs(90));
+        // A four-hour file, the longest import allowed, gets eight hours.
+        assert_eq!(
+            import_conversion_timeout(MAX_IMPORT_DURATION_SECONDS),
+            Duration::from_secs(8 * 60 * 60)
+        );
+        // A length that is not a length still bounds the wait.
+        assert_eq!(import_conversion_timeout(0.0), Duration::from_secs(60));
+        assert_eq!(import_conversion_timeout(-5.0), Duration::from_secs(60));
+        assert_eq!(import_conversion_timeout(f64::NAN), Duration::from_secs(60));
+        assert_eq!(
+            import_conversion_timeout(f64::INFINITY),
+            Duration::from_secs(60)
+        );
+
+        let message = conversion_timeout_message(Duration::from_secs(90));
+        assert!(message.contains("90 seconds"), "{message}");
+        assert!(message.contains("network volume"), "{message}");
+    }
+
+    #[test]
+    fn the_space_estimate_charges_the_converted_wav_plus_a_margin() {
+        // One hour of 16 kHz mono 16-bit is 115.2 MB.
+        assert_eq!(
+            import_conversion_bytes_needed(3600.0),
+            3600 * 32_000 + IMPORT_SPACE_MARGIN_BYTES
+        );
+        // Even a zero-length file is charged the margin, so a full disk is
+        // caught before afconvert is spawned at all.
+        assert_eq!(
+            import_conversion_bytes_needed(0.0),
+            IMPORT_SPACE_MARGIN_BYTES
+        );
+
+        let needed = import_conversion_bytes_needed(3600.0);
+        assert_eq!(import_space_shortfall(3600.0, Some(needed)), None);
+        assert_eq!(
+            import_space_shortfall(3600.0, Some(needed - 1)),
+            Some(needed)
+        );
+        // Unmeasurable free space leaves the import unpreflighted, not refused.
+        assert_eq!(import_space_shortfall(3600.0, None), None);
+
+        let message = insufficient_space_message(needed);
+        assert!(message.contains("not enough free space"), "{message}");
+        assert!(message.contains("GB free"), "{message}");
     }
 
     #[test]
