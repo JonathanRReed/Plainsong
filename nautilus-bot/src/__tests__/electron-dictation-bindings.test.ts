@@ -44,6 +44,30 @@ describe("resolveDictationBindings (migration)", () => {
     ]);
   });
 
+  // The sidecar's `reconcile_keyboard_shortcuts` defaults an unrecognised
+  // behavior to "inherit". Dropping the row here instead meant a file written
+  // by an older build lost a working binding in Electron while the sidecar
+  // kept it, so the two sides registered different hotkeys.
+  it("defaults a missing or unrecognised behavior to inherit, like the sidecar", () => {
+    const table = [
+      { id: "no-behavior", trigger: { kind: "key", accelerator: "Cmd+Alt+E" }, action: { kind: "dictation", modeId: null } },
+      { id: "odd-behavior", trigger: { kind: "key", accelerator: "Cmd+Alt+R" }, action: { kind: "dictation", modeId: "email", behavior: "push" } },
+    ] as unknown as DictationBinding[];
+
+    expect(resolveDictationBindings({ dictationBindings: table })).toEqual([
+      {
+        id: "no-behavior",
+        trigger: { kind: "key", accelerator: "Cmd+Alt+E" },
+        action: { kind: "dictation", modeId: null, behavior: "inherit" },
+      },
+      {
+        id: "odd-behavior",
+        trigger: { kind: "key", accelerator: "Cmd+Alt+R" },
+        action: { kind: "dictation", modeId: "email", behavior: "inherit" },
+      },
+    ]);
+  });
+
   it("returns nothing when the legacy key was cleared and no table exists", () => {
     expect(resolveDictationBindings({ toggleDictation: "" })).toEqual([]);
     expect(resolveDictationBindings(undefined)).toEqual([]);
@@ -110,7 +134,7 @@ describe("validateDictationBindings", () => {
     );
   });
 
-  it("refuses a bare letter but allows function keys and lone modifiers", () => {
+  it("refuses a bare letter but allows function keys and Fn on its own", () => {
     const issues = validateDictationBindings(
       [keyBinding("bare", "D"), keyBinding("fkey", "F5"), keyBinding("fn", "Fn")],
       { nativeShortcutAvailable: true },
@@ -118,6 +142,50 @@ describe("validateDictationBindings", () => {
     expect(issues).toEqual([
       expect.objectContaining({ bindingId: "bare", code: "bare_key" }),
     ]);
+  });
+
+  // The helper matches `.maskCommand` (either Cmd key) and arms after 150 ms
+  // with nothing else pressed, so a lone Cmd would start dictation from an
+  // ordinary pause mid-chord. Fn is the only one the selector ever offered.
+  it("allows only Fn as a trigger on its own", () => {
+    const issues = validateDictationBindings(
+      [
+        keyBinding("fn", "Fn"),
+        keyBinding("cmd", "Cmd"),
+        keyBinding("ctrl", "Control"),
+        keyBinding("shift", "\u21e7"),
+      ],
+      { nativeShortcutAvailable: true },
+    );
+    expect(issues.map((issue) => [issue.bindingId, issue.code])).toEqual([
+      ["cmd", "unsupported_lone_modifier"],
+      ["ctrl", "unsupported_lone_modifier"],
+      ["shift", "unsupported_lone_modifier"],
+    ]);
+    expect(issues[0].message).toMatch(/Fn is the only modifier that can\./);
+  });
+
+  it("refuses chords macOS owns, however they are spelled", () => {
+    const reserved = ["Cmd+Q", "Cmd+W", "Cmd+Tab", "Cmd+Space", "Cmd+H", "Cmd+M", "\u2318+Q"];
+    const issues = validateDictationBindings(
+      reserved.map((accelerator, index) => keyBinding(`r${index}`, accelerator)),
+      { nativeShortcutAvailable: true },
+    );
+    expect(issues.map((issue) => issue.code)).toEqual(reserved.map(() => "reserved_combo"));
+    expect(issues[0].message).toMatch(/reserved by macOS/);
+  });
+
+  it("leaves a chord with an extra modifier alone, including the product default", () => {
+    expect(
+      validateDictationBindings(
+        [
+          keyBinding("default", "Cmd+Shift+Space"),
+          keyBinding("a", "Cmd+Ctrl+Q"),
+          keyBinding("b", "Ctrl+Q"),
+        ],
+        { nativeShortcutAvailable: true },
+      ),
+    ).toEqual([]);
   });
 
   it("marks mouse buttons and lone modifiers as needing the native helper when it is down", () => {

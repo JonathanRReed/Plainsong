@@ -2163,13 +2163,22 @@ export function SettingsView() {
       setRecordingBindingId(null);
     };
 
-  // Extra mouse buttons while a recorder is listening become a mouse trigger.
-  // DOM numbers them 1 (middle), 3 (back), 4 (forward); Plainsong uses 3-5.
+  // An extra mouse button pressed on a row's own recorder becomes a mouse
+  // trigger. DOM numbers them 1 (middle), 3 (back), 4 (forward); Plainsong
+  // uses 3-5.
+  //
+  // There is deliberately no "is this recorder already listening" check:
+  // `mousedown` fires BEFORE `focus`, so requiring `recordingBindingId` to
+  // already name this row threw away the first click on an unfocused
+  // recorder -- the user had to click once to focus and again to bind. The
+  // gate that remains is the same one `onFocus` applies: a row whose trigger
+  // type is "Fn on its own" is not recording anything.
   const handleBindingRecorderMouseDown =
-    (bindingId: string) => (event: ReactMouseEvent<HTMLInputElement>) => {
+    (bindingId: string, recordable: boolean) =>
+    (event: ReactMouseEvent<HTMLInputElement>) => {
       const button =
         event.button === 1 ? 3 : event.button === 3 ? 4 : event.button === 4 ? 5 : null;
-      if (button === null || recordingBindingId !== bindingId) {
+      if (button === null || !recordable) {
         return;
       }
       event.preventDefault();
@@ -2196,6 +2205,8 @@ export function SettingsView() {
     // press-only fallback runs it as toggle (see
     // `resolveDictationShortcutCapability`), so the row has to say so rather
     // than silently reading as something else.
+    // "Fn on its own" needs no recorder; everything else records.
+    const triggerIsRecordable = triggerType === "keys" || binding.trigger.kind === "mouse";
     const holdWithoutHelper =
       !nativeShortcutAvailable &&
       binding.action.kind === "dictation" &&
@@ -2242,7 +2253,7 @@ export function SettingsView() {
                   : ""
             }`}
             onFocus={() => {
-              if (triggerType === "keys" || binding.trigger.kind === "mouse") {
+              if (triggerIsRecordable) {
                 setRecordingBindingId(binding.id);
               }
             }}
@@ -2252,7 +2263,7 @@ export function SettingsView() {
               }
             }}
             onKeyDown={handleBindingRecorderKeyDown(binding.id)}
-            onMouseDown={handleBindingRecorderMouseDown(binding.id)}
+            onMouseDown={handleBindingRecorderMouseDown(binding.id, triggerIsRecordable)}
           />
           <select
             aria-label={`${rowLabel} action`}

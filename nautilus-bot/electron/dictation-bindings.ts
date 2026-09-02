@@ -53,6 +53,32 @@ const DICTATION_BINDING_MOUSE_BUTTONS: readonly DictationBindingMouseButton[] = 
 const MODIFIER_TOKENS = new Set(["command", "control", "alt", "shift", "fn"]);
 
 /**
+ * Chords macOS itself owns, in the spelling `normalizeShortcutAccelerator`
+ * produces. Binding one either does nothing (the system swallows it first) or
+ * takes a gesture the user needs more than a dictation hotkey: quit, close,
+ * app switch, Spotlight, hide, minimize. Mirrored by
+ * `RESERVED_SHORTCUT_CHORDS` in `rust-sidecar/src/settings.rs`.
+ */
+const RESERVED_SHORTCUT_ACCELERATORS: ReadonlySet<string> = new Set([
+  "command+q",
+  "command+w",
+  "command+tab",
+  "command+space",
+  "command+h",
+  "command+m",
+]);
+
+/**
+ * The only modifier that may be a trigger on its own.
+ *
+ * The helper matches `.maskCommand` (either Cmd key) and arms after 150 ms
+ * with nothing else pressed, so a lone Cmd would start dictation from an
+ * ordinary pause mid-chord. Fn is the one modifier nothing else on macOS
+ * treats as a hold, and the only one the trigger-type selector ever offered.
+ */
+const LONE_MODIFIER_ALLOWED = "fn";
+
+/**
  * Built-in mode presets, in the order their tiles appear on the Dictation
  * screen (`DICTATION_PROFILE_TILES` in `src/lib/dictation-profiles.ts`).
  */
@@ -126,7 +152,7 @@ export function resolveDictationBindings(
 ): DictationBinding[] {
   const table = shortcuts?.dictationBindings;
   if (Array.isArray(table)) {
-    const valid = table.filter(isDictationBinding);
+    const valid = table.filter(isDictationBinding).map(normalizeDictationBindingBehavior);
     if (table.length > 0) {
       return valid;
     }
@@ -160,14 +186,26 @@ function isDictationBinding(value: unknown): value is DictationBinding {
         (trigger as { button?: unknown }).button as number,
       ));
   const action = binding.action as Partial<DictationBindingAction>;
+  // A dictation action with a missing or unrecognised `behavior` is NOT
+  // malformed. The sidecar's `reconcile_keyboard_shortcuts` defaults it to
+  // "inherit"; dropping the row here instead meant a settings file written by
+  // an older build (or hand-edited) lost a working binding in Electron while
+  // the sidecar kept it, so the hotkey registered differently on each side.
   const actionOk =
-    action.kind === "cycleMode" ||
-    action.kind === "cancel" ||
-    (action.kind === "dictation" &&
-      ["toggle", "hold", "inherit"].includes(
-        (action as { behavior?: unknown }).behavior as string,
-      ));
+    action.kind === "cycleMode" || action.kind === "cancel" || action.kind === "dictation";
   return triggerOk && actionOk;
+}
+
+/** Apply the sidecar's default for a behavior it would have normalized. */
+function normalizeDictationBindingBehavior(binding: DictationBinding): DictationBinding {
+  if (binding.action.kind !== "dictation") {
+    return binding;
+  }
+  const behavior = binding.action.behavior as unknown;
+  if (behavior === "toggle" || behavior === "hold" || behavior === "inherit") {
+    return binding;
+  }
+  return { ...binding, action: { ...binding.action, behavior: "inherit" } };
 }
 
 /**
@@ -304,7 +342,9 @@ export type DictationBindingIssueCode =
   | "duplicate_trigger"
   | "needs_native_helper"
   | "unknown_mode"
-  | "invalid_accelerator";
+  | "invalid_accelerator"
+  | "reserved_combo"
+  | "unsupported_lone_modifier";
 
 export type DictationBindingIssue = {
   bindingId: string;
@@ -340,9 +380,17 @@ export function validateDictationBindings(
         });
         continue;
       }
-      const lone = isLoneModifierAccelerator(accelerator);
-      if (!lone) {
-        const normalized = normalizeShortcutAccelerator(accelerator);
+      const normalized = normalizeShortcutAccelerator(accelerator);
+      if (isLoneModifierAccelerator(accelerator)) {
+        if (normalized !== LONE_MODIFIER_ALLOWED) {
+          issues.push({
+            bindingId: binding.id,
+            code: "unsupported_lone_modifier",
+            message: `${describeDictationBindingTrigger(binding.trigger)} cannot be a trigger on its own. Fn is the only modifier that can.`,
+          });
+          continue;
+        }
+      } else {
         const parts = normalized.split("+").filter(Boolean);
         const hasModifier = parts.some((part) => MODIFIER_TOKENS.has(part));
         const key = parts.find((part) => !MODIFIER_TOKENS.has(part)) ?? "";
@@ -363,6 +411,14 @@ export function validateDictationBindings(
           });
           continue;
         }
+      }
+      if (RESERVED_SHORTCUT_ACCELERATORS.has(normalized)) {
+        issues.push({
+          bindingId: binding.id,
+          code: "reserved_combo",
+          message: `${describeDictationBindingTrigger(binding.trigger)} is reserved by macOS. Pick a different combination.`,
+        });
+        continue;
       }
     }
     if (isHelperOnlyTrigger(binding.trigger) && !context.nativeShortcutAvailable) {

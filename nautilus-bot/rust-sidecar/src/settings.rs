@@ -723,6 +723,37 @@ fn is_primary_dictation_binding(binding: &DictationBinding) -> bool {
 
 const SHORTCUT_MODIFIER_TOKENS: &[&str] = &["cmd", "ctrl", "alt", "shift", "fn"];
 
+/// Chords macOS itself owns, as `(sorted modifiers, key)` in the canonical
+/// spelling `dictation_binding_trigger_key` produces. Binding one either does
+/// nothing (the system swallows it first) or takes a gesture the user needs
+/// more than a dictation hotkey -- quit, close, app switch, Spotlight, hide,
+/// minimize. Mirrored by `RESERVED_SHORTCUT_ACCELERATORS` in
+/// `electron/dictation-bindings.ts`.
+const RESERVED_SHORTCUT_CHORDS: &[(&str, &str)] = &[
+    ("cmd", "q"),
+    ("cmd", "w"),
+    ("cmd", "tab"),
+    ("cmd", "space"),
+    ("cmd", "h"),
+    ("cmd", "m"),
+];
+
+/// `f1` through `f24` and nothing else. The old check accepted `f` followed
+/// by any digits, so `f0`, `f99` and `f12345` all passed as "a function key"
+/// and skipped the needs-a-modifier rule. Mirrors the TS side's
+/// `/^f([1-9]|1[0-9]|2[0-4])$/`, leading zeros included.
+fn is_function_key_token(key: &str) -> bool {
+    let Some(digits) = key.strip_prefix('f') else {
+        return false;
+    };
+    if digits.is_empty() || digits.starts_with('0') {
+        return false;
+    }
+    digits
+        .parse::<u32>()
+        .is_ok_and(|number| (1..=24).contains(&number))
+}
+
 fn normalize_shortcut_token(token: &str) -> String {
     match token.trim().to_ascii_lowercase().as_str() {
         "⌘" | "cmd" | "command" | "meta" | "super" => "cmd".to_string(),
@@ -740,8 +771,18 @@ fn normalize_shortcut_token(token: &str) -> String {
 pub(crate) fn dictation_binding_trigger_key(trigger: &DictationBindingTrigger) -> String {
     match trigger {
         DictationBindingTrigger::Key { accelerator } => {
+            // The symbols are separated out, NOT deleted. Replacing them with
+            // a space dropped the modifier entirely, so "⌘+Q" normalized to
+            // the bare key "q" -- which made it look like ordinary typing to
+            // the validator and made "⌘⇧Space" and "Space" the same trigger
+            // for duplicate detection. Mirrors `splitShortcutTokens` in
+            // `electron/shortcut-registration.ts`, which pads them the same
+            // way; `normalize_shortcut_token` maps each symbol to its word.
             let tokens: Vec<String> = accelerator
-                .replace(['⌘', '⌃', '⌥', '⇧'], " ")
+                .replace('⌘', " ⌘ ")
+                .replace('⌃', " ⌃ ")
+                .replace('⌥', " ⌥ ")
+                .replace('⇧', " ⇧ ")
                 .split(|c: char| c == '+' || c.is_whitespace())
                 .filter(|part| !part.trim().is_empty())
                 .map(normalize_shortcut_token)
@@ -818,16 +859,35 @@ pub(crate) fn validate_dictation_bindings(bindings: &[DictationBinding]) -> Resu
                         accelerator
                     ));
                 }
-                if modifiers.is_empty() && !keys.is_empty() {
-                    let is_function_key = keys.len() >= 2
-                        && keys.starts_with('f')
-                        && keys[1..].chars().all(|c| c.is_ascii_digit());
-                    if !is_function_key {
+                if keys.is_empty() {
+                    // A modifier on its own. Only Fn is offered and only Fn is
+                    // safe: the helper matches `.maskCommand` (either Cmd key)
+                    // and arms after 150 ms with nothing else pressed, so a
+                    // lone Cmd would start dictation from an ordinary pause
+                    // mid-chord. Fn is the one modifier nothing else on macOS
+                    // treats as a hold.
+                    if modifiers != "fn" {
                         return Err(format!(
-                            "'{}' would fire on ordinary typing. Add a modifier such as Cmd or Ctrl.",
+                            "'{}' cannot be a trigger on its own. Fn is the only modifier that can.",
                             accelerator
                         ));
                     }
+                } else if modifiers.is_empty() && !is_function_key_token(keys) {
+                    return Err(format!(
+                        "'{}' would fire on ordinary typing. Add a modifier such as Cmd or Ctrl.",
+                        accelerator
+                    ));
+                }
+                if RESERVED_SHORTCUT_CHORDS
+                    .iter()
+                    .any(|(reserved_modifiers, reserved_key)| {
+                        *reserved_modifiers == modifiers && *reserved_key == keys
+                    })
+                {
+                    return Err(format!(
+                        "'{}' is reserved by macOS. Pick a different combination.",
+                        accelerator
+                    ));
                 }
             }
             DictationBindingTrigger::Mouse { button, .. } => {

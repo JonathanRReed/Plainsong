@@ -354,3 +354,26 @@ describe("convertShortcutToAccelerator", () => {
     expect(convertShortcutToAccelerator("Ctrl+F0")).toBeNull();
   });
 });
+
+// A dictation overlay created for this notice has not loaded its renderer
+// yet, so a broadcast in the same tick lands before `listen()` has registered
+// anything and is dropped -- the notice never appears.
+describe("cycle-mode notice delivery in main.ts", () => {
+  const mainSource = readFileSync(resolve(process.cwd(), "electron/main.ts"), "utf8");
+
+  it("re-sends the notice to an overlay that was still loading", () => {
+    expect(mainSource).toMatch(
+      /getOrCreateOverlayWindow\("dictation"\)[\s\S]{0,200}isLoadingMainFrame\(\)/,
+    );
+    expect(mainSource).toMatch(
+      /broadcastRendererEvent\("dictation-mode-cycled", payload\)[\s\S]{0,200}resendOverlayEventWhenReady\(\s*freshOverlay,\s*"dictation-mode-cycled",\s*payload,?\s*\)/,
+    );
+  });
+
+  it("waits for did-finish-load and retries once after it", () => {
+    const body = mainSource.split("function resendOverlayEventWhenReady(")[1] ?? "";
+    const fn = body.split("\nfunction ")[0];
+    expect(fn).toContain('once("did-finish-load"');
+    expect(fn).toContain("setTimeout(send, OVERLAY_EVENT_SETTLE_MS)");
+  });
+});

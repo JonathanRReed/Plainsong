@@ -172,6 +172,23 @@ evidence is stale and must be recaptured before this becomes a candidate.
   files that still carry it load cleanly and are rewritten without it.
 
 ### Fixed
+- Dictation bindings refuse the chords macOS owns (Cmd+Q, Cmd+W, Cmd+Tab,
+  Cmd+Space, Cmd+H, Cmd+M), and a modifier on its own can only be Fn — a lone
+  Cmd would have started dictation from an ordinary pause mid-chord. Both the
+  sidecar and the Settings screen say so in the same words.
+- A shortcut written with the macOS symbols kept its modifiers. The sidecar
+  was deleting them when it normalized a trigger, so a symbol chord read as
+  its bare key: it could fail validation as "ordinary typing", and two
+  different chords could look like the same trigger.
+- A binding whose activation behavior was missing or unrecognised is now read
+  as "follows the setting above" instead of being dropped, matching what the
+  sidecar already did — the two sides could otherwise register different
+  hotkeys from the same file. Only F1 through F24 count as a function key.
+- The first click of an extra mouse button on a binding's recorder now
+  registers. It was discarded because the click had not focused the field
+  yet, so binding a mouse button took two clicks.
+- The "next profile" notice reaches a dictation overlay that had to be
+  created to show it, instead of arriving before that window could listen.
 - The dictation HUD's "next profile" notice is rust and neutral instead of
   gilded. Picking a profile is a mode selector, and gilding it competed with
   the live recording moment gold is reserved for.

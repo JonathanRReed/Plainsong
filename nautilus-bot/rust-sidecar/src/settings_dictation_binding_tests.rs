@@ -5,9 +5,10 @@
 //! arrive in the same settings file.
 
 use super::{
-    normalize_keyboard_shortcuts, reconcile_saved_keyboard_shortcuts, validate_dictation_bindings,
-    DictationBinding, DictationBindingAction, DictationBindingTrigger, KeyboardShortcuts, Settings,
-    SettingsManager, PRIMARY_DICTATION_BINDING_ID,
+    dictation_binding_trigger_key, normalize_keyboard_shortcuts,
+    reconcile_saved_keyboard_shortcuts, validate_dictation_bindings, DictationBinding,
+    DictationBindingAction, DictationBindingTrigger, KeyboardShortcuts, Settings, SettingsManager,
+    PRIMARY_DICTATION_BINDING_ID,
 };
 use std::fs;
 use std::path::PathBuf;
@@ -260,8 +261,8 @@ fn validator_rejects_duplicate_triggers_and_bare_letters() {
     let function_key = vec![key_binding("a", "F5", None)];
     validate_dictation_bindings(&function_key).expect("a function key alone is fine");
 
-    let lone_modifier = vec![key_binding("a", "Fn", None)];
-    validate_dictation_bindings(&lone_modifier).expect("a lone modifier is an explicit choice");
+    let lone_fn = vec![key_binding("a", "Fn", None)];
+    validate_dictation_bindings(&lone_fn).expect("Fn on its own is an explicit choice");
 
     let bad_button = vec![DictationBinding {
         id: "m".to_string(),
@@ -324,4 +325,88 @@ fn a_save_that_only_edits_the_legacy_key_moves_the_primary_binding() {
     retabled.dictation_bindings = vec![key_binding("primary", "Cmd+Alt+Space", None)];
     reconcile_saved_keyboard_shortcuts(&mut retabled, &previous);
     assert_eq!(retabled.toggle_dictation, "Cmd+Alt+Space");
+}
+
+/// Fn is the only modifier the helper can watch safely on its own: it matches
+/// `.maskCommand` for either Cmd key and arms after 150 ms with nothing else
+/// pressed, so a lone Cmd would start dictation from an ordinary pause
+/// mid-chord. The UI only ever offered Fn; the validator now agrees.
+#[test]
+fn only_fn_may_be_a_lone_modifier_trigger() {
+    validate_dictation_bindings(&[key_binding("a", "Fn", None)]).expect("Fn alone is allowed");
+    for modifier in ["Cmd", "Ctrl", "Alt", "Shift", "Command", "⌘"] {
+        let error = validate_dictation_bindings(&[key_binding("a", modifier, None)])
+            .expect_err("only Fn may stand alone");
+        assert!(error.contains("on its own"), "{modifier}: {error}");
+    }
+}
+
+#[test]
+fn reserved_macos_chords_are_refused() {
+    for accelerator in [
+        "Cmd+Q",
+        "Cmd+W",
+        "Cmd+Tab",
+        "Cmd+Space",
+        "Cmd+H",
+        "Cmd+M",
+        "cmd q",
+        "⌘+Q",
+    ] {
+        let error = validate_dictation_bindings(&[key_binding("a", accelerator, None)])
+            .expect_err("reserved chord");
+        assert!(
+            error.contains("reserved by macOS"),
+            "{accelerator}: {error}"
+        );
+    }
+
+    // Adding another modifier makes it the user's chord again, not the
+    // system's -- including the product default.
+    for accelerator in ["Cmd+Shift+Space", "Cmd+Ctrl+Q", "Cmd+Alt+W", "Ctrl+Q"] {
+        validate_dictation_bindings(&[key_binding("a", accelerator, None)])
+            .unwrap_or_else(|error| panic!("{accelerator} must be bindable: {error}"));
+    }
+}
+
+/// The old check was "f followed by any digits", so `f0`, `f99` and `f12345`
+/// all counted as function keys and skipped the needs-a-modifier rule.
+#[test]
+fn only_f1_through_f24_count_as_a_function_key() {
+    for key in ["F1", "F9", "F10", "F19", "F24"] {
+        validate_dictation_bindings(&[key_binding("a", key, None)])
+            .unwrap_or_else(|error| panic!("{key} must be bindable alone: {error}"));
+    }
+    for key in ["F0", "F25", "F99", "F01", "F123"] {
+        let error = validate_dictation_bindings(&[key_binding("a", key, None)])
+            .expect_err("not a function key");
+        assert!(error.contains("ordinary typing"), "{key}: {error}");
+    }
+}
+
+/// `dictation_binding_trigger_key` used to replace the macOS symbols with a
+/// space instead of separating them out, so the modifier was dropped:
+/// "Cmd-Shift-Space" written in symbols and a bare "Space" were the same
+/// trigger, and the symbol form of Cmd+Q read as ordinary typing. Found while
+/// adding the reserved-chord check, which the drop defeated.
+#[test]
+fn macos_symbol_modifiers_survive_normalization() {
+    let symbol = DictationBindingTrigger::Key {
+        accelerator: "\u{2318}\u{21e7}Space".to_string(),
+    };
+    let words = DictationBindingTrigger::Key {
+        accelerator: "Cmd+Shift+Space".to_string(),
+    };
+    let bare = DictationBindingTrigger::Key {
+        accelerator: "Space".to_string(),
+    };
+    assert_eq!(
+        dictation_binding_trigger_key(&symbol),
+        dictation_binding_trigger_key(&words)
+    );
+    assert_ne!(
+        dictation_binding_trigger_key(&symbol),
+        dictation_binding_trigger_key(&bare),
+        "a chord written in symbols must not collapse onto its bare key"
+    );
 }

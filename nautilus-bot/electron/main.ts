@@ -444,6 +444,33 @@ function createTray(): void {
   void refreshDictationPermissionSummary();
 }
 
+// `did-finish-load` fires before React has mounted and subscribed, so a
+// window that was still loading gets the event once on load and once a beat
+// later. The popup's handlers are idempotent (the same label re-sets the same
+// state), so a duplicate costs nothing and a miss costs the whole notice.
+const OVERLAY_EVENT_SETTLE_MS = 200;
+
+/**
+ * Deliver an event again to a window that was still loading when it was
+ * first broadcast. Only for that case -- an already-loaded window has its
+ * listeners and needs no duplicate.
+ */
+function resendOverlayEventWhenReady(
+  window: BrowserWindow,
+  eventName: string,
+  payload: unknown,
+): void {
+  const send = () => {
+    if (!window.isDestroyed()) {
+      window.webContents.send(`sidecar:event:${eventName}`, payload);
+    }
+  };
+  window.webContents.once("did-finish-load", () => {
+    send();
+    setTimeout(send, OVERLAY_EVENT_SETTLE_MS);
+  });
+}
+
 function broadcastRendererEvent(eventName: string, payload: unknown): void {
   for (const win of BrowserWindow.getAllWindows()) {
     if (!win.isDestroyed()) {
@@ -1570,14 +1597,25 @@ async function handleCycleDictationModeBinding(settings: AppSettings): Promise<v
   };
   await ipcBridge.invoke("save_settings", { settings: updated });
   qaLog("dictation mode cycled", next);
+  // A dictation overlay that had to be created for this notice has not
+  // loaded its renderer yet, so a broadcast in the same tick lands before
+  // `listen()` has registered anything and is simply dropped -- the notice
+  // never appears, on exactly the launch where the user needs it most.
+  let freshOverlay: BrowserWindow | null = null;
   if (showDictationOverlayEnabled) {
-    showOverlayWindow(getOrCreateOverlayWindow("dictation"));
+    const overlay = getOrCreateOverlayWindow("dictation");
+    freshOverlay = overlay.webContents.isLoadingMainFrame() ? overlay : null;
+    showOverlayWindow(overlay);
   }
-  broadcastRendererEvent("dictation-mode-cycled", {
+  const payload = {
     modePreset: next.modePreset,
     selectedCustomModeId: next.selectedCustomModeId,
     label: next.label,
-  });
+  };
+  broadcastRendererEvent("dictation-mode-cycled", payload);
+  if (freshOverlay) {
+    resendOverlayEventWhenReady(freshOverlay, "dictation-mode-cycled", payload);
+  }
 }
 
 async function handleDictationBindingTransition(

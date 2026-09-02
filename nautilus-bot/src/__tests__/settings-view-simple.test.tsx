@@ -1788,6 +1788,50 @@ describe("SettingsView performance behavior", () => {
     ).toBeInTheDocument();
   });
 
+  // `mousedown` fires before `focus`, so requiring the recorder to already be
+  // listening threw away the first click on an unfocused row: the user had to
+  // click once to focus and again to bind.
+  it("binds an extra mouse button on the first click, without focusing first", async () => {
+    const backend = await import("@/lib/backend");
+    vi.mocked(backend.getDictationShortcutCapabilityStatus).mockResolvedValue({
+      nativeShortcutAvailable: true,
+    });
+    vi.mocked(backend.getSettings).mockResolvedValue({
+      ...baseSettings,
+      shortcuts: {
+        ...baseSettings.shortcuts,
+        toggleDictation: "Ctrl+Shift+Space",
+      },
+    } as unknown as Awaited<ReturnType<typeof backend.getSettings>>);
+
+    render(
+      <ToastProvider>
+        <SettingsView />
+      </ToastProvider>,
+    );
+
+    await screen.findByText("How Plainsong listens, writes, and what it keeps.");
+    await screen.findByText("Dictation bindings");
+    vi.mocked(backend.saveSettings).mockClear();
+
+    const recorder = await screen.findByLabelText("Dictation shortcut");
+    // No focus event first: this is the very first interaction with the row.
+    fireEvent.mouseDown(recorder, { button: 3 });
+
+    await waitFor(() => {
+      expect(backend.saveSettings).toHaveBeenCalled();
+    });
+    const saveCalls = vi.mocked(backend.saveSettings).mock.calls;
+    const saved = saveCalls[saveCalls.length - 1]?.[0] as unknown as {
+      shortcuts: { dictationBindings: Array<{ trigger: Record<string, unknown> }> };
+    };
+    expect(saved.shortcuts.dictationBindings[0].trigger).toEqual({
+      kind: "mouse",
+      button: 4,
+      modifiers: [],
+    });
+  });
+
   // ── Translate to English (roadmap item B7a) ────────────────────────────
   it("refuses translate-to-English on an English-only whisper model and says why", async () => {
     render(
