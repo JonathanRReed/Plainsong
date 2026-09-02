@@ -8,6 +8,7 @@ import {
   findPrimaryDictationBinding,
   isHelperOnlyTrigger,
   isLoneModifierAccelerator,
+  isRecordedDictationTrigger,
   PRIMARY_DICTATION_BINDING_ID,
   registrableDictationBindings,
   resolveDictationBindingBehavior,
@@ -172,6 +173,18 @@ describe("validateDictationBindings", () => {
     expect(
       validateDictationBindings([keyBinding("new", "  ")], { nativeShortcutAvailable: true }),
     ).toEqual([expect.objectContaining({ bindingId: "new", code: "empty_trigger" })]);
+  });
+});
+
+describe("isRecordedDictationTrigger", () => {
+  it("is false only for a row the sidecar would drop on save", () => {
+    expect(isRecordedDictationTrigger({ kind: "key", accelerator: "Cmd+Alt+E" })).toBe(true);
+    expect(isRecordedDictationTrigger({ kind: "mouse", button: 4 })).toBe(true);
+    expect(isRecordedDictationTrigger({ kind: "key", accelerator: "" })).toBe(false);
+    expect(isRecordedDictationTrigger({ kind: "key", accelerator: "   " })).toBe(false);
+    expect(
+      isRecordedDictationTrigger({ kind: "mouse", button: 1 as unknown as 3 }),
+    ).toBe(false);
   });
 });
 

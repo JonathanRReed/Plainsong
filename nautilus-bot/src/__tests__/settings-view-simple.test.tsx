@@ -1631,7 +1631,12 @@ describe("SettingsView performance behavior", () => {
     ).toBeInTheDocument();
   });
 
-  it("saves a whole binding table, keeping the legacy toggleDictation key in step", async () => {
+  // A row with an empty accelerator is dropped by the sidecar's
+  // `reconcile_keyboard_shortcuts`, so writing one produced a row that
+  // showed in the draft settings, never reached the file, and disappeared on
+  // the next reload with no explanation. "Add binding" now holds the row in
+  // local state until the recorder captures a trigger.
+  it("keeps a new binding unsaved until the recorder captures a trigger, then saves it", async () => {
     const backend = await import("@/lib/backend");
     vi.mocked(backend.getDictationShortcutCapabilityStatus).mockResolvedValue({
       nativeShortcutAvailable: true,
@@ -1652,8 +1657,22 @@ describe("SettingsView performance behavior", () => {
 
     await screen.findByText("How Plainsong listens, writes, and what it keeps.");
     await screen.findByText("Dictation bindings");
+    vi.mocked(backend.saveSettings).mockClear();
 
     fireEvent.click(screen.getByRole("button", { name: "Add binding" }));
+
+    // The row is on screen and listening, and nothing was written.
+    const recorder = await screen.findByLabelText("Binding 2 trigger");
+    expect(recorder).toHaveValue("Listening...");
+    await screen.findByText("No keys recorded yet.");
+    expect(backend.saveSettings).not.toHaveBeenCalled();
+
+    fireEvent.keyDown(recorder, {
+      key: "E",
+      code: "KeyE",
+      ctrlKey: true,
+      altKey: true,
+    });
 
     await waitFor(() => {
       expect(backend.saveSettings).toHaveBeenCalled();
@@ -1665,14 +1684,59 @@ describe("SettingsView performance behavior", () => {
         dictationBindings: Array<{ trigger: { accelerator?: string } }>;
       };
     };
-    // The legacy key was migrated into the first row, and the new row is the
-    // empty recorder waiting for keys.
     expect(saved.shortcuts.dictationBindings).toHaveLength(2);
     expect(saved.shortcuts.dictationBindings[0].trigger.accelerator).toBe(
       "Ctrl+Shift+Space",
     );
-    expect(saved.shortcuts.dictationBindings[1].trigger.accelerator).toBe("");
+    expect(saved.shortcuts.dictationBindings[1].trigger.accelerator).toBe(
+      "Ctrl+Alt+E",
+    );
     expect(saved.shortcuts.toggleDictation).toBe("Ctrl+Shift+Space");
+    // No save anywhere in this flow may carry a triggerless row.
+    for (const [payload] of saveCalls) {
+      const bindings =
+        (payload as unknown as {
+          shortcuts?: { dictationBindings?: Array<{ trigger: { accelerator?: string } }> };
+        }).shortcuts?.dictationBindings ?? [];
+      for (const binding of bindings) {
+        expect(binding.trigger.accelerator?.trim()).not.toBe("");
+      }
+    }
+  });
+
+  it("drops an abandoned new binding without saving anything", async () => {
+    const backend = await import("@/lib/backend");
+    vi.mocked(backend.getDictationShortcutCapabilityStatus).mockResolvedValue({
+      nativeShortcutAvailable: true,
+    });
+    vi.mocked(backend.getSettings).mockResolvedValue({
+      ...baseSettings,
+      shortcuts: {
+        ...baseSettings.shortcuts,
+        toggleDictation: "Ctrl+Shift+Space",
+      },
+    } as unknown as Awaited<ReturnType<typeof backend.getSettings>>);
+
+    render(
+      <ToastProvider>
+        <SettingsView />
+      </ToastProvider>,
+    );
+
+    await screen.findByText("How Plainsong listens, writes, and what it keeps.");
+    await screen.findByText("Dictation bindings");
+    vi.mocked(backend.saveSettings).mockClear();
+
+    fireEvent.click(screen.getByRole("button", { name: "Add binding" }));
+    await screen.findByLabelText("Binding 2 trigger");
+    fireEvent.click(
+      screen.getByRole("button", { name: "Remove binding 2 binding" }),
+    );
+
+    await waitFor(() => {
+      expect(screen.queryByLabelText("Binding 2 trigger")).not.toBeInTheDocument();
+    });
+    expect(backend.saveSettings).not.toHaveBeenCalled();
   });
 
   // ── Translate to English (roadmap item B7a) ────────────────────────────

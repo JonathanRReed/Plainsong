@@ -256,6 +256,20 @@ export function dictationBindingTriggerKey(trigger: DictationBindingTrigger): st
   return `mouse:${modifiers}:${trigger.button}`;
 }
 
+/**
+ * Whether a row's trigger is one the sidecar will keep. A row created by
+ * "Add binding" has none until the recorder captures one, and the sidecar's
+ * `reconcile_keyboard_shortcuts` drops exactly these: an empty accelerator,
+ * or a mouse button outside 3-5. Settings uses it to know when a draft row
+ * has become real enough to write.
+ */
+export function isRecordedDictationTrigger(trigger: DictationBindingTrigger): boolean {
+  if (trigger.kind === "mouse") {
+    return (DICTATION_BINDING_MOUSE_BUTTONS as readonly number[]).includes(trigger.button);
+  }
+  return trigger.accelerator.trim().length > 0;
+}
+
 /** Triggers only the native CGEventTap helper can deliver. */
 export function isHelperOnlyTrigger(trigger: DictationBindingTrigger): boolean {
   return trigger.kind === "mouse" || isLoneModifierAccelerator(trigger.accelerator);

@@ -172,6 +172,11 @@ evidence is stale and must be recaptured before this becomes a candidate.
   files that still carry it load cleanly and are rewritten without it.
 
 ### Fixed
+- "Add binding" no longer creates a row that disappears. The new row was
+  saved immediately with no keys recorded, and the sidecar drops a binding
+  with no trigger, so it survived on screen only until the next reload. The
+  row is now held unsaved until the recorder captures a trigger, and written
+  the moment it does.
 - A dictation binding on the same keys as Open window (or either recovery
   shortcut) now says so in Settings. Dictation bindings are registered first
   and take the keys, so the other shortcut silently stopped working with only

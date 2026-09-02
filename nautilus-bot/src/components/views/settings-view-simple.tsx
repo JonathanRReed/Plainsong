@@ -123,6 +123,7 @@ import {
   dictationBindingConflictSources,
   dictationModeLabelFor,
   findPrimaryDictationBinding,
+  isRecordedDictationTrigger,
   resolveDictationBindings,
   validateDictationBindings,
   type DictationBinding,
@@ -545,6 +546,15 @@ export function SettingsView() {
   >([]);
   // Which binding's recorder is listening for keys or a mouse button.
   const [recordingBindingId, setRecordingBindingId] = useState<string | null>(
+    null,
+  );
+  // A row "Add binding" created that has no trigger yet. It is deliberately
+  // NOT saved: the sidecar's `reconcile_keyboard_shortcuts` drops any binding
+  // with an empty accelerator, so writing it produced a row that showed up in
+  // the draft settings, vanished from the file, and then disappeared from the
+  // screen on the next reload with no explanation. It is written the moment
+  // the recorder captures a trigger, and never before.
+  const [draftBinding, setDraftBinding] = useState<DictationBinding | null>(
     null,
   );
   // Whether the dictation AI lane can answer right now: `null` until the
@@ -2009,7 +2019,12 @@ export function SettingsView() {
     aiLaneReady: dictationAiLaneReady,
   });
 
-  const dictationBindings = resolveDictationBindings(settings.shortcuts);
+  const savedDictationBindings = resolveDictationBindings(settings.shortcuts);
+  // The draft row (if any) renders last, after everything actually stored.
+  // It is never part of what gets saved.
+  const dictationBindings = draftBinding
+    ? [...savedDictationBindings, draftBinding]
+    : savedDictationBindings;
   const dictationCustomModes = (settings.transcription.dictationCustomModes ?? []).map(
     (mode) => ({ id: mode.id, name: mode.name }),
   );
@@ -2051,10 +2066,38 @@ export function SettingsView() {
     bindingId: string,
     patch: Partial<DictationBinding>,
   ) => {
+    if (draftBinding && bindingId === draftBinding.id) {
+      const next = { ...draftBinding, ...patch };
+      // The draft becomes a real, saved row the instant it has a trigger the
+      // sidecar will keep -- and not one edit sooner, because a row with an
+      // empty accelerator is dropped on the way to disk and then vanishes
+      // from the screen on the next reload.
+      if (isRecordedDictationTrigger(next.trigger)) {
+        setDraftBinding(null);
+        saveDictationBindings([...savedDictationBindings, next]);
+      } else {
+        setDraftBinding(next);
+      }
+      return;
+    }
     saveDictationBindings(
-      dictationBindings.map((binding) =>
+      savedDictationBindings.map((binding) =>
         binding.id === bindingId ? { ...binding, ...patch } : binding,
       ),
+    );
+  };
+
+  const removeDictationBinding = (bindingId: string) => {
+    if (draftBinding && bindingId === draftBinding.id) {
+      // Nothing was ever written, so there is nothing to save.
+      setDraftBinding(null);
+      if (recordingBindingId === bindingId) {
+        setRecordingBindingId(null);
+      }
+      return;
+    }
+    saveDictationBindings(
+      savedDictationBindings.filter((candidate) => candidate.id !== bindingId),
     );
   };
 
@@ -2256,11 +2299,7 @@ export function SettingsView() {
             size="sm"
             className="h-9 px-3"
             aria-label={`Remove ${rowLabel.toLowerCase()} binding`}
-            onClick={() =>
-              saveDictationBindings(
-                dictationBindings.filter((candidate) => candidate.id !== binding.id),
-              )
-            }
+            onClick={() => removeDictationBinding(binding.id)}
           >
             Remove
           </Button>
@@ -2305,16 +2344,15 @@ export function SettingsView() {
           <Button
             variant="outline"
             size="sm"
+            disabled={draftBinding !== null}
             onClick={() => {
               const id = `binding-${Date.now().toString(36)}`;
-              saveDictationBindings([
-                ...dictationBindings,
-                {
-                  id,
-                  trigger: { kind: "key", accelerator: "" },
-                  action: { kind: "dictation", modeId: null, behavior: "inherit" },
-                },
-              ]);
+              // Held locally, not saved: see `draftBinding`.
+              setDraftBinding({
+                id,
+                trigger: { kind: "key", accelerator: "" },
+                action: { kind: "dictation", modeId: null, behavior: "inherit" },
+              });
               setRecordingBindingId(id);
             }}
           >
@@ -2323,15 +2361,16 @@ export function SettingsView() {
           <Button
             variant="ghost"
             size="sm"
-            onClick={() =>
+            onClick={() => {
+              setDraftBinding(null);
               saveDictationBindings([
                 {
                   id: "primary",
                   trigger: { kind: "key", accelerator: defaultDictationShortcut() },
                   action: { kind: "dictation", modeId: null, behavior: "inherit" },
                 },
-              ])
-            }
+              ]);
+            }}
           >
             Reset to default
           </Button>
