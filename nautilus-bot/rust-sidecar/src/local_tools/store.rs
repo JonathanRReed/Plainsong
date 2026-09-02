@@ -210,6 +210,10 @@ impl MeetingSource for ReadOnlyStore {
             template_id: recording.meeting_template_id.clone(),
             capture_mode: recording.meeting_capture_mode.clone(),
             analysis_failure: recording.analysis_failure.clone(),
+            // Names only: `attendee_names_for_context` is the one function that
+            // turns an attendee list into text for a consumer outside the app,
+            // and it drops the address.
+            attendee_names: crate::models::attendee_names_for_context(&recording.attendees),
         }))
     }
 

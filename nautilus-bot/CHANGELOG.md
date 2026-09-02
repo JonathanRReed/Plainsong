@@ -39,6 +39,10 @@ evidence is stale and must be recaptured before this becomes a candidate.
   but not deleted, because they would only come back. Manage them from
   Settings → AI or the picker's own footer. They live in your settings file
   on this Mac and choosing one only fills the box.
+- A meeting export now says who was there. Markdown, Word, plain text and
+  JSON carry the attendee list with names and addresses — an export is your
+  own file — while the local `plainsong` CLI and MCP server return attendee
+  names only. Prompts are unchanged: still names, never addresses.
 - Plainsong now notices a live call and offers to record it. Every few
   seconds the sidecar checks, locally, which apps are running; when Zoom,
   Microsoft Teams, Webex, FaceTime, Slack, Discord, or a browser window

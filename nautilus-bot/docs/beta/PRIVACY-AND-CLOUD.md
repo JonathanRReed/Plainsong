@@ -142,9 +142,12 @@ Two limits on where that list can go:
   travel only where the meeting's own transcript already travels: to the AI
   provider you chose, at the moment you ask for a summary or an answer.
 
-Addresses are visible to you on hover in the meeting header, are included in a
-meeting export the same way the rest of the meeting is, and are deleted with
-the meeting.
+Addresses are visible to you on hover in the meeting header, are written into
+a meeting export (Markdown, Word, plain text and JSON) beside the names, and
+are deleted with the meeting. An export is a file on your own disk, which is
+why it is the one place the whole list goes. The local `plainsong` CLI and its
+MCP server are not: `get_meeting` returns attendee NAMES only, framed as
+untrusted content like every other field somebody else wrote.
 
 The pre-meeting brief follows the same rule. "Prepare" on a calendar cue
 searches only meetings already on this Mac — ones sharing an attendee or a
