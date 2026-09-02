@@ -43,6 +43,7 @@ import {
   getRecording,
   openRecordingAudio,
   renameRecording,
+  updateRecordingAttendees,
   acknowledgeIncompleteTranscript,
   retranscribeRecording,
   retryMeetingAnalysis,
@@ -129,6 +130,8 @@ import {
 } from "@/lib/meeting-analysis-status";
 import { StatusBanner } from "@/components/ui/status-banner";
 import { CalendarMeetingCue } from "@/components/meetings/calendar-meeting-cue";
+import { MeetingAttendees } from "@/components/meetings/meeting-attendees";
+import { attendeeNameSuggestions, type MeetingAttendee } from "@/lib/attendees";
 import type { CalendarCapturePrefill } from "@/lib/calendar-events";
 import {
   canRecheckMeetingAudio,
@@ -2411,6 +2414,16 @@ export function RecordingsView() {
           } catch (error) {
             console.error("Failed to apply the calendar meeting title:", error);
           }
+          // Same shape as the rename above: applied after the start, so a
+          // failure costs the attendee list and nothing else. The meeting is
+          // already recording by this point and must not be undone for it.
+          if (prefill.attendees.length > 0) {
+            try {
+              await updateRecordingAttendees(startedId, prefill.attendees);
+            } catch (error) {
+              console.error("Failed to store the calendar attendee list:", error);
+            }
+          }
         }
         void refetch();
       }
@@ -3161,6 +3174,25 @@ export function RecordingsView() {
 
   // The title is edited where it is read, in the workspace header. It is the
   // same write the row's Rename dialog performs.
+  const handleAttendeesChange = async (next: MeetingAttendee[]) => {
+    if (!selectedRecording) {
+      return;
+    }
+    const recordingId = selectedRecording.id;
+    try {
+      // Render what the sidecar stored, not what was sent: it sanitizes the
+      // list (duplicates dropped, fields clipped) and the header must show
+      // the version that is actually on disk.
+      const stored = await updateRecordingAttendees(recordingId, next);
+      setSelectedRecording((current) =>
+        current?.id === recordingId ? { ...current, attendees: stored } : current,
+      );
+    } catch (error) {
+      console.error("Failed to update the attendee list:", error);
+      toast("Couldn't save that attendee change.", "error");
+    }
+  };
+
   const handleRenameMeetingTitle = async (nextTitle: string) => {
     if (!selectedRecording) {
       return;
@@ -4209,6 +4241,11 @@ export function RecordingsView() {
                 {selectedMeetingConsent.message}
               </p>
             ) : null}
+            <MeetingAttendees
+              attendees={selectedRecording?.attendees ?? []}
+              onChange={(next) => void handleAttendeesChange(next)}
+              disabled={!selectedRecording}
+            />
           </div>
 
           {/* What the capture actually got. Rendered before anything derived
@@ -5700,6 +5737,9 @@ export function RecordingsView() {
                     <TranscriptViewer
                       segments={transcriptSegments}
                       speakerNames={speakerNames}
+                      speakerNameSuggestions={attendeeNameSuggestions(
+                        selectedRecording?.attendees,
+                      )}
                       provenance={selectedTranscriptProvenance}
                       currentTime={transcriptCueTime}
                       onSegmentClick={(segment) => setTranscriptCueTime(segment.startTime)}

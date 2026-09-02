@@ -16,6 +16,7 @@ import type {
   MeetingTranscriptDetails,
 } from "@/types";
 import type { Settings } from "@/types/settings";
+import type { MeetingAttendee } from "@/lib/attendees";
 
 export interface DictationStartOptions {
   saveToInbox: boolean;
@@ -339,6 +340,18 @@ export async function retranscribeRecording(recordingId: string): Promise<void> 
 
 export async function renameRecording(recordingId: string, newTitle: string): Promise<void> {
   await invoke("rename_recording", { recordingId, newTitle });
+}
+
+/**
+ * Replace a meeting's attendee list. Returns what the sidecar actually
+ * stored, which is the sanitized list -- duplicates dropped, fields clipped
+ * -- so the caller renders what is on disk rather than what it sent.
+ */
+export async function updateRecordingAttendees(
+  recordingId: string,
+  attendees: MeetingAttendee[],
+): Promise<MeetingAttendee[]> {
+  return await invoke("update_recording_attendees", { recordingId, attendees });
 }
 
 export async function updateRecordingNotes(

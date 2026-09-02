@@ -19,12 +19,23 @@ import Foundation
 //     "budget review with $NAME at $ADDRESS" note therefore contributes a Zoom
 //     link and nothing else.
 //
+// Attendees ARE emitted, as of protocol version 2: a name, and the address
+// from the participant's mailto: URL when EventKit has one. That is a real
+// widening of what leaves this process, and it is the feature — a meeting
+// started from a calendar cue records who was invited, which is what makes
+// speaker names and a pre-meeting brief possible. Locations and notes are
+// still stripped exactly as before, so an attendee list is the only prose
+// this helper has ever emitted besides the title.
+//
 // Classification of those URLs into a service ("this is a Zoom call") happens
 // in the Electron main process rather than here, so the host table can be
 // corrected without recompiling and re-signing a native binary — and so it can
 // be unit tested.
 
-private let protocolVersion = 1
+/// 2 added `attendees` to each event payload. The Electron parser tolerates
+/// its absence, so an older helper left behind by a partial install still
+/// produces usable events -- with no attendees on them.
+private let protocolVersion = 2
 
 /// ~8 hours, the window the Meetings header affordance reads from.
 private let defaultHorizonMinutes = 480
@@ -32,6 +43,11 @@ private let maximumHorizonMinutes = 24 * 60
 private let maximumEvents = 50
 private let maximumConferenceUrlsPerEvent = 4
 private let maximumConferenceUrlLength = 512
+/// A meeting with more than this many invitees is a mailing list, not a
+/// meeting anyone is about to attend; the chips would be unreadable and the
+/// grounded "Attendees:" line would be mostly noise.
+private let maximumAttendeesPerEvent = 40
+private let maximumAttendeeFieldLength = 256
 private let authorizationTimeoutSeconds = 60
 
 private enum HelperErrorCode: String {
@@ -59,6 +75,17 @@ private struct CalendarPayload: Encodable {
   let accountName: String
 }
 
+private struct AttendeePayload: Encodable {
+  let name: String
+  /// The address behind the participant's `mailto:` URL, when EventKit has
+  /// one. EventKit exposes no public email property on macOS; the URL is the
+  /// documented way, and a participant whose URL is not a mailto (a room
+  /// resource, say) simply has no address.
+  let email: String?
+  let isOrganizer: Bool
+  let isCurrentUser: Bool
+}
+
 private struct EventPayload: Encodable {
   let id: String
   let title: String
@@ -68,6 +95,7 @@ private struct EventPayload: Encodable {
   let calendarId: String
   let calendarName: String
   let conferenceUrls: [String]
+  let attendees: [AttendeePayload]
 }
 
 private struct ProbePayload: Encodable {
@@ -270,6 +298,71 @@ private func currentUserDeclined(_ event: EKEvent) -> Bool {
   return attendees.contains { $0.isCurrentUser && $0.participantStatus == .declined }
 }
 
+/// The address behind a participant, or nothing.
+///
+/// EventKit publishes no email property for a participant on macOS; `url` is
+/// the documented accessor and it carries a `mailto:` for a person. Anything
+/// else — a room resource, a group URI — is discarded rather than guessed at,
+/// because a non-address in an "email" field would be shown on a chip's
+/// tooltip as though it were one.
+private func attendeeEmail(_ participant: EKParticipant) -> String? {
+  let url = participant.url
+  guard url.scheme?.lowercased() == "mailto" else { return nil }
+  // `URL` exposes no opaque-part accessor, so the scheme is taken off the
+  // front and any `?subject=`-style tail off the back. What is left is the
+  // address, percent-decoded when it needs it.
+  var body = String(url.absoluteString.dropFirst("mailto:".count))
+  if let queryStart = body.firstIndex(of: "?") {
+    body = String(body[body.startIndex..<queryStart])
+  }
+  let decoded = body.removingPercentEncoding ?? body
+  let address = decoded.trimmingCharacters(in: CharacterSet.whitespacesAndNewlines)
+  guard !address.isEmpty, address.count <= maximumAttendeeFieldLength else { return nil }
+  return address
+}
+
+/// The invitee list, name-first.
+///
+/// A participant with neither a name nor an address is dropped: it would
+/// render as an empty chip and could not be matched against a prior meeting.
+/// When only the address is known, it stands in as the name too, because a
+/// chip has to say something and the address is what the reader would
+/// recognize.
+///
+/// Ordering is EventKit's, with the organizer's flag carried alongside rather
+/// than used to sort — the renderer decides how to present that.
+private func attendeePayloads(for event: EKEvent) -> [AttendeePayload] {
+  guard let participants = event.attendees else { return [] }
+  let organizerUrl = event.organizer?.url
+
+  var payloads: [AttendeePayload] = []
+  for participant in participants {
+    if payloads.count >= maximumAttendeesPerEvent { break }
+    let email = attendeeEmail(participant)
+    var name = (participant.name ?? "")
+      .trimmingCharacters(in: CharacterSet.whitespacesAndNewlines)
+    if name.isEmpty {
+      name = email ?? ""
+    }
+    guard !name.isEmpty else { continue }
+    if name.count > maximumAttendeeFieldLength {
+      name = String(name.prefix(maximumAttendeeFieldLength))
+    }
+    payloads.append(
+      AttendeePayload(
+        name: name,
+        email: email,
+        // `EKParticipant` does not conform to Equatable usefully here, so the
+        // organizer is matched on the same URL identity EventKit uses to
+        // address a participant.
+        isOrganizer: organizerUrl != nil && participant.url == organizerUrl,
+        isCurrentUser: participant.isCurrentUser
+      )
+    )
+  }
+  return payloads
+}
+
 private func eventPayload(_ event: EKEvent) -> EventPayload? {
   guard let start = event.startDate, let end = event.endDate else { return nil }
   guard let calendar = event.calendar else { return nil }
@@ -291,7 +384,8 @@ private func eventPayload(_ event: EKEvent) -> EventPayload? {
     isAllDay: event.isAllDay,
     calendarId: calendar.calendarIdentifier,
     calendarName: calendar.title,
-    conferenceUrls: conferenceUrls(for: event)
+    conferenceUrls: conferenceUrls(for: event),
+    attendees: attendeePayloads(for: event)
   )
 }
 

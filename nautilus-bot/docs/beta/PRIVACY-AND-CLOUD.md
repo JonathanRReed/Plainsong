@@ -47,8 +47,45 @@ your behalf, and it does not type into or press keys in another app to do so.
 Sending the notice is your action. Plainsong records only whether the consent
 sheet was shown for that meeting.
 
+## The calendar, and who was in a meeting
+
+Calendar access is optional and never asked for at launch: the prompt follows
+the "Connect calendar" button and only that button. Plainsong reads the next
+few hours of events, never writes to a calendar, and sends nothing anywhere by
+reading one.
+
+What the calendar helper emits is deliberately narrow. Event titles and times
+leave it whole. Locations and notes do not: they are run through a link
+detector inside the helper and only http/https matches escape it, so a note
+reading "budget review with Dana at 40 Hill St" contributes a Zoom link and
+nothing else.
+
+Attendees are the exception, and they are the feature. When you start a
+meeting from a calendar cue, Plainsong stores the invitee list on that
+meeting: each person's display name, and their email address when the calendar
+had one. You can add or remove attendees by hand on any meeting. The list is
+stored in the local database beside the rest of the meeting.
+
+Two limits on where that list can go:
+
+- **Names, never addresses, reach an AI provider.** When a meeting has
+  attendees, its summary and chat prompts carry a single `Attendees: ...` line
+  of names, inside the same fenced, non-instruction data block the notes use.
+  Email addresses are dropped before the prompt is built and are never sent to
+  a local or cloud analysis provider. They exist to recognize the same person
+  across two meetings and to label a chip, and that is all.
+- **Nothing about a calendar leaves your Mac on its own.** The attendee names
+  travel only where the meeting's own transcript already travels: to the AI
+  provider you chose, at the moment you ask for a summary or an answer.
+
+Addresses are visible to you on hover in the meeting header, are included in a
+meeting export the same way the rest of the meeting is, and are deleted with
+the meeting.
+
 ## Permissions
 
+- Calendar is optional and only used to offer to start capture for a meeting
+  you are about to join, and to record who was invited to it.
 - Microphone is required for Dictation and mic-side Meeting capture.
 - Accessibility is required to insert Dictation into other apps.
 - Speech Recognition is optional and only used by the Apple on-device

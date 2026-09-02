@@ -1650,6 +1650,13 @@ impl Database {
         // install pointed at an uninstalled Ollama produced no summary, no
         // action items, and no title, and the app said nothing at all.
         self.ensure_table_column("recordings", "analysis_failure", "TEXT")?;
+        // Who was in the meeting, as a JSON array of {name, email, isOrganizer}.
+        // A column rather than a table because the list is written once, read
+        // whole, and never queried across meetings by SQL -- the pre-meeting
+        // brief's attendee overlap is computed in Rust over recordings it has
+        // already loaded. NULL for every meeting recorded before this existed,
+        // which reads back as an empty list.
+        self.ensure_table_column("recordings", "attendees", "TEXT")?;
 
         // Chunked meeting transcription survives per-chunk ASR failures and
         // still returns a transcript, so "completed" alone never meant "the
@@ -2148,7 +2155,8 @@ impl Database {
                     recordings.consent_notice_updated_at,
                     meeting_artifacts.summary_provenance,
                     meeting_artifacts.action_items_provenance,
-                    recordings.analysis_failure
+                    recordings.analysis_failure,
+                    recordings.attendees
              FROM recordings
              LEFT JOIN meeting_artifacts ON meeting_artifacts.recording_id = recordings.id
              WHERE (?1 IS NULL OR recordings.project_id = ?1)
@@ -2206,6 +2214,14 @@ impl Database {
                     .get::<_, Option<String>>(22)?
                     .map(|value| value.trim().to_string())
                     .filter(|value| !value.is_empty()),
+                // Sanitized on the way back out as well as on the way in: a
+                // hand-edited row is exactly as capable of holding 5000
+                // duplicates as a crafted command payload is.
+                attendees: crate::models::sanitize_meeting_attendees(
+                    row.get::<_, Option<String>>(23)?
+                        .and_then(|value| serde_json::from_str(&value).ok())
+                        .unwrap_or_default(),
+                ),
             })
         })?;
 
@@ -2244,7 +2260,8 @@ impl Database {
                     recordings.consent_notice_updated_at,
                     meeting_artifacts.summary_provenance,
                     meeting_artifacts.action_items_provenance,
-                    recordings.analysis_failure
+                    recordings.analysis_failure,
+                    recordings.attendees
              FROM recordings
              LEFT JOIN meeting_artifacts ON meeting_artifacts.recording_id = recordings.id
              WHERE recordings.id = ?1",
@@ -2299,6 +2316,14 @@ impl Database {
                     .get::<_, Option<String>>(22)?
                     .map(|value| value.trim().to_string())
                     .filter(|value| !value.is_empty()),
+                // Sanitized on the way back out as well as on the way in: a
+                // hand-edited row is exactly as capable of holding 5000
+                // duplicates as a crafted command payload is.
+                attendees: crate::models::sanitize_meeting_attendees(
+                    row.get::<_, Option<String>>(23)?
+                        .and_then(|value| serde_json::from_str(&value).ok())
+                        .unwrap_or_default(),
+                ),
             })
         });
 
@@ -3864,6 +3889,29 @@ impl Database {
         )?;
         tx.commit()?;
         Ok(())
+    }
+
+    /// Replace a meeting's attendee list.
+    ///
+    /// Called once when a meeting starts from a calendar cue, and again for
+    /// every manual add or remove. Sanitized here rather than trusted from
+    /// the caller: this is the boundary the renderer writes through.
+    pub fn update_recording_attendees(
+        &mut self,
+        recording_id: &str,
+        attendees: Vec<crate::models::MeetingAttendee>,
+    ) -> Result<Vec<crate::models::MeetingAttendee>> {
+        let sanitized = crate::models::sanitize_meeting_attendees(attendees);
+        let encoded = serde_json::to_string(&sanitized)
+            .context("Failed to serialize the meeting attendee list")?;
+        let updated = self.conn.execute(
+            "UPDATE recordings SET attendees = ?1, updated_at = ?2 WHERE id = ?3",
+            params![encoded, Utc::now().to_rfc3339(), recording_id],
+        )?;
+        if updated != 1 {
+            anyhow::bail!("Recording not found: {}", recording_id);
+        }
+        Ok(sanitized)
     }
 
     pub fn update_recording_meeting_chat(
@@ -5925,6 +5973,7 @@ mod tests {
             consent_notice_message: None,
             consent_notice_updated_at: None,
             analysis_failure: None,
+            attendees: Vec::new(),
         }
     }
 
@@ -8357,6 +8406,74 @@ mod tests {
         let reloaded = db.get_recording("r1").unwrap().unwrap();
         assert_eq!(reloaded.summary.as_deref(), Some("Summary only"));
         assert!(reloaded.action_items.is_none());
+    }
+
+    #[test]
+    fn attendees_round_trip_and_are_sanitized_on_the_way_in_and_out() {
+        use crate::models::MeetingAttendee;
+
+        let mut db = in_memory_db();
+        db.create_recording(&sample_recording("r1", "inbox"))
+            .unwrap();
+
+        // A meeting recorded before the column existed reads back as nobody,
+        // not as a parse failure.
+        assert!(db
+            .get_recording("r1")
+            .unwrap()
+            .unwrap()
+            .attendees
+            .is_empty());
+
+        let stored = db
+            .update_recording_attendees(
+                "r1",
+                vec![
+                    MeetingAttendee {
+                        name: "  Alice   Brown ".to_string(),
+                        email: Some("Alice@Example.com".to_string()),
+                        is_organizer: true,
+                    },
+                    // Same address, different display name: one person.
+                    MeetingAttendee {
+                        name: "A. Brown".to_string(),
+                        email: Some("alice@example.com".to_string()),
+                        is_organizer: false,
+                    },
+                    MeetingAttendee {
+                        name: "   ".to_string(),
+                        email: None,
+                        is_organizer: false,
+                    },
+                ],
+            )
+            .unwrap();
+        assert_eq!(stored.len(), 1);
+        assert_eq!(stored[0].name, "Alice Brown");
+        assert!(stored[0].is_organizer);
+
+        let reloaded = db.get_recording("r1").unwrap().unwrap();
+        assert_eq!(reloaded.attendees, stored);
+        let listed = db.get_recordings(None).unwrap();
+        assert_eq!(listed[0].attendees, stored);
+
+        // Removing the last attendee is an empty list, not a no-op.
+        assert!(db
+            .update_recording_attendees("r1", Vec::new())
+            .unwrap()
+            .is_empty());
+        assert!(db
+            .get_recording("r1")
+            .unwrap()
+            .unwrap()
+            .attendees
+            .is_empty());
+    }
+
+    #[test]
+    fn updating_attendees_on_a_missing_recording_is_an_error() {
+        let mut db = in_memory_db();
+        assert!(db.update_recording_attendees("nope", Vec::new()).is_err());
     }
 
     #[test]

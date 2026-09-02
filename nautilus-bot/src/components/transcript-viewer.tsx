@@ -38,6 +38,8 @@ interface TranscriptViewerProps {
   onSegmentClick?: (segment: TranscriptSegment) => void;
   currentTime?: number;
   speakerNames?: Record<string, string>;
+  /** Offered while renaming a speaker. See `SpeakerBadgeProps`. */
+  speakerNameSuggestions?: readonly string[];
   /** Provenance of the transcript; reported as unknown when omitted. */
   provenance?: TranscriptProvenance;
   /**
@@ -83,6 +85,13 @@ interface SpeakerBadgeProps {
   isActive?: boolean;
   isFirstMention?: boolean;
   onRename?: (newName: string) => Promise<void> | void;
+  /**
+   * Names to offer while renaming: the meeting's attendees, when it started
+   * from a calendar event. A suggestion list, not a constraint -- diarization
+   * finds voices, not invitations, and the reader can always type something
+   * that was never on the invite.
+   */
+  nameSuggestions?: readonly string[];
 }
 
 function normalizePersistedSpeakerId(speakerId: string | null | undefined): string | null {
@@ -104,7 +113,7 @@ function defaultSpeakerLabel(speakerId: string | null | undefined) {
   return normalized;
 }
 
-const SpeakerBadge = memo(function SpeakerBadge({ speakerId, speakerName, isEditing, isActive, isFirstMention, onRename }: SpeakerBadgeProps) {
+const SpeakerBadge = memo(function SpeakerBadge({ speakerId, speakerName, isEditing, isActive, isFirstMention, onRename, nameSuggestions }: SpeakerBadgeProps) {
   const [isEditMode, setIsEditMode] = useState(false);
   const [isSaving, setIsSaving] = useState(false);
   const [editValue, setEditValue] = useState(speakerName || defaultSpeakerLabel(speakerId));
@@ -132,14 +141,27 @@ const SpeakerBadge = memo(function SpeakerBadge({ speakerId, speakerName, isEdit
     }
   };
 
+  const suggestionListId =
+    nameSuggestions && nameSuggestions.length > 0
+      ? `speaker-name-suggestions-${speakerId ?? "unattributed"}`
+      : undefined;
+
   if (isEditMode) {
     return (
       <div className="flex items-center gap-1">
+        {suggestionListId ? (
+          <datalist id={suggestionListId}>
+            {nameSuggestions?.map((name) => (
+              <option key={name} value={name} />
+            ))}
+          </datalist>
+        ) : null}
         <Input
           value={editValue}
           onChange={(e: React.ChangeEvent<HTMLInputElement>) => setEditValue(e.target.value)}
           className="h-6 w-24 text-xs"
           aria-label="Speaker name"
+          list={suggestionListId}
           autoFocus
           disabled={isSaving}
           onKeyDown={(e) => {
@@ -229,6 +251,7 @@ export function TranscriptViewer({
   onSegmentClick,
   currentTime,
   speakerNames: externalSpeakerNames,
+  speakerNameSuggestions,
   provenance,
   highlightQuery,
   activeMatchIndex = 0,
@@ -669,6 +692,7 @@ export function TranscriptViewer({
                       isActive={isActive}
                       isFirstMention={isFirstSpeakerMention}
                       onRename={renameSpeakerForGroup}
+                      nameSuggestions={speakerNameSuggestions}
                     />
                   </div>
 

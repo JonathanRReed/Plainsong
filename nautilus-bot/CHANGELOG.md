@@ -13,6 +13,15 @@ changed underneath `0.9.0-beta.2`. See `LAUNCH.md` for which qualification
 evidence is stale and must be recaptured before this becomes a candidate.
 
 ### Added
+- Meetings started from a calendar cue now record who was invited. The macOS
+  calendar helper reports each attendee's name (and the address the calendar
+  had for them, when it had one); the meeting header shows them as chips with
+  the address on hover, and any meeting can have attendees added or removed by
+  hand. Renaming a speaker offers those names. When a meeting has attendees,
+  its summary and chat prompts carry one `Attendees: ...` line of NAMES only,
+  inside the same fenced non-instruction block the notes use — addresses are
+  never sent to an AI provider. Locations and notes are still stripped inside
+  the helper exactly as before. See `docs/beta/PRIVACY-AND-CLOUD.md`.
 - Saved prompts for the two chat boxes. Type "/" in a meeting's chat or in
   "Ask your meetings" to pick a question you keep asking; "Save as prompt" on
   a message you already sent turns it into one. Six starters ship (decisions,

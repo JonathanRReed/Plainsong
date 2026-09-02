@@ -118,6 +118,114 @@ pub struct Recording {
     /// say so and offer a retry.
     #[serde(default)]
     pub analysis_failure: Option<String>,
+    /// Who was in the meeting, captured from the calendar event that started
+    /// it (or typed by hand afterwards). Empty for every meeting that did
+    /// not start from a calendar cue, and for everything recorded before
+    /// this column existed.
+    #[serde(default)]
+    pub attendees: Vec<MeetingAttendee>,
+}
+
+/// One person in a meeting. Mirrors `MeetingAttendee` in
+/// `src/lib/attendees.ts` -- same shape, same caps, same identity rule.
+///
+/// `email` exists because it is the only reliable way to recognize the same
+/// person across two meetings: display names differ between accounts and an
+/// address does not. It is stored, shown on a chip's tooltip, and matched
+/// against -- and it is never put in a prompt. `attendee_names_for_context`
+/// is the only function that produces prompt-bound text from a list, and it
+/// drops the address.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(default, rename_all = "camelCase")]
+pub struct MeetingAttendee {
+    pub name: String,
+    pub email: Option<String>,
+    pub is_organizer: bool,
+}
+
+/// Mirrors `MAX_MEETING_ATTENDEES` in src/lib/attendees.ts. A meeting with
+/// more invitees than this is a mailing list, and the header chips would be
+/// unreadable long before the list was.
+pub const MAX_MEETING_ATTENDEES: usize = 40;
+const MAX_ATTENDEE_FIELD_LENGTH: usize = 256;
+
+fn collapse_whitespace(value: &str) -> String {
+    value.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
+fn clip_attendee_field(value: &str) -> String {
+    let collapsed = collapse_whitespace(value);
+    if collapsed.chars().count() <= MAX_ATTENDEE_FIELD_LENGTH {
+        return collapsed;
+    }
+    collapsed
+        .chars()
+        .take(MAX_ATTENDEE_FIELD_LENGTH)
+        .collect::<String>()
+        .trim_end()
+        .to_string()
+}
+
+/// How two attendee entries are recognized as the same person.
+///
+/// Address first, because display names differ between accounts ("J. Reed"
+/// in one invite, "Jonathan Reed" in another) and an address does not. Name
+/// only when there is no address.
+pub fn attendee_identity_key(name: &str, email: Option<&str>) -> String {
+    match email.map(str::trim).filter(|value| !value.is_empty()) {
+        Some(address) => format!("email:{}", address.to_lowercase()),
+        None => format!("name:{}", collapse_whitespace(name).to_lowercase()),
+    }
+}
+
+/// Trim, de-duplicate and cap an attendee list, whatever produced it.
+///
+/// Run on every path that stores one -- the renderer's write command, and
+/// the read back out of SQLite -- so a duplicated invite or a hand-edited
+/// database row cannot put the same person on the header twice, and so a
+/// crafted payload cannot store 5000 of them.
+pub fn sanitize_meeting_attendees(attendees: Vec<MeetingAttendee>) -> Vec<MeetingAttendee> {
+    let mut seen = std::collections::HashSet::new();
+    let mut result = Vec::new();
+    for attendee in attendees {
+        let name = clip_attendee_field(&attendee.name);
+        if name.is_empty() {
+            continue;
+        }
+        let email = attendee
+            .email
+            .as_deref()
+            .map(clip_attendee_field)
+            .filter(|value| !value.is_empty());
+        let key = attendee_identity_key(&name, email.as_deref());
+        if !seen.insert(key) {
+            continue;
+        }
+        result.push(MeetingAttendee {
+            name,
+            email,
+            is_organizer: attendee.is_organizer,
+        });
+        if result.len() >= MAX_MEETING_ATTENDEES {
+            break;
+        }
+    }
+    result
+}
+
+/// The names, and only the names, for a grounded prompt's "Attendees:" line.
+///
+/// The single place an attendee list becomes prompt-bound text. Addresses are
+/// dropped here rather than at each call site so there is exactly one thing
+/// to audit: a summary lane pointed at a cloud provider must not carry the
+/// reader's contact book there, and a model does not answer better for
+/// knowing someone's employer domain.
+pub fn attendee_names_for_context(attendees: &[MeetingAttendee]) -> Vec<String> {
+    attendees
+        .iter()
+        .map(|attendee| collapse_whitespace(&attendee.name))
+        .filter(|name| !name.is_empty())
+        .collect()
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -632,4 +740,83 @@ pub struct UpsertDictationCommandPresetRequest {
 
 fn default_true() -> bool {
     true
+}
+
+#[cfg(test)]
+mod attendee_tests {
+    use super::{
+        attendee_identity_key, attendee_names_for_context, sanitize_meeting_attendees,
+        MeetingAttendee, MAX_MEETING_ATTENDEES,
+    };
+
+    fn attendee(name: &str, email: Option<&str>) -> MeetingAttendee {
+        MeetingAttendee {
+            name: name.to_string(),
+            email: email.map(str::to_string),
+            is_organizer: false,
+        }
+    }
+
+    #[test]
+    fn identity_prefers_the_address_over_the_display_name() {
+        assert_eq!(
+            attendee_identity_key("J. Reed", Some("j@example.com")),
+            attendee_identity_key("Jonathan Reed", Some("J@Example.com")),
+            "the same address is the same person however the invite spelled the name"
+        );
+        assert_eq!(
+            attendee_identity_key("  Alice   Brown ", None),
+            attendee_identity_key("alice brown", None)
+        );
+        assert_ne!(
+            attendee_identity_key("Alex", Some("a@one.com")),
+            attendee_identity_key("Alex", Some("a@two.com"))
+        );
+    }
+
+    #[test]
+    fn sanitize_drops_nameless_and_duplicate_entries_and_caps_the_list() {
+        let sanitized = sanitize_meeting_attendees(vec![
+            attendee("   ", None),
+            attendee("  Alice   Brown ", None),
+            attendee("Alice Brown", None),
+            attendee("Bob", Some("bob@example.com")),
+            attendee("Robert", Some("BOB@example.com")),
+        ]);
+        assert_eq!(
+            sanitized
+                .iter()
+                .map(|entry| entry.name.as_str())
+                .collect::<Vec<_>>(),
+            vec!["Alice Brown", "Bob"]
+        );
+
+        let many: Vec<MeetingAttendee> = (0..(MAX_MEETING_ATTENDEES + 20))
+            .map(|index| attendee(&format!("Person {index}"), None))
+            .collect();
+        assert_eq!(
+            sanitize_meeting_attendees(many).len(),
+            MAX_MEETING_ATTENDEES
+        );
+    }
+
+    #[test]
+    fn sanitize_treats_a_blank_address_as_no_address() {
+        let sanitized = sanitize_meeting_attendees(vec![attendee("Alice", Some("   "))]);
+        assert_eq!(sanitized[0].email, None);
+    }
+
+    /// The one rule the whole feature rests on: names may reach a prompt,
+    /// addresses never do. A summary lane pointed at a cloud provider must
+    /// not carry the reader's contact book there.
+    #[test]
+    fn context_names_never_carry_an_address() {
+        let names = attendee_names_for_context(&[
+            attendee("Alice  Brown", Some("alice@acme-holdings.example")),
+            attendee("Bob", Some("bob@example.com")),
+            attendee("   ", None),
+        ]);
+        assert_eq!(names, vec!["Alice Brown", "Bob"]);
+        assert!(!names.join(" ").contains('@'));
+    }
 }

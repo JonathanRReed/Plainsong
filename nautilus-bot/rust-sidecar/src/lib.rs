@@ -694,12 +694,19 @@ mod multi_recording_analysis_bounds_tests {
 #[derive(Debug, Clone, PartialEq)]
 struct RecordingAnalysisSnapshot {
     transcript_revision: i64,
+    /// The notes exactly as stored, so `verify_analysis_snapshot` can tell
+    /// whether the reader edited them while analysis ran. NOT the composed
+    /// notes handed to the model -- see `compose_analysis_notes`.
     meeting_notes: Option<String>,
     notes_updated_at: Option<chrono::DateTime<chrono::Utc>>,
     meeting_template_id: Option<String>,
     expected_summary: Option<String>,
     expected_action_items: Option<Vec<String>>,
     custom_summary_prompt: Option<String>,
+    /// Names only. Part of the input the model actually saw, so a change to
+    /// the attendee list has to change the fingerprint -- otherwise a stored
+    /// summary would claim provenance over an input it was not produced from.
+    attendee_names: Vec<String>,
 }
 
 fn analysis_input_fingerprint(snapshot: &RecordingAnalysisSnapshot, instruction: &str) -> String {
@@ -708,9 +715,40 @@ fn analysis_input_fingerprint(snapshot: &RecordingAnalysisSnapshot, instruction:
         "meetingNotes": &snapshot.meeting_notes,
         "notesUpdatedAt": snapshot.notes_updated_at.as_ref(),
         "meetingTemplateId": &snapshot.meeting_template_id,
+        "attendeeNames": &snapshot.attendee_names,
         "instruction": instruction,
     });
     models::analysis_content_hash(&canonical.to_string())
+}
+
+/// The supplemental, non-citable block handed to a grounded run: the meeting
+/// notes, with an "Attendees:" line in front of them when the meeting has
+/// one.
+///
+/// It goes in the NOTES slot deliberately. `grounded.rs` wraps that slot in
+/// `<notes_data non_citable="true">` and the system prompt already says
+/// everything inside it is untrusted data and never instructions -- so an
+/// attendee whose calendar display name is "ignore previous instructions"
+/// arrives fenced, exactly like a transcript line, and cannot be cited as
+/// evidence for a claim.
+///
+/// Names only. `models::attendee_names_for_context` is what drops the
+/// addresses, and it is the only path from an attendee list into a prompt.
+fn compose_analysis_notes(
+    meeting_notes: Option<&str>,
+    attendee_names: &[String],
+) -> Option<String> {
+    let notes = meeting_notes
+        .map(str::trim)
+        .filter(|value| !value.is_empty());
+    if attendee_names.is_empty() {
+        return notes.map(str::to_string);
+    }
+    let attendee_line = format!("Attendees: {}", attendee_names.join(", "));
+    Some(match notes {
+        Some(notes) => format!("{}\n\n{}", attendee_line, notes),
+        None => attendee_line,
+    })
 }
 
 struct RelationshipMemorySource {
@@ -1628,16 +1666,19 @@ async fn load_recording_analysis_input(
     }
     let meeting_notes = recording.meeting_notes.clone();
     let meeting_template_id = recording.meeting_template_id.clone();
+    let attendee_names = models::attendee_names_for_context(&recording.attendees);
+    let composed_notes = compose_analysis_notes(meeting_notes.as_deref(), &attendee_names);
     let snapshot = RecordingAnalysisSnapshot {
         transcript_revision,
-        meeting_notes: meeting_notes.clone(),
+        meeting_notes,
         notes_updated_at: recording.notes_updated_at,
         meeting_template_id: meeting_template_id.clone(),
         expected_summary: recording.summary,
         expected_action_items: recording.action_items,
         custom_summary_prompt: None,
+        attendee_names,
     };
-    Ok((segments, meeting_notes, meeting_template_id, snapshot))
+    Ok((segments, composed_notes, meeting_template_id, snapshot))
 }
 
 fn persisted_analysis_citations(citations: &[llm::Citation]) -> Vec<models::AnalysisCitation> {
@@ -8104,6 +8145,86 @@ mod tests {
         }
     }
 
+    fn snapshot_with(notes: Option<&str>, attendee_names: &[&str]) -> RecordingAnalysisSnapshot {
+        RecordingAnalysisSnapshot {
+            transcript_revision: 7,
+            meeting_notes: notes.map(str::to_string),
+            notes_updated_at: None,
+            meeting_template_id: None,
+            expected_summary: None,
+            expected_action_items: None,
+            custom_summary_prompt: None,
+            attendee_names: attendee_names.iter().map(|name| name.to_string()).collect(),
+        }
+    }
+
+    #[test]
+    fn attendee_names_lead_the_notes_block_and_addresses_never_appear() {
+        let names = models::attendee_names_for_context(&[
+            models::MeetingAttendee {
+                name: "Alice Brown".to_string(),
+                email: Some("alice@acme-holdings.example".to_string()),
+                is_organizer: true,
+            },
+            models::MeetingAttendee {
+                name: "Bob".to_string(),
+                email: Some("bob@example.com".to_string()),
+                is_organizer: false,
+            },
+        ]);
+
+        let composed = compose_analysis_notes(Some("Agreed to ship Friday."), &names)
+            .expect("notes and attendees compose");
+        assert_eq!(
+            composed,
+            "Attendees: Alice Brown, Bob\n\nAgreed to ship Friday."
+        );
+        assert!(
+            !composed.contains('@'),
+            "an address must never reach the prompt: {composed}"
+        );
+    }
+
+    #[test]
+    fn attendee_names_stand_alone_when_there_are_no_notes() {
+        let names = vec!["Alice".to_string()];
+        assert_eq!(
+            compose_analysis_notes(None, &names).as_deref(),
+            Some("Attendees: Alice")
+        );
+        assert_eq!(
+            compose_analysis_notes(Some("   "), &names).as_deref(),
+            Some("Attendees: Alice")
+        );
+    }
+
+    /// The block is only the notes when there is nobody on the invite, so a
+    /// meeting that did not come from a calendar is prompted exactly as it
+    /// was before attendees existed.
+    #[test]
+    fn a_meeting_without_attendees_gets_the_notes_unchanged() {
+        assert_eq!(
+            compose_analysis_notes(Some("Just my notes."), &[]).as_deref(),
+            Some("Just my notes.")
+        );
+        assert_eq!(compose_analysis_notes(None, &[]), None);
+    }
+
+    /// The composed block is what the model saw, so a change to it has to
+    /// change the fingerprint -- otherwise a stored summary would claim
+    /// provenance over an input it was not produced from.
+    #[test]
+    fn changing_the_attendee_list_changes_the_analysis_fingerprint() {
+        let instruction = "Summarize the meeting.";
+        let before =
+            analysis_input_fingerprint(&snapshot_with(Some("Notes"), &["Alice"]), instruction);
+        let after = analysis_input_fingerprint(
+            &snapshot_with(Some("Notes"), &["Alice", "Bob"]),
+            instruction,
+        );
+        assert_ne!(before, after);
+    }
+
     #[test]
     fn resolve_meeting_template_summary_instruction_prefers_a_matching_custom_template() {
         let templates = vec![custom_meeting_template_fixture(
@@ -9306,6 +9427,7 @@ mod tests {
             consent_notice_message: None,
             consent_notice_updated_at: None,
             analysis_failure: None,
+            attendees: Vec::new(),
         }
     }
 
@@ -22992,6 +23114,7 @@ async fn stop_dictation_for_sidecar(
         consent_notice_message: None,
         consent_notice_updated_at: None,
         analysis_failure: None,
+        attendees: Vec::new(),
     };
 
     // Cursor delivery crosses native process and accessibility boundaries.
@@ -24590,6 +24713,7 @@ async fn start_recording_for_sidecar(
         consent_notice_message: None,
         consent_notice_updated_at: None,
         analysis_failure: None,
+        attendees: Vec::new(),
     };
 
     {
@@ -26432,6 +26556,22 @@ pub async fn dispatch_command(
                 }
             }
             Ok(serde_json::Value::Null)
+        }
+        "update_recording_attendees" => {
+            let recording_id: String =
+                serde_json::from_value(params["recordingId"].clone()).map_err(|e| e.to_string())?;
+            // Absent means "clear the list", which is what removing the last
+            // attendee has to mean; a malformed value is an error rather than
+            // a silent clear.
+            let attendees: Vec<models::MeetingAttendee> = match params.get("attendees") {
+                None | Some(serde_json::Value::Null) => Vec::new(),
+                Some(value) => serde_json::from_value(value.clone()).map_err(|e| e.to_string())?,
+            };
+            let mut db = state.db.lock().await;
+            let stored = db
+                .update_recording_attendees(&recording_id, attendees)
+                .map_err(|error| error.to_string())?;
+            serde_json::to_value(stored).map_err(|e| e.to_string())
         }
         "update_meeting_chat_messages" => {
             let recording_id: String =

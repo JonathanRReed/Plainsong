@@ -25,6 +25,7 @@ export {
   testSystemAudioCapture,
   updateMeetingChatMessages,
   updateRecordingAnalysis,
+  updateRecordingAttendees,
   updateRecordingNotes,
   updateRecordingTemplate,
 } from "../backend";

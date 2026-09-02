@@ -269,6 +269,7 @@ const ALLOWED_RENDERER_COMMANDS = new Set<string>([
   "update_dictation_snippet",
   "update_meeting_chat_messages",
   "update_recording_analysis",
+  "update_recording_attendees",
   "update_recording_notes",
   "update_recording_template",
   "upsert_dictation_command_preset",
