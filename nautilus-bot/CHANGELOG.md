@@ -205,6 +205,20 @@ evidence is stale and must be recaptured before this becomes a candidate.
 - The read-only database open sets its busy timeout before the first statement
   that touches the file rather than after, so a reader started while the app
   is mid-write waits instead of failing.
+- `get_meeting` over MCP capped only the notes field, so a long summary, a
+  wall of action items, or a provider's error message pasted into the meeting
+  could each blow past the 60k result budget on their own. Every field is
+  capped now, with one `truncated` flag and the real action-item count. The
+  provider error text and the meeting template id are also wrapped in
+  `<untrusted_content>` frames like the rest of the meeting's text.
+- The MCP server now enforces the 2026-07-28 revision's per-request rule that
+  a client declaring that version also sends its capabilities (`-32602`
+  otherwise), and answers `server/discover` in the modern shape even when the
+  request carries no `_meta` at all, which is how a client that does not yet
+  know a version has to ask.
+- An over-long MCP request line was refused and then drained through the
+  unbounded reader, which handed back exactly the allocation the size cap
+  exists to refuse. It is drained through the bounded reader now.
 - Opening an encrypted (SQLCipher) database failed every time with "Execute
   returned results": the key check ran a `SELECT` through rusqlite's
   `execute`, which refuses any statement that returns rows. No install had a
