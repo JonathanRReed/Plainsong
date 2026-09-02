@@ -323,7 +323,12 @@ export interface DetectedCall {
   appLabel: string;
   videoService: string | null;
   bundleId: string;
-  windowTitle: string | null;
+  /**
+   * Whether the call was found through a window rather than only through the
+   * microphone. The title itself never leaves the sidecar: for Google Meet it
+   * is the meeting's own name.
+   */
+  hasCallWindow: boolean;
   confidence: "medium" | "high";
   detectedAtMs: number;
   detectedAt: string;

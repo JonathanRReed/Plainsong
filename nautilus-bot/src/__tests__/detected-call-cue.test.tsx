@@ -22,7 +22,7 @@ function activeCall(overrides: Partial<DetectedCall> = {}): DetectedCall {
     appLabel: "Zoom",
     videoService: "zoom",
     bundleId: "us.zoom.xos",
-    windowTitle: "Zoom Meeting",
+    hasCallWindow: true,
     confidence: "high",
     detectedAtMs: DETECTED_AT,
     detectedAt: new Date(DETECTED_AT).toISOString(),

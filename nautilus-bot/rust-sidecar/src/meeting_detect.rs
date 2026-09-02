@@ -204,8 +204,10 @@ pub struct CallCandidate {
 }
 
 /// The call detection is currently sure about.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
-#[serde(rename_all = "camelCase")]
+///
+/// Serialized by hand rather than derived, because one field must not leave
+/// the sidecar: see `window_title`.
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ActiveCall {
     /// Monotonic per sidecar process. Dismissals are scoped to it, so waving
     /// away this call never silences the next one in the same app.
@@ -214,11 +216,57 @@ pub struct ActiveCall {
     pub app_label: &'static str,
     pub video_service: Option<&'static str>,
     pub bundle_id: String,
+    /// The window title the call was found through, kept only so the next poll
+    /// can tell whether that window is still there.
+    ///
+    /// It never crosses the wire. `meeting-call-detected` goes to every
+    /// renderer window, and for Google Meet this title is the meeting's own
+    /// name — read out of a browser, about a call Plainsong is not recording
+    /// and may never be asked to record. Nothing in the UI wanted it;
+    /// `hasCallWindow` is the part that was ever useful.
     pub window_title: Option<String>,
     pub confidence: CallConfidence,
     pub detected_at_ms: i64,
     pub detected_at: String,
     pub dismissed: bool,
+}
+
+/// `ActiveCall` as the renderer sees it: the window title replaced by whether
+/// there was a window at all.
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ActiveCallWire<'a> {
+    call_id: u64,
+    app: CallApp,
+    app_label: &'static str,
+    video_service: Option<&'static str>,
+    bundle_id: &'a str,
+    /// Whether the call was found through a window rather than only through
+    /// the microphone — which is what "this ends when the window closes"
+    /// depends on.
+    has_call_window: bool,
+    confidence: CallConfidence,
+    detected_at_ms: i64,
+    detected_at: &'a str,
+    dismissed: bool,
+}
+
+impl Serialize for ActiveCall {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        ActiveCallWire {
+            call_id: self.call_id,
+            app: self.app,
+            app_label: self.app_label,
+            video_service: self.video_service,
+            bundle_id: &self.bundle_id,
+            has_call_window: self.window_title.is_some(),
+            confidence: self.confidence,
+            detected_at_ms: self.detected_at_ms,
+            detected_at: &self.detected_at,
+            dismissed: self.dismissed,
+        }
+        .serialize(serializer)
+    }
 }
 
 impl ActiveCall {
@@ -1166,16 +1214,39 @@ mod tests {
     }
 
     #[test]
-    fn active_call_serializes_camel_case_for_the_renderer() {
+    fn active_call_serializes_camel_case_and_never_the_window_title() {
         let json = serde_json::to_value(detector_call_fixture()).expect("serialize");
         assert_eq!(json["callId"], 1);
         assert_eq!(json["app"], "zoom");
         assert_eq!(json["appLabel"], "Zoom");
         assert_eq!(json["videoService"], "zoom");
         assert_eq!(json["bundleId"], "us.zoom.xos");
-        assert_eq!(json["windowTitle"], "Zoom Meeting");
         assert_eq!(json["confidence"], "high");
         assert_eq!(json["detectedAtMs"], 2);
         assert_eq!(json["dismissed"], false);
+
+        // The title itself never crosses the wire: for Meet it is the
+        // meeting's name, broadcast to every renderer window about a call
+        // Plainsong is not recording. Only its presence travels.
+        assert_eq!(json["hasCallWindow"], true);
+        assert!(
+            json.get("windowTitle").is_none(),
+            "the window title must not be serialized: {json}"
+        );
+        assert!(
+            !serde_json::to_string(&detector_call_fixture())
+                .expect("serialize")
+                .contains("Zoom Meeting"),
+            "no serialized form may carry the title"
+        );
+
+        let mic_only = ActiveCall {
+            window_title: None,
+            ..detector_call_fixture()
+        };
+        assert_eq!(
+            serde_json::to_value(mic_only).expect("serialize")["hasCallWindow"],
+            false
+        );
     }
 }
