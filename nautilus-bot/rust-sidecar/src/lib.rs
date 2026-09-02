@@ -8408,6 +8408,26 @@ mod tests {
     }
 
     #[test]
+    fn the_pause_path_persists_the_span_ledger_itself() {
+        // The stop path used to be the only writer, so a crash mid-meeting
+        // lost every marker. The pause path already holds the DB lock for its
+        // audit event; this pins the write to it rather than to a comment.
+        const SOURCE: &str = include_str!("lib.rs");
+        let start = SOURCE
+            .find("\nasync fn set_recording_paused_for_sidecar(")
+            .expect("the pause path must exist");
+        let body = &SOURCE[start + 1..];
+        let body = body
+            .split_once("\n/// Why the capture monitor")
+            .map(|parts| parts.0)
+            .unwrap_or(body);
+        assert!(
+            body.contains("set_recording_pause_spans("),
+            "pausing or resuming must persist the span ledger"
+        );
+    }
+
+    #[test]
     fn duplicate_meeting_stop_is_idempotent_only_after_safe_finalization() {
         for status in ["processing", "completed", "error"] {
             assert!(meeting_stop_is_already_terminal_or_processing(status));
@@ -24912,6 +24932,19 @@ async fn set_recording_paused_for_sidecar(
     );
     {
         let mut db = state.db.lock().await;
+        // Written on every pause and resume, not only at stop: the audio file
+        // skips the pauses, so these spans are the only record of where the
+        // gaps are, and a crash mid-meeting used to lose all of them. The
+        // ledger is small and the DB lock is already held for the audit event.
+        // A failure costs the timeline markers and nothing else, so it does
+        // not fail the pause.
+        if let Err(error) = db.set_recording_pause_spans(recording_id, &snapshot.spans) {
+            tracing::warn!(
+                "Failed to persist pause spans for {}: {}",
+                recording_id,
+                error
+            );
+        }
         let details = serde_json::json!({
             "recording_id": recording_id,
             "pause_count": snapshot.spans.len(),

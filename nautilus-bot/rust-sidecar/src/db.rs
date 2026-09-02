@@ -5889,6 +5889,29 @@ mod tests {
     }
 
     #[test]
+    fn a_pause_still_open_is_persisted_so_a_crash_keeps_the_marker() {
+        // Spans are written on every pause and resume, not only at stop, so a
+        // meeting that crashes while paused still has its markers. The open
+        // span (no `endedAtMs`) has to survive the round trip.
+        let mut db = in_memory_db();
+        db.create_recording(&sample_recording("meeting-open-pause", "inbox"))
+            .unwrap();
+        let open = vec![crate::recording_pause::PauseSpan {
+            started_at_ms: 12_000,
+            ended_at_ms: None,
+            at_seconds: 42.5,
+        }];
+        db.set_recording_pause_spans("meeting-open-pause", &open)
+            .expect("persist an open span");
+        let read = db
+            .get_recording("meeting-open-pause")
+            .expect("read")
+            .expect("row");
+        assert_eq!(read.pause_spans, open);
+        assert_eq!(read.pause_spans[0].ended_at_ms, None);
+    }
+
+    #[test]
     fn analysis_failure_round_trips_through_list_and_detail_reads() {
         let mut db = in_memory_db();
         db.create_recording(&sample_recording("meeting-1", "inbox"))
