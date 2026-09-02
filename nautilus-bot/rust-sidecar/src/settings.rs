@@ -198,6 +198,11 @@ pub struct TranscriptionSettings {
     pub dictation_retention_preset: String,
     /// Dictation retention custom duration in hours.
     pub dictation_retention_custom_hours: u32,
+    /// Keep each dictation's captured audio in the recordings store so history
+    /// entries can be run through the recognizer again ("Process again").
+    /// Off by default: it is a privacy trade the user makes knowingly, and the
+    /// audio is deleted with the entry (retention sweep or manual delete).
+    pub dictation_keep_audio: bool,
     /// Meeting audio storage mode: always or transcript_only.
     pub meeting_audio_storage_mode: String,
     /// Meeting retention policy.
@@ -363,6 +368,7 @@ impl Default for TranscriptionSettings {
             dictation_project_id: "inbox".to_string(),
             dictation_retention_preset: "never".to_string(),
             dictation_retention_custom_hours: 24,
+            dictation_keep_audio: false,
             meeting_audio_storage_mode: "always".to_string(),
             meeting_retention_preset: "never".to_string(),
             meeting_retention_custom_months: 1,
@@ -2009,6 +2015,46 @@ mod tests {
             serde_json::json!("parakeet-tdt-0.6b-v3")
         );
         let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn settings_file_predating_keep_dictation_audio_loads_with_it_off() {
+        // A file written before `dictationKeepAudio` existed carries no key for
+        // it. It must load, and the new behaviour must stay off: keeping audio
+        // is opt-in, never something an upgrade turns on.
+        let legacy = serde_json::json!({
+            "transcription": {
+                "dictationRetentionPreset": "72h",
+                "dictationRetentionCustomHours": 24
+            }
+        });
+        let suffix = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("system time before epoch")
+            .as_nanos();
+        let root = std::env::temp_dir().join(format!("nautilus-settings-keep-audio-{suffix}"));
+        let settings_path = root.join("settings.json");
+        fs::create_dir_all(&root).expect("create settings test directory");
+        fs::write(
+            &settings_path,
+            serde_json::to_string(&legacy).expect("serialize"),
+        )
+        .expect("write legacy settings");
+
+        let manager = SettingsManager::load_from_path(settings_path)
+            .expect("a file without the key must still load");
+        assert!(!manager.settings().transcription.dictation_keep_audio);
+        assert_eq!(
+            manager.settings().transcription.dictation_retention_preset,
+            "72h"
+        );
+        let _ = fs::remove_dir_all(&root);
+
+        // And the key round-trips under its camelCase name once set.
+        let mut settings = Settings::default();
+        settings.transcription.dictation_keep_audio = true;
+        let raw = serde_json::to_value(&settings).expect("serialize");
+        assert_eq!(raw["transcription"]["dictationKeepAudio"], true);
     }
 
     #[test]

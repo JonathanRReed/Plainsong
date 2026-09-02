@@ -337,6 +337,40 @@ pub struct DictationHistoryDetails {
     pub transcription_latency_ms: Option<u64>,
     pub insert_latency_ms: Option<u64>,
     pub end_to_end_ms: Option<u64>,
+    /// What the recognizer heard before the pipeline touched it, when the
+    /// dictation was saved with it (older rows only kept the delivered text).
+    #[serde(default)]
+    pub raw_transcript: Option<String>,
+    /// Whether the captured audio is still on disk, which is what "Process
+    /// again" needs. `None` for dictations saved without audio.
+    #[serde(default)]
+    pub audio_available: Option<bool>,
+    /// Set on an entry produced by "Process again": the dictation whose audio
+    /// it re-ran, and when that dictation was captured.
+    #[serde(default)]
+    pub reprocessed_from_id: Option<String>,
+    #[serde(default)]
+    pub reprocessed_from_created_at: Option<DateTime<Utc>>,
+}
+
+/// The result of running a saved dictation's audio through the pipeline
+/// again: the new history entry plus what produced it. Nothing is inserted.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DictationReprocessOutcome {
+    pub recording: Recording,
+    pub transcript: Transcript,
+    pub final_text: String,
+    pub raw_text: String,
+    pub mode_preset: String,
+    pub custom_mode_id: Option<String>,
+    pub custom_mode_name: Option<String>,
+    pub provider: String,
+    pub model_id: String,
+    pub used_ai: bool,
+    pub reprocessed_from_id: String,
+    pub reprocessed_from_created_at: DateTime<Utc>,
+    pub transcription_latency_ms: u64,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -389,6 +423,23 @@ pub struct SearchHit {
     pub text: String,
     pub start_time: f64,
     pub end_time: f64,
+    pub score: f64,
+}
+
+/// One ranked hit from dictation history search.
+///
+/// `snippet` is a short window of the matched text with each matched term
+/// wrapped in `[[` / `]]`, which the renderer turns into a highlight.
+/// `matched_field` says whether the delivered text or the raw transcript
+/// matched, so the row can say which of the two it is quoting.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DictationHistorySearchHit {
+    pub recording_id: String,
+    pub recording_title: String,
+    pub created_at: DateTime<Utc>,
+    pub snippet: String,
+    pub matched_field: String,
     pub score: f64,
 }
 

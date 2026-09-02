@@ -3043,7 +3043,44 @@ fn dictation_history_details_from_audit(
         end_to_end_ms: details
             .get("end_to_end_ms")
             .and_then(|value| value.as_u64()),
+        // Filled from the history text row and the recording, not the audit
+        // log: see `enrich_dictation_history_details`.
+        raw_transcript: None,
+        audio_available: None,
+        reprocessed_from_id: None,
+        reprocessed_from_created_at: None,
     }
+}
+
+/// Adds what the audit log never carries: the raw transcript, whether the
+/// captured audio is still on disk, and the "Process again" lineage.
+fn enrich_dictation_history_details(
+    mut details: models::DictationHistoryDetails,
+    history_text: Option<&crate::store::DictationHistoryTextRecord>,
+    recording: Option<&models::Recording>,
+    reprocessed_from: Option<&models::Recording>,
+) -> models::DictationHistoryDetails {
+    if let Some(text) = history_text {
+        // Older rows were backfilled with the delivered text on both sides;
+        // reporting that as "heard" would claim a raw transcript that was
+        // never kept.
+        if !text.raw_text.trim().is_empty() && text.raw_text != text.final_text {
+            details.raw_transcript = Some(text.raw_text.clone());
+        }
+        details.reprocessed_from_id = text.reprocessed_from_id.clone();
+        if details.mode_preset.is_none() {
+            details.mode_preset = text.mode_preset.clone();
+        }
+    }
+    if let Some(recording) = recording {
+        details.audio_available = if recording.audio_path.trim().is_empty() {
+            None
+        } else {
+            Some(Path::new(&recording.audio_path).is_file())
+        };
+    }
+    details.reprocessed_from_created_at = reprocessed_from.map(|source| source.created_at);
+    details
 }
 
 fn merge_dictation_history_details(
@@ -3099,6 +3136,10 @@ fn dictation_history_details_is_empty(details: &models::DictationHistoryDetails)
         && details.model_id.is_none()
         && details.route_preference.is_none()
         && details.resolved_hosting.is_none()
+        && details.raw_transcript.is_none()
+        && details.audio_available.is_none()
+        && details.reprocessed_from_id.is_none()
+        && details.reprocessed_from_created_at.is_none()
         && details.startup_latency_ms.is_none()
         && details.transcription_latency_ms.is_none()
         && details.insert_latency_ms.is_none()
@@ -3515,6 +3556,598 @@ async fn tracker_copy_to_clipboard(state: &AppState) -> bool {
     // Matches `dictation_copy_to_clipboard`'s default: without an explicit
     // opt-in, do not leave the dictated text sitting on the user's clipboard.
     tracker.copy_to_clipboard_at_start.unwrap_or(false)
+}
+
+/// What `reprocess_dictation` was asked to do. `mode_id` is a built-in
+/// preset ("voice", "messages", ...) or the id of a custom mode; `provider`
+/// and `model_id` override the dictation lane's route for this run only.
+#[derive(Debug, Clone)]
+struct DictationReprocessRequest {
+    history_id: String,
+    mode_id: Option<String>,
+    provider: Option<String>,
+    model_id: Option<String>,
+}
+
+/// Whether a saved dictation's audio can be run again, decided from facts the
+/// caller already has so the refusal can name the setting that would have
+/// kept it. Pure so the policy is testable without a database or a file.
+fn dictation_reprocess_audio_decision(
+    audio_path: &str,
+    audio_file_present: bool,
+    keep_audio_enabled: bool,
+    retention_preset: &str,
+) -> Result<(), String> {
+    if audio_path.trim().is_empty() {
+        return Err(if keep_audio_enabled {
+            "This dictation was saved before \"Keep dictation audio\" was turned on, so there is no audio to process again. Newer dictations keep theirs.".to_string()
+        } else {
+            "This dictation's audio was not kept. Turn on \"Keep dictation audio for Process again\" in Dictation settings; from then on each dictation keeps its audio until its history entry is deleted.".to_string()
+        });
+    }
+    if !audio_file_present {
+        let preset = normalize_dictation_retention_preset(retention_preset);
+        return Err(if preset == "never" {
+            "This dictation's audio file is no longer on disk, so it cannot be processed again."
+                .to_string()
+        } else {
+            format!(
+                "This dictation's audio file is gone. Dictation auto-delete is set to \"{}\", which removes kept audio with the entry; a longer setting keeps it for Process again.",
+                preset
+            )
+        });
+    }
+    Ok(())
+}
+
+/// Resolves a requested mode id to the base preset the pipeline runs and the
+/// custom mode (if any) whose prompt applies. Unknown ids fall back to the
+/// active mode, the same way live dictation resolves it.
+fn resolve_reprocess_mode<'a>(
+    settings: &'a settings::Settings,
+    mode_id: Option<&str>,
+) -> (&'static str, Option<&'a settings::DictationCustomMode>) {
+    if let Some(mode_id) = mode_id.map(str::trim).filter(|value| !value.is_empty()) {
+        if let Some(custom) = settings
+            .transcription
+            .dictation_custom_modes
+            .iter()
+            .find(|mode| mode.id == mode_id)
+        {
+            let base = custom
+                .base_mode_preset
+                .as_deref()
+                .map(normalize_dictation_base_mode_preset)
+                .unwrap_or("voice");
+            return (base, Some(custom));
+        }
+        // `normalize_dictation_mode_preset` answers "voice" for anything it
+        // does not know, which would turn a stale or mistyped mode id into a
+        // silent style change. Only an id that really is one of the built-in
+        // presets short-circuits; everything else falls through to the mode
+        // the reader is actually using.
+        let preset = normalize_dictation_mode_preset(mode_id);
+        if preset != "custom" && preset == mode_id {
+            return (preset, None);
+        }
+    }
+    (
+        resolved_dictation_mode_preset(settings),
+        active_dictation_custom_mode(settings),
+    )
+}
+
+/// Runs kept dictation audio through the recognizer and the chosen style
+/// again and saves the result as a new history entry linked to the original.
+/// Nothing is inserted, copied to the clipboard, or shown in the popup.
+async fn reprocess_dictation_impl(
+    state: &AppState,
+    handle: &crate::sidecar_handle::SidecarHandle,
+    request: DictationReprocessRequest,
+) -> Result<models::DictationReprocessOutcome, String> {
+    // Reads stored audio, so it is excluded against backup/restore/vault work
+    // exactly like meeting post-processing.
+    let _postprocessing_lease = state
+        .operation_coordinator
+        .try_acquire(operation_coordinator::OperationKind::PostProcess)?;
+    let settings_snapshot = state.settings_manager.lock().await.settings().clone();
+
+    let (source, dictionary_entries, snippets) = {
+        let db = state.db.lock().await;
+        let source = db
+            .get_recording(&request.history_id)
+            .map_err(|e| e.to_string())?
+            .ok_or_else(|| "That saved dictation no longer exists.".to_string())?;
+        if source.source_type != "dictation" {
+            return Err("Process again works on saved dictations only.".to_string());
+        }
+        let dictionary_entries = db
+            .list_dictation_dictionary_entries()
+            .map_err(|e| format!("Failed to read the dictation dictionary: {e}"))?;
+        let snippets = if settings_snapshot.transcription.dictation_snippets_enabled {
+            db.list_dictation_snippets()
+                .map_err(|e| format!("Failed to read dictation snippets: {e}"))?
+        } else {
+            Vec::new()
+        };
+        (source, dictionary_entries, snippets)
+    };
+
+    dictation_reprocess_audio_decision(
+        &source.audio_path,
+        Path::new(&source.audio_path).is_file(),
+        settings_snapshot.transcription.dictation_keep_audio,
+        &settings_snapshot.transcription.dictation_retention_preset,
+    )?;
+
+    // Same ownership path as meeting audio: approved-root check, decryption
+    // when the vault holds it, and the storage gate so a retention sweep or
+    // delete cannot pull the file out from under the read.
+    let audio_bytes = {
+        let _storage_guard = state.audio_storage_gate.lock().await;
+        let bundle = resolve_recording_audio_bundle_for_runtime(state, &source.id).await?;
+        std::fs::read(&bundle.primary).map_err(|error| {
+            format!(
+                "Could not read this dictation's kept audio ({}): {}",
+                bundle.primary.display(),
+                error
+            )
+        })?
+    };
+    let duration_seconds = compute_wav_duration_seconds_from_bytes(&audio_bytes)?;
+
+    let (provider_type, model_id) = match (&request.provider, &request.model_id) {
+        (Some(provider), model) => {
+            let provider_type = asr_provider_from_settings_value(provider)
+                .ok_or_else(|| format!("Unknown speech engine '{provider}'."))?;
+            let model_id = model
+                .clone()
+                .unwrap_or_else(|| provider_type.default_model_id().to_string());
+            (
+                provider_type,
+                normalize_asr_model_id(provider_type, &model_id),
+            )
+        }
+        (None, _) => resolve_transcription_provider_and_model(
+            &settings_snapshot.transcription,
+            TranscriptionScope::Dictation,
+        ),
+    };
+    enforce_remote_asr_provider_policy(
+        provider_type,
+        settings_snapshot.privacy.remote_processing_enabled,
+    )?;
+    ensure_asr_route_ready(state, provider_type, &model_id, "process again").await?;
+
+    let (base_preset, custom_mode) =
+        resolve_reprocess_mode(&settings_snapshot, request.mode_id.as_deref());
+    let base_preset = base_preset.to_string();
+    let custom_mode = custom_mode.cloned();
+
+    // The original destination app scopes the dictionary and the formatting
+    // style, exactly as it did the first time.
+    let original_details = {
+        let db = state.db.lock().await;
+        db.get_all_audit_log()
+            .map_err(|e| e.to_string())?
+            .into_iter()
+            .rev()
+            .find(|entry| {
+                entry.event == "dictation_completed"
+                    && entry.details.get("recording_id").and_then(|v| v.as_str())
+                        == Some(source.id.as_str())
+            })
+            .map(|entry| dictation_history_details_from_audit(&entry.details))
+            .unwrap_or_default()
+    };
+    let app_target = original_details
+        .app_target
+        .clone()
+        .or_else(|| original_details.context_app_name.clone());
+    let formatting_hint = resolve_dictation_formatting_hint(
+        app_target.as_deref(),
+        original_details.activation_matcher.as_deref(),
+        original_details.context_app_name.as_deref(),
+    );
+    let destination_category = settings::resolve_dictation_app_category_with_overrides_and_hint(
+        &settings_snapshot.transcription,
+        app_target.as_deref(),
+        None,
+        formatting_hint.as_deref(),
+    );
+    let transcription_options = asr::TranscriptionOptions {
+        vocabulary_hint: crate::dictation_parity::build_vocabulary_hint(
+            &crate::dictation_pipeline::vocabulary_candidates_from_entries(
+                &dictionary_entries,
+                &snippets,
+            ),
+            app_target.as_deref(),
+            destination_category,
+        ),
+    };
+
+    if let Ok(mut overlay) = state.dictation_overlay_state.lock() {
+        overlay.message = Some("Processing a saved dictation again…".to_string());
+    }
+    let transcription_started = std::time::Instant::now();
+    let transcription_result = state
+        .asr_manager
+        .transcribe_bytes_for_dictation_with_options(
+            provider_type,
+            &audio_bytes,
+            Some(model_id.as_str()),
+            &transcription_options,
+        )
+        .await
+        .map_err(|error| {
+            format!(
+                "Process again failed on {} / {}: {}",
+                provider_type.display_name(),
+                model_id,
+                error
+            )
+        })?;
+    let transcription_latency_ms = transcription_started.elapsed().as_millis() as u64;
+
+    let raw_text =
+        sanitize_dictation_output(&transcription_result.text, &transcription_result.text)
+            .trim()
+            .to_string();
+    if raw_text.is_empty() {
+        return Err(
+            "The recognizer heard nothing in this dictation's audio, so there is nothing to save."
+                .to_string(),
+        );
+    }
+
+    // Stage two: the same local pipeline the live path runs, then the mode's
+    // transform. Commands are deliberately not re-executed: a "delete that"
+    // said last week must not act on whatever is focused now.
+    let pipeline_result = crate::dictation_pipeline::apply_dictation_pipeline(
+        crate::dictation_pipeline::DictationPipelineInput {
+            text: raw_text.as_str(),
+            dictionary_entries: &dictionary_entries,
+            snippets: &snippets,
+            app_target: app_target.as_deref(),
+            mode_preset: base_preset.as_str(),
+            smart_formatting_enabled: true,
+            recent_inserted_text: None,
+            destination_category,
+        },
+    );
+    let mut final_text = pipeline_result.text.trim().to_string();
+    let mut used_ai = false;
+    let mut pipeline_stage_keys = pipeline_result.pipeline_stage_keys.clone();
+
+    let custom_prompt = custom_mode
+        .as_ref()
+        .and_then(|mode| mode.custom_prompt.as_deref())
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_string);
+    let llm_allowed = settings_snapshot.transcription.dictation_ai_formatting
+        || custom_mode
+            .as_ref()
+            .map(|mode| mode.profile == "power_rewrite")
+            .unwrap_or(false);
+    if !final_text.is_empty() {
+        match base_preset.as_str() {
+            "messages" | "email" | "meeting_follow_up" => {
+                // A custom mode built on this base supplies the prompt; any
+                // other custom mode must not hijack an explicit preset choice.
+                let prompt = custom_prompt.clone().unwrap_or_else(|| {
+                    dictation_mode_transform_prompt(&base_preset)
+                        .unwrap_or_default()
+                        .to_string()
+                });
+                if llm_allowed && !prompt.is_empty() {
+                    match run_custom_dictation_transform_with_selected_provider(
+                        state,
+                        final_text.as_str(),
+                        prompt.as_str(),
+                    )
+                    .await
+                    {
+                        Ok((output, _, _)) => {
+                            final_text = output.trim().to_string();
+                            used_ai = true;
+                            pipeline_stage_keys.push("mode_transform".to_string());
+                        }
+                        Err(error) => {
+                            tracing::warn!(
+                                "Process again: '{}' transform fell back to the local rewrite: {}",
+                                base_preset,
+                                error
+                            );
+                            final_text = match base_preset.as_str() {
+                                "messages" => rewrite_shorter_text(&final_text),
+                                _ => rewrite_professional_text(&final_text),
+                            };
+                            pipeline_stage_keys.push("mode_transform_fallback".to_string());
+                        }
+                    }
+                } else {
+                    final_text = match base_preset.as_str() {
+                        "messages" => rewrite_shorter_text(&final_text),
+                        _ => rewrite_professional_text(&final_text),
+                    };
+                    pipeline_stage_keys.push("mode_transform_fallback".to_string());
+                }
+            }
+            "notes" => {
+                let bulletized = bulletize_text(&final_text);
+                if bulletized != final_text {
+                    final_text = bulletized;
+                    pipeline_stage_keys.push("mode_transform".to_string());
+                }
+            }
+            _ => {
+                if let (true, Some(prompt)) = (llm_allowed, custom_prompt.as_deref()) {
+                    match run_custom_dictation_transform_with_selected_provider(
+                        state,
+                        final_text.as_str(),
+                        prompt,
+                    )
+                    .await
+                    {
+                        Ok((output, _, _)) => {
+                            final_text = output.trim().to_string();
+                            used_ai = true;
+                            pipeline_stage_keys.push("smart_formatting".to_string());
+                        }
+                        Err(error) => tracing::warn!(
+                            "Process again: custom-mode formatting kept the local output: {}",
+                            error
+                        ),
+                    }
+                }
+            }
+        }
+    }
+    final_text = sanitize_dictation_output(final_text.as_str(), raw_text.as_str())
+        .trim()
+        .to_string();
+    let stored_text = if final_text.is_empty() {
+        raw_text.clone()
+    } else {
+        final_text.clone()
+    };
+
+    // The new entry keeps its own copy of the audio, so deleting either entry
+    // (by hand or by the retention sweep) never strands the other.
+    let now = chrono::Utc::now();
+    let recording_id = uuid::Uuid::new_v4().to_string();
+    let kept_audio_path = if settings_snapshot.transcription.dictation_keep_audio {
+        Some(write_kept_dictation_audio(&recording_id, &audio_bytes)?)
+    } else {
+        None
+    };
+    let kept_audio_metadata = kept_audio_path
+        .as_deref()
+        .map(recording_audio::validate_plaintext_wav)
+        .and_then(|validation| match validation {
+            recording_audio::RecordingAudioValidation::Ready(metadata) => Some(metadata),
+            _ => None,
+        });
+
+    let transcript = models::Transcript {
+        id: uuid::Uuid::new_v4().to_string(),
+        recording_id: recording_id.clone(),
+        segments: if stored_text == raw_text {
+            transcription_result
+                .segments
+                .iter()
+                .cloned()
+                .map(|segment| models::TranscriptSegment {
+                    id: uuid::Uuid::new_v4().to_string(),
+                    start_time: segment.start_time,
+                    end_time: segment.end_time,
+                    text: segment.text,
+                    speaker_id: None,
+                    confidence: segment.confidence,
+                })
+                .collect()
+        } else {
+            vec![models::TranscriptSegment {
+                id: uuid::Uuid::new_v4().to_string(),
+                start_time: 0.0,
+                end_time: 0.0,
+                text: stored_text.clone(),
+                speaker_id: None,
+                confidence: transcription_result.confidence,
+            }]
+        },
+        full_text: stored_text.clone(),
+        language: transcription_result.language.clone(),
+        confidence: transcription_result.confidence,
+        model: transcription_result.model_name.clone(),
+        model_id: Some(transcription_result.model_id.clone()),
+        requested_provider: Some(asr_provider_to_settings_value(provider_type).to_string()),
+        actual_provider: Some(
+            asr_provider_to_settings_value(transcription_result.actual_provider).to_string(),
+        ),
+        created_at: now,
+    };
+    let mode_label = custom_mode
+        .as_ref()
+        .map(|mode| mode.name.clone())
+        .unwrap_or_else(|| {
+            dictation_mode_label(
+                &base_preset,
+                None,
+                &settings_snapshot.transcription.dictation_custom_modes,
+            )
+        });
+    let recording = models::Recording {
+        id: recording_id.clone(),
+        title: format!(
+            "Dictation (processed again, {}) - {}",
+            mode_label,
+            chrono::Local::now().format("%Y-%m-%d %H:%M")
+        ),
+        project_id: source.project_id.clone(),
+        duration: duration_seconds,
+        created_at: now,
+        updated_at: now,
+        source_type: "dictation".to_string(),
+        audio_path: kept_audio_path
+            .as_ref()
+            .map(|path| path.to_string_lossy().to_string())
+            .unwrap_or_default(),
+        status: "completed".to_string(),
+        summary: None,
+        action_items: None,
+        summary_provenance: None,
+        action_items_provenance: None,
+        meeting_notes: None,
+        meeting_template_id: None,
+        meeting_capture_mode: None,
+        imported_source_name: None,
+        notes_updated_at: None,
+        consent_prompt_shown: false,
+        consent_notice_mode: None,
+        consent_notice_surface: None,
+        consent_notice_message: None,
+        consent_notice_updated_at: None,
+        analysis_failure: None,
+    };
+    let history_text = crate::store::DictationHistoryTextRecord {
+        recording_id: recording_id.clone(),
+        final_text: stored_text.clone(),
+        raw_text: raw_text.clone(),
+        reprocessed_from_id: Some(source.id.clone()),
+        mode_preset: Some(base_preset.clone()),
+        created_at: now,
+    };
+
+    {
+        let mut db = state.db.lock().await;
+        if let Err(error) = db.create_dictation_history_entry(
+            &recording,
+            &transcript,
+            &history_text,
+            kept_audio_metadata.as_ref(),
+        ) {
+            if let Some(path) = kept_audio_path.as_deref() {
+                let _ = std::fs::remove_file(path);
+            }
+            return Err(format!(
+                "Plainsong could not save the processed-again dictation: {error}"
+            ));
+        }
+        let _ = db.save_transcript_artifact(&TranscriptArtifactRecord {
+            id: uuid::Uuid::new_v4().to_string(),
+            recording_id: recording_id.clone(),
+            transcript_id: Some(transcript.id.clone()),
+            segment_count: transcript.segments.len() as i64,
+            model_id: Some(transcription_result.model_id.clone()),
+            requested_provider: Some(asr_provider_to_settings_value(provider_type).to_string()),
+            actual_provider: Some(
+                asr_provider_to_settings_value(transcription_result.actual_provider).to_string(),
+            ),
+            quality_score: Some(transcription_result.confidence),
+            startup_latency_ms: None,
+            transcription_latency_ms: Some(transcription_latency_ms as i64),
+            insert_latency_ms: None,
+            end_to_end_ms: Some(transcription_latency_ms as i64),
+            created_at: now,
+        });
+        // Mirrors `dictation_completed` closely enough that the history
+        // inspector reads the new entry through the same code path.
+        let _ = db.log_audit_event(
+            "dictation_completed",
+            Some(serde_json::json!({
+                "recording_id": &recording_id,
+                "reprocessed_from_id": &source.id,
+                "stop_reason": "process_again",
+                "dictation_mode_preset": custom_mode.as_ref().map(|_| "custom").unwrap_or(base_preset.as_str()),
+                "dictation_mode_label": mode_label,
+                "dictation_base_mode_preset": &base_preset,
+                "dictation_custom_mode_id": custom_mode.as_ref().map(|mode| mode.id.clone()),
+                "dictation_custom_mode_name": custom_mode.as_ref().map(|mode| mode.name.clone()),
+                "app_target": app_target,
+                "dictionary_applied_count": pipeline_result.dictionary_applied_count,
+                "snippet_applied_count": pipeline_result.snippet_applied_count,
+                "formatting_applied": used_ai || pipeline_result.formatting_applied,
+                "pipeline_stage_keys": pipeline_stage_keys,
+                "requested_provider": asr_provider_to_settings_value(provider_type),
+                "actual_provider": asr_provider_to_settings_value(transcription_result.actual_provider),
+                "model_id": &transcription_result.model_id,
+                "transcription_latency_ms": transcription_latency_ms,
+                "outcome": "saved",
+            })),
+            "info",
+        );
+        let _ = db.log_audit_event(
+            "dictation_reprocessed",
+            Some(serde_json::json!({
+                "recording_id": &recording_id,
+                "reprocessed_from_id": &source.id,
+                "mode_preset": &base_preset,
+                "custom_mode_id": custom_mode.as_ref().map(|mode| mode.id.clone()),
+                "provider": asr_provider_to_settings_value(transcription_result.actual_provider),
+                "model_id": &transcription_result.model_id,
+                "used_ai": used_ai,
+                "duration_seconds": duration_seconds,
+                "transcription_latency_ms": transcription_latency_ms,
+            })),
+            "info",
+        );
+    }
+    if let Ok(mut overlay) = state.dictation_overlay_state.lock() {
+        overlay.message = None;
+    }
+    handle.emit_event(
+        "dictation-history-changed",
+        serde_json::json!({
+            "recordingId": &recording_id,
+            "reprocessedFromId": &source.id,
+        }),
+    );
+
+    Ok(models::DictationReprocessOutcome {
+        recording,
+        transcript,
+        final_text: stored_text,
+        raw_text,
+        mode_preset: base_preset,
+        custom_mode_id: custom_mode.as_ref().map(|mode| mode.id.clone()),
+        custom_mode_name: custom_mode.as_ref().map(|mode| mode.name.clone()),
+        provider: asr_provider_to_settings_value(transcription_result.actual_provider).to_string(),
+        model_id: transcription_result.model_id.clone(),
+        used_ai,
+        reprocessed_from_id: source.id.clone(),
+        reprocessed_from_created_at: source.created_at,
+        transcription_latency_ms,
+    })
+}
+
+/// Writes a dictation's captured WAV into the recordings store under a name
+/// that cannot collide, and returns its path. The caller registers it as the
+/// entry's owned primary asset in the same transaction as the row.
+fn write_kept_dictation_audio(recording_id: &str, audio_bytes: &[u8]) -> Result<PathBuf, String> {
+    let recordings_dir = nautilus_data_root()?.join("recordings");
+    std::fs::create_dir_all(&recordings_dir).map_err(|error| {
+        format!(
+            "Failed to prepare the recordings folder '{}': {}",
+            recordings_dir.display(),
+            error
+        )
+    })?;
+    let timestamp = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|duration| duration.as_secs())
+        .unwrap_or(0);
+    let short_id: String = recording_id.chars().take(8).collect();
+    let path = recordings_dir.join(format!("dictation_{timestamp}_{short_id}.wav"));
+    std::fs::write(&path, audio_bytes).map_err(|error| {
+        format!(
+            "Failed to keep the dictation audio at '{}': {}",
+            path.display(),
+            error
+        )
+    })?;
+    Ok(path)
 }
 
 async fn reprocess_dictation_text_impl(
@@ -11018,7 +11651,7 @@ mod tests {
         // delivery attempt, not after it returns.
         let body = owned_stop_dictation_body();
         let persistence = body
-            .find("create_recording_with_transcript")
+            .find("create_dictation_history_entry")
             .expect("dictation stop must persist the result transactionally");
         let delivery = body
             .find("paste_text_systemwide")
@@ -12138,6 +12771,158 @@ mod tests {
                 "smart_formatting".to_string()
             ]
         );
+    }
+
+    #[test]
+    fn reprocess_audio_decision_names_the_setting_that_would_have_kept_it() {
+        // Audio present: allowed regardless of the toggle's current value.
+        assert!(dictation_reprocess_audio_decision("/kept/a.wav", true, false, "never").is_ok());
+        assert!(dictation_reprocess_audio_decision("/kept/a.wav", true, true, "24h").is_ok());
+
+        // Never kept, toggle off: point at the toggle.
+        let off = dictation_reprocess_audio_decision("", false, false, "never").unwrap_err();
+        assert!(
+            off.contains("Keep dictation audio for Process again"),
+            "{off}"
+        );
+
+        // Never kept, toggle on now: say it predates the toggle.
+        let predates = dictation_reprocess_audio_decision("", false, true, "never").unwrap_err();
+        assert!(predates.contains("before"), "{predates}");
+
+        // Kept, then removed by auto-delete: name the retention preset.
+        let swept =
+            dictation_reprocess_audio_decision("/kept/a.wav", false, true, "24h").unwrap_err();
+        assert!(
+            swept.contains("auto-delete") && swept.contains("24h"),
+            "{swept}"
+        );
+
+        // Kept, gone for some other reason: no false claim about retention.
+        let gone =
+            dictation_reprocess_audio_decision("/kept/a.wav", false, true, "never").unwrap_err();
+        assert!(!gone.contains("auto-delete"), "{gone}");
+    }
+
+    #[test]
+    fn reprocess_mode_resolves_presets_custom_modes_and_falls_back_to_the_active_mode() {
+        let mut settings = settings::Settings::default();
+        settings.transcription.dictation_mode_preset = "notes".to_string();
+        settings.transcription.dictation_custom_modes = vec![settings::DictationCustomMode {
+            id: "mode-email".to_string(),
+            name: "Investor email".to_string(),
+            description: String::new(),
+            base_mode_preset: Some("email".to_string()),
+            custom_prompt: Some("Write it for an investor.".to_string()),
+            profile: "normal_speed".to_string(),
+            route_preference: None,
+            language_override: None,
+            live_preview_enabled: None,
+            insertion_mode: "auto".to_string(),
+            context_source: "none".to_string(),
+            save_to_inbox: true,
+            copy_to_clipboard: false,
+            command_mode_enabled: true,
+            dictation_provider: None,
+            dictation_model_id: None,
+            ai_provider: None,
+            ai_model_id: None,
+            activation_app_matcher: None,
+            activation_domain_matcher: None,
+        }];
+
+        let (preset, custom) = resolve_reprocess_mode(&settings, Some("messages"));
+        assert_eq!(preset, "messages");
+        assert!(custom.is_none());
+
+        let (preset, custom) = resolve_reprocess_mode(&settings, Some("mode-email"));
+        assert_eq!(preset, "email");
+        assert_eq!(custom.map(|mode| mode.id.as_str()), Some("mode-email"));
+
+        // Unknown id and no id both land on the active mode.
+        let (preset, custom) = resolve_reprocess_mode(&settings, Some("mode-missing"));
+        assert_eq!(preset, "notes");
+        assert!(custom.is_none());
+        let (preset, _) = resolve_reprocess_mode(&settings, None);
+        assert_eq!(preset, "notes");
+    }
+
+    #[test]
+    fn history_details_enrichment_reports_lineage_audio_and_a_real_raw_transcript() {
+        let now = chrono::Utc::now();
+        let source_created_at = now - chrono::Duration::minutes(30);
+        let source = models::Recording {
+            id: "source".to_string(),
+            title: "Dictation".to_string(),
+            project_id: "inbox".to_string(),
+            duration: 3,
+            created_at: source_created_at,
+            updated_at: source_created_at,
+            source_type: "dictation".to_string(),
+            audio_path: String::new(),
+            status: "completed".to_string(),
+            summary: None,
+            action_items: None,
+            summary_provenance: None,
+            action_items_provenance: None,
+            meeting_notes: None,
+            meeting_template_id: None,
+            meeting_capture_mode: None,
+            imported_source_name: None,
+            notes_updated_at: None,
+            consent_prompt_shown: false,
+            consent_notice_mode: None,
+            consent_notice_surface: None,
+            consent_notice_message: None,
+            consent_notice_updated_at: None,
+            analysis_failure: None,
+        };
+        let entry = models::Recording {
+            id: "entry".to_string(),
+            audio_path: "/definitely/not/here.wav".to_string(),
+            ..source.clone()
+        };
+        let text = crate::store::DictationHistoryTextRecord {
+            recording_id: "entry".to_string(),
+            final_text: "Water the plants.".to_string(),
+            raw_text: "water the plants".to_string(),
+            reprocessed_from_id: Some("source".to_string()),
+            mode_preset: Some("voice".to_string()),
+            created_at: now,
+        };
+
+        let details = enrich_dictation_history_details(
+            models::DictationHistoryDetails::default(),
+            Some(&text),
+            Some(&entry),
+            Some(&source),
+        );
+        assert_eq!(details.raw_transcript.as_deref(), Some("water the plants"));
+        assert_eq!(details.audio_available, Some(false));
+        assert_eq!(details.reprocessed_from_id.as_deref(), Some("source"));
+        assert_eq!(details.reprocessed_from_created_at, Some(source_created_at));
+        assert_eq!(details.mode_preset.as_deref(), Some("voice"));
+        assert!(!dictation_history_details_is_empty(&details));
+
+        // A backfilled legacy row carries the delivered text on both sides;
+        // that is not a raw transcript and must not be shown as one.
+        let legacy = crate::store::DictationHistoryTextRecord {
+            raw_text: text.final_text.clone(),
+            reprocessed_from_id: None,
+            ..text.clone()
+        };
+        let details = enrich_dictation_history_details(
+            models::DictationHistoryDetails::default(),
+            Some(&legacy),
+            Some(&source),
+            None,
+        );
+        assert_eq!(details.raw_transcript, None);
+        assert_eq!(
+            details.audio_available, None,
+            "no audio path means no claim"
+        );
+        assert_eq!(details.reprocessed_from_id, None);
     }
 
     #[test]
@@ -23175,6 +23960,38 @@ async fn stop_dictation_for_sidecar(
         ),
         created_at: now,
     };
+    // Opt-in: keep the captured WAV so this entry can be processed again.
+    // Written before the row so a failed write never leaves a row that claims
+    // audio it does not have; a failed row write removes the file again below.
+    let kept_audio_path = if settings_snapshot.transcription.dictation_keep_audio {
+        match write_kept_dictation_audio(&recording_id, &audio_bytes) {
+            Ok(path) => Some(path),
+            Err(error) => {
+                tracing::warn!("Dictation audio was not kept: {}", error);
+                warnings.push(format!(
+                    "The dictation audio could not be kept for Process again: {error}"
+                ));
+                None
+            }
+        }
+    } else {
+        None
+    };
+    let kept_audio_metadata = kept_audio_path
+        .as_deref()
+        .map(recording_audio::validate_plaintext_wav)
+        .and_then(|validation| match validation {
+            recording_audio::RecordingAudioValidation::Ready(metadata) => Some(metadata),
+            _ => None,
+        });
+    let history_text = crate::store::DictationHistoryTextRecord {
+        recording_id: recording_id.clone(),
+        final_text: stored_text.clone(),
+        raw_text: raw_transcribed_text.clone(),
+        reprocessed_from_id: None,
+        mode_preset: Some(effective_mode.clone()),
+        created_at: now,
+    };
     let recording = models::Recording {
         id: recording_id.clone(),
         title: format!(
@@ -23189,7 +24006,11 @@ async fn stop_dictation_for_sidecar(
         created_at: now,
         updated_at: now,
         source_type: "dictation".to_string(),
-        audio_path: String::new(),
+        audio_path: kept_audio_metadata
+            .as_ref()
+            .and(kept_audio_path.as_ref())
+            .map(|path| path.to_string_lossy().to_string())
+            .unwrap_or_default(),
         status: "completed".to_string(),
         summary: None,
         action_items: None,
@@ -23213,8 +24034,16 @@ async fn stop_dictation_for_sidecar(
     // failure or app termination during insertion cannot erase the words.
     {
         let mut db = state.db.lock().await;
-        if let Err(error) = db.create_recording_with_transcript(&recording, &transcript) {
+        if let Err(error) = db.create_dictation_history_entry(
+            &recording,
+            &transcript,
+            &history_text,
+            kept_audio_metadata.as_ref(),
+        ) {
             drop(db);
+            if let Some(path) = kept_audio_path.as_deref() {
+                let _ = std::fs::remove_file(path);
+            }
             record_recent_dictation_result(
                 state,
                 &final_text,
@@ -28838,12 +29667,86 @@ pub async fn dispatch_command(
                 transcript_artifact.as_ref(),
                 insertion_action.as_ref(),
             );
+            let history_text = db
+                .get_dictation_history_text(&recording_id)
+                .map_err(|e| e.to_string())?;
+            let recording = db.get_recording(&recording_id).map_err(|e| e.to_string())?;
+            let reprocessed_from = match history_text
+                .as_ref()
+                .and_then(|text| text.reprocessed_from_id.as_deref())
+            {
+                Some(source_id) => db.get_recording(source_id).map_err(|e| e.to_string())?,
+                None => None,
+            };
+            let details = enrich_dictation_history_details(
+                details,
+                history_text.as_ref(),
+                recording.as_ref(),
+                reprocessed_from.as_ref(),
+            );
             let result = if dictation_history_details_is_empty(&details) {
                 None
             } else {
                 Some(details)
             };
             serde_json::to_value(result).map_err(|e| e.to_string())
+        }
+        "search_dictation_history" => {
+            let query: String = params
+                .get("query")
+                .and_then(|value| value.as_str())
+                .unwrap_or_default()
+                .to_string();
+            let limit = params
+                .get("limit")
+                .and_then(|value| value.as_u64())
+                .unwrap_or(25) as usize;
+            let offset = params
+                .get("offset")
+                .and_then(|value| value.as_u64())
+                .unwrap_or(0) as usize;
+            let mut db = state.db.lock().await;
+            let hits = db
+                .search_dictation_history(&query, limit, offset)
+                .map_err(|e| e.to_string())?;
+            // The query is the user's own words; only its shape is logged.
+            let _ = db.log_audit_event(
+                "dictation_history_searched",
+                Some(serde_json::json!({
+                    "query_terms": query.split_whitespace().count(),
+                    "query_chars": query.chars().count(),
+                    "hits": hits.len(),
+                    "offset": offset,
+                })),
+                "info",
+            );
+            serde_json::to_value(hits).map_err(|e| e.to_string())
+        }
+        "reprocess_dictation" => {
+            let history_id: String = params
+                .get("historyId")
+                .or_else(|| params.get("recordingId"))
+                .and_then(|value| value.as_str())
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .ok_or_else(|| "Process again needs the id of a saved dictation.".to_string())?
+                .to_string();
+            let optional_string = |key: &str| {
+                params
+                    .get(key)
+                    .and_then(|value| value.as_str())
+                    .map(str::trim)
+                    .filter(|value| !value.is_empty())
+                    .map(str::to_string)
+            };
+            let request = DictationReprocessRequest {
+                history_id,
+                mode_id: optional_string("modeId"),
+                provider: optional_string("provider"),
+                model_id: optional_string("modelId"),
+            };
+            let outcome = reprocess_dictation_impl(state.as_ref(), handle, request).await?;
+            serde_json::to_value(outcome).map_err(|e| e.to_string())
         }
         "get_dictation_insights" => {
             // Bounded aggregate query: this used to load every dictation and

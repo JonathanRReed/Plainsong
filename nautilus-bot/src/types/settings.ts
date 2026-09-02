@@ -144,6 +144,12 @@ export interface TranscriptionSettings {
   dictationProjectId: string;
   dictationRetentionPreset?: "immediate" | "24h" | "72h" | "never" | "custom";
   dictationRetentionCustomHours?: number;
+  /**
+   * Keep each dictation's captured audio so a history entry can be run through
+   * the recognizer again ("Process again"). Off by default; the audio is
+   * deleted with the entry. Mirrors `dictation_keep_audio` in settings.rs.
+   */
+  dictationKeepAudio?: boolean;
   meetingAudioStorageMode?: "always" | "transcript_only";
   meetingRetentionPreset?: "1m" | "2m" | "3m" | "custom" | "never";
   meetingRetentionCustomMonths?: number;

@@ -13,6 +13,16 @@ changed underneath `0.9.0-beta.2`. See `LAUNCH.md` for which qualification
 evidence is stale and must be recaptured before this becomes a candidate.
 
 ### Added
+- Dictation history is searchable, and a saved dictation can be run through
+  the recognizer again. The search field over Recent dictations matches both
+  what was delivered and (where it was kept) what the recognizer heard,
+  marking the matched words in each result. "Process again" in a saved
+  dictation's dialog re-runs its kept audio through any style and saves the
+  result as a new history entry linked to the original — it never types or
+  pastes anything. Keeping the audio is a new off-by-default setting, "Keep
+  dictation audio for Process again"; without it, the dialog says so and
+  names the setting instead of offering a button it cannot honour. Kept audio
+  is deleted with its history entry.
 - "Import audio…" in the Meetings header transcribes an audio file you
   already have. Plainsong decodes .wav, .mp3, .m4a, .aac, .mp4, .webm, .ogg
   and .flac up to 2 GB and 4 hours with macOS' own converter, copies the

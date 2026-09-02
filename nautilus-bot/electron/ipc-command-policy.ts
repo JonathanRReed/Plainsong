@@ -77,6 +77,9 @@ const EXTENDED_COMMANDS = new Set<string>([
   "refresh_asr_runtime_probes",
   "reindex_embeddings",
   "repair_local_model_cache",
+  // Re-runs ASR (and possibly an LLM pass) over a saved dictation's kept
+  // audio; a ten-minute dictation on a cold model needs the extended budget.
+  "reprocess_dictation",
   "restore_backup_default",
   "run_diarization",
   "summarize_recording",
@@ -153,6 +156,11 @@ export function getCommandWorkKey(command: string, args?: unknown): string | nul
   }
   if (command === "benchmark_asr_providers" || command === "benchmark_asr_providers_bytes") {
     return "benchmark:active";
+  }
+  if (command === "reprocess_dictation") {
+    // One re-run per saved dictation at a time; a second click on the same
+    // entry is refused instead of queued behind the first.
+    return `reprocess_dictation:${stringArgument(args, ["historyId"]) ?? command}`;
   }
   if (ANALYSIS_COMMANDS.has(command)) {
     const target = stringArgument(args, ["runId", "recordingId"]) ?? command;

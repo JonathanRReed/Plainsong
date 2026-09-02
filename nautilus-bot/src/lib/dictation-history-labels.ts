@@ -59,6 +59,37 @@ export const SESSION_INSERTION_MODE_LABELS: Record<
   none: "Save only",
 };
 
+/**
+ * Splits a history-search snippet into runs, marking the ones the sidecar
+ * wrapped in `[[`/`]]` (FTS5's `snippet()` and the LIKE fallback both emit
+ * that shape). Unbalanced markers are rendered as plain text rather than
+ * swallowed, so a transcript that literally says "[[" still reads.
+ */
+export function splitHistorySnippet(
+  snippet: string,
+): Array<{ text: string; matched: boolean }> {
+  const runs: Array<{ text: string; matched: boolean }> = [];
+  let rest = snippet;
+  while (rest.length > 0) {
+    const open = rest.indexOf("[[");
+    if (open === -1) {
+      runs.push({ text: rest, matched: false });
+      break;
+    }
+    const close = rest.indexOf("]]", open + 2);
+    if (close === -1) {
+      runs.push({ text: rest, matched: false });
+      break;
+    }
+    if (open > 0) {
+      runs.push({ text: rest.slice(0, open), matched: false });
+    }
+    runs.push({ text: rest.slice(open + 2, close), matched: true });
+    rest = rest.slice(close + 2);
+  }
+  return runs.filter((run) => run.text.length > 0);
+}
+
 function formatSnakeCaseLabel(value: string): string {
   return value
     .split("_")

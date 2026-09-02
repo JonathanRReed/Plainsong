@@ -124,6 +124,9 @@ fn classify_command(command: &str) -> CommandClass {
         | "ask_memory"
         | "extract_action_items"
         | "extract_action_items_grounded"
+        // Re-runs ASR and possibly an LLM pass over kept dictation audio, so
+        // it shares the analysis budget and the per-target duplicate guard.
+        | "reprocess_dictation"
         | "retry_meeting_analysis"
         | "summarize_recording"
         | "summarize_recording_grounded" => CommandClass::Analysis,
@@ -153,7 +156,7 @@ fn duplicate_work_key(command: &str, params: &Value) -> Option<String> {
                 .unwrap_or_else(|| command.to_string())
         }
         CommandClass::Benchmark => "benchmark".to_string(),
-        CommandClass::Analysis => string_param(params, &["runId", "recordingId"])
+        CommandClass::Analysis => string_param(params, &["runId", "recordingId", "historyId"])
             .or_else(|| {
                 params
                     .get("recordingIds")

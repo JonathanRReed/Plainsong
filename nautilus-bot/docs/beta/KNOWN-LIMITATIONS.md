@@ -46,6 +46,17 @@ using sensitive content.
 - The first local model download and preparation take longer than later
   Dictations and require additional disk space. Ready means the selected model
   is actually present, not merely selected in Settings.
+- "Process again" needs the dictation's audio, and Plainsong keeps that only
+  when "Keep dictation audio for Process again" is on, which it is not by
+  default. Turning it on affects later dictations, never ones already saved,
+  and the kept audio is deleted with its history entry — by auto-delete or by
+  hand. A history entry whose audio is gone says so and names the setting
+  rather than offering an action it cannot complete.
+- History search covers the dictations still in history. Anything auto-delete
+  has already removed cannot be found, and dictations saved before this
+  version were indexed on their delivered text only, so for them a search
+  cannot distinguish what was heard from what was delivered.
+
 ## Meetings
 
 - A Meeting interrupted before its first durable WAV checkpoint may be too
