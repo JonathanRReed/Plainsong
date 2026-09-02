@@ -2179,29 +2179,15 @@ fn resolve_meeting_template_summary_instruction(
     meeting_template_summary_query(None).to_string()
 }
 
+/// The stored one-line form of a grounded item. `export::action_items` owns
+/// the shape so the exports and the workspace read back exactly what was
+/// written.
 fn format_grounded_action_item_for_storage(item: &GroundedActionItem) -> String {
-    let mut details = Vec::new();
-    if let Some(assignee) = item
-        .assignee
-        .as_deref()
-        .map(str::trim)
-        .filter(|v| !v.is_empty())
-    {
-        details.push(format!("Owner: {}", assignee));
-    }
-    if let Some(deadline) = item
-        .deadline
-        .as_deref()
-        .map(str::trim)
-        .filter(|v| !v.is_empty())
-    {
-        details.push(format!("Due: {}", deadline));
-    }
-    if details.is_empty() {
-        item.task.trim().to_string()
-    } else {
-        format!("{} ({})", item.task.trim(), details.join(" · "))
-    }
+    export::action_items::format_action_item_for_storage(
+        &item.task,
+        item.assignee.as_deref(),
+        item.deadline.as_deref(),
+    )
 }
 
 async fn extract_action_items_grounded_internal(
@@ -17521,6 +17507,22 @@ fn persisted_template_analysis(
     (summary, action_items)
 }
 
+/// Speaker names an export may show, read from the aliases a person set in
+/// the transcript viewer. A speaker with no alias is left out: subtitles then
+/// fall back to the capture side (`Me`/`Them`) rather than invent a name.
+fn export_context_for_recording(db: &db::Database, recording_id: &str) -> export::ExportContext {
+    let speaker_names = db
+        .get_speaker_aliases(recording_id)
+        .unwrap_or_default()
+        .into_iter()
+        .filter_map(|(speaker_id, (name, _, _))| {
+            let name = name?.trim().to_string();
+            (!name.is_empty()).then_some((speaker_id, name))
+        })
+        .collect();
+    export::ExportContext { speaker_names }
+}
+
 fn write_template_export(path: &std::path::Path, contents: &[u8]) -> Result<(), String> {
     if let Some(parent) = path.parent() {
         safe_fs::ensure_directory_without_links(parent).map_err(|error| {
@@ -17548,6 +17550,7 @@ fn template_format_extension(format: &export::templates::ExportFormat) -> &'stat
         export::templates::ExportFormat::Json => "json",
         export::templates::ExportFormat::Csv => "csv",
         export::templates::ExportFormat::Pdf => "pdf",
+        export::templates::ExportFormat::Docx => "docx",
     }
 }
 
@@ -28827,7 +28830,7 @@ pub async fn dispatch_command(
                 .get("target")
                 .and_then(|v| v.as_str())
                 .map(str::to_string);
-            let (recording, transcript) = {
+            let (recording, transcript, export_context) = {
                 let db = state.db.lock().await;
                 let recording = db
                     .get_recording(&recording_id)
@@ -28836,7 +28839,8 @@ pub async fn dispatch_command(
                 let transcript = db
                     .get_transcript(&recording_id)
                     .map_err(|e| e.to_string())?;
-                (recording, transcript)
+                let context = export_context_for_recording(&db, &recording_id);
+                (recording, transcript, context)
             };
             let validated_target = match target.as_deref() {
                 Some(path) => Some(validate_export_target_path(state.as_ref(), path).await?),
@@ -28847,6 +28851,7 @@ pub async fn dispatch_command(
                 transcript.as_ref(),
                 &format,
                 validated_target.as_deref(),
+                &export_context,
             )
             .map_err(|e| e.to_string())?;
             let mut db = state.db.lock().await;
@@ -28871,7 +28876,7 @@ pub async fn dispatch_command(
                 .get("preview")
                 .and_then(|v| v.as_bool())
                 .unwrap_or(false);
-            let (recording, transcript) = {
+            let (recording, transcript, export_context) = {
                 let db = state.db.lock().await;
                 let recording = db
                     .get_recording(&recording_id)
@@ -28880,7 +28885,8 @@ pub async fn dispatch_command(
                 let transcript = db
                     .get_transcript(&recording_id)
                     .map_err(|e| e.to_string())?;
-                (recording, transcript)
+                let context = export_context_for_recording(&db, &recording_id);
+                (recording, transcript, context)
             };
             let validated_target = match target.as_deref() {
                 Some(path) => Some(validate_export_target_path(state.as_ref(), path).await?),
@@ -28893,6 +28899,7 @@ pub async fn dispatch_command(
                 validated_target.as_deref(),
                 &redaction_level,
                 preview_mode,
+                &export_context,
             )
             .map_err(|e| e.to_string())?;
             let mut db = state.db.lock().await;
@@ -29012,7 +29019,14 @@ pub async fn dispatch_command(
                 }
             };
             let export_path_buf = std::path::PathBuf::from(&export_path);
-            write_template_export(&export_path_buf, rendered.as_bytes())?;
+            // A Docx template renders Markdown like the others; only the file
+            // it is written into differs.
+            let bytes = if template.format.is_binary() {
+                export::docx::markdown_to_docx(&rendered).map_err(|error| error.to_string())?
+            } else {
+                rendered.as_bytes().to_vec()
+            };
+            write_template_export(&export_path_buf, &bytes)?;
             let mut db = state.db.lock().await;
             let _ = db.log_audit_event("recording_template_exported", Some(serde_json::json!({"recording_id": &recording_id, "template_id": &template_id, "target": &export_path})), "info");
             serde_json::to_value(models::TemplateExportResponse {

@@ -13,6 +13,18 @@ changed underneath `0.9.0-beta.2`. See `LAUNCH.md` for which qualification
 evidence is stale and must be recaptured before this becomes a candidate.
 
 ### Added
+- Exports can now be written as subtitles or as a Word document. "Subtitles
+  (SRT)" and "Subtitles (WebVTT)" build cues from the transcript's timed
+  segments — lines wrapped at 42 characters over at most two lines, speaker
+  aliases as the cue prefix, and sub-half-second segments folded into the
+  neighbouring turn so a cue is readable before it goes. "Word document
+  (.docx)" writes the Markdown export as a real Office package (headings,
+  bullets, numbered lists, bold), and there is a matching "Meeting Notes
+  (Word)" export template. The chosen redaction level applies to all of them,
+  because every format is redacted as text before the file is encoded; a
+  .docx preview shows the Markdown the document is built from and says so.
+  Asking for subtitles on a recording that has no transcript says that
+  instead of writing an empty file.
 - Meetings now play their own audio in the app, in step with the transcript:
   play/pause, a scrubber drawn over the stored waveform, 1×/1.5×/2× speed,
   ← → to skip five seconds, and Space to play or pause with the transcript
