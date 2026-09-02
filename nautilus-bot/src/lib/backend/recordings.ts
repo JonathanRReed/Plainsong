@@ -17,6 +17,8 @@ export {
   listAudioInputDevices,
   openRecordingAudio,
   pauseRecording,
+  prepareRecordingPlayback,
+  releaseRecordingPlayback,
   renameRecording,
   resumeRecording,
   retranscribeRecording,

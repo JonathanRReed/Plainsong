@@ -2,8 +2,13 @@
 //!
 //! Plain export to a chosen format, optionally redacting emails/phones (basic)
 //! or also URLs/secrets/long numbers (strict) before writing.
+//!
+//! Every format is produced as text and redacted once, before
+//! `export::encode_export` turns it into the bytes the file gets. That is why
+//! a Word export cannot leak an unredacted string into its XML: the redaction
+//! runs on the Markdown the document is built from.
 
-use crate::export::{self, export_recording, ExportFormat};
+use crate::export::{self, export_recording, ExportContext, ExportFormat};
 use crate::models::Recording;
 use anyhow::Result;
 use regex::Regex;
@@ -16,6 +21,7 @@ pub fn export_with_policy(
     target: Option<&str>,
     redaction_level: &str,
     preview: bool,
+    context: &ExportContext,
 ) -> Result<crate::models::ExportResponse> {
     // Fail loudly on formats this build cannot produce instead of silently
     // writing another format into a mislabeled file.
@@ -23,10 +29,31 @@ pub fn export_with_policy(
         anyhow::anyhow!("Export format '{}' is not supported in this build", format)
     })?;
 
-    let content = export_recording(recording, transcript, export_format, true)?;
-    let redacted_content = apply_redaction(&content, redaction_level);
+    // Subtitles are redacted at the source (see `redacts_before_render`);
+    // every other format is redacted once, over the finished text.
+    let pre_redacted = export_format.redacts_before_render().then(|| {
+        (
+            transcript.map(|t| redact_transcript(t, redaction_level)),
+            redact_export_context(context, redaction_level),
+        )
+    });
+    let (transcript, context) = match &pre_redacted {
+        Some((redacted_transcript, redacted_context)) => {
+            (redacted_transcript.as_ref(), redacted_context)
+        }
+        None => (transcript, context),
+    };
+
+    let content = export_recording(recording, transcript, export_format, true, context)?;
+    let redacted_content = if export_format.redacts_before_render() {
+        content
+    } else {
+        apply_redaction(&content, redaction_level)
+    };
 
     if preview {
+        // For a binary format this is the source the file is built from, not
+        // the file; the Exports view says so beside the preview.
         return Ok(crate::models::ExportResponse {
             format: format.to_string(),
             redaction_level: redaction_level.to_string(),
@@ -44,7 +71,8 @@ pub fn export_with_policy(
     if let Some(parent) = export_path.parent() {
         crate::safe_fs::ensure_directory_without_links(parent)?;
     }
-    crate::safe_fs::atomic_write(&export_path, redacted_content.as_bytes())?;
+    let bytes = export::encode_export(export_format, &redacted_content)?;
+    crate::safe_fs::atomic_write(&export_path, &bytes)?;
 
     Ok(crate::models::ExportResponse {
         format: format.to_string(),
@@ -60,6 +88,7 @@ pub fn export(
     transcript: Option<&crate::models::Transcript>,
     format: &str,
     target: Option<&str>,
+    context: &ExportContext,
 ) -> Result<String> {
     let export_format = format.parse::<ExportFormat>().map_err(|_| {
         anyhow::anyhow!("Export format '{}' is not supported in this build", format)
@@ -74,12 +103,39 @@ pub fn export(
         crate::safe_fs::ensure_directory_without_links(parent)?;
     }
 
-    let content = export_recording(recording, transcript, export_format, true)?;
-    crate::safe_fs::atomic_write(&export_path, content.as_bytes())?;
+    let content = export_recording(recording, transcript, export_format, true, context)?;
+    let bytes = export::encode_export(export_format, &content)?;
+    crate::safe_fs::atomic_write(&export_path, &bytes)?;
 
     tracing::info!("Exported recording {} to {:?}", recording.id, export_path);
 
     Ok(export_path.to_string_lossy().to_string())
+}
+
+/// A copy of the transcript with every piece of spoken text redacted. Used by
+/// the formats whose own structure must not go through the redactor.
+fn redact_transcript(
+    transcript: &crate::models::Transcript,
+    redaction_level: &str,
+) -> crate::models::Transcript {
+    let mut redacted = transcript.clone();
+    redacted.full_text = apply_redaction(&redacted.full_text, redaction_level);
+    for segment in &mut redacted.segments {
+        segment.text = apply_redaction(&segment.text, redaction_level);
+    }
+    redacted
+}
+
+/// Speaker aliases are typed by a person and end up in a subtitle cue prefix,
+/// so they go through the same redactor as the words.
+fn redact_export_context(context: &ExportContext, redaction_level: &str) -> ExportContext {
+    ExportContext {
+        speaker_names: context
+            .speaker_names
+            .iter()
+            .map(|(id, name)| (id.clone(), apply_redaction(name, redaction_level)))
+            .collect(),
+    }
 }
 
 pub(crate) fn apply_redaction(content: &str, redaction_level: &str) -> String {
@@ -265,11 +321,100 @@ mod tests {
         assert_eq!(out, "call me at [REDACTED_PHONE] today");
     }
 
+    fn transcript_with(texts: &[&str]) -> crate::models::Transcript {
+        crate::models::Transcript {
+            id: "t1".to_string(),
+            recording_id: "r1".to_string(),
+            segments: texts
+                .iter()
+                .enumerate()
+                .map(|(index, text)| crate::models::TranscriptSegment {
+                    id: format!("s{index}"),
+                    start_time: index as f64,
+                    end_time: index as f64 + 1.0,
+                    text: (*text).to_string(),
+                    speaker_id: Some("me".to_string()),
+                    confidence: 0.9,
+                })
+                .collect(),
+            full_text: texts.join(" "),
+            language: "en".to_string(),
+            confidence: 0.9,
+            model: "test".to_string(),
+            model_id: None,
+            requested_provider: None,
+            actual_provider: None,
+            created_at: Utc::now(),
+        }
+    }
+
+    #[test]
+    fn subtitle_redaction_masks_the_words_and_leaves_the_cue_scaffolding_alone() {
+        // Long enough to reach a four-digit cue number, which the strict
+        // level's `\d{4,}` rule would mask if the finished file went through
+        // the redactor. One line ends in a number, which the phone rule would
+        // otherwise run together with the next cue's number and timestamp.
+        let mut texts: Vec<String> = (0..1002).map(|_| "a spoken line".to_string()).collect();
+        texts[0] = "mail me at a@b.com".to_string();
+        texts[998] = "we counted seven hundred".to_string();
+        let borrowed: Vec<&str> = texts.iter().map(String::as_str).collect();
+        let transcript = transcript_with(&borrowed);
+
+        for level in ["basic", "strict"] {
+            let response = export_with_policy(
+                &test_recording(),
+                Some(&transcript),
+                "srt",
+                None,
+                level,
+                true,
+                &ExportContext::default(),
+            )
+            .expect("srt preview");
+            let srt = response.content.expect("preview content");
+
+            assert!(
+                srt.contains("[REDACTED_EMAIL]"),
+                "{level}: spoken text is redacted"
+            );
+            assert!(!srt.contains("a@b.com"), "{level}");
+            assert!(
+                srt.contains("\n1000\n00:16:39,000 --> 00:16:40,000\n"),
+                "{level}: the four-digit cue number and its timestamps survive"
+            );
+            assert!(!srt.contains("[REDACTED_NUMBER]"), "{level}");
+            assert!(!srt.contains("[REDACTED_PHONE]"), "{level}");
+        }
+    }
+
+    #[test]
+    fn a_subtitle_export_names_a_missing_transcript_instead_of_writing_an_empty_file() {
+        let error = export_with_policy(
+            &test_recording(),
+            None,
+            "vtt",
+            None,
+            "none",
+            true,
+            &ExportContext::default(),
+        )
+        .expect_err("no transcript means no subtitles");
+        assert!(error.to_string().contains("no transcript yet"), "{error}");
+    }
+
     #[test]
     fn export_with_policy_rejects_unsupported_format() {
         let recording = test_recording();
-        let error = export_with_policy(&recording, None, "bogus", None, "none", true)
-            .expect_err("unknown format must not silently fall back");
+        let error = export_with_policy(
+            &recording,
+            None,
+            "bogus",
+            None,
+            "none",
+            true,
+            &ExportContext::default(),
+        )
+        .expect_err("unknown format must not silently fall back");
         assert!(error.to_string().contains("not supported"));
     }
 
@@ -294,6 +439,7 @@ mod tests {
             None,
             "text",
             Some(destination.to_str().expect("utf-8 test path")),
+            &ExportContext::default(),
         )
         .expect("safe export");
 
@@ -336,6 +482,7 @@ mod tests {
             Some(destination.to_str().expect("utf-8 test path")),
             "none",
             false,
+            &ExportContext::default(),
         )
         .expect_err("the export_recording_v2 write path must reject a linked parent");
 

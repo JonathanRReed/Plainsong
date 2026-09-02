@@ -392,6 +392,26 @@ export async function openRecordingAudio(recordingId: string): Promise<void> {
   await invoke("open_recording_audio", { recordingId });
 }
 
+/**
+ * What the main process hands back for in-app playback: a token and the URL
+ * the privileged `plainsong://playback` route answers for it. Never a path.
+ */
+interface PreparedPlayback {
+  token: string;
+  url: string;
+  recordingId: string;
+  protection: "plaintext" | "decrypted";
+  durationSeconds: number;
+}
+
+export async function prepareRecordingPlayback(recordingId: string): Promise<PreparedPlayback> {
+  return await invoke("prepare_recording_playback", { recordingId });
+}
+
+export async function releaseRecordingPlayback(token: string): Promise<void> {
+  await invoke("release_recording_playback", { token });
+}
+
 export async function openExportPath(targetPath: string): Promise<void> {
   await invoke("open_export_path", { targetPath });
 }
@@ -565,9 +585,22 @@ interface ExportResult {
   content: string | null;
 }
 
+/**
+ * File formats the sidecar can actually write. `docx` is a Word package built
+ * from the Markdown export, so a `preview: true` call for it returns that
+ * Markdown, not the bytes of the file.
+ */
+export type RecordingExportFormat =
+  | "markdown"
+  | "json"
+  | "text"
+  | "srt"
+  | "vtt"
+  | "docx";
+
 export async function exportRecordingV2(
   recordingId: string,
-  format: "markdown" | "pdf" | "json" | "text",
+  format: RecordingExportFormat,
   options?: {
     redactionLevel?: "none" | "basic" | "strict";
     target?: string;
@@ -587,7 +620,7 @@ export interface ExportTemplate {
   id: string;
   name: string;
   description: string;
-  format: "markdown" | "plain_text" | "html" | "json" | "csv" | "pdf";
+  format: "markdown" | "plain_text" | "html" | "json" | "csv" | "pdf" | "docx";
   template: string;
   includeSpeakers: boolean;
   includeTimestamps: boolean;

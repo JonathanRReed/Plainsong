@@ -64,6 +64,38 @@ evidence is stale and must be recaptured before this becomes a candidate.
   dictation window with "Recording from a link" on it. The packaged
   `plainsong-cli` is signed with an empty entitlement set, and the packaging
   gate now checks that. See docs/automation.md.
+- Exports can now be written as subtitles or as a Word document. "Subtitles
+  (SRT)" and "Subtitles (WebVTT)" build cues from the transcript's timed
+  segments — lines wrapped at 42 characters over at most two lines, speaker
+  aliases as the cue prefix, and sub-half-second segments folded into the
+  neighbouring turn so a cue is readable before it goes. "Word document
+  (.docx)" writes the Markdown export as a real Office package (headings,
+  bullets, numbered lists, bold), and there is a matching "Meeting Notes
+  (Word)" export template. The chosen redaction level applies to all of them,
+  because every format is redacted as text before the file is encoded; a
+  .docx preview shows the Markdown the document is built from and says so.
+  Asking for subtitles on a recording that has no transcript says that
+  instead of writing an empty file.
+- Action-item owners and due dates are now shown as their own chips beside the
+  task in the meeting workspace, instead of being left inside the sentence as
+  "(Owner: … · Due: …)", and the JSON export carries each item split into
+  task, owner, and due date alongside the verbatim line. Plainsong only fills
+  an owner it can point at: the model is told to set one solely from a line it
+  cites, and an owner that neither the cited lines nor a speaker alias names
+  is dropped while the task itself is kept.
+- Meetings now play their own audio in the app, in step with the transcript:
+  play/pause, a scrubber drawn over the stored waveform, 1×/1.5×/2× speed,
+  ← → to skip five seconds, and Space to play or pause with the transcript
+  focused. Clicking a transcript line seeks the audio there, the line under
+  the playhead carries the gold reading mark, and the transcript follows
+  playback unless you scrolled it yourself in the last few seconds. A
+  vault-encrypted recording is decrypted frame by frame into an app-owned,
+  owner-only temporary file that is deleted when you leave the meeting, when
+  the vault locks, and at every sidecar start and stop; the renderer never
+  receives a file path, only a single-use token that the privileged
+  `plainsong://playback` route resolves per request (with HTTP Range support,
+  so seeking does not wait on a full download). "Open audio file", which
+  hands the recording to the system player, stays as the secondary action.
 - Onboarding now asks how meeting notes get written: local Ollama (with live
   detection), bring-your-own-key cloud AI, or transcripts only — instead of
   silently defaulting to an Ollama install that usually isn't there.
@@ -296,6 +328,33 @@ evidence is stale and must be recaptured before this becomes a candidate.
   against a keyed file. The open and rekey paths now verify the key with a
   query. Found while adding the local tools; regression-tested in
   `db::tests::keyed_open_round_trip`.
+- Opening the same meeting's audio repeatedly no longer decrypts it again
+  every time: each open used to write another full-length plaintext copy that
+  stayed on disk until the vault locked (twenty opens of a two-hour meeting
+  left roughly fourteen gigabytes behind). Players for one meeting now share
+  the one decrypted copy, playback decrypts only the track it actually plays
+  instead of all three of a dual-track meeting, and a fourth meeting opened
+  for playback at once is refused with a message that says to close one.
+  Reloading the window, a renderer crash, a preparation that timed out, and
+  "Reset app state" all release the tokens they leave behind, so the
+  decrypted audio goes with them.
+- A subtitle cue for a very short turn no longer runs over the top of the
+  next cue: it is still held long enough to read, but never past the moment
+  the next speaker starts.
+- The Word export no longer italicises identifiers: `file_name_here` keeps
+  its underscores, because `_` now marks emphasis only at a word boundary.
+- An action item whose owner the meeting called by their first name is no
+  longer dropped when the speaker alias or the transcript spells the name out
+  in full ("Priya" against "Priya Raman", "Jon" against "Jonathan").
+- Following the audio no longer re-renders the whole Meetings view about four
+  times a second, and the up and down arrow keys inside the transcript no
+  longer move the reading position while a control in it has focus.
+- "Open audio file" and the stored waveform could not open a recording
+  encrypted by the streaming vault writer: the runtime decrypt path still
+  ran the pre-streaming whole-file decoder on every file, which fails the
+  integrity check on a PSVAULT1 payload. It now streams PSVAULT1 frames into
+  the temporary file and uses the whole-file decoder only for legacy
+  payloads, which is also what keeps a long meeting out of memory.
 - A mic failure mid-meeting in a "me and them" (microphone plus system
   audio) recording is now detected and noted on the meeting instead of being
   silently padded with silence and presented as a complete recording; a

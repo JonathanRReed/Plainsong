@@ -6,6 +6,7 @@ import {
   listExportTemplates,
   openExportPath,
   type ExportTemplate,
+  type RecordingExportFormat,
 } from "@/lib/backend/exports";
 import { Button } from "@/components/ui/button";
 import { PageHeader } from "@/components/ui/page-header";
@@ -23,8 +24,59 @@ import {
 } from "@/components/ui/select";
 import { ExternalLink, FileAudio, FileOutput, Loader2, Eye, RefreshCw } from "lucide-react";
 
-type ExportFormat = "markdown" | "json" | "text";
+type ExportFormat = RecordingExportFormat;
 type RedactionLevel = "none" | "basic" | "strict";
+
+/**
+ * The dropdown, in the order a person is likely to want them. Labels name the
+ * file that gets written, and `note` says what else the choice needs or does
+ * so nothing has to be discovered by exporting.
+ */
+const EXPORT_FORMATS: ReadonlyArray<{
+  value: ExportFormat;
+  label: string;
+  note: string;
+}> = [
+  {
+    value: "markdown",
+    label: "Markdown (.md)",
+    note: "The recap, notes, and transcript as text.",
+  },
+  {
+    value: "docx",
+    label: "Word document (.docx)",
+    note: "The same document as Markdown, written as a Word file. The preview below shows the Markdown it is built from, not the file itself.",
+  },
+  {
+    value: "text",
+    label: "Plain text (.txt)",
+    note: "The recap, notes, and transcript with no formatting.",
+  },
+  {
+    value: "json",
+    label: "JSON (.json)",
+    note: "Every stored field, including each action item split into task, owner, and due date.",
+  },
+  {
+    value: "srt",
+    label: "Subtitles (SRT)",
+    note: "One cue per transcript segment. Needs a transcript.",
+  },
+  {
+    value: "vtt",
+    label: "Subtitles (WebVTT)",
+    note: "The same cues in the WebVTT format browsers read. Needs a transcript.",
+  },
+];
+
+const FORMAT_EXTENSIONS: Record<ExportFormat, string> = {
+  markdown: "md",
+  docx: "docx",
+  text: "txt",
+  json: "json",
+  srt: "srt",
+  vtt: "vtt",
+};
 
 const previewClass =
   "min-h-[200px] whitespace-pre-wrap rounded-md bg-muted/20 p-4 font-mono text-sm leading-relaxed";
@@ -55,6 +107,9 @@ export function ExportsView() {
   const [templateTargetPath, setTemplateTargetPath] = useState("");
   const [lastTemplateExportPath, setLastTemplateExportPath] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
+
+  const formatNote =
+    EXPORT_FORMATS.find((option) => option.value === format)?.note ?? "";
 
   const ensureRecording = () => {
     if (!recordingId) {
@@ -252,11 +307,14 @@ export function ExportsView() {
                     <SelectValue />
                   </SelectTrigger>
                   <SelectContent>
-                    <SelectItem value="markdown">Markdown</SelectItem>
-                    <SelectItem value="json">JSON</SelectItem>
-                    <SelectItem value="text">Plain text</SelectItem>
+                    {EXPORT_FORMATS.map((option) => (
+                      <SelectItem key={option.value} value={option.value}>
+                        {option.label}
+                      </SelectItem>
+                    ))}
                   </SelectContent>
                 </Select>
+                <p className="text-sm text-muted-foreground">{formatNote}</p>
               </div>
 
               <div className="space-y-2">
@@ -287,7 +345,7 @@ export function ExportsView() {
                 id="export-path"
                 value={targetPath}
                 onChange={(e: ChangeEvent<HTMLInputElement>) => setTargetPath(e.target.value)}
-                placeholder="/path/to/export.md"
+                placeholder={`/path/to/export.${FORMAT_EXTENSIONS[format]}`}
               />
               <p className="text-sm text-muted-foreground">
                 Leave this blank to write a timestamped file into Plainsong's exports folder.

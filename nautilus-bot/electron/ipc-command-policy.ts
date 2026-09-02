@@ -102,6 +102,10 @@ const LONG_COMMANDS = new Set<string>([
   "repair_cursor_insert_permissions",
   "reprocess_dictation_text",
   "request_apple_speech_permission",
+  // Decrypts a whole meeting's audio into the runtime directory before the
+  // first byte can play; a long, vault-protected meeting on a busy machine
+  // takes real time.
+  "prepare_recording_playback",
   // Blocks on a macOS permission dialog the reader has to read and answer, so
   // it gets the long timeout every other TCC prompt here gets.
   "request_calendar_access",

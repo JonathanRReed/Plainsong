@@ -268,6 +268,14 @@ vi.mock("@/lib/backend", () => ({
   getRecording: vi.fn(async () => ({})) as any,
   getRecordingWaveform: vi.fn() as any,
   openRecordingAudio: vi.fn() as any,
+  prepareRecordingPlayback: vi.fn(async (recordingId: string) => ({
+    token: "0123456789abcdef0123456789abcdef",
+    url: "plainsong://playback/0123456789abcdef0123456789abcdef",
+    recordingId,
+    protection: "plaintext",
+    durationSeconds: 14,
+  })) as any,
+  releaseRecordingPlayback: vi.fn(async () => {}) as any,
   getSpeakers: vi.fn() as any,
   getTranscript: vi.fn(async () => ({})) as any,
   getMeetingTranscriptDetails: vi.fn(async () => ({})) as any,
@@ -2559,7 +2567,7 @@ describe("RecordingsView", () => {
 
       // The banner used to live only in the list branch, so the workspace's own
       // Play audio failed with nothing on screen but a toast.
-      fireEvent.click(screen.getByRole("button", { name: "Play audio" }));
+      fireEvent.click(screen.getByRole("button", { name: "Open audio file" }));
 
       expect(
         await screen.findByText(
@@ -2582,7 +2590,7 @@ describe("RecordingsView", () => {
 
     fireEvent.click(screen.getByText("Weekly sync"));
     await screen.findByText("The record");
-    fireEvent.click(screen.getByRole("button", { name: "Play audio" }));
+    fireEvent.click(screen.getByRole("button", { name: "Open audio file" }));
     expect(await screen.findByText("Audio file is missing.")).toBeInTheDocument();
 
     fireEvent.click(screen.getByRole("button", { name: "All meetings" }));

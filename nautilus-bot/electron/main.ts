@@ -16,6 +16,7 @@ import {
 import { nativeImage, shell } from "electron/common";
 import { execFile, spawn } from "child_process";
 import {
+  createReadStream,
   existsSync,
   lstatSync,
   readFileSync,
@@ -25,6 +26,8 @@ import {
   unlinkSync,
   writeFileSync,
 } from "fs";
+import { stat } from "node:fs/promises";
+import { Readable } from "node:stream";
 import path from "path";
 import { pathToFileURL } from "url";
 import { autoUpdater, type AppUpdater } from "electron-updater";
@@ -95,12 +98,16 @@ import {
 } from "./window-bounds-policy";
 import {
   isRendererUrl,
+  playbackTokenFromUrl,
+  playbackUrl,
   RENDERER_HOST,
   RENDERER_SCHEME,
   rendererUrl,
   resolveRendererAssetPath,
   withRendererSecurityHeaders,
 } from "./renderer-protocol";
+import { parsePreparedPlayback, PlaybackTokenMap } from "./playback-tokens";
+import { buildPlaybackResponse } from "./playback-range";
 import {
   RENDERER_READY_LOG_MESSAGE,
   shouldForwardRendererConsoleMessage,
@@ -187,6 +194,9 @@ protocol.registerSchemesAsPrivileged([
       standard: true,
       secure: true,
       supportFetchAPI: true,
+      // The playback route answers `<audio>` with Range responses; media
+      // elements only stream from a scheme registered as streamable.
+      stream: true,
     },
   },
 ]);
@@ -198,6 +208,81 @@ if (isDev) {
 
 let mainWindow: BrowserWindow | null = null;
 let ipcBridge: IpcBridge | null = null;
+
+/**
+ * Live playback tokens. The sidecar's answer to `prepare_recording_playback`
+ * carries a filesystem path; it is kept here and never forwarded, so the
+ * renderer only ever holds a token. See playback-tokens.ts.
+ */
+const playbackTokens = new PlaybackTokenMap();
+
+/**
+ * Forget every playback token. `notifySidecar` is false when the sidecar is
+ * already gone: its restart sweeps the decrypted temporaries itself, and a
+ * release sent to a dead process would only log a rejection.
+ */
+function releaseAllPlayback(reason: string, notifySidecar: boolean): void {
+  const drained = playbackTokens.drain();
+  if (drained.length === 0) {
+    return;
+  }
+  console.log(`[playback] releasing ${drained.length} token(s): ${reason}`);
+  if (!notifySidecar || !ipcBridge) {
+    return;
+  }
+  for (const { token } of drained) {
+    void ipcBridge.invokeSidecar("release_recording_playback", { token }).catch((error) => {
+      console.warn("[playback] release failed", { reason, error });
+    });
+  }
+}
+
+function rendererNotFoundResponse(): Response {
+  return new Response("Not found", {
+    status: 404,
+    headers: { "content-type": "text/plain; charset=utf-8" },
+  });
+}
+
+/**
+ * Answer `plainsong://playback/<token>`. The token must be one this process
+ * registered from a successful prepare; the file is streamed for exactly the
+ * requested byte window so seeking is a Range request, not a full download.
+ */
+async function servePlayback(request: Request, token: string): Promise<Response> {
+  const entry = playbackTokens.resolve(token);
+  if (!entry) {
+    console.warn("[playback] refused unknown token");
+    return withRendererSecurityHeaders(rendererNotFoundResponse());
+  }
+  let size: number;
+  try {
+    const info = await stat(entry.path);
+    if (!info.isFile()) {
+      throw new Error("playback path is not a regular file");
+    }
+    size = info.size;
+  } catch (error) {
+    // The file can vanish under a live token: locking the vault deletes the
+    // decrypted temporary before the revoke event reaches this process.
+    console.warn("[playback] audio file unavailable", {
+      recordingId: entry.recordingId,
+      error,
+    });
+    playbackTokens.release(token);
+    return withRendererSecurityHeaders(rendererNotFoundResponse());
+  }
+  return withRendererSecurityHeaders(
+    buildPlaybackResponse({
+      method: request.method,
+      rangeHeader: request.headers.get("range"),
+      size,
+      contentType: "audio/wav",
+      openStream: (start, end) =>
+        Readable.toWeb(createReadStream(entry.path, { start, end })) as ReadableStream<Uint8Array>,
+    }),
+  );
+}
 let dictationPhase = "idle";
 let dictationShortcutFailureResetTimer: ReturnType<typeof setTimeout> | null = null;
 const captureAdmission = new CaptureAdmissionController();
@@ -1576,6 +1661,69 @@ async function handleLocalCommand(
       await ipcBridge.invokeSidecar("stop_recording", { recordingId });
       return { handled: true, result: null };
     }
+    case "prepare_recording_playback": {
+      // Main window only: the overlays have no transcript to play against, and
+      // a token minted for a hidden window would be a token nobody can see.
+      if (!senderWindow || senderWindow !== mainWindow) {
+        throw new Error("Playback can only be prepared from the main Plainsong window");
+      }
+      if (!ipcBridge) {
+        throw new Error("Playback service is not ready");
+      }
+      const payload = (args ?? {}) as { recordingId?: unknown };
+      if (typeof payload.recordingId !== "string" || !payload.recordingId) {
+        throw new Error("Playback needs a recording id");
+      }
+      let prepared;
+      try {
+        prepared = parsePreparedPlayback(
+          await ipcBridge.invoke("prepare_recording_playback", {
+            recordingId: payload.recordingId,
+          }),
+        );
+      } catch (error) {
+        // The sidecar may have registered a token anyway — a five-minute
+        // timeout on a long decrypt is the case that happens — and its id
+        // never reached anyone who could release it. Ask for the recording's
+        // tokens by name so the plaintext is not pinned until the vault locks.
+        void ipcBridge
+          .invokeSidecar("release_recording_playback", {
+            recordingId: payload.recordingId,
+          })
+          .catch((releaseError) => {
+            console.warn("[playback] abandoned prepare not released", releaseError);
+          });
+        throw error;
+      }
+      playbackTokens.register(prepared.token, {
+        path: prepared.path,
+        recordingId: prepared.recordingId,
+        protection: prepared.protection,
+      });
+      // The path stays in this process. The renderer gets the token and the
+      // URL the protocol handler answers for it, nothing else.
+      return {
+        handled: true,
+        result: {
+          token: prepared.token,
+          url: playbackUrl(prepared.token),
+          recordingId: prepared.recordingId,
+          protection: prepared.protection,
+          durationSeconds: prepared.durationSeconds,
+        },
+      };
+    }
+    case "release_recording_playback": {
+      const payload = (args ?? {}) as { token?: unknown };
+      const released = playbackTokens.release(payload.token);
+      if (!released || !ipcBridge) {
+        return { handled: true, result: { released: false } };
+      }
+      return {
+        handled: true,
+        result: await ipcBridge.invoke("release_recording_playback", { token: payload.token }),
+      };
+    }
     default:
       return { handled: false };
   }
@@ -2236,6 +2384,7 @@ function createMainWindow(): BrowserWindow {
 
   win.on("closed", () => {
     mainWindow = null;
+    releaseAllPlayback("main window closed", true);
     // The overlay windows are created hidden at bootstrap and outlive the main
     // window, so `window-all-closed` never fires; keep the non-macOS "closing
     // the window quits the app" behavior explicit rather than relying on it.
@@ -2250,6 +2399,21 @@ function createMainWindow(): BrowserWindow {
       event.preventDefault();
       win.hide();
     }
+  });
+
+  // A reload or an in-app navigation replaces the renderer that holds the
+  // tokens: it will never release them, and the decrypted audio behind them
+  // would stay on disk until the vault locked. Same for a renderer that dies,
+  // which is why that release is registered here rather than beside the dev
+  // logging it used to sit in.
+  win.webContents.on("did-start-navigation", (details) => {
+    if (!details.isMainFrame || details.isSameDocument) {
+      return;
+    }
+    releaseAllPlayback("renderer navigated", true);
+  });
+  win.webContents.on("render-process-gone", () => {
+    releaseAllPlayback("renderer process gone", true);
   });
 
   win.webContents.on(
@@ -2649,32 +2813,35 @@ async function bootstrap() {
 
   installRendererPermissionHandlers();
 
-  if (!devServerUrlIsUsable) {
-    await protocol.handle(RENDERER_SCHEME, async (request) => {
-      try {
-        const rendererRoot = path.join(__dirname, "../dist");
-        const assetPath = resolveRendererAssetPath(rendererRoot, request.url);
-        // Headers, not just the index.html meta tag: a meta CSP is parsed by
-        // the document that carries it and covers nothing else the handler
-        // serves, and `frame-ancestors` has no effect in a meta tag at all.
-        return withRendererSecurityHeaders(
-          await net.fetch(pathToFileURL(assetPath).toString()),
-        );
-      } catch (error) {
-        console.error("[renderer] refused packaged asset request", {
-          host: RENDERER_HOST,
-          url: request.url,
-          error,
-        });
-        return withRendererSecurityHeaders(
-          new Response("Not found", {
-            status: 404,
-            headers: { "content-type": "text/plain; charset=utf-8" },
-          }),
-        );
-      }
-    });
-  }
+  // Registered in every mode: the playback route has to exist when the
+  // renderer comes from the dev server too, or the in-app player would only
+  // work packaged. Bundle assets are still served only when packaged.
+  await protocol.handle(RENDERER_SCHEME, async (request) => {
+    const playbackToken = playbackTokenFromUrl(request.url);
+    if (playbackToken !== null) {
+      return servePlayback(request, playbackToken);
+    }
+    if (devServerUrlIsUsable) {
+      return withRendererSecurityHeaders(rendererNotFoundResponse());
+    }
+    try {
+      const rendererRoot = path.join(__dirname, "../dist");
+      const assetPath = resolveRendererAssetPath(rendererRoot, request.url);
+      // Headers, not just the index.html meta tag: a meta CSP is parsed by
+      // the document that carries it and covers nothing else the handler
+      // serves, and `frame-ancestors` has no effect in a meta tag at all.
+      return withRendererSecurityHeaders(
+        await net.fetch(pathToFileURL(assetPath).toString()),
+      );
+    } catch (error) {
+      console.error("[renderer] refused packaged asset request", {
+        host: RENDERER_HOST,
+        url: request.url,
+        error,
+      });
+      return withRendererSecurityHeaders(rendererNotFoundResponse());
+    }
+  });
 
   if (devServerUrlIsUsable) {
     const timeout = new Promise<never>((_, reject) => {
@@ -2715,6 +2882,9 @@ async function bootstrap() {
   // resolves to a failing stop_dictation, and the hotkey is wedged. Reset the
   // mirror and tell renderers so their UI resyncs too.
   ipcBridge.onTerminated(() => {
+    // The registry died with the process; its restart sweeps the decrypted
+    // temporaries. Tokens minted against it must not resolve any more.
+    releaseAllPlayback("sidecar terminated", false);
     // Any hold-to-talk session died with the process: drop its watchdog even
     // if the cached phase never left "idle" (start acked, recording event
     // never observed before the crash).
@@ -2747,6 +2917,16 @@ async function bootstrap() {
   });
 
   ipcBridge.onEvent((eventName: string, payload: unknown) => {
+    if (
+      eventName === "recording-playback-revoked" &&
+      payload &&
+      typeof payload === "object"
+    ) {
+      // Vault locked: the sidecar already deleted the plaintext, so the token
+      // must stop resolving here as well. The renderer gets the same event.
+      playbackTokens.release((payload as { token?: unknown }).token);
+    }
+
     if (eventName === "settings-changed" && payload && typeof payload === "object") {
       applyUiSettings(payload as AppSettings);
       // The sidecar emits this after both normal saves and backup restores.

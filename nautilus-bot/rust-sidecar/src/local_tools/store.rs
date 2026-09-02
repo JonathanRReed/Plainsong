@@ -303,11 +303,24 @@ impl MeetingSource for ReadOnlyStore {
             ExportFormat::Json => crate::export::ExportFormat::Json,
             ExportFormat::Text => crate::export::ExportFormat::Text,
         };
+        // Same speaker aliases the app's export path passes, so a format that
+        // labels its output names the person rather than the capture side.
+        let speaker_names = self
+            .db
+            .get_speaker_aliases(id)
+            .unwrap_or_default()
+            .into_iter()
+            .filter_map(|(speaker_id, (name, _, _))| {
+                let name = name?.trim().to_string();
+                (!name.is_empty()).then_some((speaker_id, name))
+            })
+            .collect();
         Ok(Some(crate::export::export_recording(
             &recording,
             transcript.as_ref(),
             format,
             true,
+            &crate::export::ExportContext { speaker_names },
         )?))
     }
 }

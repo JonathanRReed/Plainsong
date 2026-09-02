@@ -13,6 +13,13 @@ interface DocumentFieldProps {
   onChange: (next: string) => void;
   /** Markdown actually handed to the reader; defaults to `value`. */
   renderValue?: string;
+  /**
+   * Read mode only: show this instead of the markdown. For a field whose
+   * saved text has structure worth showing (action items carry an owner and a
+   * date), so reading it does not mean reading the raw stored line. The
+   * editor still edits `value`, which stays the one saved thing.
+   */
+  renderBody?: ReactNode;
   /** Sentence shown in place of the document when there is nothing yet. */
   emptyMessage: string;
   editorPlaceholder: string;
@@ -39,6 +46,7 @@ export function DocumentField({
   value,
   onChange,
   renderValue,
+  renderBody,
   emptyMessage,
   editorPlaceholder,
   isEditing,
@@ -119,7 +127,7 @@ export function DocumentField({
           className={cn(hasText && bodyClassName, hasText && "pl-3")}
         >
           {hasText ? (
-            <MarkdownText value={renderValue ?? value} />
+            (renderBody ?? <MarkdownText value={renderValue ?? value} />)
           ) : (
             <p className="text-sm text-muted-foreground">{emptyMessage}</p>
           )}
