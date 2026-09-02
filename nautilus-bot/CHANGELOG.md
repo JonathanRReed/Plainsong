@@ -13,6 +13,34 @@ changed underneath `0.9.0-beta.2`. See `LAUNCH.md` for which qualification
 evidence is stale and must be recaptured before this becomes a candidate.
 
 ### Added
+- Plainsong now notices a live call and offers to record it. Every few
+  seconds the sidecar checks, locally, which apps are running; when Zoom,
+  Microsoft Teams, Webex, FaceTime, Slack, Discord, or a browser window
+  titled for Google Meet (Accessibility permission needed) has a second sign
+  of a call — its call window, or the microphone open by another app — a
+  macOS notification asks "Zoom call started. Record it with Plainsong?" and
+  the Meetings header shows the same offer beside the calendar cue. Clicking
+  either opens the usual consent sheet with the title prefilled ("Zoom call,
+  14:05"); nothing records without that click, and dismissing is per call.
+  Off switch and copy in Settings › General › Meetings.
+- A meeting recorded alongside a detected call stops on its own when that
+  app quits or its call window closes, and any meeting stops after 15
+  minutes with nothing audible on every captured source (Settings › General
+  › Meetings; 0 turns the silence stop off). Both go through the normal stop
+  path, so the audio is saved, hashed and transcribed, and a notification
+  says why ("Meeting stopped: Zoom closed").
+- Pause and resume a meeting from the recording mini window, the Meetings
+  header, or the live meeting card (⌘⇧P). The microphone and system audio
+  stay open, so resume is instant, but nothing captured while paused reaches
+  the file, the live preview, or the silence watchdogs; the clock stands
+  still, the saved audio skips the gap, and the transcript timeline marks it
+  as "[Paused 2 min 10 s]". Pauses are recorded on the meeting and in the
+  audit log.
+- macOS notifications for meeting events (started, stopped, stopped on its
+  own, transcript ready, notes ready or failed) and for a dictation that was
+  refused or could not be delivered while the dictation mini window is
+  hidden. One sentence each; clicking one opens the meeting or the dictation
+  view. Both classes have a switch in Settings › General › Notifications.
 - Onboarding now asks how meeting notes get written: local Ollama (with live
   detection), bring-your-own-key cloud AI, or transcripts only — instead of
   silently defaulting to an Ollama install that usually isn't there.

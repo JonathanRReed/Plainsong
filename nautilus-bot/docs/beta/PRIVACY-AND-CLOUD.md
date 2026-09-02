@@ -38,6 +38,24 @@ Turning remote processing off revokes that authorization for new work. In-flight
 remote requests are cancelled and a result returned after revocation is not
 committed as an accepted local result.
 
+## Call detection and notifications
+
+When "Offer to record a call it notices" is on (the default), the local
+sidecar reads the list of running applications on this Mac every few seconds
+and keeps only the bundle identifiers of known conferencing apps and
+browsers, asks CoreAudio whether the default microphone is open by another
+process, and — only with Accessibility permission — reads the window titles
+of those browsers and of Zoom to look for a call. Nothing about which apps
+you run is written to disk, sent anywhere, or kept beyond the current poll;
+the only thing remembered is the one call currently being offered, in
+memory, until it ends. Turning the setting off stops the polling within a
+few seconds.
+
+macOS notifications carry the app name and the meeting's state (started,
+stopped, transcript ready, notes ready or failed) or a one-line reason a
+dictation was not delivered. They never contain transcript text, notes, or
+dictated words.
+
 ## The meeting consent notice
 
 Before a Meeting starts, Plainsong shows a short notice you can copy that
