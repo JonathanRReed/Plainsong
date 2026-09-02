@@ -51,6 +51,10 @@ pub struct Settings {
     pub updates: UpdateSettings,
     /// Theme
     pub theme: String,
+    /// Reusable chat prompts. New section: a settings.json written before it
+    /// existed simply has no `ai` key, and `#[serde(default)]` on this struct
+    /// fills it in without a migration.
+    pub ai: AiSettings,
 }
 
 impl Default for Settings {
@@ -64,8 +68,38 @@ impl Default for Settings {
             shortcuts: KeyboardShortcuts::default(),
             updates: UpdateSettings::default(),
             theme: "system".to_string(),
+            ai: AiSettings::default(),
         }
     }
+}
+
+/// Settings for the chat surfaces that talk to an AI lane.
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(default, rename_all = "camelCase")]
+pub struct AiSettings {
+    /// The reader's prompt library, offered by the "/" picker in both the
+    /// per-meeting chat and the dashboard's "ask your meetings".
+    pub saved_prompts: Vec<SavedPrompt>,
+}
+
+/// One reusable question. Mirrors `SavedPrompt` in `src/types/settings.ts`.
+///
+/// An entry whose `id` is in `BUILTIN_SAVED_PROMPT_IDS` is an *override* of
+/// that starter prompt rather than a separate prompt -- that is how an edited
+/// or hidden built-in is persisted. `built_in` is recomputed from the id on
+/// every load and save (see `sanitize_saved_prompts`), so the renderer can
+/// neither claim built-in status for a user prompt nor strip it from a real
+/// one.
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(default, rename_all = "camelCase")]
+pub struct SavedPrompt {
+    pub id: String,
+    pub name: String,
+    pub prompt: String,
+    /// "meeting", "memory" or "both"; anything else normalizes to "both".
+    pub scope: String,
+    pub built_in: bool,
+    pub hidden: bool,
 }
 
 /// Audio recording settings
@@ -1160,6 +1194,93 @@ pub(crate) fn sanitize_meeting_custom_templates(
     sanitized
 }
 
+/// Ids of the starter prompts declared in `src/lib/saved-prompts.ts`.
+///
+/// A stored entry carrying one of these ids is an override of that starter,
+/// which is what makes "editable and hideable but not deletable" a single
+/// storage shape rather than two. Kept in sync by hand with the renderer, the
+/// same arrangement `BUILTIN_MEETING_TEMPLATE_IDS` has.
+pub(crate) const BUILTIN_SAVED_PROMPT_IDS: &[&str] = &[
+    "builtin_decisions",
+    "builtin_open_questions",
+    "builtin_my_commitments",
+    "builtin_risks_blockers",
+    "builtin_follow_up_message",
+    "builtin_catch_me_up",
+];
+
+/// Beyond this a prompt library is a sync loop or a corrupted file, not a
+/// reader with 40 genuine questions they reuse.
+const MAX_SAVED_PROMPTS: usize = 40;
+/// A prompt name reads as a short label in a picker row.
+const MAX_SAVED_PROMPT_NAME_LEN: usize = 80;
+/// The prompt text is handed to the grounded chat path as the instruction, so
+/// it gets a ceiling of its own rather than the 4000 a summary playbook gets:
+/// a question is not a playbook, and a shorter cap keeps a pasted transcript
+/// from becoming a "prompt".
+const MAX_SAVED_PROMPT_TEXT_LEN: usize = 2000;
+
+fn normalize_saved_prompt_scope(scope: &str) -> String {
+    match scope.trim() {
+        "meeting" => "meeting".to_string(),
+        "memory" => "memory".to_string(),
+        // Includes the empty string: a prompt with no stated scope is
+        // offered everywhere rather than nowhere, which is the failure a
+        // reader can see and fix.
+        _ => "both".to_string(),
+    }
+}
+
+/// Sanitize a saved (or about-to-be-saved) prompt library.
+///
+/// Same discipline as `sanitize_meeting_custom_templates`: trim and cap every
+/// free-text field, drop anything unresolvable, and run on both load and save
+/// so a dropped entry stays dropped rather than round-tripping back in from
+/// whichever path didn't just sanitize it.
+///
+/// `built_in` is not read from the input at all -- it is recomputed from the
+/// id. That is the whole protection for the starter prompts: the renderer
+/// decides what a built-in row can do (hide, not delete) from this flag, so
+/// letting the wire set it would let a crafted settings.json turn a user
+/// prompt into an undeletable one.
+pub(crate) fn sanitize_saved_prompts(prompts: Vec<SavedPrompt>) -> Vec<SavedPrompt> {
+    let mut seen_ids = std::collections::HashSet::new();
+    let mut sanitized = Vec::new();
+
+    for mut prompt in prompts {
+        prompt.id = prompt.id.trim().to_string();
+        prompt.name = prompt.name.trim().to_string();
+        prompt.prompt = prompt.prompt.trim().to_string();
+
+        // No identity, no label, or no question: all three make the row
+        // unusable in the picker, so it is dropped rather than repaired. For
+        // an override of a starter prompt, dropping it restores the starter's
+        // shipped text, which is the better of the two failures.
+        if prompt.id.is_empty() || prompt.name.is_empty() || prompt.prompt.is_empty() {
+            continue;
+        }
+        if !seen_ids.insert(prompt.id.clone()) {
+            continue;
+        }
+
+        prompt
+            .name
+            .truncate_to_char_count(MAX_SAVED_PROMPT_NAME_LEN);
+        prompt
+            .prompt
+            .truncate_to_char_count(MAX_SAVED_PROMPT_TEXT_LEN);
+        prompt.scope = normalize_saved_prompt_scope(&prompt.scope);
+        prompt.built_in = BUILTIN_SAVED_PROMPT_IDS.contains(&prompt.id.as_str());
+
+        sanitized.push(prompt);
+        if sanitized.len() >= MAX_SAVED_PROMPTS {
+            break;
+        }
+    }
+
+    sanitized
+}
+
 /// Caps by *character* count, not byte length. The renderer's editor dialog
 /// enforces the same ceilings with a plain HTML `maxLength`, which counts
 /// UTF-16 code units -- for any non-ASCII text (accented names, CJK, emoji
@@ -1550,6 +1671,10 @@ impl SettingsManager {
         normalize_keyboard_shortcuts(&mut settings.shortcuts);
         normalize_loaded_transcription_settings(&mut settings.transcription);
         normalize_loaded_privacy_settings(&mut settings.privacy);
+        // Loaded straight from disk, so a hand-edited or pre-upgrade file gets
+        // the same treatment `update_settings` gives a fresh write.
+        settings.ai.saved_prompts =
+            sanitize_saved_prompts(std::mem::take(&mut settings.ai.saved_prompts));
 
         let manager = Self {
             settings,
@@ -1661,12 +1786,14 @@ mod tests {
     use super::{
         normalize_dictation_active_languages, normalize_loaded_privacy_settings,
         normalize_loaded_transcription_settings, normalize_transcription_model_id,
-        resolve_dictation_app_category_with_overrides, sanitize_meeting_custom_templates, AiLane,
-        AiLaneSettings, AudioInputDevicePreference, DictationAppCategoryOverride,
-        DictationCustomMode, MeetingCustomTemplate, PlatformOptimizationSettings, PrivacySettings,
-        Settings, SettingsManager, TranscriptionSettings, MAX_MEETING_CUSTOM_TEMPLATES,
+        resolve_dictation_app_category_with_overrides, sanitize_meeting_custom_templates,
+        sanitize_saved_prompts, AiLane, AiLaneSettings, AudioInputDevicePreference,
+        DictationAppCategoryOverride, DictationCustomMode, MeetingCustomTemplate,
+        PlatformOptimizationSettings, PrivacySettings, SavedPrompt, Settings, SettingsManager,
+        TranscriptionSettings, BUILTIN_SAVED_PROMPT_IDS, MAX_MEETING_CUSTOM_TEMPLATES,
         MAX_MEETING_TEMPLATE_NAME_LEN, MAX_MEETING_TEMPLATE_OUTLINE_SECTIONS,
         MAX_MEETING_TEMPLATE_OUTLINE_SECTION_LEN, MAX_MEETING_TEMPLATE_PROMPT_LEN,
+        MAX_SAVED_PROMPTS, MAX_SAVED_PROMPT_NAME_LEN, MAX_SAVED_PROMPT_TEXT_LEN,
     };
     use crate::text::format::DictationAppCategory;
     use std::fs;
@@ -2505,6 +2632,194 @@ mod tests {
             "Summarize board sentiment, asks, and follow-ups."
         );
         assert_eq!(template.notes_outline, vec!["Sentiment", "Asks"]);
+    }
+
+    fn saved_prompt(id: &str, name: &str, prompt: &str, scope: &str) -> SavedPrompt {
+        SavedPrompt {
+            id: id.to_string(),
+            name: name.to_string(),
+            prompt: prompt.to_string(),
+            scope: scope.to_string(),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn saved_prompts_round_trip_and_normalize_scope() {
+        let sanitized = sanitize_saved_prompts(vec![
+            saved_prompt("p1", "  Decisions  ", "  What was decided?  ", "meeting"),
+            saved_prompt("p2", "Across", "What is still open?", "memory"),
+            // Unknown scope: offered everywhere rather than nowhere.
+            saved_prompt("p3", "Anywhere", "Anything?", "somewhere-else"),
+            saved_prompt("p4", "No scope", "Anything?", ""),
+        ]);
+
+        assert_eq!(sanitized.len(), 4);
+        assert_eq!(sanitized[0].name, "Decisions");
+        assert_eq!(sanitized[0].prompt, "What was decided?");
+        assert_eq!(sanitized[0].scope, "meeting");
+        assert_eq!(sanitized[1].scope, "memory");
+        assert_eq!(sanitized[2].scope, "both");
+        assert_eq!(sanitized[3].scope, "both");
+        assert!(
+            sanitized.iter().all(|prompt| !prompt.built_in),
+            "no user id is a built-in id"
+        );
+    }
+
+    #[test]
+    fn saved_prompts_drop_malformed_and_duplicate_entries() {
+        let sanitized = sanitize_saved_prompts(vec![
+            saved_prompt("", "No id", "Body", "both"),
+            saved_prompt("p1", "", "Body", "both"),
+            saved_prompt("p2", "No body", "   ", "both"),
+            saved_prompt("p3", "Keeper", "Body", "both"),
+            saved_prompt("p3", "Duplicate id", "Different body", "both"),
+        ]);
+
+        assert_eq!(sanitized.len(), 1);
+        assert_eq!(sanitized[0].id, "p3");
+        assert_eq!(
+            sanitized[0].name, "Keeper",
+            "first occurrence of an id wins, like a custom template"
+        );
+    }
+
+    #[test]
+    fn saved_prompts_cap_lengths_and_count() {
+        let sanitized = sanitize_saved_prompts(vec![saved_prompt(
+            "p1",
+            &"n".repeat(MAX_SAVED_PROMPT_NAME_LEN + 40),
+            &"b".repeat(MAX_SAVED_PROMPT_TEXT_LEN + 500),
+            "both",
+        )]);
+        assert_eq!(sanitized[0].name.chars().count(), MAX_SAVED_PROMPT_NAME_LEN);
+        assert_eq!(
+            sanitized[0].prompt.chars().count(),
+            MAX_SAVED_PROMPT_TEXT_LEN
+        );
+
+        let too_many: Vec<SavedPrompt> = (0..(MAX_SAVED_PROMPTS + 10))
+            .map(|index| saved_prompt(&format!("p{index}"), "Name", "Body", "both"))
+            .collect();
+        assert_eq!(sanitize_saved_prompts(too_many).len(), MAX_SAVED_PROMPTS);
+    }
+
+    /// `built_in` decides what the manage dialog will let the reader do with a
+    /// row (hide, never delete). Reading it from the wire would let a crafted
+    /// settings.json mint an undeletable prompt, or strip the flag off a real
+    /// starter so "delete" appeared on it.
+    #[test]
+    fn saved_prompts_recompute_the_built_in_flag_from_the_id() {
+        let builtin_id = BUILTIN_SAVED_PROMPT_IDS[0];
+        let sanitized = sanitize_saved_prompts(vec![
+            SavedPrompt {
+                id: "not-a-builtin".to_string(),
+                name: "Impostor".to_string(),
+                prompt: "Body".to_string(),
+                scope: "both".to_string(),
+                built_in: true,
+                hidden: false,
+            },
+            SavedPrompt {
+                id: builtin_id.to_string(),
+                name: "Edited starter".to_string(),
+                prompt: "My own wording".to_string(),
+                scope: "both".to_string(),
+                built_in: false,
+                hidden: true,
+            },
+        ]);
+
+        assert!(!sanitized[0].built_in, "a user id can never claim built-in");
+        assert!(sanitized[1].built_in, "a built-in id always carries it");
+        assert!(
+            sanitized[1].hidden,
+            "hiding a starter is the reader's decision and must survive"
+        );
+    }
+
+    /// The `ai` section did not exist before saved prompts. A settings.json
+    /// written by any earlier build has no such key at all, and must load.
+    #[test]
+    fn settings_file_without_the_ai_section_loads_with_an_empty_prompt_library() {
+        let legacy = serde_json::json!({
+            "theme": "dark",
+            "shortcuts": { "toggleDictation": "Cmd+Shift+Space" }
+        });
+
+        let suffix = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("system time before epoch")
+            .as_nanos();
+        let root = std::env::temp_dir().join(format!("nautilus-settings-no-ai-{suffix}"));
+        let settings_path = root.join("settings.json");
+        fs::create_dir_all(&root).expect("create settings test directory");
+        fs::write(
+            &settings_path,
+            serde_json::to_string(&legacy).expect("serialize"),
+        )
+        .expect("write legacy settings");
+
+        let manager = SettingsManager::load_from_path(settings_path.clone())
+            .expect("a file predating the ai section must still load");
+        assert!(manager.settings().ai.saved_prompts.is_empty());
+        assert_eq!(manager.settings().theme, "dark");
+
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    /// A prompt library that a previous save already sanitized must survive
+    /// the load path unchanged, including a hidden starter override.
+    #[test]
+    fn saved_prompts_survive_a_settings_file_round_trip() {
+        let builtin_id = BUILTIN_SAVED_PROMPT_IDS[1];
+        let stored = serde_json::json!({
+            "ai": {
+                "savedPrompts": [
+                    {
+                        "id": builtin_id,
+                        "name": "Open questions",
+                        "prompt": "List every question left unanswered.",
+                        "scope": "both",
+                        "builtIn": true,
+                        "hidden": true
+                    },
+                    {
+                        "id": "mine-1",
+                        "name": "Budget asks",
+                        "prompt": "What did anyone ask for money for?",
+                        "scope": "memory"
+                    }
+                ]
+            }
+        });
+
+        let suffix = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("system time before epoch")
+            .as_nanos();
+        let root = std::env::temp_dir().join(format!("nautilus-settings-prompts-{suffix}"));
+        let settings_path = root.join("settings.json");
+        fs::create_dir_all(&root).expect("create settings test directory");
+        fs::write(
+            &settings_path,
+            serde_json::to_string(&stored).expect("serialize"),
+        )
+        .expect("write settings");
+
+        let manager =
+            SettingsManager::load_from_path(settings_path.clone()).expect("load saved prompts");
+        let prompts = &manager.settings().ai.saved_prompts;
+        assert_eq!(prompts.len(), 2);
+        assert_eq!(prompts[0].id, builtin_id);
+        assert!(prompts[0].built_in);
+        assert!(prompts[0].hidden);
+        assert_eq!(prompts[1].id, "mine-1");
+        assert_eq!(prompts[1].scope, "memory");
+        assert!(!prompts[1].built_in);
+
+        let _ = fs::remove_dir_all(&root);
     }
 
     #[test]

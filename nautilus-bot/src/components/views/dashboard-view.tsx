@@ -4,6 +4,7 @@ import { PageHeader } from "@/components/ui/page-header";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Input } from "@/components/ui/input";
+import { useSavedPromptChat } from "@/components/prompts/use-saved-prompt-chat";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { Separator } from "@/components/ui/separator";
@@ -164,7 +165,16 @@ export function DashboardView() {
     ].join("\n");
   };
 
+  const savedPromptChat = useSavedPromptChat({
+    scope: "memory",
+    inputValue: memoryQuery,
+    onPickPrompt: setMemoryQuery,
+    label: "Saved prompts for your meetings",
+  });
+
   const runMemoryQuery = async (queryOverride?: string) => {
+    // While the "/" picker is open the box holds a filter, not a question.
+    if (queryOverride === undefined && savedPromptChat.pickerOpen) return;
     const query = (queryOverride ?? memoryQuery).trim();
     if (!query) return;
     
@@ -258,6 +268,7 @@ export function DashboardView() {
 
   return (
     <div className="h-full flex flex-col">
+      {savedPromptChat.manager}
       <PageHeader
         eyebrow="WORKSPACE"
         title="Home"
@@ -419,20 +430,30 @@ export function DashboardView() {
               </p>
             </CardHeader>
             <CardContent className="space-y-4">
-              <div className="flex gap-2">
-                <Input
-                  value={memoryQuery}
-                  onChange={(e: ChangeEvent<HTMLInputElement>) => setMemoryQuery(e.target.value)}
-                  onKeyDown={(e) => { if (e.key === "Enter") void runMemoryQuery(); }}
-                  placeholder="Ask about your meetings..."
-                />
-                <Button
-                  aria-label="Send"
-                  onClick={() => void runMemoryQuery()}
-                  disabled={memoryLoading || !memoryQuery.trim()}
-                >
-                  {memoryLoading ? <Loader2 className="h-4 w-4 animate-spin" /> : <Send className="h-4 w-4" />}
-                </Button>
+              <div className="space-y-2">
+                <div className="flex gap-2">
+                  <Input
+                    value={memoryQuery}
+                    onChange={(e: ChangeEvent<HTMLInputElement>) => setMemoryQuery(e.target.value)}
+                    onKeyDown={(e) => {
+                      savedPromptChat.onInputKeyDown(e);
+                      if (e.defaultPrevented) return;
+                      if (e.key === "Enter") void runMemoryQuery();
+                    }}
+                    placeholder="Ask about your meetings..."
+                  />
+                  <Button
+                    aria-label="Send"
+                    onClick={() => void runMemoryQuery()}
+                    disabled={memoryLoading || !memoryQuery.trim() || savedPromptChat.pickerOpen}
+                  >
+                    {memoryLoading ? <Loader2 className="h-4 w-4 animate-spin" /> : <Send className="h-4 w-4" />}
+                  </Button>
+                </div>
+                {savedPromptChat.picker}
+                <p className="text-sm text-muted-foreground">
+                  Type &ldquo;/&rdquo; for a saved prompt.
+                </p>
               </div>
               {memoryError && (
                 <div className="rounded-md border border-rust/30 bg-rust/10 p-3 text-sm text-rust">
@@ -450,6 +471,17 @@ export function DashboardView() {
                       )}
                     >
                       <p className="text-sm">{message.content}</p>
+                      {message.role === "user" && message.content.trim() ? (
+                        <Button
+                          type="button"
+                          size="sm"
+                          variant="ghost"
+                          className="mt-1 h-auto px-2 py-1 text-sm text-muted-foreground"
+                          onClick={() => savedPromptChat.saveTextAsPrompt(message.content)}
+                        >
+                          Save as prompt
+                        </Button>
+                      ) : null}
                       {message.citations && message.citations.length > 0 && (
                         <div className="mt-2 space-y-1">
                           {message.citations.map((citation, idx) => (

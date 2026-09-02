@@ -15,6 +15,8 @@ import {
   isRemoteAnalysisProvider,
   type AiLaneKey,
 } from "@/components/models/ai-lanes";
+import { SavedPromptManagerDialog } from "@/components/prompts/saved-prompt-manager-dialog";
+import { resolveSavedPrompts } from "@/lib/saved-prompts";
 import { listen } from "@/lib/electron";
 import { Button } from "@/components/ui/button";
 import { Switch } from "@/components/ui/switch";
@@ -489,6 +491,7 @@ export function SettingsView() {
   const { theme, setTheme } = useTheme();
   const { productReadiness } = useProductReadinessStatus();
   const [activeTab, setActiveTab] = useState<TabId>("general");
+  const [savedPromptsOpen, setSavedPromptsOpen] = useState(false);
   const [draftSettings, setDraftSettings] = useState<Settings | null>(null);
   const [persistedSettings, setPersistedSettings] = useState<Settings | null>(
     null,
@@ -5012,6 +5015,41 @@ export function SettingsView() {
                         Open Models
                       </Button>
                     </div>
+
+                    {/* The prompt library the "/" picker offers in a
+                        meeting's chat and in "Ask your meetings". Managed
+                        here and from the picker's own footer -- same dialog,
+                        same settings key. */}
+                    <div className="flex flex-col gap-3 rounded-md border border-border/60 bg-muted/20 p-4 lg:flex-row lg:items-center lg:justify-between">
+                      <div className="max-w-2xl space-y-0.5">
+                        <p className="section-heading">Saved prompts</p>
+                        <p className="text-sm leading-6 text-muted-foreground">
+                          {`${resolveSavedPrompts(settings.ai?.savedPrompts).filter((prompt) => !prompt.hidden).length} prompts you can pick with "/" in a meeting's chat or in "Ask your meetings". They are stored in your settings file on this Mac.`}
+                        </p>
+                      </div>
+                      <Button
+                        variant="secondary"
+                        onClick={() => setSavedPromptsOpen(true)}
+                      >
+                        Manage prompts
+                      </Button>
+                    </div>
+
+                    <SavedPromptManagerDialog
+                      open={savedPromptsOpen}
+                      onOpenChange={setSavedPromptsOpen}
+                      prompts={resolveSavedPrompts(settings.ai?.savedPrompts)}
+                      onPersist={(next) => {
+                        updateSettings(
+                          {
+                            ...settings,
+                            ai: { ...(settings.ai ?? {}), savedPrompts: [...next] },
+                          },
+                          { immediate: true },
+                        );
+                        return true;
+                      }}
+                    />
 
                     <div className="flex items-center justify-between">
                       <div className="space-y-0.5">

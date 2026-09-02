@@ -13,6 +13,14 @@ changed underneath `0.9.0-beta.2`. See `LAUNCH.md` for which qualification
 evidence is stale and must be recaptured before this becomes a candidate.
 
 ### Added
+- Saved prompts for the two chat boxes. Type "/" in a meeting's chat or in
+  "Ask your meetings" to pick a question you keep asking; "Save as prompt" on
+  a message you already sent turns it into one. Six starters ship (decisions,
+  open questions, what you committed to, risks and blockers, a follow-up
+  draft, a catch-up explanation); they can be edited, reordered and hidden,
+  but not deleted, because they would only come back. Manage them from
+  Settings → AI or the picker's own footer. They live in your settings file
+  on this Mac and choosing one only fills the box.
 - Onboarding now asks how meeting notes get written: local Ollama (with live
   detection), bring-your-own-key cloud AI, or transcripts only — instead of
   silently defaulting to an Ollama install that usually isn't there.

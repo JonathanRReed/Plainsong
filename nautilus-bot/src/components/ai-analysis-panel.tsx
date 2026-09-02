@@ -7,6 +7,7 @@ import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { Input } from "@/components/ui/input";
 import { Badge } from "@/components/ui/badge";
+import { useSavedPromptChat } from "@/components/prompts/use-saved-prompt-chat";
 import {
   analyzeRecording,
   cancelAnalysisRun,
@@ -397,7 +398,17 @@ export function AiAnalysisPanel({
     }
   };
 
+  const savedPromptChat = useSavedPromptChat({
+    scope: "meeting",
+    inputValue: customQuery,
+    onPickPrompt: setCustomQuery,
+    label: "Saved prompts for this meeting",
+  });
+
   const handleCustomQuery = async () => {
+    // A "/" query is the picker's, not a question. Sending it would ask the
+    // meeting about the literal text "/dec".
+    if (savedPromptChat.pickerOpen) return;
     if (!customQuery.trim()) return;
     const requestToken = requestGuard.beginRequest(recordingId);
     const runId = crypto.randomUUID();
@@ -520,6 +531,7 @@ export function AiAnalysisPanel({
 
   return (
     <div className={cn("space-y-4", className)}>
+      {savedPromptChat.manager}
       {/* Template Buttons */}
       <div className="grid grid-cols-2 gap-2">
         {templates.map((template) => (
@@ -542,26 +554,38 @@ export function AiAnalysisPanel({
       </div>
 
       {/* Custom Query */}
-      <div className="flex gap-2">
-        <Input
-          placeholder={inputPlaceholder}
-          value={customQuery}
-          onChange={(e: React.ChangeEvent<HTMLInputElement>) => setCustomQuery(e.target.value)}
-          onKeyDown={(e) => e.key === "Enter" && handleCustomQuery()}
-          disabled={isAnalyzing}
-        />
-        <Button 
-          size="icon" 
-          aria-label="Send"
-          onClick={handleCustomQuery}
-          disabled={isAnalyzing || !customQuery.trim()}
-        >
-          {isAnalyzing ? (
-            <Loader2 className="h-4 w-4 animate-spin" />
-          ) : (
-            <Send className="h-4 w-4" />
-          )}
-        </Button>
+      <div className="space-y-2">
+        <div className="flex gap-2">
+          <Input
+            placeholder={inputPlaceholder}
+            value={customQuery}
+            onChange={(e: React.ChangeEvent<HTMLInputElement>) => setCustomQuery(e.target.value)}
+            onKeyDown={(e) => {
+              // The picker takes the arrows, Enter and Escape while it is
+              // open; anything it does not claim falls through to Send.
+              savedPromptChat.onInputKeyDown(e);
+              if (e.defaultPrevented) return;
+              if (e.key === "Enter") void handleCustomQuery();
+            }}
+            disabled={isAnalyzing}
+          />
+          <Button
+            size="icon"
+            aria-label="Send"
+            onClick={handleCustomQuery}
+            disabled={isAnalyzing || !customQuery.trim() || savedPromptChat.pickerOpen}
+          >
+            {isAnalyzing ? (
+              <Loader2 className="h-4 w-4 animate-spin" />
+            ) : (
+              <Send className="h-4 w-4" />
+            )}
+          </Button>
+        </div>
+        {savedPromptChat.picker}
+        <p className="text-sm text-muted-foreground">
+          Type &ldquo;/&rdquo; for a saved prompt.
+        </p>
       </div>
 
       {threadMessages.length > 0 && (
@@ -584,9 +608,22 @@ export function AiAnalysisPanel({
                       <p className="rubric-muted">
                         {message.role === "assistant" ? "Assistant" : "You"}
                       </p>
-                      <p className="font-mono text-[11px] text-muted-foreground tabular-nums">
-                        {new Date(message.createdAt).toLocaleTimeString()}
-                      </p>
+                      <div className="flex items-center gap-2">
+                        {message.role === "user" && message.content.trim() ? (
+                          <Button
+                            type="button"
+                            size="sm"
+                            variant="ghost"
+                            className="h-auto px-2 py-1 text-sm text-muted-foreground"
+                            onClick={() => savedPromptChat.saveTextAsPrompt(message.content)}
+                          >
+                            Save as prompt
+                          </Button>
+                        ) : null}
+                        <p className="font-mono text-[11px] text-muted-foreground tabular-nums">
+                          {new Date(message.createdAt).toLocaleTimeString()}
+                        </p>
+                      </div>
                     </div>
                     <p className="mt-2 whitespace-pre-wrap text-sm">{message.content}</p>
                     {message.citations.length > 0 && (

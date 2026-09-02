@@ -20682,6 +20682,11 @@ async fn save_settings_for_sidecar(
     settings.transcription.meeting_custom_templates = settings::sanitize_meeting_custom_templates(
         std::mem::take(&mut settings.transcription.meeting_custom_templates),
     );
+    // Same reasoning, one section over: the saved prompt library is free text
+    // the renderer hands straight back, and `built_in` is recomputed here so
+    // a crafted payload cannot mint an undeletable prompt.
+    settings.ai.saved_prompts =
+        settings::sanitize_saved_prompts(std::mem::take(&mut settings.ai.saved_prompts));
     settings.transcription.dictation_command_prefix =
         normalize_dictation_command_prefix(&settings.transcription.dictation_command_prefix)
             .to_string();
