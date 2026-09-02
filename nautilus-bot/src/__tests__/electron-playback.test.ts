@@ -1,3 +1,5 @@
+import { readFileSync } from "node:fs";
+import path from "node:path";
 import { describe, expect, it } from "vitest";
 import { isRendererCommandAllowed } from "../../electron/ipc-bridge";
 import { getCommandTimeoutMs } from "../../electron/ipc-command-policy";
@@ -248,5 +250,43 @@ describe("playback IPC contract", () => {
   it("gives preparation the long budget a whole-file decrypt needs", () => {
     expect(getCommandTimeoutMs("prepare_recording_playback")).toBe(5 * 60_000);
     expect(getCommandTimeoutMs("release_recording_playback")).toBe(60_000);
+  });
+});
+
+function mainSource(): string {
+  return readFileSync(path.resolve(process.cwd(), "electron/main.ts"), "utf8");
+}
+
+describe("orphaned playback tokens", () => {
+  it("releases every token when the renderer that holds them goes away", () => {
+    // A reload or an in-app navigation replaces the renderer: it can no longer
+    // release its tokens, and the decrypted audio behind them stayed on disk
+    // until the vault locked. Both handlers must also be registered for real
+    // builds, not only inside the dev-only block they used to sit in.
+    const source = mainSource();
+    const createMainWindow = source.slice(source.indexOf("function createMainWindow"));
+    const alwaysRegistered = createMainWindow.slice(0, createMainWindow.indexOf("if (isDev) {"));
+    expect(alwaysRegistered).toContain('win.webContents.on("did-start-navigation"');
+    expect(alwaysRegistered).toContain('releaseAllPlayback("renderer navigated", true)');
+    expect(alwaysRegistered).toContain('win.webContents.on("render-process-gone"');
+    expect(alwaysRegistered).toContain('releaseAllPlayback("renderer process gone", true)');
+    // A same-document navigation is the same renderer; it keeps its tokens.
+    expect(alwaysRegistered).toContain("details.isSameDocument");
+    expect(alwaysRegistered).toContain("details.isMainFrame");
+  });
+
+  it("releases a preparation that failed after the sidecar minted its token", () => {
+    // `prepare_recording_playback` has a five-minute budget. A decrypt that
+    // runs past it rejects here while the sidecar goes on to register a token
+    // whose id nobody ever learns, so the release has to name the recording.
+    const source = mainSource();
+    const prepareCase = source.slice(
+      source.indexOf('case "prepare_recording_playback": {'),
+      source.indexOf('case "release_recording_playback": {'),
+    );
+    expect(prepareCase).toContain("} catch (error) {");
+    expect(prepareCase).toContain('invokeSidecar("release_recording_playback"');
+    expect(prepareCase).toContain("recordingId: payload.recordingId");
+    expect(prepareCase).toContain("throw error;");
   });
 });

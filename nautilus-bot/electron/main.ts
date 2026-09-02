@@ -1523,11 +1523,27 @@ async function handleLocalCommand(
       if (typeof payload.recordingId !== "string" || !payload.recordingId) {
         throw new Error("Playback needs a recording id");
       }
-      const prepared = parsePreparedPlayback(
-        await ipcBridge.invoke("prepare_recording_playback", {
-          recordingId: payload.recordingId,
-        }),
-      );
+      let prepared;
+      try {
+        prepared = parsePreparedPlayback(
+          await ipcBridge.invoke("prepare_recording_playback", {
+            recordingId: payload.recordingId,
+          }),
+        );
+      } catch (error) {
+        // The sidecar may have registered a token anyway — a five-minute
+        // timeout on a long decrypt is the case that happens — and its id
+        // never reached anyone who could release it. Ask for the recording's
+        // tokens by name so the plaintext is not pinned until the vault locks.
+        void ipcBridge
+          .invokeSidecar("release_recording_playback", {
+            recordingId: payload.recordingId,
+          })
+          .catch((releaseError) => {
+            console.warn("[playback] abandoned prepare not released", releaseError);
+          });
+        throw error;
+      }
       playbackTokens.register(prepared.token, {
         path: prepared.path,
         recordingId: prepared.recordingId,
@@ -2125,6 +2141,21 @@ function createMainWindow(): BrowserWindow {
     }
   });
 
+  // A reload or an in-app navigation replaces the renderer that holds the
+  // tokens: it will never release them, and the decrypted audio behind them
+  // would stay on disk until the vault locked. Same for a renderer that dies,
+  // which is why that release is registered here rather than beside the dev
+  // logging it used to sit in.
+  win.webContents.on("did-start-navigation", (details) => {
+    if (!details.isMainFrame || details.isSameDocument) {
+      return;
+    }
+    releaseAllPlayback("renderer navigated", true);
+  });
+  win.webContents.on("render-process-gone", () => {
+    releaseAllPlayback("renderer process gone", true);
+  });
+
   win.webContents.on(
     "console-message",
     ({ level, message, lineNumber, sourceId }) => {
@@ -2181,8 +2212,6 @@ function createMainWindow(): BrowserWindow {
     });
     win.webContents.on("render-process-gone", (_event, details) => {
       console.error("[renderer] render-process-gone", details);
-      // The renderer that held the tokens cannot release them any more.
-      releaseAllPlayback("renderer process gone", true);
     });
     if (devServerUrlIsUsable) {
       void win.loadURL(devServerUrl);

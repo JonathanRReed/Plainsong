@@ -381,6 +381,30 @@ pub(crate) fn validate_plaintext_wav(path: &Path) -> RecordingAudioValidation {
     })
 }
 
+/// Length of a WAV this process just wrote from an authenticated ciphertext,
+/// after checking that its header parses and that it carries audio frames.
+///
+/// Deliberately cheaper than `validate_plaintext_wav`: it neither decodes
+/// every sample nor hashes the file. Playback uses it because the bytes came
+/// out of `decrypt_stream`, whose AEAD already refused any frame that was not
+/// written by this vault's key — re-proving that by reading a 700 MB file
+/// twice more only delays the first note. Every other caller, and every
+/// unauthenticated plaintext file, still gets the full validation.
+pub(crate) fn measure_plaintext_wav_header(path: &Path) -> Result<u64> {
+    let metadata = std::fs::symlink_metadata(path)
+        .with_context(|| format!("Could not inspect audio file '{}'", path.display()))?;
+    if !metadata.file_type().is_file() {
+        anyhow::bail!("Decrypted audio path is not a regular file");
+    }
+    let reader = hound::WavReader::open(path)
+        .with_context(|| format!("Decrypted audio '{}' is not a readable WAV", path.display()))?;
+    let spec = reader.spec();
+    if reader.duration() == 0 || spec.sample_rate == 0 {
+        anyhow::bail!("Decrypted audio file contains zero audio frames");
+    }
+    Ok(metadata.len())
+}
+
 pub(crate) fn compute_file_sha256(path: &Path) -> Result<String> {
     let mut file = File::open(path)
         .with_context(|| format!("Failed to open '{}' for hashing", path.display()))?;

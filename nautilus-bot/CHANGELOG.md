@@ -181,6 +181,16 @@ evidence is stale and must be recaptured before this becomes a candidate.
   files that still carry it load cleanly and are rewritten without it.
 
 ### Fixed
+- Opening the same meeting's audio repeatedly no longer decrypts it again
+  every time: each open used to write another full-length plaintext copy that
+  stayed on disk until the vault locked (twenty opens of a two-hour meeting
+  left roughly fourteen gigabytes behind). Players for one meeting now share
+  the one decrypted copy, playback decrypts only the track it actually plays
+  instead of all three of a dual-track meeting, and a fourth meeting opened
+  for playback at once is refused with a message that says to close one.
+  Reloading the window, a renderer crash, a preparation that timed out, and
+  "Reset app state" all release the tokens they leave behind, so the
+  decrypted audio goes with them.
 - "Open audio file" and the stored waveform could not open a recording
   encrypted by the streaming vault writer: the runtime decrypt path still
   ran the pre-streaming whole-file decoder on every file, which fails the
