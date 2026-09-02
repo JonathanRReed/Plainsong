@@ -421,77 +421,34 @@ fn transcribe_blocking(
         .create_state()
         .context("Failed to create Whisper state")?;
 
-    // Use beam search for better accuracy (5 beams is a good balance)
-    let mut params = whisper_rs::FullParams::new(whisper_rs::SamplingStrategy::BeamSearch {
-        beam_size: 5,
-        patience: 1.0, // Standard patience - higher values search more but slower
-    });
-
-    // Speed optimizations
-    let num_threads = std::thread::available_parallelism()
-        .map(|n| n.get() as i32)
-        .unwrap_or(4);
-    params.set_n_threads(std::cmp::min(num_threads, 8)); // Cap at 8 threads to avoid diminishing returns
-
-    params.set_print_special(false);
-    params.set_print_progress(false);
-    params.set_print_realtime(false);
-    params.set_print_timestamps(false);
     // English-only models (".en") are forced to English; multilingual models
     // auto-detect the spoken language rather than assuming English.
     let english_only = model_id.ends_with(".en");
-    params.set_language(if english_only { Some("en") } else { None });
-    params.set_translate(false);
 
-    // Anti-repetition and hallucination mitigation
-    params.set_no_context(true); // Don't use previous context to prevent loop hallucinations
-    params.set_entropy_thold(2.4); // Stricter entropy threshold
-    params.set_logprob_thold(-1.0); // Stricter logprob threshold
-
-    // Beam search patience for better accuracy on technical terms
-    params.set_token_timestamps(true); // Enable token-level timestamps for better alignment
-
-    // Personal-dictionary vocabulary bias, as whisper's initial prompt. Only
-    // attached when there is something in it: an empty prompt buys nothing
-    // and a blank one is a known way to make small models drift. The
-    // `set_no_context(true)` above does not discard it — whisper.cpp clears
-    // the rolling context *before* seeding the initial prompt, so the first
-    // decode window is conditioned on these spellings (checked against
-    // whisper_full_with_state in the vendored whisper.cpp).
-    //
-    // Withheld on near-silent or sub-half-second audio: with nothing to
-    // transcribe, a prompted decoder's cheapest output is the prompt itself,
-    // so a silent hotkey tap could type "Vocabulary:" or a bare dictionary
-    // term into the target. The gate is energy + voiced duration, measured
-    // after the VAD trim (whisper-rs 0.16 exposes no no-speech probability).
-    let mut prompted_hint: Option<&VocabularyHint> = None;
-    if let Some(hint) = vocabulary_hint {
-        let prompt = sanitize_initial_prompt(&hint.as_prompt());
-        if prompt.is_empty() {
-            // Nothing survived sanitising; behave as if no hint was given.
-        } else if !audio_stats.carries_enough_speech_for_a_prompt() {
+    // One decode of `audio_data` on `state` with the given initial prompt.
+    // The prompt policy may call this twice: once with the vocabulary prompt
+    // and, if that decode only echoed the prompt on weak audio, once more
+    // without it.
+    let mut decode = |initial_prompt: Option<&str>| -> Result<WhisperDecodeOutput> {
+        let mut params = build_whisper_params(english_only);
+        if let Some(prompt) = initial_prompt {
             tracing::info!(
-                "Whisper initial prompt withheld: {:.2}s voiced at rms {:.4} is too little audio to prompt safely",
-                audio_stats.voiced_seconds(),
-                audio_stats.rms
+                "Whisper initial prompt carries a {}-char vocabulary hint",
+                prompt.chars().count()
             );
-        } else {
-            tracing::info!(
-                "Whisper initial prompt carries a {}-char vocabulary hint ({} terms)",
-                prompt.chars().count(),
-                hint.terms().len()
-            );
-            params.set_initial_prompt(&prompt);
-            prompted_hint = Some(hint);
+            params.set_initial_prompt(prompt);
         }
-    }
-
-    // Run transcription
-    state
-        .full(params, &audio_data)
-        .context("Failed to run Whisper transcription")?;
-
-    let num_segments = state.full_n_segments();
+        state
+            .full(params, &audio_data)
+            .context("Failed to run Whisper transcription")?;
+        collect_whisper_segments(&state)
+    };
+    let (output, vocabulary_hint_terms_applied) =
+        decode_with_prompt_policy(vocabulary_hint, &audio_stats, &mut decode)?;
+    let WhisperDecodeOutput {
+        segments,
+        text: full_text,
+    } = output;
 
     // Report the actual language: forced "en" for English-only models,
     // otherwise the language Whisper detected during decoding.
@@ -504,49 +461,7 @@ fn transcribe_blocking(
             .to_string()
     };
 
-    tracing::info!("Whisper produced {} segments", num_segments);
-
-    let mut segments = Vec::new();
-    let mut full_text = String::new();
-
-    for i in 0..num_segments {
-        let segment = state
-            .get_segment(i)
-            .ok_or_else(|| anyhow::anyhow!("Failed to get Whisper segment {}", i))?;
-        let text = segment.to_str().context("Failed to get segment text")?;
-        let start = segment.start_timestamp();
-        let end = segment.end_timestamp();
-
-        segments.push(TranscriptSegment {
-            start_time: start as f64 / 100.0, // Convert from centiseconds to seconds
-            end_time: end as f64 / 100.0,
-            text: text.trim().to_string(),
-            confidence: 0.9, // whisper-rs doesn't provide per-segment confidence
-        });
-
-        if !full_text.is_empty() {
-            full_text.push(' ');
-        }
-        full_text.push_str(text.trim());
-    }
-
-    // Second line of defence behind the gate above: audio quiet or short
-    // enough to be a tap rather than speech, and an output that is nothing
-    // but the hint (the frame word, hint terms, or both) — that is the prompt
-    // echoing, not the user speaking. Dropped rather than delivered.
-    let vocabulary_hint_terms_applied = prompted_hint.map(|hint| hint.terms().len()).unwrap_or(0);
-    if let Some(hint) = prompted_hint {
-        if prompt_echo_should_be_dropped(&full_text, hint, &audio_stats) {
-            tracing::warn!(
-                "Whisper output only echoed the vocabulary hint on weak audio ({:.2}s voiced, rms {:.4}); dropping '{}'",
-                audio_stats.voiced_seconds(),
-                audio_stats.rms,
-                full_text
-            );
-            full_text.clear();
-            segments.clear();
-        }
-    }
+    tracing::info!("Whisper produced {} segments", segments.len());
 
     let processing_time = start_time.elapsed().as_millis() as u64;
 
@@ -807,20 +722,161 @@ fn output_is_only_prompt_echo(text: &str, hint: &VocabularyHint) -> bool {
     words.iter().all(|word| allowed.contains(word))
 }
 
-/// The post-filter decision: prompt echo on weak audio is dropped; the same
-/// hint-only text on clearly voiced audio is the user actually saying a
-/// dictionary word and is kept.
-fn prompt_echo_should_be_dropped(
+/// What to do with a prompted decode's output.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PromptEchoDecision {
+    /// The output is the user's words; return it.
+    Keep,
+    /// The output is nothing but the hint on weak audio — more likely the
+    /// prompt echoing than the user. Decode the same audio again without
+    /// the prompt and return *that*: a real quiet one-word dictation of a
+    /// dictionary term survives (the plain decode hears it too), and true
+    /// silence comes back empty.
+    RedecodeWithoutPrompt,
+}
+
+/// The post-filter decision. Hint-only text on clearly voiced audio is the
+/// user actually saying a dictionary word and is kept.
+fn prompt_echo_decision(
     text: &str,
     hint: &VocabularyHint,
     audio: &PromptAudioStats,
-) -> bool {
-    audio.is_weak_enough_for_prompt_echo() && output_is_only_prompt_echo(text, hint)
+) -> PromptEchoDecision {
+    if audio.is_weak_enough_for_prompt_echo() && output_is_only_prompt_echo(text, hint) {
+        PromptEchoDecision::RedecodeWithoutPrompt
+    } else {
+        PromptEchoDecision::Keep
+    }
+}
+
+/// One whisper decode's output, before the provider result is assembled.
+#[derive(Debug, Clone)]
+struct WhisperDecodeOutput {
+    text: String,
+    segments: Vec<TranscriptSegment>,
+}
+
+/// The decode parameters every whisper run uses; only the initial prompt
+/// varies between runs, and the caller sets that.
+fn build_whisper_params(english_only: bool) -> whisper_rs::FullParams<'static, 'static> {
+    // Use beam search for better accuracy (5 beams is a good balance)
+    let mut params = whisper_rs::FullParams::new(whisper_rs::SamplingStrategy::BeamSearch {
+        beam_size: 5,
+        patience: 1.0, // Standard patience - higher values search more but slower
+    });
+
+    // Speed optimizations
+    let num_threads = std::thread::available_parallelism()
+        .map(|n| n.get() as i32)
+        .unwrap_or(4);
+    params.set_n_threads(std::cmp::min(num_threads, 8)); // Cap at 8 threads to avoid diminishing returns
+
+    params.set_print_special(false);
+    params.set_print_progress(false);
+    params.set_print_realtime(false);
+    params.set_print_timestamps(false);
+    params.set_language(if english_only { Some("en") } else { None });
+    params.set_translate(false);
+
+    // Anti-repetition and hallucination mitigation. `set_no_context(true)`
+    // does not discard an initial prompt — whisper.cpp clears the rolling
+    // context *before* seeding the prompt, so the first decode window is
+    // still conditioned on it (checked against whisper_full_with_state in
+    // the vendored whisper.cpp).
+    params.set_no_context(true); // Don't use previous context to prevent loop hallucinations
+    params.set_entropy_thold(2.4); // Stricter entropy threshold
+    params.set_logprob_thold(-1.0); // Stricter logprob threshold
+
+    // Beam search patience for better accuracy on technical terms
+    params.set_token_timestamps(true); // Enable token-level timestamps for better alignment
+    params
+}
+
+/// Reads the segments of the decode that just ran on `state`.
+fn collect_whisper_segments(state: &whisper_rs::WhisperState) -> Result<WhisperDecodeOutput> {
+    let num_segments = state.full_n_segments();
+    let mut segments = Vec::new();
+    let mut text = String::new();
+
+    for i in 0..num_segments {
+        let segment = state
+            .get_segment(i)
+            .ok_or_else(|| anyhow::anyhow!("Failed to get Whisper segment {}", i))?;
+        let segment_text = segment.to_str().context("Failed to get segment text")?;
+        let start = segment.start_timestamp();
+        let end = segment.end_timestamp();
+
+        segments.push(TranscriptSegment {
+            start_time: start as f64 / 100.0, // Convert from centiseconds to seconds
+            end_time: end as f64 / 100.0,
+            text: segment_text.trim().to_string(),
+            confidence: 0.9, // whisper-rs doesn't provide per-segment confidence
+        });
+
+        if !text.is_empty() {
+            text.push(' ');
+        }
+        text.push_str(segment_text.trim());
+    }
+
+    Ok(WhisperDecodeOutput { text, segments })
+}
+
+/// Runs `decode` under the vocabulary-prompt policy and returns the output
+/// to deliver plus how many hint terms that output was decoded with.
+///
+/// The prompt is attached only when there is one and the audio carries
+/// enough speech for it (`PromptAudioStats::carries_enough_speech_for_a_prompt`):
+/// with nothing to transcribe, a prompted decoder's cheapest output is the
+/// prompt itself, so a silent hotkey tap could type "Vocabulary:" or a bare
+/// dictionary term. Behind that gate, a prompted output that is nothing but
+/// hint words on weak audio is decoded once more without the prompt and
+/// that result is returned — empty if it really was silence, the word if
+/// the user quietly said it. `decode` is injected so this policy is tested
+/// with a counted stub rather than a model.
+fn decode_with_prompt_policy(
+    vocabulary_hint: Option<&VocabularyHint>,
+    audio_stats: &PromptAudioStats,
+    decode: &mut dyn FnMut(Option<&str>) -> Result<WhisperDecodeOutput>,
+) -> Result<(WhisperDecodeOutput, usize)> {
+    let Some(hint) = vocabulary_hint else {
+        return Ok((decode(None)?, 0));
+    };
+    let prompt = sanitize_initial_prompt(&hint.as_prompt());
+    if prompt.is_empty() {
+        // Nothing survived sanitising; behave as if no hint was given.
+        return Ok((decode(None)?, 0));
+    }
+    if !audio_stats.carries_enough_speech_for_a_prompt() {
+        tracing::info!(
+            "Whisper initial prompt withheld: {:.2}s voiced at rms {:.4} is too little audio to prompt safely",
+            audio_stats.voiced_seconds(),
+            audio_stats.rms
+        );
+        return Ok((decode(None)?, 0));
+    }
+
+    let prompted = decode(Some(&prompt))?;
+    match prompt_echo_decision(&prompted.text, hint, audio_stats) {
+        PromptEchoDecision::Keep => Ok((prompted, hint.terms().len())),
+        PromptEchoDecision::RedecodeWithoutPrompt => {
+            tracing::warn!(
+                "Whisper output only echoed the vocabulary hint on weak audio ({:.2}s voiced, rms {:.4}); decoding again without the prompt: '{}'",
+                audio_stats.voiced_seconds(),
+                audio_stats.rms,
+                prompted.text
+            );
+            Ok((decode(None)?, 0))
+        }
+    }
 }
 
 #[cfg(test)]
 mod prompt_gate_tests {
-    use super::{output_is_only_prompt_echo, prompt_echo_should_be_dropped, PromptAudioStats};
+    use super::{
+        decode_with_prompt_policy, output_is_only_prompt_echo, prompt_echo_decision,
+        PromptAudioStats, PromptEchoDecision, WhisperDecodeOutput,
+    };
     use crate::asr::VocabularyHint;
 
     fn hint(terms: &[&str]) -> VocabularyHint {
@@ -898,21 +954,115 @@ mod prompt_gate_tests {
     }
 
     #[test]
-    fn echo_is_dropped_only_on_weak_audio() {
+    fn echo_decision_asks_for_a_re_decode_only_on_weak_audio() {
         let hint = hint(&["Plainsong"]);
         // Quiet and short: the classic silent-tap echo.
         let weak = PromptAudioStats::measure(&noise(0.6, 0.012), 9_600);
-        assert!(prompt_echo_should_be_dropped("Plainsong", &hint, &weak));
+        assert_eq!(
+            prompt_echo_decision("Plainsong", &hint, &weak),
+            PromptEchoDecision::RedecodeWithoutPrompt
+        );
         // Clearly voiced, two seconds: the user said the word. Keep it.
         let voiced = tone(2.0, 0.05);
         let strong = PromptAudioStats::measure(&voiced, voiced.len());
-        assert!(!prompt_echo_should_be_dropped("Plainsong", &hint, &strong));
+        assert_eq!(
+            prompt_echo_decision("Plainsong", &hint, &strong),
+            PromptEchoDecision::Keep
+        );
         // Weak audio but real words beyond the hint: also kept.
-        assert!(!prompt_echo_should_be_dropped(
-            "Plainsong is ready",
-            &hint,
-            &weak
-        ));
+        assert_eq!(
+            prompt_echo_decision("Plainsong is ready", &hint, &weak),
+            PromptEchoDecision::Keep
+        );
+    }
+
+    fn output(text: &str) -> WhisperDecodeOutput {
+        WhisperDecodeOutput {
+            text: text.to_string(),
+            segments: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn echo_on_weak_audio_is_decoded_again_without_the_prompt_not_dropped() {
+        // A prompted decode of a quiet tap came back as nothing but the hint.
+        // The policy must run a second, un-prompted decode and return that:
+        // empty for real silence...
+        let hint = hint(&["Plainsong"]);
+        let weak = PromptAudioStats::measure(&noise(0.6, 0.012), 9_600);
+        let mut calls: Vec<Option<String>> = Vec::new();
+        let mut silence_stub = |prompt: Option<&str>| {
+            calls.push(prompt.map(str::to_string));
+            Ok(output(if prompt.is_some() { "Plainsong" } else { "" }))
+        };
+        let (result, applied) =
+            decode_with_prompt_policy(Some(&hint), &weak, &mut silence_stub).expect("decode");
+        assert_eq!(result.text, "");
+        assert_eq!(applied, 0, "the returned decode carried no prompt");
+        assert_eq!(
+            calls,
+            vec![Some("Vocabulary: Plainsong.".to_string()), None],
+            "prompted decode first, then exactly one re-decode without the prompt"
+        );
+
+        // ...and the word itself when the user quietly said it: the plain
+        // decode hears it too, and it is returned rather than lost.
+        let mut calls: Vec<Option<String>> = Vec::new();
+        let mut quiet_word_stub = |prompt: Option<&str>| {
+            calls.push(prompt.map(str::to_string));
+            Ok(output(if prompt.is_some() {
+                "Plainsong"
+            } else {
+                "plainsong"
+            }))
+        };
+        let (result, applied) =
+            decode_with_prompt_policy(Some(&hint), &weak, &mut quiet_word_stub).expect("decode");
+        assert_eq!(result.text, "plainsong");
+        assert_eq!(applied, 0);
+        assert_eq!(calls.len(), 2);
+    }
+
+    #[test]
+    fn hint_only_output_on_voiced_audio_is_kept_after_a_single_decode() {
+        let hint = hint(&["Plainsong"]);
+        let voiced = tone(2.0, 0.05);
+        let strong = PromptAudioStats::measure(&voiced, voiced.len());
+        let mut calls = 0usize;
+        let mut stub = |prompt: Option<&str>| {
+            calls += 1;
+            assert!(
+                prompt.is_some(),
+                "the prompt must be attached on voiced audio"
+            );
+            Ok(output("Plainsong"))
+        };
+        let (result, applied) =
+            decode_with_prompt_policy(Some(&hint), &strong, &mut stub).expect("decode");
+        assert_eq!(result.text, "Plainsong");
+        assert_eq!(applied, 1);
+        assert_eq!(calls, 1, "no re-decode when the user clearly spoke");
+    }
+
+    #[test]
+    fn the_prompt_is_withheld_before_any_decode_on_silence() {
+        let hint = hint(&["Plainsong"]);
+        let silence = vec![0.0_f32; 17_600];
+        let stats = PromptAudioStats::measure(&silence, 0);
+        let mut calls: Vec<Option<String>> = Vec::new();
+        let mut stub = |prompt: Option<&str>| {
+            calls.push(prompt.map(str::to_string));
+            Ok(output(""))
+        };
+        let (result, applied) =
+            decode_with_prompt_policy(Some(&hint), &stats, &mut stub).expect("decode");
+        assert_eq!(result.text, "");
+        assert_eq!(applied, 0);
+        assert_eq!(
+            calls,
+            vec![None],
+            "one un-prompted decode, no prompt ever attached"
+        );
     }
 }
 

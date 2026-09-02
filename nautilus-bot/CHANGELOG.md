@@ -45,7 +45,8 @@ evidence is stale and must be recaptured before this becomes a candidate.
   Snippet expansions and misheard spoken forms are never sent; the prompt
   is capped at an estimated 200 tokens under whisper's window, withheld on
   near-silent or sub-half-second audio, and an output that only echoes the
-  hint on such audio is dropped rather than typed. Cohere's
+  hint on quiet or sub-second audio is decoded again without the prompt
+  rather than typed as-is. Cohere's
   OpenAI-compatible endpoint documents `prompt` as unsupported, and Parakeet,
   Moonshine, Candle, Qwen3 and Apple Speech have no equivalent, so those
   routes are unchanged. Note for ElevenLabs users: ElevenLabs bills a 20%
