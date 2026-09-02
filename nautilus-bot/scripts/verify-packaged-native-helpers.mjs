@@ -64,6 +64,13 @@ function appBundlePaths(appPath) {
       "sidecar",
       "plainsong-sidecar",
     ),
+    cli: path.join(
+      appPath,
+      "Contents",
+      "Resources",
+      "sidecar",
+      "plainsong-cli",
+    ),
     shortcutHelper: path.join(
       appPath,
       "Contents",
@@ -323,6 +330,7 @@ function verifyAppBundle(appPath, expectedArchitecture) {
   const executables = [
     ["app executable", paths.mainExecutable],
     ["Rust sidecar", paths.sidecar],
+    ["plainsong CLI", paths.cli],
     ["shortcut helper", paths.shortcutHelper],
     ["calendar helper", paths.calendarHelper],
     ["Apple Speech helper", paths.speechHelper],

@@ -13,6 +13,24 @@ changed underneath `0.9.0-beta.2`. See `LAUNCH.md` for which qualification
 evidence is stale and must be recaptured before this becomes a candidate.
 
 ### Added
+- A local command-line tool, a read-only MCP server, and `plainsong://` deep
+  links, all behind one off-by-default switch (Settings > General > Local
+  tools). `plainsong list / search / show / transcript / export / dictations
+  / stats` read the same SQLCipher database the app uses, opened with
+  SQLite's read-only flag from a separate `plainsong-cli` binary packaged
+  beside the sidecar; there is no write command. `plainsong mcp` serves six
+  read-only tools over stdio to Claude Desktop, Claude Code or Cursor,
+  answers both the 2025 `initialize` handshake and the 2026-07-28
+  per-request protocol, caps and paginates results, and wraps every
+  transcript, note, summary, action item and dictation string in an
+  `<untrusted_content>` frame whose close tag cannot be forged from inside.
+  `plainsong://record`, `stop`, `mode?key=…`, `meeting/start` (opens the
+  consent sheet, never records), `meeting/stop` and `open` are the only
+  links; they carry no text, are rate-limited, and are written to the audit
+  log by action and outcome. "Install command-line tool" in Settings links
+  `/usr/local/bin/plainsong` or, when that directory is not writable, shows
+  the one command to paste rather than asking for an administrator
+  password. See docs/automation.md.
 - Onboarding now asks how meeting notes get written: local Ollama (with live
   detection), bring-your-own-key cloud AI, or transcripts only — instead of
   silently defaulting to an Ollama install that usually isn't there.
@@ -135,6 +153,16 @@ evidence is stale and must be recaptured before this becomes a candidate.
   files that still carry it load cleanly and are rewritten without it.
 
 ### Fixed
+- Opening an encrypted (SQLCipher) database failed every time with "Execute
+  returned results": the key check ran a `SELECT` through rusqlite's
+  `execute`, which refuses any statement that returns rows. No install had a
+  vault key yet, so nothing caught it until the read-only CLI open was tested
+  against a keyed file. The open and rekey paths now verify the key with a
+  query. Found while adding the local tools; regression-tested in
+  `db::tests::keyed_open_round_trip`. (Still open, and now written down in
+  that test: `PRAGMA rekey` is a silent no-op on a database opened without a
+  key, so the vault's plaintext-to-encrypted step does not encrypt; it needs
+  `sqlcipher_export` and its own migration.)
 - A mic failure mid-meeting in a "me and them" (microphone plus system
   audio) recording is now detected and noted on the meeting instead of being
   silently padded with silence and presented as a complete recording; a

@@ -33,6 +33,14 @@ into searchable notes without sending a bot into the call.
   running), and **hands-free** (VAD auto start/stop, with an optional Silero
   VAD model download for better accuracy). The beta requires **macOS 13 or later**
   and is **arm64-only**.
+- **Yours from the terminal, too.** An off-by-default `plainsong` command
+  reads your meetings, transcripts and dictation history (`list`, `search`,
+  `show`, `transcript`, `export`, `dictations`, `stats`), serves them to
+  Claude Desktop, Claude Code or Cursor as a local, read-only MCP server
+  (`plainsong mcp`), and `plainsong://` links drive dictation and meeting
+  start/stop from Raycast or Shortcuts. No account, no history cap, no write
+  path; transcript text reaches an assistant wrapped as untrusted content.
+  See [docs/automation.md](docs/automation.md).
 - **MIT licensed**, no trial, no tiers, no nags.
 
 ## Layout
