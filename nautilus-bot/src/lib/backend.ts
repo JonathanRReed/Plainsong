@@ -297,6 +297,26 @@ export async function openRecordingAudio(recordingId: string): Promise<void> {
   await invoke("open_recording_audio", { recordingId });
 }
 
+/**
+ * What the main process hands back for in-app playback: a token and the URL
+ * the privileged `plainsong://playback` route answers for it. Never a path.
+ */
+interface PreparedPlayback {
+  token: string;
+  url: string;
+  recordingId: string;
+  protection: "plaintext" | "decrypted";
+  durationSeconds: number;
+}
+
+export async function prepareRecordingPlayback(recordingId: string): Promise<PreparedPlayback> {
+  return await invoke("prepare_recording_playback", { recordingId });
+}
+
+export async function releaseRecordingPlayback(token: string): Promise<void> {
+  await invoke("release_recording_playback", { token });
+}
+
 export async function openExportPath(targetPath: string): Promise<void> {
   await invoke("open_export_path", { targetPath });
 }

@@ -241,6 +241,12 @@ impl ResolvedRecordingAudioBundle {
             _temporary_files,
         }
     }
+
+    /// True when at least one path is an app-owned decrypted copy that is
+    /// deleted when this bundle drops.
+    pub(crate) fn holds_temporary_files(&self) -> bool {
+        !self._temporary_files.is_empty()
+    }
 }
 
 /// Deletes an unpublished temporary file unless ownership is explicitly released.

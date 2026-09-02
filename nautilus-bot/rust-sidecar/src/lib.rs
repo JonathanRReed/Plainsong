@@ -20,6 +20,7 @@ mod models;
 mod operation_coordinator;
 mod ort_utils;
 mod paths;
+mod playback;
 mod recording_audio;
 mod remote_processing;
 mod safe_fs;
@@ -114,6 +115,8 @@ pub struct AppState {
     /// Registered by the privileged Electron side and redeemed by
     /// `authorize_meeting_capture_options`.
     capture_admission: Arc<admission::CaptureAdmissionRegistry>,
+    /// Prepared in-app playbacks, keyed by token. See `playback.rs`.
+    playback_registry: Arc<playback::PlaybackRegistry>,
     active_capture_lease: Arc<Mutex<Option<(String, operation_coordinator::OperationLease)>>>,
     /// Set as soon as the sidecar accepts a shutdown request. Meeting
     /// post-processing failures caused by runtime teardown must remain
@@ -6579,21 +6582,6 @@ async fn migrate_storage_encryption(state: &AppState, password: &str) -> Result<
     Ok(())
 }
 
-fn validate_wav_bytes(bytes: &[u8], label: &str) -> Result<(), String> {
-    let mut reader = hound::WavReader::new(std::io::Cursor::new(bytes))
-        .map_err(|error| format!("{} is not a readable WAV: {}", label, error))?;
-    if reader.duration() == 0 || reader.spec().sample_rate == 0 {
-        return Err(format!("{} contains zero audio frames", label));
-    }
-    if let Some(error) = reader.samples::<i16>().find_map(Result::err) {
-        return Err(format!(
-            "{} contains unreadable WAV samples: {}",
-            label, error
-        ));
-    }
-    Ok(())
-}
-
 fn ensure_regular_file_in_roots(
     path: &Path,
     label: &str,
@@ -7545,52 +7533,28 @@ fn resolve_recording_audio_bundle_in_directory(
                 let key = key.ok_or_else(|| {
                     "Vault is locked. Unlock vault before opening encrypted recordings.".to_string()
                 })?;
-                let ciphertext = std::fs::read(&canonical).map_err(|error| {
-                    format!(
-                        "Failed to read encrypted recording audio '{}': {}",
-                        canonical.display(),
-                        error
-                    )
-                })?;
-                let plaintext = crate::crypto::ProjectKeyManager::decrypt(&ciphertext, key)
-                    .map_err(|_| {
-                        format!(
-                            "Failed to decrypt recording '{}' '{}' audio. Verify the vault password and retry.",
-                            bundle.recording_id,
-                            asset.role.as_str()
-                        )
-                    })?;
-                validate_wav_bytes(
-                    &plaintext,
-                    &format!(
-                        "Decrypted recording '{}' '{}' audio",
-                        bundle.recording_id,
-                        asset.role.as_str()
-                    ),
-                )?;
                 let temp_path = runtime_dir.join(format!(
                     "{}-{}.wav",
                     uuid::Uuid::new_v4(),
                     asset.role.as_str()
                 ));
-                let mut temp_file = recording_audio::create_new_file(&temp_path)
-                    .map_err(|error| error.to_string())?;
+                // Streams PSVAULT1 frames straight into the owner-only temp
+                // file (a legacy whole-file payload is read whole, the only
+                // way that layout can be read), so a long meeting is never held
+                // in memory as ciphertext and plaintext at once. Before this
+                // the runtime path used the legacy decoder for every file and
+                // could not open a recording encrypted by the streaming writer.
+                playback::decrypt_vault_file_to_path(&canonical, &temp_path, key).map_err(
+                    |error| {
+                        format!(
+                            "Failed to decrypt recording '{}' '{}' audio. Verify the vault password and retry. ({})",
+                            bundle.recording_id,
+                            asset.role.as_str(),
+                            error
+                        )
+                    },
+                )?;
                 let temp_guard = recording_audio::DurableTempFile::new(temp_path.clone());
-                temp_file.write_all(&plaintext).map_err(|error| {
-                    format!(
-                        "Failed to write runtime decrypted audio '{}': {}",
-                        temp_path.display(),
-                        error
-                    )
-                })?;
-                temp_file.sync_all().map_err(|error| {
-                    format!(
-                        "Failed to sync runtime decrypted audio '{}': {}",
-                        temp_path.display(),
-                        error
-                    )
-                })?;
-                drop(temp_file);
                 let metadata = match recording_audio::validate_plaintext_wav(&temp_path) {
                     recording_audio::RecordingAudioValidation::Ready(metadata) => metadata,
                     recording_audio::RecordingAudioValidation::Missing(error)
@@ -7672,6 +7636,142 @@ fn schedule_recording_audio_bundle_cleanup(
         drop(bundle);
         drop(runtime_audio_lease);
     });
+}
+
+/// What `prepare_recording_playback` answers. The privileged Electron process
+/// keeps `path` for itself and hands the renderer only the token: the renderer
+/// never learns where audio lives on disk.
+#[derive(Debug, Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct PreparedRecordingPlayback {
+    token: String,
+    recording_id: String,
+    path: String,
+    protection: playback::PlaybackProtection,
+    duration_seconds: i64,
+}
+
+async fn prepare_recording_playback_impl(
+    state: &Arc<AppState>,
+    handle: &sidecar_handle::SidecarHandle,
+    recording_id: &str,
+) -> Result<PreparedRecordingPlayback, String> {
+    let recording = {
+        let db = state.db.lock().await;
+        db.get_recording(recording_id)
+            .map_err(|e| e.to_string())?
+            .ok_or("Recording not found")?
+    };
+    if recording.audio_path.trim().is_empty() {
+        return Err("Recording has no audio file path".to_string());
+    }
+
+    // Held for as long as the token lives: a vault lock revokes it (and with
+    // it the decrypted temp), and a restore or vault migration cannot start
+    // underneath an open player.
+    let lease = state
+        .operation_coordinator
+        .try_acquire(operation_coordinator::OperationKind::RuntimeAudio)?;
+    let resolved = resolve_recording_audio_bundle_for_runtime(state, recording_id).await?;
+    let protection = if resolved.holds_temporary_files() {
+        playback::PlaybackProtection::Decrypted
+    } else {
+        playback::PlaybackProtection::Plaintext
+    };
+    let path = resolved.primary.clone();
+
+    let token = playback::PlaybackRegistry::new_token();
+    let (release_tx, release_rx) = tokio::sync::oneshot::channel();
+    state.playback_registry.register(
+        token.clone(),
+        recording_id.to_string(),
+        path.clone(),
+        protection,
+        release_tx,
+    );
+    spawn_playback_holder(
+        Arc::clone(&state.playback_registry),
+        handle.clone(),
+        token.clone(),
+        recording_id.to_string(),
+        resolved,
+        lease,
+        release_rx,
+    );
+
+    let mut db = state.db.lock().await;
+    let details = serde_json::json!({
+        "recording_id": recording_id,
+        "protection": protection.as_str(),
+    });
+    if let Err(e) = db.log_audit_event("recording_playback_prepared", Some(details), "info") {
+        tracing::warn!("Failed to log audit event: {}", e);
+    }
+
+    Ok(PreparedRecordingPlayback {
+        token,
+        recording_id: recording_id.to_string(),
+        path: path.to_string_lossy().to_string(),
+        protection,
+        duration_seconds: recording.duration,
+    })
+}
+
+/// Owns the decrypted temp-file guard and the coordinator lease for one token.
+/// Ends on release (the reader moved on) or on revoke (the vault locked);
+/// either way the guard drops and the plaintext is gone.
+fn spawn_playback_holder(
+    registry: Arc<playback::PlaybackRegistry>,
+    handle: sidecar_handle::SidecarHandle,
+    token: String,
+    recording_id: String,
+    bundle: recording_audio::ResolvedRecordingAudioBundle,
+    mut lease: operation_coordinator::OperationLease,
+    release_rx: tokio::sync::oneshot::Receiver<()>,
+) {
+    tokio::spawn(async move {
+        let revoked = tokio::select! {
+            _ = release_rx => false,
+            _ = lease.cancelled() => true,
+        };
+        drop(bundle);
+        drop(lease);
+        if revoked {
+            registry.forget(&token);
+            handle.emit(
+                "recording-playback-revoked",
+                serde_json::json!({
+                    "token": token,
+                    "recordingId": recording_id,
+                    "reason": "vault_locked",
+                }),
+            );
+        }
+    });
+}
+
+async fn release_recording_playback_impl(state: &AppState, token: &str) -> Result<bool, String> {
+    let Some(released) = state.playback_registry.release(token) else {
+        return Ok(false);
+    };
+    let mut db = state.db.lock().await;
+    let details = serde_json::json!({
+        "recording_id": released.recording_id,
+        "protection": released.protection.as_str(),
+    });
+    if let Err(e) = db.log_audit_event("recording_playback_released", Some(details), "info") {
+        tracing::warn!("Failed to log audit event: {}", e);
+    }
+    Ok(true)
+}
+
+/// Delete every decrypted playback temporary the app owns. The sidecar binary
+/// calls this at startup (a crash can leave plaintext behind) and at shutdown
+/// (nothing may outlive the process that decrypted it).
+pub fn sweep_runtime_playback_audio_for_sidecar() -> Result<bool, String> {
+    let data_dir = crate::paths::data_dir()
+        .ok_or("Could not find data directory while sweeping playback audio")?;
+    remove_decrypted_runtime_audio_directory(&data_dir)
 }
 
 #[cfg(all(
@@ -20468,6 +20568,7 @@ pub async fn build_app_state() -> Result<AppState, String> {
         active_meeting_audio_postprocessing: Arc::new(StdMutex::new(HashMap::new())),
         operation_coordinator: operation_coordinator::OperationCoordinator::new(),
         capture_admission: Arc::new(admission::CaptureAdmissionRegistry::default()),
+        playback_registry: Arc::new(playback::PlaybackRegistry::default()),
         active_capture_lease: Arc::new(Mutex::new(None)),
         sidecar_shutting_down: Arc::new(AtomicBool::new(false)),
         recent_dictation_results: Arc::new(StdMutex::new(Vec::new())),
@@ -26565,6 +26666,18 @@ pub async fn dispatch_command(
             open_recording_audio_impl(state.as_ref(), &recording_id).await?;
             Ok(serde_json::Value::Null)
         }
+        "prepare_recording_playback" => {
+            let recording_id: String =
+                serde_json::from_value(params["recordingId"].clone()).map_err(|e| e.to_string())?;
+            let prepared = prepare_recording_playback_impl(state, handle, &recording_id).await?;
+            serde_json::to_value(prepared).map_err(|e| e.to_string())
+        }
+        "release_recording_playback" => {
+            let token: String =
+                serde_json::from_value(params["token"].clone()).map_err(|e| e.to_string())?;
+            let released = release_recording_playback_impl(state.as_ref(), &token).await?;
+            Ok(serde_json::json!({ "released": released }))
+        }
         "open_export_path" => {
             let target_path: String =
                 serde_json::from_value(params["targetPath"].clone()).map_err(|e| e.to_string())?;
@@ -29187,4 +29300,172 @@ pub async fn dispatch_command(
 
 pub fn audio_system_test_worker() -> audio::system_capture::SystemAudioTestResult {
     audio::system_capture::run_system_audio_test_worker(std::time::Duration::from_secs(45))
+}
+
+#[cfg(test)]
+mod playback_preparation_tests {
+    use super::*;
+
+    fn scratch_dir(label: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!(
+            "plainsong-playback-prep-{}-{}",
+            label,
+            uuid::Uuid::new_v4()
+        ));
+        std::fs::create_dir_all(&dir).expect("create scratch dir");
+        dir
+    }
+
+    fn write_wav(path: &Path) {
+        let mut writer = hound::WavWriter::create(
+            path,
+            hound::WavSpec {
+                channels: 1,
+                sample_rate: 16_000,
+                bits_per_sample: 16,
+                sample_format: hound::SampleFormat::Int,
+            },
+        )
+        .expect("create wav");
+        for index in 0..16_000_i32 {
+            writer
+                .write_sample(((index % 200) as i16 - 100) * 50)
+                .expect("write sample");
+        }
+        writer.finalize().expect("finalize wav");
+    }
+
+    fn asset(
+        path: PathBuf,
+        protection: recording_audio::RecordingAudioProtection,
+    ) -> recording_audio::RecordingAudioAsset {
+        recording_audio::RecordingAudioAsset {
+            recording_id: "rec-playback".to_string(),
+            role: recording_audio::RecordingAudioRole::Primary,
+            path,
+            lifecycle: recording_audio::RecordingAudioLifecycle::Ready,
+            protection,
+            plaintext_bytes: None,
+            plaintext_sha256: None,
+            last_error: None,
+        }
+    }
+
+    fn encrypted_bundle(dir: &Path, key: &[u8; 32]) -> recording_audio::RecordingAudioBundle {
+        let plain = dir.join("source.wav");
+        write_wav(&plain);
+        let encrypted = dir.join("recording.wav.enc");
+        {
+            let mut reader = std::fs::File::open(&plain).expect("open plaintext");
+            let mut writer = std::fs::File::create(&encrypted).expect("create ciphertext");
+            crate::crypto::ProjectKeyManager::encrypt_stream(&mut reader, &mut writer, key, |_| {})
+                .expect("encrypt stream");
+        }
+        std::fs::remove_file(&plain).expect("remove plaintext source");
+        let mut bundle = recording_audio::RecordingAudioBundle::empty("rec-playback");
+        bundle
+            .insert(asset(
+                encrypted,
+                recording_audio::RecordingAudioProtection::Encrypted,
+            ))
+            .expect("insert asset");
+        bundle
+    }
+
+    #[test]
+    fn locked_vault_refuses_encrypted_playback_without_touching_disk() {
+        let dir = scratch_dir("locked");
+        let runtime = dir.join("runtime");
+        std::fs::create_dir_all(&runtime).expect("create runtime dir");
+        let bundle = encrypted_bundle(&dir, &[5u8; 32]);
+
+        let error = resolve_recording_audio_bundle_in_directory(
+            &bundle,
+            None,
+            &runtime,
+            std::slice::from_ref(&dir),
+        )
+        .expect_err("locked vault must refuse");
+        assert!(error.contains("Vault is locked"), "{error}");
+        assert_eq!(
+            std::fs::read_dir(&runtime)
+                .expect("list runtime dir")
+                .count(),
+            0,
+            "no plaintext may be written while the vault is locked"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn encrypted_playback_decrypts_to_an_owner_only_temp_that_release_removes() {
+        let dir = scratch_dir("decrypt");
+        let runtime = dir.join("runtime");
+        std::fs::create_dir_all(&runtime).expect("create runtime dir");
+        let key = [5u8; 32];
+        let bundle = encrypted_bundle(&dir, &key);
+
+        let resolved = resolve_recording_audio_bundle_in_directory(
+            &bundle,
+            Some(&key),
+            &runtime,
+            std::slice::from_ref(&dir),
+        )
+        .expect("unlocked vault resolves");
+        assert!(resolved.holds_temporary_files());
+        let temp = resolved.primary.clone();
+        assert!(temp.starts_with(&runtime), "temp lives in the runtime dir");
+        assert!(temp.exists());
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = std::fs::metadata(&temp)
+                .expect("stat temp")
+                .permissions()
+                .mode();
+            assert_eq!(mode & 0o777, 0o600);
+        }
+        let reader = hound::WavReader::open(&temp).expect("decrypted temp is a WAV");
+        assert_eq!(reader.duration(), 16_000);
+
+        drop(resolved);
+        assert!(!temp.exists(), "releasing the playback deletes the temp");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn plaintext_playback_serves_the_stored_file_without_a_temp() {
+        let dir = scratch_dir("plain");
+        let runtime = dir.join("runtime");
+        std::fs::create_dir_all(&runtime).expect("create runtime dir");
+        let stored = dir.join("recording.wav");
+        write_wav(&stored);
+        let mut bundle = recording_audio::RecordingAudioBundle::empty("rec-playback");
+        bundle
+            .insert(asset(
+                stored.clone(),
+                recording_audio::RecordingAudioProtection::Plaintext,
+            ))
+            .expect("insert asset");
+
+        let resolved = resolve_recording_audio_bundle_in_directory(
+            &bundle,
+            None,
+            &runtime,
+            std::slice::from_ref(&dir),
+        )
+        .expect("plaintext resolves without a key");
+        assert!(!resolved.holds_temporary_files());
+        assert_eq!(
+            resolved.primary,
+            stored.canonicalize().expect("canonical stored path")
+        );
+        assert_eq!(
+            std::fs::read_dir(&runtime)
+                .expect("list runtime dir")
+                .count(),
+            0
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 }

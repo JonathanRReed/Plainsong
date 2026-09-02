@@ -13,6 +13,19 @@ changed underneath `0.9.0-beta.2`. See `LAUNCH.md` for which qualification
 evidence is stale and must be recaptured before this becomes a candidate.
 
 ### Added
+- Meetings now play their own audio in the app, in step with the transcript:
+  play/pause, a scrubber drawn over the stored waveform, 1×/1.5×/2× speed,
+  ← → to skip five seconds, and Space to play or pause with the transcript
+  focused. Clicking a transcript line seeks the audio there, the line under
+  the playhead carries the gold reading mark, and the transcript follows
+  playback unless you scrolled it yourself in the last few seconds. A
+  vault-encrypted recording is decrypted frame by frame into an app-owned,
+  owner-only temporary file that is deleted when you leave the meeting, when
+  the vault locks, and at every sidecar start and stop; the renderer never
+  receives a file path, only a single-use token that the privileged
+  `plainsong://playback` route resolves per request (with HTTP Range support,
+  so seeking does not wait on a full download). "Open audio file", which
+  hands the recording to the system player, stays as the secondary action.
 - Onboarding now asks how meeting notes get written: local Ollama (with live
   detection), bring-your-own-key cloud AI, or transcripts only — instead of
   silently defaulting to an Ollama install that usually isn't there.
@@ -135,6 +148,12 @@ evidence is stale and must be recaptured before this becomes a candidate.
   files that still carry it load cleanly and are rewritten without it.
 
 ### Fixed
+- "Open audio file" and the stored waveform could not open a recording
+  encrypted by the streaming vault writer: the runtime decrypt path still
+  ran the pre-streaming whole-file decoder on every file, which fails the
+  integrity check on a PSVAULT1 payload. It now streams PSVAULT1 frames into
+  the temporary file and uses the whole-file decoder only for legacy
+  payloads, which is also what keeps a long meeting out of memory.
 - A mic failure mid-meeting in a "me and them" (microphone plus system
   audio) recording is now detected and noted on the meeting instead of being
   silently padded with silence and presented as a complete recording; a

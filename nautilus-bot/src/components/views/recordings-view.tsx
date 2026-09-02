@@ -11,6 +11,7 @@ import { Textarea } from "@/components/ui/textarea";
 import { useRecordings } from "@/hooks/use-recordings";
 import { useRecording } from "@/hooks/use-recording";
 import { useRecordingDetail } from "@/hooks/use-recording-detail";
+import { AudioPlayer, type AudioPlayerHandle } from "@/components/meetings/audio-player";
 import { useScopedRequestGuard } from "@/hooks/use-scoped-request-guard";
 import { useToast } from "@/components/toast";
 import { ConsentDialog } from "@/components/recording-overlay";
@@ -1041,9 +1042,11 @@ export function RecordingsView() {
   const [transcriptMatches, setTranscriptMatches] = useState<TranscriptMatch[]>([]);
   const [activeTranscriptMatchIndex, setActiveTranscriptMatchIndex] = useState(0);
   // Where the reader is in the transcript. Set by a segment click, by keyboard
-  // stepping, by a search hit, and by a citation's "jump to source" — it is a
-  // reading position, not audio playback, which this build cannot drive.
+  // stepping, by a search hit, by a citation's "jump to source", and — while
+  // the meeting's audio plays — by the playhead, a few times a second.
   const [transcriptCueTime, setTranscriptCueTime] = useState<number | undefined>(undefined);
+  // The in-app player, so a transcript click or a citation can seek the audio.
+  const audioPlayerRef = useRef<AudioPlayerHandle | null>(null);
   // A deep link names both a query and the moment it was found at. The hits
   // only exist once the transcript has loaded, so the requested moment is
   // parked here and spent on the first report that actually has hits in it.
@@ -3530,6 +3533,9 @@ export function RecordingsView() {
     setActiveTranscriptMatchIndex(0);
     pendingMatchFocusTimeRef.current = null;
     setTranscriptCueTime(typeof startTime === "number" ? startTime : undefined);
+    if (typeof startTime === "number") {
+      audioPlayerRef.current?.seekTo(startTime);
+    }
   }, []);
   const selectedMeetingRelationshipMatches = useMemo(() => {
     if (!selectedRecording || !relationshipMemory) {
@@ -4062,8 +4068,8 @@ export function RecordingsView() {
                     }
                   }}
                 >
-                  <Play className="mr-2 h-4 w-4" />
-                  Play audio
+                  <ExternalLink className="mr-2 h-4 w-4" />
+                  Open audio file
                 </Button>
                 <DropdownMenu>
                   <DropdownMenuTrigger asChild>
@@ -5679,9 +5685,24 @@ export function RecordingsView() {
                     </span>
                   </div>
                   <p className="mb-3 max-w-prose text-sm text-muted-foreground">
-                    Click a line to mark your place; the text stays selectable. Double-click it, or
-                    use Edit, to correct it. Arrow keys move line by line.
+                    Click a line to mark your place; with audio loaded, playback jumps there too.
+                    The text stays selectable. Double-click it, or use Edit, to correct it. Arrow
+                    keys move line by line; Space plays or pauses; ← and → skip five seconds.
                   </p>
+                  {selectedRecording?.audioPath ? (
+                    <AudioPlayer
+                      key={selectedRecording.id}
+                      ref={audioPlayerRef}
+                      recordingId={selectedRecording.id}
+                      waveform={waveformData}
+                      durationHint={selectedRecording.duration}
+                      onTimeUpdate={setTranscriptCueTime}
+                      onError={(message) =>
+                        setAudioPlaybackIssue({ recordingId: selectedRecording.id, message })
+                      }
+                      className="mb-4 shrink-0"
+                    />
+                  ) : null}
                   <TranscriptSearch
                     query={searchQuery}
                     onQueryChange={(query) => {
@@ -5702,7 +5723,12 @@ export function RecordingsView() {
                       speakerNames={speakerNames}
                       provenance={selectedTranscriptProvenance}
                       currentTime={transcriptCueTime}
-                      onSegmentClick={(segment) => setTranscriptCueTime(segment.startTime)}
+                      onSegmentClick={(segment) => {
+                        setTranscriptCueTime(segment.startTime);
+                        audioPlayerRef.current?.seekTo(segment.startTime);
+                      }}
+                      onTogglePlayback={() => audioPlayerRef.current?.togglePlayback()}
+                      onSeekBy={(delta) => audioPlayerRef.current?.seekBy(delta)}
                       highlightQuery={searchQuery}
                       activeMatchIndex={activeTranscriptMatchIndex}
                       onMatchesChange={handleTranscriptMatchesChange}

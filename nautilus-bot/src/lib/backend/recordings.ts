@@ -14,6 +14,8 @@ export {
   getWaveformData,
   listAudioInputDevices,
   openRecordingAudio,
+  prepareRecordingPlayback,
+  releaseRecordingPlayback,
   renameRecording,
   retranscribeRecording,
   retryMeetingAnalysis,
