@@ -284,6 +284,7 @@ impl AsrProvider for DistilWhisperProvider {
             actual_engine: Some("provider_default".to_string()),
             optimization_applied: false,
             fallback_reason: None,
+            vocabulary_hint_terms_applied: 0,
         })
     }
 

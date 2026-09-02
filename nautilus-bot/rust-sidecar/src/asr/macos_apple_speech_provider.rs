@@ -68,6 +68,7 @@ impl AsrProvider for MacosAppleSpeechProvider {
             actual_engine: Some(PlatformEngine::MacosAppleSpeech.id().to_string()),
             optimization_applied: false,
             fallback_reason: None,
+            vocabulary_hint_terms_applied: 0,
         })
     }
 
@@ -91,6 +92,7 @@ impl AsrProvider for MacosAppleSpeechProvider {
             actual_engine: Some(PlatformEngine::MacosAppleSpeech.id().to_string()),
             optimization_applied: false,
             fallback_reason: None,
+            vocabulary_hint_terms_applied: 0,
         })
     }
 

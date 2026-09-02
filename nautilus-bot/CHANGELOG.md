@@ -46,6 +46,26 @@ evidence is stale and must be recaptured before this becomes a candidate.
   chunks, and a decode that would come back truncated is refused.
 
 ### Changed
+- The personal dictionary now reaches the recognizer, not only the text
+  afterwards. Each dictation builds a vocabulary hint from the dictionary
+  entries and plain-word snippet triggers that apply to the app in front
+  (same app/category scoping as the replacement pass; newest first; deduped;
+  capped at 60 terms / 600 characters; nothing sent when nothing applies) and
+  hands it to the provider with the audio: whisper.cpp as the initial prompt,
+  OpenAI and Groq as the `prompt` field (both as one framed sentence,
+  `Vocabulary: term, term.` — a bare comma list measurably hurt `base.en` on
+  the repo fixtures), ElevenLabs Scribe as `keyterms`.
+  Snippet expansions and misheard spoken forms are never sent; the prompt
+  is capped at an estimated 200 tokens under whisper's window, withheld on
+  near-silent or sub-half-second audio, and an output that only echoes the
+  hint on quiet or sub-second audio is decoded again without the prompt
+  rather than typed as-is. Cohere's
+  OpenAI-compatible endpoint documents `prompt` as unsupported, and Parakeet,
+  Moonshine, Candle, Qwen3 and Apple Speech have no equivalent, so those
+  routes are unchanged. Note for ElevenLabs users: ElevenLabs bills a 20%
+  surcharge on any request that carries keyterms, so a non-empty dictionary
+  now costs 20% more per Scribe dictation. `benchmark-latency` gained
+  `--vocabulary` so the effect can be measured on the fixtures.
 - **Parakeet TDT 0.6B v3 is now the default and recommended dictation
   model** (640 MB), because this repo's own benchmark shows whisper.cpp
   `base.en` mis-transcribing words it hasn't seen before — including
@@ -168,6 +188,19 @@ evidence is stale and must be recaptured before this becomes a candidate.
   download existed to fix a problem no route has.
 
 ### Security
+- Dictation now refuses to deliver into password boxes and other secure
+  inputs. Before the direct Accessibility write, before the clipboard +
+  Cmd+V fallback, and before the Cmd+C used to read a selection, the sidecar
+  checks the focused control (`AXSecureTextField` role/subrole), letting
+  macOS's system-wide secure-event-input flag decide only when the control
+  cannot be inspected; when the check says "secure", nothing is inserted,
+  nothing is staged on the clipboard (clipboard-only mode included), the
+  words stay in dictation history, and the popup reports the distinct
+  `secure_field` outcome in plain language with the Copy action still
+  available. The paste fallback re-probes immediately before it touches the
+  clipboard, so focus moving between the first check and the paste cannot
+  slip a password box in. Previously this was left to whatever the target
+  app did with a synthetic paste.
 - `shell.openExternal` and in-app link navigation now check a fixed host
   allowlist before opening anything in the user's browser; a link to any
   other host is refused and logged, not opened.

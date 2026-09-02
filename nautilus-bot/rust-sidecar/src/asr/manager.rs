@@ -3,7 +3,7 @@ use super::{
         macos_speech::AppleSpeechReadiness, EngineDiagnostics, EngineProbe, PlatformEngine,
     },
     AsrProvider, AsrProviderFactory, AsrProviderType, DownloadStatus, ModelInfo,
-    TranscriptionResult,
+    TranscriptionOptions, TranscriptionResult,
 };
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
@@ -551,6 +551,7 @@ impl AsrManager {
         // When `Some`, bypasses the global mlx_accelerated_providers set.
         // Use this for slot-aware routing (dictation vs meeting).
         mlx_override: Option<bool>,
+        options: &TranscriptionOptions,
     ) -> Result<TranscriptionResult> {
         let requested_provider = provider_type;
         let resolved_model = match selected_model {
@@ -682,6 +683,7 @@ impl AsrManager {
                 PlatformEngine::ProviderDefault,
                 effective_selection.mlx_accelerated,
                 None,
+                options,
             )
             .await
         {
@@ -743,6 +745,7 @@ impl AsrManager {
             actual_engine: Some(engine.id().to_string()),
             optimization_applied: true,
             fallback_reason: None,
+            vocabulary_hint_terms_applied: 0,
         })
     }
 
@@ -758,12 +761,13 @@ impl AsrManager {
         actual_engine: PlatformEngine,
         optimization_applied: bool,
         fallback_reason: Option<String>,
+        options: &TranscriptionOptions,
     ) -> Result<TranscriptionResult> {
         let provider = Self::provider_with_model(actual_provider, Some(model_id));
         let request = async {
             match (file_path, audio_data) {
                 (Some(path), None) => provider.transcribe(path).await,
-                (None, Some(bytes)) => provider.transcribe_bytes(bytes).await,
+                (None, Some(bytes)) => provider.transcribe_bytes_with_options(bytes, options).await,
                 _ => Err(anyhow::anyhow!("Invalid transcription input")),
             }
         };
@@ -918,15 +922,29 @@ impl AsrManager {
     /// Transcribe using the default provider
     pub async fn transcribe(&self, audio_path: &Path) -> Result<TranscriptionResult> {
         let provider_type = self.get_default_provider().await;
-        self.transcribe_inner(provider_type, Some(audio_path), None, None, None)
-            .await
+        self.transcribe_inner(
+            provider_type,
+            Some(audio_path),
+            None,
+            None,
+            None,
+            &TranscriptionOptions::default(),
+        )
+        .await
     }
 
     /// Transcribe bytes using the default provider
     pub async fn transcribe_bytes(&self, audio_data: &[u8]) -> Result<TranscriptionResult> {
         let provider_type = self.get_default_provider().await;
-        self.transcribe_inner(provider_type, None, Some(audio_data), None, None)
-            .await
+        self.transcribe_inner(
+            provider_type,
+            None,
+            Some(audio_data),
+            None,
+            None,
+            &TranscriptionOptions::default(),
+        )
+        .await
     }
 
     /// Transcribe bytes with a specific provider (uses the global MLX accelerated set).
@@ -936,8 +954,15 @@ impl AsrManager {
         audio_data: &[u8],
         selected_model: Option<&str>,
     ) -> Result<TranscriptionResult> {
-        self.transcribe_inner(provider_type, None, Some(audio_data), selected_model, None)
-            .await
+        self.transcribe_inner(
+            provider_type,
+            None,
+            Some(audio_data),
+            selected_model,
+            None,
+            &TranscriptionOptions::default(),
+        )
+        .await
     }
 
     /// Transcribe bytes for the dictation route slot (uses per-slot dictation MLX flag).
@@ -947,6 +972,26 @@ impl AsrManager {
         audio_data: &[u8],
         selected_model: Option<&str>,
     ) -> Result<TranscriptionResult> {
+        self.transcribe_bytes_for_dictation_with_options(
+            provider_type,
+            audio_data,
+            selected_model,
+            &TranscriptionOptions::default(),
+        )
+        .await
+    }
+
+    /// `transcribe_bytes_for_dictation` with per-request options — the final
+    /// dictation decode passes the personal-dictionary vocabulary hint here.
+    /// Options ride along through the engine/provider fallback chain, so a
+    /// fallback provider that can use them still gets them.
+    pub async fn transcribe_bytes_for_dictation_with_options(
+        &self,
+        provider_type: AsrProviderType,
+        audio_data: &[u8],
+        selected_model: Option<&str>,
+        options: &TranscriptionOptions,
+    ) -> Result<TranscriptionResult> {
         let mlx_enabled = *self.dictation_mlx_enabled.read().await;
         self.transcribe_inner(
             provider_type,
@@ -954,6 +999,7 @@ impl AsrManager {
             Some(audio_data),
             selected_model,
             Some(mlx_enabled),
+            options,
         )
         .await
     }
@@ -977,6 +1023,7 @@ impl AsrManager {
             Some(audio_data),
             selected_model,
             Some(mlx_enabled),
+            &TranscriptionOptions::default(),
         )
         .await
     }
