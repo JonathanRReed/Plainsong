@@ -168,7 +168,7 @@ const ALLOWED_RENDERER_COMMANDS = new Set<string>([
   "get_loopback_device_name",
   "get_system_audio_capability",
   "get_meeting_chat_messages",
-  "get_meeting_consent_automation_status",
+  "get_meeting_consent_notice_status",
   "get_meeting_transcript_details",
   "get_ollama_status",
   "get_permission_diagnostics",

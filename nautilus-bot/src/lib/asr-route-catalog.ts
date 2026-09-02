@@ -67,6 +67,9 @@ export interface AsrRouteCatalogEntry {
 // words it hasn't seen before (including "Plainsong" itself). Platform-native
 // engines and Moonshine's lowest-friction local route still rank first where
 // available; base.en remains offered as the smaller download further down.
+// Qwen3-ASR sits with the other experimental local route: it is offered (it
+// is the only local route to Chinese, Japanese and Korean) but never
+// recommended, and `isExperimentalRoute` sorts it into the last bucket.
 const DICTATION_PROVIDER_ORDER: AsrProviderType[] = [
   "moonshine",
   "macos_apple_speech",
@@ -75,6 +78,7 @@ const DICTATION_PROVIDER_ORDER: AsrProviderType[] = [
   "whisper",
   "distil_whisper",
   "whisper_candle",
+  "qwen3_asr",
   "openai_cloud",
   "elevenlabs_scribe",
   "groq",
@@ -364,6 +368,9 @@ function routeSummary(
   if (providerType === "whisper") {
     return "Flexible Whisper family for local power users who want finer model control.";
   }
+  if (providerType === "qwen3_asr") {
+    return "Experimental local route with the widest language list here, including Chinese, Japanese and Korean; slower than real time on the CPU.";
+  }
   return capabilityBadge === "Shared"
     ? "One route that stays viable for both dictation and meetings."
     : capabilityBadge === "Best for meetings"
@@ -456,12 +463,23 @@ export function getLaneRoutes(
   );
 }
 
+/**
+ * The route the app recommends for a lane, or null when only experimental
+ * routes are compatible. Sorting already pushes experimental routes to the
+ * back, but a Qwen-only (or Candle-only) inventory would still surface one
+ * as "recommended" -- and the first-run wizard saves this as the meeting
+ * route -- so experimental routes are excluded outright rather than ranked.
+ */
 export function getRecommendedLaneRoute(
   routes: AsrRouteCatalogEntry[],
   lane: AsrRouteLane,
   meetingRoutePolicy: MeetingRoutePolicy,
 ) {
-  return getLaneRoutes(routes, lane, meetingRoutePolicy)[0] ?? null;
+  return (
+    getLaneRoutes(routes, lane, meetingRoutePolicy).find(
+      (route) => !route.experimental,
+    ) ?? null
+  );
 }
 
 export function buildAsrRouteCatalog(

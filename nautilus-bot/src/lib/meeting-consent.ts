@@ -23,16 +23,8 @@ export function describeMeetingConsent(
   const mode = state?.consentNoticeMode ?? null;
   const message = state?.consentNoticeMessage?.trim() ? state.consentNoticeMessage : null;
 
-  if (mode === "sent") {
-    return {
-      label: "Notice sent",
-      shareLabel: "Notice sent",
-      message,
-      tracked: true,
-      needsManualNotice: false,
-    };
-  }
-
+  // Plainsong never posts the notice itself, so a recorded mode always means
+  // the user was asked to send it by hand. There is no "sent" state to show.
   if (mode) {
     return {
       label: "Manual reminder required",

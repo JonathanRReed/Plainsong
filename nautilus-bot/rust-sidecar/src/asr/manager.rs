@@ -476,11 +476,14 @@ impl AsrManager {
 
     /// Whether the provider has active transcription inference in this build.
     ///
-    /// Qwen3-ASR's autoregressive decoder loop with KV cache threading is
-    /// implemented but not yet validated with real audio. It is gated out of
-    /// active transcription until end-to-end testing confirms correct output.
-    pub fn is_provider_transcription_enabled(provider_type: AsrProviderType) -> bool {
-        !matches!(provider_type, AsrProviderType::Qwen3Asr)
+    /// This is the seam a provider sits behind while its runtime is still
+    /// unproven. Nothing is behind it today: Qwen3-ASR, the last occupant,
+    /// left on 2026-09-01 once its real-audio eval passed (see
+    /// `qwen3_asr_real_audio_eval` in asr/qwen3_asr.rs). The flag still
+    /// reaches the UI as `inferenceEnabled`, so a future provider can ship
+    /// downloadable-but-not-selectable without a schema change.
+    pub fn is_provider_transcription_enabled(_provider_type: AsrProviderType) -> bool {
+        true
     }
 
     /// Get the default provider
@@ -1725,7 +1728,17 @@ fn runtime_diagnostics_for_provider(
                 && is_valid_onnx_artifact(&model_dir.join("decoder_step.int4.onnx"))
                 && is_valid_json_artifact(&model_dir.join("config.json"), 64)
                 && is_valid_json_artifact(&model_dir.join("tokenizer.json"), 1024);
-            let missing_files = missing_or_invalid_qwen3_asr_files(model_dir.as_path());
+            let mut missing_files = missing_or_invalid_qwen3_asr_files(model_dir.as_path());
+            // Bytes that look right are not enough: readiness follows the
+            // integrity receipts, the same rule `Qwen3AsrProvider::is_available`
+            // applies, so the diagnostics never say Ready for a swapped file.
+            let trusted = super::qwen3_asr::artifacts_trusted(model_dir.as_path());
+            if model_ready && !trusted {
+                missing_files.push(
+                    "integrity receipts for the pinned Qwen3-ASR files (not verified)".to_string(),
+                );
+            }
+            let model_ready = model_ready && trusted;
             runtime_native_model(
                 provider_available,
                 model_dir,
@@ -1733,7 +1746,7 @@ fn runtime_diagnostics_for_provider(
                 &missing_files,
                 MissingModelCopy {
                     message:
-                        "Qwen3-ASR ONNX model not downloaded. Download encoder + decoder + embed_tokens assets first.",
+                        "Qwen3-ASR model files are missing or have not passed Plainsong integrity verification.",
                     setup_action: "Re-download Qwen3-ASR ONNX assets in Settings -> ASR Models.",
                 },
                 "Qwen3-ASR native ONNX inference ready.",
@@ -2041,6 +2054,19 @@ mod tests {
     use crate::asr::AsrProviderFactory;
     use crate::settings::PlatformOptimizationSettings;
     use std::path::PathBuf;
+
+    #[test]
+    fn no_provider_is_gated_out_of_transcription_in_this_build() {
+        // Qwen3-ASR was the last provider behind this gate; it was lifted
+        // after the 2026-09-01 real-audio eval. If a provider needs to go
+        // back behind it, this test is the place to say which and why.
+        for provider in AsrProviderType::all() {
+            assert!(
+                AsrManager::is_provider_transcription_enabled(provider),
+                "{provider:?} is gated out of transcription"
+            );
+        }
+    }
 
     fn temp_models_root() -> PathBuf {
         let root = std::env::temp_dir().join(format!(

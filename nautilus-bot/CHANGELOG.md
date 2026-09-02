@@ -31,6 +31,19 @@ evidence is stale and must be recaptured before this becomes a candidate.
 - An explicit, off-by-default "Also copy every dictation to the clipboard"
   toggle in Settings, with the plain-language caveat that turning it on
   replaces clipboard contents on every dictation and does not restore them.
+- Qwen3-ASR 0.6B (int4 ONNX, ~1.9 GiB) is now selectable as an
+  experimental local route for dictation and meetings, the only local
+  route here to Chinese, Japanese and Korean (30 languages listed
+  upstream). It had shipped downloadable but gated off because it was
+  never run on real audio; the first run found the mel layout transposed
+  and the chat-template prompt missing, both fixed. Validated on English
+  real audio (3.7% WER on the 44 s fixture against a Parakeet/whisper
+  cross-checked reference). It is not promoted and not the default: the
+  int4 decoders run on the CPU at anywhere from a quarter of real time to
+  slower than real time depending on load (11-59 s for 44 s of speech on
+  an M4 Pro across quiet and shared-CPU runs; provisional), and the route's
+  own copy says so. Audio longer than 60 s is decoded in pause-aligned
+  chunks, and a decode that would come back truncated is refused.
 
 ### Changed
 - **Parakeet TDT 0.6B v3 is now the default and recommended dictation
@@ -89,6 +102,17 @@ evidence is stale and must be recaptured before this becomes a candidate.
   websocket-only and could never work through this app's upload path).
   Context-window budgeting now recognizes GPT-5.x and Gemini-3.x models'
   real ~1M-token windows instead of clamping them to a stale estimate.
+- The stored meeting-lane default now names the route the meeting lane
+  actually runs: `parakeet` / `parakeet-tdt-0.6b-v3`. It was stored as
+  whisper.cpp `base.en`, but whisper.cpp has never been a meeting-supported
+  provider, so that slot was never read and every fresh install already
+  transcribed meetings with Parakeet. A settings file still carrying the old
+  `whisper`/`base.en` meeting pair is rewritten to Parakeet on load; shared
+  dictation/meeting selection is untouched. No transcription behavior
+  changes; the settings file stops claiming a route that never ran.
+- The unused `toggleDictationAlternates` shortcut key is gone from the
+  settings schema (it was only ever written as an empty list). Old settings
+  files that still carry it load cleanly and are rewritten without it.
 
 ### Fixed
 - A mic failure mid-meeting in a "me and them" (microphone plus system
@@ -127,6 +151,21 @@ evidence is stale and must be recaptured before this becomes a candidate.
   Microphone settings" action, distinct from a system-audio or disk-full
   failure). A capture source that hard-fails is now described as failed,
   not as having "gone silent," which previously read as a muting problem.
+
+### Removed
+- The never-reachable "post the consent notice into the meeting chat for
+  you" automation for Zoom and Google Meet. Its keystroke senders sat behind
+  a gate that was hard-wired to off because nothing could prove the meeting
+  app's chat field had focus, so no build ever sent a notice. The start
+  sheet, the recording popup, and the beta docs now say plainly that
+  Plainsong does not post the notice; the notice text and its Copy button
+  stay. Automation can only come back with a positive focus-verification
+  design and on-device QA.
+- The ML punctuation/casing model (`punct_cap_seg_en`, ~210 MB) and the
+  `text-recasepunct` build feature. Its restore function had no caller, and
+  every shipped speech route already emits punctuated, cased text (see
+  docs/model-inventory-upgrades.md item 9 for the per-route table), so the
+  download existed to fix a problem no route has.
 
 ### Security
 - `shell.openExternal` and in-app link navigation now check a fixed host

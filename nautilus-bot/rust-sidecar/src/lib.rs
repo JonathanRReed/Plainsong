@@ -775,27 +775,24 @@ struct SetupVerificationResult {
     details: Vec<String>,
 }
 
+/// What the start sheet shows beside the consent notice: which meeting app
+/// Plainsong saw in front (if any) and the instruction to send the notice
+/// there. Plainsong never posts the notice itself, so there is no mode or
+/// "can automate" flag to report.
 #[derive(Debug, Clone, serde::Serialize)]
 #[serde(rename_all = "camelCase")]
-struct MeetingConsentAutomationStatus {
-    mode: String,
+struct MeetingConsentNoticeStatus {
     surface: Option<String>,
     app_name: Option<String>,
     app_bundle_id: Option<String>,
     browser_url: Option<String>,
-    can_automate: bool,
     message: String,
     notice_text: String,
 }
 
-#[derive(Debug, Clone, serde::Serialize)]
-#[serde(rename_all = "camelCase")]
-struct MeetingConsentNoticeResult {
-    mode: String,
-    surface: Option<String>,
-    message: String,
-    notice_text: String,
-}
+/// The only consent-notice mode a meeting can carry. The notice is shown and
+/// copyable; sending it is always the user's action.
+const MEETING_CONSENT_NOTICE_MODE_MANUAL: &str = "manual_required";
 
 #[derive(Debug, Clone, serde::Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -3187,14 +3184,6 @@ async fn ensure_asr_route_ready(
                 .to_string(),
         );
     }
-    if provider_type == asr::AsrProviderType::Qwen3Asr
-        && effective_provider == asr::AsrProviderType::Qwen3Asr
-    {
-        return Err(
-            "Qwen3-ASR is not launch-ready in this build (decoder implemented but not yet validated with real audio). Choose a stable local route such as Parakeet, Whisper, or Apple Native Speech."
-                .to_string(),
-        );
-    }
     let diagnostics = state
         .asr_manager
         .get_runtime_diagnostics(provider_type)
@@ -4803,73 +4792,58 @@ fn consent_target_is_fresh(target: &PendingDictationTarget) -> bool {
     now_ms - target.captured_at_ms <= MEETING_CONSENT_TARGET_MAX_AGE_MS
 }
 
-#[cfg(target_os = "macos")]
-fn consent_surface_can_automate(_surface: &str) -> bool {
-    // v1 keeps consent delivery manual. Zoom's chat shortcut is a toggle and
-    // browser meeting layouts change frequently, so keyboard access alone
-    // cannot prove that the notice will land in the intended chat field.
-    false
+/// The instruction shown beside the consent notice. Plainsong never posts
+/// the notice into a meeting chat; the detected surface only lets the copy
+/// say where the user should send it. Automation can return only with a
+/// design that positively verifies the meeting app's chat field has focus,
+/// plus on-device QA of that check. Neither exists yet.
+fn meeting_consent_notice_message(surface: Option<&str>) -> &'static str {
+    match surface {
+        Some("zoom") => {
+            "Zoom is in front. Plainsong does not post the notice into Zoom chat for you; copy it and send it there before you start recording."
+        }
+        Some("google_meet") => {
+            "Google Meet is in front. Plainsong does not post the notice into the Meet chat for you; copy it and send it there before you start recording."
+        }
+        _ => {
+            "Plainsong does not post the consent notice for you. Copy it and send it in the meeting before you start recording."
+        }
+    }
 }
 
 #[cfg(target_os = "macos")]
-fn meeting_consent_automation_status(state: &AppState) -> MeetingConsentAutomationStatus {
+fn meeting_consent_notice_status(state: &AppState) -> MeetingConsentNoticeStatus {
     let notice_text = meeting_consent_notice_text().to_string();
-    let target = resolve_recent_external_target_context(state);
-
-    let Some(target) = target else {
-        return MeetingConsentAutomationStatus {
-            mode: "manual_required".to_string(),
+    let Some(target) = resolve_recent_external_target_context(state) else {
+        return MeetingConsentNoticeStatus {
             surface: None,
             app_name: None,
             app_bundle_id: None,
             browser_url: None,
-            can_automate: false,
-            message: "Manual consent notice. Open the meeting chat, copy the notice from Plainsong, and send it before recording.".to_string(),
+            message: meeting_consent_notice_message(None).to_string(),
             notice_text,
         };
     };
 
     let surface = match_meeting_consent_surface(&target).map(str::to_string);
-    let can_automate = surface
-        .as_deref()
-        .map(consent_surface_can_automate)
-        .unwrap_or(false);
-    let message = match surface.as_deref() {
-        Some("zoom") => {
-            "Manual consent notice for Zoom. Plainsong will not toggle chat or press Send because it cannot prove which field is focused. Copy and send the notice yourself.".to_string()
-        }
-        Some("google_meet") => {
-            "Manual consent notice for Google Meet. Plainsong will not open chat or press Send because it cannot prove which field is focused. Copy and send the notice yourself.".to_string()
-        }
-        _ => {
-            "Manual consent notice. Copy the notice from Plainsong and send it in the meeting before recording.".to_string()
-        }
-    };
-
-    MeetingConsentAutomationStatus {
-        mode: "manual_required".to_string(),
+    MeetingConsentNoticeStatus {
+        message: meeting_consent_notice_message(surface.as_deref()).to_string(),
         surface,
         app_name: target.app_name,
         app_bundle_id: target.app_bundle_id,
         browser_url: target.browser_url,
-        can_automate,
-        message,
         notice_text,
     }
 }
 
 #[cfg(not(target_os = "macos"))]
-fn meeting_consent_automation_status(_state: &AppState) -> MeetingConsentAutomationStatus {
-    MeetingConsentAutomationStatus {
-        mode: "manual_required".to_string(),
+fn meeting_consent_notice_status(_state: &AppState) -> MeetingConsentNoticeStatus {
+    MeetingConsentNoticeStatus {
         surface: None,
         app_name: None,
         app_bundle_id: None,
         browser_url: None,
-        can_automate: false,
-        message:
-            "Manual reminder only. Consent chat automation is currently implemented for macOS meeting apps."
-                .to_string(),
+        message: meeting_consent_notice_message(None).to_string(),
         notice_text: meeting_consent_notice_text().to_string(),
     }
 }
@@ -8572,11 +8546,19 @@ mod tests {
         root
     }
 
-    #[cfg(target_os = "macos")]
     #[test]
-    fn meeting_consent_delivery_stays_manual_until_target_field_is_verified() {
-        assert!(!consent_surface_can_automate("zoom"));
-        assert!(!consent_surface_can_automate("google_meet"));
+    fn meeting_consent_notice_copy_never_claims_plainsong_will_post_it() {
+        for surface in [None, Some("zoom"), Some("google_meet"), Some("teams")] {
+            let message = meeting_consent_notice_message(surface);
+            assert!(message.contains("does not post"), "{surface:?}: {message}");
+            assert!(
+                !message.to_ascii_lowercase().contains("automatic"),
+                "{surface:?}: {message}"
+            );
+        }
+        assert!(meeting_consent_notice_message(Some("zoom")).contains("Zoom"));
+        assert!(meeting_consent_notice_message(Some("google_meet")).contains("Google Meet"));
+        assert_eq!(MEETING_CONSENT_NOTICE_MODE_MANUAL, "manual_required");
     }
 
     #[test]
@@ -12683,6 +12665,30 @@ mod tests {
             resolve_transcription_provider_and_model(&transcription, TranscriptionScope::Meeting);
         assert_eq!(meeting_provider, asr::AsrProviderType::Parakeet);
         assert_eq!(meeting_model_id, "parakeet-tdt-0.6b-v3");
+    }
+
+    #[test]
+    fn fresh_settings_resolve_the_meeting_lane_to_parakeet_v3() {
+        let transcription = settings::Settings::default().transcription;
+        assert_eq!(transcription.meeting_provider, "parakeet");
+        assert!(meeting_provider_is_supported(
+            asr_provider_from_settings_value(&transcription.meeting_provider)
+                .expect("stored meeting provider must parse")
+        ));
+
+        let (provider, model_id) =
+            resolve_transcription_provider_and_model(&transcription, TranscriptionScope::Meeting);
+        assert_eq!(provider, asr::AsrProviderType::Parakeet);
+        assert_eq!(model_id, "parakeet-tdt-0.6b-v3");
+
+        // The stored slot now names the route the resolver picks, so turning
+        // shared selection off changes nothing for meetings.
+        let mut dedicated = transcription.clone();
+        dedicated.use_shared_asr_selection = false;
+        let (provider, model_id) =
+            resolve_transcription_provider_and_model(&dedicated, TranscriptionScope::Meeting);
+        assert_eq!(provider, asr::AsrProviderType::Parakeet);
+        assert_eq!(model_id, "parakeet-tdt-0.6b-v3");
     }
 
     fn provider_info_for_test(
@@ -18870,162 +18876,6 @@ fn send_native_copy_key(
     Err("Copy command is not supported on this platform.".to_string())
 }
 
-#[cfg(target_os = "macos")]
-fn send_meeting_consent_notice_via_zoom(
-    target: &PendingDictationTarget,
-    notice_text: &str,
-) -> Result<(), String> {
-    reactivate_target_application(target.app_name.as_deref(), target.app_bundle_id.as_deref())?;
-    std::thread::sleep(std::time::Duration::from_millis(180));
-    dispatch_macos_keystroke(
-        4,
-        MacosKeyModifiers {
-            command: true,
-            shift: true,
-            ..MacosKeyModifiers::default()
-        },
-    )
-    .map_err(|error| format!("Failed to open Zoom chat: {}", error))?;
-    std::thread::sleep(std::time::Duration::from_millis(220));
-    dispatch_macos_keystroke(
-        14,
-        MacosKeyModifiers {
-            command: true,
-            shift: true,
-            ..MacosKeyModifiers::default()
-        },
-    )
-    .map_err(|error| format!("Failed to focus the Zoom chat message box: {}", error))?;
-    std::thread::sleep(std::time::Duration::from_millis(140));
-    insert_text_via_accessibility(
-        notice_text,
-        target.app_name.as_deref(),
-        target.app_bundle_id.as_deref(),
-    )
-    .or_else(|_| {
-        dispatch_paste_from_clipboard(
-            notice_text,
-            false,
-            target.app_name.as_deref(),
-            target.app_bundle_id.as_deref(),
-        )
-        .map(|_| ())
-    })?;
-    std::thread::sleep(std::time::Duration::from_millis(120));
-    dispatch_macos_keystroke(36, MacosKeyModifiers::default())
-        .map_err(|error| format!("Failed to send the Zoom chat message: {}", error))?;
-    Ok(())
-}
-
-#[cfg(target_os = "macos")]
-fn send_meeting_consent_notice_via_google_meet(
-    target: &PendingDictationTarget,
-    notice_text: &str,
-) -> Result<(), String> {
-    reactivate_target_application(target.app_name.as_deref(), target.app_bundle_id.as_deref())?;
-    std::thread::sleep(std::time::Duration::from_millis(180));
-    dispatch_macos_keystroke(
-        8,
-        MacosKeyModifiers {
-            command: true,
-            control: true,
-            ..MacosKeyModifiers::default()
-        },
-    )
-    .map_err(|error| format!("Failed to open Google Meet chat: {}", error))?;
-    std::thread::sleep(std::time::Duration::from_millis(260));
-    insert_text_via_accessibility(
-        notice_text,
-        target.app_name.as_deref(),
-        target.app_bundle_id.as_deref(),
-    )?;
-    std::thread::sleep(std::time::Duration::from_millis(120));
-    dispatch_macos_keystroke(36, MacosKeyModifiers::default())
-        .map_err(|error| format!("Failed to send the Google Meet chat message: {}", error))?;
-    Ok(())
-}
-
-#[cfg(target_os = "macos")]
-fn send_meeting_consent_notice_internal(state: &AppState) -> MeetingConsentNoticeResult {
-    let status = meeting_consent_automation_status(state);
-    let notice_text = status.notice_text.clone();
-    let manual_return = |surface: Option<String>, message: String| -> MeetingConsentNoticeResult {
-        MeetingConsentNoticeResult {
-            mode: "manual_required".to_string(),
-            surface,
-            message,
-            notice_text: notice_text.clone(),
-        }
-    };
-
-    let Some(target) = resolve_recent_external_target_context(state) else {
-        return manual_return(
-            None,
-            "Manual reminder only. Copy the consent notice from the start sheet or recorder before you continue.".to_string(),
-        );
-    };
-
-    let Some(surface) = match_meeting_consent_surface(&target).map(str::to_string) else {
-        return manual_return(
-            None,
-            "Manual reminder only. This meeting surface is not one Plainsong can post into automatically.".to_string(),
-        );
-    };
-
-    if !consent_surface_can_automate(&surface) {
-        return manual_return(
-            Some(surface),
-            "Manual reminder only. Copy the consent notice from Plainsong before you continue."
-                .to_string(),
-        );
-    }
-
-    let send_result = match surface.as_str() {
-        "zoom" => send_meeting_consent_notice_via_zoom(&target, &notice_text),
-        "google_meet" => send_meeting_consent_notice_via_google_meet(&target, &notice_text),
-        _ => Err("Unsupported meeting surface.".to_string()),
-    };
-
-    match send_result {
-        Ok(()) => MeetingConsentNoticeResult {
-            mode: "sent".to_string(),
-            surface: Some(surface.clone()),
-            message: if surface == "zoom" {
-                "Consent notice posted in Zoom chat.".to_string()
-            } else {
-                "Consent notice posted in Google Meet chat.".to_string()
-            },
-            notice_text,
-        },
-        Err(error) => {
-            tracing::warn!(
-                "Consent notice automation failed on surface '{}': {}",
-                surface,
-                error
-            );
-            manual_return(
-                Some(surface),
-                format!(
-                    "Automatic consent posting did not complete. {} Copy the notice from Plainsong and send it manually.",
-                    error
-                ),
-            )
-        }
-    }
-}
-
-#[cfg(not(target_os = "macos"))]
-fn send_meeting_consent_notice_internal(_state: &AppState) -> MeetingConsentNoticeResult {
-    MeetingConsentNoticeResult {
-        mode: "manual_required".to_string(),
-        surface: None,
-        message:
-            "Consent reminder stayed manual. Copy the notice from Plainsong before you continue."
-                .to_string(),
-        notice_text: meeting_consent_notice_text().to_string(),
-    }
-}
-
 #[cfg(not(target_os = "macos"))]
 fn schedule_clipboard_restore(previous: String, inserted_text: String) {
     std::thread::spawn(move || {
@@ -20177,7 +20027,6 @@ pub async fn build_app_state() -> Result<AppState, String> {
         .join("models");
     let mut model_integrity_artifacts = download::managed_model_integrity_artifacts(&models_root);
     model_integrity_artifacts.extend(asr::model_integrity_artifacts(&models_root));
-    model_integrity_artifacts.extend(text::recasepunct::model_integrity_artifacts(&models_root));
     // This runs inline (fail-closed trust semantics are correct here), and
     // an artifact without a cached-and-trusted receipt yet is re-hashed in
     // full -- for many multi-gigabyte models on first launch after an
@@ -20504,7 +20353,6 @@ async fn save_settings_for_sidecar(
         &settings.transcription.meeting_retention_delete_mode,
     )
     .to_string();
-    settings.shortcuts.toggle_dictation_alternates.clear();
     validate_shortcut_settings(&settings.shortcuts)?;
     if settings
         .transcription
@@ -24455,13 +24303,15 @@ async fn start_recording_for_sidecar(
         }
 
         if options.consent_prompt_shown {
-            let result = send_meeting_consent_notice_internal(state);
+            // Plainsong shows the notice and copies it on request; it never
+            // posts it, so the recorded mode is always manual.
+            let status = meeting_consent_notice_status(state);
             let _ = db.update_recording_consent_state(
                 &recording_id,
                 true,
-                Some(result.mode.as_str()),
-                result.surface.as_deref(),
-                Some(result.message.as_str()),
+                Some(MEETING_CONSENT_NOTICE_MODE_MANUAL),
+                status.surface.as_deref(),
+                Some(status.message.as_str()),
             );
         } else {
             let _ = db.update_recording_consent_state(&recording_id, false, None, None, None);
@@ -28201,8 +28051,8 @@ pub async fn dispatch_command(
             };
             serde_json::to_value(result).map_err(|e| e.to_string())
         }
-        "get_meeting_consent_automation_status" => {
-            let result = meeting_consent_automation_status(state.as_ref());
+        "get_meeting_consent_notice_status" => {
+            let result = meeting_consent_notice_status(state.as_ref());
             serde_json::to_value(result).map_err(|e| e.to_string())
         }
         "request_dictation_permissions" => {
