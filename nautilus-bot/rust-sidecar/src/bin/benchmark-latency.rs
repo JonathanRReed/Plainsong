@@ -6,7 +6,7 @@
 //! faster than real time). It requires the chosen model to be downloaded.
 //!
 //! Usage:
-//!   benchmark-latency [--wav <path>] [--secondary-wav <path>] [--provider <name>] [--model <id>] [--runs N] [--out <path>] [--out-e2e <path>]
+//!   benchmark-latency [--wav <path>] [--secondary-wav <path>] [--provider <name>] [--model <id>] [--runs N] [--vocabulary <terms>] [--out <path>] [--out-e2e <path>]
 //!
 //! Defaults: `--wav` is the short-utterance reference fixture
 //! (`scripts/fixtures/local-quality-gate.wav`, ~5.3s), `--secondary-wav` is a
@@ -22,7 +22,9 @@
 //! as importantly, what it does not: no key-release, no IPC hop, no
 //! `DICTATION_STOP_CAPTURE_TAIL_MS` wait, no real insertion, no LLM pass.
 
-use plainsong_lib::asr::{AsrProviderFactory, AsrProviderType};
+use plainsong_lib::asr::{
+    AsrProviderFactory, AsrProviderType, TranscriptionOptions, VocabularyHint,
+};
 use plainsong_lib::dictation_pipeline::{apply_dictation_pipeline, DictationPipelineInput};
 use plainsong_lib::text::format::DictationAppCategory;
 use sha2::{Digest, Sha256};
@@ -67,6 +69,9 @@ Options:
                         distil_whisper, or macos_apple_speech [default: whisper]
   --model <ID>          Model ID for the selected provider [default: provider default]
   --runs <1..100>       Timed transcription runs after one warm-up [default: 5]
+  --vocabulary <TERMS>  Comma-separated vocabulary hint handed to the provider
+                        exactly as dictation does (whisper initial prompt,
+                        OpenAI/Groq prompt, ElevenLabs keyterms) [default: none]
   --out <PATH>          provider_transcription_only JSON report path
                         (primary fixture only)
                         [default: artifacts/qa/dictation-latency.json]
@@ -90,6 +95,7 @@ struct BenchmarkArgs {
     provider_type: AsrProviderType,
     model: String,
     runs: usize,
+    vocabulary_hint: Option<VocabularyHint>,
     report_path: PathBuf,
     report_path_e2e: PathBuf,
 }
@@ -159,6 +165,7 @@ fn parse_args(args: &[String]) -> Result<ParseOutcome, String> {
     let mut provider_name = None;
     let mut model = None;
     let mut runs = None;
+    let mut vocabulary = None;
     let mut report_path = None;
     let mut report_path_e2e = None;
     let mut index = 0;
@@ -184,6 +191,10 @@ fn parse_args(args: &[String]) -> Result<ParseOutcome, String> {
             "--runs" => {
                 let value = next_value(args, &mut index, "--runs")?;
                 set_once(&mut runs, value, "--runs")?;
+            }
+            "--vocabulary" => {
+                let value = next_value(args, &mut index, "--vocabulary")?;
+                set_once(&mut vocabulary, value, "--vocabulary")?;
             }
             "--out" => {
                 let value = next_value(args, &mut index, "--out")?;
@@ -241,11 +252,24 @@ fn parse_args(args: &[String]) -> Result<ParseOutcome, String> {
         provider_type,
         model,
         runs,
+        vocabulary_hint: parse_vocabulary_terms(vocabulary.as_deref()),
         report_path: PathBuf::from(report_path.unwrap_or_else(|| DEFAULT_REPORT_PATH.to_string())),
         report_path_e2e: PathBuf::from(
             report_path_e2e.unwrap_or_else(|| DEFAULT_REPORT_PATH_E2E.to_string()),
         ),
     }))
+}
+
+/// `--vocabulary "Plainsong, Kubernetes"` -> the same hint shape dictation
+/// builds; blank terms are ignored and an empty list is no hint at all.
+fn parse_vocabulary_terms(raw: Option<&str>) -> Option<VocabularyHint> {
+    let terms = raw?
+        .split(',')
+        .map(str::trim)
+        .filter(|term| !term.is_empty())
+        .map(str::to_string)
+        .collect::<Vec<_>>();
+    VocabularyHint::new(terms)
 }
 
 fn wav_duration_seconds(path: &Path) -> Result<f64, String> {
@@ -289,6 +313,7 @@ struct BenchmarkReportInput<'a> {
     warmup_inference_ms: u64,
     wall_ms: &'a [u64],
     transcript: &'a str,
+    vocabulary_hint_terms: usize,
 }
 
 /// Shared `hardware` block for both receipts (`provider_transcription_only`
@@ -390,6 +415,7 @@ fn build_report(input: BenchmarkReportInput<'_>) -> serde_json::Value {
         "transcriptWordCount": transcript_word_count,
         "transcriptSample": transcript_sample,
         "transcriptTailSample": transcript_tail_sample,
+        "vocabularyHintTerms": input.vocabulary_hint_terms,
     })
 }
 
@@ -487,6 +513,7 @@ async fn run_fixture_benchmark(
     mock_insertion: &MockInsertionSink,
     wav_path: &Path,
     runs: usize,
+    options: &TranscriptionOptions,
 ) -> Result<FixtureBenchmarkResult, String> {
     let audio_bytes = std::fs::read(wav_path)
         .map_err(|e| format!("Failed to read WAV '{}': {e}", wav_path.display()))?;
@@ -503,7 +530,10 @@ async fn run_fixture_benchmark(
 
     for run_index in 1..=runs {
         let start = Instant::now();
-        let (text, asr_ms) = match provider.transcribe_bytes(&audio_bytes).await {
+        let (text, asr_ms) = match provider
+            .transcribe_bytes_with_options(&audio_bytes, options)
+            .await
+        {
             Ok(result) => {
                 let asr_ms = start.elapsed().as_millis() as u64;
                 asr_wall_ms.push(asr_ms);
@@ -746,8 +776,13 @@ fn main() {
                 std::process::exit(2);
             }
         };
+        let options = TranscriptionOptions {
+            vocabulary_hint: args.vocabulary_hint.clone(),
+        };
         let warmup_started = Instant::now();
-        let warmup_result = provider.transcribe_bytes(&warmup_audio).await;
+        let warmup_result = provider
+            .transcribe_bytes_with_options(&warmup_audio, &options)
+            .await;
         let warmup_inference_ms = warmup_started.elapsed().as_millis() as u64;
         if let Err(e) = warmup_result {
             eprintln!(
@@ -765,6 +800,7 @@ fn main() {
             &mock_insertion,
             &args.wav,
             args.runs,
+            &options,
         )
         .await
         {
@@ -779,6 +815,7 @@ fn main() {
             &mock_insertion,
             &args.secondary_wav,
             args.runs,
+            &options,
         )
         .await
         {
@@ -808,6 +845,11 @@ fn main() {
             warmup_inference_ms,
             wall_ms: &primary.asr_wall_ms,
             transcript: &primary.last_transcript,
+            vocabulary_hint_terms: args
+                .vocabulary_hint
+                .as_ref()
+                .map(|hint| hint.terms().len())
+                .unwrap_or(0),
         });
         let report_json = serde_json::to_string(&report).unwrap();
         if let Some(parent) = args.report_path.parent() {
@@ -873,6 +915,18 @@ fn main() {
             percentile(secondary.samples.iter().map(StageSample::total_on_ms).collect(), 95.0),
         );
         eprintln!(
+            "vocabulary hint: {}",
+            match &args.vocabulary_hint {
+                Some(hint) => format!("{} term(s): {}", hint.terms().len(), hint.as_prompt()),
+                None => "none".to_string(),
+            }
+        );
+        eprintln!("transcript (primary, last run): {}", primary.last_transcript);
+        eprintln!(
+            "transcript (secondary, last run): {}",
+            secondary.last_transcript
+        );
+        eprintln!(
             "note: this benchmark's clock excludes the stop gesture, the Electron-to-sidecar IPC \
              hop, the {CAPTURE_TAIL_EXCLUDED_MS}ms DICTATION_STOP_CAPTURE_TAIL_MS wait, real \
              insertion, and any LLM formatting pass. See the receipt's own scope notes."
@@ -895,6 +949,31 @@ mod tests {
 
     fn strings(values: &[&str]) -> Vec<String> {
         values.iter().map(|value| (*value).to_string()).collect()
+    }
+
+    #[test]
+    fn vocabulary_flag_splits_terms_and_ignores_blanks() {
+        let args = match parse_args(&strings(&[
+            "--wav",
+            "Cargo.toml",
+            "--secondary-wav",
+            "Cargo.toml",
+            "--vocabulary",
+            "Plainsong, Kubernetes,, ",
+        ]))
+        .expect("parse benchmark args")
+        {
+            ParseOutcome::Run(args) => args,
+            ParseOutcome::Help => panic!("expected runnable benchmark args"),
+        };
+        let hint = args.vocabulary_hint.expect("a hint was given");
+        assert_eq!(hint.terms(), ["Plainsong", "Kubernetes"]);
+        assert_eq!(hint.as_prompt(), "Vocabulary: Plainsong, Kubernetes.");
+
+        // Blank or missing -> no hint, matching dictation's "never attach an
+        // empty prompt" rule.
+        assert_eq!(parse_vocabulary_terms(Some(" , ")), None);
+        assert_eq!(parse_vocabulary_terms(None), None);
     }
 
     #[test]
@@ -1032,6 +1111,7 @@ mod tests {
             warmup_inference_ms: 100,
             wall_ms: &[250, 300, 400],
             transcript: "spoken fixture",
+            vocabulary_hint_terms: 0,
         });
 
         assert_eq!(report["provider"], "whisper");

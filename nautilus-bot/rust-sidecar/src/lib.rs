@@ -22460,6 +22460,94 @@ async fn stop_dictation_for_sidecar(
         }
     };
 
+    // Dictionary entries always apply: `dictation_auto_learn_corrections`
+    // only gates whether new entries are learned from user corrections
+    // (see the auto-learn handlers), not whether existing entries — manual,
+    // CSV-imported, or previously learned — are used. Loaded before
+    // transcription (not after, as they once were) because the recognizer
+    // gets them as a vocabulary hint as well as the text pass afterwards.
+    let dictionary_entries = {
+        let db = state.db.lock().await;
+        match db.list_dictation_dictionary_entries() {
+            Ok(entries) => entries,
+            Err(error) => {
+                drop(db);
+                return Err(fail_dictation_stop(
+                    state,
+                    handle,
+                    &failure_context,
+                    None,
+                    format!("Failed to read the dictation dictionary: {}", error),
+                )
+                .await);
+            }
+        }
+    };
+    let snippets = if settings_snapshot.transcription.dictation_snippets_enabled {
+        let db = state.db.lock().await;
+        match db.list_dictation_snippets() {
+            Ok(snippets) => snippets,
+            Err(error) => {
+                drop(db);
+                return Err(fail_dictation_stop(
+                    state,
+                    handle,
+                    &failure_context,
+                    None,
+                    format!("Failed to read dictation snippets: {}", error),
+                )
+                .await);
+            }
+        }
+    } else {
+        Vec::new()
+    };
+
+    let formatting_hint = resolve_dictation_formatting_hint(
+        app_target.as_deref(),
+        dictation_options.activation_matcher.as_deref(),
+        dictation_options.context_app_name.as_deref(),
+    );
+    // Resolve the destination-app category once — settings overrides,
+    // bundle id, AND the browser-domain formatting hint — so the recognizer
+    // vocabulary hint, dictionary/snippet category scoping and local smart
+    // formatting all agree on the same category (matching what the LLM
+    // prompt path resolves).
+    let destination_category = settings::resolve_dictation_app_category_with_overrides_and_hint(
+        &settings_snapshot.transcription,
+        app_target.as_deref(),
+        app_bundle_id.as_deref(),
+        formatting_hint.as_deref(),
+    );
+
+    // Recognizer vocabulary bias, built from the same dictionary and snippet
+    // entries the post-transcription pass applies and scoped the same way
+    // (app, destination category, enabled). Whisper gets it as the initial
+    // prompt; OpenAI/Groq as `prompt`; ElevenLabs as `keyterms`; every other
+    // provider ignores it. `None` when nothing applies, so no provider ever
+    // sees a blank hint.
+    let transcription_options = asr::TranscriptionOptions {
+        vocabulary_hint: crate::dictation_parity::build_vocabulary_hint(
+            &crate::dictation_pipeline::vocabulary_candidates_from_entries(
+                &dictionary_entries,
+                &snippets,
+            ),
+            app_target.as_deref(),
+            destination_category,
+        ),
+    };
+    let vocabulary_hint_terms = transcription_options
+        .vocabulary_hint
+        .as_ref()
+        .map(|hint| hint.terms().len())
+        .unwrap_or(0);
+    if vocabulary_hint_terms > 0 {
+        tracing::info!(
+            "Dictation vocabulary hint carries {} term(s) for the recognizer",
+            vocabulary_hint_terms
+        );
+    }
+
     if let Ok(mut overlay) = state.dictation_overlay_state.lock() {
         overlay.phase = "transcribing".to_string();
         overlay.message = Some("Transcribing…".to_string());
@@ -22491,7 +22579,12 @@ async fn stop_dictation_for_sidecar(
 
     let transcription_result = match state
         .asr_manager
-        .transcribe_bytes_for_dictation(provider_type, &audio_bytes, actual_model_id.as_deref())
+        .transcribe_bytes_for_dictation_with_options(
+            provider_type,
+            &audio_bytes,
+            actual_model_id.as_deref(),
+            &transcription_options,
+        )
         .await
     {
         Ok(result) => result,
@@ -22542,53 +22635,7 @@ async fn stop_dictation_for_sidecar(
         })
         .map(|delivery| delivery.text.as_str());
 
-    // Dictionary entries always apply: `dictation_auto_learn_corrections`
-    // only gates whether new entries are learned from user corrections
-    // (see the auto-learn handlers), not whether existing entries — manual,
-    // CSV-imported, or previously learned — are used.
-    let dictionary_entries = {
-        let db = state.db.lock().await;
-        match db.list_dictation_dictionary_entries() {
-            Ok(entries) => entries,
-            Err(error) => {
-                drop(db);
-                return Err(fail_dictation_stop(
-                    state,
-                    handle,
-                    &failure_context,
-                    None,
-                    format!("Failed to read the dictation dictionary: {}", error),
-                )
-                .await);
-            }
-        }
-    };
-    let snippets = if settings_snapshot.transcription.dictation_snippets_enabled {
-        let db = state.db.lock().await;
-        match db.list_dictation_snippets() {
-            Ok(snippets) => snippets,
-            Err(error) => {
-                drop(db);
-                return Err(fail_dictation_stop(
-                    state,
-                    handle,
-                    &failure_context,
-                    None,
-                    format!("Failed to read dictation snippets: {}", error),
-                )
-                .await);
-            }
-        }
-    } else {
-        Vec::new()
-    };
-
     let effective_mode = resolved_dictation_mode_preset(&settings_snapshot).to_string();
-    let formatting_hint = resolve_dictation_formatting_hint(
-        app_target.as_deref(),
-        dictation_options.activation_matcher.as_deref(),
-        dictation_options.context_app_name.as_deref(),
-    );
 
     let mut final_text = raw_transcribed_text.clone();
     let mut command_applied: Option<String> = None;
@@ -22682,16 +22729,8 @@ async fn stop_dictation_for_sidecar(
     }
 
     if command_applied.is_none() {
-        // Resolve the destination-app category once — settings overrides,
-        // bundle id, AND the browser-domain formatting hint — so dictionary/
-        // snippet category scoping and local smart formatting agree on the
-        // same category (matching what the LLM prompt path resolves).
-        let destination_category = settings::resolve_dictation_app_category_with_overrides_and_hint(
-            &settings_snapshot.transcription,
-            app_target.as_deref(),
-            app_bundle_id.as_deref(),
-            formatting_hint.as_deref(),
-        );
+        // `destination_category` was resolved once, before transcription, so
+        // the recognizer hint and this pass scope entries identically.
         let pipeline_result = crate::dictation_pipeline::apply_dictation_pipeline(
             crate::dictation_pipeline::DictationPipelineInput {
                 text: raw_transcribed_text.as_str(),
@@ -23397,6 +23436,7 @@ async fn stop_dictation_for_sidecar(
             "command_applied": command_applied,
             "dictionary_applied_count": dictionary_applied_count,
             "snippet_applied_count": snippet_applied_count,
+            "vocabulary_hint_terms": vocabulary_hint_terms,
             "formatting_applied": formatting_applied,
             "recent_insert_reused": recent_insert_reused,
             "pipeline_stage_keys": pipeline_stage_keys,

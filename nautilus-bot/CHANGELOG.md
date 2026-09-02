@@ -33,6 +33,22 @@ evidence is stale and must be recaptured before this becomes a candidate.
   replaces clipboard contents on every dictation and does not restore them.
 
 ### Changed
+- The personal dictionary now reaches the recognizer, not only the text
+  afterwards. Each dictation builds a vocabulary hint from the dictionary
+  entries and plain-word snippet triggers that apply to the app in front
+  (same app/category scoping as the replacement pass; newest first; deduped;
+  capped at 60 terms / 600 characters; nothing sent when nothing applies) and
+  hands it to the provider with the audio: whisper.cpp as the initial prompt,
+  OpenAI and Groq as the `prompt` field (both as one framed sentence,
+  `Vocabulary: term, term.` — a bare comma list measurably hurt `base.en` on
+  the repo fixtures), ElevenLabs Scribe as `keyterms`.
+  Snippet expansions and misheard spoken forms are never sent. Cohere's
+  OpenAI-compatible endpoint documents `prompt` as unsupported, and Parakeet,
+  Moonshine, Candle, Qwen3 and Apple Speech have no equivalent, so those
+  routes are unchanged. Note for ElevenLabs users: ElevenLabs bills a 20%
+  surcharge on any request that carries keyterms, so a non-empty dictionary
+  now costs 20% more per Scribe dictation. `benchmark-latency` gained
+  `--vocabulary` so the effect can be measured on the fixtures.
 - **Parakeet TDT 0.6B v3 is now the default and recommended dictation
   model** (640 MB), because this repo's own benchmark shows whisper.cpp
   `base.en` mis-transcribing words it hasn't seen before — including

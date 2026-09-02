@@ -1,5 +1,6 @@
 use super::{
-    AsrProvider, AsrProviderType, DownloadStatus, ModelInfo, TranscriptSegment, TranscriptionResult,
+    AsrProvider, AsrProviderType, DownloadStatus, ModelInfo, TranscriptSegment,
+    TranscriptionOptions, TranscriptionResult, VocabularyHint,
 };
 use anyhow::{Context, Result};
 use async_trait::async_trait;
@@ -203,11 +204,13 @@ impl WhisperProvider {
         &self,
         audio_path: PathBuf,
         temp_wav: Option<TempWav>,
+        initial_prompt: Option<String>,
     ) -> Result<TranscriptionResult> {
         let ctx = self.get_or_load_ctx()?;
         let model_id = self.model_id.clone();
         tokio::task::spawn_blocking(move || {
-            let result = transcribe_blocking(&ctx, &model_id, &audio_path);
+            let result =
+                transcribe_blocking(&ctx, &model_id, &audio_path, initial_prompt.as_deref());
             // Tokio cannot cancel a running blocking closure. Keeping the guard in
             // this closure leaves the WAV readable until inference actually exits,
             // while still unlinking it after an async caller is cancelled.
@@ -283,14 +286,30 @@ impl AsrProvider for WhisperProvider {
         // inference in `spawn_blocking`; this brings Whisper in line. The
         // Whisper *state* is created inside the closure so only the
         // `Arc<WhisperContext>` (`Send + Sync`) crosses the boundary.
-        self.transcribe_owned_path(audio_path.to_path_buf(), None)
+        self.transcribe_owned_path(audio_path.to_path_buf(), None, None)
             .await
     }
 
     async fn transcribe_bytes(&self, audio_data: &[u8]) -> Result<TranscriptionResult> {
         let temp_wav = TempWav::create(audio_data)?;
         let temp_path = temp_wav.path().to_path_buf();
-        self.transcribe_owned_path(temp_path, Some(temp_wav)).await
+        self.transcribe_owned_path(temp_path, Some(temp_wav), None)
+            .await
+    }
+
+    async fn transcribe_bytes_with_options(
+        &self,
+        audio_data: &[u8],
+        options: &TranscriptionOptions,
+    ) -> Result<TranscriptionResult> {
+        let temp_wav = TempWav::create(audio_data)?;
+        let temp_path = temp_wav.path().to_path_buf();
+        let initial_prompt = options
+            .vocabulary_hint
+            .as_ref()
+            .map(VocabularyHint::as_prompt);
+        self.transcribe_owned_path(temp_path, Some(temp_wav), initial_prompt)
+            .await
     }
 
     fn download_status(&self) -> DownloadStatus {
@@ -338,6 +357,7 @@ fn transcribe_blocking(
     ctx: &Arc<whisper_rs::WhisperContext>,
     model_id: &str,
     audio_path: &Path,
+    initial_prompt: Option<&str>,
 ) -> Result<TranscriptionResult> {
     let start_time = std::time::Instant::now();
 
@@ -427,6 +447,24 @@ fn transcribe_blocking(
 
     // Beam search patience for better accuracy on technical terms
     params.set_token_timestamps(true); // Enable token-level timestamps for better alignment
+
+    // Personal-dictionary vocabulary bias, as whisper's initial prompt. Only
+    // attached when there is something in it: an empty prompt buys nothing
+    // and a blank one is a known way to make small models drift. The
+    // `set_no_context(true)` above does not discard it — whisper.cpp clears
+    // the rolling context *before* seeding the initial prompt, so the first
+    // decode window is conditioned on these spellings (checked against
+    // whisper_full_with_state in the vendored whisper.cpp).
+    if let Some(prompt) = initial_prompt
+        .map(sanitize_initial_prompt)
+        .filter(|prompt| !prompt.is_empty())
+    {
+        tracing::info!(
+            "Whisper initial prompt carries a {}-char vocabulary hint",
+            prompt.chars().count()
+        );
+        params.set_initial_prompt(&prompt);
+    }
 
     // Run transcription
     state
@@ -633,5 +671,42 @@ mod cache_tests {
 
         assert!(Arc::ptr_eq(&first, &second));
         assert!(!Arc::ptr_eq(&first, &other));
+    }
+}
+
+/// `FullParams::set_initial_prompt` builds a `CString` and panics on an
+/// interior NUL. Dictionary text is user-supplied (typed, CSV-imported, or
+/// learned from corrections), so strip control characters instead of
+/// trusting it. Everything else is passed through untouched.
+fn sanitize_initial_prompt(prompt: &str) -> String {
+    prompt
+        .chars()
+        .filter(|ch| !ch.is_control())
+        .collect::<String>()
+        .trim()
+        .to_string()
+}
+
+#[cfg(test)]
+mod initial_prompt_tests {
+    use super::sanitize_initial_prompt;
+
+    #[test]
+    fn interior_nul_and_control_characters_never_reach_whisper() {
+        // A NUL would panic inside whisper-rs; a newline would be a second
+        // "line" of prompt the model was never meant to see.
+        assert_eq!(
+            sanitize_initial_prompt("Plainsong,\u{0} Kubernetes\n, OpenAI "),
+            "Plainsong, Kubernetes, OpenAI"
+        );
+        assert_eq!(sanitize_initial_prompt("\u{0}\t"), "");
+    }
+
+    #[test]
+    fn ordinary_terms_pass_through_unchanged() {
+        assert_eq!(
+            sanitize_initial_prompt("Plainsong, Céline, naïve, C++"),
+            "Plainsong, Céline, naïve, C++"
+        );
     }
 }

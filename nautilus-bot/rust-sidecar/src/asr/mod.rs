@@ -122,6 +122,62 @@ pub enum DownloadStatus {
     Error,
 }
 
+/// Recognizer-side vocabulary bias: the spellings the recognizer should
+/// prefer for this request. Built at dictation time from the user's personal
+/// dictionary (the *replacement* spellings, never the misheard forms) and
+/// plain-word snippet triggers (never their expansions), scoped and capped by
+/// `dictation_parity::build_vocabulary_hint`. Providers that accept a prompt
+/// or keyterm list attach it; every other provider ignores it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct VocabularyHint {
+    terms: Vec<String>,
+}
+
+impl VocabularyHint {
+    /// `None` for an empty list, so a hint is only ever attached when there
+    /// is something in it — an empty whisper prompt is worse than none.
+    pub fn new(terms: Vec<String>) -> Option<Self> {
+        if terms.is_empty() {
+            None
+        } else {
+            Some(Self { terms })
+        }
+    }
+
+    pub fn terms(&self) -> &[String] {
+        &self.terms
+    }
+
+    /// Characters `as_prompt` adds around the joined terms. Callers that
+    /// budget the prompt (`dictation_parity::build_vocabulary_hint`) count
+    /// this so the whole prompt, not only the terms, stays under the cap.
+    pub const PROMPT_FRAME_CHARS: usize = "Vocabulary: .".len();
+
+    /// The prompt form for whisper-style `initial_prompt` / `prompt` fields:
+    /// one framed sentence, `Vocabulary: term, term, term.`
+    ///
+    /// The shape matters more than it looks. whisper treats the prompt as
+    /// *prior transcript*, so a bare comma list (`Plainsong, hotkey, Slack,
+    /// Nautilus`) taught `base.en` the wrong things on the repo fixtures:
+    /// it dropped a sentence boundary on the 44 s fixture and turned a
+    /// correctly-heard "Nautilus" into "not-a-list" on the 5 s one. Ending
+    /// with a period fixed the words but leaked comma-only punctuation into
+    /// the output. The framed sentence kept every word fix and left the
+    /// punctuation identical to the un-hinted decode. See
+    /// docs/evals/dictation-dictionary-fixture-report.md.
+    pub fn as_prompt(&self) -> String {
+        format!("Vocabulary: {}.", self.terms.join(", "))
+    }
+}
+
+/// Per-request options for `AsrProvider::transcribe_bytes_with_options`.
+/// `Default` is "no options", which is what every path other than dictation
+/// passes.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct TranscriptionOptions {
+    pub vocabulary_hint: Option<VocabularyHint>,
+}
+
 #[async_trait]
 pub trait AsrProvider: Send + Sync {
     fn name(&self) -> &str;
@@ -130,6 +186,18 @@ pub trait AsrProvider: Send + Sync {
     fn model_info(&self) -> ModelInfo;
     async fn transcribe(&self, audio_path: &Path) -> Result<TranscriptionResult>;
     async fn transcribe_bytes(&self, audio_data: &[u8]) -> Result<TranscriptionResult>;
+    /// `transcribe_bytes` with per-request options. The default drops the
+    /// options on the floor, so a provider that has no use for them (no
+    /// prompt or vocabulary field in its API) needs no change; providers that
+    /// can bias recognition override this.
+    async fn transcribe_bytes_with_options(
+        &self,
+        audio_data: &[u8],
+        options: &TranscriptionOptions,
+    ) -> Result<TranscriptionResult> {
+        let _ = options;
+        self.transcribe_bytes(audio_data).await
+    }
     /// Optionally pre-load the model into the same process cache used by
     /// transcription. Unlike the old best-effort hook, this acknowledgement is
     /// allowed to fail so callers cannot publish a false "model ready" state.
