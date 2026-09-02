@@ -33,7 +33,7 @@ export interface TranscriptMatch {
   startTime: number;
 }
 
-interface TranscriptViewerProps {
+export interface TranscriptViewerProps {
   segments: TranscriptSegment[];
   className?: string;
   onSegmentClick?: (segment: TranscriptSegment) => void;
@@ -238,7 +238,14 @@ function splitOnQuery(
   return parts;
 }
 
-export function TranscriptViewer({
+/**
+ * Memoized: the meetings view around it re-renders for reasons that have
+ * nothing to do with the transcript, and re-rendering hundreds of speaker
+ * turns to redraw a toolbar is work nobody asked for. The playhead reaches it
+ * through `PlayheadTranscriptViewer`, so following the audio does not depend
+ * on the parent re-rendering either.
+ */
+export const TranscriptViewer = memo(function TranscriptViewer({
   segments,
   className,
   onSegmentClick,
@@ -633,6 +640,13 @@ export function TranscriptViewer({
               markUserScroll();
               return;
             }
+            // Reading and playback keys act only when focus is on the
+            // transcript itself, not on a button, badge, or field inside it:
+            // ↑/↓ move a listbox or a menu that has focus, and stealing them
+            // there breaks the control the reader is actually using.
+            if (isInteractiveTarget(event.target)) {
+              return;
+            }
             if (event.key === "ArrowDown") {
               event.preventDefault();
               moveReadingPosition(1);
@@ -641,11 +655,6 @@ export function TranscriptViewer({
             if (event.key === "ArrowUp") {
               event.preventDefault();
               moveReadingPosition(-1);
-              return;
-            }
-            // Playback keys act only when focus is on the transcript itself,
-            // not on a button, badge, or field inside it.
-            if (isInteractiveTarget(event.target)) {
               return;
             }
             if ((event.key === " " || event.key === "Spacebar") && onTogglePlayback) {
@@ -943,7 +952,7 @@ export function TranscriptViewer({
       </Dialog>
     </div>
   );
-}
+});
 
 interface TranscriptSearchProps {
   query: string;

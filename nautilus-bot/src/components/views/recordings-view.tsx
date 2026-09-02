@@ -16,11 +16,12 @@ import { useScopedRequestGuard } from "@/hooks/use-scoped-request-guard";
 import { useToast } from "@/components/toast";
 import { ConsentDialog } from "@/components/recording-overlay";
 import {
-  TranscriptViewer,
   TranscriptSearch,
   type TranscriptMatch,
   type TranscriptProvenance,
 } from "@/components/transcript-viewer";
+import { PlayheadTranscriptViewer } from "@/components/meetings/playhead-transcript-viewer";
+import { usePlayheadStore } from "@/lib/playhead-store";
 import {
   isCloudProvider,
   isKnownAsrProvider,
@@ -1044,8 +1045,11 @@ export function RecordingsView() {
   const [activeTranscriptMatchIndex, setActiveTranscriptMatchIndex] = useState(0);
   // Where the reader is in the transcript. Set by a segment click, by keyboard
   // stepping, by a search hit, by a citation's "jump to source", and — while
-  // the meeting's audio plays — by the playhead, a few times a second.
-  const [transcriptCueTime, setTranscriptCueTime] = useState<number | undefined>(undefined);
+  // the meeting's audio plays — by the playhead, a few times a second. Held
+  // outside React state on purpose: as view state, every one of those playback
+  // ticks re-rendered this whole view to move one highlight. Only the
+  // transcript subscribes.
+  const playhead = usePlayheadStore();
   // The in-app player, so a transcript click or a citation can seek the audio.
   const audioPlayerRef = useRef<AudioPlayerHandle | null>(null);
   // A deep link names both a query and the moment it was found at. The hits
@@ -2288,7 +2292,7 @@ export function RecordingsView() {
     setSearchQuery(focus?.highlightQuery ?? "");
     setTranscriptMatches([]);
     setActiveTranscriptMatchIndex(0);
-    setTranscriptCueTime(focus?.segmentTime);
+    playhead.set(focus?.segmentTime);
     // Which hit the reader asked for: the one at the moment they clicked, not
     // whichever occurrence happens to come first in the meeting.
     pendingMatchFocusTimeRef.current =
@@ -3215,7 +3219,7 @@ export function RecordingsView() {
         (activeTranscriptMatchIndex + direction + transcriptMatches.length) %
         transcriptMatches.length;
       setActiveTranscriptMatchIndex(nextIndex);
-      setTranscriptCueTime(transcriptMatches[nextIndex].startTime);
+      playhead.set(transcriptMatches[nextIndex].startTime);
     },
     [activeTranscriptMatchIndex, transcriptMatches]
   );
@@ -3533,7 +3537,7 @@ export function RecordingsView() {
     setTranscriptMatches([]);
     setActiveTranscriptMatchIndex(0);
     pendingMatchFocusTimeRef.current = null;
-    setTranscriptCueTime(typeof startTime === "number" ? startTime : undefined);
+    playhead.set(typeof startTime === "number" ? startTime : undefined);
     if (typeof startTime === "number") {
       audioPlayerRef.current?.seekTo(startTime);
     }
@@ -5700,7 +5704,7 @@ export function RecordingsView() {
                       recordingId={selectedRecording.id}
                       waveform={waveformData}
                       durationHint={selectedRecording.duration}
-                      onTimeUpdate={setTranscriptCueTime}
+                      onTimeUpdate={playhead.set}
                       onError={(message) =>
                         setAudioPlaybackIssue({ recordingId: selectedRecording.id, message })
                       }
@@ -5722,13 +5726,13 @@ export function RecordingsView() {
                     className="mb-4 shrink-0"
                   />
                   <div className="min-h-0 flex-1 overflow-hidden rounded-md border">
-                    <TranscriptViewer
+                    <PlayheadTranscriptViewer
+                      playhead={playhead}
                       segments={transcriptSegments}
                       speakerNames={speakerNames}
                       provenance={selectedTranscriptProvenance}
-                      currentTime={transcriptCueTime}
                       onSegmentClick={(segment) => {
-                        setTranscriptCueTime(segment.startTime);
+                        playhead.set(segment.startTime);
                         audioPlayerRef.current?.seekTo(segment.startTime);
                       }}
                       onTogglePlayback={() => audioPlayerRef.current?.togglePlayback()}

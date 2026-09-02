@@ -199,6 +199,9 @@ evidence is stale and must be recaptured before this becomes a candidate.
 - An action item whose owner the meeting called by their first name is no
   longer dropped when the speaker alias or the transcript spells the name out
   in full ("Priya" against "Priya Raman", "Jon" against "Jonathan").
+- Following the audio no longer re-renders the whole Meetings view about four
+  times a second, and the up and down arrow keys inside the transcript no
+  longer move the reading position while a control in it has focus.
 - "Open audio file" and the stored waveform could not open a recording
   encrypted by the streaming vault writer: the runtime decrypt path still
   ran the pre-streaming whole-file decoder on every file, which fails the
