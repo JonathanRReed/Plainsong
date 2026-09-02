@@ -7840,6 +7840,75 @@ fn available_space_for_encryption(path: &Path) -> Option<u64> {
     crate::download::available_space_for_path(directory).ok()
 }
 
+/// Encrypt a just-finalized recording's audio bundle into the vault, when the
+/// vault is on. A no-op when it is off, or when the bundle is already covered.
+///
+/// Lifted out of the meeting stop path because two other routes land the same
+/// kind of owned audio asset and neither encrypted it: "Import audio..." wrote
+/// the converted WAV into the recordings folder and spawned the pipeline, and a
+/// kept dictation WAV went in with `protection 'plaintext'` and stayed that
+/// way. Both are read back by the same playback, export, retention and
+/// migration code as a stopped meeting's audio, so leaving them in the clear
+/// left plaintext audio under a vault the UI says is on, and held
+/// `get_security_status` at "not every recording is encrypted" forever.
+///
+/// A locked vault is an error rather than a silent skip: the file is already on
+/// disk by the time this runs, so saying nothing would be the quiet failure.
+async fn encrypt_finalized_recording_audio(
+    state: &AppState,
+    handle: Option<&crate::sidecar_handle::SidecarHandle>,
+    recording_id: &str,
+) -> Result<(), String> {
+    let vault_initialized = state
+        .settings_manager
+        .lock()
+        .await
+        .settings()
+        .privacy
+        .vault_initialized;
+    if !vault_initialized {
+        return Ok(());
+    }
+    let key = {
+        let vault_state = state.vault_state.lock().await;
+        if !vault_state.unlocked {
+            return Err(
+                "Vault locked before the finalized recording bundle could be encrypted".to_string(),
+            );
+        }
+        vault_state.recording_key.ok_or_else(|| {
+            "Vault key became unavailable before recording encryption was journaled".to_string()
+        })?
+    };
+    let operation = state
+        .db
+        .lock()
+        .await
+        .begin_recording_audio_encryption(recording_id)
+        .map_err(|error| error.to_string())?;
+    // No operation means there was nothing plaintext left to encrypt.
+    let Some(operation) = operation else {
+        return Ok(());
+    };
+    if let Err(error) =
+        encrypt_recording_audio_operation(state, operation, &key, handle).await
+    {
+        let mut db = state.db.lock().await;
+        let _ = db.update_recording_status(recording_id, "error");
+        let _ = db.log_audit_event(
+            "recording_audio_encryption_pending",
+            Some(serde_json::json!({
+                "recording_id": recording_id,
+                "error": &error,
+            })),
+            "warning",
+        );
+        drop(db);
+        return Err(error);
+    }
+    Ok(())
+}
+
 /// Encrypt a recording's audio bundle into the vault.
 ///
 /// Runs the file work on the blocking pool and takes the database lock only for
@@ -24623,6 +24692,26 @@ async fn stop_dictation_for_sidecar(
         }
     }
 
+    // Kept dictation audio is an owned asset in the recordings store exactly
+    // like a meeting's track, and it went in as `protection 'plaintext'`. With
+    // the vault on it has to be encrypted here, or the words the reader chose
+    // to keep sit in the clear under a vault the UI says covers them.
+    //
+    // A failure is a warning, not a refusal: the transcript is already
+    // committed and the text still has to be delivered. The asset stays
+    // plaintext and `get_security_status` keeps reporting it as such, which is
+    // the truth, and the reader is told rather than left to find out.
+    if kept_audio_metadata.is_some() {
+        if let Err(error) =
+            encrypt_finalized_recording_audio(state, Some(handle), &recording_id).await
+        {
+            tracing::warn!("Kept dictation audio was not encrypted: {}", error);
+            warnings.push(format!(
+                "The kept dictation audio is not in the vault yet: {error}"
+            ));
+        }
+    }
+
     let mut insert_latency_ms: Option<u64> = None;
     let mut post_insert_focus_anchor: Option<
         dictation_correction_capture::FocusedFieldFingerprint,
@@ -27269,55 +27358,11 @@ async fn stop_recording_for_sidecar_inner(
         }
     }
 
-    let vault_initialized = state
-        .settings_manager
-        .lock()
-        .await
-        .settings()
-        .privacy
-        .vault_initialized;
-    if vault_initialized {
-        let key = {
-            let vault_state = state.vault_state.lock().await;
-            if !vault_state.unlocked {
-                return Err(
-                    "Vault locked before the finalized recording bundle could be encrypted"
-                        .to_string(),
-                );
-            }
-            vault_state.recording_key.ok_or_else(|| {
-                "Vault key became unavailable before recording encryption was journaled".to_string()
-            })?
-        };
-        let operation = state
-            .db
-            .lock()
-            .await
-            .begin_recording_audio_encryption(&recording_id)
-            .map_err(|error| error.to_string())?;
-        if let Some(operation) = operation {
-            if let Err(error) =
-                encrypt_recording_audio_operation(state.as_ref(), operation, &key, Some(handle))
-                    .await
-            {
-                let message = format!(
-                    "Recording was finalized, but vault encryption must be retried before transcription: {}",
-                    error
-                );
-                let mut db = state.db.lock().await;
-                let _ = db.update_recording_status(&recording_id, "error");
-                let _ = db.log_audit_event(
-                    "recording_audio_encryption_pending",
-                    Some(serde_json::json!({
-                        "recording_id": &recording_id,
-                        "error": &error,
-                    })),
-                    "warning",
-                );
-                drop(db);
-                return Err(message);
-            }
-        }
+    if let Err(error) = encrypt_finalized_recording_audio(state.as_ref(), Some(handle), &recording_id).await
+    {
+        return Err(format!(
+            "Recording was finalized, but vault encryption must be retried before transcription: {error}"
+        ));
     }
 
     emit_meeting_lifecycle_phase(
@@ -27698,6 +27743,21 @@ async fn import_audio_file_impl(
     }
 
     let recording_id = recording.id.clone();
+
+    // Same order the stop path uses: the audio is encrypted into the vault
+    // before the pipeline is allowed to read it. An imported file lands in the
+    // recordings folder as the same kind of owned asset a meeting's audio does,
+    // so skipping this left plaintext audio under a vault the UI says is on.
+    if let Err(error) = encrypt_finalized_recording_audio(state.as_ref(), Some(handle), &recording_id).await
+    {
+        let mut db = state.db.lock().await;
+        let _ = db.update_recording_status(&recording_id, "error");
+        drop(db);
+        return Err(format!(
+            "The audio was imported, but vault encryption must be retried before it can be transcribed: {error}"
+        ));
+    }
+
     handle.emit_event(
         "recording-status-changed",
         serde_json::json!({
@@ -27859,6 +27919,41 @@ mod audio_import_tests {
         std::fs::create_dir_all(&dir).expect("mkdir");
         let not_a_file = prepare_audio_import(&dir, &recordings_dir).unwrap_err();
         assert!(not_a_file.contains("not a folder"), "{not_a_file}");
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// The import wrote its converted WAV into the recordings store and started
+    /// the pipeline without ever encrypting it, so with the vault on an
+    /// imported meeting was plaintext audio sitting under a vault the UI says
+    /// is on. `import_audio_file_impl` now runs the stop path's encryption step
+    /// before the pipeline; this is the storage half of that, showing the asset
+    /// the import registers is one the vault operation picks up.
+    #[test]
+    fn an_imported_meetings_audio_is_an_asset_the_vault_operation_can_encrypt() {
+        let root = scratch_dir("vault");
+        let source = root.join("board call.wav");
+        write_stereo_fixture(&source, 1);
+        let recordings_dir = root.join("recordings");
+
+        let prepared = prepare_audio_import(&source, &recordings_dir).expect("import");
+        let mut db = db::Database::new_in_memory_for_test().expect("in-memory db");
+        let recording = imported_recording_row(&prepared, "inbox", chrono::Utc::now());
+        persist_audio_import(&mut db, &prepared, &recording).expect("persist");
+
+        // As persisted it is plaintext, like a meeting's audio at finalize.
+        assert_eq!(db.count_encrypted_recordings().expect("counts"), (0, 1));
+
+        let operation = db
+            .begin_recording_audio_encryption(&recording.id)
+            .expect("begin encryption")
+            .expect("an imported meeting must open an encryption operation");
+        assert_eq!(operation.items.len(), 1);
+        assert_eq!(operation.items[0].source_path, prepared.plan.primary_path);
+
+        db.switch_recording_audio_encryption(&operation)
+            .expect("switch");
+        assert_eq!(db.count_encrypted_recordings().expect("counts"), (1, 1));
 
         let _ = std::fs::remove_dir_all(&root);
     }

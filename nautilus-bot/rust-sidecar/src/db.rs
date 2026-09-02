@@ -8097,6 +8097,64 @@ mod tests {
         let _ = std::fs::remove_dir_all(&root);
     }
 
+    /// Kept dictation audio is registered as `protection 'plaintext'`, which is
+    /// correct as an intermediate state but was also its final state: nothing
+    /// ever encrypted it, so with the vault on the words the reader chose to
+    /// keep stayed in the clear and `count_encrypted_recordings` reported the
+    /// store as partly unencrypted forever. The stop path's encryption step now
+    /// runs for it too; this is the database half of that, showing the asset is
+    /// one the vault operation can actually pick up and switch.
+    #[test]
+    fn kept_dictation_audio_is_an_asset_the_vault_operation_can_encrypt() {
+        let mut db = in_memory_db();
+        let root = std::env::temp_dir().join(format!(
+            "plainsong-dictation-vault-test-{}",
+            uuid::Uuid::new_v4()
+        ));
+        std::fs::create_dir_all(&root).unwrap();
+        let kept = root.join("dictation.wav");
+        write_test_wav(&kept);
+        let RecordingAudioValidation::Ready(metadata) = validate_plaintext_wav(&kept) else {
+            panic!("valid wav fixture");
+        };
+
+        let (mut recording, transcript, history) = dictation_fixture(
+            "kept-dictation",
+            Utc::now(),
+            "Water the plants.",
+            "water the plants",
+        );
+        recording.audio_path = kept.to_string_lossy().to_string();
+        db.create_dictation_history_entry(&recording, &transcript, &history, Some(&metadata))
+            .expect("dictation entry with kept audio");
+
+        // As written, it is plaintext and the store is not fully encrypted.
+        let bundle = db.load_recording_audio_bundle(&recording.id).unwrap();
+        assert_eq!(
+            bundle.primary.as_ref().unwrap().protection,
+            RecordingAudioProtection::Plaintext
+        );
+        assert_eq!(db.count_encrypted_recordings().unwrap(), (0, 1));
+
+        // The vault's own operation covers it, exactly like a meeting track.
+        let operation = db
+            .begin_recording_audio_encryption(&recording.id)
+            .unwrap()
+            .expect("kept dictation audio must open an encryption operation");
+        assert_eq!(operation.items.len(), 1);
+        assert_eq!(operation.items[0].source_path, kept);
+
+        db.switch_recording_audio_encryption(&operation).unwrap();
+        let switched = db.load_recording_audio_bundle(&recording.id).unwrap();
+        assert_eq!(
+            switched.primary.as_ref().unwrap().protection,
+            RecordingAudioProtection::Encrypted
+        );
+        assert_eq!(db.count_encrypted_recordings().unwrap(), (1, 1));
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
     #[test]
     fn degraded_transcripts_are_durable_and_hold_audio_back_until_acknowledged() {
         let mut db = in_memory_db();

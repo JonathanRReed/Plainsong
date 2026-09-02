@@ -22,7 +22,8 @@ evidence is stale and must be recaptured before this becomes a candidate.
   pastes anything. Keeping the audio is a new off-by-default setting, "Keep
   dictation audio for Process again"; without it, the dialog says so and
   names the setting instead of offering a button it cannot honour. Kept audio
-  is deleted with its history entry.
+  is deleted with its history entry, and with the vault on it is encrypted
+  into the vault like a meeting's audio rather than left in the clear.
 - "Import audio…" in the Meetings header transcribes an audio file you
   already have. Plainsong decodes .wav, .mp3, .m4a, .aac, .mp4, .ogg and
   .flac up to 2 GB and 4 hours with macOS' own converter, copies the
