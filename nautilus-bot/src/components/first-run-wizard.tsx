@@ -2684,6 +2684,8 @@ function MeetingSetupStep({
     <div className="space-y-4">
       <p className="text-sm text-muted-foreground">
         Meetings work best with a meeting-grade ASR route and, when available, both microphone and system audio capture.
+        Parakeet is the recommended local route; for a language it does not cover, whisper.cpp small, medium,
+        large-v3 or large-v3-turbo can run meetings too (100 languages, on the GPU, slower than Parakeet).
       </p>
 
       <div className="space-y-3">

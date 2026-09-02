@@ -3295,6 +3295,7 @@ async fn resolve_ready_meeting_selection(
                 default_provider,
                 dictation_provider,
                 meeting_provider,
+                Some(transcription.meeting_model_id.as_str()),
             );
             let repaired_candidate = select_ready_meeting_candidate(
                 &provider_infos,
@@ -12680,6 +12681,129 @@ mod tests {
     }
 
     #[test]
+    fn whisper_multilingual_model_in_the_meeting_slot_stays_on_whisper() {
+        // A dedicated meeting slot naming large-v3-turbo is an explicit
+        // choice: the resolver keeps it instead of falling through to Parakeet.
+        let mut transcription = settings::TranscriptionSettings {
+            use_shared_asr_selection: false,
+            default_provider: "parakeet".to_string(),
+            selected_model_id: "parakeet-tdt-0.6b-v3".to_string(),
+            dictation_provider: "parakeet".to_string(),
+            dictation_model_id: "parakeet-tdt-0.6b-v3".to_string(),
+            meeting_provider: "whisper".to_string(),
+            meeting_model_id: "large-v3-turbo".to_string(),
+            ..Default::default()
+        };
+
+        normalize_contextual_asr_settings(&mut transcription);
+
+        assert_eq!(transcription.meeting_provider, "whisper");
+        assert_eq!(transcription.meeting_model_id, "large-v3-turbo");
+
+        let (meeting_provider, meeting_model_id) =
+            resolve_transcription_provider_and_model(&transcription, TranscriptionScope::Meeting);
+        assert_eq!(meeting_provider, asr::AsrProviderType::Whisper);
+        assert_eq!(meeting_model_id, "large-v3-turbo");
+        assert!(ensure_meeting_route_supported(meeting_provider, &meeting_model_id).is_ok());
+    }
+
+    #[test]
+    fn whisper_multilingual_model_keeps_shared_selection_for_both_lanes() {
+        let mut transcription = settings::TranscriptionSettings {
+            use_shared_asr_selection: true,
+            default_provider: "whisper".to_string(),
+            selected_model_id: "medium".to_string(),
+            dictation_provider: "whisper".to_string(),
+            dictation_model_id: "medium".to_string(),
+            meeting_provider: "whisper".to_string(),
+            meeting_model_id: "medium".to_string(),
+            ..Default::default()
+        };
+
+        normalize_contextual_asr_settings(&mut transcription);
+
+        assert!(transcription.use_shared_asr_selection);
+        assert_eq!(transcription.meeting_provider, "whisper");
+        assert_eq!(transcription.meeting_model_id, "medium");
+    }
+
+    #[test]
+    fn whisper_english_model_in_the_meeting_slot_falls_through_to_parakeet() {
+        // The meeting slot can be left on base.en by an old settings file.
+        // That is dictation-only, so meetings resolve to Parakeet -- never to
+        // a whisper model the user did not pick.
+        let mut transcription = settings::TranscriptionSettings {
+            use_shared_asr_selection: false,
+            default_provider: "whisper".to_string(),
+            selected_model_id: "base.en".to_string(),
+            dictation_provider: "whisper".to_string(),
+            dictation_model_id: "base.en".to_string(),
+            meeting_provider: "whisper".to_string(),
+            meeting_model_id: "base.en".to_string(),
+            ..Default::default()
+        };
+
+        normalize_contextual_asr_settings(&mut transcription);
+
+        assert_eq!(transcription.meeting_provider, "parakeet");
+        assert_eq!(transcription.meeting_model_id, "parakeet-tdt-0.6b-v3");
+    }
+
+    #[test]
+    fn whisper_is_never_an_automatic_meeting_candidate() {
+        // Inherited from the default or dictation slot, whisper must not
+        // enter the candidate list at all; Parakeet stays first.
+        let candidates = preferred_meeting_provider_candidates(
+            MeetingRoutePolicy::PreferLocal,
+            asr::AsrProviderType::Whisper,
+            asr::AsrProviderType::Whisper,
+            None,
+            Some("large-v3-turbo"),
+        );
+        assert!(!candidates.contains(&asr::AsrProviderType::Whisper));
+        assert_eq!(candidates.first(), Some(&asr::AsrProviderType::Parakeet));
+
+        // Named in the meeting slot with a meeting-grade model: first.
+        let explicit = preferred_meeting_provider_candidates(
+            MeetingRoutePolicy::PreferLocal,
+            asr::AsrProviderType::Parakeet,
+            asr::AsrProviderType::Parakeet,
+            Some(asr::AsrProviderType::Whisper),
+            Some("large-v3-turbo"),
+        );
+        assert_eq!(explicit.first(), Some(&asr::AsrProviderType::Whisper));
+
+        // Named in the meeting slot with an English-only model: skipped.
+        let english = preferred_meeting_provider_candidates(
+            MeetingRoutePolicy::PreferLocal,
+            asr::AsrProviderType::Parakeet,
+            asr::AsrProviderType::Parakeet,
+            Some(asr::AsrProviderType::Whisper),
+            Some("base.en"),
+        );
+        assert!(!english.contains(&asr::AsrProviderType::Whisper));
+    }
+
+    #[test]
+    fn whisper_meeting_lane_accepts_languages_parakeet_cannot() {
+        let whisper = settings::dictation_supported_languages("whisper", "large-v3-turbo")
+            .expect("multilingual whisper enumerates its languages");
+        let parakeet = settings::dictation_supported_languages("parakeet", "parakeet-tdt-0.6b-v3")
+            .expect("Parakeet v3 enumerates its languages");
+        for code in ["zh", "ja", "ko", "hi", "ar"] {
+            assert!(whisper.contains(&code), "whisper must list {code}");
+            assert!(
+                !parakeet.contains(&code),
+                "Parakeet v3 does not list {code}"
+            );
+        }
+        assert_eq!(
+            settings::dictation_supported_languages("whisper", "medium.en"),
+            Some(&["en"][..])
+        );
+    }
+
+    #[test]
     fn moonshine_is_dictation_only_for_meetings() {
         let mut transcription = settings::TranscriptionSettings {
             use_shared_asr_selection: true,
@@ -12702,9 +12826,43 @@ mod tests {
 
     #[test]
     fn meeting_route_support_matrix_matches_expected_provider_families() {
+        // whisper.cpp: multilingual `small` and up only. Never tiny/base,
+        // never a `.en` build.
         assert!(!meeting_route_is_shared_compatible(
             asr::AsrProviderType::Whisper,
             "base.en"
+        ));
+        assert!(!meeting_route_is_shared_compatible(
+            asr::AsrProviderType::Whisper,
+            "tiny"
+        ));
+        assert!(!meeting_route_is_shared_compatible(
+            asr::AsrProviderType::Whisper,
+            "base"
+        ));
+        assert!(!meeting_route_is_shared_compatible(
+            asr::AsrProviderType::Whisper,
+            "small.en"
+        ));
+        assert!(!meeting_route_is_shared_compatible(
+            asr::AsrProviderType::Whisper,
+            "medium.en"
+        ));
+        assert!(meeting_route_is_shared_compatible(
+            asr::AsrProviderType::Whisper,
+            "small"
+        ));
+        assert!(meeting_route_is_shared_compatible(
+            asr::AsrProviderType::Whisper,
+            "medium"
+        ));
+        assert!(meeting_route_is_shared_compatible(
+            asr::AsrProviderType::Whisper,
+            "large-v3"
+        ));
+        assert!(meeting_route_is_shared_compatible(
+            asr::AsrProviderType::Whisper,
+            "large-v3-turbo"
         ));
         assert!(!meeting_route_is_shared_compatible(
             asr::AsrProviderType::Moonshine,
@@ -13156,6 +13314,7 @@ mod tests {
             asr::AsrProviderType::OpenAiCloud,
             asr::AsrProviderType::CohereTranscribe,
             Some(asr::AsrProviderType::ElevenLabsScribe),
+            None,
         );
         assert!(candidates.iter().all(|provider| !provider.is_remote()));
 
@@ -13192,6 +13351,7 @@ mod tests {
             asr::AsrProviderType::Whisper,
             asr::AsrProviderType::Moonshine,
             Some(asr::AsrProviderType::CohereTranscribe),
+            None,
         );
         assert_eq!(
             explicit.first(),
@@ -13202,6 +13362,7 @@ mod tests {
             MeetingRoutePolicy::BestAvailable,
             asr::AsrProviderType::Whisper,
             asr::AsrProviderType::Moonshine,
+            None,
             None,
         );
         assert!(inferred.iter().all(|provider| !provider.is_remote()));
@@ -16045,6 +16206,20 @@ fn provider_is_dictation_only(provider: asr::AsrProviderType) -> bool {
     !meeting_provider_is_supported(provider)
 }
 
+/// Whether a stored meeting route can only ever serve dictation.
+///
+/// Provider-level for every engine but whisper.cpp, whose meeting support is
+/// per model: `base.en` in the meeting slot is dictation-only, `large-v3-turbo`
+/// is not. Deciding this at the route level is what lets the resolver keep
+/// falling through to Parakeet for the small English models without also
+/// throwing away an explicit multilingual selection.
+fn meeting_route_is_dictation_only(provider: asr::AsrProviderType, model_id: &str) -> bool {
+    match provider {
+        asr::AsrProviderType::Whisper => !meeting_model_is_supported(provider, model_id),
+        _ => provider_is_dictation_only(provider),
+    }
+}
+
 fn provider_supports_generic_live_preview(provider: asr::AsrProviderType) -> bool {
     !provider.is_remote() && provider != asr::AsrProviderType::MacosAppleSpeech
 }
@@ -16063,8 +16238,25 @@ fn meeting_provider_is_supported(provider: asr::AsrProviderType) -> bool {
             | asr::AsrProviderType::Groq
             | asr::AsrProviderType::CohereTranscribe
             | asr::AsrProviderType::Qwen3Asr
+            // whisper.cpp is meeting-capable per model, not per provider:
+            // see `WHISPER_MEETING_MODEL_IDS`. It never enters the meeting
+            // lane on its own (`preferred_meeting_provider_candidates`), only
+            // when the meeting slot names one of those models outright.
+            | asr::AsrProviderType::Whisper
     )
 }
+
+/// The whisper.cpp ggml models allowed in the meeting lane.
+///
+/// Multilingual weights from `small` up: they carry the ~100-language
+/// coverage Parakeet v3 (25 European languages) and Distil-Whisper (English)
+/// lack, and whisper.cpp returns per-segment timestamps for them, which is
+/// what `transcribe_recording_in_chunks` offsets and merges. `tiny` and
+/// `base` are left out on accuracy: this repo's own benchmark shows base.en
+/// mis-transcribing unfamiliar words, and the multilingual weights of the same
+/// size are worse still. Every `.en` build is left out because the meeting
+/// lane exists here for the languages English-only models cannot hear.
+const WHISPER_MEETING_MODEL_IDS: &[&str] = &["small", "medium", "large-v3", "large-v3-turbo"];
 
 fn meeting_model_is_supported(provider: asr::AsrProviderType, model_id: &str) -> bool {
     if !meeting_provider_is_supported(provider) {
@@ -16072,6 +16264,9 @@ fn meeting_model_is_supported(provider: asr::AsrProviderType, model_id: &str) ->
     }
 
     let candidate = normalize_asr_model_id(provider, model_id);
+    if provider == asr::AsrProviderType::Whisper {
+        return WHISPER_MEETING_MODEL_IDS.contains(&candidate.as_str());
+    }
     provider
         .model_options()
         .iter()
@@ -16079,7 +16274,12 @@ fn meeting_model_is_supported(provider: asr::AsrProviderType, model_id: &str) ->
 }
 
 fn default_meeting_model_id(provider: asr::AsrProviderType) -> &'static str {
-    provider.default_model_id()
+    match provider {
+        // The provider default (`base.en`) is dictation-only; the meeting slot
+        // needs a model that is actually allowed there.
+        asr::AsrProviderType::Whisper => "large-v3-turbo",
+        _ => provider.default_model_id(),
+    }
 }
 
 fn normalize_meeting_model_id(provider: asr::AsrProviderType, model_id: &str) -> String {
@@ -16104,7 +16304,7 @@ fn ensure_meeting_route_supported(
     }
 
     Err(format!(
-        "Meetings require a meeting-grade ASR route. '{}' with model '{}' is dictation-only or unsupported for meetings. Choose Distil Whisper, Parakeet, Qwen3-ASR, ElevenLabs, OpenAI, Groq, or Cohere in Settings -> ASR / Providers.",
+        "Meetings require a meeting-grade ASR route. '{}' with model '{}' is dictation-only or unsupported for meetings. Choose Parakeet, whisper.cpp small/medium/large-v3/large-v3-turbo, Distil Whisper, Qwen3-ASR, ElevenLabs, OpenAI, Groq, or Cohere in Settings -> ASR / Providers.",
         provider.display_name(),
         model_id
     ))
@@ -16115,6 +16315,7 @@ fn preferred_meeting_provider_candidates(
     default_provider: asr::AsrProviderType,
     dictation_provider: asr::AsrProviderType,
     meeting_provider: Option<asr::AsrProviderType>,
+    meeting_model_id: Option<&str>,
 ) -> Vec<asr::AsrProviderType> {
     let mut candidates = Vec::new();
     let explicit_candidates = [
@@ -16140,10 +16341,20 @@ fn preferred_meeting_provider_candidates(
                 !provider.is_remote() || meeting_provider == Some(provider)
             }
         };
-        if hosting_allowed
-            && meeting_provider_is_supported(provider)
-            && !candidates.contains(&provider)
-        {
+        // whisper.cpp is a meeting candidate only when the meeting slot itself
+        // names a meeting-grade ggml model. Inheriting it from the default or
+        // dictation slot would silently move every `base.en` install's
+        // meetings onto a 1.6 GB model nobody downloaded, when Parakeet is
+        // both ranked first and usually already on disk.
+        let supported = if provider == asr::AsrProviderType::Whisper {
+            meeting_provider == Some(provider)
+                && meeting_model_id.is_some_and(|model_id| {
+                    meeting_model_is_supported(asr::AsrProviderType::Whisper, model_id)
+                })
+        } else {
+            meeting_provider_is_supported(provider)
+        };
+        if hosting_allowed && supported && !candidates.contains(&provider) {
             candidates.push(provider);
         }
     }
@@ -16155,12 +16366,14 @@ fn preferred_meeting_provider(
     default_provider: asr::AsrProviderType,
     dictation_provider: asr::AsrProviderType,
     meeting_provider: Option<asr::AsrProviderType>,
+    meeting_model_id: Option<&str>,
 ) -> asr::AsrProviderType {
     if let Some(provider) = preferred_meeting_provider_candidates(
         policy,
         default_provider,
         dictation_provider,
         meeting_provider,
+        meeting_model_id,
     )
     .into_iter()
     .next()
@@ -16330,6 +16543,7 @@ fn normalize_contextual_asr_settings(transcription: &mut settings::Transcription
         default_provider,
         dictation_provider,
         requested_meeting_provider.or(Some(default_provider)),
+        Some(transcription.meeting_model_id.as_str()),
     );
     transcription.meeting_provider = asr_provider_to_settings_value(meeting_provider).to_string();
     transcription.meeting_model_id = normalize_meeting_model_id(
@@ -16391,19 +16605,21 @@ fn resolve_transcription_provider_and_model(
 
     let provider =
         asr_provider_from_settings_value(provider_value).unwrap_or(asr::AsrProviderType::Whisper);
-    let provider =
-        if matches!(scope, TranscriptionScope::Meeting) && provider_is_dictation_only(provider) {
-            preferred_meeting_provider(
-                meeting_policy,
-                asr_provider_from_settings_value(&transcription.default_provider)
-                    .unwrap_or(asr::AsrProviderType::Whisper),
-                asr_provider_from_settings_value(&transcription.dictation_provider)
-                    .unwrap_or(asr::AsrProviderType::Whisper),
-                asr_provider_from_settings_value(&transcription.meeting_provider),
-            )
-        } else {
-            provider
-        };
+    let provider = if matches!(scope, TranscriptionScope::Meeting)
+        && meeting_route_is_dictation_only(provider, model_value)
+    {
+        preferred_meeting_provider(
+            meeting_policy,
+            asr_provider_from_settings_value(&transcription.default_provider)
+                .unwrap_or(asr::AsrProviderType::Whisper),
+            asr_provider_from_settings_value(&transcription.dictation_provider)
+                .unwrap_or(asr::AsrProviderType::Whisper),
+            asr_provider_from_settings_value(&transcription.meeting_provider),
+            Some(transcription.meeting_model_id.as_str()),
+        )
+    } else {
+        provider
+    };
     let model_id = if matches!(scope, TranscriptionScope::Meeting) {
         normalize_meeting_model_id(provider, model_value)
     } else {

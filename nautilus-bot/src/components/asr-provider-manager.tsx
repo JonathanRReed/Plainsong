@@ -2269,7 +2269,10 @@ export function AsrProviderManager({ className }: AsrProviderManagerProps) {
                   <p className="font-medium mb-1">Whisper (Enabled)</p>
                   <p className="text-muted-foreground">
                     Production local transcription provider. Supports model
-                    selection including turbo variants.
+                    selection including turbo variants. The multilingual
+                    small, medium, large-v3 and large-v3-turbo models can also
+                    run meetings (100 languages, on the GPU, slower than
+                    Parakeet); tiny, base and every .en model stay dictation-only.
                   </p>
                 </div>
                 <div className="p-3 bg-muted/50 rounded-lg">

@@ -13,6 +13,15 @@ changed underneath `0.9.0-beta.2`. See `LAUNCH.md` for which qualification
 evidence is stale and must be recaptured before this becomes a candidate.
 
 ### Added
+- Multilingual meetings can use whisper.cpp. The `small`, `medium`,
+  `large-v3` and `large-v3-turbo` ggml models are now allowed in the meeting
+  lane, so a language outside Parakeet v3's 25 European languages has a local
+  meeting route that is not the experimental CPU-bound Qwen3 (100 languages,
+  runs on the GPU, slower than Parakeet). `tiny`, `base` and every `.en`
+  build stay dictation-only, Parakeet stays ranked first in every policy, and
+  whisper.cpp never enters the meeting lane on its own: a `base.en` default
+  still resolves meetings to Parakeet, and whisper runs a meeting only when
+  one of those four models is picked for the meeting lane.
 - Onboarding now asks how meeting notes get written: local Ollama (with live
   detection), bring-your-own-key cloud AI, or transcripts only — instead of
   silently defaulting to an Ollama install that usually isn't there.
