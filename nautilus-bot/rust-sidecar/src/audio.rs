@@ -245,8 +245,14 @@ pub fn silence_auto_stop_due(health: &RecordingCaptureHealth, silence_minutes: u
     if silence_minutes == 0 || health.paused {
         return false;
     }
-    let fuse_seconds = silence_minutes as f32 * 60.0;
-    if health.seconds_since_activity_epoch < fuse_seconds {
+    every_source_quiet_for(health, silence_minutes as f32 * 60.0)
+}
+
+/// Whether every captured source has been inactive for `seconds`, and frames
+/// have been flowing on purpose for at least that long. Shared by the stop and
+/// the warning that precedes it so the two can never disagree.
+fn every_source_quiet_for(health: &RecordingCaptureHealth, seconds: f32) -> bool {
+    if health.seconds_since_activity_epoch < seconds {
         return false;
     }
     let sources = [
@@ -256,11 +262,44 @@ pub fn silence_auto_stop_due(health: &RecordingCaptureHealth, silence_minutes: u
     let mut any_source = false;
     for inactive_seconds in sources.into_iter().flatten() {
         any_source = true;
-        if inactive_seconds < fuse_seconds {
+        if inactive_seconds < seconds {
             return false;
         }
     }
     any_source
+}
+
+/// How long a meeting must have been quiet before it is warned, or `None` when
+/// there is no useful warning to give.
+///
+/// Half the fuse, floored to whole minutes so the sentence can name both
+/// numbers exactly: a 15-minute fuse warns at 7 and says 8 remain. A fuse of
+/// one minute has no half worth announcing, and `0` is the setting for off.
+pub fn silence_auto_stop_warning_minutes(silence_minutes: u32) -> Option<u32> {
+    let warn_after = silence_minutes / 2;
+    (warn_after > 0).then_some(warn_after)
+}
+
+/// Whether a running meeting should be told it is on course to stop itself for
+/// silence.
+///
+/// The threshold that ends a meeting is a heuristic about room tone, and it
+/// used to be announced only in the same breath as the stop — by which point a
+/// lecture nobody was miked for had already ended. Same conditions as the stop
+/// (every source quiet, the fuse's own clock running since the last resume, a
+/// paused meeting exempt), at half the distance, so a warning can never appear
+/// for a meeting the stop would not reach.
+pub fn silence_auto_stop_warning_due(
+    health: &RecordingCaptureHealth,
+    silence_minutes: u32,
+) -> bool {
+    let Some(warn_after) = silence_auto_stop_warning_minutes(silence_minutes) else {
+        return false;
+    };
+    if health.paused {
+        return false;
+    }
+    every_source_quiet_for(health, warn_after as f32 * 60.0)
 }
 
 /// Decide what a free-space reading means for a running meeting.
@@ -3365,10 +3404,10 @@ mod recording_writer_tests {
 mod recording_capture_health_tests {
     use super::{
         meeting_headroom_bytes, meeting_space_pressure, meeting_start_space_shortfall,
-        run_wav_writer_thread, silence_auto_stop_due, write_aligned_wav_files,
-        MeetingSpacePressure, RecordingCaptureHealth, SourceInactivity,
-        MEETING_CRITICAL_SPACE_STOP_SECONDS, MEETING_LOW_SPACE_WARN_SECONDS,
-        MEETING_START_MIN_HEADROOM_SECONDS,
+        run_wav_writer_thread, silence_auto_stop_due, silence_auto_stop_warning_due,
+        silence_auto_stop_warning_minutes, write_aligned_wav_files, MeetingSpacePressure,
+        RecordingCaptureHealth, SourceInactivity, MEETING_CRITICAL_SPACE_STOP_SECONDS,
+        MEETING_LOW_SPACE_WARN_SECONDS, MEETING_START_MIN_HEADROOM_SECONDS,
     };
     use std::sync::{Arc, Mutex};
 
@@ -3584,6 +3623,50 @@ mod recording_capture_health_tests {
         ));
         assert!(silence_auto_stop_due(
             &quiet_health(Some(1_200.0), None, 900.0),
+            15
+        ));
+    }
+
+    #[test]
+    fn a_quiet_meeting_is_warned_at_half_the_fuse_before_it_is_stopped() {
+        // 15 minutes: warn at 7, stop at 15, and the sentence can say "8 more".
+        assert_eq!(silence_auto_stop_warning_minutes(15), Some(7));
+        assert_eq!(silence_auto_stop_warning_minutes(16), Some(8));
+        // A one-minute fuse has no half worth announcing; 0 is off.
+        assert_eq!(silence_auto_stop_warning_minutes(1), None);
+        assert_eq!(silence_auto_stop_warning_minutes(0), None);
+
+        // Quiet for six minutes: nothing said yet.
+        assert!(!silence_auto_stop_warning_due(
+            &quiet_health(Some(360.0), None, 2_000.0),
+            15
+        ));
+        // Seven: warned, and still nowhere near the stop.
+        let warned = quiet_health(Some(420.0), None, 2_000.0);
+        assert!(silence_auto_stop_warning_due(&warned, 15));
+        assert!(!silence_auto_stop_due(&warned, 15));
+
+        // Me + Them: one side still talking is not a quiet meeting.
+        assert!(!silence_auto_stop_warning_due(
+            &quiet_health(Some(900.0), Some(10.0), 2_000.0),
+            15
+        ));
+        // A meeting with no measurable source is never warned.
+        assert!(!silence_auto_stop_warning_due(
+            &quiet_health(None, None, 2_000.0),
+            15
+        ));
+
+        // The same exemptions the stop has: off, paused, and just resumed.
+        assert!(!silence_auto_stop_warning_due(
+            &quiet_health(Some(9_999.0), None, 9_999.0),
+            0
+        ));
+        let mut paused = quiet_health(Some(9_999.0), None, 9_999.0);
+        paused.paused = true;
+        assert!(!silence_auto_stop_warning_due(&paused, 15));
+        assert!(!silence_auto_stop_warning_due(
+            &quiet_health(Some(1_200.0), None, 5.0),
             15
         ));
     }

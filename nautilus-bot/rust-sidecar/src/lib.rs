@@ -25219,6 +25219,7 @@ fn spawn_meeting_capture_monitor(
     tokio::spawn(async move {
         let mut writer_failure_reported = false;
         let mut low_space_reported = false;
+        let mut silence_warning_reported = false;
         loop {
             tokio::time::sleep(MEETING_CAPTURE_MONITOR_INTERVAL).await;
 
@@ -25259,20 +25260,41 @@ fn spawn_meeting_capture_monitor(
                     return;
                 }
             }
-            if audio::silence_auto_stop_due(
-                &health,
-                meetings_settings.auto_stop_after_silence_minutes,
-            ) {
+            let silence_minutes = meetings_settings.auto_stop_after_silence_minutes;
+            if audio::silence_auto_stop_due(&health, silence_minutes) {
                 auto_stop_meeting(
                     &state,
                     &handle,
                     &recording_id,
                     MeetingAutoStopReason::Silence {
-                        minutes: meetings_settings.auto_stop_after_silence_minutes,
+                        minutes: silence_minutes,
                     },
                 )
                 .await;
                 return;
+            }
+            // Said at half the fuse rather than only as the meeting ends: the
+            // threshold is a heuristic about room tone, and a quiet lecture
+            // deserves the chance to answer it while there is still a meeting
+            // to save. Re-arms whenever sound comes back, so a second quiet
+            // stretch is announced too.
+            if let Some(warn_after) = audio::silence_auto_stop_warning_minutes(silence_minutes) {
+                if audio::silence_auto_stop_warning_due(&health, silence_minutes) {
+                    if !silence_warning_reported {
+                        silence_warning_reported = true;
+                        emit_meeting_capture_warning(
+                            state.as_ref(),
+                            &handle,
+                            &recording_id,
+                            &format!(
+                                "No audio for {warn_after} minutes; Plainsong stops this meeting in {} unless sound resumes.",
+                                silence_minutes - warn_after
+                            ),
+                        );
+                    }
+                } else {
+                    silence_warning_reported = false;
+                }
             }
 
             if !writer_failure_reported {
