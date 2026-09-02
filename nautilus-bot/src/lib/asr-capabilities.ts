@@ -473,7 +473,7 @@ const ASR_MODEL_CAPABILITIES_WITHOUT_LANGUAGE_EVIDENCE: readonly Omit<
     tier: "more",
     pauseBehavior: "encoder_decoder",
     tradeoff:
-      "experimental — English is the only language verified in Plainsong, and the int4 decoders run on the CPU at roughly real time or slower (26-59 s to transcribe 44 s of speech on an M4 Pro whose CPU was shared with other builds), so a meeting can take longer to transcribe than it took to hold.",
+      "experimental — English is the only language verified in Plainsong, and the int4 decoders run on the CPU at anywhere from a quarter of real time to slower than real time depending on load (11-59 s to transcribe 44 s of speech on an M4 Pro across quiet and shared-CPU runs), so a meeting can take longer to transcribe than it took to hold.",
   },
 ];
 

@@ -1728,7 +1728,17 @@ fn runtime_diagnostics_for_provider(
                 && is_valid_onnx_artifact(&model_dir.join("decoder_step.int4.onnx"))
                 && is_valid_json_artifact(&model_dir.join("config.json"), 64)
                 && is_valid_json_artifact(&model_dir.join("tokenizer.json"), 1024);
-            let missing_files = missing_or_invalid_qwen3_asr_files(model_dir.as_path());
+            let mut missing_files = missing_or_invalid_qwen3_asr_files(model_dir.as_path());
+            // Bytes that look right are not enough: readiness follows the
+            // integrity receipts, the same rule `Qwen3AsrProvider::is_available`
+            // applies, so the diagnostics never say Ready for a swapped file.
+            let trusted = super::qwen3_asr::artifacts_trusted(model_dir.as_path());
+            if model_ready && !trusted {
+                missing_files.push(
+                    "integrity receipts for the pinned Qwen3-ASR files (not verified)".to_string(),
+                );
+            }
+            let model_ready = model_ready && trusted;
             runtime_native_model(
                 provider_available,
                 model_dir,
@@ -1736,7 +1746,7 @@ fn runtime_diagnostics_for_provider(
                 &missing_files,
                 MissingModelCopy {
                     message:
-                        "Qwen3-ASR ONNX model not downloaded. Download encoder + decoder + embed_tokens assets first.",
+                        "Qwen3-ASR model files are missing or have not passed Plainsong integrity verification.",
                     setup_action: "Re-download Qwen3-ASR ONNX assets in Settings -> ASR Models.",
                 },
                 "Qwen3-ASR native ONNX inference ready.",

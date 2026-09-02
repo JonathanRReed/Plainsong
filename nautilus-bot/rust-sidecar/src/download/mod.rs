@@ -281,6 +281,17 @@ pub(crate) fn is_diarization_model_artifact_trusted(model_id: &str, path: &Path)
         .is_some_and(|model| is_model_artifact_trusted(path, Some(model.sha256)))
 }
 
+/// Test seam: write the receipt the download path writes once a file's hash
+/// matched its pin, so a provider test can prove readiness follows the
+/// receipt rather than the bytes. Test builds use a fixed MAC key.
+#[cfg(test)]
+pub(crate) async fn record_model_integrity_receipt_for_tests(
+    path: &Path,
+    expected_sha256: &str,
+) -> Result<()> {
+    write_model_integrity_receipt(path, expected_sha256).await
+}
+
 async fn write_model_integrity_receipt(path: &Path, expected_sha256: &str) -> Result<()> {
     let receipt_path = model_integrity_receipt_path(path);
     let temp_receipt_path = path_with_suffix(&receipt_path, ".tmp");
@@ -1424,12 +1435,34 @@ impl DownloadManager {
             }
         }
 
-        // Check Qwen3-ASR models
+        // Check Qwen3-ASR models. The shipped bundle is seven flat files
+        // directly under `models/qwen3_asr` (see asr/qwen3_asr.rs), so they
+        // are summed into one entry; a subdirectory is listed as its own
+        // bundle in case a later export moves to per-model directories.
         let qwen3_dir = self.models_dir.join("qwen3_asr");
         if qwen3_dir.exists() {
+            let mut flat_size = 0u64;
+            let mut flat_files = 0usize;
+            let mut flat_modified: Option<std::time::SystemTime> = None;
             let mut entries = tokio::fs::read_dir(&qwen3_dir).await?;
             while let Some(entry) = entries.next_entry().await? {
                 let path = entry.path();
+                if path.is_file() {
+                    if is_internal_model_metadata_file(&path) {
+                        continue;
+                    }
+                    if let Ok(metadata) = entry.metadata().await {
+                        flat_size += metadata.len();
+                        flat_files += 1;
+                        if let Ok(modified) = metadata.modified() {
+                            flat_modified = Some(match flat_modified {
+                                Some(existing) if existing >= modified => existing,
+                                _ => modified,
+                            });
+                        }
+                    }
+                    continue;
+                }
                 if path.is_dir() {
                     let name = path
                         .file_name()
@@ -1463,6 +1496,15 @@ impl DownloadManager {
                         });
                     }
                 }
+            }
+            if flat_files > 0 {
+                models.push(DownloadedModel {
+                    name: "qwen3-asr-0.6b".to_string(),
+                    provider: "qwen3_asr".to_string(),
+                    path: qwen3_dir.clone(),
+                    size_bytes: flat_size,
+                    downloaded_at: flat_modified.unwrap_or_else(std::time::SystemTime::now),
+                });
             }
         }
 
@@ -2183,6 +2225,48 @@ mod tests {
         assert!(
             listed.iter().all(|model| model.provider == "parakeet"),
             "both routes report the parakeet provider"
+        );
+
+        std::fs::remove_dir_all(&models_dir).ok();
+    }
+
+    #[tokio::test]
+    async fn downloaded_model_listing_sums_the_flat_qwen3_bundle() {
+        let models_dir = std::env::temp_dir()
+            .join("plainsong-download-qwen3-listing")
+            .join(uuid::Uuid::new_v4().to_string());
+        let qwen3_dir = models_dir.join("qwen3_asr");
+        std::fs::create_dir_all(&qwen3_dir).expect("create qwen3 dir");
+        std::fs::write(qwen3_dir.join("encoder.int4.onnx"), vec![0u8; 1000]).expect("encoder");
+        std::fs::write(qwen3_dir.join("decoder_weights.int4.data"), vec![0u8; 500])
+            .expect("weights");
+        std::fs::write(qwen3_dir.join("config.json"), b"{}").expect("config");
+        std::fs::write(
+            qwen3_dir.join("config.json.plainsong-integrity"),
+            b"receipt",
+        )
+        .expect("receipt is metadata, not model footprint");
+
+        let manager = DownloadManager {
+            client: build_download_client().expect("client"),
+            models_dir: models_dir.clone(),
+        };
+        let listed = manager
+            .list_downloaded_models()
+            .await
+            .expect("listing should succeed");
+
+        let qwen3: Vec<&DownloadedModel> = listed
+            .iter()
+            .filter(|model| model.provider == "qwen3_asr")
+            .collect();
+        assert_eq!(qwen3.len(), 1, "one flat bundle entry, got {qwen3:?}");
+        assert_eq!(qwen3[0].name, "qwen3-asr-0.6b");
+        assert_eq!(qwen3[0].path, qwen3_dir);
+        assert_eq!(
+            qwen3[0].size_bytes,
+            1000 + 500 + 2,
+            "the flat files are the footprint; the receipt is not"
         );
 
         std::fs::remove_dir_all(&models_dir).ok();

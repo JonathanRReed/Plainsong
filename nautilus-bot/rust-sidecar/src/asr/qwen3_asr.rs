@@ -64,8 +64,12 @@ use super::{
 use anyhow::{Context, Result};
 use async_trait::async_trait;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 #[cfg(feature = "asr-parakeet")]
 use std::sync::{Mutex, OnceLock};
+#[cfg(feature = "asr-parakeet")]
+use std::time::{Duration, Instant};
 
 // ---------------------------------------------------------------------------
 // Model constants
@@ -92,10 +96,145 @@ const QWEN3_ASR_HOP_LENGTH: usize = 160;
 #[cfg(feature = "asr-parakeet")]
 const QWEN3_ASR_SAMPLE_RATE: u32 = 16_000;
 
-/// Maximum decoder tokens to generate (caps KV cache growth).
-/// 512 tokens is sufficient for ~60s of typical English audio.
+/// Longest stretch of audio decoded in one pass. Longer input is split at
+/// pauses (`split_audio_into_chunks`) and each piece decoded on its own, so
+/// a 10-minute dictation or a 90 s meeting chunk never runs the decoder
+/// past the regime it was validated in (the 44 s real-audio eval), and the
+/// KV cache the step loop re-copies on every token stays bounded.
 #[cfg(feature = "asr-parakeet")]
-const QWEN3_ASR_MAX_TOKENS: usize = 512;
+const QWEN3_ASR_CHUNK_SECONDS: f64 = 60.0;
+
+/// Upper bound on generated tokens per second of audio, used to size each
+/// chunk's token cap. Basis: the real-audio eval (`qwen3_asr_real_audio_eval`
+/// prints tokens and tokens/s per fixture) generates about 4 tokens per
+/// second of fluent English (`language English<asr_text>` prefix included);
+/// Chinese, Japanese and Korean tokenize near one token per character,
+/// roughly 5-6/s of speech. 12/s leaves better than 2x headroom over the
+/// densest observed output; a chunk that needs more is looping, not talking.
+#[cfg(feature = "asr-parakeet")]
+const QWEN3_ASR_MAX_TOKENS_PER_AUDIO_SECOND: f64 = 12.0;
+/// Floor so a one-word clip can still fit its language tag and marker.
+#[cfg(feature = "asr-parakeet")]
+const QWEN3_ASR_MIN_NEW_TOKENS: usize = 64;
+/// Hard ceiling regardless of chunk length (a full 60 s chunk at 12/s is 736).
+#[cfg(feature = "asr-parakeet")]
+const QWEN3_ASR_MAX_NEW_TOKENS_CEILING: usize = 1024;
+/// Wall-clock budget for decoding one chunk: 4x the chunk's own duration,
+/// at least 30 s. The shared-CPU measurement came in at 0.6-1.3x real time,
+/// so 4x is generous on a healthy machine; it is what bounds how long an
+/// abandoned request can keep the runtime mutex.
+#[cfg(feature = "asr-parakeet")]
+const QWEN3_ASR_DECODE_BUDGET_PER_AUDIO_SECOND: f64 = 4.0;
+#[cfg(feature = "asr-parakeet")]
+const QWEN3_ASR_DECODE_BUDGET_MIN_SECONDS: f64 = 30.0;
+
+/// Token cap for one chunk of `audio_seconds`, scaled with the audio and
+/// clamped to `[QWEN3_ASR_MIN_NEW_TOKENS, QWEN3_ASR_MAX_NEW_TOKENS_CEILING]`.
+#[cfg(feature = "asr-parakeet")]
+fn max_new_tokens_for_audio(audio_seconds: f64) -> usize {
+    let scaled = (audio_seconds.max(0.0) * QWEN3_ASR_MAX_TOKENS_PER_AUDIO_SECOND).ceil() as usize;
+    (scaled + 16).clamp(QWEN3_ASR_MIN_NEW_TOKENS, QWEN3_ASR_MAX_NEW_TOKENS_CEILING)
+}
+
+/// Wall-clock budget for decoding one chunk of `audio_seconds`.
+#[cfg(feature = "asr-parakeet")]
+fn decode_budget_for_audio(audio_seconds: f64) -> Duration {
+    Duration::from_secs_f64(
+        (audio_seconds.max(0.0) * QWEN3_ASR_DECODE_BUDGET_PER_AUDIO_SECOND)
+            .max(QWEN3_ASR_DECODE_BUDGET_MIN_SECONDS),
+    )
+}
+
+/// Why a decode stopped before the model finished on its own.
+#[cfg(feature = "asr-parakeet")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum DecodeStop {
+    /// The async caller dropped the request (`CancelOnDrop` fired).
+    Cancelled,
+    /// The chunk's wall-clock budget ran out.
+    DeadlineExceeded,
+    /// The token cap was reached without an end-of-speech token.
+    TokenCap,
+}
+
+/// Cooperative check run once per generated token. The blocking step loop
+/// cannot be pre-empted, so this is what turns an abandoned request or a
+/// runaway decode into a bounded return instead of a mutex held to the end.
+#[cfg(feature = "asr-parakeet")]
+fn check_decode_control(cancelled: &AtomicBool, deadline: Instant) -> Result<(), DecodeStop> {
+    if cancelled.load(Ordering::Relaxed) {
+        return Err(DecodeStop::Cancelled);
+    }
+    if Instant::now() >= deadline {
+        return Err(DecodeStop::DeadlineExceeded);
+    }
+    Ok(())
+}
+
+/// The error a stopped decode surfaces. None of these ever becomes a
+/// normal-looking transcript: a chunk that hit its cap without end-of-speech
+/// would be silently missing its tail, so it is refused outright.
+#[cfg(feature = "asr-parakeet")]
+fn decode_stop_error(
+    stop: DecodeStop,
+    generated: usize,
+    cap: usize,
+    audio_seconds: f64,
+) -> anyhow::Error {
+    match stop {
+        DecodeStop::Cancelled => anyhow::anyhow!(
+            "Qwen3-ASR decode cancelled by the caller after {generated} tokens of a {audio_seconds:.1} s chunk"
+        ),
+        DecodeStop::DeadlineExceeded => anyhow::anyhow!(
+            "Qwen3-ASR decode exceeded its {:.0} s budget for a {audio_seconds:.1} s chunk after {generated} tokens",
+            decode_budget_for_audio(audio_seconds).as_secs_f64()
+        ),
+        DecodeStop::TokenCap => anyhow::anyhow!(
+            "Qwen3-ASR hit its {cap}-token cap for a {audio_seconds:.1} s chunk before end-of-speech; refusing to return a silently truncated transcript"
+        ),
+    }
+}
+
+/// Sets the shared flag when dropped. The async `transcribe` future holds
+/// one across its `.await`, so a caller that abandons the request (the
+/// sidecar aborts a request's task when Electron gives up on it) flips the
+/// flag and the blocking step loop returns at its next token instead of
+/// holding the runtime mutex until it finishes on its own.
+struct CancelOnDrop(Arc<AtomicBool>);
+
+impl Drop for CancelOnDrop {
+    fn drop(&mut self) {
+        self.0.store(true, Ordering::Relaxed);
+    }
+}
+
+/// Split audio into pieces of at most `QWEN3_ASR_CHUNK_SECONDS`, each cut in
+/// a pause where the last few seconds of the window offer one (the same
+/// energy-based search the meeting pipeline uses), so a sentence is not
+/// severed at a fixed sample count. Covers every sample exactly once.
+#[cfg(feature = "asr-parakeet")]
+fn split_audio_into_chunks(samples: &[f32], sample_rate: u32) -> Vec<Vec<f32>> {
+    let chunk_size = ((sample_rate as f64 * QWEN3_ASR_CHUNK_SECONDS) as usize).max(1);
+    let mut chunks = Vec::new();
+    let mut offset = 0;
+    while offset < samples.len() {
+        let remaining = &samples[offset..];
+        if remaining.len() <= chunk_size {
+            chunks.push(remaining.to_vec());
+            break;
+        }
+        let window = &remaining[..chunk_size];
+        let cut = crate::vad_aligned_cut_point(window, sample_rate);
+        let cut = if cut == 0 || cut > window.len() {
+            window.len()
+        } else {
+            cut
+        };
+        chunks.push(window[..cut].to_vec());
+        offset += cut;
+    }
+    chunks
+}
 
 /// `<asr_text>`: separates the model's language tag from the transcript in
 /// its answer. `config.json` carries the id; this is the fallback when an
@@ -153,8 +292,8 @@ fn language_code_for_name(name: &str) -> String {
 /// M4 Pro with the int4 decoders on CPU (`benchmark-latency --provider
 /// qwen3_asr`, 44 s fixture, 3-run p50 on 2026-09-01). Above 1.0 means
 /// slower than real time. Provisional: the CPU was shared with other
-/// builds during the run; an uncontended run of the same fixture measured
-/// 0.58. Re-measure on a quiet machine before quoting it.
+/// builds during the run; quieter eval runs of the same fixture measured
+/// 0.58 and 0.26. Re-measure on a quiet machine before quoting it.
 const QWEN3_ASR_MEASURED_RTF: f64 = 1.33;
 
 fn qwen3_asr_artifact_max_bytes(local_name: &str) -> u64 {
@@ -232,6 +371,17 @@ fn qwen3_asr_repo_files() -> [(
             "bd2a97b55c8f7f9c328c73ee9b9178771037e9f566dfca8e238a063d41cbac92",
         ),
     ]
+}
+
+/// Whether all seven pinned files in `model_dir` pass `is_model_artifact_trusted`
+/// (the receipt the download path or the startup migration wrote after
+/// hashing them). Shared with the manager's diagnostics so both say the same.
+pub(crate) fn artifacts_trusted(model_dir: &Path) -> bool {
+    qwen3_asr_repo_files()
+        .iter()
+        .all(|(_, _, _, local_name, sha256)| {
+            crate::download::is_model_artifact_trusted(&model_dir.join(local_name), Some(sha256))
+        })
 }
 
 pub(crate) fn model_integrity_artifacts(models_root: &Path) -> Vec<(PathBuf, String)> {
@@ -407,6 +557,12 @@ fn load_embed_cache(path: &Path, config: &Qwen3AsrConfig) -> Result<ndarray::Arr
         || config.embed_tokens_dtype.eq_ignore_ascii_case("float16");
 
     if is_fp16 {
+        if bytes.len() % 2 != 0 {
+            return Err(anyhow::anyhow!(
+                "embed_tokens.bin has {} bytes, not a whole number of float16 values",
+                bytes.len()
+            ));
+        }
         let element_count = bytes.len() / 2;
         if element_count % hidden_size != 0 {
             return Err(anyhow::anyhow!(
@@ -424,6 +580,12 @@ fn load_embed_cache(path: &Path, config: &Qwen3AsrConfig) -> Result<ndarray::Arr
         ndarray::Array2::from_shape_vec((vocab_size, hidden_size), data)
             .context("Failed to shape embed_tokens matrix")
     } else {
+        if bytes.len() % 4 != 0 {
+            return Err(anyhow::anyhow!(
+                "embed_tokens.bin has {} bytes, not a whole number of float32 values",
+                bytes.len()
+            ));
+        }
         let element_count = bytes.len() / 4;
         if element_count % hidden_size != 0 {
             return Err(anyhow::anyhow!(
@@ -753,13 +915,25 @@ fn argmax_slice(logits: &ndarray::Array<f32, ndarray::IxDyn>, position: usize) -
 struct Qwen3Decoded {
     language: Option<String>,
     text: String,
+    /// Tokens the decoder generated (language tag, marker and text), summed
+    /// over chunks. The eval prints it per second of audio, which is where
+    /// `QWEN3_ASR_MAX_TOKENS_PER_AUDIO_SECOND` comes from.
+    generated_tokens: usize,
+    /// How many pieces the audio was decoded in.
+    chunks: usize,
 }
 
+/// Transcribe a file: load it (mono, 16 kHz), split it into pause-aligned
+/// chunks, and decode each with the cached runtime. The runtime mutex is
+/// held for the whole call; every chunk's step loop checks `cancelled` and
+/// its own deadline per token, so the hold is bounded even for a request
+/// nobody is waiting on any more.
 #[cfg(feature = "asr-parakeet")]
-fn run_qwen3_asr_onnx(model_dir: &Path, audio_path: &Path) -> Result<Qwen3Decoded> {
-    use ndarray::{Array1, Array2};
-    use ort::value::Tensor;
-
+fn run_qwen3_asr_onnx(
+    model_dir: &Path,
+    audio_path: &Path,
+    cancelled: &AtomicBool,
+) -> Result<Qwen3Decoded> {
     let samples = crate::audio::utils::load_audio_file(audio_path)
         .context("Failed to load audio for Qwen3-ASR")?;
 
@@ -767,28 +941,68 @@ fn run_qwen3_asr_onnx(model_dir: &Path, audio_path: &Path) -> Result<Qwen3Decode
         return Ok(Qwen3Decoded {
             language: None,
             text: String::new(),
+            generated_tokens: 0,
+            chunks: 0,
         });
     }
 
     let model_dir_key = model_dir.to_string_lossy().to_string();
-    {
-        let mut cache = runtime_cache().lock().map_err(|error| {
-            anyhow::anyhow!("Qwen3-ASR runtime cache is unavailable: {}", error)
-        })?;
-        let should_reload = cache
-            .as_ref()
-            .map(|rt| rt.model_dir_key != model_dir_key)
-            .unwrap_or(true);
-        if should_reload {
-            *cache = Some(load_runtime(model_dir)?);
-        }
-        let runtime = cache
-            .as_mut()
-            .ok_or_else(|| anyhow::anyhow!("Qwen3-ASR runtime cache unavailable"))?;
+    let mut cache = runtime_cache()
+        .lock()
+        .map_err(|error| anyhow::anyhow!("Qwen3-ASR runtime cache is unavailable: {}", error))?;
+    let should_reload = cache
+        .as_ref()
+        .map(|rt| rt.model_dir_key != model_dir_key)
+        .unwrap_or(true);
+    if should_reload {
+        *cache = Some(load_runtime(model_dir)?);
+    }
+    let runtime = cache
+        .as_mut()
+        .ok_or_else(|| anyhow::anyhow!("Qwen3-ASR runtime cache unavailable"))?;
 
+    let chunks = split_audio_into_chunks(&samples, QWEN3_ASR_SAMPLE_RATE);
+    let mut language = None;
+    let mut texts = Vec::with_capacity(chunks.len());
+    let mut generated_tokens = 0usize;
+    for chunk in &chunks {
+        let decoded = decode_chunk(runtime, chunk, cancelled)?;
+        if language.is_none() {
+            language = decoded.language;
+        }
+        generated_tokens += decoded.generated_tokens;
+        if !decoded.text.is_empty() {
+            texts.push(decoded.text);
+        }
+    }
+
+    Ok(Qwen3Decoded {
+        language,
+        text: texts.join(" "),
+        generated_tokens,
+        chunks: chunks.len(),
+    })
+}
+
+/// Decode one chunk of at most `QWEN3_ASR_CHUNK_SECONDS` of 16 kHz audio.
+#[cfg(feature = "asr-parakeet")]
+fn decode_chunk(
+    runtime: &mut Qwen3AsrRuntime,
+    samples: &[f32],
+    cancelled: &AtomicBool,
+) -> Result<Qwen3Decoded> {
+    use ndarray::{Array1, Array2};
+    use ort::value::Tensor;
+
+    let audio_seconds = samples.len() as f64 / f64::from(QWEN3_ASR_SAMPLE_RATE);
+    let cap = max_new_tokens_for_audio(audio_seconds);
+    let deadline = Instant::now() + decode_budget_for_audio(audio_seconds);
+    let mut reached_eos = false;
+
+    {
         // 1. Compute mel spectrogram
         let mel =
-            compute_log_mel_spectrogram(&samples, runtime.config.mel.fmin, runtime.config.mel.fmax)
+            compute_log_mel_spectrogram(samples, runtime.config.mel.fmin, runtime.config.mel.fmax)
                 .context("Failed to compute Qwen3-ASR mel spectrogram")?;
 
         // 2. Run encoder
@@ -913,7 +1127,16 @@ fn run_qwen3_asr_onnx(model_dir: &Path, audio_path: &Path) -> Result<Qwen3Decode
         let hidden_size = runtime.config.decoder.hidden_size;
         let mut pos = seq_len as i64;
 
-        for _ in 1..QWEN3_ASR_MAX_TOKENS {
+        for _ in 1..cap {
+            if let Err(stop) = check_decode_control(cancelled, deadline) {
+                return Err(decode_stop_error(
+                    stop,
+                    output_tokens.len(),
+                    cap,
+                    audio_seconds,
+                ));
+            }
+
             // Embedding lookup from cached table
             let token_embed = {
                 let id = current_token as usize;
@@ -980,11 +1203,21 @@ fn run_qwen3_asr_onnx(model_dir: &Path, audio_path: &Path) -> Result<Qwen3Decode
                 .eos_token_ids
                 .contains(&next_token)
             {
+                reached_eos = true;
                 break;
             }
             output_tokens.push(next_token);
             current_token = next_token;
             pos += 1;
+        }
+
+        if !reached_eos {
+            return Err(decode_stop_error(
+                DecodeStop::TokenCap,
+                output_tokens.len(),
+                cap,
+                audio_seconds,
+            ));
         }
 
         Ok(decode_generation(
@@ -1023,12 +1256,16 @@ fn decode_generation(
             text: decode_tokens(tokenizer, &token_ids[split + 1..])
                 .trim()
                 .to_string(),
+            generated_tokens: token_ids.len(),
+            chunks: 1,
         };
     }
     let raw = decode_tokens(tokenizer, token_ids);
     Qwen3Decoded {
         language: fallback_language_name(&raw),
         text: strip_language_prefix(&raw).trim().to_string(),
+        generated_tokens: token_ids.len(),
+        chunks: 1,
     }
 }
 
@@ -1043,7 +1280,11 @@ fn fallback_language_name(raw: &str) -> Option<String> {
 }
 
 #[cfg(not(feature = "asr-parakeet"))]
-fn run_qwen3_asr_onnx(_model_dir: &Path, _audio_path: &Path) -> Result<Qwen3Decoded> {
+fn run_qwen3_asr_onnx(
+    _model_dir: &Path,
+    _audio_path: &Path,
+    _cancelled: &AtomicBool,
+) -> Result<Qwen3Decoded> {
     Err(anyhow::anyhow!(
         "Qwen3-ASR ONNX support is not compiled into this build. Rebuild with the `asr-parakeet` feature."
     ))
@@ -1092,16 +1333,25 @@ pub struct Qwen3AsrProvider {
 
 impl Qwen3AsrProvider {
     pub fn new(selected_model_id: Option<&str>) -> Self {
-        let model_id = selected_model_id.unwrap_or(QWEN3_ASR_MODEL_ID).to_string();
         let root_dir = crate::paths::data_dir()
             .unwrap_or_else(|| PathBuf::from("."))
             .join("Plainsong")
             .join("models");
-        let model_dir = root_dir.join("qwen3_asr");
+        Self::with_models_root(&root_dir, selected_model_id)
+    }
+
+    pub(crate) fn with_models_root(models_root: &Path, selected_model_id: Option<&str>) -> Self {
         Self {
-            model_dir,
-            model_id,
+            model_dir: models_root.join("qwen3_asr"),
+            model_id: selected_model_id.unwrap_or(QWEN3_ASR_MODEL_ID).to_string(),
         }
+    }
+
+    /// Every pinned artifact carries a valid integrity receipt. Plausible
+    /// bytes on disk are not enough: a swapped `decoder_step.int4.onnx` of
+    /// the right size and header would otherwise run.
+    fn has_trusted_required_files(&self) -> bool {
+        artifacts_trusted(&self.model_dir)
     }
 
     fn has_required_files(&self) -> bool {
@@ -1166,13 +1416,18 @@ impl AsrProvider for Qwen3AsrProvider {
     }
 
     fn is_available(&self) -> bool {
-        self.has_required_files()
+        self.has_required_files() && self.has_trusted_required_files()
     }
 
     async fn prewarm(&self) -> Result<()> {
         if !self.has_required_files() {
             anyhow::bail!(
                 "Qwen3-ASR model is not downloaded. Use the model manager to download it."
+            );
+        }
+        if !self.has_trusted_required_files() {
+            anyhow::bail!(
+                "Qwen3-ASR model files have not passed Plainsong integrity verification. Re-download the model from Settings."
             );
         }
         let model_dir = self.model_dir.clone();
@@ -1210,16 +1465,27 @@ impl AsrProvider for Qwen3AsrProvider {
                 "Qwen3-ASR model not downloaded. Use the model manager to download it."
             ));
         }
+        if !self.has_trusted_required_files() {
+            return Err(anyhow::anyhow!(
+                "Qwen3-ASR model files have not passed Plainsong integrity verification. Re-download the model from Settings."
+            ));
+        }
 
         let start = std::time::Instant::now();
         let model_dir = self.model_dir.clone();
         let audio_for_dur = audio_path.to_path_buf();
         let audio_path_owned = audio_path.to_path_buf();
 
-        let decoded =
-            tokio::task::spawn_blocking(move || run_qwen3_asr_onnx(&model_dir, &audio_path_owned))
-                .await
-                .context("Qwen3-ASR inference task panicked")??;
+        // Dropping this future (the sidecar aborts a request's task when the
+        // caller gives up) flips the flag; the blocking decode sees it at its
+        // next token and returns, releasing the runtime for the next request.
+        let cancelled = Arc::new(AtomicBool::new(false));
+        let _cancel_guard = CancelOnDrop(Arc::clone(&cancelled));
+        let decoded = tokio::task::spawn_blocking(move || {
+            run_qwen3_asr_onnx(&model_dir, &audio_path_owned, &cancelled)
+        })
+        .await
+        .context("Qwen3-ASR inference task panicked")??;
 
         let text = decoded.text;
         let language = decoded
@@ -1400,6 +1666,217 @@ mod tests {
         );
     }
 
+    #[cfg(feature = "asr-parakeet")]
+    #[test]
+    fn token_cap_scales_with_audio_and_stays_bounded() {
+        assert_eq!(max_new_tokens_for_audio(0.0), QWEN3_ASR_MIN_NEW_TOKENS);
+        assert_eq!(max_new_tokens_for_audio(1.0), QWEN3_ASR_MIN_NEW_TOKENS);
+        // 44 s * 12/s + 16 headroom: comfortably above the ~180 tokens the
+        // eval generates for the fixture, far below the old fixed 512 for a
+        // 10-minute dictation that would have been silently cut.
+        assert_eq!(max_new_tokens_for_audio(44.0), 544);
+        assert_eq!(max_new_tokens_for_audio(60.0), 736);
+        assert_eq!(
+            max_new_tokens_for_audio(600.0),
+            QWEN3_ASR_MAX_NEW_TOKENS_CEILING
+        );
+        assert!(max_new_tokens_for_audio(f64::NAN) >= QWEN3_ASR_MIN_NEW_TOKENS);
+    }
+
+    #[cfg(feature = "asr-parakeet")]
+    #[test]
+    fn decode_budget_has_a_floor_and_scales_with_audio() {
+        assert_eq!(decode_budget_for_audio(1.0), Duration::from_secs(30));
+        assert_eq!(decode_budget_for_audio(60.0), Duration::from_secs(240));
+    }
+
+    #[cfg(feature = "asr-parakeet")]
+    #[test]
+    fn decode_control_stops_on_cancel_and_on_deadline() {
+        let flag = AtomicBool::new(false);
+        let later = Instant::now() + Duration::from_secs(60);
+        assert_eq!(check_decode_control(&flag, later), Ok(()));
+        assert_eq!(
+            check_decode_control(&flag, Instant::now() - Duration::from_millis(1)),
+            Err(DecodeStop::DeadlineExceeded)
+        );
+        flag.store(true, Ordering::Relaxed);
+        assert_eq!(
+            check_decode_control(&flag, later),
+            Err(DecodeStop::Cancelled)
+        );
+    }
+
+    #[test]
+    fn dropping_the_cancel_guard_flags_the_decode() {
+        let flag = Arc::new(AtomicBool::new(false));
+        {
+            let _guard = CancelOnDrop(Arc::clone(&flag));
+            assert!(!flag.load(Ordering::Relaxed));
+        }
+        assert!(flag.load(Ordering::Relaxed));
+    }
+
+    #[cfg(feature = "asr-parakeet")]
+    #[test]
+    fn a_decode_that_hits_its_cap_is_an_error_not_a_transcript() {
+        let message = decode_stop_error(DecodeStop::TokenCap, 544, 544, 44.0).to_string();
+        assert!(message.contains("544-token cap"), "{message}");
+        assert!(message.contains("truncated"), "{message}");
+        let message = decode_stop_error(DecodeStop::Cancelled, 12, 544, 44.0).to_string();
+        assert!(message.contains("cancelled"), "{message}");
+        let message = decode_stop_error(DecodeStop::DeadlineExceeded, 12, 544, 44.0).to_string();
+        assert!(message.contains("176 s budget"), "{message}");
+    }
+
+    #[cfg(feature = "asr-parakeet")]
+    #[test]
+    fn long_audio_splits_at_a_pause_and_covers_every_sample() {
+        let rate = QWEN3_ASR_SAMPLE_RATE;
+        let seconds = 100.0;
+        let total = (rate as f64 * seconds) as usize;
+        // A steady tone stands in for speech; half a second of silence at
+        // 55.0-55.5 s is the only pause inside the first 60 s window's
+        // 8 s search span, so the first cut must land in it.
+        let samples: Vec<f32> = (0..total)
+            .map(|i| {
+                let t = i as f64 / rate as f64;
+                if (55.0..55.5).contains(&t) {
+                    0.0
+                } else {
+                    (0.3 * (2.0 * std::f64::consts::PI * 440.0 * t).sin()) as f32
+                }
+            })
+            .collect();
+
+        let chunks = split_audio_into_chunks(&samples, rate);
+        assert_eq!(chunks.len(), 2, "100 s cuts once");
+        let first_seconds = chunks[0].len() as f64 / rate as f64;
+        assert!(
+            (55.0..=55.5).contains(&first_seconds),
+            "first cut at {first_seconds:.2} s is not inside the pause"
+        );
+        assert_eq!(chunks.iter().map(Vec::len).sum::<usize>(), total);
+        let chunk_size = (rate as f64 * QWEN3_ASR_CHUNK_SECONDS) as usize;
+        assert!(chunks.iter().all(|chunk| chunk.len() <= chunk_size));
+        assert_eq!(chunks[0].as_slice(), &samples[..chunks[0].len()]);
+
+        // A clip shorter than one window is not touched.
+        let short = vec![0.1f32; rate as usize * 5];
+        assert_eq!(split_audio_into_chunks(&short, rate), vec![short.clone()]);
+        // No pause anywhere: the cut falls back to the window boundary.
+        let tone: Vec<f32> = (0..rate as usize * 70)
+            .map(|i| {
+                (0.3 * (2.0 * std::f64::consts::PI * 440.0 * i as f64 / rate as f64).sin()) as f32
+            })
+            .collect();
+        let chunks = split_audio_into_chunks(&tone, rate);
+        assert_eq!(chunks.len(), 2);
+        assert_eq!(chunks[0].len(), chunk_size);
+    }
+
+    #[cfg(feature = "asr-parakeet")]
+    #[test]
+    fn embed_cache_rejects_a_trailing_partial_element() {
+        let config: Qwen3AsrConfig =
+            serde_json::from_str(r#"{"decoder":{"hidden_size":4},"embed_tokens_dtype":"float16"}"#)
+                .expect("config");
+        let dir = std::env::temp_dir().join(format!("qwen3-embed-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).expect("dir");
+        let path = dir.join("embed_tokens.bin");
+
+        std::fs::write(&path, vec![0u8; 2 * 4 * 3 + 1]).expect("write odd");
+        let error = load_embed_cache(&path, &config).expect_err("odd byte length");
+        assert!(error.to_string().contains("whole number"), "{error}");
+
+        std::fs::write(&path, vec![0u8; 2 * 4 * 3]).expect("write even");
+        let table = load_embed_cache(&path, &config).expect("even byte length");
+        assert_eq!(table.shape(), &[3, 4]);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Writes seven files that pass the structural check (sizes, ONNX
+    /// header bytes) but carry no integrity receipts.
+    fn write_plausible_but_unverified_artifacts(model_dir: &Path) {
+        std::fs::create_dir_all(model_dir).expect("model dir");
+        let onnx = {
+            let mut bytes = vec![0x08u8; 8192];
+            bytes[0] = 0x08;
+            bytes
+        };
+        for name in [
+            QWEN3_ASR_LOCAL_ENCODER,
+            QWEN3_ASR_LOCAL_DECODER_INIT,
+            QWEN3_ASR_LOCAL_DECODER_STEP,
+        ] {
+            std::fs::write(model_dir.join(name), &onnx).expect("write onnx");
+        }
+        std::fs::write(
+            model_dir.join(QWEN3_ASR_LOCAL_DECODER_WEIGHTS),
+            vec![1u8; 4096],
+        )
+        .expect("weights");
+        std::fs::write(
+            model_dir.join(QWEN3_ASR_LOCAL_EMBED_TOKENS),
+            vec![1u8; 4096],
+        )
+        .expect("embed");
+        std::fs::write(
+            model_dir.join(QWEN3_ASR_LOCAL_CONFIG),
+            format!(
+                "{{\"model_type\":\"qwen3_asr\",\"padding\":\"{}\"}}",
+                "x".repeat(80)
+            ),
+        )
+        .expect("config");
+        std::fs::write(model_dir.join(QWEN3_ASR_LOCAL_TOKENIZER), vec![b'{'; 4096])
+            .expect("tokenizer");
+    }
+
+    #[tokio::test]
+    async fn readiness_requires_integrity_receipts_not_just_plausible_files() {
+        let root = std::env::temp_dir().join(format!("qwen3-trust-{}", uuid::Uuid::new_v4()));
+        let provider = Qwen3AsrProvider::with_models_root(&root, None);
+        write_plausible_but_unverified_artifacts(&provider.model_dir);
+
+        assert!(provider.has_required_files(), "structure check passes");
+        assert_eq!(provider.download_status(), DownloadStatus::Downloaded);
+        assert!(!provider.is_available(), "no receipts, so not ready");
+        let error = provider
+            .prewarm()
+            .await
+            .expect_err("untrusted files must not load");
+        assert!(
+            error.to_string().contains("integrity verification"),
+            "{error}"
+        );
+
+        // The receipts the download path (or the startup migration) writes
+        // after hashing are what make the same bytes trusted.
+        for (_, _, _, local_name, sha256) in qwen3_asr_repo_files() {
+            crate::download::record_model_integrity_receipt_for_tests(
+                &provider.model_dir.join(local_name),
+                sha256,
+            )
+            .await
+            .expect("receipt");
+        }
+        assert!(provider.has_trusted_required_files());
+        assert!(provider.is_available());
+
+        // One swapped artifact breaks trust for the whole route.
+        std::fs::write(
+            provider.model_dir.join(QWEN3_ASR_LOCAL_DECODER_STEP),
+            vec![0x08u8; 8192 + 1],
+        )
+        .expect("swap decoder_step");
+        assert!(
+            !provider.is_available(),
+            "a swapped decoder_step is not trusted"
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
     #[test]
     fn language_names_map_to_codes_the_picker_understands() {
         assert_eq!(language_code_for_name("English"), "en");
@@ -1552,9 +2029,21 @@ mod tests {
         ];
         for (label, path, reference) in cases {
             let raw_started = std::time::Instant::now();
-            let raw = run_qwen3_asr_onnx(&provider.model_dir, &path).expect("raw inference");
+            let never_cancelled = AtomicBool::new(false);
+            let raw = run_qwen3_asr_onnx(&provider.model_dir, &path, &never_cancelled)
+                .expect("raw inference");
             let raw_ms = raw_started.elapsed().as_millis();
-            eprintln!("[{label}] raw ({raw_ms} ms): {raw:?}");
+            let raw_seconds = Qwen3AsrProvider::wav_duration_seconds(&path);
+            eprintln!(
+                "[{label}] raw ({raw_ms} ms, {} tokens = {:.2} tokens/s of audio, {} chunk(s)): {raw:?}",
+                raw.generated_tokens,
+                raw.generated_tokens as f64 / raw_seconds.max(0.001),
+                raw.chunks
+            );
+            assert_eq!(
+                raw.chunks, 1,
+                "[{label}] a sub-60 s fixture decodes in one chunk"
+            );
             assert_eq!(
                 raw.language.as_deref(),
                 Some("English"),
@@ -1593,6 +2082,56 @@ mod tests {
             }
         }
 
+        // Long audio takes the chunked path: the 44 s fixture twice with a
+        // second of silence between is 89 s, so it must decode as two
+        // pause-aligned chunks and still match the doubled reference.
+        {
+            let source = fixture("real-speech-44s.wav");
+            let mut reader = hound::WavReader::open(&source).expect("open fixture");
+            let spec = reader.spec();
+            let samples: Vec<i16> = reader
+                .samples::<i16>()
+                .map(|sample| sample.expect("fixture sample"))
+                .collect();
+            let doubled_path = std::env::temp_dir()
+                .join(format!("qwen3-eval-doubled-{}.wav", uuid::Uuid::new_v4()));
+            let mut writer = hound::WavWriter::create(&doubled_path, spec).expect("create wav");
+            for sample in &samples {
+                writer.write_sample(*sample).expect("write");
+            }
+            for _ in 0..spec.sample_rate {
+                writer.write_sample(0i16).expect("write silence");
+            }
+            for sample in &samples {
+                writer.write_sample(*sample).expect("write");
+            }
+            writer.finalize().expect("finalize");
+
+            let started = std::time::Instant::now();
+            let raw =
+                run_qwen3_asr_onnx(&provider.model_dir, &doubled_path, &AtomicBool::new(false))
+                    .expect("chunked inference");
+            eprintln!(
+                "[doubled 44s] ({} ms, {} chunks, {} tokens): {}",
+                started.elapsed().as_millis(),
+                raw.chunks,
+                raw.generated_tokens,
+                raw.text
+            );
+            let _ = std::fs::remove_file(&doubled_path);
+            assert_eq!(raw.chunks, 2, "89 s of audio must split into two chunks");
+            if !REAL_SPEECH_44S_REFERENCE.trim().is_empty() {
+                let doubled_reference =
+                    format!("{REAL_SPEECH_44S_REFERENCE} {REAL_SPEECH_44S_REFERENCE}");
+                let wer = word_error_rate(&doubled_reference, &raw.text);
+                eprintln!(
+                    "[doubled 44s] WER vs doubled reference: {:.1}%",
+                    wer * 100.0
+                );
+                assert!(wer <= 0.15, "[doubled 44s] WER {:.1}%", wer * 100.0);
+            }
+        }
+
         // Optional spot checks in other languages: colon-separated WAV paths
         // whose raw output (language tag + text) is printed, never asserted,
         // because they are operator-supplied and have no reference here.
@@ -1600,7 +2139,7 @@ mod tests {
             for path in extra.split(':').filter(|path| !path.is_empty()) {
                 let path = Path::new(path);
                 let started = std::time::Instant::now();
-                match run_qwen3_asr_onnx(&provider.model_dir, path) {
+                match run_qwen3_asr_onnx(&provider.model_dir, path, &AtomicBool::new(false)) {
                     Ok(raw) => eprintln!(
                         "[extra {}] raw ({} ms, {:.1} s audio): {raw:?}",
                         path.display(),

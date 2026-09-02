@@ -52,16 +52,18 @@ whisper.cpp `base.en`:
 
 | Fixture | WER | Wall time (p50) | RTF | Language tag |
 |---|---|---|---|---|
-| `real-speech-44s.wav` (44.0 s) | 3.7% vs Parakeet (0.0% vs whisper.cpp base.en; the two references disagree with each other by 3.7%) | 26-59 s | 0.6-1.3× (provisional) | English |
-| `local-quality-gate.wav` (5.3 s) | 0.0% vs both | 1.4-1.7 s | 0.3× | English |
+| `real-speech-44s.wav` (44.0 s) | 3.7% vs Parakeet (0.0% vs whisper.cpp base.en; the two references disagree with each other by 3.7%) | 11-59 s | 0.26-1.3× (provisional) | English |
+| `local-quality-gate.wav` (5.3 s) | 0.0% vs both | 0.8-1.7 s | 0.15-0.3× | English |
+| `real-speech-44s.wav` twice, 1 s gap (89 s; exercises the chunked path) | 5.2% vs the doubled reference | 99 s | 1.1× | English (2 chunks) |
 
-Latency is provisional: every timed run shared the M4 Pro's CPU with
-other lanes' builds and benchmarks (load average 16-32 during the
-receipt). The `benchmark-latency` receipt's 3-run p50 for the 44 s
-fixture was 58.7 s (samples 35.7 s, 220.6 s, 58.7 s); the eval test's
-earlier run of the same fixture took 25.6 s. Re-measure on a quiet
-machine before quoting a single number; the route copy states the
-range.
+Latency is provisional: the timed runs ranged from a quiet machine to
+one shared with other lanes' builds and benchmarks (load average 16-32
+during the receipt). The `benchmark-latency` receipt's 3-run p50 for the
+44 s fixture was 58.7 s (samples 35.7 s, 220.6 s, 58.7 s); eval-test
+runs of the same fixture took 25.6 s and, on a quieter machine, 11.4 s
+(3.7 generated tokens per second of audio). Re-measure with a receipt on
+a quiet machine before quoting a single number; the route copy states
+the range.
 
 Output is punctuated and cased. Chinese, Japanese and Korean were
 spot-checked with macOS TTS clips (language tag and script correct); that
