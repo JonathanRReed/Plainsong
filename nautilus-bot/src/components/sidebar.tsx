@@ -37,6 +37,11 @@ import { useRecording } from "@/hooks/use-recording";
 import { useProductReadinessStatus } from "@/features/readiness/product-readiness-context";
 import { selectReadinessForSurface } from "@/features/readiness/product-readiness";
 import { requestReadinessDestination } from "@/lib/navigation";
+import {
+  describeAnalysisDestination,
+  isKnownAnalysisProvider,
+  isRemoteAnalysisProvider,
+} from "@/components/models/ai-lanes";
 
 interface SidebarProps {
   activeView: string;
@@ -100,13 +105,15 @@ const UNKNOWN_LOCAL_MODE_STATUS: LocalModeStatus = {
   detail: "Couldn't read privacy settings, so the processing mode is unknown.",
 };
 
-// The only analysis provider that runs on this machine. Everything else in
-// AnalysisProvider is a network call.
-const LOCAL_ANALYSIS_PROVIDER = "ollama";
-
 // Two lanes now choose an analysis provider — dictation cleanup and meeting
 // analysis — and either one leaving the machine is enough to break a "Local
 // only" claim, so the chip has to look at both.
+//
+// This asks `isRemoteAnalysisProvider` rather than comparing against Ollama.
+// It used to be `provider !== "ollama"`, which was true while Ollama was the
+// only local route; with the built-in model and Apple's on-device model that
+// test would report "Cloud Enabled · dictation cleanup uses 'bundled_local'"
+// for a provider that has no network path at all.
 function deriveLocalModeStatus(
   dictationProvider: string | undefined,
   meetingsProvider: string | undefined,
@@ -120,24 +127,29 @@ function deriveLocalModeStatus(
     };
   }
 
-  // A missing lane means the settings payload isn't the shape we understand.
-  // Guessing "Local" would be a privacy promise we can't verify and guessing
-  // "Cloud" would smear a provider that may well be local, so refuse to
-  // answer instead of asserting either.
-  if (!dictationProvider || !meetingsProvider) {
+  // A missing or unrecognized lane means the settings payload isn't the shape
+  // we understand. Guessing "Local" would be a privacy promise we can't verify
+  // and guessing "Cloud" would smear a provider that may well be local, so
+  // refuse to answer instead of asserting either.
+  if (
+    !isKnownAnalysisProvider(dictationProvider) ||
+    !isKnownAnalysisProvider(meetingsProvider)
+  ) {
     return UNKNOWN_LOCAL_MODE_STATUS;
   }
 
   const remoteLanes = [
     { label: "dictation cleanup", provider: dictationProvider },
     { label: "meeting summaries", provider: meetingsProvider },
-  ].filter((lane) => lane.provider !== LOCAL_ANALYSIS_PROVIDER);
+  ].filter((lane) => isRemoteAnalysisProvider(lane.provider));
 
   if (remoteLanes.length === 0) {
     return {
       active: true,
       label: "Local only",
-      detail: "Both analysis lanes run locally (Ollama).",
+      detail: `Both analysis lanes run on this Mac: dictation cleanup on ${describeAnalysisDestination(
+        dictationProvider
+      )}, meeting summaries on ${describeAnalysisDestination(meetingsProvider)}.`,
     };
   }
 

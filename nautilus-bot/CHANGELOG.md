@@ -45,6 +45,30 @@ evidence is stale and must be recaptured before this becomes a candidate.
   own copy says so. Audio longer than 60 s is decoded in pause-aligned
   chunks, and a decode that would come back truncated is refused.
 
+- **Dictation cleanup now works out of the box.** Smart Format used to need
+  Ollama installed or a cloud key pasted, so on a fresh install it simply
+  never ran. A new "Built-in (no setup)" route downloads S1-mini by
+  Superwhisper once (473 MiB, verified against a checksum pinned in the app)
+  and then runs it inside Plainsong with no server, no account and no
+  network. It removes fillers, resolves false starts, punctuates, and writes
+  spoken numbers, dates and email addresses in written form — English only.
+  It is the default for the dictation lane on new installs; anyone who
+  already chose Ollama or a cloud provider keeps that choice. Models shows
+  its size and a Delete action.
+  It is deliberately not offered for meeting notes: it is a text normalizer,
+  not an assistant, and its own model card says it will not follow general
+  instructions. Custom modes and dictation commands fall back to
+  Plainsong's built-in text transforms while this route is selected, and
+  the picker says so.
+- **Apple's on-device model is selectable for dictation cleanup on macOS 26
+  and newer.** Nothing to download: it uses the model Apple Intelligence
+  already ships, through a small Plainsong helper with no network client and
+  no entitlements. Availability is probed at launch and the Models screen
+  says which of "this Mac can't", "Apple Intelligence is off" and "it is
+  still downloading" applies, rather than only "not available". Also
+  dictation-only — its 4,096-token window is shared between the prompt and
+  the answer.
+
 ### Changed
 - **The macOS sidecar now ships Candle's Metal backend** (`candle-metal`),
   so the Distil-Whisper and Whisper large-v3-turbo providers run on the GPU

@@ -9,6 +9,10 @@ import type { ProductReadinessSnapshot } from "@/features/readiness/product-read
 const getAsrProviderInventoryMock = vi.fn();
 const listDownloadedModelsMock = vi.fn();
 const downloadAsrModelsMock = vi.fn();
+const getBundledCleanupModelStatusMock = vi.fn();
+const downloadBundledCleanupModelMock = vi.fn();
+const deleteBundledCleanupModelMock = vi.fn();
+const getAppleLanguageModelAvailabilityMock = vi.fn();
 const readinessContext = vi.hoisted(() => ({
   refresh: vi.fn(async () => {}),
   productReadiness: {
@@ -36,9 +40,39 @@ vi.mock("@/lib/backend/asr", () => ({
     downloadAsrModelsMock(providerType, modelId),
 }));
 
+vi.mock("@/lib/backend/ai", () => ({
+  getBundledCleanupModelStatus: () => getBundledCleanupModelStatusMock(),
+  downloadBundledCleanupModel: () => downloadBundledCleanupModelMock(),
+  deleteBundledCleanupModel: () => deleteBundledCleanupModelMock(),
+  getAppleLanguageModelAvailability: (refresh: boolean) =>
+    getAppleLanguageModelAvailabilityMock(refresh),
+}));
+
 vi.mock("@/lib/electron", () => ({
   listen: vi.fn(async () => () => {}),
 }));
+
+const BUNDLED_STATUS = {
+  provider: "bundled_local",
+  modelId: "s1-mini",
+  displayName: "S1-mini",
+  vendor: "Superwhisper",
+  downloadBytes: 495_654_965,
+  bytesOnDisk: 0,
+  ready: false,
+  missingFiles: ["s1-mini-q4_k_m.gguf"],
+  path: "/models/bundled_cleanup",
+};
+
+const APPLE_AVAILABILITY = {
+  provider: "apple_language_model",
+  displayName: "Apple on-device model",
+  available: false,
+  reason: "apple_intelligence_not_enabled",
+  detail:
+    "Apple Intelligence is turned off. Turn it on in System Settings to use the Apple on-device model.",
+  operatingSystemVersion: "27.0.0",
+};
 
 const WHISPER_MODEL_OPTIONS = [
   { id: "tiny", label: "tiny (fastest)" },
@@ -214,6 +248,77 @@ describe("Models screen", () => {
       },
     ]);
     downloadAsrModelsMock.mockResolvedValue(undefined);
+    getBundledCleanupModelStatusMock.mockResolvedValue(BUNDLED_STATUS);
+    downloadBundledCleanupModelMock.mockResolvedValue({
+      ...BUNDLED_STATUS,
+      ready: true,
+      bytesOnDisk: 495_654_965,
+      missingFiles: [],
+    });
+    deleteBundledCleanupModelMock.mockResolvedValue(BUNDLED_STATUS);
+    getAppleLanguageModelAvailabilityMock.mockResolvedValue(APPLE_AVAILABILITY);
+  });
+
+  it("never offers a dictation-only provider for meeting notes", async () => {
+    // Both on-device providers refuse meeting work in the sidecar. Offering
+    // them here would only be a way to choose a guaranteed failure.
+    render(<Harness />);
+
+    const meetingsPicker = (await screen.findByLabelText(
+      "Who writes summaries, answers, and actions",
+    )) as HTMLSelectElement;
+    const values = [...meetingsPicker.options].map((option) => option.value);
+    expect(values).not.toContain("bundled_local");
+    expect(values).not.toContain("apple_language_model");
+
+    const dictationPicker = screen.getByLabelText(
+      "Who cleans up dictation",
+    ) as HTMLSelectElement;
+    expect([...dictationPicker.options].map((option) => option.value)).toContain(
+      "bundled_local",
+    );
+  });
+
+  it("offers the built-in model's download, with its size and what it cannot do", async () => {
+    const settings = settingsFixture();
+    settings.privacy.dictationAi = { provider: "bundled_local", modelId: null };
+    render(<Harness initial={settings} />);
+
+    const row = await screen.findByRole("region", {
+      name: "Built-in dictation cleanup model",
+    });
+    expect(row.textContent).toContain("S1-mini by Superwhisper");
+    expect(row.textContent).toContain("473 MiB to download");
+    expect(row.textContent).toContain("does not summarize");
+
+    fireEvent.click(within(row).getByRole("button", { name: "Download" }));
+    await waitFor(() =>
+      expect(downloadBundledCleanupModelMock).toHaveBeenCalledTimes(1),
+    );
+    await waitFor(() =>
+      expect(within(row).getByRole("button", { name: "Delete" })).toBeTruthy(),
+    );
+  });
+
+  it("says why Apple's on-device model is unavailable rather than only that it is", async () => {
+    const settings = settingsFixture();
+    settings.privacy.dictationAi = {
+      provider: "apple_language_model",
+      modelId: null,
+    };
+    render(<Harness initial={settings} />);
+
+    const row = await screen.findByRole("region", {
+      name: "Apple on-device model",
+    });
+    await waitFor(() =>
+      expect(row.textContent).toContain("Apple Intelligence is turned off"),
+    );
+
+    fireEvent.click(within(row).getByRole("button", { name: "Check again" }));
+    await waitFor(() =>
+      expect(getAppleLanguageModelAvailabilityMock).toHaveBeenCalledWith(true),
+    );
   });
 
   it("shows one row per task and a measured disk total", async () => {

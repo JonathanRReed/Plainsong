@@ -2495,6 +2495,21 @@ function AiNotesStep({
         route you choose. Capture and the transcript never depend on it.
       </p>
 
+      {/*
+        Dictation cleanup is a different lane with a different answer, and
+        saying so here stops the most common misreading of this step: that
+        picking "Transcripts only" also turns dictation cleanup off. The
+        built-in model ships as the default for that lane and needs nothing
+        from this screen -- but it is a normalizer, so it is not one of the
+        three answers below.
+      */}
+      <p className="text-sm text-muted-foreground">
+        Dictation cleanup is separate. It uses a small built-in model that runs
+        on this Mac with nothing to install — it tidies punctuation, fillers and
+        spoken numbers, but it cannot write meeting notes. Change either lane
+        later in Models.
+      </p>
+
       <div
         className="space-y-2"
         role="radiogroup"

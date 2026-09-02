@@ -1136,6 +1136,66 @@ export async function downloadSileroVadModel(): Promise<void> {
   await invoke("download_silero_vad_model");
 }
 
+/**
+ * Readiness of the bundled zero-setup dictation cleanup model.
+ *
+ * `ready` is "every pinned file carries a trusted integrity receipt", not
+ * "the files are on disk" -- the sidecar refuses to load weights it cannot
+ * vouch for, so anything weaker here would show a green row for a model that
+ * will not run.
+ */
+export interface BundledCleanupModelStatus {
+  provider: string;
+  modelId: string;
+  /** License-required name: "S1-mini" by "Superwhisper". */
+  displayName: string;
+  vendor: string;
+  /** Total bytes the download will fetch. */
+  downloadBytes: number;
+  /** Bytes currently on disk, whether or not they verify. */
+  bytesOnDisk: number;
+  ready: boolean;
+  /** Pinned files that are missing or failed verification. */
+  missingFiles: string[];
+  path: string;
+}
+
+export async function getBundledCleanupModelStatus(): Promise<BundledCleanupModelStatus> {
+  return await invoke("get_bundled_cleanup_model_status");
+}
+
+export async function downloadBundledCleanupModel(): Promise<BundledCleanupModelStatus> {
+  return await invoke("download_bundled_cleanup_model");
+}
+
+export async function deleteBundledCleanupModel(): Promise<BundledCleanupModelStatus> {
+  return await invoke("delete_bundled_cleanup_model");
+}
+
+/**
+ * Whether Apple's on-device model can run here.
+ *
+ * Probed once at sidecar startup and cached, because the answer only changes
+ * when the user flips a System Settings switch or an OS model download
+ * finishes. Pass `refresh` after sending someone to System Settings.
+ */
+export interface AppleLanguageModelAvailability {
+  provider: string;
+  displayName: string;
+  available: boolean;
+  /** Machine-readable reason when unavailable. */
+  reason: string | null;
+  /** One sentence the user can act on when unavailable. */
+  detail: string | null;
+  operatingSystemVersion: string | null;
+}
+
+export async function getAppleLanguageModelAvailability(
+  refresh = false,
+): Promise<AppleLanguageModelAvailability> {
+  return await invoke("get_apple_language_model_availability", { refresh });
+}
+
 export async function getSpeakers(recordingId: string): Promise<Speaker[]> {
   return await invoke("get_speakers", { recordingId });
 }

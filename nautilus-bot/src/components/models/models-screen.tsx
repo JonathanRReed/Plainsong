@@ -10,6 +10,14 @@ import {
   getAsrProviderInventory,
   listDownloadedModels,
 } from "@/lib/backend/asr";
+import {
+  deleteBundledCleanupModel,
+  downloadBundledCleanupModel,
+  getAppleLanguageModelAvailability,
+  getBundledCleanupModelStatus,
+  type AppleLanguageModelAvailability,
+  type BundledCleanupModelStatus,
+} from "@/lib/backend/ai";
 import { listen } from "@/lib/electron";
 import type { AsrProviderInventory } from "@/types";
 import type { Settings } from "@/types/settings";
@@ -38,6 +46,10 @@ import {
 import { MoreModelsDrawer } from "@/components/models/more-models-drawer";
 import { PresetPicker } from "@/components/models/preset-picker";
 import { SpeechLaneRow } from "@/components/models/speech-lane-row";
+import {
+  AppleLanguageModelRow,
+  BundledCleanupModelRow,
+} from "@/components/models/zero-setup-model-row";
 import { useProductReadinessStatus } from "@/features/readiness/product-readiness-context";
 import { selectReadinessForSurface } from "@/features/readiness/product-readiness";
 
@@ -67,7 +79,7 @@ const AI_LANE_COPY: Record<AiLaneKey, { label: string; help: string }> = {
   },
   dictationAi: {
     label: "Who cleans up dictation",
-    help: "Runs on every capture behind a short timeout, so a smaller, faster model usually wins here. A dictation mode that carries its own AI provider overrides this while that mode is selected.",
+    help: "Runs on every capture behind a short timeout, so a smaller, faster model usually wins here. Built-in needs nothing installed; Ollama and the cloud providers can also run custom modes and dictation commands. A dictation mode that carries its own AI provider overrides this while that mode is selected.",
   },
 };
 
@@ -95,6 +107,14 @@ export function ModelsScreen({
     null,
   );
   const [busyRouteId, setBusyRouteId] = useState<string | null>(null);
+  const [bundledStatus, setBundledStatus] =
+    useState<BundledCleanupModelStatus | null>(null);
+  const [bundledBusy, setBundledBusy] = useState(false);
+  const [bundledProgress, setBundledProgress] = useState<number | null>(null);
+  const [bundledError, setBundledError] = useState<string | null>(null);
+  const [appleAvailability, setAppleAvailability] =
+    useState<AppleLanguageModelAvailability | null>(null);
+  const [appleChecking, setAppleChecking] = useState(false);
   const [actionError, setActionError] = useState<string | null>(null);
   const [drawerOpen, setDrawerOpen] = useState(false);
   const mountedRef = useRef(true);
@@ -127,13 +147,136 @@ export function ModelsScreen({
     }
   }, []);
 
+  // Both zero-setup providers answer a cheap, local question, so they are
+  // read on mount rather than only when their row is on screen: the picker
+  // has to be able to say "Not available" the moment someone selects one.
+  const refreshBundledStatus = useCallback(async () => {
+    try {
+      const status = await getBundledCleanupModelStatus();
+      if (mountedRef.current) {
+        setBundledStatus(status);
+      }
+    } catch (error) {
+      // No measured state is better than an invented one.
+      console.warn("Failed to read the built-in cleanup model state:", error);
+      if (mountedRef.current) {
+        setBundledStatus(null);
+      }
+    }
+  }, []);
+
+  const refreshAppleAvailability = useCallback(async (force = false) => {
+    setAppleChecking(true);
+    try {
+      const availability = await getAppleLanguageModelAvailability(force);
+      if (mountedRef.current) {
+        setAppleAvailability(availability);
+      }
+    } catch (error) {
+      console.warn("Failed to probe the Apple on-device model:", error);
+      if (mountedRef.current) {
+        setAppleAvailability(null);
+      }
+    } finally {
+      if (mountedRef.current) {
+        setAppleChecking(false);
+      }
+    }
+  }, []);
+
   useEffect(() => {
     mountedRef.current = true;
     void refresh();
+    void refreshBundledStatus();
+    void refreshAppleAvailability();
     return () => {
       mountedRef.current = false;
     };
-  }, [refresh]);
+  }, [refresh, refreshBundledStatus, refreshAppleAvailability]);
+
+  // The sidecar emits weighted 0..100 progress across all four pinned files
+  // while `download_bundled_cleanup_model` runs. Without this the button can
+  // only say "Downloading…" for the whole ~484 MB, which reads as a hang.
+  useEffect(() => {
+    let disposed = false;
+    let unlisten: (() => void) | undefined;
+
+    void listen("model-download-progress", (payload) => {
+      if (disposed) {
+        return;
+      }
+      const update = payload as { modelName?: string; percentage?: number };
+      if (update?.modelName !== "bundled_cleanup") {
+        return;
+      }
+      if (typeof update.percentage === "number") {
+        setBundledProgress(update.percentage);
+      }
+    })
+      .then((dispose) => {
+        if (disposed) {
+          dispose?.();
+          return;
+        }
+        unlisten = dispose;
+      })
+      .catch((error) => {
+        console.warn("Failed to subscribe to model-download-progress:", error);
+      });
+
+    return () => {
+      disposed = true;
+      unlisten?.();
+    };
+  }, []);
+
+  const handleBundledDownload = useCallback(async () => {
+    setBundledBusy(true);
+    setBundledProgress(null);
+    setBundledError(null);
+    try {
+      const status = await downloadBundledCleanupModel();
+      if (mountedRef.current) {
+        setBundledStatus(status);
+      }
+    } catch (error) {
+      if (mountedRef.current) {
+        setBundledError(
+          error instanceof Error
+            ? error.message
+            : "The download did not finish.",
+        );
+      }
+      void refreshBundledStatus();
+    } finally {
+      if (mountedRef.current) {
+        setBundledBusy(false);
+        setBundledProgress(null);
+      }
+    }
+  }, [refreshBundledStatus]);
+
+  const handleBundledDelete = useCallback(async () => {
+    setBundledBusy(true);
+    setBundledError(null);
+    try {
+      const status = await deleteBundledCleanupModel();
+      if (mountedRef.current) {
+        setBundledStatus(status);
+      }
+    } catch (error) {
+      if (mountedRef.current) {
+        setBundledError(
+          error instanceof Error ? error.message : "Could not delete it.",
+        );
+      }
+      void refreshBundledStatus();
+    } finally {
+      if (mountedRef.current) {
+        setBundledBusy(false);
+      }
+    }
+  }, [refreshBundledStatus]);
 
   // The sidecar applies each provider's model map while it saves, so download
   // state only becomes true after the write lands. Re-reading on the broadcast
@@ -485,6 +628,25 @@ export function ModelsScreen({
                 modelsLoading={aiModelsLoading}
                 onProviderChange={onAiProviderChange}
                 onModelChange={onAiModelChange}
+                zeroSetupSlot={
+                  settings.privacy[lane].provider === "bundled_local" ? (
+                    <BundledCleanupModelRow
+                      status={bundledStatus}
+                      busy={bundledBusy}
+                      progressPercent={bundledProgress}
+                      error={bundledError}
+                      onDownload={() => void handleBundledDownload()}
+                      onDelete={() => void handleBundledDelete()}
+                    />
+                  ) : settings.privacy[lane].provider ===
+                    "apple_language_model" ? (
+                    <AppleLanguageModelRow
+                      availability={appleAvailability}
+                      checking={appleChecking}
+                      onRecheck={() => void refreshAppleAvailability(true)}
+                    />
+                  ) : null
+                }
               />
             </div>
           ))}
