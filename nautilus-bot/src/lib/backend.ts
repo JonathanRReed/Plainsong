@@ -1286,6 +1286,20 @@ export interface BundledCleanupModelStatus {
   /** Pinned files that are missing or failed verification. */
   missingFiles: string[];
   path: string;
+  /**
+   * Which backend a cleanup would actually run on: "metal", "cpu", or
+   * "unavailable" in a build without the local runtime. Probed without
+   * loading the weights.
+   */
+  backend: string;
+  /**
+   * Whether that backend can finish a long dictation inside the pre-insert
+   * budget. False on CPU, where a 200-word dictation measured 11-13 s against
+   * a 6 s budget — "downloaded" and "usable here" are different questions.
+   */
+  backendMeetsBudget: boolean;
+  /** Roughly what the model holds in memory while it is loaded. */
+  residentBytes: number;
 }
 
 export async function getBundledCleanupModelStatus(): Promise<BundledCleanupModelStatus> {

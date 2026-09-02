@@ -14284,6 +14284,7 @@ fn bundled_cleanup_model_status() -> serde_json::Value {
         .unwrap_or_default();
     let dir = llm::bundled_local::model_dir(&models_root);
     let missing = llm::bundled_local::untrusted_artifacts(&dir);
+    let backend = llm::bundled_local::available_backend();
     serde_json::json!({
         "provider": llm::bundled_local::PROVIDER_SETTINGS_VALUE,
         "modelId": llm::bundled_local::MODEL_ID,
@@ -14294,6 +14295,14 @@ fn bundled_cleanup_model_status() -> serde_json::Value {
         "ready": missing.is_empty(),
         "missingFiles": missing,
         "path": dir.to_string_lossy(),
+        // Which backend a cleanup would actually run on, and whether that
+        // backend can meet the pre-insert budget. "Downloaded" and "usable"
+        // are different questions here: on CPU a 200-word dictation takes
+        // 11-13 s against a 6 s budget, so the Models screen has to say so
+        // rather than let the user discover it as a recurring warning.
+        "backend": backend,
+        "backendMeetsBudget": llm::bundled_local::backend_meets_dictation_budget(backend),
+        "residentBytes": llm::bundled_local::RESIDENT_BYTES,
     })
 }
 

@@ -256,6 +256,15 @@ evidence is stale and must be recaptured before this becomes a candidate.
   files that still carry it load cleanly and are rewritten without it.
 
 ### Fixed
+- The Models screen now says which processor the built-in cleanup model runs
+  on, and Plainsong no longer starts a new install on that route where it
+  would be too slow. On a Mac that falls back to the CPU a 200-word dictation
+  takes 11 to 13 seconds against a six-second limit, so the row says so and
+  the dictation lane starts on Ollama instead; choosing the built-in model
+  there is still yours to make.
+- The Apple on-device model row says "Still downloading" while Apple
+  Intelligence is fetching its model, instead of "Not available" — a wait,
+  not a verdict about this Mac.
 - A dictation cleanup that runs past its time limit now stops within a
   token instead of running to the end of its budget. The built-in model
   (S1-mini by Superwhisper) is held behind one lock, so an abandoned cleanup

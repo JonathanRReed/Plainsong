@@ -67,6 +67,14 @@ pub const MODEL_VENDOR: &str = "Superwhisper";
 /// Directory under the models root that holds the bundled cleanup model.
 pub const MODEL_DIR_NAME: &str = "bundled_cleanup";
 
+/// Roughly what the loaded model holds in memory: the Q4 weights themselves,
+/// plus a KV cache that is cleared between requests and small next to them.
+///
+/// Quoted in the Models screen because keeping a model warm is a real cost the
+/// user is entitled to know about before choosing this route, and because the
+/// keep-warm switch is what decides whether it stays paid between dictations.
+pub const RESIDENT_BYTES: u64 = 484_219_808;
+
 /// The system prompt, verbatim from the model card. Changing a single word
 /// of this is a documented way to make the model hallucinate: it is part of
 /// the input format it was trained on, not an instruction we author.
@@ -199,6 +207,39 @@ pub fn build_prompt(control: StyleControl, transcript: &str) -> String {
 pub fn max_new_tokens_for_input(input_tokens: usize) -> usize {
     let scaled = input_tokens.saturating_mul(6) / 5;
     scaled.saturating_add(32).clamp(32, MAX_OUTPUT_TOKENS)
+}
+
+// ---------------------------------------------------------------------------
+// Backend
+// ---------------------------------------------------------------------------
+
+/// The GPU path. The only configuration this route can meet its budget on.
+pub const BACKEND_METAL: &str = "metal";
+
+/// The fallback path: correct, and too slow for a long dictation.
+pub const BACKEND_CPU: &str = "cpu";
+
+/// A build without the `local-llm` feature has no backend at all.
+pub const BACKEND_UNAVAILABLE: &str = "unavailable";
+
+/// Whether this backend can clean up a long dictation inside the pre-insert
+/// budget.
+///
+/// Measured on an M4 Pro (`artifacts/qa/bundled-cleanup-receipt-2026-09-02.md`)
+/// against the 6 s `DICTATION_FORMAT_TIMEOUT_LOCAL`:
+///
+/// | backend | 59 words | 199 words |
+/// |---|---|---|
+/// | metal | 414 ms p50 | 1.82 s p50 |
+/// | cpu | 4.85 s p50 | **11.26 s p50 / 13.42 s p95** |
+///
+/// So on CPU a 200-word dictation misses the budget every time and the user
+/// gets their unmodified text plus a "took too long" warning on every long
+/// capture. Metal is not an optimization for this route; it is the thing that
+/// makes it usable, which is why this answer -- not just "the model is
+/// downloaded" -- decides whether the route may be chosen for someone.
+pub fn backend_meets_dictation_budget(backend: &str) -> bool {
+    backend == BACKEND_METAL
 }
 
 // ---------------------------------------------------------------------------
@@ -601,7 +642,7 @@ mod runtime {
         #[cfg(feature = "candle-metal")]
         {
             match Device::new_metal(0) {
-                Ok(device) => return (device, "metal"),
+                Ok(device) => return (device, BACKEND_METAL),
                 Err(error) => {
                     tracing::warn!(
                         "Metal device unavailable for the bundled cleanup model, using CPU: {error}"
@@ -609,7 +650,32 @@ mod runtime {
                 }
             }
         }
-        (Device::Cpu, "cpu")
+        (Device::Cpu, BACKEND_CPU)
+    }
+
+    /// Which backend a cleanup would run on, without loading 484 MB to find
+    /// out.
+    ///
+    /// A resident model answers for itself; otherwise the device selection is
+    /// run once and cached. The Models screen and the settings default both
+    /// need this answer before any cleanup has happened, because the honest
+    /// version of "no setup" depends on it: on CPU this route misses its
+    /// budget on long dictations (measured 11.3 s p50 / 13.4 s p95 for 199
+    /// words against a 6 s budget -- `artifacts/qa/bundled-cleanup-receipt-2026-09-02.md`).
+    pub fn available_backend() -> &'static str {
+        if let Some(existing) = resident()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .as_ref()
+        {
+            return existing.backend;
+        }
+        static PROBED: OnceLock<&'static str> = OnceLock::new();
+        PROBED.get_or_init(|| {
+            let (device, backend) = select_device();
+            drop(device);
+            backend
+        })
     }
 
     fn load(model_dir: &Path) -> Result<Resident> {
@@ -810,7 +876,7 @@ mod runtime {
 }
 
 #[cfg(feature = "local-llm")]
-pub use runtime::clear_cached_runtime;
+pub use runtime::{available_backend, clear_cached_runtime};
 
 /// Load the model now so the next dictation does not pay for it. Returns the
 /// backend name ("metal"/"cpu") it warmed.
@@ -822,6 +888,14 @@ pub fn prewarm(models_root: &Path) -> anyhow::Result<&'static str> {
 #[cfg(not(feature = "local-llm"))]
 pub fn prewarm(_models_root: &Path) -> anyhow::Result<&'static str> {
     Err(anyhow::anyhow!(BUILD_WITHOUT_LOCAL_LLM))
+}
+
+/// A build without the runtime has no backend to report. Kept as a function
+/// (rather than the caller branching on the feature) so every surface asks the
+/// same question.
+#[cfg(not(feature = "local-llm"))]
+pub fn available_backend() -> &'static str {
+    BACKEND_UNAVAILABLE
 }
 
 /// What a build without the `local-llm` feature tells the user. It is a build
@@ -1521,6 +1595,28 @@ mod tests {
         if std::env::var("PLAINSONG_BUNDLED_CLEANUP_EVAL_ROOT").is_err() {
             std::fs::remove_dir_all(&models_root).ok();
         }
+    }
+
+    /// The measured reason this answer exists: on CPU a 199-word dictation
+    /// took 11.26 s p50 / 13.42 s p95 against a 6 s budget, so "the model is
+    /// downloaded" is not the same question as "this route works here".
+    #[test]
+    fn only_metal_is_treated_as_fast_enough_for_the_budget() {
+        assert!(backend_meets_dictation_budget(BACKEND_METAL));
+        assert!(!backend_meets_dictation_budget(BACKEND_CPU));
+        assert!(!backend_meets_dictation_budget(BACKEND_UNAVAILABLE));
+        // An unrecognized backend is not a promise we can make.
+        assert!(!backend_meets_dictation_budget("cuda"));
+        assert!(!backend_meets_dictation_budget(""));
+    }
+
+    #[test]
+    fn the_reported_backend_is_one_of_the_three_known_answers() {
+        let backend = available_backend();
+        assert!(
+            [BACKEND_METAL, BACKEND_CPU, BACKEND_UNAVAILABLE].contains(&backend),
+            "unexpected backend {backend:?}"
+        );
     }
 
     #[test]

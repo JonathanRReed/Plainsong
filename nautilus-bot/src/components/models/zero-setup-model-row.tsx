@@ -23,6 +23,39 @@ const BUNDLED_CLEANUP_WHAT_IT_DOES =
 const BUNDLED_CLEANUP_WHAT_IT_CANNOT_DO =
   "It does not summarize, answer questions, or follow a custom prompt, so meeting notes, custom modes and dictation commands need Ollama or a cloud provider.";
 
+/**
+ * What the machine underneath actually delivers.
+ *
+ * Measured on an M4 Pro (artifacts/qa/bundled-cleanup-receipt-2026-09-02.md):
+ * on the GPU a 200-word dictation cleans up in 1.8 s, on the CPU in 11-13 s
+ * against a 6 second limit. That is not a footnote — on CPU every long
+ * dictation ends in a "took too long" warning and the unedited text — so the
+ * row says it here rather than letting the user learn it one warning at a
+ * time. The sidecar reports the backend it would actually use, probed without
+ * loading the weights.
+ */
+function describeBackend(status: BundledCleanupModelStatus): {
+  text: string;
+  slow: boolean;
+} {
+  if (status.backendMeetsBudget) {
+    return {
+      text: "Runs on this Mac's GPU, where a long dictation is cleaned up in about two seconds.",
+      slow: false,
+    };
+  }
+  if (status.backend === "cpu") {
+    return {
+      text: "This Mac runs it on the CPU, not the GPU. A short dictation still finishes in about five seconds, but a 200-word one takes 11 to 13 — past the six-second limit, so long dictations arrive as spoken with a “took too long” warning. Ollama or a cloud provider is the better choice here.",
+      slow: true,
+    };
+  }
+  return {
+    text: "This build has no runtime for the built-in model, so cleanup here is skipped and your words are inserted unchanged. Choose Ollama or a cloud provider.",
+    slow: true,
+  };
+}
+
 interface BundledCleanupModelRowProps {
   status: BundledCleanupModelStatus | null;
   busy: boolean;
@@ -61,6 +94,7 @@ export function BundledCleanupModelRow({
   }
 
   const partial = !status.ready && status.bytesOnDisk > 0;
+  const backend = describeBackend(status);
 
   return (
     <section
@@ -124,10 +158,21 @@ export function BundledCleanupModelRow({
         </p>
       ) : null}
 
-      <p className="mt-2 text-sm leading-6 text-muted-foreground">
+      <p
+        className={`mt-2 max-w-2xl text-sm leading-6 ${
+          backend.slow ? "text-rust" : "text-muted-foreground"
+        }`}
+      >
+        {backend.text}
+      </p>
+
+      <p className="mt-2 max-w-2xl text-sm leading-6 text-muted-foreground">
         Downloaded once from Hugging Face and verified against a pinned
         checksum. After that it runs on this Mac with no network, no account
-        and nothing to install.
+        and nothing to install. It holds about{" "}
+        {formatModelSize(bytesToMib(status.residentBytes))} of memory while it
+        is loaded, and stays loaded between dictations while “Keep the model
+        warm” is on.
       </p>
     </section>
   );
@@ -137,6 +182,24 @@ interface AppleLanguageModelRowProps {
   availability: AppleLanguageModelAvailability | null;
   checking: boolean;
   onRecheck: () => void;
+}
+
+/**
+ * The one-line verdict beside the row.
+ *
+ * "Not available" is right for a Mac that cannot run this model and wrong for
+ * one that is still downloading it: the second is a wait, not a verdict, and
+ * the difference decides whether "Check again" is worth pressing. The sidecar
+ * already distinguishes them, so the label does too.
+ */
+function availabilityLabel(
+  availability: AppleLanguageModelAvailability | null,
+  checking: boolean,
+): string {
+  if (checking) return "Checking…";
+  if (availability?.available) return "Available";
+  if (availability?.reason === "model_not_ready") return "Still downloading";
+  return "Not available";
 }
 
 /**
@@ -167,13 +230,7 @@ export function AppleLanguageModelRow({
         </div>
         <div className="flex items-center gap-3">
           <ReadinessMark
-            label={
-              checking
-                ? "Checking…"
-                : availability?.available
-                  ? "Available"
-                  : "Not available"
-            }
+            label={availabilityLabel(availability, checking)}
             tone={availability?.available ? "ready" : "attention"}
           />
           <Button

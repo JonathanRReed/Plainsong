@@ -62,6 +62,9 @@ const BUNDLED_STATUS = {
   ready: false,
   missingFiles: ["s1-mini-q4_k_m.gguf"],
   path: "/models/bundled_cleanup",
+  backend: "metal",
+  backendMeetsBudget: true,
+  residentBytes: 484_219_808,
 };
 
 const APPLE_AVAILABILITY = {

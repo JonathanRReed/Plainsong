@@ -1246,6 +1246,18 @@ impl TruncateToCharCount for String {
 /// provider itself explains that the build cannot serve it.
 pub const DEFAULT_DICTATION_AI_PROVIDER: &str = "bundled_local";
 
+/// Where the dictation lane starts when the built-in model cannot meet the
+/// pre-insert budget on this machine.
+///
+/// The built-in route is only the right *default* where it is fast enough. On
+/// a CPU-only backend a 200-word dictation takes 11-13 s against a 6 s budget
+/// (`artifacts/qa/bundled-cleanup-receipt-2026-09-02.md`), so auto-selecting it
+/// there would hand every new user a route that warns and drops its work on
+/// every long capture. Ollama is not zero-setup, but the Models screen says
+/// plainly that it needs installing -- a default that announces what it needs
+/// is better than one that silently underdelivers.
+pub const DICTATION_AI_PROVIDER_WITHOUT_ACCELERATION: &str = "ollama";
+
 /// Providers that can only run dictation cleanup.
 ///
 /// A settings file that names one of these for the meetings lane would fail
@@ -1670,6 +1682,64 @@ fn migrate_legacy_ai_lane_settings(raw: &serde_json::Value, privacy: &mut Privac
     }
 }
 
+/// Whether the settings file itself names the built-in cleanup model for the
+/// dictation lane.
+///
+/// Only a value written into `privacy.dictationAi.provider` counts. Landing on
+/// the provider because the key was absent, or because a malformed value was
+/// repaired to the shipped default, is the app choosing -- and the app is only
+/// allowed to choose this route where it runs fast enough. The same spelling
+/// repairs `normalize_ai_lane_settings` performs are applied here so a
+/// hand-edited `bundled-local` still reads as a deliberate choice.
+fn raw_settings_choose_the_bundled_dictation_lane(raw: &serde_json::Value) -> bool {
+    raw.get("privacy")
+        .and_then(|privacy| privacy.get("dictationAi"))
+        .and_then(|lane| lane.get("provider"))
+        .and_then(serde_json::Value::as_str)
+        .map(|provider| provider.trim().to_lowercase().replace('-', "_"))
+        .is_some_and(|provider| provider == DEFAULT_DICTATION_AI_PROVIDER)
+}
+
+/// Keep the zero-setup dictation default off machines it cannot serve.
+///
+/// `PrivacySettings::default()` names the built-in model, which is right on
+/// every Mac the release ships to (the macOS binary always compiles
+/// `candle-metal`) and wrong wherever the runtime falls back to CPU, where the
+/// route misses its budget on any long dictation. This runs last in the load
+/// path, so it sees the provider the user will actually get, and it moves only
+/// an *auto-selected* lane -- a settings file that names the route keeps it,
+/// because that is the user's choice to make and the Models screen tells them
+/// what it costs.
+fn apply_zero_setup_dictation_default(
+    privacy: &mut PrivacySettings,
+    chosen_in_file: bool,
+    backend_meets_budget: bool,
+) {
+    if chosen_in_file || backend_meets_budget {
+        return;
+    }
+    if privacy.dictation_ai.provider != DEFAULT_DICTATION_AI_PROVIDER {
+        return;
+    }
+    tracing::info!(
+        "The built-in cleanup model cannot meet the dictation budget on this machine's backend; starting the dictation lane on {} instead",
+        DICTATION_AI_PROVIDER_WITHOUT_ACCELERATION
+    );
+    privacy.dictation_ai.provider = DICTATION_AI_PROVIDER_WITHOUT_ACCELERATION.to_string();
+    privacy.dictation_ai.model_id = None;
+}
+
+/// Whether the built-in cleanup model would run fast enough on this machine.
+///
+/// Asked of the provider rather than answered here so there is one definition
+/// of "fast enough", and so a build without the runtime (which reports no
+/// backend at all) answers no by the same rule.
+fn bundled_cleanup_backend_meets_budget() -> bool {
+    crate::llm::bundled_local::backend_meets_dictation_budget(
+        crate::llm::bundled_local::available_backend(),
+    )
+}
+
 /// Settings manager
 pub struct SettingsManager {
     settings: Settings,
@@ -1684,11 +1754,16 @@ impl SettingsManager {
 
     fn load_from_path(config_path: PathBuf) -> Result<Self> {
         let mut needs_migration_rewrite = false;
+        // A file that never named the built-in cleanup route counts as not
+        // having chosen it, and so does no file at all.
+        let mut bundled_dictation_lane_chosen_in_file = false;
         let mut settings = if config_path.exists() {
             match Self::load_from_file(&config_path) {
                 Ok((mut settings, raw)) => {
                     needs_migration_rewrite = raw_settings_contain_removed_keys(&raw)
                         || raw_settings_carry_dead_whisper_meeting_slot(&raw);
+                    bundled_dictation_lane_chosen_in_file =
+                        raw_settings_choose_the_bundled_dictation_lane(&raw);
                     // Must run before the removed keys are dropped from disk
                     // by the rewrite below: it is the only thing that reads
                     // the retired single AI provider/model pair.
@@ -1726,6 +1801,11 @@ impl SettingsManager {
         normalize_loaded_transcription_settings(&mut settings.transcription);
         normalize_loaded_privacy_settings(&mut settings.privacy);
         normalize_loaded_meetings_settings(&mut settings.meetings);
+        apply_zero_setup_dictation_default(
+            &mut settings.privacy,
+            bundled_dictation_lane_chosen_in_file,
+            bundled_cleanup_backend_meets_budget(),
+        );
 
         let manager = Self {
             settings,
@@ -1829,11 +1909,12 @@ impl Default for SettingsManager {
 #[cfg(test)]
 mod tests {
     use super::{
-        dictation_app_category_from_key, dictation_app_category_to_key,
-        dictation_supported_languages, migrate_legacy_ai_lane_settings,
-        normalize_audio_input_device_preference, validate_dictation_active_languages,
-        AutomationSettings, DEFAULT_DICTATION_AI_PROVIDER, ENGLISH_ONLY_LANGUAGES,
-        PARAKEET_V3_LANGUAGES, WHISPER_MULTILINGUAL_LANGUAGES,
+        apply_zero_setup_dictation_default, dictation_app_category_from_key,
+        dictation_app_category_to_key, dictation_supported_languages,
+        migrate_legacy_ai_lane_settings, normalize_audio_input_device_preference,
+        validate_dictation_active_languages, AutomationSettings, DEFAULT_DICTATION_AI_PROVIDER,
+        DICTATION_AI_PROVIDER_WITHOUT_ACCELERATION, ENGLISH_ONLY_LANGUAGES, PARAKEET_V3_LANGUAGES,
+        WHISPER_MULTILINGUAL_LANGUAGES,
     };
     use super::{
         normalize_dictation_active_languages, normalize_loaded_privacy_settings,
@@ -2389,6 +2470,92 @@ mod tests {
             lane(DEFAULT_DICTATION_AI_PROVIDER, None)
         );
         assert_eq!(privacy.meetings_ai, lane("ollama", None));
+    }
+
+    /// The zero-setup default is only honest where the route is fast enough.
+    /// On a CPU-only backend a 199-word dictation measured 11.26 s p50 against
+    /// a 6 s budget, so auto-selecting it there would hand a new user a route
+    /// that warns and discards its work on every long capture.
+    #[test]
+    fn the_bundled_route_is_not_auto_selected_without_an_accelerated_backend() {
+        let mut privacy = PrivacySettings::default();
+        apply_zero_setup_dictation_default(&mut privacy, false, false);
+        assert_eq!(
+            privacy.dictation_ai,
+            lane(DICTATION_AI_PROVIDER_WITHOUT_ACCELERATION, None)
+        );
+        // The meetings lane is not this decision's business.
+        assert_eq!(privacy.meetings_ai, lane("ollama", None));
+    }
+
+    #[test]
+    fn the_bundled_route_stays_the_default_on_an_accelerated_backend() {
+        let mut privacy = PrivacySettings::default();
+        apply_zero_setup_dictation_default(&mut privacy, false, true);
+        assert_eq!(
+            privacy.dictation_ai,
+            lane(DEFAULT_DICTATION_AI_PROVIDER, None)
+        );
+    }
+
+    /// Choosing it is the user's call to make; the app only refuses to make it
+    /// *for* them. The Models screen states the CPU cost beside the choice.
+    #[test]
+    fn a_user_who_chose_the_bundled_route_keeps_it_on_a_slow_backend() {
+        let mut privacy = PrivacySettings {
+            dictation_ai: lane(DEFAULT_DICTATION_AI_PROVIDER, None),
+            ..PrivacySettings::default()
+        };
+        apply_zero_setup_dictation_default(&mut privacy, true, false);
+        assert_eq!(
+            privacy.dictation_ai,
+            lane(DEFAULT_DICTATION_AI_PROVIDER, None)
+        );
+    }
+
+    #[test]
+    fn a_lane_pointing_somewhere_else_is_never_touched_by_the_backend_check() {
+        for existing in ["ollama", "openai", "apple_language_model", "anthropic"] {
+            let mut privacy = PrivacySettings {
+                dictation_ai: lane(existing, Some("their-model")),
+                ..PrivacySettings::default()
+            };
+            apply_zero_setup_dictation_default(&mut privacy, false, false);
+            assert_eq!(
+                privacy.dictation_ai,
+                lane(existing, Some("their-model")),
+                "{existing} must survive the backend check"
+            );
+        }
+    }
+
+    #[test]
+    fn only_the_written_provider_counts_as_choosing_the_bundled_route() {
+        use super::raw_settings_choose_the_bundled_dictation_lane;
+
+        assert!(raw_settings_choose_the_bundled_dictation_lane(
+            &serde_json::json!({ "privacy": { "dictationAi": { "provider": "bundled_local" } } })
+        ));
+        // The same spelling repairs the normalizer performs.
+        assert!(raw_settings_choose_the_bundled_dictation_lane(
+            &serde_json::json!({ "privacy": { "dictationAi": { "provider": " Bundled-Local " } } })
+        ));
+        // Absent key, absent lane, absent privacy, another provider, and a
+        // malformed value that only *normalizes* to the default: all the app
+        // choosing, not the user.
+        for raw in [
+            serde_json::json!({ "privacy": { "dictationAi": { "modelId": null } } }),
+            serde_json::json!({ "privacy": { "meetingsAi": { "provider": "ollama" } } }),
+            serde_json::json!({ "privacy": { "llmProvider": "ollama" } }),
+            serde_json::json!({ "theme": "dark" }),
+            serde_json::json!({ "privacy": { "dictationAi": { "provider": "groq" } } }),
+            serde_json::json!({ "privacy": { "dictationAi": { "provider": "" } } }),
+        ] {
+            assert!(
+                !raw_settings_choose_the_bundled_dictation_lane(&raw),
+                "{raw} must not read as a deliberate choice"
+            );
+        }
     }
 
     #[test]

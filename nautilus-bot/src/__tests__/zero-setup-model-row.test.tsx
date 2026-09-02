@@ -22,6 +22,9 @@ function statusFixture(
     ready: false,
     missingFiles: ["s1-mini-q4_k_m.gguf", "tokenizer.json", "LICENSE", "NOTICE"],
     path: "/models/bundled_cleanup",
+    backend: "metal",
+    backendMeetsBudget: true,
+    residentBytes: 484_219_808,
     ...overrides,
   };
 }
@@ -139,6 +142,77 @@ describe("the built-in cleanup model row", () => {
     expect(region.textContent).toContain("failed verification");
   });
 
+  it("says the CPU fallback cannot keep up with a long dictation", () => {
+    // Measured: 11.26 s p50 for 199 words against a 6 s budget. A user who is
+    // not told this discovers it as a "took too long" warning on every long
+    // capture, with no way to connect the warning to its cause.
+    render(
+      <BundledCleanupModelRow
+        status={statusFixture({
+          ready: true,
+          bytesOnDisk: 495_654_965,
+          missingFiles: [],
+          backend: "cpu",
+          backendMeetsBudget: false,
+        })}
+        busy={false}
+        progressPercent={null}
+        error={null}
+        onDownload={() => {}}
+        onDelete={() => {}}
+      />,
+    );
+    const region = screen.getByRole("region", {
+      name: "Built-in dictation cleanup model",
+    });
+    expect(region.textContent).toContain("CPU");
+    expect(region.textContent).toContain("11 to 13");
+    expect(region.textContent).toContain("six-second limit");
+    // Rust is the "not yet / cannot" color; there is no amber in this app.
+    const warning = Array.from(region.querySelectorAll("p")).find((node) =>
+      node.textContent?.includes("11 to 13"),
+    );
+    expect(warning?.className).toContain("text-rust");
+  });
+
+  it("does not warn about speed when the GPU is doing the work", () => {
+    render(
+      <BundledCleanupModelRow
+        status={statusFixture({ ready: true, missingFiles: [] })}
+        busy={false}
+        progressPercent={null}
+        error={null}
+        onDownload={() => {}}
+        onDelete={() => {}}
+      />,
+    );
+    const region = screen.getByRole("region", {
+      name: "Built-in dictation cleanup model",
+    });
+    expect(region.textContent).toContain("GPU");
+    expect(region.textContent).not.toContain("11 to 13");
+  });
+
+  it("states the memory it holds while it is loaded", () => {
+    // Keeping a model warm costs half a gigabyte of RAM; a user choosing
+    // between routes is entitled to that number before they choose.
+    render(
+      <BundledCleanupModelRow
+        status={statusFixture({ ready: true, missingFiles: [] })}
+        busy={false}
+        progressPercent={null}
+        error={null}
+        onDownload={() => {}}
+        onDelete={() => {}}
+      />,
+    );
+    const region = screen.getByRole("region", {
+      name: "Built-in dictation cleanup model",
+    });
+    expect(region.textContent).toContain("462 MiB of memory");
+    expect(region.textContent).toContain("Keep the model");
+  });
+
   it("shows nothing measured rather than inventing a state", () => {
     render(
       <BundledCleanupModelRow
@@ -203,6 +277,41 @@ describe("the Apple on-device model row", () => {
     });
     expect(region.textContent).toContain("Apple Intelligence is turned off");
     expect(region.textContent).toContain("inserted unchanged");
+  });
+
+  it("calls a downloading model a wait, not a verdict", () => {
+    // "Not available" reads as "this Mac cannot", which is wrong and sends the
+    // user to buy a different Mac instead of waiting ten minutes.
+    render(
+      <AppleLanguageModelRow
+        availability={availability({
+          reason: "model_not_ready",
+          detail:
+            "Apple Intelligence is still downloading its model. Try again once it has finished.",
+        })}
+        checking={false}
+        onRecheck={() => {}}
+      />,
+    );
+    expect(screen.getByText("Still downloading")).toBeTruthy();
+    expect(screen.queryByText("Not available")).toBeNull();
+    const region = screen.getByRole("region", {
+      name: "Apple on-device model",
+    });
+    expect(region.textContent).toContain(
+      "Apple Intelligence is still downloading its model",
+    );
+  });
+
+  it("still says 'Not available' when this Mac genuinely cannot run it", () => {
+    render(
+      <AppleLanguageModelRow
+        availability={availability({ reason: "device_not_eligible" })}
+        checking={false}
+        onRecheck={() => {}}
+      />,
+    );
+    expect(screen.getByText("Not available")).toBeTruthy();
   });
 
   it("does not claim a verdict while it is still probing", () => {
