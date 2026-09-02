@@ -581,6 +581,7 @@ mod tests {
                     temperature: Some(0.1),
                     json_schema: None,
                     requested_context_tokens: Some(4096),
+                    dictation_style: None,
                 },
             })
             .await
@@ -620,6 +621,7 @@ mod tests {
                         "required": ["response", "lineIds"]
                     })),
                     requested_context_tokens: Some(4096),
+                    dictation_style: None,
                 },
             })
             .await

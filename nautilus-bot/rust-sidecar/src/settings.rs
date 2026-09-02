@@ -514,7 +514,7 @@ pub enum AiLane {
 }
 
 /// Privacy settings
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default, rename_all = "camelCase")]
 pub struct PrivacySettings {
     /// Allow remote provider processing (local-first default)
@@ -537,6 +537,38 @@ pub struct PrivacySettings {
     pub vault_initialized: bool,
     /// Salt used to derive recording-encryption key material
     pub vault_salt: Option<String>,
+}
+
+/// The two lanes start on different providers, which is why this is written
+/// out instead of derived.
+///
+/// Dictation cleanup defaults to the bundled on-device model: it is the only
+/// route that works on a fresh install with nothing installed and no key
+/// pasted, which is the whole point of shipping it. Meetings stay on Ollama,
+/// because the bundled model is a dictation normalizer and cannot write a
+/// summary (see `Provider::supports_meeting_analysis`).
+///
+/// `#[serde(default)]` on the container means a settings file that is missing
+/// `privacy` -- or missing just `dictationAi` -- lands here too. A file that
+/// *has* a `dictationAi` keeps whatever it says: an existing user's choice is
+/// not overwritten by shipping a new default.
+impl Default for PrivacySettings {
+    fn default() -> Self {
+        Self {
+            remote_processing_enabled: false,
+            dictation_ai: AiLaneSettings {
+                provider: DEFAULT_DICTATION_AI_PROVIDER.to_string(),
+                model_id: None,
+            },
+            meetings_ai: AiLaneSettings::default(),
+            export_root: None,
+            export_location_id: None,
+            export_location_label: None,
+            export_location_approved: false,
+            vault_initialized: false,
+            vault_salt: None,
+        }
+    }
 }
 
 impl PrivacySettings {
@@ -1180,11 +1212,59 @@ impl TruncateToCharCount for String {
     }
 }
 
-fn normalize_ai_lane_settings(lane: &mut AiLaneSettings) {
+/// The dictation lane's default on a fresh install.
+///
+/// Mirrors `llm::bundled_local::PROVIDER_SETTINGS_VALUE`. Spelled out here
+/// rather than imported so `settings.rs` stays loadable in a build without
+/// the `local-llm` feature -- the value is still the right *setting*, and the
+/// provider itself explains that the build cannot serve it.
+pub const DEFAULT_DICTATION_AI_PROVIDER: &str = "bundled_local";
+
+/// Providers that can only run dictation cleanup.
+///
+/// A settings file that names one of these for the meetings lane would fail
+/// every summary with a refusal the user cannot act on from that screen, so
+/// load-time normalization moves the meetings lane back to Ollama. The
+/// dictation lane is left exactly as written.
+const DICTATION_ONLY_AI_PROVIDERS: [&str; 2] = ["bundled_local", "apple_language_model"];
+
+/// Every provider the sidecar can route to. Kept in sync with
+/// `llm::Provider::from_settings_value`, which is the enforcing copy: a
+/// provider missing here is normalized away at load rather than failing at
+/// the first dictation.
+const KNOWN_AI_PROVIDERS: [&str; 8] = [
+    "bundled_local",
+    "apple_language_model",
+    "ollama",
+    "openai",
+    "anthropic",
+    "gemini",
+    "deepseek",
+    "ollama-cloud",
+];
+
+fn normalize_ai_lane_settings(lane: &mut AiLaneSettings, which: AiLane) {
     // Normalize LLM provider to ensure it's a valid value
     lane.provider = lane.provider.trim().to_lowercase();
-    if lane.provider.is_empty() {
+    // Accept the hyphenated spelling of the two snake_case ids so a
+    // hand-edited settings file is repaired rather than reset.
+    if lane.provider == "bundled-local" {
+        lane.provider = "bundled_local".to_string();
+    }
+    if lane.provider == "apple-language-model" {
+        lane.provider = "apple_language_model".to_string();
+    }
+
+    let fallback = match which {
+        AiLane::Dictation => DEFAULT_DICTATION_AI_PROVIDER,
+        AiLane::Meetings => "ollama",
+    };
+    if lane.provider.is_empty() || !KNOWN_AI_PROVIDERS.contains(&lane.provider.as_str()) {
+        lane.provider = fallback.to_string();
+    }
+    if which == AiLane::Meetings && DICTATION_ONLY_AI_PROVIDERS.contains(&lane.provider.as_str()) {
         lane.provider = "ollama".to_string();
+        lane.model_id = None;
     }
 
     // Normalize model ID if present
@@ -1194,11 +1274,17 @@ fn normalize_ai_lane_settings(lane: &mut AiLaneSettings) {
             lane.model_id = None;
         }
     }
+
+    // The two on-device providers serve exactly one model each, so a stale
+    // model id left over from a previous provider must not travel with them.
+    if DICTATION_ONLY_AI_PROVIDERS.contains(&lane.provider.as_str()) {
+        lane.model_id = None;
+    }
 }
 
 fn normalize_loaded_privacy_settings(privacy: &mut PrivacySettings) {
-    normalize_ai_lane_settings(&mut privacy.dictation_ai);
-    normalize_ai_lane_settings(&mut privacy.meetings_ai);
+    normalize_ai_lane_settings(&mut privacy.dictation_ai, AiLane::Dictation);
+    normalize_ai_lane_settings(&mut privacy.meetings_ai, AiLane::Meetings);
 }
 
 /// Update channel (stable or beta)
@@ -1656,7 +1742,8 @@ mod tests {
         dictation_app_category_from_key, dictation_app_category_to_key,
         dictation_supported_languages, migrate_legacy_ai_lane_settings,
         normalize_audio_input_device_preference, validate_dictation_active_languages,
-        ENGLISH_ONLY_LANGUAGES, PARAKEET_V3_LANGUAGES, WHISPER_MULTILINGUAL_LANGUAGES,
+        DEFAULT_DICTATION_AI_PROVIDER, ENGLISH_ONLY_LANGUAGES, PARAKEET_V3_LANGUAGES,
+        WHISPER_MULTILINGUAL_LANGUAGES,
     };
     use super::{
         normalize_dictation_active_languages, normalize_loaded_privacy_settings,
@@ -2103,13 +2190,131 @@ mod tests {
         }
     }
 
-    /// A fresh install must not silently change which model runs anything, so
-    /// both lanes start where the single setting used to.
+    /// The two lanes start in different places, and deliberately so.
+    ///
+    /// This test used to assert both lanes started on Ollama, "so a fresh
+    /// install does not silently change which model runs anything". That was
+    /// right while Ollama was the only local option -- but it meant a fresh
+    /// install's dictation cleanup was pointed at software the user had not
+    /// installed, so Smart Format simply never ran. The dictation lane now
+    /// starts on the bundled on-device model, which needs nothing installed;
+    /// the meetings lane stays on Ollama because the bundled model cannot
+    /// write a summary. Existing settings files are untouched: this default
+    /// only reaches a file that has no `dictationAi` key at all.
     #[test]
-    fn ai_lane_defaults_match_the_single_setting_they_replaced() {
+    fn dictation_defaults_to_the_bundled_model_and_meetings_to_ollama() {
         let privacy = PrivacySettings::default();
-        assert_eq!(privacy.dictation_ai, lane("ollama", None));
+        assert_eq!(
+            privacy.dictation_ai,
+            lane(DEFAULT_DICTATION_AI_PROVIDER, None)
+        );
         assert_eq!(privacy.meetings_ai, lane("ollama", None));
+    }
+
+    #[test]
+    fn an_existing_dictation_lane_is_never_overwritten_by_the_new_default() {
+        // The whole migration promise: a user who chose Ollama (or a cloud
+        // provider) before this shipped keeps it.
+        for existing in [
+            "ollama",
+            "openai",
+            "anthropic",
+            "gemini",
+            "deepseek",
+            "ollama-cloud",
+        ] {
+            let mut privacy = PrivacySettings {
+                dictation_ai: lane(existing, Some("their-model")),
+                ..PrivacySettings::default()
+            };
+            normalize_loaded_privacy_settings(&mut privacy);
+            assert_eq!(
+                privacy.dictation_ai,
+                lane(existing, Some("their-model")),
+                "{existing} must survive load untouched"
+            );
+        }
+    }
+
+    #[test]
+    fn an_empty_or_unknown_dictation_provider_falls_back_to_the_bundled_model() {
+        for written in ["", "   ", "groq", "s1-mini", "ollmaa"] {
+            let mut privacy = PrivacySettings {
+                dictation_ai: lane(written, None),
+                ..PrivacySettings::default()
+            };
+            normalize_loaded_privacy_settings(&mut privacy);
+            assert_eq!(
+                privacy.dictation_ai.provider, DEFAULT_DICTATION_AI_PROVIDER,
+                "{written:?} should have been filled with the zero-setup default"
+            );
+        }
+    }
+
+    #[test]
+    fn the_hyphenated_spelling_of_the_on_device_ids_is_repaired_not_reset() {
+        let mut privacy = PrivacySettings {
+            dictation_ai: lane("bundled-local", None),
+            ..PrivacySettings::default()
+        };
+        normalize_loaded_privacy_settings(&mut privacy);
+        assert_eq!(privacy.dictation_ai.provider, "bundled_local");
+
+        let mut privacy = PrivacySettings {
+            dictation_ai: lane("apple-language-model", None),
+            ..PrivacySettings::default()
+        };
+        normalize_loaded_privacy_settings(&mut privacy);
+        assert_eq!(privacy.dictation_ai.provider, "apple_language_model");
+    }
+
+    #[test]
+    fn a_dictation_only_provider_never_survives_on_the_meetings_lane() {
+        // Neither on-device provider can write a summary. A settings file
+        // that names one for meetings would otherwise fail every analysis
+        // with a refusal the Meetings screen cannot act on.
+        for dictation_only in ["bundled_local", "apple_language_model"] {
+            let mut privacy = PrivacySettings {
+                meetings_ai: lane(dictation_only, Some("whatever")),
+                ..PrivacySettings::default()
+            };
+            normalize_loaded_privacy_settings(&mut privacy);
+            assert_eq!(privacy.meetings_ai, lane("ollama", None));
+        }
+    }
+
+    #[test]
+    fn the_on_device_providers_never_carry_a_stale_model_id() {
+        let mut privacy = PrivacySettings {
+            dictation_ai: lane("bundled_local", Some("qwen3.5:4b")),
+            ..PrivacySettings::default()
+        };
+        normalize_loaded_privacy_settings(&mut privacy);
+        assert_eq!(privacy.dictation_ai.model_id, None);
+    }
+
+    /// An old settings file -- written before either on-device provider
+    /// existed -- still loads, and keeps every choice it recorded.
+    #[test]
+    fn a_pre_b6_settings_file_loads_with_its_choices_intact() {
+        let raw = serde_json::json!({
+            "privacy": {
+                "remoteProcessingEnabled": true,
+                "dictationAi": { "provider": "ollama", "modelId": "qwen3.5:4b" },
+                "meetingsAi": { "provider": "anthropic", "modelId": "claude-opus-5" },
+                "vaultInitialized": true
+            }
+        });
+        let mut privacy: PrivacySettings =
+            serde_json::from_value(raw["privacy"].clone()).expect("old privacy blob still loads");
+        normalize_loaded_privacy_settings(&mut privacy);
+        assert_eq!(privacy.dictation_ai, lane("ollama", Some("qwen3.5:4b")));
+        assert_eq!(
+            privacy.meetings_ai,
+            lane("anthropic", Some("claude-opus-5"))
+        );
+        assert!(privacy.remote_processing_enabled);
+        assert!(privacy.vault_initialized);
     }
 
     #[test]
@@ -2222,14 +2427,20 @@ mod tests {
         let mut privacy = PrivacySettings::default();
 
         migrate_legacy_ai_lane_settings(&serde_json::json!({ "theme": "dark" }), &mut privacy);
-        assert_eq!(privacy.dictation_ai, lane("ollama", None));
+        assert_eq!(
+            privacy.dictation_ai,
+            lane(DEFAULT_DICTATION_AI_PROVIDER, None)
+        );
         assert_eq!(privacy.meetings_ai, lane("ollama", None));
 
         migrate_legacy_ai_lane_settings(
             &serde_json::json!({ "privacy": { "remoteProcessingEnabled": true } }),
             &mut privacy,
         );
-        assert_eq!(privacy.dictation_ai, lane("ollama", None));
+        assert_eq!(
+            privacy.dictation_ai,
+            lane(DEFAULT_DICTATION_AI_PROVIDER, None)
+        );
         assert_eq!(privacy.meetings_ai, lane("ollama", None));
     }
 
