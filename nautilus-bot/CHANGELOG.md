@@ -256,6 +256,19 @@ evidence is stale and must be recaptured before this becomes a candidate.
   files that still carry it load cleanly and are rewritten without it.
 
 ### Fixed
+- A dictation cleanup that runs past its time limit now stops within a
+  token instead of running to the end of its budget. The built-in model
+  (S1-mini by Superwhisper) is held behind one lock, so an abandoned cleanup
+  used to leave every later dictation of the session waiting on it with the
+  GPU still busy; the first slow cleanup no longer breaks the rest.
+- The built-in cleanup model can no longer put its own markup into your
+  document. A reasoning block or a stray chat-turn marker in the model's
+  output is removed, and a result that is nothing but reasoning falls back
+  to the text the local pipeline already produced.
+- Chat-turn markers in a transcript — reachable through a dictionary
+  replacement you wrote yourself — are rewritten as plain text before the
+  built-in model sees them, so a dictation cannot open a second turn and
+  address the model as its instructions.
 - A meeting only stops itself for a call ending when it is the call whose
   offer was actually accepted. A recording started any other way, or started
   from an offer that was waved away, is no longer ended because some

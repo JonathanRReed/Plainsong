@@ -1833,8 +1833,7 @@ mod tests {
         dictation_supported_languages, migrate_legacy_ai_lane_settings,
         normalize_audio_input_device_preference, validate_dictation_active_languages,
         AutomationSettings, DEFAULT_DICTATION_AI_PROVIDER, ENGLISH_ONLY_LANGUAGES,
-        PARAKEET_V3_LANGUAGES,
-        WHISPER_MULTILINGUAL_LANGUAGES,
+        PARAKEET_V3_LANGUAGES, WHISPER_MULTILINGUAL_LANGUAGES,
     };
     use super::{
         normalize_dictation_active_languages, normalize_loaded_privacy_settings,
