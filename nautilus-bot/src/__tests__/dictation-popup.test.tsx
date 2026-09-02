@@ -771,6 +771,58 @@ describe("DictationPopup", () => {
     expect(screen.queryByText("Backtrack applied")).not.toBeInTheDocument();
   });
 
+  it("explains a secure-field refusal and keeps the copy action available", async () => {
+    // The sidecar refused to write into a password field: nothing inserted,
+    // nothing copied, words kept in history. The popup must say exactly that
+    // rather than "Transcription ready" or "Inserted into", and still offer
+    // Copy result for the user who wants the words on the clipboard anyway.
+    let container!: HTMLElement;
+    await act(async () => {
+      ({ container } = render(<DictationPopup />));
+    });
+
+    const stateHandler = popupMocks.listeners.get("dictation-state-changed");
+    const textReadyHandler = popupMocks.listeners.get("dictation-text-ready");
+
+    await act(async () => {
+      textReadyHandler?.({
+        payload: {
+          text: "hunter two",
+          outcome: "secure_field",
+          pasted: false,
+          copied: false,
+          pasteError:
+            "The field in front is a password or secure input, so Plainsong did not insert or copy the words. They are kept in your dictation history.",
+          appTarget: "Safari",
+        },
+      });
+      stateHandler?.({
+        payload: {
+          phase: "done",
+          sessionId: 11,
+          outcome: "secure_field",
+          appTarget: "Safari",
+        },
+      });
+    });
+
+    expect(
+      await screen.findByText("Not inserted — secure field"),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByText(/password or secure input.*did not insert or copy/),
+    ).toBeInTheDocument();
+    expect(screen.getByText("Kept in history")).toBeInTheDocument();
+    expect(screen.getByText("Copy result")).toBeInTheDocument();
+    expect(screen.queryByText("Transcription ready")).not.toBeInTheDocument();
+    expect(screen.queryByText(/^Inserted into/)).not.toBeInTheDocument();
+    expect(screen.queryByText("Clipboard ready")).not.toBeInTheDocument();
+    expect(container.querySelector(".lucide-circle-check-big")).toBeNull();
+    expect(
+      container.querySelector(".lucide-triangle-alert"),
+    ).toBeInTheDocument();
+  });
+
   it("turns done state into a real review surface with command metadata and quick actions", async () => {
     await act(async () => {
       render(<DictationPopup />);

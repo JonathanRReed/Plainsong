@@ -99,6 +99,14 @@ export interface DictationTimingRecord {
 
 interface DictationTextReadyEvent {
   text: string;
+  /**
+   * Terminal delivery outcome, mirrored from the sidecar: `pasted`,
+   * `paste_dispatched`, `copied`, `replaced`, `copied_replacement`,
+   * `previewed`, `undone`, `error`, `empty`, or `secure_field` (delivery
+   * refused because the focused control is a password or secure input —
+   * see `describeDictationDeliveryRefusal`).
+   */
+  outcome?: string | null;
   pasted?: boolean;
   copied?: boolean;
   pasteError?: string | null;

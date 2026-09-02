@@ -26,8 +26,17 @@ using sensitive content.
 
 ## Dictation
 
-- System-wide insertion requires Accessibility permission. Password fields and
-  other secure macOS controls intentionally reject automated insertion.
+- System-wide insertion requires Accessibility permission.
+- Plainsong checks the focused control before every insertion. When it is a
+  password box or another secure input (macOS reports the `AXSecureTextField`
+  role or subrole, or secure keyboard entry is on), Plainsong does not insert,
+  does not stage the words on the clipboard, and does not send the Cmd+C used
+  to read a selection. The words stay in dictation history with the usual Copy
+  action, and the popup says why. Two caveats: the secure-keyboard-entry
+  signal is system-wide, so while Terminal's Secure Keyboard Entry (or a
+  password manager's equivalent) is on, dictation into any app is refused with
+  the same message; and the check is macOS-only — Windows insertion has no
+  equivalent probe yet.
 - Some apps may reject direct insertion even after transcription succeeds.
   Plainsong preserves the recognized text and offers copy-based recovery rather
   than discarding it or claiming it was inserted.

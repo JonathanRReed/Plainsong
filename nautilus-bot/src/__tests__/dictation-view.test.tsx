@@ -901,6 +901,36 @@ describe("DictationView modes", () => {
     });
   });
 
+  it("does not call a secure-field refusal 'ready to review'", async () => {
+    // The sidecar refused to write into a password field. Nothing was
+    // inserted or copied, so the status line must say that instead of the
+    // generic ready message, and the paste status carries the reason.
+    render(<DictationView />);
+
+    await screen.findByRole("tab", { name: "Profiles" });
+    const handler = backendMocks.eventListeners.get("dictation-text-ready");
+    expect(handler).toBeTruthy();
+
+    await act(async () => {
+      handler?.({
+        payload: {
+          text: "hunter two",
+          outcome: "secure_field",
+          pasted: false,
+          copied: false,
+          pasteError:
+            "The field in front is a password or secure input, so Plainsong did not insert or copy the words. They are kept in your dictation history.",
+          actualProvider: "distil_whisper",
+        },
+      });
+    });
+
+    expect(
+      await screen.findAllByText(/password or secure input/),
+    ).not.toHaveLength(0);
+    expect(screen.queryByText("Result is ready to review.")).not.toBeInTheDocument();
+  });
+
   it("opens a saved dictation from a keyboard-accessible history control", async () => {
     const user = userEvent.setup();
     const recording = createSavedDictation();

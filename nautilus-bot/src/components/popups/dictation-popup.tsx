@@ -50,7 +50,10 @@ import {
   type DictationPopupDisplayMode,
 } from "@/lib/dictation-popup-layout";
 import { formatShortcutForDisplay } from "@/lib/shortcuts";
-import { sanitizeUserFacingDictationMessage } from "@/lib/dictation-ui-message";
+import {
+  describeDictationDeliveryRefusal,
+  sanitizeUserFacingDictationMessage,
+} from "@/lib/dictation-ui-message";
 import { cn } from "@/lib/utils";
 import { AudioWaveform } from "@/components/ui/audio-waveform";
 import { WaveformVisualizer } from "@/components/waveform-visualizer";
@@ -176,10 +179,16 @@ function formatDoneTitle(
   commandApplied: string | null,
   appTarget: string | null,
 ) {
-  // A delivery failure still lands on phase "done" — the transcript exists and
-  // is in history, only the insertion failed. This has to win over the command
-  // arms below: a command applied to text the user never received is not
-  // something to report as applied.
+  // A refused delivery (password or secure field) and a failed one both
+  // land on phase "done" — the transcript exists and is in history, only the
+  // insertion did not happen. Both have to win over the command arms below:
+  // a command applied to text the user never received is not something to
+  // report as applied.
+  const refusal = describeDictationDeliveryRefusal(outcome);
+  if (refusal) {
+    return refusal.title;
+  }
+
   if (outcome === "error") {
     return "Not delivered — saved to history";
   }
@@ -214,6 +223,11 @@ function formatDoneMessage(
   appTarget: string | null,
   leftOnClipboard: boolean,
 ) {
+  const refusal = describeDictationDeliveryRefusal(outcome);
+  if (refusal) {
+    return refusal.message;
+  }
+
   if (commandApplied === "backtrack_replace_last_insert") {
     return appTarget
       ? `Replaced the last insert for ${appTarget}.`
@@ -1005,7 +1019,8 @@ export function DictationPopup() {
 
   // Computed above every early return below: hooks must run in the same order
   // on every render, and the minimal pill returns before this point.
-  const { doneTitle, doneMessage, commandLabel } = useMemo(() => ({
+  const { doneTitle, doneMessage, commandLabel, deliveryRefusal } = useMemo(() => ({
+    deliveryRefusal: describeDictationDeliveryRefusal(outcome),
     doneTitle: formatDoneTitle(
       outcome,
       finalCommandApplied,
@@ -1327,7 +1342,7 @@ export function DictationPopup() {
 
         {phase === "done" && (
           <div className="flex items-center gap-3 text-foreground">
-            {outcome === "error" ? (
+            {outcome === "error" || deliveryRefusal ? (
               <TriangleAlert className="h-5 w-5 text-destructive" />
             ) : (
               <CheckCircle2 className="h-5 w-5 text-foreground" />
@@ -1369,9 +1384,11 @@ export function DictationPopup() {
                     </span>
                   )}
                   <span className="rounded-full border border-foreground/10 bg-foreground/5 px-2.5 py-1">
-                    {outcome === "copied"
-                      ? "Clipboard ready"
-                      : "Edit commands available"}
+                    {deliveryRefusal
+                      ? "Kept in history"
+                      : outcome === "copied"
+                        ? "Clipboard ready"
+                        : "Edit commands available"}
                   </span>
                 </div>
               )}

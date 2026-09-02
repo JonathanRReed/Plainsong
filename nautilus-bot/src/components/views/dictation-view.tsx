@@ -88,7 +88,10 @@ import {
   requestMainView,
   requestReadinessDestination,
 } from "@/lib/navigation";
-import { sanitizeUserFacingDictationMessage } from "@/lib/dictation-ui-message";
+import {
+  describeDictationDeliveryRefusal,
+  sanitizeUserFacingDictationMessage,
+} from "@/lib/dictation-ui-message";
 import { invoke, listen } from "@/lib/electron";
 import { speakTextAloud, stopSpeakingText } from "@/lib/text-to-speech";
 import { useToast } from "@/components/toast";
@@ -2691,14 +2694,19 @@ export function DictationView() {
     // so an unconditional "also copied" would send the user to Cmd+V for
     // whatever they had copied before dictating.
     const leftOnClipboard = payload.copied === true;
+    // A refused delivery (password or secure field) is not "ready to review":
+    // nothing was inserted or copied, and the message has to say so.
+    const deliveryRefusal = describeDictationDeliveryRefusal(payload.outcome);
     setDictationPhaseMessage(
-      payload.pasted
-        ? leftOnClipboard
-          ? "Inserted into the target app and copied to the clipboard."
-          : "Inserted into the target app."
-        : leftOnClipboard
-          ? "Copied to the clipboard and ready to paste."
-          : "Result is ready to review.",
+      deliveryRefusal
+        ? deliveryRefusal.message
+        : payload.pasted
+          ? leftOnClipboard
+            ? "Inserted into the target app and copied to the clipboard."
+            : "Inserted into the target app."
+          : leftOnClipboard
+            ? "Copied to the clipboard and ready to paste."
+            : "Result is ready to review.",
     );
     setDictationPhasePreview(text || null);
     if (payload.pasted) {

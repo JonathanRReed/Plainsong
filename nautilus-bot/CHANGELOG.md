@@ -129,6 +129,15 @@ evidence is stale and must be recaptured before this becomes a candidate.
   not as having "gone silent," which previously read as a muting problem.
 
 ### Security
+- Dictation now refuses to deliver into password boxes and other secure
+  inputs. Before the direct Accessibility write, before the clipboard +
+  Cmd+V fallback, and before the Cmd+C used to read a selection, the sidecar
+  checks the focused control (`AXSecureTextField` role/subrole) and macOS's
+  secure-event-input flag; when either says "secure", nothing is inserted,
+  nothing is staged on the clipboard, the words stay in dictation history,
+  and the popup reports the distinct `secure_field` outcome in plain language
+  with the Copy action still available. Previously this was left to whatever
+  the target app did with a synthetic paste.
 - `shell.openExternal` and in-app link navigation now check a fixed host
   allowlist before opening anything in the user's browser; a link to any
   other host is refused and logged, not opened.

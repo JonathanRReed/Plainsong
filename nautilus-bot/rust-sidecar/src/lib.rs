@@ -10,6 +10,7 @@ pub mod dictation_correction_capture;
 mod dictation_dictionary_csv;
 pub mod dictation_parity;
 pub mod dictation_pipeline;
+pub mod dictation_secure_field;
 pub mod dictation_timing;
 mod download;
 mod events;
@@ -10570,6 +10571,11 @@ mod tests {
             dictation_overlay_idle_reset_delay_ms("error"),
             DICTATION_IDLE_RESET_ERROR_MS
         );
+        assert_eq!(
+            dictation_overlay_idle_reset_delay_ms(dictation_secure_field::SECURE_FIELD_REASON_CODE),
+            DICTATION_IDLE_RESET_ERROR_MS,
+            "a secure-field refusal is a non-delivery and keeps the long window"
+        );
         for delivered in ["pasted", "copied", "undone", ""] {
             assert_eq!(
                 dictation_overlay_idle_reset_delay_ms(delivered),
@@ -10578,6 +10584,60 @@ mod tests {
                 delivered
             );
         }
+    }
+
+    #[test]
+    fn secure_field_refusal_is_its_own_outcome_and_never_reports_a_copy() {
+        // Nothing was inserted and nothing was staged on the clipboard, so
+        // the refusal must not collapse into "copied" or the generic "error"
+        // — the renderer keys on the distinct code to explain the field.
+        let refused = resolve_dictation_delivery_outcome(DictationDeliveryFacts {
+            pasted: false,
+            copied: false,
+            confirmed: false,
+            undo_performed: false,
+            secure_field_refused: true,
+            has_paste_error: true,
+            previous: "",
+        });
+        assert_eq!(refused, dictation_secure_field::SECURE_FIELD_REASON_CODE);
+
+        // The existing arms are untouched.
+        let cases = [
+            ((true, false, true, false, false, false), "pasted"),
+            (
+                (true, false, false, false, false, false),
+                "paste_dispatched",
+            ),
+            ((true, false, true, true, false, false), "replaced"),
+            ((false, true, false, false, false, false), "copied"),
+            (
+                (false, true, false, true, false, false),
+                "copied_replacement",
+            ),
+            ((false, false, false, false, false, true), "error"),
+            ((false, false, false, false, false, false), "kept"),
+        ];
+        for ((pasted, copied, confirmed, undo_performed, secure, has_error), expected) in cases {
+            assert_eq!(
+                resolve_dictation_delivery_outcome(DictationDeliveryFacts {
+                    pasted,
+                    copied,
+                    confirmed,
+                    undo_performed,
+                    secure_field_refused: secure,
+                    has_paste_error: has_error,
+                    previous: "kept",
+                }),
+                expected
+            );
+        }
+
+        let message =
+            dictation_done_message(dictation_secure_field::SECURE_FIELD_REASON_CODE, false, &[]);
+        assert!(message.contains("password"), "{message}");
+        assert!(message.contains("did not insert or copy"), "{message}");
+        assert!(message.contains("dictation history"), "{message}");
     }
 
     #[test]
@@ -16319,9 +16379,60 @@ fn build_provider_fallback_message(
 /// so a clipboard-only fallback, or a delivery that failed outright, read as
 /// an ordinary success. Say what happened to the text first, then why it is
 /// not quite what was asked for.
+/// What the delivery step observed, reduced to the terminal `outcome` string
+/// the overlay, the audit log and the renderer key on.
+struct DictationDeliveryFacts<'a> {
+    pasted: bool,
+    copied: bool,
+    /// The target was observed to take the text (direct Accessibility write),
+    /// as opposed to a Cmd+V that was merely dispatched.
+    confirmed: bool,
+    undo_performed: bool,
+    /// The secure-field policy refused delivery: nothing inserted, nothing
+    /// on the clipboard. Distinct from `error` so the renderer can say why.
+    secure_field_refused: bool,
+    has_paste_error: bool,
+    /// The outcome already set before delivery ran (an undo-only session,
+    /// or nothing at all), kept when delivery reported nothing.
+    previous: &'a str,
+}
+
+fn resolve_dictation_delivery_outcome(facts: DictationDeliveryFacts<'_>) -> String {
+    if facts.pasted {
+        if facts.undo_performed {
+            "replaced".to_string()
+        } else if facts.confirmed {
+            "pasted".to_string()
+        } else {
+            // Dispatched via Cmd+V with no read-back. Claiming a confirmed
+            // insert here is what let the app tell users it had typed text
+            // into an app that never took it.
+            "paste_dispatched".to_string()
+        }
+    } else if facts.copied {
+        if facts.undo_performed {
+            "copied_replacement".to_string()
+        } else {
+            "copied".to_string()
+        }
+    } else if facts.secure_field_refused {
+        dictation_secure_field::SECURE_FIELD_REASON_CODE.to_string()
+    } else if facts.has_paste_error {
+        "error".to_string()
+    } else {
+        facts.previous.to_string()
+    }
+}
+
 fn dictation_done_message(outcome: &str, final_text_is_empty: bool, warnings: &[String]) -> String {
     let outcome_message = match outcome {
         "pasted" | "replaced" => "Inserted into the target app.",
+        // Refused on purpose: the focused control is a password or other
+        // secure input. Says so, says nothing was copied either, and says
+        // where the words are.
+        dictation_secure_field::SECURE_FIELD_REASON_CODE => {
+            "Not inserted: the field in front is a password or secure input. Plainsong did not insert or copy the words; they are saved in your dictation history."
+        }
         // The paste keystroke was sent but nothing reported back that the app
         // took it, so this says what actually happened and leaves the user a
         // next step. The text stays on the clipboard for exactly this case.
@@ -17456,6 +17567,11 @@ struct PasteOutcome {
     confirmed: bool,
     successful_strategy: Option<CursorInsertStrategy>,
     error: Option<String>,
+    /// `Some` when delivery was refused because the focused control is a
+    /// password or other secure input. Nothing was inserted and nothing was
+    /// staged on the clipboard; `error` carries the plain-language reason
+    /// and the stop path reports `outcome = "secure_field"`.
+    secure_field: Option<dictation_secure_field::SecureFieldSignal>,
 }
 
 #[cfg(target_os = "macos")]
@@ -17491,6 +17607,17 @@ unsafe extern "C" {
 unsafe extern "C" {
     fn CGPreflightPostEventAccess() -> bool;
     fn CGRequestPostEventAccess() -> bool;
+}
+
+// HIToolbox (Carbon umbrella). Secure event input is the OS-level switch a
+// password field turns on while it has focus; Terminal's "Secure Keyboard
+// Entry" and password managers hold it on deliberately. Reading it needs no
+// Accessibility permission, which is exactly why it is the backstop when the
+// focused element cannot be inspected.
+#[cfg(target_os = "macos")]
+#[link(name = "Carbon", kind = "framework")]
+unsafe extern "C" {
+    fn IsSecureEventInputEnabled() -> Boolean;
 }
 
 #[cfg(target_os = "macos")]
@@ -17998,42 +18125,170 @@ fn replace_utf16_range(
     Some((next_value, next_range))
 }
 
+/// Whether macOS currently has secure event input on. System-wide: true
+/// while any password field has focus, and while an app that opts in
+/// (Terminal's Secure Keyboard Entry, password managers) keeps it on.
+#[cfg(target_os = "macos")]
+fn secure_event_input_enabled() -> bool {
+    unsafe { IsSecureEventInputEnabled() != 0 }
+}
+
+/// Decides whether `focused_element` may receive dictated text. Reads the
+/// role and subrole the element reports and combines them with the
+/// secure-event-input flag through the pure policy in
+/// `dictation_secure_field`.
+#[cfg(target_os = "macos")]
+fn classify_focused_element_security(
+    focused_element: AXUIElementRef,
+) -> Option<dictation_secure_field::SecureFieldSignal> {
+    let role = ax_copy_string_attribute(focused_element, "AXRole")
+        .ok()
+        .flatten();
+    let subrole = ax_copy_string_attribute(focused_element, "AXSubrole")
+        .ok()
+        .flatten();
+    dictation_secure_field::classify_secure_field(
+        role.as_deref(),
+        subrole.as_deref(),
+        secure_event_input_enabled(),
+    )
+}
+
+/// Probes the system-wide focused element for the secure-field policy
+/// without needing a caller-held element. Used before the clipboard-paste
+/// fallback and before the synthetic Cmd+C of selection capture — the paths
+/// that do not otherwise look at the focused control at all. When the
+/// element cannot be reached (no Accessibility permission, no reported
+/// focus) the secure-event-input flag alone decides.
+#[cfg(target_os = "macos")]
+fn probe_focused_secure_field() -> Option<dictation_secure_field::SecureFieldSignal> {
+    let secure_event_input = secure_event_input_enabled();
+    let system_wide = unsafe { AXUIElementCreateSystemWide() };
+    if system_wide.is_null() {
+        return dictation_secure_field::classify_secure_field(None, None, secure_event_input);
+    }
+    let focused_element = ax_copy_attribute_value(system_wide, "AXFocusedUIElement")
+        .ok()
+        .flatten();
+    unsafe { CFRelease(system_wide) };
+    let Some(focused_element) = focused_element else {
+        return dictation_secure_field::classify_secure_field(None, None, secure_event_input);
+    };
+    let signal = classify_focused_element_security(focused_element);
+    unsafe { CFRelease(focused_element) };
+    signal
+}
+
+/// Why a direct Accessibility write did not happen.
+#[cfg(target_os = "macos")]
+enum AccessibilityInsertFailure {
+    /// The focused control is a password or other secure input. Delivery
+    /// stops here: no paste fallback, no clipboard staging.
+    SecureField(dictation_secure_field::SecureFieldSignal),
+    /// Any other reason; the caller may fall back to a native paste.
+    Other(String),
+}
+
+#[cfg(target_os = "macos")]
+impl From<String> for AccessibilityInsertFailure {
+    fn from(message: String) -> Self {
+        AccessibilityInsertFailure::Other(message)
+    }
+}
+
+#[cfg(target_os = "macos")]
+impl AccessibilityInsertFailure {
+    fn into_message(self) -> String {
+        match self {
+            AccessibilityInsertFailure::SecureField(signal) => {
+                dictation_secure_field::secure_field_refusal_message(signal)
+            }
+            AccessibilityInsertFailure::Other(message) => message,
+        }
+    }
+}
+
+/// The `PasteOutcome` for a delivery refused by the secure-field policy:
+/// nothing inserted, nothing on the clipboard, the reason spelled out.
+#[cfg(target_os = "macos")]
+fn secure_field_refusal_outcome(signal: dictation_secure_field::SecureFieldSignal) -> PasteOutcome {
+    tracing::warn!(
+        "Refusing dictation delivery: {}. Nothing was inserted or copied; the text stays in dictation history.",
+        signal.describe()
+    );
+    PasteOutcome {
+        pasted: false,
+        copied: false,
+        direct_accessibility: false,
+        confirmed: false,
+        successful_strategy: None,
+        error: Some(dictation_secure_field::secure_field_refusal_message(signal)),
+        secure_field: Some(signal),
+    }
+}
+
+/// String-error wrapper for the meeting consent-notice callers, which only
+/// need to know that the write did not happen. Dictation delivery calls
+/// `insert_text_via_accessibility_guarded` directly so a secure-field
+/// refusal is never mistaken for a plain failure and retried through Cmd+V.
 #[cfg(target_os = "macos")]
 fn insert_text_via_accessibility(
     text: &str,
     target_app: Option<&str>,
     target_app_bundle_id: Option<&str>,
 ) -> Result<(), String> {
+    insert_text_via_accessibility_guarded(text, target_app, target_app_bundle_id)
+        .map_err(AccessibilityInsertFailure::into_message)
+}
+
+#[cfg(target_os = "macos")]
+fn insert_text_via_accessibility_guarded(
+    text: &str,
+    target_app: Option<&str>,
+    target_app_bundle_id: Option<&str>,
+) -> Result<(), AccessibilityInsertFailure> {
     reactivate_target_application(target_app, target_app_bundle_id)?;
     std::thread::sleep(std::time::Duration::from_millis(35));
 
     let system_wide = unsafe { AXUIElementCreateSystemWide() };
     if system_wide.is_null() {
-        return Err(if check_accessibility_permission() {
-            "Accessibility could not create the system-wide element.".to_string()
-        } else {
-            "Accessibility could not create the system-wide element. macOS may still have direct cursor insertion disabled for this app copy."
-                .to_string()
-        });
+        return Err(AccessibilityInsertFailure::Other(
+            if check_accessibility_permission() {
+                "Accessibility could not create the system-wide element.".to_string()
+            } else {
+                "Accessibility could not create the system-wide element. macOS may still have direct cursor insertion disabled for this app copy."
+                    .to_string()
+            },
+        ));
     }
 
     let focused_element = match ax_copy_attribute_value(system_wide, "AXFocusedUIElement") {
         Ok(Some(value)) => value,
         Ok(None) => {
             unsafe { CFRelease(system_wide) };
-            return Err(if check_accessibility_permission() {
-                "Accessibility did not find a focused text element.".to_string()
-            } else {
-                "Accessibility did not find a focused text element. macOS may still have direct cursor insertion disabled for this app copy."
-                    .to_string()
-            });
+            return Err(AccessibilityInsertFailure::Other(
+                if check_accessibility_permission() {
+                    "Accessibility did not find a focused text element.".to_string()
+                } else {
+                    "Accessibility did not find a focused text element. macOS may still have direct cursor insertion disabled for this app copy."
+                        .to_string()
+                },
+            ));
         }
         Err(error) => {
             unsafe { CFRelease(system_wide) };
-            return Err(error);
+            return Err(error.into());
         }
     };
     unsafe { CFRelease(system_wide) };
+
+    // Password boxes and other secure inputs are refused before anything is
+    // written. This runs on the element already in hand, so the common path
+    // pays two attribute reads and nothing else.
+    if let Some(signal) = classify_focused_element_security(focused_element) {
+        unsafe { CFRelease(focused_element) };
+        return Err(AccessibilityInsertFailure::SecureField(signal));
+    }
 
     let role = ax_copy_string_attribute(focused_element, "AXRole")
         .ok()
@@ -18091,10 +18346,10 @@ fn insert_text_via_accessibility(
     }
 
     unsafe { CFRelease(focused_element) };
-    Err(format!(
+    Err(AccessibilityInsertFailure::Other(format!(
         "Focused element role '{}' is not settable through macOS Accessibility, so Plainsong must fall back to paste.",
         role
-    ))
+    )))
 }
 
 /// Reactivates `target_app`/`target_app_bundle_id` (if needed) and copies the
@@ -18378,15 +18633,24 @@ fn replace_focused_field_text_via_accessibility(
     text: &str,
     target_app: Option<&str>,
     target_app_bundle_id: Option<&str>,
-) -> Result<(), String> {
+) -> Result<(), AccessibilityInsertFailure> {
     let Some(focused_element) = copy_focused_accessibility_element(
         target_app,
         target_app_bundle_id,
         "Accessibility could not create the system-wide element.".to_string(),
     )?
     else {
-        return Err("Accessibility did not find a focused text element.".to_string());
+        return Err(AccessibilityInsertFailure::Other(
+            "Accessibility did not find a focused text element.".to_string(),
+        ));
     };
+
+    // Same refusal as cursor insertion: a whole-field replacement into a
+    // password box is still a write into a password box.
+    if let Some(signal) = classify_focused_element_security(focused_element) {
+        unsafe { CFRelease(focused_element) };
+        return Err(AccessibilityInsertFailure::SecureField(signal));
+    }
 
     let role = ax_copy_string_attribute(focused_element, "AXRole")
         .ok()
@@ -18395,10 +18659,10 @@ fn replace_focused_field_text_via_accessibility(
     let value_settable = ax_is_attribute_settable(focused_element, "AXValue")?;
     if !value_settable {
         unsafe { CFRelease(focused_element) };
-        return Err(format!(
+        return Err(AccessibilityInsertFailure::Other(format!(
             "Focused element role '{}' does not allow replacing the focused field.",
             role
-        ));
+        )));
     }
 
     ax_set_string_attribute(focused_element, "AXValue", text)?;
@@ -18450,10 +18714,14 @@ fn replace_focused_field_text_systemwide(
                     direct_accessibility: true,
                     confirmed: true,
                     successful_strategy: Some(CursorInsertStrategy::AccessibilityDirectText),
+                    secure_field: None,
                     error: None,
                 }
             }
-            Err(error) => {
+            Err(AccessibilityInsertFailure::SecureField(signal)) => {
+                secure_field_refusal_outcome(signal)
+            }
+            Err(AccessibilityInsertFailure::Other(error)) => {
                 let copied = copy_to_clipboard(text).is_ok();
                 PasteOutcome {
                     pasted: false,
@@ -18461,6 +18729,7 @@ fn replace_focused_field_text_systemwide(
                     direct_accessibility: false,
                     confirmed: false,
                     successful_strategy: None,
+                    secure_field: None,
                     error: Some(format!(
                         "Result is ready, but Plainsong could not replace the focused field ({})",
                         error
@@ -18480,6 +18749,7 @@ fn replace_focused_field_text_systemwide(
             direct_accessibility: false,
             confirmed: false,
             successful_strategy: None,
+            secure_field: None,
             error: Some("Focused-field replacement is only implemented on macOS.".to_string()),
         }
     }
@@ -19085,6 +19355,15 @@ fn dispatch_paste_from_clipboard(
     target_app: Option<&str>,
     target_app_bundle_id: Option<&str>,
 ) -> Result<CursorInsertStrategy, String> {
+    // Backstop for every caller of the native paste, including the ones
+    // that never looked at the focused element: while secure keyboard entry
+    // is on, nothing is staged on the clipboard and no Cmd+V is sent.
+    if secure_event_input_enabled() {
+        return Err(dictation_secure_field::secure_field_refusal_message(
+            dictation_secure_field::SecureFieldSignal::SecureEventInput,
+        ));
+    }
+
     let previous_clipboard = read_clipboard_text().ok();
     copy_to_clipboard(text)
         .map_err(|error| format!("Failed to stage clipboard paste: {}", error))?;
@@ -19133,6 +19412,16 @@ fn capture_selected_text_via_clipboard(target_app: Option<&str>) -> Result<Optio
             "Selected text capture needs macOS keyboard-event access or direct Accessibility insertion."
                 .to_string(),
         );
+    }
+
+    // Look at the focused control before the clipboard is touched or Cmd+C
+    // is sent: a password field is never read from, and its clipboard is
+    // never replaced with the sentinel. The target is brought forward first
+    // so the probe sees the field the copy would land in.
+    reactivate_target_application(target_app, None)?;
+    std::thread::sleep(std::time::Duration::from_millis(35));
+    if let Some(signal) = probe_focused_secure_field() {
+        return Err(dictation_secure_field::secure_field_capture_refusal_message(signal));
     }
 
     // If the clipboard can't even be read we can't restore it afterwards,
@@ -19376,7 +19665,7 @@ fn paste_text_systemwide(
                 (target_app, target_app_bundle_id)
             };
 
-        match insert_text_via_accessibility(text, target_app, target_app_bundle_id) {
+        match insert_text_via_accessibility_guarded(text, target_app, target_app_bundle_id) {
             Ok(()) => {
                 mark_accessibility_insert_observed(accessibility_trust_observed);
                 let copied = if keep_text_in_clipboard {
@@ -19400,15 +19689,27 @@ fn paste_text_systemwide(
                     direct_accessibility: true,
                     confirmed: true,
                     successful_strategy: Some(CursorInsertStrategy::AccessibilityDirectText),
+                    secure_field: None,
                     error: None,
                 };
             }
-            Err(error) => {
+            Err(AccessibilityInsertFailure::SecureField(signal)) => {
+                return secure_field_refusal_outcome(signal);
+            }
+            Err(AccessibilityInsertFailure::Other(error)) => {
                 tracing::warn!(
                     "Direct Accessibility insertion failed, falling back to native Cmd+V dispatch: {}",
                     error
                 );
             }
+        }
+
+        // The direct write may have failed before it could see the focused
+        // control (no Accessibility permission, no reported focus). Ask again
+        // before anything is staged on the clipboard for Cmd+V: a refusal
+        // here costs a few attribute reads; a wrong paste costs a password.
+        if let Some(signal) = probe_focused_secure_field() {
+            return secure_field_refusal_outcome(signal);
         }
 
         match dispatch_paste_from_clipboard(
@@ -19440,6 +19741,7 @@ fn paste_text_systemwide(
                     direct_accessibility: false,
                     confirmed: false,
                     successful_strategy: Some(strategy),
+                    secure_field: None,
                     error: None,
                 }
             }
@@ -19455,6 +19757,7 @@ fn paste_text_systemwide(
                         direct_accessibility: false,
                         confirmed: false,
                         successful_strategy: None,
+                        secure_field: None,
                         error: Some(error),
                     };
                 }
@@ -19465,6 +19768,7 @@ fn paste_text_systemwide(
                     direct_accessibility: false,
                     confirmed: false,
                     successful_strategy: None,
+                    secure_field: None,
                     error: Some(format!("Copied to clipboard. {}", insert_error)),
                 }
             }
@@ -19492,6 +19796,7 @@ fn paste_text_systemwide(
                 direct_accessibility: false,
                 confirmed: false,
                 successful_strategy: None,
+                secure_field: None,
                 error: Some(error),
             };
         }
@@ -19524,6 +19829,7 @@ fn paste_text_systemwide(
                     direct_accessibility: false,
                     confirmed: false,
                     successful_strategy: Some(strategy),
+                    secure_field: None,
                     error: None,
                 }
             }
@@ -19533,6 +19839,7 @@ fn paste_text_systemwide(
                 direct_accessibility: false,
                 confirmed: false,
                 successful_strategy: None,
+                secure_field: None,
                 error: Some(format!("Copied to clipboard. {}", error)),
             },
         }
@@ -22832,6 +23139,7 @@ async fn stop_dictation_for_sidecar(
                                 direct_accessibility: false,
                                 confirmed: false,
                                 successful_strategy: None,
+                                secure_field: None,
                                 error: None,
                             },
                             Err(error) => PasteOutcome {
@@ -22840,6 +23148,7 @@ async fn stop_dictation_for_sidecar(
                                 direct_accessibility: false,
                                 confirmed: false,
                                 successful_strategy: None,
+                                secure_field: None,
                                 error: Some(error),
                             },
                         }
@@ -22885,6 +23194,7 @@ async fn stop_dictation_for_sidecar(
                                     direct_accessibility: false,
                                     confirmed: false,
                                     successful_strategy: None,
+                                    secure_field: None,
                                     error: Some(
                                         "Text insertion did not complete. The transcript was saved."
                                             .to_string(),
@@ -22918,6 +23228,7 @@ async fn stop_dictation_for_sidecar(
             }
             pasted = paste_outcome.pasted;
             copied = paste_outcome.copied;
+            let secure_field_refused = paste_outcome.secure_field.is_some();
             if paste_error.is_none() {
                 paste_error = paste_outcome.error;
             }
@@ -22952,28 +23263,15 @@ async fn stop_dictation_for_sidecar(
                     None
                 });
             }
-            outcome = if pasted {
-                if undo_performed {
-                    "replaced".to_string()
-                } else if paste_outcome.confirmed {
-                    "pasted".to_string()
-                } else {
-                    // Dispatched via Cmd+V with no read-back. Claiming a
-                    // confirmed insert here is what let the app tell users it
-                    // had typed text into an app that never took it.
-                    "paste_dispatched".to_string()
-                }
-            } else if copied {
-                if undo_performed {
-                    "copied_replacement".to_string()
-                } else {
-                    "copied".to_string()
-                }
-            } else if paste_error.is_some() {
-                "error".to_string()
-            } else {
-                outcome
-            };
+            outcome = resolve_dictation_delivery_outcome(DictationDeliveryFacts {
+                pasted,
+                copied,
+                confirmed: paste_outcome.confirmed,
+                undo_performed,
+                secure_field_refused,
+                has_paste_error: paste_error.is_some(),
+                previous: outcome.as_str(),
+            });
         } else if undo_performed {
             actual_insertion_mode = "command_only".to_string();
         } else if paste_error.is_none() {
@@ -23304,7 +23602,9 @@ async fn stop_dictation_for_sidecar(
 /// text only in dictation history, so the user needs long enough to notice and
 /// reach for it.
 fn dictation_overlay_idle_reset_delay_ms(outcome: &str) -> u64 {
-    if outcome == "error" {
+    // A secure-field refusal is a non-delivery too: the words exist only in
+    // dictation history, so it gets the same longer window as an error.
+    if outcome == "error" || outcome == dictation_secure_field::SECURE_FIELD_REASON_CODE {
         DICTATION_IDLE_RESET_ERROR_MS
     } else {
         DICTATION_IDLE_RESET_SUCCESS_MS
