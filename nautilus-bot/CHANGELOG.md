@@ -167,6 +167,16 @@ evidence is stale and must be recaptured before this becomes a candidate.
   files that still carry it load cleanly and are rewritten without it.
 
 ### Fixed
+- The `plainsong` command read its Local tools switch through a path that
+  honours `PLAINSONG_CONFIG_DIR`, so anything that could set that variable
+  could point the gate at a settings file it wrote itself while the database
+  path and its Keychain key stayed real. The gate now reads only the file the
+  app writes.
+- A meeting note, transcript or dictation containing a multi-byte character
+  immediately before the text `untrusted_content` crashed the MCP server
+  mid-response (a byte-offset slice landing inside the character). The frame
+  neutraliser also missed `</ untrusted_content>` — whitespace inside the tag
+  punctuation — which a lenient reader would still take as the frame ending.
 - Opening an encrypted (SQLCipher) database failed every time with "Execute
   returned results": the key check ran a `SELECT` through rusqlite's
   `execute`, which refuses any statement that returns rows. No install had a
