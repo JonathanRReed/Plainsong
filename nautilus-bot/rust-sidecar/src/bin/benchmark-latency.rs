@@ -87,8 +87,9 @@ Options:
 Output:
   Two JSON objects on stdout (provider-only, then pipeline), one per line.
   Progress and the human summary are written to stderr. Neither receipt is
-  committed to source control -- see artifacts/qa/'s intentionally blanket
-  .gitignore and attach receipts to release evidence by hand instead.";
+  committed to source control -- artifacts/qa/'s .gitignore names both
+  dictation-latency JSON files explicitly (other qa receipts are tracked) --
+  so attach them to release evidence by hand instead.";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct BenchmarkArgs {
@@ -749,6 +750,22 @@ fn main() {
             std::process::exit(2);
         }
     };
+
+    // Route the providers' `tracing` lines to stderr (the sidecar's sink too)
+    // so a receipt captured from this binary also shows which compute path
+    // ran: "Candle using Metal GPU device", "Registering CoreML EP for ...",
+    // or the CPU fallback warnings. Without a subscriber those lines are
+    // dropped and an acceleration regression is invisible in the output.
+    // ONNX Runtime's per-graph-transformer INFO chatter (hundreds of lines per
+    // session) is muted by default; its WARN-level partition report still
+    // shows. `RUST_LOG` overrides the default filter.
+    tracing_subscriber::fmt()
+        .with_writer(std::io::stderr)
+        .with_env_filter(
+            tracing_subscriber::EnvFilter::try_from_default_env()
+                .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info,ort::logging=warn")),
+        )
+        .init();
 
     let runtime = tokio::runtime::Runtime::new().expect("tokio runtime");
     runtime.block_on(async move {

@@ -59,6 +59,20 @@ evidence is stale and must be recaptured before this becomes a candidate.
   chunks, and a decode that would come back truncated is refused.
 
 ### Changed
+- **The macOS sidecar now ships Candle's Metal backend** (`candle-metal`),
+  so the Distil-Whisper and Whisper large-v3-turbo providers run on the GPU
+  instead of CPU F32. Measured on an M4 Pro with a combined
+  `candle-metal,ort-coreml` dev binary on a loaded shared machine (two usable
+  processes): distil-large-v3.5 went from 32.8 s to 0.96 s p50 for a 5.3 s
+  utterance; the as-shipped binary itself was not re-measured (a keychain
+  prompt blocked it) and a quiet-machine re-run is still owed, so treat the
+  figures as provisional. `scripts/sidecar-cargo-features.mjs` is now
+  the one list of macOS-only sidecar features, shared by the release build,
+  `lint:rust` / `test:rust` / `benchmark:latency`, CI, and the third-party
+  notices. The `ort-coreml` CoreML execution provider was measured as well
+  and deliberately left out: it regressed Moonshine (24 s first-load
+  compile, slower steady state). Receipt:
+  `artifacts/qa/acceleration-receipt-2026-09-01.md`.
 - The personal dictionary now reaches the recognizer, not only the text
   afterwards. Each dictation builds a vocabulary hint from the dictionary
   entries and plain-word snippet triggers that apply to the app in front
