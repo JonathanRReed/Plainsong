@@ -2830,10 +2830,10 @@ function MeetingSetupStep({
             ask for: the app will notice a call and offer. It never records
             without a click. */}
         <p className="text-sm text-muted-foreground">
-          Plainsong also notices when a Zoom, Teams, Meet, Webex or FaceTime
-          call is in progress on this Mac and offers to record it; it never
-          starts on its own, and you can turn the offer off in Settings ›
-          General.
+          Plainsong also notices when a Zoom, Teams, Meet, Webex, Slack,
+          Discord or FaceTime call is in progress on this Mac and offers to
+          record it; it never starts on its own, and you can turn the offer off
+          in Settings › General.
         </p>
         <div className="space-y-2">
           <label
