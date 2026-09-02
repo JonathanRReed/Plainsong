@@ -901,6 +901,24 @@ describe("DictationView modes", () => {
     });
   });
 
+  it("tells a cloud dictation route that dictionary terms travel with the audio", async () => {
+    // The dictionary now reaches the recognizer. For a cloud route that
+    // means the terms leave the machine, and for ElevenLabs it costs extra;
+    // both belong where the route is chosen, not only in developer docs.
+    backendMocks.transcriptionOverrides.defaultProvider = "elevenlabs_scribe";
+    backendMocks.transcriptionOverrides.dictationProvider = "elevenlabs_scribe";
+
+    render(<DictationView />);
+
+    fireEvent.click(await screen.findByRole("tab", { name: "Profiles" }));
+
+    expect(
+      await screen.findByText(
+        /dictionary terms and snippet triggers are sent with the audio.*ElevenLabs bills 20% more/,
+      ),
+    ).toBeInTheDocument();
+  });
+
   it("does not call a secure-field refusal 'ready to review'", async () => {
     // The sidecar refused to write into a password field. Nothing was
     // inserted or copied, so the status line must say that instead of the

@@ -1,8 +1,38 @@
 import { describe, expect, it } from "vitest";
 import {
+  describeCloudDictationVocabularyNote,
   describeDictationDeliveryRefusal,
   sanitizeUserFacingDictationMessage,
 } from "@/lib/dictation-ui-message";
+
+describe("describeCloudDictationVocabularyNote", () => {
+  it("says the dictionary travels with the audio for cloud routes that take it", () => {
+    for (const provider of ["openai_cloud", "groq", "elevenlabs_scribe"]) {
+      expect(describeCloudDictationVocabularyNote(provider)).toMatch(
+        /dictionary terms and snippet triggers are sent with the audio/,
+      );
+    }
+  });
+
+  it("names the ElevenLabs keyterms surcharge next to the choice", () => {
+    expect(describeCloudDictationVocabularyNote("elevenlabs_scribe")).toMatch(
+      /ElevenLabs bills 20% more/,
+    );
+    expect(describeCloudDictationVocabularyNote("openai_cloud")).not.toMatch(/20%/);
+  });
+
+  it("says plainly when a cloud route does not take the dictionary", () => {
+    expect(describeCloudDictationVocabularyNote("cohere_transcribe")).toMatch(
+      /does not accept vocabulary hints/,
+    );
+  });
+
+  it("says nothing for routes that keep the dictionary on this Mac", () => {
+    for (const provider of ["whisper", "parakeet", "macos_apple_speech", "", null, undefined]) {
+      expect(describeCloudDictationVocabularyNote(provider)).toBeNull();
+    }
+  });
+});
 
 describe("describeDictationDeliveryRefusal", () => {
   it("explains a secure-field refusal in plain language", () => {

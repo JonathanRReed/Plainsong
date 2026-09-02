@@ -89,6 +89,7 @@ import {
   requestReadinessDestination,
 } from "@/lib/navigation";
 import {
+  describeCloudDictationVocabularyNote,
   describeDictationDeliveryRefusal,
   sanitizeUserFacingDictationMessage,
 } from "@/lib/dictation-ui-message";
@@ -4241,6 +4242,12 @@ export function DictationView() {
                           : "on this Mac."
                         : "somewhere not yet known."}
                     </p>
+                    {currentDictationProvider &&
+                    describeCloudDictationVocabularyNote(currentDictationProvider) ? (
+                      <p className="text-sm text-muted-foreground">
+                        {describeCloudDictationVocabularyNote(currentDictationProvider)}
+                      </p>
+                    ) : null}
                     {!useSharedAsrSelection &&
                     currentDictationProvider &&
                     currentMeetingProvider &&

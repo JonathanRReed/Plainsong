@@ -92,12 +92,10 @@ impl GroqProvider {
 
         // Personal-dictionary vocabulary bias; Groq's endpoint is
         // OpenAI-compatible and takes the same `prompt` field.
-        if let Some(prompt) = options
-            .vocabulary_hint
-            .as_ref()
-            .map(VocabularyHint::as_prompt)
-        {
-            form = form.text("prompt", prompt);
+        let mut vocabulary_hint_terms_applied = 0usize;
+        if let Some(hint) = options.vocabulary_hint.as_ref() {
+            vocabulary_hint_terms_applied = hint.terms().len();
+            form = form.text("prompt", VocabularyHint::as_prompt(hint));
         }
 
         let response = self
@@ -154,6 +152,7 @@ impl GroqProvider {
             actual_engine: Some("provider_default".to_string()),
             optimization_applied: false,
             fallback_reason: None,
+            vocabulary_hint_terms_applied,
         })
     }
 }

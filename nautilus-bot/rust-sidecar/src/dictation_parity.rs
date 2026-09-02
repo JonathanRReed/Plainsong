@@ -442,6 +442,11 @@ pub fn apply_dictation_snippets_for_category(
 /// the first decode window room for speech.
 pub const VOCABULARY_HINT_MAX_TERMS: usize = 60;
 pub const VOCABULARY_HINT_MAX_CHARS: usize = 600;
+/// Estimated-token cap on the framed prompt, under whisper's 224-token
+/// prompt window with room to spare. Characters alone do not bound tokens —
+/// rare proper nouns tokenize into many short pieces — so the builder also
+/// stops when `VocabularyHint::estimate_prompt_tokens` would exceed this.
+pub const VOCABULARY_HINT_MAX_TOKENS: usize = 200;
 
 /// Longest single term worth sending: anything longer is a sentence, not a
 /// vocabulary item, and ElevenLabs' keyterm limit is the same number.
@@ -514,18 +519,29 @@ pub fn build_vocabulary_hint(
     let mut seen = std::collections::HashSet::new();
     let mut terms: Vec<String> = Vec::new();
     let mut prompt_chars = VocabularyHint::PROMPT_FRAME_CHARS;
+    let mut prompt = String::new();
     for (_, _, term) in eligible {
         if !seen.insert(term.to_lowercase()) {
             continue;
         }
         let separator = if terms.is_empty() { 0 } else { 2 };
         let added = term.chars().count() + separator;
+        // The exact prompt the next term would produce, for the token
+        // estimate (frame, separators and the trailing period included).
+        let candidate_prompt = if terms.is_empty() {
+            format!("Vocabulary: {term}.")
+        } else {
+            format!("{}, {term}.", &prompt[..prompt.len() - 1])
+        };
         if terms.len() >= VOCABULARY_HINT_MAX_TERMS
             || prompt_chars + added > VOCABULARY_HINT_MAX_CHARS
+            || VocabularyHint::estimate_prompt_tokens(&candidate_prompt)
+                > VOCABULARY_HINT_MAX_TOKENS
         {
             break;
         }
         prompt_chars += added;
+        prompt = candidate_prompt;
         terms.push(term);
     }
 
@@ -2133,8 +2149,10 @@ mod vocabulary_hint_tests {
 
     #[test]
     fn the_term_cap_is_applied_after_ordering() {
+        // Two-to-three-character terms keep the token estimate well under
+        // its cap, so the term cap is the one that binds here.
         let candidates: Vec<VocabularyTermCandidate> = (0..(VOCABULARY_HINT_MAX_TERMS + 15))
-            .map(|index| candidate(&format!("term{index}"), index as i64))
+            .map(|index| candidate(&format!("t{index}"), index as i64))
             .collect();
         let hint = terms(build_vocabulary_hint(
             &candidates,
@@ -2142,18 +2160,20 @@ mod vocabulary_hint_tests {
             DictationAppCategory::Other,
         ));
         assert_eq!(hint.len(), VOCABULARY_HINT_MAX_TERMS);
-        assert_eq!(hint[0], format!("term{}", VOCABULARY_HINT_MAX_TERMS + 14));
+        assert_eq!(hint[0], format!("t{}", VOCABULARY_HINT_MAX_TERMS + 14));
         assert!(
-            !hint.contains(&"term0".to_string()),
+            !hint.contains(&"t0".to_string()),
             "the oldest term is the one cut"
         );
     }
 
     #[test]
-    fn the_character_cap_stops_before_the_prompt_overflows() {
-        // 20 terms of 40 chars would be 20*40 + 19*2 = 838 characters; with
-        // the 13-character frame counted, the 600-character cap admits 14 of
-        // them (13 + 14*40 + 13*2 = 599).
+    fn the_character_and_token_caps_stop_before_the_prompt_overflows() {
+        // 20 terms of 40 chars would be 20*40 + 19*2 = 838 characters. The
+        // 600-character cap alone (frame counted) would admit 14; the token
+        // estimate (chars/3 + separators) binds first at 13, since
+        // 13 + 13*40 + 12*2 = 557 chars -> 186 + 14 separators = 200 tokens
+        // and a 14th term would push it to 215.
         let candidates: Vec<VocabularyTermCandidate> = (0..20)
             .map(|index| {
                 candidate(
@@ -2164,8 +2184,31 @@ mod vocabulary_hint_tests {
             .collect();
         let hint = build_vocabulary_hint(&candidates, None, DictationAppCategory::Other)
             .expect("some terms fit");
-        assert_eq!(hint.terms().len(), 14);
+        assert_eq!(hint.terms().len(), 13);
         assert!(hint.as_prompt().chars().count() <= VOCABULARY_HINT_MAX_CHARS);
+        assert!(hint.estimated_prompt_tokens() <= VOCABULARY_HINT_MAX_TOKENS);
+    }
+
+    #[test]
+    fn the_token_estimate_binds_before_the_term_cap_for_short_uncommon_terms() {
+        // 60 eight-character terms fit the character cap but not whisper's
+        // prompt window once each is counted at a token per three
+        // characters: the estimate passes 200 before the 60th term.
+        let candidates: Vec<VocabularyTermCandidate> = (0..VOCABULARY_HINT_MAX_TERMS)
+            .map(|index| candidate(&format!("word{index:0>4}"), 100 - index as i64))
+            .collect();
+        let hint =
+            build_vocabulary_hint(&candidates, None, DictationAppCategory::Other).expect("hint");
+        assert!(hint.terms().len() < VOCABULARY_HINT_MAX_TERMS);
+        assert!(hint.estimated_prompt_tokens() <= VOCABULARY_HINT_MAX_TOKENS);
+        let prompt = hint.as_prompt();
+        assert!(
+            VocabularyHint::estimate_prompt_tokens(&format!(
+                "{}, word9999.",
+                &prompt[..prompt.len() - 1]
+            )) > VOCABULARY_HINT_MAX_TOKENS,
+            "one more term would have overflowed the estimate"
+        );
     }
 
     #[test]

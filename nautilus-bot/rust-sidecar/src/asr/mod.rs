@@ -111,6 +111,14 @@ pub struct TranscriptionResult {
     pub optimization_applied: bool,
     #[serde(default)]
     pub fallback_reason: Option<String>,
+    /// How many vocabulary-hint terms the provider actually attached to the
+    /// request (whisper's initial prompt, a cloud `prompt`/`keyterms`
+    /// field). Zero for providers that ignore the hint and for a whisper
+    /// decode that withheld the prompt on near-silent audio. Compared with
+    /// the number of terms *built* in the audit log, so "the dictionary
+    /// reached the recognizer" is never claimed for a route it did not.
+    #[serde(default)]
+    pub vocabulary_hint_terms_applied: usize,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq)]
@@ -146,6 +154,25 @@ impl VocabularyHint {
 
     pub fn terms(&self) -> &[String] {
         &self.terms
+    }
+
+    /// Conservative token estimate for a prompt string, for budgeting against
+    /// whisper's prompt window (half of its 448-token text context, so 224).
+    /// Heuristic, stated plainly: one token per three characters — proper
+    /// nouns and unfamiliar spellings tokenize into short pieces, so the
+    /// usual "four characters per token" for prose is too generous here —
+    /// plus one token per comma or period. Over-estimating only trims a few
+    /// of the oldest terms; under-estimating would let whisper silently drop
+    /// the newest.
+    pub fn estimate_prompt_tokens(prompt: &str) -> usize {
+        let chars = prompt.chars().count();
+        let separators = prompt.chars().filter(|ch| matches!(ch, ',' | '.')).count();
+        chars.div_ceil(3) + separators
+    }
+
+    /// `estimate_prompt_tokens` of this hint's own `as_prompt()`.
+    pub fn estimated_prompt_tokens(&self) -> usize {
+        Self::estimate_prompt_tokens(&self.as_prompt())
     }
 
     /// Characters `as_prompt` adds around the joined terms. Callers that

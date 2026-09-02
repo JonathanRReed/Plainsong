@@ -742,6 +742,7 @@ impl AsrManager {
             actual_engine: Some(engine.id().to_string()),
             optimization_applied: true,
             fallback_reason: None,
+            vocabulary_hint_terms_applied: 0,
         })
     }
 

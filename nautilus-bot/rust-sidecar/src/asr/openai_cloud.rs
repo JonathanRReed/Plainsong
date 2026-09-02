@@ -137,12 +137,10 @@ impl OpenAiCloudWhisperProvider {
         // Personal-dictionary vocabulary bias. OpenAI's transcription API
         // reads `prompt` as style/spelling guidance for every model here
         // (whisper-1 and the gpt-4o transcribe family alike).
-        if let Some(prompt) = options
-            .vocabulary_hint
-            .as_ref()
-            .map(VocabularyHint::as_prompt)
-        {
-            form = form.text("prompt", prompt);
+        let mut vocabulary_hint_terms_applied = 0usize;
+        if let Some(hint) = options.vocabulary_hint.as_ref() {
+            vocabulary_hint_terms_applied = hint.terms().len();
+            form = form.text("prompt", VocabularyHint::as_prompt(hint));
         }
 
         let response = self
@@ -204,6 +202,7 @@ impl OpenAiCloudWhisperProvider {
             actual_engine: Some("provider_default".to_string()),
             optimization_applied: false,
             fallback_reason: None,
+            vocabulary_hint_terms_applied,
         })
     }
 }

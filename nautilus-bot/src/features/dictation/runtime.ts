@@ -176,12 +176,39 @@ function normalizeStateEvent(payload: DictationStateChangedEvent): DictationStat
   };
 }
 
-function mergeStateEvent(
+/**
+ * Fields that describe one session's result and must not outlive it. The
+ * idle event that follows a done/error phase does not repeat them, so a plain
+ * spread merge kept the finished session's message and outcome — a
+ * secure-field refusal, say — on screen after the overlay had already reset.
+ * Provider/route metadata is deliberately not in this list: it is sticky by
+ * design and describes the configuration, not the session.
+ */
+const VOLATILE_SESSION_FIELDS = [
+  "message",
+  "preview",
+  "partialText",
+  "outcome",
+  "stopReason",
+  "fallbackReason",
+] as const;
+
+/**
+ * Folds the next `dictation-state-changed` event into the last one. Exported
+ * for its tests; the hook below is its only production caller.
+ */
+export function reduceDictationStateEvent(
   previous: DictationStateChangedEvent | null,
   next: DictationStateChangedEvent,
 ): DictationStateChangedEvent {
+  const carried: Partial<DictationStateChangedEvent> = { ...(previous ?? {}) };
+  if (next.phase === "idle") {
+    for (const field of VOLATILE_SESSION_FIELDS) {
+      delete carried[field];
+    }
+  }
   return normalizeStateEvent({
-    ...(previous ?? {}),
+    ...carried,
     ...next,
   });
 }
@@ -199,7 +226,7 @@ export function useDictationRuntime() {
       try {
         const initialState = await invoke<DictationStateChangedEvent>("get_dictation_overlay_state");
         if (!disposed) {
-          setStateEvent((previous) => mergeStateEvent(previous, initialState));
+          setStateEvent((previous) => reduceDictationStateEvent(previous, initialState));
         }
       } catch {
         // Ignore initial hydration failures.
@@ -210,7 +237,7 @@ export function useDictationRuntime() {
         (event) => {
           if (!disposed) {
             setStateEvent((previous) =>
-              mergeStateEvent(previous, event.payload),
+              reduceDictationStateEvent(previous, event.payload),
             );
           }
         },

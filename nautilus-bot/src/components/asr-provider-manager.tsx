@@ -1,3 +1,4 @@
+import { describeCloudDictationVocabularyNote } from "@/lib/dictation-ui-message";
 import { useState, useEffect, useMemo, useRef } from "react";
 import { cn } from "@/lib/utils";
 import { normalizeDownloadStatus } from "@/lib/download-status";
@@ -1436,6 +1437,11 @@ export function AsrProviderManager({ className }: AsrProviderManagerProps) {
                 <CardDescription className="mt-1">
                   {provider.description}
                 </CardDescription>
+                {describeCloudDictationVocabularyNote(provider.providerType) ? (
+                  <p className="mt-1 text-sm text-muted-foreground">
+                    {describeCloudDictationVocabularyNote(provider.providerType)}
+                  </p>
+                ) : null}
               </div>
             </div>
             <div className="flex items-center gap-2">

@@ -30,6 +30,29 @@ export function describeDictationDeliveryRefusal(
   };
 }
 
+/**
+ * What a cloud dictation route does with the personal dictionary, in the
+ * words the route selector and the provider cards show. The terms leave the
+ * machine only for providers that accept them, and ElevenLabs charges for it;
+ * both facts belong next to the choice, not only in developer docs. `null`
+ * for routes that keep the dictionary on this Mac.
+ */
+export function describeCloudDictationVocabularyNote(
+  providerType: string | null | undefined,
+): string | null {
+  switch (providerType) {
+    case "openai_cloud":
+    case "groq":
+      return "Your dictionary terms and snippet triggers are sent with the audio to help recognition.";
+    case "elevenlabs_scribe":
+      return "Your dictionary terms and snippet triggers are sent with the audio to help recognition. ElevenLabs bills 20% more for a request that carries them.";
+    case "cohere_transcribe":
+      return "Cohere does not accept vocabulary hints, so your dictionary is applied only after transcription, on this Mac.";
+    default:
+      return null;
+  }
+}
+
 export function sanitizeUserFacingDictationMessage(
   message: string | null | undefined,
   options?: {

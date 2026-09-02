@@ -25,7 +25,7 @@ with the audio through `AsrProvider::transcribe_bytes_with_options`:
 
 | Provider | How the hint is sent | Notes |
 | --- | --- | --- |
-| whisper.cpp (`whisper-rs`) | `FullParams::set_initial_prompt`, one framed sentence: `Vocabulary: term, term.` | Seeds the first 30 s decode window; `no_context` does not discard it. Control characters are stripped (a NUL would panic inside whisper-rs). The frame is not decoration — see the prompt-shape table below. |
+| whisper.cpp (`whisper-rs`) | `FullParams::set_initial_prompt`, one framed sentence: `Vocabulary: term, term.` | Seeds the first 30 s decode window; `no_context` does not discard it. Control characters are stripped (a NUL would panic inside whisper-rs). The frame is not decoration — see the prompt-shape table below. The prompt is withheld when the VAD-trimmed audio is under 0.5 s or below an RMS of 0.004 (a silent hotkey tap must not type "Vocabulary:"), and an output that consists only of hint words on quiet (RMS < 0.012) or sub-second audio is dropped as prompt echo. |
 | OpenAI transcription | multipart `prompt` field, same framed sentence | whisper-1 and the gpt-4o transcribe models both read it. |
 | Groq | multipart `prompt` field, same framed sentence | OpenAI-compatible endpoint. |
 | ElevenLabs Scribe | one multipart `keyterms` field per term | Terms over 50 chars / 5 words or containing `<>{}[]\` are dropped. **ElevenLabs bills a 20% surcharge on any request carrying keyterms**, so a non-empty applicable dictionary costs 20% more per Scribe dictation. |
@@ -42,8 +42,13 @@ What goes into the hint, and what never does:
   the pipeline: a snippet that expands `sig` into a four-line signature must
   not teach the recognizer the signature.
 - Newest entries first (`updated_at`), deduplicated case-insensitively,
-  capped at 60 terms or 600 characters of prompt (frame included), whichever
-  comes first.
+  capped at 60 terms, 600 characters of prompt (frame included), or an
+  estimated 200 prompt tokens (one per three characters plus one per
+  separator — conservative for proper nouns) under whisper's 224-token
+  window, whichever comes first.
+- The audit log records `vocabulary_hint_terms_built` and
+  `vocabulary_hint_terms_applied` separately; only the second means the
+  route that ran actually attached the terms.
 - Nothing is attached when nothing applies. There is no separate on/off
   switch for the dictionary (entries have always applied unconditionally);
   disabling or deleting entries removes them from the hint, and snippet

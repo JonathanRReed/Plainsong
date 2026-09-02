@@ -42,7 +42,10 @@ evidence is stale and must be recaptured before this becomes a candidate.
   OpenAI and Groq as the `prompt` field (both as one framed sentence,
   `Vocabulary: term, term.` — a bare comma list measurably hurt `base.en` on
   the repo fixtures), ElevenLabs Scribe as `keyterms`.
-  Snippet expansions and misheard spoken forms are never sent. Cohere's
+  Snippet expansions and misheard spoken forms are never sent; the prompt
+  is capped at an estimated 200 tokens under whisper's window, withheld on
+  near-silent or sub-half-second audio, and an output that only echoes the
+  hint on such audio is dropped rather than typed. Cohere's
   OpenAI-compatible endpoint documents `prompt` as unsupported, and Parakeet,
   Moonshine, Candle, Qwen3 and Apple Speech have no equivalent, so those
   routes are unchanged. Note for ElevenLabs users: ElevenLabs bills a 20%
@@ -148,12 +151,16 @@ evidence is stale and must be recaptured before this becomes a candidate.
 - Dictation now refuses to deliver into password boxes and other secure
   inputs. Before the direct Accessibility write, before the clipboard +
   Cmd+V fallback, and before the Cmd+C used to read a selection, the sidecar
-  checks the focused control (`AXSecureTextField` role/subrole) and macOS's
-  secure-event-input flag; when either says "secure", nothing is inserted,
-  nothing is staged on the clipboard, the words stay in dictation history,
-  and the popup reports the distinct `secure_field` outcome in plain language
-  with the Copy action still available. Previously this was left to whatever
-  the target app did with a synthetic paste.
+  checks the focused control (`AXSecureTextField` role/subrole), letting
+  macOS's system-wide secure-event-input flag decide only when the control
+  cannot be inspected; when the check says "secure", nothing is inserted,
+  nothing is staged on the clipboard (clipboard-only mode included), the
+  words stay in dictation history, and the popup reports the distinct
+  `secure_field` outcome in plain language with the Copy action still
+  available. The paste fallback re-probes immediately before it touches the
+  clipboard, so focus moving between the first check and the paste cannot
+  slip a password box in. Previously this was left to whatever the target
+  app did with a synthetic paste.
 - `shell.openExternal` and in-app link navigation now check a fixed host
   allowlist before opening anything in the user's browser; a link to any
   other host is refused and logged, not opened.

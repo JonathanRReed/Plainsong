@@ -105,8 +105,10 @@ impl ElevenLabsScribeProvider {
         // surcharge on a request that carries keyterms, which is why this is
         // only ever sent when the user's own dictionary has applicable
         // entries — see CHANGELOG and docs/evals/dictation-dictionary-fixture-report.md.
+        let mut vocabulary_hint_terms_applied = 0usize;
         if let Some(hint) = options.vocabulary_hint.as_ref() {
             for term in scribe_keyterms(hint.terms()) {
+                vocabulary_hint_terms_applied += 1;
                 form = form.text("keyterms", term);
             }
         }
@@ -160,6 +162,7 @@ impl ElevenLabsScribeProvider {
             actual_engine: Some("provider_default".to_string()),
             optimization_applied: false,
             fallback_reason: None,
+            vocabulary_hint_terms_applied,
         })
     }
 
