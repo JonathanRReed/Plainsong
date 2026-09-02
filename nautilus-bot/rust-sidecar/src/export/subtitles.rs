@@ -166,7 +166,14 @@ fn merge_short_units(units: Vec<Unit>) -> Vec<Unit> {
                 previous.text = format!("{} {}", previous.text, unit.text);
                 continue;
             }
-            unit.end = unit.start + MIN_CUE_SECONDS;
+            // Held for the minimum, but never into the next unit: two cues on
+            // screen at once is what a player does with overlapping timings,
+            // and the reader sees the following line before it is spoken.
+            let extended = unit.start + MIN_CUE_SECONDS;
+            unit.end = match iter.peek() {
+                Some(next) => extended.min(next.start).max(unit.end),
+                None => extended,
+            };
         }
         out.push(unit);
     }
@@ -407,10 +414,65 @@ mod tests {
             vec!["Me: Um so the plan is set.".to_string()]
         );
         assert_eq!((cues[0].start, cues[0].end), (0.0, 3.0));
-        // No same-speaker neighbour: held for the minimum instead of dropped.
+        // No same-speaker neighbour: held longer than it was spoken instead of
+        // dropped, but only up to the moment the next speaker starts. It used
+        // to run to 3.5s, on screen over the top of the next cue.
         assert_eq!(cues[1].lines, vec!["Them: Yes.".to_string()]);
-        assert!((cues[1].end - cues[1].start - MIN_CUE_SECONDS).abs() < 1e-9);
+        assert!(cues[1].end > cues[1].start);
+        assert_eq!(cues[1].end, cues[2].start);
         assert_eq!(cues[2].lines, vec!["Me: Good.".to_string()]);
+        assert_no_overlap(&cues);
+    }
+
+    /// Cue N must end before cue N+1 begins; a player given overlapping
+    /// timings shows both at once.
+    fn assert_no_overlap(cues: &[SubtitleCue]) {
+        for pair in cues.windows(2) {
+            assert!(
+                pair[0].end <= pair[1].start,
+                "cue {:?} overlaps {:?}",
+                pair[0],
+                pair[1]
+            );
+        }
+    }
+
+    #[test]
+    fn a_short_final_turn_is_still_held_for_the_minimum() {
+        // Nothing follows it, so there is nothing to run into: the whole point
+        // of the minimum is that a 100 ms cue cannot be read.
+        let cues = build_cues(
+            &[
+                segment("a", 0.0, 2.0, Some("me"), "First."),
+                segment("b", 4.0, 4.1, Some("them"), "Bye."),
+            ],
+            true,
+            &HashMap::new(),
+        );
+        assert_eq!(cues.len(), 2);
+        assert!((cues[1].end - (4.0 + MIN_CUE_SECONDS)).abs() < 1e-9);
+        assert_no_overlap(&cues);
+    }
+
+    #[test]
+    fn back_to_back_short_turns_never_overlap() {
+        // Four different speakers, each under the minimum, 200 ms apart: every
+        // one of them wanted to be held for 500 ms.
+        let cues = build_cues(
+            &[
+                segment("a", 0.0, 0.1, Some("me"), "One."),
+                segment("b", 0.2, 0.3, Some("them"), "Two."),
+                segment("c", 0.4, 0.5, Some("me"), "Three."),
+                segment("d", 0.6, 0.7, Some("them"), "Four."),
+            ],
+            true,
+            &HashMap::new(),
+        );
+        assert_eq!(cues.len(), 4, "{cues:?}");
+        assert_no_overlap(&cues);
+        for cue in &cues {
+            assert!(cue.end > cue.start, "no cue may be empty: {cue:?}");
+        }
     }
 
     #[test]

@@ -191,6 +191,11 @@ evidence is stale and must be recaptured before this becomes a candidate.
   Reloading the window, a renderer crash, a preparation that timed out, and
   "Reset app state" all release the tokens they leave behind, so the
   decrypted audio goes with them.
+- A subtitle cue for a very short turn no longer runs over the top of the
+  next cue: it is still held long enough to read, but never past the moment
+  the next speaker starts.
+- The Word export no longer italicises identifiers: `file_name_here` keeps
+  its underscores, because `_` now marks emphasis only at a word boundary.
 - "Open audio file" and the stored waveform could not open a recording
   encrypted by the streaming vault writer: the runtime decrypt path still
   ran the pre-streaming whole-file decoder on every file, which fails the

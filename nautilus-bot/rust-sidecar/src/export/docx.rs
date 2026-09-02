@@ -147,8 +147,20 @@ fn parse_runs(text: &str) -> Vec<Run> {
                 index += 2;
                 continue;
             }
-        } else if !code && (c == '*' || c == '_') {
+        } else if !code && c == '*' {
             let closes = italic || chars[index + 1..].contains(&c);
+            if closes {
+                flush(&mut buffer, &mut runs, bold, italic, code);
+                italic = !italic;
+                index += 1;
+                continue;
+            }
+        } else if !code && c == '_' {
+            let closes = if italic {
+                underscore_closes_at(&chars, index)
+            } else {
+                underscore_opens_at(&chars, index)
+            };
             if closes {
                 flush(&mut buffer, &mut runs, bold, italic, code);
                 italic = !italic;
@@ -167,6 +179,26 @@ fn has_pair(haystack: &[char], needle: &[char; 2]) -> bool {
     haystack.windows(2).any(|w| w == needle)
 }
 
+/// `_` marks emphasis only at a word boundary, the way every Markdown reader
+/// treats it. Without this, `file_name_here` lost both underscores and came
+/// out of the export in italics: any later `_` was taken as the partner of the
+/// first, whatever it was attached to.
+fn underscore_opens_at(chars: &[char], index: usize) -> bool {
+    let before = index.checked_sub(1).map(|previous| chars[previous]);
+    let after = chars.get(index + 1).copied();
+    before.is_none_or(|character| !character.is_alphanumeric() && character != '_')
+        && after.is_some_and(|character| !character.is_whitespace() && character != '_')
+        && (index + 1..chars.len())
+            .any(|candidate| chars[candidate] == '_' && underscore_closes_at(chars, candidate))
+}
+
+fn underscore_closes_at(chars: &[char], index: usize) -> bool {
+    let before = index.checked_sub(1).map(|previous| chars[previous]);
+    let after = chars.get(index + 1).copied();
+    before.is_some_and(|character| !character.is_whitespace() && character != '_')
+        && after.is_none_or(|character| !character.is_alphanumeric())
+}
+
 fn escape_xml(value: &str) -> String {
     let mut escaped = String::with_capacity(value.len());
     for character in value.chars() {
@@ -175,9 +207,11 @@ fn escape_xml(value: &str) -> String {
             '<' => escaped.push_str("&lt;"),
             '>' => escaped.push_str("&gt;"),
             '"' => escaped.push_str("&quot;"),
-            // XML 1.0 forbids most control characters outright; drop them
+            // XML 1.0 forbids most control characters outright, and excludes
+            // U+FFFE/U+FFFF from its `Char` production as well; drop them
             // rather than emit a file Word refuses to open.
             c if (c as u32) < 0x20 && c != '\t' && c != '\n' && c != '\r' => {}
+            '\u{FFFE}' | '\u{FFFF}' => {}
             c => escaped.push(c),
         }
     }
@@ -411,6 +445,51 @@ mod tests {
             .expect("document part")
             .1;
         assert!(document.contains("<w:body><w:p/>"));
+    }
+
+    #[test]
+    fn underscores_inside_a_word_are_not_emphasis() {
+        // The regression: an identifier came out of the export in italics with
+        // both underscores eaten.
+        let runs = parse_runs("See file_name_here in the repo.");
+        assert_eq!(runs.len(), 1);
+        assert_eq!(runs[0].text, "See file_name_here in the repo.");
+        assert!(!runs[0].italic);
+
+        // Emphasis at word boundaries still works, on its own and mid-sentence.
+        let emphasised: Vec<(String, bool)> = parse_runs("an _emphasised_ word")
+            .into_iter()
+            .map(|run| (run.text, run.italic))
+            .collect();
+        assert_eq!(
+            emphasised,
+            vec![
+                ("an ".to_string(), false),
+                ("emphasised".to_string(), true),
+                (" word".to_string(), false),
+            ]
+        );
+        // A trailing identifier does not reopen emphasis behind it.
+        let trailing = parse_runs("_start_ then snake_case_name");
+        assert_eq!(
+            trailing
+                .iter()
+                .filter(|run| run.italic)
+                .map(|run| run.text.as_str())
+                .collect::<Vec<_>>(),
+            vec!["start"]
+        );
+        assert!(trailing
+            .iter()
+            .any(|run| run.text.contains("snake_case_name")));
+    }
+
+    #[test]
+    fn xml_escaping_drops_characters_no_xml_document_may_carry() {
+        let escaped = escape_xml("ok\u{0}\u{7}\u{FFFE}\u{FFFF}\tstill\nok\u{FDD0}");
+        assert_eq!(escaped, "ok\tstill\nok\u{FDD0}");
+        assert!(!escaped.contains('\u{FFFE}'));
+        assert!(!escaped.contains('\u{FFFF}'));
     }
 
     #[test]
