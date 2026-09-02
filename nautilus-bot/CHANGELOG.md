@@ -167,6 +167,29 @@ evidence is stale and must be recaptured before this becomes a candidate.
   files that still carry it load cleanly and are rewritten without it.
 
 ### Fixed
+- **The vault's database encryption step did not encrypt the database.**
+  Turning the vault on generated a key, stored it durably in the macOS
+  Keychain, reported "database encrypted", and left `plainsong.db` readable
+  by anything that could open the file: the step used `PRAGMA rekey`, which
+  SQLCipher documents as a no-op on a connection that was never keyed, and it
+  returns success either way. Encrypted meeting audio and Keychain storage
+  were not affected. The migration is real now — `sqlcipher_export` into a
+  fresh keyed database beside the original, the schema version carried across
+  by hand (the export does not carry it), fsync, a check that the new file
+  opens with the key and does *not* open without it, then an atomic rename
+  over the original; any failure before that rename removes the staging file
+  and leaves the plaintext original intact and open. Every install that
+  turned the vault on is in the "key stored, database plaintext" state, so
+  the app detects it at launch and runs the migration then, holding the same
+  vault-migration exclusion the Settings path holds, writing an audit event,
+  and telling you in the app that it happened. A migration that cannot finish
+  no longer stops the app from launching: it keeps working on the plaintext
+  database and reports the database as not encrypted, which is the truth. The
+  `plainsong` CLI now probes rather than trusting the Keychain, so it opens
+  either kind of database and its `stats` reports the file's real state.
+  Note the one thing an atomic rename cannot do: it unlinks the old plaintext
+  pages rather than overwriting them, so they stay recoverable on the volume
+  until reused. See docs/beta/PRIVACY-AND-CLOUD.md.
 - The `plainsong` command read its Local tools switch through a path that
   honours `PLAINSONG_CONFIG_DIR`, so anything that could set that variable
   could point the gate at a settings file it wrote itself while the database
@@ -177,16 +200,18 @@ evidence is stale and must be recaptured before this becomes a candidate.
   mid-response (a byte-offset slice landing inside the character). The frame
   neutraliser also missed `</ untrusted_content>` — whitespace inside the tag
   punctuation — which a lenient reader would still take as the frame ending.
+- The `plainsong` CLI's `stats` read and parsed every transcript in the
+  database to count how many recordings had one; it is a single query now.
+- The read-only database open sets its busy timeout before the first statement
+  that touches the file rather than after, so a reader started while the app
+  is mid-write waits instead of failing.
 - Opening an encrypted (SQLCipher) database failed every time with "Execute
   returned results": the key check ran a `SELECT` through rusqlite's
   `execute`, which refuses any statement that returns rows. No install had a
   vault key yet, so nothing caught it until the read-only CLI open was tested
   against a keyed file. The open and rekey paths now verify the key with a
   query. Found while adding the local tools; regression-tested in
-  `db::tests::keyed_open_round_trip`. (Still open, and now written down in
-  that test: `PRAGMA rekey` is a silent no-op on a database opened without a
-  key, so the vault's plaintext-to-encrypted step does not encrypt; it needs
-  `sqlcipher_export` and its own migration.)
+  `db::tests::keyed_open_round_trip`.
 - A mic failure mid-meeting in a "me and them" (microphone plus system
   audio) recording is now detected and noted on the meeting instead of being
   silently padded with silence and presented as a complete recording; a

@@ -259,6 +259,10 @@ async fn run_sidecar() -> Result<(), String> {
         Err(error) => tracing::warn!("Recording audio backfill failed: {}", error),
     }
 
+    // The database is opened before the event channel exists, so a vault
+    // repair that ran at startup has had nowhere to say so until now.
+    plainsong_lib::announce_vault_startup_migration(&state, &handle);
+
     // If hands-free dictation is enabled, start the idle-time monitor right away so
     // hands-free listening is live as soon as the app launches, not just after the
     // first settings save. No-op (stays stopped) if the setting is off.

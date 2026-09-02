@@ -32,8 +32,13 @@ impl ReadOnlyStore {
         Self::open_at(&path, key.as_deref())
     }
 
+    /// Open read-only, probing rather than trusting the keychain: a stored key
+    /// does not prove the file is encrypted (the vault used to store the key
+    /// and leave the database plaintext), so the keyed open is tried first and
+    /// an unkeyed open is the fallback. Whichever one worked is what
+    /// [`Stats::database_encrypted`] reports.
     pub fn open_at(path: &Path, key: Option<&str>) -> Result<Self> {
-        let db = Database::open_read_only_at_path(path, key)?;
+        let db = Database::open_read_only_probing(path, key)?;
         Ok(Self {
             db,
             path: path.to_path_buf(),
@@ -82,12 +87,8 @@ impl ReadOnlyStore {
 
     fn has_transcript(&self, recording_id: &str) -> bool {
         self.db
-            .get_transcript(recording_id)
-            .ok()
-            .flatten()
-            .is_some_and(|transcript| {
-                !transcript.segments.is_empty() || !transcript.full_text.trim().is_empty()
-            })
+            .has_transcript_content(recording_id)
+            .unwrap_or(false)
     }
 
     fn transcript_view(&self, recording: &Recording, transcript: Transcript) -> TranscriptView {
@@ -265,9 +266,13 @@ impl MeetingSource for ReadOnlyStore {
     fn stats(&self) -> Result<Stats> {
         let recordings = self.db.get_recordings(None)?;
         let projects = self.db.get_projects()?;
+        // One query, not one full transcript load per recording: this used to
+        // read and deserialize every transcript in the database to answer a
+        // question about counts.
+        let with_transcripts = self.db.recording_ids_with_transcript_content()?;
         let transcribed = recordings
             .iter()
-            .filter(|recording| self.has_transcript(&recording.id))
+            .filter(|recording| with_transcripts.contains(&recording.id))
             .count();
         let meetings = recordings
             .iter()
@@ -392,6 +397,41 @@ mod tests {
         }
         let store = ReadOnlyStore::open_at(&path, None).unwrap();
         (dir, store)
+    }
+
+    /// Every install that turned the vault on before the `sqlcipher_export`
+    /// fix has a key in the keychain and a plaintext database. The CLI has to
+    /// open it, and `stats` has to say what is actually true about the file.
+    #[cfg(feature = "sqlcipher")]
+    #[test]
+    fn stats_reports_encryption_from_the_probe_not_from_the_stored_key() {
+        let dir = crate::test_fs::TempDir::new("local-tools-probe");
+        let path = dir.path().join("plainsong.db");
+        let key = "0123456789abcdef0123456789abcdef";
+        {
+            let mut db = Database::open_at_path(&path, None).unwrap();
+            db.create_recording(&recording("m1", "meeting", 9)).unwrap();
+        }
+
+        // Key in hand, plaintext on disk: it opens, and says "no".
+        let store = ReadOnlyStore::open_at(&path, Some(key)).expect("plaintext open with a key");
+        assert!(!store.stats().unwrap().database_encrypted);
+        assert_eq!(store.stats().unwrap().meetings, 1);
+        drop(store);
+
+        {
+            let mut db = Database::open_at_path(&path, None).unwrap();
+            db.change_key(key).unwrap();
+        }
+
+        // Genuinely encrypted now, and the same call says "yes".
+        let store = ReadOnlyStore::open_at(&path, Some(key)).expect("keyed open");
+        let stats = store.stats().unwrap();
+        assert!(stats.database_encrypted);
+        assert_eq!(stats.meetings, 1);
+        // Without the key there is nothing to fall back to, and that is an
+        // error rather than an empty answer.
+        assert!(ReadOnlyStore::open_at(&path, None).is_err());
     }
 
     #[test]

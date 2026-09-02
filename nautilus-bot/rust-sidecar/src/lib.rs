@@ -101,6 +101,11 @@ pub struct AppState {
     recent_dictation_delivery: Arc<Mutex<Option<RecentDictationDelivery>>>,
     streaming_transcriber: Arc<streaming::StreamingTranscriber>,
     vault_state: Arc<Mutex<VaultRuntimeState>>,
+    /// What the startup vault check found: whether a plaintext database that
+    /// already had a durable key was encrypted just now, or why it could not
+    /// be. Read once by the sidecar to raise the notice, so it is a plain
+    /// value rather than a lock.
+    vault_startup_migration: VaultStartupMigration,
     /// Serializes recording file ownership transitions across capture, vault
     /// migration, deletion, and retention.
     audio_storage_gate: Arc<Mutex<()>>,
@@ -6331,9 +6336,47 @@ where
 
 #[cfg(test)]
 mod vault_key_migration_tests {
-    use super::{install_vault_database_key, persist_and_verify_vault_db_key};
+    use super::{
+        install_vault_database_key, persist_and_verify_vault_db_key, VaultStartupMigration,
+    };
     use std::cell::RefCell;
     use std::rc::Rc;
+
+    #[test]
+    fn startup_repair_says_nothing_unless_something_happened() {
+        assert_eq!(VaultStartupMigration::default().notice(), None);
+    }
+
+    #[test]
+    fn a_completed_startup_repair_says_so_without_blaming_the_user() {
+        let notice = VaultStartupMigration {
+            encrypted_now: true,
+            failure: None,
+        }
+        .notice()
+        .expect("a repair that ran must be reported");
+        assert!(
+            notice.contains("finished encrypting its database"),
+            "{notice}"
+        );
+        assert!(notice.contains("nothing was lost"), "{notice}");
+    }
+
+    /// The failure notice has to say the state (not encrypted), the cause, and
+    /// what to do — and it must not imply the data is gone, because it is not.
+    #[test]
+    fn a_failed_startup_repair_states_the_state_cause_and_next_action() {
+        let notice = VaultStartupMigration {
+            encrypted_now: false,
+            failure: Some("No space left on device.".to_string()),
+        }
+        .notice()
+        .expect("a failed repair must be reported");
+        assert!(notice.contains("still readable without your"), "{notice}");
+        assert!(notice.contains("No space left on device."), "{notice}");
+        assert!(notice.contains("Your meetings are unchanged."), "{notice}");
+        assert!(notice.contains("Settings > Privacy"), "{notice}");
+    }
 
     #[test]
     fn crash_after_verified_key_write_leaves_recoverable_key() {
@@ -6471,40 +6514,63 @@ async fn migrate_storage_encryption(state: &AppState, password: &str) -> Result<
 
     let existing_db_key =
         secrets::get_internal_secret(VAULT_DB_KEY_SECRET).map_err(|e| e.to_string())?;
-    if existing_db_key.is_none() {
-        let mut db_key_bytes = [0u8; 32];
-        rand::rng().fill_bytes(&mut db_key_bytes);
-        let db_key = hex::encode(db_key_bytes);
+    match existing_db_key.as_deref() {
+        None => {
+            let mut db_key_bytes = [0u8; 32];
+            rand::rng().fill_bytes(&mut db_key_bytes);
+            let db_key = hex::encode(db_key_bytes);
 
-        #[cfg(feature = "sqlcipher")]
-        {
-            // The irreversible rekey happens only after Keychain persistence has
-            // been read back byte-for-byte. If rekey itself fails, remove the
-            // orphaned key so the next startup still opens the plaintext file.
-            let mut db = state.db.lock().await;
-            install_vault_database_key(
-                &db_key,
-                |value| {
-                    secrets::set_internal_secret(VAULT_DB_KEY_SECRET, value)
-                        .map_err(|error| error.to_string())
-                },
-                || {
-                    secrets::get_internal_secret(VAULT_DB_KEY_SECRET)
-                        .map_err(|error| error.to_string())
-                },
-                || {
-                    secrets::clear_internal_secret(VAULT_DB_KEY_SECRET)
-                        .map_err(|error| error.to_string())
-                },
-                || db.change_key(&db_key).map_err(|error| error.to_string()),
-            )?;
+            #[cfg(feature = "sqlcipher")]
+            {
+                // The irreversible encryption happens only after Keychain
+                // persistence has been read back byte-for-byte. If it fails,
+                // remove the orphaned key so the next startup still opens the
+                // plaintext file.
+                let mut db = state.db.lock().await;
+                install_vault_database_key(
+                    &db_key,
+                    |value| {
+                        secrets::set_internal_secret(VAULT_DB_KEY_SECRET, value)
+                            .map_err(|error| error.to_string())
+                    },
+                    || {
+                        secrets::get_internal_secret(VAULT_DB_KEY_SECRET)
+                            .map_err(|error| error.to_string())
+                    },
+                    || {
+                        secrets::clear_internal_secret(VAULT_DB_KEY_SECRET)
+                            .map_err(|error| error.to_string())
+                    },
+                    || db.change_key(&db_key).map_err(|error| error.to_string()),
+                )?;
+            }
+            #[cfg(not(feature = "sqlcipher"))]
+            {
+                let _ = &db_key;
+                tracing::warn!(
+                    "sqlcipher feature is disabled in this build; database encryption migration skipped"
+                );
+            }
         }
-        #[cfg(not(feature = "sqlcipher"))]
-        {
-            let _ = &db_key;
-            tracing::warn!(
-                "sqlcipher feature is disabled in this build; database encryption migration skipped"
-            );
+        Some(existing_key) => {
+            let _ = existing_key;
+            // A stored key is not proof the database is encrypted. Storing the
+            // key and encrypting the file are two steps, and for every install
+            // that turned the vault on before the `sqlcipher_export` fix the
+            // second one silently did nothing. Startup repairs that; retrying
+            // here means a user who reaches this screen after a failed repair
+            // gets another attempt instead of a permanent no-op.
+            #[cfg(feature = "sqlcipher")]
+            {
+                let mut db = state.db.lock().await;
+                if !db.is_encrypted().map_err(|error| error.to_string())? {
+                    db.change_key(existing_key).map_err(|error| {
+                        format!(
+                            "The database key is already stored, but encrypting the database failed: {error}"
+                        )
+                    })?;
+                }
+            }
         }
     }
     if existing_verifier.is_none() {
@@ -20298,29 +20364,89 @@ fn preserve_privileged_privacy_after_restore(
     restored.vault_salt = current.vault_salt.clone();
 }
 
+/// What the startup vault check found and did, so the sidecar can tell the
+/// person rather than only the log.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct VaultStartupMigration {
+    /// A plaintext database was found beside a durable key and encrypted.
+    pub encrypted_now: bool,
+    /// The migration was needed and did not finish. The database is still
+    /// plaintext and still open; this is the reason.
+    pub failure: Option<String>,
+}
+
+impl VaultStartupMigration {
+    /// The sentence the renderer shows, or `None` when nothing happened.
+    pub fn notice(&self) -> Option<String> {
+        if let Some(reason) = &self.failure {
+            return Some(format!(
+                "Plainsong could not encrypt its database, so it is still readable without your \
+                 vault key. Cause: {reason} Your meetings are unchanged. Try Settings > Privacy > \
+                 turn the vault on again, and if it keeps failing, check free disk space."
+            ));
+        }
+        self.encrypted_now.then(|| {
+            "Plainsong finished encrypting its database with your vault key. An earlier version \
+             stored the key but left the database unencrypted; that is now fixed and nothing was \
+             lost."
+                .to_string()
+        })
+    }
+}
+
+/// Open the database, and repair the one inconsistent state the vault can
+/// leave behind: a durable key in the keychain and a plaintext file on disk.
+///
+/// That state was not rare. `PRAGMA rekey` is a no-op on a connection that was
+/// never keyed, so *every* install that turned the vault on stored a key and
+/// kept a plaintext database while the app reported it as encrypted. The same
+/// state can also be reached honestly, by stopping between the key's verified
+/// keychain write and the encryption step.
+///
+/// Either way the recovery is the same and it is now real: prove the file is
+/// still plaintext, then run the `sqlcipher_export` migration with the
+/// already-durable key. A wrong key for a genuinely encrypted file cannot pass
+/// the plaintext open, so an encrypted database is never overwritten.
+///
+/// A migration that fails does not stop the app. The alternative is refusing
+/// to launch, which would leave someone with a readable database and no way to
+/// reach it; the honest answer is to open the plaintext file, report
+/// `database_encrypted: false` everywhere it is asked, and say plainly what
+/// went wrong.
 fn open_database_with_vault_key_recovery(
     initial_db_key: Option<&str>,
-) -> Result<db::Database, String> {
+) -> Result<(db::Database, VaultStartupMigration), String> {
     match db::Database::new_with_key(initial_db_key) {
-        Ok(database) => Ok(database),
+        Ok(database) => Ok((database, VaultStartupMigration::default())),
         #[cfg(feature = "sqlcipher")]
         Err(keyed_error) if initial_db_key.is_some() => {
-            // A process can stop after the key's verified Keychain write but
-            // before PRAGMA rekey. The persisted key makes that window
-            // recoverable: prove the file is still plaintext, then finish the
-            // rekey using the already-durable key. A wrong key for an encrypted
-            // file cannot pass the plaintext open and is never overwritten.
             let mut plaintext = db::Database::new_with_key(None).map_err(|plaintext_error| {
                 format!(
                     "Failed to initialize encrypted database ({keyed_error}); plaintext recovery also failed ({plaintext_error})"
                 )
             })?;
-            plaintext
-                .change_key(initial_db_key.expect("guarded by is_some"))
-                .map_err(|error| {
-                    format!("Failed to finish interrupted database encryption: {error}")
-                })?;
-            Ok(plaintext)
+            tracing::warn!(
+                "A vault key is stored but the database is plaintext; encrypting it now"
+            );
+            match plaintext.change_key(initial_db_key.expect("guarded by is_some")) {
+                Ok(()) => Ok((
+                    plaintext,
+                    VaultStartupMigration {
+                        encrypted_now: true,
+                        failure: None,
+                    },
+                )),
+                Err(error) => {
+                    tracing::error!("Startup database encryption failed: {error:#}");
+                    Ok((
+                        plaintext,
+                        VaultStartupMigration {
+                            encrypted_now: false,
+                            failure: Some(format!("{error}.")),
+                        },
+                    ))
+                }
+            }
         }
         Err(error) => Err(format!("Failed to initialize local database: {error}")),
     }
@@ -20373,7 +20499,37 @@ pub async fn build_app_state() -> Result<AppState, String> {
     let initial_db_key = secrets::get_internal_secret(VAULT_DB_KEY_SECRET)
         .map_err(|e| format!("Could not read secure database key: {}", e))?;
 
-    let database = open_database_with_vault_key_recovery(initial_db_key.as_deref())?;
+    // Built before the database so the startup encryption repair below holds
+    // the same `VaultMigration` exclusion the Settings-driven migration does.
+    // Nothing else has a handle on this coordinator yet, so the lease can only
+    // succeed; taking it anyway is what keeps the two paths from diverging if
+    // startup ever grows a concurrent step.
+    let operation_coordinator = operation_coordinator::OperationCoordinator::new();
+    let (mut database, vault_startup_migration) = {
+        let _vault_lease = operation_coordinator
+            .try_acquire(operation_coordinator::OperationKind::VaultMigration)?;
+        open_database_with_vault_key_recovery(initial_db_key.as_deref())?
+    };
+    if vault_startup_migration != VaultStartupMigration::default() {
+        // Recorded even when it failed: "we tried and could not" is the part a
+        // support bundle needs. No key material, no paths.
+        let outcome = if vault_startup_migration.encrypted_now {
+            "encrypted"
+        } else {
+            "failed"
+        };
+        if let Err(error) = database.log_audit_event(
+            "vault_database_encryption_repair",
+            Some(serde_json::json!({ "outcome": outcome })),
+            if vault_startup_migration.encrypted_now {
+                "info"
+            } else {
+                "warn"
+            },
+        ) {
+            tracing::warn!("Could not record the vault repair audit event: {}", error);
+        }
+    }
 
     let settings_manager = settings::SettingsManager::new()
         .map_err(|e| format!("Failed to initialize settings: {}", e))?;
@@ -20465,11 +20621,12 @@ pub async fn build_app_state() -> Result<AppState, String> {
         recent_dictation_delivery: Arc::new(Mutex::new(None)),
         streaming_transcriber,
         vault_state: Arc::new(Mutex::new(VaultRuntimeState::default())),
+        vault_startup_migration,
         audio_storage_gate: Arc::new(Mutex::new(())),
         recording_stream_stop: Arc::new(AtomicBool::new(false)),
         recording_templates: Arc::new(StdMutex::new(std::collections::HashMap::new())),
         active_meeting_audio_postprocessing: Arc::new(StdMutex::new(HashMap::new())),
-        operation_coordinator: operation_coordinator::OperationCoordinator::new(),
+        operation_coordinator,
         capture_admission: Arc::new(admission::CaptureAdmissionRegistry::default()),
         active_capture_lease: Arc::new(Mutex::new(None)),
         sidecar_shutting_down: Arc::new(AtomicBool::new(false)),
@@ -20973,6 +21130,27 @@ pub async fn reconcile_hands_free_monitor_for_sidecar(
     handle: &crate::sidecar_handle::SidecarHandle,
 ) {
     reconcile_hands_free_monitor(state, handle).await;
+}
+
+/// Tell the person what the startup vault check did, once, after the event
+/// channel exists.
+///
+/// The repair itself has to run before anything can open the database, which
+/// is well before there is anywhere to send a message; this is the other half.
+/// Silent when nothing happened.
+pub fn announce_vault_startup_migration(
+    state: &AppState,
+    handle: &crate::sidecar_handle::SidecarHandle,
+) {
+    if let Some(notice) = state.vault_startup_migration.notice() {
+        handle.emit_event(
+            "vault-database-encryption-notice",
+            serde_json::json!({
+                "message": notice,
+                "encrypted": state.vault_startup_migration.encrypted_now,
+            }),
+        );
+    }
 }
 
 /// Release process-global model caches before the sidecar exits.
