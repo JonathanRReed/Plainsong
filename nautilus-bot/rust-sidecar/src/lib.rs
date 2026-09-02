@@ -2,6 +2,7 @@ pub mod admission;
 mod approved_locations;
 pub mod asr;
 mod audio;
+mod audio_import;
 mod backup;
 mod crypto;
 mod db;
@@ -9300,6 +9301,7 @@ mod tests {
             meeting_notes: meeting_notes.map(str::to_string),
             meeting_template_id: None,
             meeting_capture_mode: Some("me_and_them".to_string()),
+            imported_source_name: None,
             notes_updated_at: None,
             consent_prompt_shown: false,
             consent_notice_mode: None,
@@ -23196,6 +23198,7 @@ async fn stop_dictation_for_sidecar(
         meeting_notes: None,
         meeting_template_id: None,
         meeting_capture_mode: None,
+        imported_source_name: None,
         notes_updated_at: None,
         consent_prompt_shown: false,
         consent_notice_mode: None,
@@ -24789,6 +24792,8 @@ async fn start_recording_for_sidecar(
                 "mic_only".to_string()
             }
         })),
+        // Recorded here, never imported.
+        imported_source_name: None,
         notes_updated_at: options
             .meeting_notes
             .as_ref()
@@ -25557,6 +25562,434 @@ async fn stop_recording_for_sidecar_inner(
     });
 
     Ok(())
+}
+
+/// Everything an "Import audio…" produces before the database sees it: the
+/// planned recording id and audio path, the title taken from the file, and the
+/// converted WAV's validated metadata.
+#[derive(Debug)]
+struct PreparedAudioImport {
+    plan: recording_audio::RecordingCapturePlan,
+    title: String,
+    source_file_name: String,
+    validated: recording_audio::ValidatedRecordingAudio,
+}
+
+/// Ask macOS how long a file is without decoding it.
+///
+/// Advisory: a report we cannot read returns `None` and the converted WAV
+/// answers the same question exactly a moment later. It exists so a six-hour
+/// file is refused in milliseconds instead of after a long conversion.
+fn probe_audio_duration_seconds(path: &Path) -> Option<f64> {
+    if !cfg!(target_os = "macos") {
+        return None;
+    }
+    let output = std::process::Command::new("/usr/bin/afinfo")
+        .arg("--brief")
+        .arg(path)
+        .output()
+        .or_else(|_| {
+            std::process::Command::new("/usr/bin/afinfo")
+                .arg(path)
+                .output()
+        })
+        .ok()?;
+    let text = String::from_utf8_lossy(&output.stdout);
+    audio_import::parse_afinfo_duration_seconds(&text).or_else(|| {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        audio_import::parse_afinfo_duration_seconds(&stderr)
+    })
+}
+
+/// Run macOS' `afconvert` to decode `source` into `destination`.
+fn run_afconvert(source: &Path, destination: &Path) -> Result<(), String> {
+    if !cfg!(target_os = "macos") {
+        return Err(
+            "Importing an audio file is not supported on this platform yet. It uses macOS' own audio decoder."
+                .to_string(),
+        );
+    }
+    let output = std::process::Command::new("/usr/bin/afconvert")
+        .args(audio_import::afconvert_args(source, destination))
+        .output()
+        .map_err(|error| format!("Plainsong could not run the macOS audio converter: {error}"))?;
+    if output.status.success() {
+        return Ok(());
+    }
+    // afconvert reports a codec it cannot read on stderr; the reader needs
+    // that sentence, not just an exit code.
+    let detail = String::from_utf8_lossy(&output.stderr)
+        .lines()
+        .map(str::trim)
+        .find(|line| !line.is_empty())
+        .unwrap_or("the converter gave no reason")
+        .to_string();
+    Err(format!("macOS could not decode that audio file: {detail}"))
+}
+
+/// Validate a chosen audio file and decode it into the recordings store.
+///
+/// Deliberately free of `AppState` and of the database so the whole
+/// file-to-recording step can be tested against a generated WAV in a temp
+/// directory without a recognizer, a model, or a running sidecar.
+fn prepare_audio_import(
+    source_path: &Path,
+    recordings_dir: &Path,
+) -> Result<PreparedAudioImport, String> {
+    audio_import::validate_import_extension(source_path)?;
+    let metadata = std::fs::symlink_metadata(source_path).map_err(|error| {
+        format!(
+            "Plainsong could not read '{}': {}",
+            source_path.display(),
+            error
+        )
+    })?;
+    if !metadata.file_type().is_file() {
+        return Err("Choose an audio file, not a folder or a link.".to_string());
+    }
+    audio_import::validate_import_size(metadata.len())?;
+    if let Some(seconds) = probe_audio_duration_seconds(source_path) {
+        audio_import::validate_import_duration(seconds)?;
+    }
+
+    std::fs::create_dir_all(recordings_dir).map_err(|error| {
+        format!(
+            "Failed to prepare the recordings folder '{}': {}",
+            recordings_dir.display(),
+            error
+        )
+    })?;
+    // One mic-shaped track: an imported file is a single source, so the plan
+    // has a primary path and no per-source companions.
+    let plan = recording_audio::RecordingCapturePlan::new(recordings_dir, true, false)
+        .map_err(|error| error.to_string())?;
+    // Armed until the converted WAV has been read back successfully, so a
+    // refused or corrupt import leaves nothing behind in the store.
+    let converted = recording_audio::DurableTempFile::new(plan.primary_path.clone());
+    run_afconvert(source_path, &plan.primary_path)?;
+    let validated = match recording_audio::validate_plaintext_wav(&plan.primary_path) {
+        recording_audio::RecordingAudioValidation::Ready(metadata) => metadata,
+        recording_audio::RecordingAudioValidation::Missing(reason)
+        | recording_audio::RecordingAudioValidation::Failed(reason) => {
+            return Err(format!(
+                "Plainsong could not read the converted audio: {reason}"
+            ));
+        }
+    };
+    // The authoritative duration check: afinfo above is an estimate, this is
+    // the file the pipeline will actually transcribe.
+    audio_import::validate_import_duration(validated.duration_seconds as f64)?;
+    let _ = converted.disarm();
+
+    Ok(PreparedAudioImport {
+        title: audio_import::import_title_from_file_name(source_path),
+        source_file_name: source_path
+            .file_name()
+            .map(|value| value.to_string_lossy().to_string())
+            .unwrap_or_default(),
+        plan,
+        validated,
+    })
+}
+
+/// Turn a prepared import into the meeting row the pipeline will pick up.
+///
+/// `consent_prompt_shown` stays false: nobody was in the room when Plainsong
+/// got this audio, so claiming a consent prompt was shown would be a lie. The
+/// capture mode is `imported`, which is what the Meetings view reads to show
+/// "Imported file" instead of Me + Them.
+fn imported_recording_row(
+    prepared: &PreparedAudioImport,
+    project_id: &str,
+    now: chrono::DateTime<chrono::Utc>,
+) -> models::Recording {
+    models::Recording {
+        id: prepared.plan.recording_id.clone(),
+        title: prepared.title.clone(),
+        project_id: project_id.to_string(),
+        duration: prepared.validated.duration_seconds,
+        created_at: now,
+        updated_at: now,
+        source_type: "meeting".to_string(),
+        audio_path: prepared.plan.primary_path.to_string_lossy().to_string(),
+        status: "processing".to_string(),
+        summary: None,
+        action_items: None,
+        summary_provenance: None,
+        action_items_provenance: None,
+        meeting_notes: None,
+        meeting_template_id: None,
+        meeting_capture_mode: Some(IMPORTED_MEETING_CAPTURE_MODE.to_string()),
+        imported_source_name: Some(prepared.source_file_name.clone())
+            .filter(|value| !value.trim().is_empty()),
+        notes_updated_at: None,
+        consent_prompt_shown: false,
+        consent_notice_mode: None,
+        consent_notice_surface: None,
+        consent_notice_message: None,
+        consent_notice_updated_at: None,
+        analysis_failure: None,
+    }
+}
+
+/// The capture mode written for a meeting that came from a file rather than a
+/// microphone. Mirrored by `MEETING_CAPTURE_MODE_IMPORTED` in
+/// `src/types/index.ts`.
+const IMPORTED_MEETING_CAPTURE_MODE: &str = "imported";
+
+/// Persist a prepared import: the meeting row, its owned audio asset, and the
+/// audit entry that records where the audio came from.
+fn persist_audio_import(
+    db: &mut db::Database,
+    prepared: &PreparedAudioImport,
+    recording: &models::Recording,
+) -> Result<(), String> {
+    db.create_recording_with_audio_plan(recording, &prepared.plan)
+        .map_err(|error| error.to_string())?;
+    db.finalize_recording_audio(
+        &recording.id,
+        &[(
+            recording_audio::RecordingAudioRole::Primary,
+            prepared.validated.clone(),
+        )],
+        prepared.validated.duration_seconds,
+        "processing",
+        None,
+    )
+    .map_err(|error| error.to_string())?;
+    // The original file's name is recorded; its directory is not, so the audit
+    // log does not become a map of the reader's disk.
+    if let Err(error) = db.log_audit_event(
+        "meeting_audio_imported",
+        Some(serde_json::json!({
+            "recording_id": &recording.id,
+            "source_file_name": &prepared.source_file_name,
+            "duration_seconds": prepared.validated.duration_seconds,
+            "converted_bytes": prepared.validated.plaintext_bytes,
+        })),
+        "info",
+    ) {
+        tracing::warn!("Failed to log audio import audit event: {}", error);
+    }
+    Ok(())
+}
+
+/// `import_audio_file`: decode a file the user picked, save it as a meeting,
+/// and hand it to the same post-capture pipeline a stopped meeting uses.
+///
+/// The original file is only ever read.
+async fn import_audio_file_impl(
+    state: &Arc<AppState>,
+    handle: &crate::sidecar_handle::SidecarHandle,
+    source_path: PathBuf,
+) -> Result<serde_json::Value, String> {
+    // Same lease the stop path and `retranscribe_recording` take, so an import
+    // cannot start on top of a backup, a vault migration, or another meeting's
+    // post-processing.
+    let postprocessing_lease = state
+        .operation_coordinator
+        .try_acquire(operation_coordinator::OperationKind::PostProcess)?;
+
+    let project_id = {
+        let settings = state.settings_manager.lock().await;
+        settings
+            .settings()
+            .transcription
+            .dictation_project_id
+            .clone()
+    };
+    let recordings_dir = nautilus_data_root()?.join("recordings");
+
+    let prepared = {
+        // Decoding writes into the recordings store, so it holds the same gate
+        // a retention sweep and the vault migration take.
+        let _storage_guard = state.audio_storage_gate.lock().await;
+        let source_for_task = source_path.clone();
+        let dir_for_task = recordings_dir.clone();
+        // afconvert on a long file takes minutes; it must not sit on the async
+        // runtime while it runs.
+        tokio::task::spawn_blocking(move || prepare_audio_import(&source_for_task, &dir_for_task))
+            .await
+            .map_err(|error| format!("The audio import task failed: {error}"))??
+    };
+
+    let recording = imported_recording_row(&prepared, &project_id, chrono::Utc::now());
+    {
+        let mut db = state.db.lock().await;
+        if let Err(error) = persist_audio_import(&mut db, &prepared, &recording) {
+            drop(db);
+            let _ = std::fs::remove_file(&prepared.plan.primary_path);
+            return Err(format!(
+                "Plainsong could not save the imported meeting: {error}"
+            ));
+        }
+    }
+
+    let recording_id = recording.id.clone();
+    handle.emit_event(
+        "recording-status-changed",
+        serde_json::json!({
+            "recordingId": &recording_id,
+            "status": "processing",
+            "message": "Processing transcript",
+            "progress": 0.0,
+            "updatedAt": chrono::Utc::now().to_rfc3339(),
+        }),
+    );
+
+    let audio_postprocessing_guard = MeetingAudioPostprocessingGuard::coordinated(
+        Arc::clone(&state.active_meeting_audio_postprocessing),
+        &recording_id,
+        postprocessing_lease,
+    );
+    tokio::spawn(run_meeting_transcription_pipeline(
+        Arc::clone(state),
+        handle.clone(),
+        recording_id.clone(),
+        audio_postprocessing_guard,
+    ));
+
+    Ok(serde_json::json!({
+        "recordingId": recording_id,
+        "title": recording.title,
+        "sourceFileName": prepared.source_file_name,
+        "durationSeconds": prepared.validated.duration_seconds,
+    }))
+}
+
+/// The import path from a file on disk to a saved meeting row, with the
+/// recognizer deliberately left out: `prepare_audio_import` and
+/// `persist_audio_import` are the seam, and everything after them is the same
+/// pipeline a stopped meeting already runs.
+#[cfg(test)]
+#[cfg(target_os = "macos")]
+mod audio_import_tests {
+    use super::*;
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    /// A short stereo 44.1 kHz WAV, i.e. deliberately not the shape the
+    /// meeting pipeline wants, so the conversion has something to do.
+    fn write_stereo_fixture(path: &Path, seconds: u32) {
+        let spec = hound::WavSpec {
+            channels: 2,
+            sample_rate: 44_100,
+            bits_per_sample: 16,
+            sample_format: hound::SampleFormat::Int,
+        };
+        let mut writer = hound::WavWriter::create(path, spec).expect("create fixture wav");
+        for index in 0..(44_100 * seconds) {
+            let value = ((index as f32 * 0.05).sin() * 8_000.0) as i16;
+            writer.write_sample(value).expect("left");
+            writer.write_sample(-value).expect("right");
+        }
+        writer.finalize().expect("finalize fixture wav");
+    }
+
+    fn scratch_dir(label: &str) -> PathBuf {
+        let suffix = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("system time before epoch")
+            .as_nanos();
+        let dir = std::env::temp_dir().join(format!("nautilus-import-{label}-{suffix}"));
+        std::fs::create_dir_all(&dir).expect("create scratch dir");
+        dir
+    }
+
+    #[test]
+    fn importing_a_wav_converts_it_and_saves_one_meeting_row() {
+        let root = scratch_dir("ok");
+        let source = root.join("Q3 planning call.wav");
+        write_stereo_fixture(&source, 2);
+        let recordings_dir = root.join("recordings");
+
+        let prepared =
+            prepare_audio_import(&source, &recordings_dir).expect("a plain WAV must import");
+
+        // The original is only ever read.
+        assert!(source.is_file(), "the file the user picked must survive");
+        // The converted copy lives in the recordings store, at 16 kHz mono.
+        assert!(prepared.plan.primary_path.starts_with(&recordings_dir));
+        let converted = hound::WavReader::open(&prepared.plan.primary_path).expect("converted wav");
+        assert_eq!(converted.spec().channels, 1);
+        assert_eq!(
+            converted.spec().sample_rate,
+            audio_import::IMPORT_SAMPLE_RATE_HZ
+        );
+        assert_eq!(prepared.validated.duration_seconds, 2);
+        assert_eq!(prepared.title, "Q3 planning call");
+        assert_eq!(prepared.source_file_name, "Q3 planning call.wav");
+
+        let mut db = db::Database::new_in_memory_for_test().expect("in-memory db");
+        let recording = imported_recording_row(&prepared, "inbox", chrono::Utc::now());
+        persist_audio_import(&mut db, &prepared, &recording).expect("persist the imported meeting");
+
+        let stored = db
+            .get_recording(&recording.id)
+            .expect("read back")
+            .expect("the import must produce a recording row");
+        assert_eq!(stored.source_type, "meeting");
+        assert_eq!(stored.status, "processing");
+        assert_eq!(stored.meeting_capture_mode.as_deref(), Some("imported"));
+        assert_eq!(
+            stored.imported_source_name.as_deref(),
+            Some("Q3 planning call.wav")
+        );
+        assert_eq!(stored.title, "Q3 planning call");
+        assert_eq!(stored.duration, 2);
+        // Nobody was in the room, so no consent prompt is claimed.
+        assert!(!stored.consent_prompt_shown);
+        // The audio the pipeline will read is registered as owned, not orphaned.
+        let bundle = db
+            .load_recording_audio_bundle(&recording.id)
+            .expect("audio bundle");
+        assert_eq!(
+            bundle.primary.as_ref().map(|asset| asset.path.clone()),
+            Some(prepared.plan.primary_path.clone())
+        );
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn a_refused_file_leaves_nothing_in_the_recordings_store() {
+        let root = scratch_dir("refused");
+        let recordings_dir = root.join("recordings");
+
+        // Wrong container: refused before anything is written.
+        let text = root.join("notes.pdf");
+        std::fs::write(&text, b"not audio").expect("write");
+        let refusal = prepare_audio_import(&text, &recordings_dir).unwrap_err();
+        assert!(refusal.contains(".pdf"), "{refusal}");
+        assert!(
+            !recordings_dir.exists(),
+            "a refused extension writes nothing"
+        );
+
+        // Right container, unreadable contents: afconvert fails and the
+        // half-written destination is removed with it.
+        let fake = root.join("broken.mp3");
+        std::fs::write(&fake, b"\x00\x01\x02 not an mp3").expect("write");
+        let decode_failure = prepare_audio_import(&fake, &recordings_dir).unwrap_err();
+        assert!(
+            decode_failure.contains("could not decode"),
+            "{decode_failure}"
+        );
+        let leftovers: Vec<_> = std::fs::read_dir(&recordings_dir)
+            .map(|entries| entries.flatten().map(|entry| entry.path()).collect())
+            .unwrap_or_default();
+        assert!(
+            leftovers.is_empty(),
+            "a failed conversion must leave no file behind: {leftovers:?}"
+        );
+
+        // A directory is not a file, however it is spelled.
+        let dir = root.join("album.wav");
+        std::fs::create_dir_all(&dir).expect("mkdir");
+        let not_a_file = prepare_audio_import(&dir, &recordings_dir).unwrap_err();
+        assert!(not_a_file.contains("not a folder"), "{not_a_file}");
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
 }
 
 fn emit_completed_after_persistence(
@@ -26442,6 +26875,20 @@ pub async fn dispatch_command(
                 "deletedAudioFiles": deletion.deleted_files,
                 "failedAudioFileDeletions": [],
             }))
+        }
+        "import_audio_file" => {
+            // The path comes from the native open dialog in the main Electron
+            // process, never from the renderer: `import_audio_file` is not on
+            // the renderer command allowlist, so the only caller that can
+            // reach here is the one that just showed the user a file picker.
+            let path: String = params
+                .get("path")
+                .and_then(|value| value.as_str())
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .ok_or_else(|| "Choose an audio file to import.".to_string())?
+                .to_string();
+            import_audio_file_impl(state, handle, PathBuf::from(path)).await
         }
         "retranscribe_recording" => {
             // Recovery path for meetings stranded by a crash or transient ASR

@@ -68,6 +68,9 @@ const EXTENDED_COMMANDS = new Set<string>([
   "export_recording",
   "export_recording_v2",
   "export_with_template",
+  // Decodes a picked audio file with macOS' converter before it returns; a
+  // multi-hour source needs more than the default minute.
+  "import_audio_file",
   "import_dictation_dictionary_csv",
   "install_update",
   "migrate_to_encrypted_storage",

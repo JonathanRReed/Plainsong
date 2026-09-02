@@ -12,6 +12,7 @@ export {
   getRecordings,
   getTranscript,
   getWaveformData,
+  importAudioFile,
   listAudioInputDevices,
   openRecordingAudio,
   renameRecording,
@@ -31,6 +32,7 @@ export {
 export type {
   AudioInputDeviceInfo,
   AudioInputDeviceInventory,
+  ImportedAudioFile,
   IncompleteTranscriptAcknowledgement,
   MeetingConsentNoticeStatus,
   RecordingAnalysisPatch,

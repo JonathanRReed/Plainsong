@@ -163,6 +163,19 @@ let ipcBridge: IpcBridge | null = null;
 let dictationPhase = "idle";
 let dictationShortcutFailureResetTimer: ReturnType<typeof setTimeout> | null = null;
 const captureAdmission = new CaptureAdmissionController();
+// The containers "Import audio…" offers in the open dialog. Mirrors
+// SUPPORTED_IMPORT_EXTENSIONS in rust-sidecar/src/audio_import.rs, which is
+// what actually enforces the list — this only shapes the picker.
+const IMPORTABLE_AUDIO_EXTENSIONS = [
+  "wav",
+  "mp3",
+  "m4a",
+  "aac",
+  "mp4",
+  "webm",
+  "ogg",
+  "flac",
+];
 // Session id from the most recent `dictation-state-changed` event, used to
 // drop stale VAD `silence_stop` signals emitted for an earlier session.
 let dictationSessionId: number | null = null;
@@ -1299,6 +1312,36 @@ async function handleLocalCommand(
       return {
         handled: true,
         result: await ipcBridge.invokeSidecar("approve_export_location_privileged", {
+          path: selectedPath,
+        }),
+      };
+    }
+    case "select_audio_file_to_import": {
+      // The renderer never names a path. It asks for the picker; the path the
+      // user chooses goes straight from this handler to the sidecar, so a
+      // compromised renderer cannot hand the sidecar a file of its choosing.
+      const parent = requireMainWindowGesture("Importing an audio file");
+      if (!ipcBridge) {
+        throw new Error("Audio import service is not ready");
+      }
+      const selection = await dialog.showOpenDialog(parent, {
+        title: "Choose an audio file to transcribe",
+        buttonLabel: "Import audio",
+        properties: ["openFile"],
+        filters: [
+          {
+            name: "Audio and video",
+            extensions: IMPORTABLE_AUDIO_EXTENSIONS,
+          },
+        ],
+      });
+      const selectedPath = selection.canceled ? null : (selection.filePaths[0] ?? null);
+      if (!selectedPath) {
+        return { handled: true, result: null };
+      }
+      return {
+        handled: true,
+        result: await ipcBridge.invokeSidecar("import_audio_file", {
           path: selectedPath,
         }),
       };

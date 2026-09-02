@@ -100,6 +100,9 @@ const intentionallyUnreachableSidecarCommands = new Set([
   "approve_backup_location_privileged",
   "approve_cloud_backup_location_privileged",
   "approve_export_location_privileged",
+  // Takes a filesystem path, so only the Electron main process may call it —
+  // and only with a path the user just chose in a native open dialog.
+  "import_audio_file",
   "start_recording",
   "stop_recording",
 ]);

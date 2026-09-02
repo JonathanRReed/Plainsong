@@ -46,7 +46,6 @@ using sensitive content.
 - The first local model download and preparation take longer than later
   Dictations and require additional disk space. Ready means the selected model
   is actually present, not merely selected in Settings.
-
 ## Meetings
 
 - A Meeting interrupted before its first durable WAV checkpoint may be too

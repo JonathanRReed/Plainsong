@@ -97,6 +97,14 @@ pub struct Recording {
     pub meeting_template_id: Option<String>,
     #[serde(default)]
     pub meeting_capture_mode: Option<String>,
+    /// The name of the file an imported meeting came from, without its
+    /// directory. `None` for every meeting Plainsong recorded itself.
+    ///
+    /// Stored so the detail view can still say where the audio came from
+    /// after the app restarts, and after the reader renames the meeting.
+    /// Only the file name is kept: the folder is the reader's business.
+    #[serde(default)]
+    pub imported_source_name: Option<String>,
     #[serde(default)]
     pub notes_updated_at: Option<DateTime<Utc>>,
     #[serde(default)]

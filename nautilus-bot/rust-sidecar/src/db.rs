@@ -224,11 +224,11 @@ fn insert_recording_row(
     conn.execute(
         "INSERT INTO recordings (
             id, title, project_id, duration, created_at, updated_at, source_type, audio_path, status,
-            meeting_notes, meeting_template_id, meeting_capture_mode, notes_updated_at,
-            consent_prompt_shown, consent_notice_mode, consent_notice_surface,
+            meeting_notes, meeting_template_id, meeting_capture_mode, imported_source_name,
+            notes_updated_at, consent_prompt_shown, consent_notice_mode, consent_notice_surface,
             consent_notice_message, consent_notice_updated_at
          )
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18)",
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19)",
         params![
             &recording.id,
             &recording.title,
@@ -242,6 +242,7 @@ fn insert_recording_row(
             &recording.meeting_notes,
             &recording.meeting_template_id,
             &recording.meeting_capture_mode,
+            &recording.imported_source_name,
             recording
                 .notes_updated_at
                 .as_ref()
@@ -1164,6 +1165,7 @@ impl Database {
                 meeting_notes TEXT,
                 meeting_template_id TEXT,
                 meeting_capture_mode TEXT,
+                imported_source_name TEXT,
                 notes_updated_at TEXT,
                 consent_prompt_shown INTEGER NOT NULL DEFAULT 0,
                 consent_notice_mode TEXT,
@@ -1636,6 +1638,7 @@ impl Database {
         self.ensure_table_column("recordings", "meeting_template_id", "TEXT")?;
         self.ensure_table_column("recordings", "notes_updated_at", "TEXT")?;
         self.ensure_table_column("recordings", "meeting_capture_mode", "TEXT")?;
+        self.ensure_table_column("recordings", "imported_source_name", "TEXT")?;
         self.ensure_table_column(
             "recordings",
             "consent_prompt_shown",
@@ -2148,7 +2151,8 @@ impl Database {
                     recordings.consent_notice_updated_at,
                     meeting_artifacts.summary_provenance,
                     meeting_artifacts.action_items_provenance,
-                    recordings.analysis_failure
+                    recordings.analysis_failure,
+                    recordings.imported_source_name
              FROM recordings
              LEFT JOIN meeting_artifacts ON meeting_artifacts.recording_id = recordings.id
              WHERE (?1 IS NULL OR recordings.project_id = ?1)
@@ -2206,6 +2210,10 @@ impl Database {
                     .get::<_, Option<String>>(22)?
                     .map(|value| value.trim().to_string())
                     .filter(|value| !value.is_empty()),
+                imported_source_name: row
+                    .get::<_, Option<String>>(23)?
+                    .map(|value| value.trim().to_string())
+                    .filter(|value| !value.is_empty()),
             })
         })?;
 
@@ -2244,7 +2252,8 @@ impl Database {
                     recordings.consent_notice_updated_at,
                     meeting_artifacts.summary_provenance,
                     meeting_artifacts.action_items_provenance,
-                    recordings.analysis_failure
+                    recordings.analysis_failure,
+                    recordings.imported_source_name
              FROM recordings
              LEFT JOIN meeting_artifacts ON meeting_artifacts.recording_id = recordings.id
              WHERE recordings.id = ?1",
@@ -2297,6 +2306,10 @@ impl Database {
                 consent_notice_updated_at,
                 analysis_failure: row
                     .get::<_, Option<String>>(22)?
+                    .map(|value| value.trim().to_string())
+                    .filter(|value| !value.is_empty()),
+                imported_source_name: row
+                    .get::<_, Option<String>>(23)?
                     .map(|value| value.trim().to_string())
                     .filter(|value| !value.is_empty()),
             })
@@ -2488,11 +2501,11 @@ impl Database {
         tx.execute(
             "INSERT INTO recordings (
                 id, title, project_id, duration, created_at, updated_at, source_type, audio_path, status,
-                meeting_notes, meeting_template_id, meeting_capture_mode, notes_updated_at,
-                consent_prompt_shown, consent_notice_mode, consent_notice_surface,
+                meeting_notes, meeting_template_id, meeting_capture_mode, imported_source_name,
+                notes_updated_at, consent_prompt_shown, consent_notice_mode, consent_notice_surface,
                 consent_notice_message, consent_notice_updated_at
              )
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18)",
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19)",
             params![
                 &recording.id,
                 &recording.title,
@@ -2506,6 +2519,7 @@ impl Database {
                 &recording.meeting_notes,
                 &recording.meeting_template_id,
                 &recording.meeting_capture_mode,
+                &recording.imported_source_name,
                 recording
                     .notes_updated_at
                     .as_ref()
@@ -5918,6 +5932,7 @@ mod tests {
             meeting_notes: None,
             meeting_template_id: None,
             meeting_capture_mode: None,
+            imported_source_name: None,
             notes_updated_at: None,
             consent_prompt_shown: false,
             consent_notice_mode: None,

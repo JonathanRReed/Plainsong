@@ -337,6 +337,31 @@ export async function retranscribeRecording(recordingId: string): Promise<void> 
   await invoke("retranscribe_recording", { recordingId });
 }
 
+/**
+ * What the sidecar saved for an imported audio file. `null` means the user
+ * dismissed the native file picker without choosing anything.
+ */
+export interface ImportedAudioFile {
+  recordingId: string;
+  title: string;
+  sourceFileName: string;
+  durationSeconds: number;
+}
+
+/**
+ * Open the native "choose an audio file" dialog and import what the user
+ * picks as a meeting.
+ *
+ * The renderer never names a path: Electron's main process shows the picker
+ * and hands the chosen path straight to the sidecar. Resolves as soon as the
+ * file has been decoded and saved; transcription then runs in the background
+ * and reports through the same `recording-status-changed` events a stopped
+ * meeting uses.
+ */
+export async function importAudioFile(): Promise<ImportedAudioFile | null> {
+  return (await invoke("select_audio_file_to_import")) as ImportedAudioFile | null;
+}
+
 export async function renameRecording(recordingId: string, newTitle: string): Promise<void> {
   await invoke("rename_recording", { recordingId, newTitle });
 }

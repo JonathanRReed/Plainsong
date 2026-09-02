@@ -13,6 +13,15 @@ changed underneath `0.9.0-beta.2`. See `LAUNCH.md` for which qualification
 evidence is stale and must be recaptured before this becomes a candidate.
 
 ### Added
+- "Import audio…" in the Meetings header transcribes an audio file you
+  already have. Plainsong decodes .wav, .mp3, .m4a, .aac, .mp4, .webm, .ogg
+  and .flac up to 2 GB and 4 hours with macOS' own converter, copies the
+  result into its recordings folder, and runs the same transcription,
+  diarization and analysis a stopped meeting runs, reporting the same
+  progress. The file you picked is only ever read — never moved, changed or
+  deleted. Imported meetings are labelled "Imported file" rather than
+  Me + Them, name the file they came from, and skip the consent step, which
+  has nothing to describe when nobody is being recorded.
 - Multilingual meetings can use whisper.cpp. The `small`, `medium`,
   `large-v3` and `large-v3-turbo` ggml models are now allowed in the meeting
   lane, so a language outside Parakeet v3's 25 European languages has a local

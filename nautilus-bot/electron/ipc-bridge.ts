@@ -246,6 +246,7 @@ const ALLOWED_RENDERER_COMMANDS = new Set<string>([
   "save_backup_config",
   "save_settings",
   "search_transcripts",
+  "select_audio_file_to_import",
   "select_backup_location",
   "select_cloud_backup_location",
   "select_export_location",
