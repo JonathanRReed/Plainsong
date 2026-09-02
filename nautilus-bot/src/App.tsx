@@ -10,6 +10,10 @@ import {
   type ReactNode,
 } from "react";
 import { listen } from "@/lib/electron";
+import {
+  normalizeCallCaptureRequest,
+  publishCallCaptureRequest,
+} from "@/lib/call-capture-request";
 import { Sidebar } from "@/components/sidebar";
 import { RecordingProvider } from "@/hooks/use-recording";
 import { DataCacheProvider } from "@/hooks/data-cache-context";
@@ -278,6 +282,27 @@ function App() {
     window.addEventListener(OPEN_ONBOARDING_EVENT, handleOpenOnboarding as EventListener);
     return () => {
       window.removeEventListener(OPEN_ONBOARDING_EVENT, handleOpenOnboarding as EventListener);
+    };
+  }, []);
+
+  // A clicked "Zoom call started" notification: the main process focused the
+  // window and sent the call. Go to Meetings and park the request for the
+  // view, which opens the consent dialog with the call's name on it. Nothing
+  // records until the reader says so there.
+  useEffect(() => {
+    let unlisten: (() => void) | undefined;
+    void listen<unknown>("meeting-call-capture-requested", (event) => {
+      const request = normalizeCallCaptureRequest(event.payload);
+      if (!request) {
+        return;
+      }
+      setActiveView("recordings");
+      publishCallCaptureRequest(request);
+    }).then((fn) => {
+      unlisten = fn;
+    });
+    return () => {
+      unlisten?.();
     };
   }, []);
 

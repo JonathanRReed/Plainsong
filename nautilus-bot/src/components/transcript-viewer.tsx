@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState, useMemo, memo } from "react";
+import { Fragment, useCallback, useEffect, useRef, useState, useMemo, memo } from "react";
 import { cn } from "@/lib/utils";
 import { formatTimeWithMs } from "@/lib/format-time";
 import { ScrollArea } from "@/components/ui/scroll-area";
@@ -13,7 +13,8 @@ import {
 } from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
 import { Edit2, Check, ChevronDown, ChevronUp, Trash2, User, X } from "lucide-react";
-import type { TranscriptSegment } from "@/types";
+import type { PauseSpan, TranscriptSegment } from "@/types";
+import { placePauseMarkers, type PauseMarker } from "@/lib/pause-markers";
 
 /**
  * Where this transcript was set down. A local claim has to be earned: the
@@ -34,6 +35,12 @@ export interface TranscriptMatch {
 
 interface TranscriptViewerProps {
   segments: TranscriptSegment[];
+  /**
+   * Pauses taken while recording. The audio skips them, so the timeline
+   * marks where each one sat: "[Paused 2 min 10 s]" before the first turn
+   * that starts at or after the pause.
+   */
+  pauseSpans?: PauseSpan[] | null;
   className?: string;
   onSegmentClick?: (segment: TranscriptSegment) => void;
   currentTime?: number;
@@ -225,6 +232,7 @@ function splitOnQuery(
 
 export function TranscriptViewer({
   segments,
+  pauseSpans,
   className,
   onSegmentClick,
   currentTime,
@@ -405,6 +413,39 @@ export function TranscriptViewer({
       return acc;
     }, [] as TranscriptSegment[][]);
   }, [segments]);
+
+  // Where the pause markers go, keyed by the turn they precede. A pause past
+  // the last turn is keyed by `groupedSegments.length` and rendered after it.
+  const pauseMarkersByGroup = useMemo(() => {
+    const byGroup = new Map<number, PauseMarker[]>();
+    for (const marker of placePauseMarkers(
+      groupedSegments.map((group) => group[0].startTime),
+      pauseSpans,
+    )) {
+      const list = byGroup.get(marker.beforeGroupIndex) ?? [];
+      list.push(marker);
+      byGroup.set(marker.beforeGroupIndex, list);
+    }
+    return byGroup;
+  }, [groupedSegments, pauseSpans]);
+
+  const renderPauseMarkers = (beforeGroupIndex: number) => {
+    const markers = pauseMarkersByGroup.get(beforeGroupIndex);
+    if (!markers || markers.length === 0) return null;
+    return markers.map((marker) => (
+      // The apparatus, not the manuscript: mono, muted, a hollow neume for a
+      // gap that was chosen. It is a fact about the record, so it reads as a
+      // status line, never as a speaker turn.
+      <p
+        key={`pause-${marker.atSeconds}-${marker.durationMs}`}
+        role="status"
+        className="rubric-muted my-1 inline-flex items-center gap-2 px-3"
+      >
+        <span className="neume neume-hollow" aria-hidden="true" />
+        [{marker.label}]
+      </p>
+    ));
+  };
 
   // Track which group indices are the FIRST appearance of each speaker, so the
   // first badge of a voice may be gilded once and later mentions stay neutral.
@@ -628,8 +669,9 @@ export function TranscriptViewer({
               const isLastRead = lastReadSegmentId === firstSegment.id;
 
               return (
+                <Fragment key={groupIndex}>
+                {renderPauseMarkers(groupIndex)}
                 <div
-                  key={groupIndex}
                   ref={isActive ? activeGroupRef : undefined}
                   className={cn(
                     "group relative flex gap-3 rounded-lg p-3 transition-colors",
@@ -825,9 +867,11 @@ export function TranscriptViewer({
                     )}
                   </div>
                 </div>
+                </Fragment>
               );
             })
           )}
+          {groupedSegments.length > 0 ? renderPauseMarkers(groupedSegments.length) : null}
         </div>
       </ScrollArea>
 

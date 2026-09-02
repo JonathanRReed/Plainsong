@@ -129,7 +129,10 @@ import {
 } from "@/lib/meeting-analysis-status";
 import { StatusBanner } from "@/components/ui/status-banner";
 import { CalendarMeetingCue } from "@/components/meetings/calendar-meeting-cue";
+import { DetectedCallCue } from "@/components/meetings/detected-call-cue";
 import type { CalendarCapturePrefill } from "@/lib/calendar-events";
+import { buildDetectedCallCapturePrefill } from "@/lib/detected-call";
+import { subscribeCallCaptureRequests } from "@/lib/call-capture-request";
 import {
   canRecheckMeetingAudio,
   describeCaptureDegradation,
@@ -162,6 +165,7 @@ import {
   Loader2,
   Mic2,
   MoreHorizontal,
+  Pause,
   Plus,
   Play,
   RefreshCw,
@@ -1003,21 +1007,26 @@ export function RecordingsView() {
   const {
     startMeeting,
     stopMeeting,
+    pauseMeeting,
+    resumeMeeting,
     isRecording,
     recordingId,
     formattedDuration,
     meetingPhase = "idle",
     meetingMessage = null,
+    meetingPaused = false,
   } = useRecording();
   const { toast } = useToast();
   const [recordingStatusOverrides, setRecordingStatusOverrides] = useState<
     Record<string, Recording["status"]>
   >({});
   const [showConsent, setShowConsent] = useState(false);
-  // Set only by the calendar affordance, consumed by the start that follows it.
-  // A ref rather than state because nothing renders from it: it is read once,
-  // after the meeting exists, to give the recording the event's name.
-  const pendingCalendarPrefill = useRef<CalendarCapturePrefill | null>(null);
+  // Set only by the calendar or detected-call affordance, consumed by the
+  // start that follows it. A ref rather than state because nothing renders
+  // from it: it is read once, after the meeting exists, to give the recording
+  // the event's (or the call's) name.
+  const pendingCalendarPrefill = useRef<Pick<CalendarCapturePrefill, "title"> | null>(null);
+  const [isTogglingPause, setIsTogglingPause] = useState(false);
   const [showRecordingDetail, setShowRecordingDetail] = useState(false);
   // Opening a meeting and coming back are navigations between two pages that
   // never coexist. Each page's h1 takes focus on arrival; otherwise focus is
@@ -2340,7 +2349,7 @@ export function RecordingsView() {
       });
   };
 
-  const openMeetingCapture = (calendarPrefill?: CalendarCapturePrefill) => {
+  const openMeetingCapture = (calendarPrefill?: Pick<CalendarCapturePrefill, "title">) => {
     if (!captureIsReady) {
       const cause = meetingCaptureReadiness.cause;
       toast(
@@ -2465,6 +2474,68 @@ export function RecordingsView() {
       setIsStopping(false);
     }
   };
+
+  const handleTogglePause = useCallback(async () => {
+    if (!isRecording || isTogglingPause) return;
+    setIsTogglingPause(true);
+    try {
+      if (meetingPaused) {
+        await resumeMeeting();
+      } else {
+        await pauseMeeting();
+      }
+    } catch (error) {
+      toast(
+        error instanceof Error
+          ? error.message
+          : meetingPaused
+            ? "Plainsong could not resume this meeting."
+            : "Plainsong could not pause this meeting.",
+        "error",
+      );
+    } finally {
+      setIsTogglingPause(false);
+    }
+  }, [isRecording, isTogglingPause, meetingPaused, pauseMeeting, resumeMeeting, toast]);
+
+  // ⌘⇧P / Ctrl+Shift+P pauses and resumes the live meeting from anywhere in
+  // this view, except while typing: the notes box is where the reader's
+  // hands are during a meeting, and a shortcut must not fire out of it.
+  useEffect(() => {
+    if (!isRecording) return;
+    const handleKeydown = (event: KeyboardEvent) => {
+      if (!(event.metaKey || event.ctrlKey) || !event.shiftKey || event.altKey) return;
+      if (event.key.toLowerCase() !== "p") return;
+      const target = event.target as HTMLElement | null;
+      if (
+        target &&
+        (target.tagName === "INPUT" ||
+          target.tagName === "TEXTAREA" ||
+          target.isContentEditable)
+      ) {
+        return;
+      }
+      event.preventDefault();
+      void handleTogglePause();
+    };
+    window.addEventListener("keydown", handleKeydown);
+    return () => window.removeEventListener("keydown", handleKeydown);
+  }, [handleTogglePause, isRecording]);
+
+  // A clicked "Zoom call started" notification lands here: the consent
+  // dialog opens with the call's name filled in, and nothing else happens
+  // until the reader answers it.
+  useEffect(() => {
+    return subscribeCallCaptureRequests((request) => {
+      const prefill = buildDetectedCallCapturePrefill(request);
+      if (prefill) {
+        openMeetingCapture(prefill);
+      }
+    });
+    // openMeetingCapture reads readiness at call time; re-subscribing on
+    // every render would re-deliver nothing but is wasteful.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   const handleRecordingClick = (recording: Recording) => {
     openMeetingWorkspace(recording);
@@ -5699,6 +5770,7 @@ export function RecordingsView() {
                   <div className="min-h-0 flex-1 overflow-hidden rounded-md border">
                     <TranscriptViewer
                       segments={transcriptSegments}
+                      pauseSpans={selectedRecording?.pauseSpans}
                       speakerNames={speakerNames}
                       provenance={selectedTranscriptProvenance}
                       currentTime={transcriptCueTime}
@@ -5872,14 +5944,30 @@ export function RecordingsView() {
         </div>
         <div className="flex gap-2">
           {isRecording ? (
-            <Button
-              variant="destructive"
-              disabled={isStopping}
-              onClick={() => void handleStopMeeting()}
-            >
-              <Square className="h-4 w-4 mr-2 fill-current" />
-              {isStopping ? "Stopping…" : "Stop meeting"}
-            </Button>
+            <>
+              <Button
+                variant="outline"
+                disabled={isStopping || isTogglingPause}
+                onClick={() => void handleTogglePause()}
+                aria-label={meetingPaused ? "Resume meeting" : "Pause meeting"}
+                title={`${meetingPaused ? "Resume" : "Pause"} (⌘⇧P)`}
+              >
+                {meetingPaused ? (
+                  <Play className="h-4 w-4 mr-2 fill-current" />
+                ) : (
+                  <Pause className="h-4 w-4 mr-2 fill-current" />
+                )}
+                {meetingPaused ? "Resume" : "Pause"}
+              </Button>
+              <Button
+                variant="destructive"
+                disabled={isStopping}
+                onClick={() => void handleStopMeeting()}
+              >
+                <Square className="h-4 w-4 mr-2 fill-current" />
+                {isStopping ? "Stopping…" : "Stop meeting"}
+              </Button>
+            </>
           ) : (
             <Button
               variant="active"
@@ -5899,6 +5987,13 @@ export function RecordingsView() {
             not involved — a Mac with no calendar access records meetings
             exactly as well as one with it. */}
         <CalendarMeetingCue
+          captureInProgress={isRecording}
+          onStartCapture={(prefill) => openMeetingCapture(prefill)}
+        />
+        {/* Its sibling for a call that is happening right now, found by the
+            sidecar's detector. Same shape, same hand-off, same rule about
+            never starting anything itself. */}
+        <DetectedCallCue
           captureInProgress={isRecording}
           onStartCapture={(prefill) => openMeetingCapture(prefill)}
         />
@@ -6324,12 +6419,21 @@ export function RecordingsView() {
                       {/* The gold neume is the live mark. A separate "Live
                           meeting" chip beside this line said it a second
                           time. */}
-                      <p className="inline-flex items-center gap-1.5 text-sm font-medium text-gold-text">
-                        <span className="neume neume-lit" aria-hidden="true" />
-                        Recording
-                      </p>
+                      {meetingPaused ? (
+                        <p className="inline-flex items-center gap-1.5 text-sm font-medium text-rust">
+                          <span className="neume neume-hollow" aria-hidden="true" />
+                          Paused
+                        </p>
+                      ) : (
+                        <p className="inline-flex items-center gap-1.5 text-sm font-medium text-gold-text">
+                          <span className="neume neume-lit" aria-hidden="true" />
+                          Recording
+                        </p>
+                      )}
                       <p className="text-sm text-muted-foreground">
-                        Take notes while Plainsong captures the audio.
+                        {meetingPaused
+                          ? "Nothing is being kept until you resume; the clock is stopped."
+                          : "Take notes while Plainsong captures the audio."}
                       </p>
                     </div>
                     <div className="flex flex-wrap items-center gap-2">
@@ -6385,7 +6489,29 @@ export function RecordingsView() {
                       <Edit3 className="mr-2 h-4 w-4" />
                       Open this meeting
                     </Button>
-                    <div className="font-mono text-lg font-semibold">{formattedDuration}</div>
+                    <Button
+                      variant="outline"
+                      size="sm"
+                      disabled={isStopping || isTogglingPause}
+                      onClick={() => void handleTogglePause()}
+                      aria-label={meetingPaused ? "Resume meeting" : "Pause meeting"}
+                      title={`${meetingPaused ? "Resume" : "Pause"} (⌘⇧P)`}
+                    >
+                      {meetingPaused ? (
+                        <Play className="mr-2 h-4 w-4 fill-current" />
+                      ) : (
+                        <Pause className="mr-2 h-4 w-4 fill-current" />
+                      )}
+                      {meetingPaused ? "Resume" : "Pause"}
+                    </Button>
+                    <div
+                      className={cn(
+                        "font-mono text-lg font-semibold",
+                        meetingPaused && "text-muted-foreground",
+                      )}
+                    >
+                      {formattedDuration}
+                    </div>
                   </div>
                 </div>
                 <RecordingWaveform

@@ -6,6 +6,7 @@ import {
   ipcMain,
   Menu,
   net,
+  Notification,
   protocol,
   screen,
   session,
@@ -70,6 +71,15 @@ import {
   PLAINSONG_RELEASE_TEAM_ID,
 } from "./macos-code-signature";
 import { overlayVisibilityAllowed, resolveWindowUiSettings } from "./window-ui-settings";
+import {
+  nextMeetingNotificationMemory,
+  notificationForCallDetected,
+  notificationForSidecarEvent,
+  resolveNotificationSettings,
+  type NotificationContext,
+  type NotificationSettings,
+  type PlainsongNotification,
+} from "./notification-policy";
 import {
   clampWindowSizeToWorkArea,
   isFiniteWindowNumber,
@@ -196,6 +206,22 @@ let shortcutConflicts: ShortcutConflictInfo[] = [];
 // "Paste" for each without an async round trip while the menu is being built.
 let recentDictationResults: Array<{ text: string }> = [];
 let dictationPermissionSummary: string | null = null;
+// OS notifications. The policy that decides what to say is pure
+// (notification-policy.ts); this is the memory it needs between events and
+// the settings it is gated on.
+let notificationSettings: NotificationSettings = resolveNotificationSettings(null);
+let notificationMemory: Pick<
+  NotificationContext,
+  "previousMeetingPhase" | "previousMeetingRecordingId" | "lastAutoStoppedRecordingId"
+> = {
+  previousMeetingPhase: null,
+  previousMeetingRecordingId: null,
+  lastAutoStoppedRecordingId: null,
+};
+// The same news must reach the reader once, whichever sidecar event carried
+// it first. Bounded, oldest first.
+const recentNotificationKeys: string[] = [];
+const RECENT_NOTIFICATION_KEYS_MAX = 32;
 
 function qaLog(message: string, payload?: unknown): void {
   if (process.env.PLAINSONG_QA_PACKAGED_HOTKEY === "1") {
@@ -243,6 +269,10 @@ type AppSettings = {
     alwaysOnTop?: boolean;
     showDictationPopup?: boolean;
     showRecordingPopup?: boolean;
+  };
+  notifications?: {
+    meetingEvents?: boolean;
+    dictationFailures?: boolean;
   };
 };
 
@@ -970,8 +1000,65 @@ function applyUiSettings(settings: AppSettings | null | undefined): void {
   alwaysOnTopEnabled = resolved.alwaysOnTop;
   showDictationOverlayEnabled = resolved.showDictationOverlay;
   showRecordingOverlayEnabled = resolved.showRecordingOverlay;
+  notificationSettings = resolveNotificationSettings(settings);
   if (mainWindow && !mainWindow.isDestroyed()) {
     mainWindow.setAlwaysOnTop(alwaysOnTopEnabled);
+  }
+}
+
+function dictationOverlayIsVisible(): boolean {
+  if (!showDictationOverlayEnabled) {
+    return false;
+  }
+  const overlay = findWindowByLabel("dictation-overlay");
+  return Boolean(overlay && !overlay.isDestroyed() && overlay.isVisible());
+}
+
+function mainWindowIsFocused(): boolean {
+  return Boolean(mainWindow && !mainWindow.isDestroyed() && mainWindow.isFocused());
+}
+
+/**
+ * Show one notification and route its click.
+ *
+ * The first notification an install ever shows is what makes macOS ask the
+ * reader whether Plainsong may notify at all; nothing here asks ahead of
+ * time. A click brings the main window up and asks the renderer for the view
+ * the news is about — the same `main-view-requested` channel the tray uses —
+ * or, for a detected call, hands the renderer the prefill for the consent
+ * dialog.
+ */
+function presentNotification(notification: PlainsongNotification): void {
+  if (recentNotificationKeys.includes(notification.dedupeKey)) {
+    return;
+  }
+  recentNotificationKeys.push(notification.dedupeKey);
+  if (recentNotificationKeys.length > RECENT_NOTIFICATION_KEYS_MAX) {
+    recentNotificationKeys.shift();
+  }
+  if (!Notification.isSupported()) {
+    return;
+  }
+  try {
+    const note = new Notification({
+      title: notification.title,
+      body: notification.body,
+    });
+    note.on("click", () => {
+      showAndFocusMainWindow();
+      const focus = notification.focus;
+      if (focus.view === "recordings" && focus.callCapture) {
+        broadcastRendererEvent("meeting-call-capture-requested", focus.callCapture);
+        return;
+      }
+      broadcastRendererEvent("main-view-requested", {
+        view: focus.view,
+        recordingId: focus.view === "recordings" ? focus.recordingId : null,
+      });
+    });
+    note.show();
+  } catch (error) {
+    console.warn("[main] could not show a notification", error);
   }
 }
 
@@ -2388,6 +2475,31 @@ async function bootstrap() {
       void handleDictationVadSignal(payload).catch((error) => {
         surfaceDictationShortcutFailure("dictation voice activation", error);
       });
+    }
+
+    // Decide against the memory as it was BEFORE this event, then advance it:
+    // "meeting started" is the edge into `recording`, not the state.
+    const notification = notificationForSidecarEvent(eventName, payload, {
+      settings: notificationSettings,
+      mainWindowFocused: mainWindowIsFocused(),
+      dictationOverlayVisible: dictationOverlayIsVisible(),
+      ...notificationMemory,
+    });
+    notificationMemory = nextMeetingNotificationMemory(eventName, payload, notificationMemory);
+    if (notification) {
+      presentNotification(notification);
+    }
+    if (eventName === "meeting-call-detected") {
+      // Never starts anything: the click opens the consent dialog, and the
+      // reader decides there. `activeMeetingRecordingId` was already advanced
+      // above for this event's ordering, and a meeting in progress has
+      // nothing to be offered.
+      const offer = notificationForCallDetected(payload, {
+        activeMeetingRecordingId,
+      });
+      if (offer) {
+        presentNotification(offer);
+      }
     }
 
     broadcastRendererEvent(eventName, payload);
