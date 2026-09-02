@@ -78,6 +78,13 @@ function appBundlePaths(appPath) {
       "calendar-helper",
       "plainsong-native-calendar-helper",
     ),
+    languageModelHelper: path.join(
+      appPath,
+      "Contents",
+      "Resources",
+      "language-model-helper",
+      "plainsong-native-language-model-helper",
+    ),
     speechHelper: path.join(
       appPath,
       "Contents",
@@ -188,6 +195,27 @@ function requireEmptyShortcutHelperEntitlements(filePath) {
   if (keys.length > 0) {
     fail(
       `shortcut helper must have an empty entitlement set, found: ${keys.join(", ")}`,
+    );
+  }
+}
+
+/**
+ * The Apple Foundation Models helper carries no entitlement at all.
+ *
+ * FoundationModels is not TCC-guarded and the helper needs no network client,
+ * no Apple Events and no JIT. If this ever comes back non-empty it means the
+ * helper inherited the app's broad child-process set, which would hand a
+ * process that reads dictation text a great deal more reach than it needs.
+ */
+function requireEmptyLanguageModelHelperEntitlements(filePath) {
+  const entitlements = readEntitlements(
+    filePath,
+    "Apple Foundation Models helper",
+  );
+  const keys = Object.keys(entitlements);
+  if (keys.length > 0) {
+    fail(
+      `Apple Foundation Models helper must have an empty entitlement set, found: ${keys.join(", ")}`,
     );
   }
 }
@@ -325,6 +353,7 @@ function verifyAppBundle(appPath, expectedArchitecture) {
     ["Rust sidecar", paths.sidecar],
     ["shortcut helper", paths.shortcutHelper],
     ["calendar helper", paths.calendarHelper],
+    ["Apple Foundation Models helper", paths.languageModelHelper],
     ["Apple Speech helper", paths.speechHelper],
   ];
   const architectures = {};
@@ -338,6 +367,7 @@ function verifyAppBundle(appPath, expectedArchitecture) {
   }
 
   requireEmptyShortcutHelperEntitlements(paths.shortcutHelper);
+  requireEmptyLanguageModelHelperEntitlements(paths.languageModelHelper);
   requireCalendarHelperEntitlements(paths.calendarHelper);
   requireCalendarHelperEmbeddedUsageDescriptions(paths.calendarHelper);
   requirePackagedSystemAudioUsageDescription(appPath);

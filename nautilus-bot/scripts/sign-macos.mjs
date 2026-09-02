@@ -30,6 +30,17 @@ const calendarHelperEntitlements = path.resolve(
   "build-resources",
   "entitlements.mac.calendar-helper.plist",
 );
+// Apple Foundation Models helper. It reads text on stdin and runs the
+// on-device system model; it touches no TCC-guarded resource and needs no
+// network client, so it carries an empty entitlement set rather than
+// inheriting the app's.
+const languageModelHelperName = "plainsong-native-language-model-helper";
+const languageModelHelperEntitlements = path.resolve(
+  import.meta.dirname,
+  "..",
+  "build-resources",
+  "entitlements.mac.language-model-helper.plist",
+);
 const sidecarName = "plainsong-sidecar";
 const sidecarEntitlements = path.resolve(
   import.meta.dirname,
@@ -70,6 +81,12 @@ export function optionsForSignedFile(filePath, inheritedOptionsForFile, signCont
     return {
       ...inherited,
       entitlements: calendarHelperEntitlements,
+    };
+  }
+  if (path.basename(filePath) === languageModelHelperName) {
+    return {
+      ...inherited,
+      entitlements: languageModelHelperEntitlements,
     };
   }
   if (genericHelperPattern.test(path.basename(filePath))) {
