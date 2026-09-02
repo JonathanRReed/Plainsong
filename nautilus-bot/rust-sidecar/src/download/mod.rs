@@ -1466,29 +1466,6 @@ impl DownloadManager {
             }
         }
 
-        // Check punctuation models
-        let punct_dir = self.models_dir.join("punctuation");
-        if punct_dir.exists() {
-            let onnx = punct_dir.join("punct_cap_seg_en.onnx");
-            let tokenizer = punct_dir.join("spe_32k_lc_en.model");
-            if onnx.is_file() && tokenizer.is_file() {
-                let mut total_size = 0u64;
-                if let Ok(meta) = tokio::fs::metadata(&onnx).await {
-                    total_size += meta.len();
-                }
-                if let Ok(meta) = tokio::fs::metadata(&tokenizer).await {
-                    total_size += meta.len();
-                }
-                models.push(DownloadedModel {
-                    name: "punct_cap_seg_en".to_string(),
-                    provider: "punctuation".to_string(),
-                    path: punct_dir,
-                    size_bytes: total_size,
-                    downloaded_at: std::time::SystemTime::now(),
-                });
-            }
-        }
-
         Ok(models)
     }
 

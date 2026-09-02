@@ -89,6 +89,17 @@ evidence is stale and must be recaptured before this becomes a candidate.
   websocket-only and could never work through this app's upload path).
   Context-window budgeting now recognizes GPT-5.x and Gemini-3.x models'
   real ~1M-token windows instead of clamping them to a stale estimate.
+- The stored meeting-lane default now names the route the meeting lane
+  actually runs: `parakeet` / `parakeet-tdt-0.6b-v3`. It was stored as
+  whisper.cpp `base.en`, but whisper.cpp has never been a meeting-supported
+  provider, so that slot was never read and every fresh install already
+  transcribed meetings with Parakeet. A settings file still carrying the old
+  `whisper`/`base.en` meeting pair is rewritten to Parakeet on load; shared
+  dictation/meeting selection is untouched. No transcription behavior
+  changes; the settings file stops claiming a route that never ran.
+- The unused `toggleDictationAlternates` shortcut key is gone from the
+  settings schema (it was only ever written as an empty list). Old settings
+  files that still carry it load cleanly and are rewritten without it.
 
 ### Fixed
 - A mic failure mid-meeting in a "me and them" (microphone plus system
@@ -127,6 +138,13 @@ evidence is stale and must be recaptured before this becomes a candidate.
   Microphone settings" action, distinct from a system-audio or disk-full
   failure). A capture source that hard-fails is now described as failed,
   not as having "gone silent," which previously read as a muting problem.
+
+### Removed
+- The ML punctuation/casing model (`punct_cap_seg_en`, ~210 MB) and the
+  `text-recasepunct` build feature. Its restore function had no caller, and
+  every shipped speech route already emits punctuated, cased text (see
+  docs/model-inventory-upgrades.md item 9 for the per-route table), so the
+  download existed to fix a problem no route has.
 
 ### Security
 - `shell.openExternal` and in-app link navigation now check a fixed host

@@ -74,7 +74,6 @@ const baseSettings = {
   },
   shortcuts: {
     toggleDictation: "Ctrl+Shift+Space",
-    toggleDictationAlternates: [],
     openWindow: "Ctrl+Shift+N",
   },
   theme: "system" as const,
@@ -1474,8 +1473,7 @@ describe("SettingsView performance behavior", () => {
       ...baseSettings,
       shortcuts: {
         toggleDictation: "Ctrl+Shift+Space",
-        toggleDictationAlternates: [],
-        openWindow: "Ctrl+Shift+N",
+            openWindow: "Ctrl+Shift+N",
       },
     } as unknown as Awaited<ReturnType<typeof backend.getSettings>>);
 

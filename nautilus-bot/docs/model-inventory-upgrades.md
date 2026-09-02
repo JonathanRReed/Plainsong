@@ -49,20 +49,32 @@ diarization engine now accepts a model ID via `with_model()` and
 
 ### ReCasePunct / ML punctuation (item 9)
 ReCasePunct 1 Flash (`MihaiPopa-1/ReCasePunct-1-Flash`) has no ONNX
-export — only Safetensors with a custom ALBERT architecture. Used
-alternative `punct_cap_seg_en.onnx` from `1-800-BAD-CODE` which has
-ONNX + SentencePiece. SHA256 pinned for both ONNX
-(`dd922d45...`) and tokenizer (`9e86d026...`).
+export — only Safetensors with a custom ALBERT architecture. An
+alternative, `punct_cap_seg_en.onnx` from `1-800-BAD-CODE` (ONNX +
+SentencePiece, ~210 MB), was wired up as `text::recasepunct` behind the
+`text-recasepunct` Cargo feature.
 
-**Status: Implemented.** Download infrastructure, integrity migration,
-and ONNX inference pipeline are complete. The inference pipeline
-tokenizes input text with SentencePiece (`sentencepiece-rs` crate,
-pure Rust), segments long text with 16-token overlap, runs the ONNX
-model, and reassembles text with restored punctuation, capitalization,
-and sentence boundaries following the reference `punctuators` Python
-implementation. Gated behind the `text-recasepunct` Cargo feature.
-Graceful fallback returns input unchanged when the feature is not
-enabled or the model is unavailable.
+**Status: Removed (2026-09-01).** `restore_punctuation_and_casing` never
+had a caller, and a per-route audit found no shipped ASR route that
+emits unpunctuated, uncased text, so there was nothing for it to fix:
+
+| Route | Punctuation and casing in the model output | Evidence |
+|---|---|---|
+| whisper.cpp (all ggml models) | yes | Whisper decodes punctuated, cased text by design |
+| Candle Whisper Large v3 Turbo | yes | same weights as the whisper.cpp large-v3-turbo route |
+| Distil-Whisper large-v3.5 | yes | Whisper-family decoder |
+| Parakeet TDT 0.6B v3 | yes | NeMo model card (PnC); vocabulary carries `.` `,` `?` `!` and cased pieces |
+| Parakeet TDT-CTC 110M (legacy) | yes | `nvidia/parakeet-tdt_ctc-110m` card: "transcribes speech with Punctuations and Capitalizations"; the pinned sherpa-onnx `tokens.txt` carries `. 986`, `, 988`, `? 1002`, `! 1016` and cased pieces |
+| Moonshine tiny/base | yes | upstream example transcript is punctuated and cased; route is also not launch-ready (`ensure_asr_route_ready` rejects it) |
+| Qwen3-ASR 0.6B | yes | LLM decoder; the real-audio eval in item 7 shows punctuated, cased output |
+| Apple Speech (on-device) | yes | `macos_speech_helper.swift` sets `request.addsPunctuation = true` |
+| OpenAI, Groq, ElevenLabs, Cohere (cloud) | yes | punctuated transcripts are the service default |
+
+The module, its download entry, integrity artifacts, the
+`text-recasepunct` feature, and the `sentencepiece-rs` dependency were
+deleted. If a future route ships without punctuation, the decision is
+to add the post-step for that route only, at the ASR-manager boundary,
+with a test on the dispatch decision.
 
 ### Apple SpeechAnalyzer detection (item 10)
 Added `speech_analyzer_available` and `operating_system_version` fields
@@ -88,9 +100,15 @@ FFI bindings to `parakeet.h` and a `whisper-rs-sys` fork. Estimated
 1-2 week effort. Documented as a strategic future direction.
 
 ### Moonshine v2 streaming models (item 6)
-**Blocked.** Moonshine v2 streaming models are only published in
-Safetensors format (Transformers). No ONNX exports exist upstream.
-The streaming architecture is fundamentally different from v1 — it
-requires cached encoder state for incremental processing, which cannot
-be retrofitted onto the existing ONNX inference path. Waiting for
-upstream ONNX exports from UsefulSensors.
+**Blocked on this runtime; to be revisited.** Moonshine v2 streaming
+models are published upstream in Safetensors format (Transformers); no
+ONNX export exists, so they cannot run on the existing ONNX inference
+path. The streaming architecture is also different from v1 — it needs
+cached encoder state for incremental processing.
+
+Update (2026-09-01): GGUF conversions of Moonshine v2 now exist in
+transcribe.cpp (https://github.com/handy-computer/transcribe.cpp), a
+ggml-based runtime. That is a different runtime from anything this
+sidecar links today, so it does not unblock the ONNX path; the Wave C
+runtime evaluation will revisit Moonshine v2 through that route. There
+is still no ONNX export.

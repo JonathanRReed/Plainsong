@@ -115,7 +115,6 @@ const createSettings = () => ({
   },
   shortcuts: {
     toggleDictation: "Cmd+Shift+Space",
-    toggleDictationAlternates: [],
     openWindow: "Ctrl+Shift+N",
   },
   updates: {

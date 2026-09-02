@@ -827,7 +827,6 @@ export function SettingsView() {
         shortcuts: {
           ...settings.shortcuts,
           [field]: nextShortcut,
-          toggleDictationAlternates: [],
         },
       };
       setDraftSettings(next);

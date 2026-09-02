@@ -12685,6 +12685,30 @@ mod tests {
         assert_eq!(meeting_model_id, "parakeet-tdt-0.6b-v3");
     }
 
+    #[test]
+    fn fresh_settings_resolve_the_meeting_lane_to_parakeet_v3() {
+        let transcription = settings::Settings::default().transcription;
+        assert_eq!(transcription.meeting_provider, "parakeet");
+        assert!(meeting_provider_is_supported(
+            asr_provider_from_settings_value(&transcription.meeting_provider)
+                .expect("stored meeting provider must parse")
+        ));
+
+        let (provider, model_id) =
+            resolve_transcription_provider_and_model(&transcription, TranscriptionScope::Meeting);
+        assert_eq!(provider, asr::AsrProviderType::Parakeet);
+        assert_eq!(model_id, "parakeet-tdt-0.6b-v3");
+
+        // The stored slot now names the route the resolver picks, so turning
+        // shared selection off changes nothing for meetings.
+        let mut dedicated = transcription.clone();
+        dedicated.use_shared_asr_selection = false;
+        let (provider, model_id) =
+            resolve_transcription_provider_and_model(&dedicated, TranscriptionScope::Meeting);
+        assert_eq!(provider, asr::AsrProviderType::Parakeet);
+        assert_eq!(model_id, "parakeet-tdt-0.6b-v3");
+    }
+
     fn provider_info_for_test(
         provider_type: asr::AsrProviderType,
         model_id: &str,
@@ -20177,7 +20201,6 @@ pub async fn build_app_state() -> Result<AppState, String> {
         .join("models");
     let mut model_integrity_artifacts = download::managed_model_integrity_artifacts(&models_root);
     model_integrity_artifacts.extend(asr::model_integrity_artifacts(&models_root));
-    model_integrity_artifacts.extend(text::recasepunct::model_integrity_artifacts(&models_root));
     // This runs inline (fail-closed trust semantics are correct here), and
     // an artifact without a cached-and-trusted receipt yet is re-hashed in
     // full -- for many multi-gigabyte models on first launch after an
@@ -20504,7 +20527,6 @@ async fn save_settings_for_sidecar(
         &settings.transcription.meeting_retention_delete_mode,
     )
     .to_string();
-    settings.shortcuts.toggle_dictation_alternates.clear();
     validate_shortcut_settings(&settings.shortcuts)?;
     if settings
         .transcription

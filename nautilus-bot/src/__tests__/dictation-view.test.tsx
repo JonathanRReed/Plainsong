@@ -168,7 +168,6 @@ const backendMocks = vi.hoisted(() => ({
   },
   shortcuts: {
     toggleDictation: "Ctrl+Shift+Space",
-    toggleDictationAlternates: [],
     openWindow: "Ctrl+Shift+N",
   },
   updates: {
