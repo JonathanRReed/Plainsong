@@ -149,7 +149,7 @@ export const MEETING_TEMPLATES: MeetingTemplateOption[] = [
  * `BUILTIN_MEETING_TEMPLATE_IDS` in rust-sidecar/src/settings.rs, which is
  * the real backstop: it drops any custom entry that *does* carry a built-in
  * id, from a settings.json edited by hand or written by an older client. */
-export const BUILTIN_MEETING_TEMPLATE_IDS: ReadonlySet<string> = new Set(
+const BUILTIN_MEETING_TEMPLATE_IDS: ReadonlySet<string> = new Set(
   MEETING_TEMPLATES.map((template) => template.value)
 );
 
