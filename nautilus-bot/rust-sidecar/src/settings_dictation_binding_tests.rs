@@ -5,9 +5,9 @@
 //! arrive in the same settings file.
 
 use super::{
-    reconcile_saved_keyboard_shortcuts, validate_dictation_bindings, DictationBinding,
-    DictationBindingAction, DictationBindingTrigger, KeyboardShortcuts, Settings, SettingsManager,
-    PRIMARY_DICTATION_BINDING_ID,
+    normalize_keyboard_shortcuts, reconcile_saved_keyboard_shortcuts, validate_dictation_bindings,
+    DictationBinding, DictationBindingAction, DictationBindingTrigger, KeyboardShortcuts, Settings,
+    SettingsManager, PRIMARY_DICTATION_BINDING_ID,
 };
 use std::fs;
 use std::path::PathBuf;
@@ -183,8 +183,66 @@ fn a_settings_file_written_before_b4_and_b7a_loads_with_translation_off() {
     let _ = fs::remove_dir_all(&root);
 }
 
+/// A duplicate trigger used to fail the whole batched settings save (the
+/// validator returned `Err` and `save_settings_for_sidecar` propagated it),
+/// taking every unrelated edit in the same payload with it. Reconcile now
+/// drops the later row instead -- only one of two identical triggers could
+/// ever have fired anyway.
+#[test]
+fn reconcile_drops_a_duplicate_trigger_instead_of_failing_the_save() {
+    let previous = KeyboardShortcuts::default();
+    let mut incoming = previous.clone();
+    incoming.dictation_bindings = vec![
+        key_binding("a", "Cmd+Shift+Space", None),
+        // The same chord written in a different order, plus a row that
+        // reuses an id: both are collisions, neither may fail the save.
+        key_binding("b", "shift cmd space", Some("email")),
+        key_binding("a", "Cmd+Alt+E", Some("email")),
+        key_binding("c", "Cmd+Alt+N", Some("notes")),
+    ];
+
+    reconcile_saved_keyboard_shortcuts(&mut incoming, &previous);
+
+    assert_eq!(
+        incoming
+            .dictation_bindings
+            .iter()
+            .map(|binding| binding.id.as_str())
+            .collect::<Vec<_>>(),
+        vec!["a", "c"],
+        "the first row for each id and trigger survives; later ones are dropped"
+    );
+    validate_dictation_bindings(&incoming.dictation_bindings)
+        .expect("what reconcile produces must always validate");
+}
+
+/// The load path shares the same reconcile, so a hand-edited settings file
+/// with duplicates opens cleanly rather than carrying a dead row.
+#[test]
+fn loading_a_hand_edited_file_with_duplicates_drops_the_later_row() {
+    let mut shortcuts = KeyboardShortcuts {
+        toggle_dictation: "Cmd+Shift+Space".to_string(),
+        dictation_bindings: vec![
+            key_binding(PRIMARY_DICTATION_BINDING_ID, "Cmd+Shift+Space", None),
+            key_binding("dupe", "Cmd+Shift+Space", Some("email")),
+        ],
+        ..Default::default()
+    };
+
+    normalize_keyboard_shortcuts(&mut shortcuts);
+
+    assert_eq!(shortcuts.dictation_bindings.len(), 1);
+    assert_eq!(
+        shortcuts.dictation_bindings[0].id,
+        PRIMARY_DICTATION_BINDING_ID
+    );
+    assert_eq!(shortcuts.toggle_dictation, "Cmd+Shift+Space");
+}
+
 #[test]
 fn validator_rejects_duplicate_triggers_and_bare_letters() {
+    // Still an invariant for direct callers, though reconcile removes these
+    // before the save path ever gets here.
     let duplicate = vec![
         key_binding("a", "Cmd+Shift+Space", None),
         key_binding("b", "shift cmd space", Some("email")),

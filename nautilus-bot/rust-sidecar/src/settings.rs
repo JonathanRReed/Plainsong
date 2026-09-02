@@ -778,6 +778,13 @@ pub(crate) fn dictation_binding_trigger_key(trigger: &DictationBindingTrigger) -
 /// additionally knows whether the native helper is present (a mouse or
 /// lone-modifier binding needs it); this side owns the checks that do not
 /// depend on the machine.
+///
+/// Only a malformed *trigger* is rejected here, because there is no sane way
+/// to guess what the user meant. Collisions are not rejected:
+/// `drop_duplicate_dictation_bindings` runs first on both the load and save
+/// paths and has already removed them, so the duplicate-id and
+/// duplicate-trigger arms below are unreachable invariant assertions for
+/// direct callers rather than something a settings save can trip over.
 pub(crate) fn validate_dictation_bindings(bindings: &[DictationBinding]) -> Result<(), String> {
     if bindings.len() > MAX_DICTATION_BINDINGS {
         return Err(format!(
@@ -954,6 +961,40 @@ pub(crate) fn reconcile_saved_keyboard_shortcuts(
     reconcile_keyboard_shortcuts(shortcuts, false);
 }
 
+/// Keep the first binding for each id and each trigger; drop the rest with a
+/// warning.
+///
+/// A duplicate trigger used to be a hard `Err` out of
+/// `validate_dictation_bindings`, which `save_settings_for_sidecar`
+/// propagated -- so one colliding row failed the *entire* batched settings
+/// save, taking every unrelated edit in the same payload with it, while the
+/// renderer's own validator (`validateDictationBindings` in
+/// `electron/dictation-bindings.ts`) only warned in the row. Only one of two
+/// identical triggers can ever fire, so dropping the later one loses nothing
+/// the user had; failing the save loses everything else they changed.
+pub(crate) fn drop_duplicate_dictation_bindings(bindings: &mut Vec<DictationBinding>) {
+    let mut seen_ids = std::collections::HashSet::new();
+    let mut seen_triggers = std::collections::HashSet::new();
+    bindings.retain(|binding| {
+        if !seen_ids.insert(binding.id.clone()) {
+            tracing::warn!(
+                "Dropping dictation binding with duplicate id '{}'",
+                binding.id
+            );
+            return false;
+        }
+        if !seen_triggers.insert(dictation_binding_trigger_key(&binding.trigger)) {
+            tracing::warn!(
+                "Dropping dictation binding '{}': {} is already bound",
+                binding.id,
+                describe_dictation_binding_trigger(&binding.trigger)
+            );
+            return false;
+        }
+        true
+    });
+}
+
 fn reconcile_keyboard_shortcuts(
     shortcuts: &mut KeyboardShortcuts,
     restore_default_when_empty: bool,
@@ -986,6 +1027,7 @@ fn reconcile_keyboard_shortcuts(
                 }
             }
     });
+    drop_duplicate_dictation_bindings(&mut shortcuts.dictation_bindings);
 
     if shortcuts.dictation_bindings.is_empty() {
         if restore_default_when_empty && shortcuts.toggle_dictation.trim().is_empty() {

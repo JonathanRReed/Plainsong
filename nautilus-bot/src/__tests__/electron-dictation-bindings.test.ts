@@ -94,6 +94,21 @@ describe("validateDictationBindings", () => {
     expect(issues[0].message).toMatch(/Same trigger as Dictation/);
   });
 
+  // The sidecar's `drop_duplicate_dictation_bindings` removes the later row
+  // on the next save (it used to reject the whole settings payload). The row
+  // copy has to say that, not the softer "only one of them will work" it
+  // said while the two layers disagreed.
+  it("says a duplicate row is removed on save, matching what the sidecar does", () => {
+    const issues = validateDictationBindings(
+      [keyBinding("a", "Cmd+Shift+Space"), keyBinding("b", "shift cmd space")],
+      { nativeShortcutAvailable: true },
+    );
+    expect(issues).toHaveLength(1);
+    expect(issues[0].message).toBe(
+      "Same trigger as Dictation \u2014 this one is removed when settings save.",
+    );
+  });
+
   it("refuses a bare letter but allows function keys and lone modifiers", () => {
     const issues = validateDictationBindings(
       [keyBinding("bare", "D"), keyBinding("fkey", "F5"), keyBinding("fn", "Fn")],

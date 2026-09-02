@@ -359,7 +359,11 @@ export function validateDictationBindings(
       issues.push({
         bindingId: binding.id,
         code: "duplicate_trigger",
-        message: `Same trigger as ${describeDictationBindingAction(owner.action, context.customModes ?? [])} — only one of them will work.`,
+        // Says what actually happens: the sidecar's
+        // `drop_duplicate_dictation_bindings` removes this row on the next
+        // save (it used to reject the whole settings payload instead). "Only
+        // one of them will work" understated it -- the row does not survive.
+        message: `Same trigger as ${describeDictationBindingAction(owner.action, context.customModes ?? [])} — this one is removed when settings save.`,
       });
       continue;
     }

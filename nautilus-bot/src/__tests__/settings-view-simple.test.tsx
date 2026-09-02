@@ -1549,7 +1549,7 @@ describe("SettingsView performance behavior", () => {
     // it collides with the primary one and says so in the row.
     expect(
       await screen.findByText(
-        /Same trigger as Dictation — only one of them will work\./,
+        /Same trigger as Dictation — this one is removed when settings save\./,
       ),
     ).toBeInTheDocument();
   });

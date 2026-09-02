@@ -172,6 +172,12 @@ evidence is stale and must be recaptured before this becomes a candidate.
   files that still carry it load cleanly and are rewritten without it.
 
 ### Fixed
+- Two dictation bindings on the same trigger no longer fail the whole
+  settings save. The sidecar rejected the entire payload — losing every
+  unrelated edit saved with it — where the app's own Settings screen only
+  warned in the row. The later of two identical triggers is now dropped on
+  save, which is all that could ever have happened anyway, and the row says
+  so.
 - The wait in front of an insert is now capped once, not once per pass. A
   dictation that both translates to English and then formats used to take a
   full formatting timeout for each, so the real worst case before a word
