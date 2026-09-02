@@ -256,6 +256,10 @@ evidence is stale and must be recaptured before this becomes a candidate.
   files that still carry it load cleanly and are rewritten without it.
 
 ### Fixed
+- The built-in cleanup model's 473 MiB now appears in the sidecar's list of
+  downloaded models, where it was missing entirely. The Models screen's
+  "Speech models on this Mac" total still counts only speech models, since
+  that is what it says.
 - "Keep the model warm: off" now actually releases the built-in cleanup
   model. It used to skip only the warm-up — the first dictation loaded the
   model anyway and it stayed in memory for the rest of the session — so the
