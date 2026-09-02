@@ -16,6 +16,7 @@ mod download;
 mod events;
 mod export;
 mod llm;
+pub mod local_tools;
 mod models;
 mod operation_coordinator;
 mod ort_utils;
@@ -28,6 +29,8 @@ pub mod settings;
 pub mod sidecar_handle;
 mod store;
 mod streaming;
+#[cfg(test)]
+mod test_fs;
 pub mod text;
 mod transcription;
 
@@ -28142,6 +28145,49 @@ pub async fn dispatch_command(
             let db = state.db.lock().await;
             let result = db.get_audit_log().map_err(|e| e.to_string())?;
             serde_json::to_value(result).map_err(|e| e.to_string())
+        }
+        // Main-process only (see `intentionallyUnreachableSidecarCommands` in
+        // scripts/verify-ipc-contract.mjs): records what a `plainsong://` deep
+        // link asked for and what the app did about it, so the audit log shows
+        // every external trigger next to the recordings it touched. The
+        // payload is a fixed set of short enum-like strings chosen by
+        // main.ts; no URL text or query payload is ever written here.
+        "record_automation_audit_event" => {
+            let action = params
+                .get("action")
+                .and_then(|v| v.as_str())
+                .map(str::trim)
+                .filter(|v| !v.is_empty() && v.len() <= 64)
+                .ok_or_else(|| "record_automation_audit_event needs an action".to_string())?;
+            let outcome = params
+                .get("outcome")
+                .and_then(|v| v.as_str())
+                .map(str::trim)
+                .filter(|v| !v.is_empty() && v.len() <= 64)
+                .ok_or_else(|| "record_automation_audit_event needs an outcome".to_string())?;
+            let source = params
+                .get("source")
+                .and_then(|v| v.as_str())
+                .map(str::trim)
+                .filter(|v| !v.is_empty() && v.len() <= 32)
+                .unwrap_or("deep_link");
+            let severity = if outcome == "performed" {
+                "info"
+            } else {
+                "warning"
+            };
+            let mut db = state.db.lock().await;
+            db.log_audit_event(
+                "automation.deep_link",
+                Some(serde_json::json!({
+                    "source": source,
+                    "action": action,
+                    "outcome": outcome,
+                })),
+                severity,
+            )
+            .map_err(|e| e.to_string())?;
+            Ok(serde_json::Value::Null)
         }
         "get_dictation_history_details" => {
             let recording_id: String = serde_json::from_value(

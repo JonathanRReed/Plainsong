@@ -17,6 +17,16 @@ path = "src/lib.rs"
 name = "plainsong-sidecar"
 path = "src/bin/sidecar.rs"
 
+# The `plainsong` command-line tool and read-only MCP server. A separate
+# binary rather than a mode of the sidecar because the sidecar is spawned by
+# Electron over stdio with no socket: a terminal or an AI assistant has nothing
+# to connect to. This binary opens the same SQLCipher database read-only
+# (see `db::Database::open_read_only_at_path`) and reuses the library's query
+# and export code, so nothing in the running sidecar changes for reads.
+[[bin]]
+name = "plainsong-cli"
+path = "src/bin/plainsong-cli.rs"
+
 [dependencies]
 lazy_static = "1.4"
 serde = { version = "1", features = ["derive"] }

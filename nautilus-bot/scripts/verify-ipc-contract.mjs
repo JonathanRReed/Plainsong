@@ -100,6 +100,7 @@ const intentionallyUnreachableSidecarCommands = new Set([
   "approve_backup_location_privileged",
   "approve_cloud_backup_location_privileged",
   "approve_export_location_privileged",
+  "record_automation_audit_event",
   "start_recording",
   "stop_recording",
 ]);

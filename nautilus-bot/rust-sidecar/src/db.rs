@@ -374,7 +374,7 @@ impl Database {
         Self::open_at_path(&app_dir.join("plainsong.db"), key)
     }
 
-    fn open_at_path(db_path: &Path, key: Option<&str>) -> Result<Self> {
+    pub(crate) fn open_at_path(db_path: &Path, key: Option<&str>) -> Result<Self> {
         let conn = Connection::open(db_path)?;
 
         // SQLCipher reports its library version even for an unkeyed plaintext
@@ -387,8 +387,13 @@ impl Database {
                 return Err(anyhow::anyhow!("Invalid hex encoding in database key"));
             }
             conn.execute_batch(&format!("PRAGMA key = \"x'{}'\";", hex_key))?;
-            // Reading sqlite_master proves that this key actually opened the file.
-            conn.execute("SELECT count(*) FROM sqlite_master;", [])?;
+            // Reading sqlite_master proves that this key actually opened the
+            // file. It has to be a query: rusqlite's `execute` refuses any
+            // statement that returns rows, so the previous `execute` here made
+            // every keyed open fail before the key was ever tested.
+            conn.query_row("SELECT count(*) FROM sqlite_master;", [], |row| {
+                row.get::<_, i64>(0)
+            })?;
             true
         } else {
             false
@@ -409,6 +414,84 @@ impl Database {
     /// Create new database (default, no encryption)
     pub fn new() -> Result<Self> {
         Self::new_with_key(None)
+    }
+
+    /// The on-disk path `new_with_key` opens, without creating anything.
+    pub(crate) fn default_db_path() -> Result<PathBuf> {
+        Ok(crate::paths::data_dir()
+            .context("Could not find data directory")?
+            .join("Plainsong")
+            .join("plainsong.db"))
+    }
+
+    /// Open an existing database file for reading only.
+    ///
+    /// This is the `plainsong` CLI / MCP path. It differs from `open_at_path`
+    /// in every way that matters for a second process reading beside a live
+    /// sidecar:
+    ///
+    /// - `SQLITE_OPEN_READ_ONLY`: the connection cannot write, so a bug in the
+    ///   reader can never mutate user data, and no migration runs. A file that
+    ///   does not exist is an error rather than a freshly created empty store.
+    /// - `PRAGMA query_only = ON` as a second belt: even a statement that
+    ///   slipped past the flag is refused by SQLite itself.
+    /// - `busy_timeout`: the sidecar's writes hold the rollback journal for a
+    ///   few milliseconds; a reader waits instead of failing with `SQLITE_BUSY`.
+    /// - The schema version is checked but never bumped: a newer schema than
+    ///   this binary knows is refused with a plain message.
+    ///
+    /// The key handling is identical to `open_at_path` so the two paths cannot
+    /// drift: same hex-encoded `PRAGMA key`, same `sqlite_master` read that
+    /// proves the key actually opened the file.
+    pub(crate) fn open_read_only_at_path(db_path: &Path, key: Option<&str>) -> Result<Self> {
+        use rusqlite::OpenFlags;
+
+        if !db_path.is_file() {
+            anyhow::bail!("No Plainsong database at {}", db_path.display());
+        }
+        let conn = Connection::open_with_flags(
+            db_path,
+            OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
+        )
+        .with_context(|| format!("Failed to open {} read-only", db_path.display()))?;
+
+        #[cfg(feature = "sqlcipher")]
+        let encrypted = if let Some(key) = key {
+            let hex_key = hex::encode(key.as_bytes());
+            if !hex_key.chars().all(|c| c.is_ascii_hexdigit()) {
+                return Err(anyhow::anyhow!("Invalid hex encoding in database key"));
+            }
+            conn.execute_batch(&format!("PRAGMA key = \"x'{}'\";", hex_key))?;
+            true
+        } else {
+            false
+        };
+        #[cfg(not(feature = "sqlcipher"))]
+        let encrypted = {
+            let _ = key;
+            false
+        };
+
+        // Proves the key (or its absence) actually opened the file; an
+        // encrypted database read without its key fails here, not on the
+        // first real query.
+        conn.query_row("SELECT count(*) FROM sqlite_master;", [], |row| {
+            row.get::<_, i64>(0)
+        })
+        .context("Could not read the database; is the encryption key right?")?;
+        conn.busy_timeout(std::time::Duration::from_secs(5))?;
+        conn.execute_batch("PRAGMA query_only = ON;")?;
+
+        let schema_version: i64 = conn.query_row("PRAGMA user_version", [], |row| row.get(0))?;
+        if schema_version > CURRENT_SCHEMA_VERSION {
+            anyhow::bail!(
+                "Database schema version {} is newer than this binary supports ({})",
+                schema_version,
+                CURRENT_SCHEMA_VERSION
+            );
+        }
+
+        Ok(Self { conn, encrypted })
     }
 
     #[cfg(test)]
@@ -457,8 +540,11 @@ impl Database {
         }
         self.conn
             .execute_batch(&format!("PRAGMA rekey = \"x'{}'\";", hex_key))?;
+        // A query, not `execute`, for the same reason as in `open_at_path`.
         self.conn
-            .execute("SELECT count(*) FROM sqlite_master;", [])?;
+            .query_row("SELECT count(*) FROM sqlite_master;", [], |row| {
+                row.get::<_, i64>(0)
+            })?;
         self.encrypted = true;
         tracing::info!("Database encryption key changed");
         Ok(())
@@ -5713,6 +5799,129 @@ mod tests {
         };
         db.init_tables().expect("init tables");
         db
+    }
+
+    #[test]
+    fn read_only_open_refuses_writes_and_skips_migrations() {
+        let dir = crate::test_fs::TempDir::new("local-tools");
+        let path = dir.path().join("plainsong.db");
+        // A writer creates the schema and one row the reader can see.
+        {
+            let mut db = Database::open_at_path(&path, None).unwrap();
+            let recording = sample_recording("ro-1", "inbox");
+            db.create_recording(&recording).unwrap();
+        }
+
+        let reader = Database::open_read_only_at_path(&path, None).unwrap();
+        assert_eq!(reader.get_recordings(None).unwrap().len(), 1);
+
+        // Every write path is refused by SQLite itself, not only by policy.
+        let insert = reader.conn.execute(
+            "INSERT INTO projects (id, name, created_at, updated_at) VALUES ('p', 'p', '', '')",
+            [],
+        );
+        assert!(
+            insert.is_err(),
+            "insert must fail on a read-only connection"
+        );
+        let bump = reader.conn.execute_batch("PRAGMA user_version = 99;");
+        assert!(
+            bump.is_err(),
+            "pragma write must fail on a read-only connection"
+        );
+        let query_only: i64 = reader
+            .conn
+            .query_row("PRAGMA query_only", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(query_only, 1);
+
+        // The file on disk still carries the writer's schema version.
+        let check = Connection::open(&path).unwrap();
+        let version: i64 = check
+            .query_row("PRAGMA user_version", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(version, CURRENT_SCHEMA_VERSION);
+    }
+
+    #[test]
+    fn read_only_open_refuses_a_missing_file_instead_of_creating_one() {
+        let dir = crate::test_fs::TempDir::new("local-tools");
+        let path = dir.path().join("absent.db");
+        let error = Database::open_read_only_at_path(&path, None)
+            .err()
+            .expect("open must fail");
+        assert!(error.to_string().contains("No Plainsong database"));
+        assert!(
+            !path.exists(),
+            "a read-only open must never create the file"
+        );
+    }
+
+    #[test]
+    fn read_only_open_refuses_a_newer_schema() {
+        let dir = crate::test_fs::TempDir::new("local-tools");
+        let path = dir.path().join("future.db");
+        {
+            let conn = Connection::open(&path).unwrap();
+            conn.execute_batch(&format!(
+                "PRAGMA user_version = {};",
+                CURRENT_SCHEMA_VERSION + 1
+            ))
+            .unwrap();
+        }
+        let error = Database::open_read_only_at_path(&path, None)
+            .err()
+            .expect("open must fail");
+        assert!(error
+            .to_string()
+            .contains("newer than this binary supports"));
+    }
+
+    /// The keyed open used to verify the key with `Connection::execute`,
+    /// which rusqlite rejects for any row-returning statement — so every
+    /// encrypted open failed before the key was tested. Nothing caught it
+    /// because no install had a vault key yet.
+    #[cfg(feature = "sqlcipher")]
+    #[test]
+    fn keyed_open_round_trip() {
+        let dir = crate::test_fs::TempDir::new("local-tools");
+        let path = dir.path().join("keyed.db");
+        let key = "0123456789abcdef0123456789abcdef";
+        {
+            let mut db = Database::open_at_path(&path, Some(key)).expect("keyed create");
+            assert!(db.is_encrypted().unwrap());
+            db.create_recording(&sample_recording("k-1", "inbox"))
+                .unwrap();
+        }
+        let reopened = Database::open_at_path(&path, Some(key)).expect("keyed reopen");
+        assert_eq!(reopened.get_recordings(None).unwrap().len(), 1);
+        assert!(Database::open_at_path(&path, None).is_err());
+        // Not covered here: `change_key` on a database that was opened
+        // WITHOUT a key. SQLCipher's `PRAGMA rekey` is a silent no-op on an
+        // unkeyed connection (the file stays plaintext and a keyed reopen
+        // then fails with "file is not a database"), so the vault's
+        // plaintext-to-encrypted step needs `sqlcipher_export`, not `rekey`.
+        // That is a separate fix with its own migration story; it is
+        // recorded, not papered over, here.
+    }
+
+    #[cfg(feature = "sqlcipher")]
+    #[test]
+    fn read_only_open_needs_the_same_key_the_writer_used() {
+        let dir = crate::test_fs::TempDir::new("local-tools");
+        let path = dir.path().join("cipher.db");
+        let key = "0123456789abcdef0123456789abcdef";
+        {
+            let mut db = Database::open_at_path(&path, Some(key)).unwrap();
+            db.create_recording(&sample_recording("enc-1", "inbox"))
+                .unwrap();
+        }
+        let keyed = Database::open_read_only_at_path(&path, Some(key)).unwrap();
+        assert!(keyed.is_encrypted().unwrap());
+        assert_eq!(keyed.get_recordings(None).unwrap().len(), 1);
+
+        assert!(Database::open_read_only_at_path(&path, None).is_err());
+        assert!(Database::open_read_only_at_path(&path, Some("wrong-key")).is_err());
     }
 
     #[test]
