@@ -574,10 +574,26 @@ pub struct PrivacySettings {
 /// because the bundled model is a dictation normalizer and cannot write a
 /// summary (see `Provider::supports_meeting_analysis`).
 ///
-/// `#[serde(default)]` on the container means a settings file that is missing
-/// `privacy` -- or missing just `dictationAi` -- lands here too. A file that
-/// *has* a `dictationAi` keeps whatever it says: an existing user's choice is
-/// not overwritten by shipping a new default.
+/// `#[serde(default)]` on the container means a settings file with no
+/// `privacy` section at all lands here. A file that *has* a `privacy` section
+/// but no `dictationAi` is the interesting case, and it does not simply land
+/// here: two things run after the deserializer and either of them may move
+/// that lane.
+///
+/// * A pre-lane file carrying `privacy.llmProvider` has it copied onto the
+///   missing lane by `migrate_legacy_ai_lane_settings`. That value is the
+///   user's own earlier choice, so it outranks a default shipped later.
+/// * `apply_zero_setup_dictation_default` moves an *auto-selected* bundled
+///   lane to `DICTATION_AI_PROVIDER_WITHOUT_ACCELERATION` where the backend
+///   cannot meet the dictation budget (see `llm::bundled_local`).
+///
+/// So this default is where a file lands only when it names neither the lane
+/// nor the retired pair *and* the machine can run the bundled model fast
+/// enough. A file that *has* a `dictationAi` keeps whatever it says: an
+/// existing user's choice is not overwritten by shipping a new default, and
+/// naming this provider explicitly is exempt from the backend check too.
+/// `a_file_missing_only_the_dictation_lane_lands_on_the_shipped_default`
+/// pins all of that through the real load path.
 impl Default for PrivacySettings {
     fn default() -> Self {
         Self {
@@ -2807,6 +2823,60 @@ mod tests {
         assert!(!raw_settings_contain_removed_keys(
             &serde_json::to_value(Settings::default()).expect("settings serialize")
         ));
+    }
+
+    /// Where a file that is missing only `dictationAi` actually lands, through
+    /// the real load path rather than by reading the attribute macro.
+    ///
+    /// Three different answers, which is why the doc comment on
+    /// `PrivacySettings::default` could not describe it in one clause:
+    /// container-level `#[serde(default)]` fills the missing lane from
+    /// `PrivacySettings::default()`; a pre-lane file's `llmProvider` overrides
+    /// that through `migrate_legacy_ai_lane_settings`; and
+    /// `apply_zero_setup_dictation_default` has the last word where the
+    /// backend cannot serve the bundled route.
+    #[test]
+    fn a_file_missing_only_the_dictation_lane_lands_on_the_shipped_default() {
+        let suffix = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("system time before epoch")
+            .as_nanos();
+        let root = std::env::temp_dir().join(format!("nautilus-settings-missing-lane-{suffix}"));
+        fs::create_dir_all(&root).expect("create settings test directory");
+
+        // (1) privacy present, no dictationAi, no legacy pair: the container
+        // default fills it from PrivacySettings::default().
+        let plain = root.join("plain.json");
+        fs::write(
+            &plain,
+            r#"{ "privacy": { "remoteProcessingEnabled": true, "meetingsAi": { "provider": "anthropic" } } }"#,
+        )
+        .expect("write settings without a dictation lane");
+        let manager = SettingsManager::load_from_path(plain).expect("load");
+        let landed = manager.settings().privacy.dictation_ai.provider.clone();
+        assert!(
+            landed == DEFAULT_DICTATION_AI_PROVIDER
+                || landed == DICTATION_AI_PROVIDER_WITHOUT_ACCELERATION,
+            "a missing lane lands on the shipped default, or on the fallback where the backend cannot serve it; got {landed:?}"
+        );
+        assert_eq!(manager.settings().privacy.meetings_ai.provider, "anthropic");
+
+        // (2) a pre-lane `llmProvider` instead: the migration wins, because
+        // that value is the user's own earlier choice.
+        let legacy = root.join("legacy.json");
+        fs::write(
+            &legacy,
+            r#"{ "privacy": { "llmProvider": "gemini", "llmModelId": "gemini-2.5-pro" } }"#,
+        )
+        .expect("write pre-lane settings");
+        let manager = SettingsManager::load_from_path(legacy).expect("load");
+        assert_eq!(
+            manager.settings().privacy.dictation_ai,
+            lane("gemini", Some("gemini-2.5-pro")),
+            "a legacy provider is not overwritten by the shipped default"
+        );
+
+        let _ = fs::remove_dir_all(root);
     }
 
     /// End to end through the real load path: a pre-split file on disk comes
