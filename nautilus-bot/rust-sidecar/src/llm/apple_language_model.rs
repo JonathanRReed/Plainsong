@@ -58,6 +58,32 @@ pub const MAX_PROMPT_CHARS: usize = 4_096;
 /// unmodified local-pipeline text.
 pub const HELPER_TIMEOUT: Duration = Duration::from_millis(5_000);
 
+/// Ceiling on what one helper run may write to stdout.
+///
+/// The helper answers with a single JSON line: a probe is a couple of hundred
+/// bytes, and a completion is bounded by the model's 4,096-token shared
+/// window, so a legitimate answer is comfortably under 64 KiB. Reading it with
+/// `wait_with_output()` had no ceiling at all -- a helper that looped or was
+/// replaced could stream until the sidecar ran out of memory, inside a 5 s
+/// timeout that never looks at how much has arrived. This mirrors the rule
+/// `transport::read_bounded_body` applies to every HTTP provider: bound the
+/// read, then fail with a message that names the bound.
+pub const HELPER_STDOUT_LIMIT: usize = 256 * 1024;
+
+/// Append `chunk` to `buffer` unless that would take it past `limit`.
+///
+/// Split out from the read loop so the bound is a decision that can be tested
+/// without spawning a hostile helper.
+fn push_bounded(buffer: &mut Vec<u8>, chunk: &[u8], limit: usize) -> Result<(), String> {
+    if buffer.len().saturating_add(chunk.len()) > limit {
+        return Err(format!(
+            "The Apple on-device model helper wrote more than {limit} bytes; stopping it rather than reading further."
+        ));
+    }
+    buffer.extend_from_slice(chunk);
+    Ok(())
+}
+
 /// Instructions handed to `LanguageModelSession`.
 ///
 /// Deliberately short and behavioral. This is a general instruction-following
@@ -316,22 +342,56 @@ async fn run_helper(request: &HelperRequest<'_>, timeout: Duration) -> Result<St
             .map_err(|error| format!("Could not close the helper's stdin: {error}"))?;
     }
 
-    let output = match tokio::time::timeout(timeout, child.wait_with_output()).await {
-        Ok(result) => {
-            result.map_err(|error| format!("The Apple on-device model helper failed: {error}"))?
+    let mut stdout = child
+        .stdout
+        .take()
+        .ok_or_else(|| "The helper did not expose stdout.".to_string())?;
+
+    // `let` (rather than matching the expression directly) ends the borrow of
+    // `child` at the end of this statement, so the kill below is free to take
+    // it back.
+    let outcome = tokio::time::timeout(timeout, async {
+        use tokio::io::AsyncReadExt;
+        let mut buffer: Vec<u8> = Vec::with_capacity(8 * 1024);
+        let mut chunk = [0u8; 8 * 1024];
+        loop {
+            let read = stdout
+                .read(&mut chunk)
+                .await
+                .map_err(|error| format!("Could not read the helper's answer: {error}"))?;
+            if read == 0 {
+                break;
+            }
+            push_bounded(&mut buffer, &chunk[..read], HELPER_STDOUT_LIMIT)?;
+        }
+        let status = child
+            .wait()
+            .await
+            .map_err(|error| format!("The Apple on-device model helper failed: {error}"))?;
+        Ok::<_, String>((status, buffer))
+    })
+    .await;
+
+    let (status, stdout_bytes) = match outcome {
+        Ok(Ok(value)) => value,
+        Ok(Err(message)) => {
+            // An over-long or unreadable stream: stop the helper now rather
+            // than leaving it writing into a pipe nobody is draining.
+            let _ = child.start_kill();
+            return Err(message);
         }
         Err(_) => {
+            // `kill_on_drop` fires as `child` goes out of scope.
             return Err("The Apple on-device model did not answer in time.".to_string());
         }
     };
 
-    if !output.status.success() {
+    if !status.success() {
         return Err(format!(
-            "The Apple on-device model helper exited with {}.",
-            output.status
+            "The Apple on-device model helper exited with {status}."
         ));
     }
-    Ok(String::from_utf8_lossy(&output.stdout).into_owned())
+    Ok(String::from_utf8_lossy(&stdout_bytes).into_owned())
 }
 
 /// Ask the helper whether the on-device model can run here. Never prompts and
@@ -513,6 +573,36 @@ mod tests {
             .as_deref()
             .expect("a reason the user can act on")
             .contains("Apple Intelligence"));
+    }
+
+    /// The helper is a separate process reading dictation text; an unbounded
+    /// `wait_with_output()` let it decide how much of the sidecar's memory to
+    /// take. The bound is the same rule every HTTP provider already follows.
+    #[test]
+    fn the_helper_stdout_read_is_bounded() {
+        let mut buffer = Vec::new();
+        assert!(push_bounded(&mut buffer, b"{\"type\":\"probe\"}", 32).is_ok());
+        assert_eq!(buffer.len(), 16);
+
+        // Exactly at the limit is still fine.
+        let mut buffer = Vec::new();
+        assert!(push_bounded(&mut buffer, &[0u8; 32], 32).is_ok());
+        // One byte past it is not, and the refusal names the bound.
+        let error = push_bounded(&mut buffer, b"!", 32)
+            .expect_err("a stream past the limit must be refused, not truncated silently");
+        assert!(error.contains("32 bytes"), "{error}");
+        assert_eq!(buffer.len(), 32, "the refused chunk is not appended");
+    }
+
+    #[test]
+    fn the_stdout_limit_leaves_room_for_any_real_answer() {
+        // One JSON line holding at most a 4,096-token answer. Even at four
+        // bytes per token plus escaping, the ceiling is an order of magnitude
+        // clear of anything the helper can legitimately produce.
+        assert!(HELPER_STDOUT_LIMIT > MAX_PROMPT_CHARS * 8);
+        // And it is a bound, not a fig leaf: not so large that reaching it
+        // would already have cost the sidecar its memory.
+        assert!(HELPER_STDOUT_LIMIT <= 1024 * 1024);
     }
 
     #[test]
