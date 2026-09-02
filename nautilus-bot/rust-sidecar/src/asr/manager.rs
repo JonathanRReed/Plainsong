@@ -3,7 +3,7 @@ use super::{
         macos_speech::AppleSpeechReadiness, EngineDiagnostics, EngineProbe, PlatformEngine,
     },
     AsrProvider, AsrProviderFactory, AsrProviderType, DownloadStatus, ModelInfo,
-    TranscriptionResult,
+    TranscriptionOptions, TranscriptionResult,
 };
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
@@ -476,11 +476,14 @@ impl AsrManager {
 
     /// Whether the provider has active transcription inference in this build.
     ///
-    /// Qwen3-ASR's autoregressive decoder loop with KV cache threading is
-    /// implemented but not yet validated with real audio. It is gated out of
-    /// active transcription until end-to-end testing confirms correct output.
-    pub fn is_provider_transcription_enabled(provider_type: AsrProviderType) -> bool {
-        !matches!(provider_type, AsrProviderType::Qwen3Asr)
+    /// This is the seam a provider sits behind while its runtime is still
+    /// unproven. Nothing is behind it today: Qwen3-ASR, the last occupant,
+    /// left on 2026-09-01 once its real-audio eval passed (see
+    /// `qwen3_asr_real_audio_eval` in asr/qwen3_asr.rs). The flag still
+    /// reaches the UI as `inferenceEnabled`, so a future provider can ship
+    /// downloadable-but-not-selectable without a schema change.
+    pub fn is_provider_transcription_enabled(_provider_type: AsrProviderType) -> bool {
+        true
     }
 
     /// Get the default provider
@@ -548,6 +551,7 @@ impl AsrManager {
         // When `Some`, bypasses the global mlx_accelerated_providers set.
         // Use this for slot-aware routing (dictation vs meeting).
         mlx_override: Option<bool>,
+        options: &TranscriptionOptions,
     ) -> Result<TranscriptionResult> {
         let requested_provider = provider_type;
         let resolved_model = match selected_model {
@@ -679,6 +683,7 @@ impl AsrManager {
                 PlatformEngine::ProviderDefault,
                 effective_selection.mlx_accelerated,
                 None,
+                options,
             )
             .await
         {
@@ -740,6 +745,7 @@ impl AsrManager {
             actual_engine: Some(engine.id().to_string()),
             optimization_applied: true,
             fallback_reason: None,
+            vocabulary_hint_terms_applied: 0,
         })
     }
 
@@ -755,12 +761,13 @@ impl AsrManager {
         actual_engine: PlatformEngine,
         optimization_applied: bool,
         fallback_reason: Option<String>,
+        options: &TranscriptionOptions,
     ) -> Result<TranscriptionResult> {
         let provider = Self::provider_with_model(actual_provider, Some(model_id));
         let request = async {
             match (file_path, audio_data) {
                 (Some(path), None) => provider.transcribe(path).await,
-                (None, Some(bytes)) => provider.transcribe_bytes(bytes).await,
+                (None, Some(bytes)) => provider.transcribe_bytes_with_options(bytes, options).await,
                 _ => Err(anyhow::anyhow!("Invalid transcription input")),
             }
         };
@@ -915,15 +922,29 @@ impl AsrManager {
     /// Transcribe using the default provider
     pub async fn transcribe(&self, audio_path: &Path) -> Result<TranscriptionResult> {
         let provider_type = self.get_default_provider().await;
-        self.transcribe_inner(provider_type, Some(audio_path), None, None, None)
-            .await
+        self.transcribe_inner(
+            provider_type,
+            Some(audio_path),
+            None,
+            None,
+            None,
+            &TranscriptionOptions::default(),
+        )
+        .await
     }
 
     /// Transcribe bytes using the default provider
     pub async fn transcribe_bytes(&self, audio_data: &[u8]) -> Result<TranscriptionResult> {
         let provider_type = self.get_default_provider().await;
-        self.transcribe_inner(provider_type, None, Some(audio_data), None, None)
-            .await
+        self.transcribe_inner(
+            provider_type,
+            None,
+            Some(audio_data),
+            None,
+            None,
+            &TranscriptionOptions::default(),
+        )
+        .await
     }
 
     /// Transcribe bytes with a specific provider (uses the global MLX accelerated set).
@@ -933,8 +954,15 @@ impl AsrManager {
         audio_data: &[u8],
         selected_model: Option<&str>,
     ) -> Result<TranscriptionResult> {
-        self.transcribe_inner(provider_type, None, Some(audio_data), selected_model, None)
-            .await
+        self.transcribe_inner(
+            provider_type,
+            None,
+            Some(audio_data),
+            selected_model,
+            None,
+            &TranscriptionOptions::default(),
+        )
+        .await
     }
 
     /// Transcribe bytes for the dictation route slot (uses per-slot dictation MLX flag).
@@ -944,6 +972,26 @@ impl AsrManager {
         audio_data: &[u8],
         selected_model: Option<&str>,
     ) -> Result<TranscriptionResult> {
+        self.transcribe_bytes_for_dictation_with_options(
+            provider_type,
+            audio_data,
+            selected_model,
+            &TranscriptionOptions::default(),
+        )
+        .await
+    }
+
+    /// `transcribe_bytes_for_dictation` with per-request options — the final
+    /// dictation decode passes the personal-dictionary vocabulary hint here.
+    /// Options ride along through the engine/provider fallback chain, so a
+    /// fallback provider that can use them still gets them.
+    pub async fn transcribe_bytes_for_dictation_with_options(
+        &self,
+        provider_type: AsrProviderType,
+        audio_data: &[u8],
+        selected_model: Option<&str>,
+        options: &TranscriptionOptions,
+    ) -> Result<TranscriptionResult> {
         let mlx_enabled = *self.dictation_mlx_enabled.read().await;
         self.transcribe_inner(
             provider_type,
@@ -951,6 +999,7 @@ impl AsrManager {
             Some(audio_data),
             selected_model,
             Some(mlx_enabled),
+            options,
         )
         .await
     }
@@ -974,6 +1023,7 @@ impl AsrManager {
             Some(audio_data),
             selected_model,
             Some(mlx_enabled),
+            &TranscriptionOptions::default(),
         )
         .await
     }
@@ -1725,7 +1775,17 @@ fn runtime_diagnostics_for_provider(
                 && is_valid_onnx_artifact(&model_dir.join("decoder_step.int4.onnx"))
                 && is_valid_json_artifact(&model_dir.join("config.json"), 64)
                 && is_valid_json_artifact(&model_dir.join("tokenizer.json"), 1024);
-            let missing_files = missing_or_invalid_qwen3_asr_files(model_dir.as_path());
+            let mut missing_files = missing_or_invalid_qwen3_asr_files(model_dir.as_path());
+            // Bytes that look right are not enough: readiness follows the
+            // integrity receipts, the same rule `Qwen3AsrProvider::is_available`
+            // applies, so the diagnostics never say Ready for a swapped file.
+            let trusted = super::qwen3_asr::artifacts_trusted(model_dir.as_path());
+            if model_ready && !trusted {
+                missing_files.push(
+                    "integrity receipts for the pinned Qwen3-ASR files (not verified)".to_string(),
+                );
+            }
+            let model_ready = model_ready && trusted;
             runtime_native_model(
                 provider_available,
                 model_dir,
@@ -1733,7 +1793,7 @@ fn runtime_diagnostics_for_provider(
                 &missing_files,
                 MissingModelCopy {
                     message:
-                        "Qwen3-ASR ONNX model not downloaded. Download encoder + decoder + embed_tokens assets first.",
+                        "Qwen3-ASR model files are missing or have not passed Plainsong integrity verification.",
                     setup_action: "Re-download Qwen3-ASR ONNX assets in Settings -> ASR Models.",
                 },
                 "Qwen3-ASR native ONNX inference ready.",
@@ -2041,6 +2101,19 @@ mod tests {
     use crate::asr::AsrProviderFactory;
     use crate::settings::PlatformOptimizationSettings;
     use std::path::PathBuf;
+
+    #[test]
+    fn no_provider_is_gated_out_of_transcription_in_this_build() {
+        // Qwen3-ASR was the last provider behind this gate; it was lifted
+        // after the 2026-09-01 real-audio eval. If a provider needs to go
+        // back behind it, this test is the place to say which and why.
+        for provider in AsrProviderType::all() {
+            assert!(
+                AsrManager::is_provider_transcription_enabled(provider),
+                "{provider:?} is gated out of transcription"
+            );
+        }
+    }
 
     fn temp_models_root() -> PathBuf {
         let root = std::env::temp_dir().join(format!(

@@ -1,5 +1,6 @@
 use serde::{Deserialize, Serialize};
 
+use crate::asr::VocabularyHint;
 use crate::text::format::DictationAppCategory;
 
 pub const DEFAULT_COMMAND_PREFIX: &str = "command";
@@ -432,6 +433,149 @@ pub fn apply_dictation_snippets_for_category(
     }
 
     (output, applied_total)
+}
+
+/// Cap on the recognizer vocabulary hint, terms first, then characters of
+/// the whole prompt (`VocabularyHint::as_prompt`, frame included) — whichever
+/// is reached first. whisper's prompt window is half its 448-token text
+/// context; ~600 characters of short terms stays well inside it and leaves
+/// the first decode window room for speech.
+pub const VOCABULARY_HINT_MAX_TERMS: usize = 60;
+pub const VOCABULARY_HINT_MAX_CHARS: usize = 600;
+/// Estimated-token cap on the framed prompt, under whisper's 224-token
+/// prompt window with room to spare. Characters alone do not bound tokens —
+/// rare proper nouns tokenize into many short pieces — so the builder also
+/// stops when `VocabularyHint::estimate_prompt_tokens` would exceed this.
+pub const VOCABULARY_HINT_MAX_TOKENS: usize = 200;
+
+/// Longest single term worth sending: anything longer is a sentence, not a
+/// vocabulary item, and ElevenLabs' keyterm limit is the same number.
+const VOCABULARY_TERM_MAX_CHARS: usize = 50;
+const VOCABULARY_PLAIN_WORD_MAX_CHARS: usize = 32;
+
+/// Where a vocabulary candidate came from, which decides how strict the
+/// term filter is.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum VocabularyTermKind {
+    /// A dictionary entry's written form (its *replacement*), the spelling
+    /// the recognizer should prefer. Multi-word replacements are fine.
+    DictionaryReplacement,
+    /// A snippet trigger. Only a plain single word qualifies — "brb", not
+    /// "my address" — and the expansion is never a candidate at all.
+    SnippetTrigger,
+}
+
+/// One candidate for the recognizer vocabulary hint, carrying the same
+/// app/category scoping the post-transcription replacement honors and a
+/// recency so newer entries win the cap.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct VocabularyTermCandidate {
+    pub term: String,
+    pub app_scope: Option<String>,
+    pub category_scope: Option<String>,
+    pub enabled: bool,
+    /// Most recent add/edit, epoch milliseconds. Higher is newer.
+    pub recency_ms: i64,
+    pub kind: VocabularyTermKind,
+}
+
+/// Builds the vocabulary hint for one dictation from the candidates that
+/// apply to `app_target` / `destination_category` — the exact scoping
+/// `apply_dictation_dictionary_for_category` and
+/// `apply_dictation_snippets_for_category` use afterwards, so the recognizer
+/// is only ever biased toward spellings the text pass would also enforce.
+///
+/// Newest first (ties keep input order, so the result is stable for a given
+/// list), deduplicated case-insensitively keeping the first occurrence, and
+/// cut at `VOCABULARY_HINT_MAX_TERMS` / `VOCABULARY_HINT_MAX_CHARS`,
+/// whichever comes first. `None` when nothing applies.
+pub fn build_vocabulary_hint(
+    candidates: &[VocabularyTermCandidate],
+    app_target: Option<&str>,
+    destination_category: DictationAppCategory,
+) -> Option<VocabularyHint> {
+    let mut eligible: Vec<(i64, usize, String)> = candidates
+        .iter()
+        .enumerate()
+        .filter(|(_, candidate)| candidate.enabled)
+        .filter(|(_, candidate)| {
+            snippet_app_scope_matches(candidate.app_scope.as_deref(), app_target)
+        })
+        .filter(|(_, candidate)| {
+            category_scope_matches(candidate.category_scope.as_deref(), destination_category)
+        })
+        .filter_map(|(index, candidate)| {
+            let term = normalize_vocabulary_term(&candidate.term)?;
+            if candidate.kind == VocabularyTermKind::SnippetTrigger
+                && !is_plain_vocabulary_word(&term)
+            {
+                return None;
+            }
+            Some((candidate.recency_ms, index, term))
+        })
+        .collect();
+    eligible.sort_by(|a, b| b.0.cmp(&a.0).then(a.1.cmp(&b.1)));
+
+    let mut seen = std::collections::HashSet::new();
+    let mut terms: Vec<String> = Vec::new();
+    let mut prompt_chars = VocabularyHint::PROMPT_FRAME_CHARS;
+    let mut prompt = String::new();
+    for (_, _, term) in eligible {
+        if !seen.insert(term.to_lowercase()) {
+            continue;
+        }
+        let separator = if terms.is_empty() { 0 } else { 2 };
+        let added = term.chars().count() + separator;
+        // The exact prompt the next term would produce, for the token
+        // estimate (frame, separators and the trailing period included).
+        let candidate_prompt = if terms.is_empty() {
+            format!("Vocabulary: {term}.")
+        } else {
+            format!("{}, {term}.", &prompt[..prompt.len() - 1])
+        };
+        if terms.len() >= VOCABULARY_HINT_MAX_TERMS
+            || prompt_chars + added > VOCABULARY_HINT_MAX_CHARS
+            || VocabularyHint::estimate_prompt_tokens(&candidate_prompt)
+                > VOCABULARY_HINT_MAX_TOKENS
+        {
+            break;
+        }
+        prompt_chars += added;
+        prompt = candidate_prompt;
+        terms.push(term);
+    }
+
+    VocabularyHint::new(terms)
+}
+
+/// Trims, collapses internal whitespace, and rejects anything that is not a
+/// term: empty, no letter or digit, control characters, a length that makes
+/// it a sentence, or the bracket/backslash characters no provider accepts.
+fn normalize_vocabulary_term(raw: &str) -> Option<String> {
+    let term = raw.split_whitespace().collect::<Vec<_>>().join(" ");
+    if term.is_empty()
+        || !term.chars().any(char::is_alphanumeric)
+        || term.chars().any(char::is_control)
+        || term.chars().count() > VOCABULARY_TERM_MAX_CHARS
+        || term
+            .chars()
+            .any(|ch| matches!(ch, '<' | '>' | '{' | '}' | '[' | ']' | '\\'))
+    {
+        return None;
+    }
+    Some(term)
+}
+
+/// A single token made of letters, digits, apostrophes or hyphens, with at
+/// least one letter — the shape of a snippet trigger that is also a word a
+/// recognizer could plausibly mis-hear ("brb", "ttyl", "e-mail").
+fn is_plain_vocabulary_word(term: &str) -> bool {
+    term.chars().count() >= 2
+        && term.chars().count() <= VOCABULARY_PLAIN_WORD_MAX_CHARS
+        && term.chars().any(char::is_alphabetic)
+        && term
+            .chars()
+            .all(|ch| ch.is_alphanumeric() || matches!(ch, '\'' | '-'))
 }
 
 fn command_payload<'a>(raw: &'a str, phrase: &str) -> Option<&'a str> {
@@ -1878,5 +2022,252 @@ mod tests {
                 ai_backed
             );
         }
+    }
+}
+
+#[cfg(test)]
+mod vocabulary_hint_tests {
+    use super::*;
+
+    fn candidate(term: &str, recency_ms: i64) -> VocabularyTermCandidate {
+        VocabularyTermCandidate {
+            term: term.to_string(),
+            app_scope: None,
+            category_scope: None,
+            enabled: true,
+            recency_ms,
+            kind: VocabularyTermKind::DictionaryReplacement,
+        }
+    }
+
+    fn terms(hint: Option<VocabularyHint>) -> Vec<String> {
+        hint.map(|hint| hint.terms().to_vec()).unwrap_or_default()
+    }
+
+    #[test]
+    fn empty_or_fully_filtered_input_yields_no_hint_at_all() {
+        assert_eq!(
+            build_vocabulary_hint(&[], None, DictationAppCategory::Other),
+            None
+        );
+
+        let disabled = VocabularyTermCandidate {
+            enabled: false,
+            ..candidate("Plainsong", 1)
+        };
+        let blank = candidate("   ", 2);
+        let punctuation = candidate("...", 3);
+        assert_eq!(
+            build_vocabulary_hint(
+                &[disabled, blank, punctuation],
+                None,
+                DictationAppCategory::Other
+            ),
+            None,
+            "a hint with nothing in it must be None, never Some(empty)"
+        );
+    }
+
+    #[test]
+    fn app_and_category_scoping_match_the_post_transcription_replacement() {
+        let everywhere = candidate("Plainsong", 1);
+        let slack_only = VocabularyTermCandidate {
+            app_scope: Some("Slack".to_string()),
+            ..candidate("standup", 2)
+        };
+        let email_only = VocabularyTermCandidate {
+            category_scope: Some("email".to_string()),
+            ..candidate("Regards", 3)
+        };
+        let candidates = [everywhere, slack_only, email_only];
+
+        assert_eq!(
+            terms(build_vocabulary_hint(
+                &candidates,
+                Some("Slack"),
+                DictationAppCategory::Messaging
+            )),
+            vec!["standup", "Plainsong"]
+        );
+        assert_eq!(
+            terms(build_vocabulary_hint(
+                &candidates,
+                Some("Mail"),
+                DictationAppCategory::Email
+            )),
+            vec!["Regards", "Plainsong"]
+        );
+        // No app in front: app-scoped entries do not apply (same convention
+        // as `snippet_app_scope_matches`), unscoped ones still do.
+        assert_eq!(
+            terms(build_vocabulary_hint(
+                &candidates,
+                None,
+                DictationAppCategory::Other
+            )),
+            vec!["Plainsong"]
+        );
+    }
+
+    #[test]
+    fn newest_entries_come_first_and_ties_keep_input_order() {
+        let candidates = [
+            candidate("older", 10),
+            candidate("newest", 30),
+            candidate("tie-a", 20),
+            candidate("tie-b", 20),
+        ];
+        assert_eq!(
+            terms(build_vocabulary_hint(
+                &candidates,
+                None,
+                DictationAppCategory::Other
+            )),
+            vec!["newest", "tie-a", "tie-b", "older"]
+        );
+        // Stable: the same input always yields the same list.
+        let again = build_vocabulary_hint(&candidates, None, DictationAppCategory::Other);
+        assert_eq!(terms(again), vec!["newest", "tie-a", "tie-b", "older"]);
+    }
+
+    #[test]
+    fn duplicates_collapse_case_insensitively_keeping_the_newest_spelling() {
+        let candidates = [
+            candidate("openai", 1),
+            candidate("OpenAI", 5),
+            candidate("  OpenAI ", 3),
+        ];
+        assert_eq!(
+            terms(build_vocabulary_hint(
+                &candidates,
+                None,
+                DictationAppCategory::Other
+            )),
+            vec!["OpenAI"]
+        );
+    }
+
+    #[test]
+    fn the_term_cap_is_applied_after_ordering() {
+        // Two-to-three-character terms keep the token estimate well under
+        // its cap, so the term cap is the one that binds here.
+        let candidates: Vec<VocabularyTermCandidate> = (0..(VOCABULARY_HINT_MAX_TERMS + 15))
+            .map(|index| candidate(&format!("t{index}"), index as i64))
+            .collect();
+        let hint = terms(build_vocabulary_hint(
+            &candidates,
+            None,
+            DictationAppCategory::Other,
+        ));
+        assert_eq!(hint.len(), VOCABULARY_HINT_MAX_TERMS);
+        assert_eq!(hint[0], format!("t{}", VOCABULARY_HINT_MAX_TERMS + 14));
+        assert!(
+            !hint.contains(&"t0".to_string()),
+            "the oldest term is the one cut"
+        );
+    }
+
+    #[test]
+    fn the_character_and_token_caps_stop_before_the_prompt_overflows() {
+        // 20 terms of 40 chars would be 20*40 + 19*2 = 838 characters. The
+        // 600-character cap alone (frame counted) would admit 14; the token
+        // estimate (chars/3 + separators) binds first at 13, since
+        // 13 + 13*40 + 12*2 = 557 chars -> 186 + 14 separators = 200 tokens
+        // and a 14th term would push it to 215.
+        let candidates: Vec<VocabularyTermCandidate> = (0..20)
+            .map(|index| {
+                candidate(
+                    &format!("{index:0>40}a").replace('a', ""),
+                    20 - index as i64,
+                )
+            })
+            .collect();
+        let hint = build_vocabulary_hint(&candidates, None, DictationAppCategory::Other)
+            .expect("some terms fit");
+        assert_eq!(hint.terms().len(), 13);
+        assert!(hint.as_prompt().chars().count() <= VOCABULARY_HINT_MAX_CHARS);
+        assert!(hint.estimated_prompt_tokens() <= VOCABULARY_HINT_MAX_TOKENS);
+    }
+
+    #[test]
+    fn the_token_estimate_binds_before_the_term_cap_for_short_uncommon_terms() {
+        // 60 eight-character terms fit the character cap but not whisper's
+        // prompt window once each is counted at a token per three
+        // characters: the estimate passes 200 before the 60th term.
+        let candidates: Vec<VocabularyTermCandidate> = (0..VOCABULARY_HINT_MAX_TERMS)
+            .map(|index| candidate(&format!("word{index:0>4}"), 100 - index as i64))
+            .collect();
+        let hint =
+            build_vocabulary_hint(&candidates, None, DictationAppCategory::Other).expect("hint");
+        assert!(hint.terms().len() < VOCABULARY_HINT_MAX_TERMS);
+        assert!(hint.estimated_prompt_tokens() <= VOCABULARY_HINT_MAX_TOKENS);
+        let prompt = hint.as_prompt();
+        assert!(
+            VocabularyHint::estimate_prompt_tokens(&format!(
+                "{}, word9999.",
+                &prompt[..prompt.len() - 1]
+            )) > VOCABULARY_HINT_MAX_TOKENS,
+            "one more term would have overflowed the estimate"
+        );
+    }
+
+    #[test]
+    fn snippet_triggers_only_qualify_as_plain_words() {
+        let snippet = |term: &str| VocabularyTermCandidate {
+            kind: VocabularyTermKind::SnippetTrigger,
+            ..candidate(term, 1)
+        };
+        let candidates = [
+            snippet("brb"),
+            snippet("e-mail"),
+            snippet("my address"),
+            snippet("sig!"),
+            snippet("x"),
+            snippet("123"),
+        ];
+        assert_eq!(
+            terms(build_vocabulary_hint(
+                &candidates,
+                None,
+                DictationAppCategory::Other
+            )),
+            vec!["brb", "e-mail"]
+        );
+    }
+
+    #[test]
+    fn dictionary_replacements_may_be_phrases_but_not_sentences_or_markup() {
+        let candidates = [
+            candidate("Plainsong Labs", 5),
+            candidate(
+                "a replacement that runs on far too long to be a single vocabulary term",
+                4,
+            ),
+            candidate("<b>bold</b>", 3),
+            candidate("line\nbreak", 2),
+        ];
+        assert_eq!(
+            terms(build_vocabulary_hint(
+                &candidates,
+                None,
+                DictationAppCategory::Other
+            )),
+            vec!["Plainsong Labs", "line break"],
+            "a newline collapses to a space; markup and sentences are dropped"
+        );
+    }
+
+    #[test]
+    fn prompt_form_is_one_framed_sentence() {
+        // Not a bare list: see `VocabularyHint::as_prompt` for the fixture
+        // evidence behind the frame and the trailing period.
+        let hint = build_vocabulary_hint(
+            &[candidate("Plainsong", 2), candidate("Kubernetes", 1)],
+            None,
+            DictationAppCategory::Other,
+        )
+        .expect("hint");
+        assert_eq!(hint.as_prompt(), "Vocabulary: Plainsong, Kubernetes.");
+        assert_eq!(hint.terms(), ["Plainsong", "Kubernetes"]);
     }
 }

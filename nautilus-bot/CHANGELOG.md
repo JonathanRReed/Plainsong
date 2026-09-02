@@ -31,6 +31,19 @@ evidence is stale and must be recaptured before this becomes a candidate.
 - An explicit, off-by-default "Also copy every dictation to the clipboard"
   toggle in Settings, with the plain-language caveat that turning it on
   replaces clipboard contents on every dictation and does not restore them.
+- Qwen3-ASR 0.6B (int4 ONNX, ~1.9 GiB) is now selectable as an
+  experimental local route for dictation and meetings, the only local
+  route here to Chinese, Japanese and Korean (30 languages listed
+  upstream). It had shipped downloadable but gated off because it was
+  never run on real audio; the first run found the mel layout transposed
+  and the chat-template prompt missing, both fixed. Validated on English
+  real audio (3.7% WER on the 44 s fixture against a Parakeet/whisper
+  cross-checked reference). It is not promoted and not the default: the
+  int4 decoders run on the CPU at anywhere from a quarter of real time to
+  slower than real time depending on load (11-59 s for 44 s of speech on
+  an M4 Pro across quiet and shared-CPU runs; provisional), and the route's
+  own copy says so. Audio longer than 60 s is decoded in pause-aligned
+  chunks, and a decode that would come back truncated is refused.
 
 ### Changed
 - **The macOS sidecar now ships Candle's Metal backend** (`candle-metal`),
@@ -43,6 +56,26 @@ evidence is stale and must be recaptured before this becomes a candidate.
   and deliberately left out: it regressed Moonshine (24 s first-load
   compile, slower steady state). Receipt:
   `artifacts/qa/acceleration-receipt-2026-09-01.md`.
+- The personal dictionary now reaches the recognizer, not only the text
+  afterwards. Each dictation builds a vocabulary hint from the dictionary
+  entries and plain-word snippet triggers that apply to the app in front
+  (same app/category scoping as the replacement pass; newest first; deduped;
+  capped at 60 terms / 600 characters; nothing sent when nothing applies) and
+  hands it to the provider with the audio: whisper.cpp as the initial prompt,
+  OpenAI and Groq as the `prompt` field (both as one framed sentence,
+  `Vocabulary: term, term.` — a bare comma list measurably hurt `base.en` on
+  the repo fixtures), ElevenLabs Scribe as `keyterms`.
+  Snippet expansions and misheard spoken forms are never sent; the prompt
+  is capped at an estimated 200 tokens under whisper's window, withheld on
+  near-silent or sub-half-second audio, and an output that only echoes the
+  hint on quiet or sub-second audio is decoded again without the prompt
+  rather than typed as-is. Cohere's
+  OpenAI-compatible endpoint documents `prompt` as unsupported, and Parakeet,
+  Moonshine, Candle, Qwen3 and Apple Speech have no equivalent, so those
+  routes are unchanged. Note for ElevenLabs users: ElevenLabs bills a 20%
+  surcharge on any request that carries keyterms, so a non-empty dictionary
+  now costs 20% more per Scribe dictation. `benchmark-latency` gained
+  `--vocabulary` so the effect can be measured on the fixtures.
 - **Parakeet TDT 0.6B v3 is now the default and recommended dictation
   model** (640 MB), because this repo's own benchmark shows whisper.cpp
   `base.en` mis-transcribing words it hasn't seen before — including
@@ -99,6 +132,17 @@ evidence is stale and must be recaptured before this becomes a candidate.
   websocket-only and could never work through this app's upload path).
   Context-window budgeting now recognizes GPT-5.x and Gemini-3.x models'
   real ~1M-token windows instead of clamping them to a stale estimate.
+- The stored meeting-lane default now names the route the meeting lane
+  actually runs: `parakeet` / `parakeet-tdt-0.6b-v3`. It was stored as
+  whisper.cpp `base.en`, but whisper.cpp has never been a meeting-supported
+  provider, so that slot was never read and every fresh install already
+  transcribed meetings with Parakeet. A settings file still carrying the old
+  `whisper`/`base.en` meeting pair is rewritten to Parakeet on load; shared
+  dictation/meeting selection is untouched. No transcription behavior
+  changes; the settings file stops claiming a route that never ran.
+- The unused `toggleDictationAlternates` shortcut key is gone from the
+  settings schema (it was only ever written as an empty list). Old settings
+  files that still carry it load cleanly and are rewritten without it.
 
 ### Fixed
 - A mic failure mid-meeting in a "me and them" (microphone plus system
@@ -138,7 +182,35 @@ evidence is stale and must be recaptured before this becomes a candidate.
   failure). A capture source that hard-fails is now described as failed,
   not as having "gone silent," which previously read as a muting problem.
 
+### Removed
+- The never-reachable "post the consent notice into the meeting chat for
+  you" automation for Zoom and Google Meet. Its keystroke senders sat behind
+  a gate that was hard-wired to off because nothing could prove the meeting
+  app's chat field had focus, so no build ever sent a notice. The start
+  sheet, the recording popup, and the beta docs now say plainly that
+  Plainsong does not post the notice; the notice text and its Copy button
+  stay. Automation can only come back with a positive focus-verification
+  design and on-device QA.
+- The ML punctuation/casing model (`punct_cap_seg_en`, ~210 MB) and the
+  `text-recasepunct` build feature. Its restore function had no caller, and
+  every shipped speech route already emits punctuated, cased text (see
+  docs/model-inventory-upgrades.md item 9 for the per-route table), so the
+  download existed to fix a problem no route has.
+
 ### Security
+- Dictation now refuses to deliver into password boxes and other secure
+  inputs. Before the direct Accessibility write, before the clipboard +
+  Cmd+V fallback, and before the Cmd+C used to read a selection, the sidecar
+  checks the focused control (`AXSecureTextField` role/subrole), letting
+  macOS's system-wide secure-event-input flag decide only when the control
+  cannot be inspected; when the check says "secure", nothing is inserted,
+  nothing is staged on the clipboard (clipboard-only mode included), the
+  words stay in dictation history, and the popup reports the distinct
+  `secure_field` outcome in plain language with the Copy action still
+  available. The paste fallback re-probes immediately before it touches the
+  clipboard, so focus moving between the first check and the paste cannot
+  slip a password box in. Previously this was left to whatever the target
+  app did with a synthetic paste.
 - `shell.openExternal` and in-app link navigation now check a fixed host
   allowlist before opening anything in the user's browser; a link to any
   other host is refused and logged, not opened.

@@ -32,8 +32,9 @@ const popupMocks = vi.hoisted(() => {
       meetingNotes: "Initial note",
       meetingTemplateId: "standup",
       consentPromptShown: true,
-      consentNoticeMode: "sent",
-      consentNoticeMessage: "Consent notice posted in Zoom chat.",
+      consentNoticeMode: "manual_required",
+      consentNoticeMessage:
+        "Send the consent notice in Zoom chat yourself. Plainsong does not post it for you.",
       metadata: {
         sampleRate: 16000,
         channels: 1,
@@ -115,7 +116,7 @@ describe("RecordingPopup", () => {
     });
 
     expect(await screen.findByText("Board sync")).toBeInTheDocument();
-    expect(screen.getAllByText("Notice sent").length).toBeGreaterThan(0);
+    expect(screen.getAllByText("Manual reminder required").length).toBeGreaterThan(0);
 
     fireEvent.change(screen.getByPlaceholderText(/Capture decisions, blockers, names, and next steps/i), {
       target: { value: "Updated note from popup" },
@@ -219,7 +220,7 @@ describe("RecordingPopup", () => {
     expect(screen.getByRole("button", { name: "Open Workspace" })).toBeVisible();
   });
 
-  it("offers manual consent recovery from the popup when automation did not send", async () => {
+  it("offers the copy-to-clipboard notice from the popup because Plainsong never posts it", async () => {
     popupMocks.getRecording.mockResolvedValueOnce({
       id: "r1",
       title: "Board sync",

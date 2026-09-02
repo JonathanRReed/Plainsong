@@ -381,6 +381,68 @@ pub fn create_mel_filterbank_ln(
     filterbank
 }
 
+/// Create the Slaney-normalized mel filterbank librosa builds by default
+/// (`librosa.filters.mel(norm="slaney", htk=False)`), which is also the
+/// filterbank OpenAI Whisper ships in `mel_filters.npz` and the one the
+/// Qwen3-ASR ONNX export's reference frontend uses.
+///
+/// Differs from the HTK-style banks above in both the mel scale (linear
+/// below 1 kHz, logarithmic above) and the per-filter area normalization
+/// (`2 / (f[i+2] - f[i])`). Returns `[num_mel_bins][n_fft/2 + 1]` `f64`
+/// weights, to be applied to a power spectrum.
+pub fn create_mel_filterbank_slaney(
+    fft_size: usize,
+    sample_rate: f32,
+    num_mel_bins: usize,
+    fmin: f32,
+    fmax: f32,
+) -> Vec<Vec<f64>> {
+    const F_SP: f64 = 200.0 / 3.0;
+    const MIN_LOG_HZ: f64 = 1000.0;
+    const MIN_LOG_MEL: f64 = MIN_LOG_HZ / F_SP;
+    let logstep: f64 = (6.4f64).ln() / 27.0;
+
+    let hz_to_mel = |hz: f64| {
+        if hz >= MIN_LOG_HZ {
+            MIN_LOG_MEL + (hz / MIN_LOG_HZ).ln() / logstep
+        } else {
+            hz / F_SP
+        }
+    };
+    let mel_to_hz = |mel: f64| {
+        if mel >= MIN_LOG_MEL {
+            MIN_LOG_HZ * (logstep * (mel - MIN_LOG_MEL)).exp()
+        } else {
+            F_SP * mel
+        }
+    };
+
+    let mel_low = hz_to_mel(fmin as f64);
+    let mel_high = hz_to_mel(fmax as f64);
+    let edges: Vec<f64> = (0..num_mel_bins + 2)
+        .map(|i| mel_to_hz(mel_low + (mel_high - mel_low) * i as f64 / (num_mel_bins + 1) as f64))
+        .collect();
+
+    let num_bins = fft_size / 2 + 1;
+    let fft_freqs: Vec<f64> = (0..num_bins)
+        .map(|bin| bin as f64 * sample_rate as f64 / fft_size as f64)
+        .collect();
+
+    let mut filterbank = vec![vec![0.0f64; num_bins]; num_mel_bins];
+    for (mel_idx, row) in filterbank.iter_mut().enumerate() {
+        let (lower, center, upper) = (edges[mel_idx], edges[mel_idx + 1], edges[mel_idx + 2]);
+        let enorm = 2.0 / (upper - lower);
+        for (bin_idx, weight) in row.iter_mut().enumerate() {
+            let freq = fft_freqs[bin_idx];
+            let rising = (freq - lower) / (center - lower);
+            let falling = (upper - freq) / (upper - center);
+            let value = rising.min(falling).max(0.0);
+            *weight = value * enorm;
+        }
+    }
+    filterbank
+}
+
 // ---------------------------------------------------------------------------
 // f16 → f32 conversion (Qwen3-ASR embed_tokens.bin)
 // ---------------------------------------------------------------------------
@@ -497,6 +559,49 @@ mod tests {
         for row in &bank {
             assert!(row.iter().any(|&w| w > 0.0));
         }
+    }
+
+    #[test]
+    fn slaney_filterbank_matches_the_librosa_layout() {
+        // Whisper's 128-bin bank: 16 kHz, n_fft 400, 0-8 kHz.
+        let bank = create_mel_filterbank_slaney(400, 16000.0, 128, 0.0, 8000.0);
+        assert_eq!(bank.len(), 128);
+        assert_eq!(bank[0].len(), 201);
+
+        // Every filter has support, weights are non-negative, and peaks move
+        // up in frequency monotonically.
+        let mut last_peak = 0usize;
+        for (index, row) in bank.iter().enumerate() {
+            assert!(row.iter().all(|w| *w >= 0.0));
+            let peak = row
+                .iter()
+                .enumerate()
+                .max_by(|a, b| a.1.partial_cmp(b.1).unwrap())
+                .map(|(bin, _)| bin)
+                .unwrap();
+            assert!(row[peak] > 0.0, "filter {index} is empty");
+            assert!(peak >= last_peak, "filter {index} peak moved backwards");
+            last_peak = peak;
+        }
+
+        // Slaney normalization gives each wide filter unit area over
+        // frequency: the weights of a filter several bins wide sum to about
+        // one bin width (n_fft / sr = 0.025) -- the property that separates
+        // this bank from the un-normalized HTK banks in this file.
+        let wide: f64 = bank[120].iter().sum();
+        assert!((wide - 0.025).abs() < 0.004, "sum {wide}");
+
+        // Slaney mel scale: the first edge above 1 kHz continues the linear
+        // 200/3 Hz-per-mel spacing, not the HTK curve.
+        let hz_to_mel = |hz: f64| {
+            if hz >= 1000.0 {
+                15.0 + (hz / 1000.0).ln() / ((6.4f64).ln() / 27.0)
+            } else {
+                hz / (200.0 / 3.0)
+            }
+        };
+        assert!((hz_to_mel(1000.0) - 15.0).abs() < 1e-9);
+        assert!((hz_to_mel(6400.0) - 42.0).abs() < 1e-9);
     }
 
     #[test]

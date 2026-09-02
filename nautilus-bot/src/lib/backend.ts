@@ -118,13 +118,17 @@ export interface RelationshipMemory {
   companies: CompanyMemoryProfile[];
 }
 
-export interface MeetingConsentAutomationStatus {
-  mode: "auto_ready" | "manual_required" | string;
+/**
+ * What Plainsong knows about the meeting the user is about to record and the
+ * notice they are expected to send themselves. Plainsong never posts the
+ * notice into a meeting chat; `message` names the detected meeting app (Zoom,
+ * Google Meet) only so the copy can say where the user should send it.
+ */
+export interface MeetingConsentNoticeStatus {
   surface?: "zoom" | "google_meet" | string | null;
   appName?: string | null;
   appBundleId?: string | null;
   browserUrl?: string | null;
-  canAutomate: boolean;
   message: string;
   noticeText: string;
 }
@@ -281,8 +285,8 @@ export async function listAudioInputDevices(): Promise<AudioInputDeviceInventory
   return await invoke("list_audio_input_devices");
 }
 
-export async function getMeetingConsentAutomationStatus(): Promise<MeetingConsentAutomationStatus> {
-  return await invoke("get_meeting_consent_automation_status");
+export async function getMeetingConsentNoticeStatus(): Promise<MeetingConsentNoticeStatus> {
+  return await invoke("get_meeting_consent_notice_status");
 }
 
 export async function stopRecording(recordingId: string): Promise<void> {

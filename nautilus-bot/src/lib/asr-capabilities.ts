@@ -135,9 +135,10 @@ export function isMeetingEligibleModel(providerType: AsrProviderType, modelId: s
       // always resolves openai_cloud to whisper-1.
       return normalizedModelId === "whisper-1";
     case "qwen3_asr":
-      // Qwen3-ASR is an encoder-decoder model capable of long-form transcription.
-      // Mark as experimental — the decoder loop is implemented but not yet
-      // validated with real audio, and transcription is gated off until tested.
+      // Qwen3-ASR is an encoder-decoder model that transcribes a whole
+      // recording in one pass (the meeting lane chunks it). Experimental:
+      // validated on English real audio in Plainsong on 2026-09-01, and the
+      // only local route to Chinese, Japanese and Korean.
       return normalizedModelId.startsWith("qwen3-asr");
     default:
       return false;
@@ -472,7 +473,7 @@ const ASR_MODEL_CAPABILITIES_WITHOUT_LANGUAGE_EVIDENCE: readonly Omit<
     tier: "more",
     pauseBehavior: "encoder_decoder",
     tradeoff:
-      "experimental — the autoregressive decoder loop with KV cache threading is implemented but not yet validated with real audio. The ~1.9 GiB download is gated from active transcription until tested.",
+      "experimental — English is the only language verified in Plainsong, and the int4 decoders run on the CPU at anywhere from a quarter of real time to slower than real time depending on load (11-59 s to transcribe 44 s of speech on an M4 Pro across quiet and shared-CPU runs), so a meeting can take longer to transcribe than it took to hold.",
   },
 ];
 
@@ -497,8 +498,11 @@ const LANGUAGE_EVIDENCE_BY_ROUTE = new Map<
   [
     "qwen3_asr:qwen3-asr-0.6b",
     {
+      // English: real-audio eval on 2026-09-01 (qwen3_asr_real_audio_eval).
+      // Chinese, Japanese and Korean were only spot-checked with synthetic
+      // TTS clips, which is not a qualification.
       basis: "upstream_listed",
-      verifiedLanguages: [],
+      verifiedLanguages: ["English"],
     },
   ],
 ]);
@@ -606,6 +610,18 @@ const PARAKEET_V3_LANGUAGE_CODES: readonly string[] = [
   "sl", "es", "sv", "ru", "uk",
 ];
 
+/**
+ * The 30 languages the Qwen3-ASR model card lists (its 22 Chinese dialects
+ * all surface as `zh`/`yue`). Mirrors `QWEN3_ASR_LANGUAGES` in
+ * rust-sidecar/src/settings.rs, which is what a saved selection is validated
+ * against.
+ */
+const QWEN3_ASR_LANGUAGE_CODES: readonly string[] = [
+  "zh", "en", "yue", "ar", "de", "fr", "es", "pt", "id", "it",
+  "ko", "ru", "th", "vi", "ja", "tr", "hi", "ms", "nl", "sv",
+  "da", "fi", "pl", "cs", "fil", "fa", "el", "hu", "mk", "ro",
+];
+
 /** Language codes per route, where Plainsong can name the set. */
 const LANGUAGE_CODES_BY_ROUTE = new Map<string, readonly string[]>([
   ["whisper:tiny", WHISPER_LANGUAGE_CODES],
@@ -616,6 +632,7 @@ const LANGUAGE_CODES_BY_ROUTE = new Map<string, readonly string[]>([
   ["whisper:large-v3-turbo", WHISPER_LARGE_V3_LANGUAGE_CODES],
   ["whisper_candle:whisper-large-v3-turbo", WHISPER_LARGE_V3_LANGUAGE_CODES],
   ["parakeet:parakeet-tdt-0.6b-v3", PARAKEET_V3_LANGUAGE_CODES],
+  ["qwen3_asr:qwen3-asr-0.6b", QWEN3_ASR_LANGUAGE_CODES],
 ]);
 
 /**
@@ -645,7 +662,7 @@ export const ASR_LANGUAGE_NAMES: Readonly<Record<string, string>> = {
   ba: "Bashkir", be: "Belarusian", bg: "Bulgarian", bn: "Bengali", bo: "Tibetan",
   br: "Breton", bs: "Bosnian", ca: "Catalan", cs: "Czech", cy: "Welsh",
   da: "Danish", de: "German", el: "Greek", en: "English", es: "Spanish",
-  et: "Estonian", eu: "Basque", fa: "Persian", fi: "Finnish", fo: "Faroese",
+  et: "Estonian", eu: "Basque", fa: "Persian", fi: "Finnish", fil: "Filipino", fo: "Faroese",
   fr: "French", gl: "Galician", gu: "Gujarati", ha: "Hausa", haw: "Hawaiian",
   he: "Hebrew", hi: "Hindi", hr: "Croatian", ht: "Haitian Creole", hu: "Hungarian",
   hy: "Armenian", id: "Indonesian", is: "Icelandic", it: "Italian", ja: "Japanese",

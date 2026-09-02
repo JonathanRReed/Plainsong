@@ -3,9 +3,9 @@ import { Button } from "@/components/ui/button";
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogDescription, DialogFooter } from "@/components/ui/dialog";
 import { Mic, Monitor, CheckCircle, Loader2 } from "lucide-react";
 import {
-  getMeetingConsentAutomationStatus,
+  getMeetingConsentNoticeStatus,
   getSystemAudioCapability,
-  type MeetingConsentAutomationStatus,
+  type MeetingConsentNoticeStatus,
   type SystemAudioCapability,
 } from "@/lib/backend/recordings";
 import { MEETING_CONSENT_NOTICE_TEXT } from "@/lib/meeting-consent";
@@ -41,8 +41,8 @@ export function ConsentDialog({
     systemAudioCapability?.ready === true &&
     systemAudioCapability.readiness === "ready" &&
     systemAudioCapability.backend !== "none";
-  const [consentAutomation, setConsentAutomation] =
-    useState<MeetingConsentAutomationStatus | null>(null);
+  const [consentNotice, setConsentNotice] =
+    useState<MeetingConsentNoticeStatus | null>(null);
   const [copiedNotice, setCopiedNotice] = useState(false);
   const [isStarting, setIsStarting] = useState(false);
   const [startError, setStartError] = useState<string | null>(null);
@@ -62,7 +62,7 @@ export function ConsentDialog({
     isStartingRef.current = false;
     setCaptureMode("mic_only");
     setSystemAudioCapability(null);
-    setConsentAutomation(null);
+    setConsentNotice(null);
     setCopiedNotice(false);
     setIsStarting(false);
     setStartError(null);
@@ -99,15 +99,15 @@ export function ConsentDialog({
           });
         }
       });
-    void getMeetingConsentAutomationStatus()
+    void getMeetingConsentNoticeStatus()
       .then((status) => {
         if (!cancelled) {
-          setConsentAutomation(status);
+          setConsentNotice(status);
         }
       })
       .catch(() => {
         if (!cancelled) {
-          setConsentAutomation(null);
+          setConsentNotice(null);
         }
       });
 
@@ -333,20 +333,19 @@ export function ConsentDialog({
           </div>
 
           <div className="rounded-lg border bg-muted/30 p-3 text-sm">
-            <div className="flex items-start justify-between gap-3">
-              <div>
-                <p className="font-serif text-base font-medium leading-snug text-foreground">Consent notice delivery</p>
-                <p className="mt-1 text-muted-foreground">
-                  {consentAutomation?.message ??
-                    "Plainsong checks whether it can post the consent notice automatically before the meeting starts."}
-                </p>
-              </div>
-              <span className="shrink-0 rounded-full border bg-background px-2 py-1 font-mono text-[11px] font-medium uppercase tracking-wide text-muted-foreground">
-                {consentAutomation?.canAutomate ? "Auto" : "Manual"}
-              </span>
+            <div>
+              <p className="font-serif text-base font-medium leading-snug text-foreground">Consent notice</p>
+              {/* Plainsong never posts this into the meeting chat. The
+                  backend message only names the meeting app it detected
+                  (Zoom, Google Meet) so the instruction can say where to
+                  send it; the action is always the user's. */}
+              <p className="mt-1 text-muted-foreground">
+                {consentNotice?.message ??
+                  "Plainsong does not post this notice into the meeting chat for you. Copy it and send it in the meeting yourself before you start."}
+              </p>
             </div>
-            <div className="mt-3 rounded-md border bg-background/80 px-3 py-2 text-xs text-muted-foreground">
-              {consentAutomation?.noticeText ?? MEETING_CONSENT_NOTICE_TEXT}
+            <div className="mt-3 rounded-md border bg-background/80 px-3 py-2 text-sm text-muted-foreground">
+              {consentNotice?.noticeText ?? MEETING_CONSENT_NOTICE_TEXT}
             </div>
             <div className="mt-3 flex items-center gap-2">
               <Button
@@ -357,7 +356,7 @@ export function ConsentDialog({
                 onClick={async () => {
                   try {
                     await navigator.clipboard.writeText(
-                      consentAutomation?.noticeText ?? MEETING_CONSENT_NOTICE_TEXT
+                      consentNotice?.noticeText ?? MEETING_CONSENT_NOTICE_TEXT
                     );
                     setCopiedNotice(true);
                   } catch {

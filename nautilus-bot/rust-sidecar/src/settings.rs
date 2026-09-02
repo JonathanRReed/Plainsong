@@ -307,8 +307,16 @@ impl Default for TranscriptionSettings {
             use_shared_asr_selection: true,
             dictation_provider: "parakeet".to_string(),
             dictation_model_id: "parakeet-tdt-0.6b-v3".to_string(),
-            meeting_provider: "whisper".to_string(),
-            meeting_model_id: "base.en".to_string(),
+            // The stored meeting slot names the route the meeting lane
+            // actually resolves to. whisper.cpp is not a meeting-supported
+            // provider (`meeting_provider_is_supported` in lib.rs), so the
+            // old "whisper"/"base.en" default was a slot nothing ever read:
+            // the effective route already fell through to Parakeet TDT
+            // 0.6B v3. Storing that route removes the lie without changing
+            // behavior; `migrate_dead_whisper_meeting_slot` rewrites files
+            // that still carry the old pair.
+            meeting_provider: "parakeet".to_string(),
+            meeting_model_id: "parakeet-tdt-0.6b-v3".to_string(),
             meeting_route_policy: "prefer_local".to_string(),
             provider_model_ids: HashMap::new(),
             mlx_accelerated_providers: Vec::new(),
@@ -545,10 +553,10 @@ impl PrivacySettings {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default, rename_all = "camelCase")]
 pub struct KeyboardShortcuts {
-    /// Toggle dictation mode
+    /// Toggle dictation mode. One binding per action; the retired
+    /// `toggleDictationAlternates` list is dropped on load (see
+    /// `REMOVED_SETTINGS_KEYS`).
     pub toggle_dictation: String,
-    /// Additional dictation bindings for platform parity (macOS command key, etc.)
-    pub toggle_dictation_alternates: Vec<String>,
     /// Open main window
     pub open_window: String,
     /// Re-insert the last dictation result at the cursor. The recovery path
@@ -564,7 +572,6 @@ impl Default for KeyboardShortcuts {
     fn default() -> Self {
         Self {
             toggle_dictation: default_dictation_shortcut().to_string(),
-            toggle_dictation_alternates: Vec::new(),
             open_window: "Ctrl+Shift+N".to_string(),
             repaste_last_dictation: default_repaste_shortcut().to_string(),
             recopy_last_dictation: default_recopy_shortcut().to_string(),
@@ -614,25 +621,6 @@ fn normalize_keyboard_shortcuts(shortcuts: &mut KeyboardShortcuts) {
     if shortcuts.toggle_dictation.trim().is_empty() {
         shortcuts.toggle_dictation = default_dictation_shortcut().to_string();
     }
-
-    #[cfg(target_os = "macos")]
-    {
-        let has_cmd_alternate = shortcuts
-            .toggle_dictation_alternates
-            .iter()
-            .any(|value| value.eq_ignore_ascii_case("Cmd+Shift+Space"));
-        if shortcuts
-            .toggle_dictation
-            .eq_ignore_ascii_case("Ctrl+Shift+Space")
-            && has_cmd_alternate
-        {
-            shortcuts.toggle_dictation = "Cmd+Shift+Space".to_string();
-        }
-    }
-
-    // New policy: one shortcut per action. Keep legacy field for compatibility,
-    // but clear persisted alternates during load/migration.
-    shortcuts.toggle_dictation_alternates.clear();
 }
 
 /// Collapse a stored provider name onto one that still exists.
@@ -765,6 +753,14 @@ pub const PARAKEET_V3_LANGUAGES: &[&str] = &[
 
 const ENGLISH_ONLY_LANGUAGES: &[&str] = &["en"];
 
+/// The 30 languages the Qwen3-ASR model card lists. Mirrors
+/// `asr::qwen3_asr::QWEN3_ASR_LANGUAGES` (a test keeps the two in step) and
+/// `QWEN3_ASR_LANGUAGE_CODES` in src/lib/asr-capabilities.ts.
+pub const QWEN3_ASR_LANGUAGES: &[&str] = &[
+    "ar", "cs", "da", "de", "el", "en", "es", "fa", "fi", "fil", "fr", "hi", "hu", "id", "it",
+    "ja", "ko", "mk", "ms", "nl", "pl", "pt", "ro", "ru", "sv", "th", "tr", "vi", "yue", "zh",
+];
+
 /// Which languages the *selected* dictation model can actually transcribe.
 ///
 /// `None` means the model imposes no set Plainsong can enumerate -- a cloud
@@ -801,7 +797,7 @@ pub fn dictation_supported_languages(
             }
         }
         "moonshine" => Some(ENGLISH_ONLY_LANGUAGES),
-        "qwen3_asr" => Some(WHISPER_MULTILINGUAL_LANGUAGES),
+        "qwen3_asr" => Some(QWEN3_ASR_LANGUAGES),
         // Cloud and platform routes follow their own service/OS language list,
         // which Plainsong cannot enumerate locally.
         _ => None,
@@ -929,6 +925,38 @@ pub(crate) fn normalize_loaded_audio_settings(audio: &mut AudioSettings) {
     }
 }
 
+/// Rewrite the retired "whisper"/"base.en" meeting slot to the route the
+/// meeting lane resolves it to anyway.
+///
+/// whisper.cpp has never been a meeting-supported provider, so a stored
+/// whisper meeting slot was dead: `preferred_meeting_provider` in lib.rs
+/// skipped it and fell through to Parakeet TDT 0.6B v3. Storing that route
+/// instead changes nothing at runtime and stops the settings file from
+/// claiming a route that never ran. Only the old default pair is rewritten;
+/// any other explicit whisper model in the slot is left for the resolver.
+fn migrate_dead_whisper_meeting_slot(transcription: &mut TranscriptionSettings) {
+    if transcription.meeting_provider == "whisper" && transcription.meeting_model_id == "base.en" {
+        transcription.meeting_provider = "parakeet".to_string();
+        transcription.meeting_model_id = "parakeet-tdt-0.6b-v3".to_string();
+    }
+}
+
+/// Whether a raw settings.json still stores the retired meeting slot pair,
+/// so the load path rewrites the file the way it does for removed keys.
+fn raw_settings_carry_dead_whisper_meeting_slot(raw: &serde_json::Value) -> bool {
+    let Some(transcription) = raw.get("transcription") else {
+        return false;
+    };
+    transcription
+        .get("meetingProvider")
+        .and_then(serde_json::Value::as_str)
+        == Some("whisper")
+        && transcription
+            .get("meetingModelId")
+            .and_then(serde_json::Value::as_str)
+            == Some("base.en")
+}
+
 fn normalize_loaded_transcription_settings(transcription: &mut TranscriptionSettings) {
     transcription.default_provider =
         normalize_transcription_provider_value(&transcription.default_provider);
@@ -949,6 +977,7 @@ fn normalize_loaded_transcription_settings(transcription: &mut TranscriptionSett
         transcription.meeting_provider.as_str(),
         &transcription.meeting_model_id,
     );
+    migrate_dead_whisper_meeting_slot(transcription);
 
     let mut normalized_provider_models = HashMap::new();
     for (provider, model_id) in std::mem::take(&mut transcription.provider_model_ids) {
@@ -1397,6 +1426,9 @@ const REMOVED_SETTINGS_KEYS: &[(&str, &str)] = &[
     ("shortcuts", "toggleRecording"),
     ("shortcuts", "quickExport"),
     ("shortcuts", "focusSearch"),
+    // Only ever written as an empty list; real multi-binding support arrives
+    // with its own schema (roadmap item B4), not through this key.
+    ("shortcuts", "toggleDictationAlternates"),
 ];
 
 /// Whether a raw settings.json payload still carries any key that was
@@ -1480,7 +1512,8 @@ impl SettingsManager {
         let mut settings = if config_path.exists() {
             match Self::load_from_file(&config_path) {
                 Ok((mut settings, raw)) => {
-                    needs_migration_rewrite = raw_settings_contain_removed_keys(&raw);
+                    needs_migration_rewrite = raw_settings_contain_removed_keys(&raw)
+                        || raw_settings_carry_dead_whisper_meeting_slot(&raw);
                     // Must run before the removed keys are dropped from disk
                     // by the rewrite below: it is the only thing that reads
                     // the retired single AI provider/model pair.
@@ -1674,6 +1707,37 @@ mod tests {
     }
 
     #[test]
+    fn qwen3_asr_language_list_matches_the_provider_and_names_cjk() {
+        let supported = dictation_supported_languages("qwen3_asr", "qwen3-asr-0.6b")
+            .expect("Qwen3-ASR enumerates its languages");
+        assert_eq!(supported.len(), 30);
+        for code in ["en", "zh", "ja", "ko", "yue", "fil"] {
+            assert!(supported.contains(&code), "missing {code}");
+        }
+        let mut from_provider: Vec<&str> = crate::asr::qwen3_asr::QWEN3_ASR_LANGUAGES
+            .iter()
+            .map(|(_, code)| *code)
+            .collect();
+        from_provider.sort_unstable();
+        let mut from_settings: Vec<&str> = supported.to_vec();
+        from_settings.sort_unstable();
+        assert_eq!(from_settings, from_provider);
+
+        assert!(validate_dictation_active_languages(
+            "qwen3_asr",
+            "qwen3-asr-0.6b",
+            &["zh".to_string(), "ja".to_string(), "ko".to_string()]
+        )
+        .is_ok());
+        assert!(validate_dictation_active_languages(
+            "qwen3_asr",
+            "qwen3-asr-0.6b",
+            &["uk".to_string()]
+        )
+        .is_err());
+    }
+
+    #[test]
     fn qwen3_asr_provider_and_model_survive_settings_reload() {
         let mut settings = TranscriptionSettings {
             default_provider: "qwen3_asr".to_string(),
@@ -1857,6 +1921,142 @@ mod tests {
         );
 
         let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn meeting_slot_default_names_the_route_the_meeting_lane_runs() {
+        let settings = Settings::default();
+        assert_eq!(settings.transcription.meeting_provider, "parakeet");
+        assert_eq!(
+            settings.transcription.meeting_model_id,
+            "parakeet-tdt-0.6b-v3"
+        );
+        assert!(settings.transcription.use_shared_asr_selection);
+    }
+
+    #[test]
+    fn dead_whisper_meeting_slot_migrates_to_parakeet_without_touching_sharing() {
+        for shared in [true, false] {
+            let mut transcription = TranscriptionSettings {
+                use_shared_asr_selection: shared,
+                meeting_provider: "whisper".to_string(),
+                meeting_model_id: "base.en".to_string(),
+                ..Default::default()
+            };
+            normalize_loaded_transcription_settings(&mut transcription);
+            assert_eq!(transcription.meeting_provider, "parakeet");
+            assert_eq!(transcription.meeting_model_id, "parakeet-tdt-0.6b-v3");
+            assert_eq!(transcription.use_shared_asr_selection, shared);
+        }
+
+        // Only the retired default pair is rewritten. Another whisper model
+        // in the slot is an explicit choice the route resolver judges.
+        let mut explicit = TranscriptionSettings {
+            meeting_provider: "whisper".to_string(),
+            meeting_model_id: "small".to_string(),
+            ..Default::default()
+        };
+        normalize_loaded_transcription_settings(&mut explicit);
+        assert_eq!(explicit.meeting_provider, "whisper");
+        assert_eq!(explicit.meeting_model_id, "small");
+    }
+
+    #[test]
+    fn stored_whisper_meeting_default_is_rewritten_on_load() {
+        use super::raw_settings_carry_dead_whisper_meeting_slot;
+
+        let legacy = serde_json::json!({
+            "transcription": { "meetingProvider": "whisper", "meetingModelId": "base.en" }
+        });
+        assert!(raw_settings_carry_dead_whisper_meeting_slot(&legacy));
+        assert!(!raw_settings_carry_dead_whisper_meeting_slot(
+            &serde_json::to_value(Settings::default()).expect("settings serialize")
+        ));
+
+        let suffix = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("system time before epoch")
+            .as_nanos();
+        let root = std::env::temp_dir().join(format!("nautilus-settings-meeting-slot-{suffix}"));
+        let settings_path = root.join("settings.json");
+        fs::create_dir_all(&root).expect("create settings test directory");
+        fs::write(
+            &settings_path,
+            serde_json::to_string(&legacy).expect("serialize"),
+        )
+        .expect("write legacy settings");
+
+        let manager =
+            SettingsManager::load_from_path(settings_path.clone()).expect("load legacy settings");
+        assert_eq!(
+            manager.settings().transcription.meeting_provider,
+            "parakeet"
+        );
+        assert_eq!(
+            manager.settings().transcription.meeting_model_id,
+            "parakeet-tdt-0.6b-v3"
+        );
+
+        let rewritten: serde_json::Value =
+            serde_json::from_str(&fs::read_to_string(&settings_path).expect("read rewritten file"))
+                .expect("rewritten settings parse");
+        assert_eq!(
+            rewritten["transcription"]["meetingProvider"],
+            serde_json::json!("parakeet")
+        );
+        assert_eq!(
+            rewritten["transcription"]["meetingModelId"],
+            serde_json::json!("parakeet-tdt-0.6b-v3")
+        );
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn settings_file_with_retired_toggle_dictation_alternates_loads_cleanly() {
+        use super::raw_settings_contain_removed_keys;
+
+        let legacy = serde_json::json!({
+            "shortcuts": {
+                "toggleDictation": "Cmd+Shift+Space",
+                "toggleDictationAlternates": ["Ctrl+Shift+Space"],
+                "openWindow": "Ctrl+Shift+N"
+            }
+        });
+        assert!(raw_settings_contain_removed_keys(&legacy));
+
+        let suffix = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("system time before epoch")
+            .as_nanos();
+        let root = std::env::temp_dir().join(format!("nautilus-settings-alternates-{suffix}"));
+        let settings_path = root.join("settings.json");
+        fs::create_dir_all(&root).expect("create settings test directory");
+        fs::write(
+            &settings_path,
+            serde_json::to_string(&legacy).expect("serialize"),
+        )
+        .expect("write legacy settings");
+
+        let manager = SettingsManager::load_from_path(settings_path.clone())
+            .expect("a file carrying the retired key must still load");
+        assert_eq!(
+            manager.settings().shortcuts.toggle_dictation,
+            "Cmd+Shift+Space"
+        );
+        assert_eq!(manager.settings().shortcuts.open_window, "Ctrl+Shift+N");
+
+        let rewritten: serde_json::Value =
+            serde_json::from_str(&fs::read_to_string(&settings_path).expect("read rewritten file"))
+                .expect("rewritten settings parse");
+        assert!(rewritten["shortcuts"]
+            .get("toggleDictationAlternates")
+            .is_none());
+        assert!(
+            serde_json::to_value(Settings::default()).expect("settings serialize")["shortcuts"]
+                .get("toggleDictationAlternates")
+                .is_none()
+        );
+        let _ = fs::remove_dir_all(&root);
     }
 
     #[test]
@@ -2158,7 +2358,7 @@ mod tests {
         let settings = Settings::default();
         assert!(settings.transcription.use_shared_asr_selection);
         assert_eq!(settings.transcription.dictation_provider, "parakeet");
-        assert_eq!(settings.transcription.meeting_provider, "whisper");
+        assert_eq!(settings.transcription.meeting_provider, "parakeet");
         assert!(settings.transcription.dictation_command_mode_enabled);
         assert_eq!(settings.transcription.dictation_command_prefix, "command");
         assert_eq!(settings.transcription.dictation_insertion_mode, "auto");

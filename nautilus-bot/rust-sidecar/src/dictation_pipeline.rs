@@ -1,4 +1,7 @@
-use crate::dictation_parity::{apply_contextual_phrase_replacement, DictionaryRule, SnippetRule};
+use crate::dictation_parity::{
+    apply_contextual_phrase_replacement, DictionaryRule, SnippetRule, VocabularyTermCandidate,
+    VocabularyTermKind,
+};
 use crate::models::{DictationDictionaryEntry, DictationSnippet};
 use crate::text::format::DictationAppCategory;
 
@@ -256,6 +259,39 @@ pub fn apply_learned_dictionary(
     destination_category: DictationAppCategory,
 ) -> (String, usize) {
     apply_dictionary_entries(input, entries, app_target, destination_category)
+}
+
+/// The recognizer-hint candidates for the same entries the pipeline applies
+/// afterwards: each dictionary entry contributes its *replacement* (the
+/// spelling to prefer — the misheard `spoken_form` is deliberately not sent,
+/// biasing toward it would defeat the entry), and each snippet contributes
+/// its trigger only. Expansions never leave this function: a snippet that
+/// expands "sig" into a four-line signature must not teach the recognizer
+/// the signature. Recency is `updated_at`, the closest thing the entries
+/// carry to "most recently used or added".
+pub fn vocabulary_candidates_from_entries(
+    entries: &[DictationDictionaryEntry],
+    snippets: &[DictationSnippet],
+) -> Vec<VocabularyTermCandidate> {
+    entries
+        .iter()
+        .map(|entry| VocabularyTermCandidate {
+            term: entry.replacement.clone(),
+            app_scope: entry.app_scope.clone(),
+            category_scope: entry.category_scope.clone(),
+            enabled: entry.enabled,
+            recency_ms: entry.updated_at.timestamp_millis(),
+            kind: VocabularyTermKind::DictionaryReplacement,
+        })
+        .chain(snippets.iter().map(|snippet| VocabularyTermCandidate {
+            term: snippet.trigger.clone(),
+            app_scope: snippet.app_scope.clone(),
+            category_scope: snippet.category_scope.clone(),
+            enabled: snippet.enabled,
+            recency_ms: snippet.updated_at.timestamp_millis(),
+            kind: VocabularyTermKind::SnippetTrigger,
+        }))
+        .collect()
 }
 
 fn apply_dictionary_entries(
@@ -613,5 +649,58 @@ mod tests {
         assert!(result.recent_insert_reused);
         assert_eq!(result.pipeline_stage_keys, vec!["backtrack"]);
         assert!(result.undo_previous_insert);
+    }
+}
+
+#[cfg(test)]
+mod vocabulary_candidate_tests {
+    use super::*;
+    use crate::dictation_parity::build_vocabulary_hint;
+    use chrono::{TimeZone, Utc};
+
+    #[test]
+    fn dictionary_entries_contribute_replacements_and_snippets_only_their_triggers() {
+        let at = |secs: i64| Utc.timestamp_opt(secs, 0).single().expect("timestamp");
+        let entries = vec![DictationDictionaryEntry {
+            id: "d1".to_string(),
+            spoken_form: "open a i".to_string(),
+            replacement: "OpenAI".to_string(),
+            app_scope: None,
+            case_sensitive: false,
+            enabled: true,
+            category_scope: None,
+            created_at: at(10),
+            updated_at: at(20),
+        }];
+        let snippets = vec![DictationSnippet {
+            id: "s1".to_string(),
+            trigger: "sig".to_string(),
+            expansion: "Best regards,\nJonathan Reed\nPlainsong".to_string(),
+            app_scope: None,
+            case_sensitive: false,
+            enabled: true,
+            category_scope: None,
+            created_at: at(30),
+            updated_at: at(40),
+        }];
+
+        let candidates = vocabulary_candidates_from_entries(&entries, &snippets);
+        let terms: Vec<&str> = candidates.iter().map(|c| c.term.as_str()).collect();
+        assert_eq!(terms, vec!["OpenAI", "sig"]);
+        assert!(
+            !candidates.iter().any(|c| c.term.contains("Best regards")),
+            "snippet expansions must never become recognizer vocabulary"
+        );
+        assert!(
+            !candidates.iter().any(|c| c.term == "open a i"),
+            "the misheard spoken form must not be sent either"
+        );
+        assert_eq!(candidates[0].recency_ms, 20_000);
+        assert_eq!(candidates[1].kind, VocabularyTermKind::SnippetTrigger);
+
+        // End to end through the builder: the newer snippet trigger leads.
+        let hint =
+            build_vocabulary_hint(&candidates, None, DictationAppCategory::Other).expect("hint");
+        assert_eq!(hint.as_prompt(), "Vocabulary: sig, OpenAI.");
     }
 }

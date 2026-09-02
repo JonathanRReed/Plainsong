@@ -56,9 +56,6 @@ candle-transformers = { version = "0.10", optional = true }
 # Tokenizers for HuggingFace models
 tokenizers = { version = "0.23", optional = true }
 
-# SentencePiece tokenizer for the punctuation/casing model (pure Rust, no C++ dep)
-sentencepiece-rs = { version = "0.2", optional = true }
-
 # Audio preprocessing. Not optional: the mixed ("Me + Them") capture path
 # resamples whichever of the mic/loopback devices is running at the lower rate
 # onto the session's target rate, so this has to be present in every build, not
@@ -126,7 +123,7 @@ default = ["asr-all", "sqlcipher", "whisper-gpu"]
 asr-whisper = ["whisper-rs", "download-manager"]
 asr-parakeet = ["ort", "ndarray", "download-manager", "audio-processing", "rustfft", "tokenizers"]
 asr-canary = ["candle-core", "candle-nn", "candle-transformers", "tokenizers", "download-manager", "audio-processing"]
-asr-all = ["asr-whisper", "asr-parakeet", "asr-canary", "diarization", "text-recasepunct"]
+asr-all = ["asr-whisper", "asr-parakeet", "asr-canary", "diarization"]
 
 # Whisper GPU acceleration (Metal — macOS only). No CUDA feature is wired;
 # non-macOS builds must use --no-default-features and re-enable
@@ -195,9 +192,6 @@ desktop-shell = []
 
 # Speaker diarization (requires ONNX runtime)
 diarization = ["ort", "ndarray", "rustfft"]
-
-# ML-based punctuation/casing restoration (requires ONNX runtime + SentencePiece)
-text-recasepunct = ["ort", "ndarray", "sentencepiece-rs", "download-manager"]
 
 [patch.crates-io]
 # CPAL 0.18.1's macOS loopback implementation links the macOS 14.2 process-tap

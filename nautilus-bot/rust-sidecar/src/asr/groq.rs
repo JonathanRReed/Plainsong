@@ -8,7 +8,7 @@ use super::{
     cloud_asr_status_error,
     openai_cloud::{build_cloud_asr_client, CloudAsrHttpTimeouts},
     read_cloud_asr_json, AsrProvider, AsrProviderType, DownloadStatus, ModelInfo,
-    TranscriptSegment, TranscriptionResult,
+    TranscriptSegment, TranscriptionOptions, TranscriptionResult, VocabularyHint,
 };
 use crate::secrets;
 use anyhow::{Context, Result};
@@ -72,7 +72,11 @@ impl GroqProvider {
         }
     }
 
-    async fn transcribe_impl(&self, audio_data: &[u8]) -> Result<TranscriptionResult> {
+    async fn transcribe_impl(
+        &self,
+        audio_data: &[u8],
+        options: &TranscriptionOptions,
+    ) -> Result<TranscriptionResult> {
         let api_key = Self::api_key().context("GROQ_API_KEY environment variable not set. Get your API key at https://console.groq.com/keys")?;
 
         let start = std::time::Instant::now();
@@ -80,11 +84,19 @@ impl GroqProvider {
         let part = reqwest::multipart::Part::bytes(audio_data.to_vec())
             .file_name("audio.wav")
             .mime_str("audio/wav")?;
-        let form = reqwest::multipart::Form::new()
+        let mut form = reqwest::multipart::Form::new()
             .part("file", part)
             .text("model", self.model_id.clone())
             .text("response_format", "verbose_json")
             .text("timestamp_granularities[]", "segment");
+
+        // Personal-dictionary vocabulary bias; Groq's endpoint is
+        // OpenAI-compatible and takes the same `prompt` field.
+        let mut vocabulary_hint_terms_applied = 0usize;
+        if let Some(hint) = options.vocabulary_hint.as_ref() {
+            vocabulary_hint_terms_applied = hint.terms().len();
+            form = form.text("prompt", VocabularyHint::as_prompt(hint));
+        }
 
         let response = self
             .client
@@ -140,6 +152,7 @@ impl GroqProvider {
             actual_engine: Some("provider_default".to_string()),
             optimization_applied: false,
             fallback_reason: None,
+            vocabulary_hint_terms_applied,
         })
     }
 }
@@ -183,11 +196,21 @@ impl AsrProvider for GroqProvider {
         let audio_data = tokio::fs::read(audio_path)
             .await
             .context("Failed to read audio file for Groq Whisper")?;
-        self.transcribe_impl(&audio_data).await
+        self.transcribe_impl(&audio_data, &TranscriptionOptions::default())
+            .await
     }
 
     async fn transcribe_bytes(&self, audio_data: &[u8]) -> Result<TranscriptionResult> {
-        self.transcribe_impl(audio_data).await
+        self.transcribe_impl(audio_data, &TranscriptionOptions::default())
+            .await
+    }
+
+    async fn transcribe_bytes_with_options(
+        &self,
+        audio_data: &[u8],
+        options: &TranscriptionOptions,
+    ) -> Result<TranscriptionResult> {
+        self.transcribe_impl(audio_data, options).await
     }
 
     fn download_status(&self) -> DownloadStatus {

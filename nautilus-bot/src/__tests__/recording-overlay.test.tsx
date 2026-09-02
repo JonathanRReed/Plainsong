@@ -5,7 +5,7 @@ import { ConsentDialog } from "@/components/recording-overlay";
 import type { SystemAudioCapability } from "@/lib/backend/recordings";
 
 const backendMocks = vi.hoisted(() => ({
-  getMeetingConsentAutomationStatus: vi.fn(),
+  getMeetingConsentNoticeStatus: vi.fn(),
   getSystemAudioCapability: vi.fn(),
 }));
 
@@ -43,9 +43,7 @@ function capability(
 describe("ConsentDialog", () => {
   beforeEach(() => {
     vi.clearAllMocks();
-    backendMocks.getMeetingConsentAutomationStatus.mockResolvedValue({
-      mode: "manual_required",
-      canAutomate: false,
+    backendMocks.getMeetingConsentNoticeStatus.mockResolvedValue({
       message: "Copy the notice into the meeting chat.",
       noticeText: "This meeting is being recorded and transcribed.",
     });

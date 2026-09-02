@@ -151,7 +151,74 @@ function appleProvider(status: AppleSpeechReadinessStatus): AsrProviderInfo {
   };
 }
 
+const qwen3Provider: AsrProviderInfo = {
+  providerType: "qwen3_asr",
+  name: "Qwen3-ASR (Local)",
+  description: "Experimental multilingual local route",
+  isAvailable: true,
+  inferenceEnabled: true,
+  modelInfo: {
+    name: "Qwen3-ASR 0.6B",
+    version: "0.6b-int4",
+    sizeMb: 1927,
+    parameters: "0.6B",
+    languages: ["en", "zh", "ja", "ko"],
+    license: "Apache-2.0",
+    sourceUrl: "https://example.com/qwen3",
+  },
+  selectedModelId: "qwen3-asr-0.6b",
+  modelOptions: [{ id: "qwen3-asr-0.6b", label: "Qwen3-ASR 0.6B int4" }],
+  downloadStatus: "Downloaded",
+  runtimeStatus: "ready",
+  runtimeDetails: {},
+};
+
 describe("asr-route-catalog", () => {
+  it("offers a ready Qwen3-ASR route for both lanes as experimental and never recommends it over Parakeet", () => {
+    const routes = buildAsrRouteCatalog([...providers, qwen3Provider], "prefer_local");
+    const qwen3 = routes.find((route) => route.providerType === "qwen3_asr");
+
+    expect(qwen3).toBeDefined();
+    expect(qwen3?.experimental).toBe(true);
+    expect(qwen3?.readiness).toBe("ready");
+    expect(qwen3?.selectable).toBe(true);
+    expect(qwen3?.laneCompatibility).toEqual({ dictation: true, meeting: true, shared: true });
+    expect(qwen3?.summary).toContain("Chinese, Japanese and Korean");
+
+    for (const lane of ["dictation", "meeting", "shared"] as const) {
+      const laneRoutes = getLaneRoutes(routes, lane, "prefer_local");
+      expect(laneRoutes.some((route) => route.providerType === "qwen3_asr")).toBe(true);
+      expect(getRecommendedLaneRoute(routes, lane, "prefer_local")?.providerType).not.toBe(
+        "qwen3_asr",
+      );
+      const parakeetIndex = laneRoutes.findIndex((route) => route.providerType === "parakeet");
+      const qwen3Index = laneRoutes.findIndex((route) => route.providerType === "qwen3_asr");
+      expect(parakeetIndex).toBeLessThan(qwen3Index);
+    }
+  });
+
+  it("recommends nothing rather than an experimental route when only Qwen3-ASR is ready", () => {
+    const routes = buildAsrRouteCatalog([qwen3Provider], "prefer_local");
+
+    for (const lane of ["dictation", "meeting", "shared"] as const) {
+      // The route is still offered ...
+      expect(getLaneRoutes(routes, lane, "prefer_local").map((route) => route.providerType)).toEqual([
+        "qwen3_asr",
+      ]);
+      // ... but never recommended: the first-run wizard saves the
+      // recommended meeting route, and an experimental route must not
+      // become a default by being the only one installed.
+      expect(getRecommendedLaneRoute(routes, lane, "prefer_local")).toBeNull();
+      expect(getRecommendedLaneRoute(routes, lane, "best_available")).toBeNull();
+    }
+
+    // With a non-experimental route alongside it, that route wins.
+    const withParakeet = buildAsrRouteCatalog([qwen3Provider, providers[2]], "prefer_local");
+    expect(getRecommendedLaneRoute(withParakeet, "meeting", "prefer_local")?.providerType).toBe(
+      "parakeet",
+    );
+  });
+
   it("keeps dictation-only routes out of meeting selectors and promotes the current Parakeet release", () => {
     const routes = buildAsrRouteCatalog(providers, "prefer_local");
     const meetingRoutes = getLaneRoutes(routes, "meeting", "prefer_local");

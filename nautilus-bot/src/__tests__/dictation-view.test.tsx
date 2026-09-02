@@ -168,7 +168,6 @@ const backendMocks = vi.hoisted(() => ({
   },
   shortcuts: {
     toggleDictation: "Ctrl+Shift+Space",
-    toggleDictationAlternates: [],
     openWindow: "Ctrl+Shift+N",
   },
   updates: {
@@ -899,6 +898,54 @@ describe("DictationView modes", () => {
     await waitFor(() => {
       expect(backendMocks.refetchDictationHistory).toHaveBeenCalled();
     });
+  });
+
+  it("tells a cloud dictation route that dictionary terms travel with the audio", async () => {
+    // The dictionary now reaches the recognizer. For a cloud route that
+    // means the terms leave the machine, and for ElevenLabs it costs extra;
+    // both belong where the route is chosen, not only in developer docs.
+    backendMocks.transcriptionOverrides.defaultProvider = "elevenlabs_scribe";
+    backendMocks.transcriptionOverrides.dictationProvider = "elevenlabs_scribe";
+
+    render(<DictationView />);
+
+    fireEvent.click(await screen.findByRole("tab", { name: "Profiles" }));
+
+    expect(
+      await screen.findByText(
+        /dictionary terms and snippet triggers are sent with the audio.*ElevenLabs bills 20% more/,
+      ),
+    ).toBeInTheDocument();
+  });
+
+  it("does not call a secure-field refusal 'ready to review'", async () => {
+    // The sidecar refused to write into a password field. Nothing was
+    // inserted or copied, so the status line must say that instead of the
+    // generic ready message, and the paste status carries the reason.
+    render(<DictationView />);
+
+    await screen.findByRole("tab", { name: "Profiles" });
+    const handler = backendMocks.eventListeners.get("dictation-text-ready");
+    expect(handler).toBeTruthy();
+
+    await act(async () => {
+      handler?.({
+        payload: {
+          text: "hunter two",
+          outcome: "secure_field",
+          pasted: false,
+          copied: false,
+          pasteError:
+            "The field in front is a password or secure input, so Plainsong did not insert or copy the words. They are kept in your dictation history.",
+          actualProvider: "distil_whisper",
+        },
+      });
+    });
+
+    expect(
+      await screen.findAllByText(/password or secure input/),
+    ).not.toHaveLength(0);
+    expect(screen.queryByText("Result is ready to review.")).not.toBeInTheDocument();
   });
 
   it("opens a saved dictation from a keyboard-accessible history control", async () => {

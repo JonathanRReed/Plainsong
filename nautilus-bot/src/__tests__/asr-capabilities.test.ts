@@ -201,6 +201,14 @@ describe("ASR model capability metadata", () => {
     expect(cap?.sizeMib).toBe(1927);
     expect(cap?.pauseBehavior).toBe("encoder_decoder");
     expect(cap?.tier).toBe("more");
+    // English is the only language exercised with real audio in Plainsong;
+    // the copy must say so and must name the CPU cost, not hide it.
+    expect(cap?.languageEvidence.verifiedLanguages).toEqual(["English"]);
+    const summary = describeAsrModel("qwen3_asr", "qwen3-asr-0.6b");
+    expect(summary).toContain("English verified in Plainsong");
+    expect(summary).toContain("experimental");
+    expect(summary).toContain("real time");
+    expect(summary).not.toContain("gated");
   });
 
   it("treats Qwen3-ASR as meeting-eligible to match the Rust side", () => {
@@ -293,10 +301,26 @@ describe("language boundaries", () => {
   });
 
   it("says so rather than guessing when the set is not known", () => {
-    expect(resolveAsrLanguageBoundary("qwen3_asr", "qwen3-asr-0.6b").kind).toBe(
+    expect(resolveAsrLanguageBoundary("elevenlabs_scribe", "scribe_v2").kind).toBe(
       "unenumerated",
     );
     expect(resolveAsrLanguageBoundary(null, null).kind).toBe("unenumerated");
+  });
+
+  it("names Qwen3-ASR's 30 languages, including Chinese, Japanese and Korean", () => {
+    const boundary = resolveAsrLanguageBoundary("qwen3_asr", "qwen3-asr-0.6b");
+    expect(boundary.kind).toBe("enumerated");
+    if (boundary.kind !== "enumerated") {
+      throw new Error("expected an enumerated boundary");
+    }
+    expect(boundary.codes).toHaveLength(30);
+    for (const code of ["en", "zh", "ja", "ko", "yue", "fil"]) {
+      expect(boundary.codes).toContain(code);
+    }
+    expect(boundary.label).toBe("30 languages + 22 Chinese dialects");
+    const labels = asrLanguageOptions(boundary).map((option) => option.label);
+    expect(labels).toContain("Filipino");
+    expect(labels).toContain("Cantonese");
   });
 
   it("names and sorts the options it hands the picker", () => {

@@ -931,7 +931,6 @@ export function FirstRunWizard({ mode = "full", onComplete }: Props) {
         throw new Error(conflictMessage);
       }
       settings.shortcuts.toggleDictation = toggleDictation;
-      settings.shortcuts.toggleDictationAlternates = [];
       settings.transcription.dictationAutoRequestPermissions = autoRequestPermissions;
       await saveSettings(settings);
       return true;
