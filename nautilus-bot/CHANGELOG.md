@@ -172,6 +172,17 @@ evidence is stale and must be recaptured before this becomes a candidate.
   files that still carry it load cleanly and are rewritten without it.
 
 ### Fixed
+- The dictation HUD's "next profile" notice is rust and neutral instead of
+  gilded. Picking a profile is a mode selector, and gilding it competed with
+  the live recording moment gold is reserved for.
+- "Next profile" now walks the profiles in the order their tiles are shown,
+  so the ready-made Coding and Quiet profiles land where you see them rather
+  than behind whatever you built yourself.
+- A binding saved as hold-to-talk on a machine where the native shortcut
+  helper is not running no longer reads as "Follows the setting above". The
+  hold option is shown, disabled, with the reason, and the row says the
+  binding presses to start and presses again to stop until the helper is
+  available.
 - Editing a dictation binding while recording no longer strands the
   recording. Each edit saves immediately, and the native shortcut helper takes
   its whole binding table on launch, so the save killed and respawned it —

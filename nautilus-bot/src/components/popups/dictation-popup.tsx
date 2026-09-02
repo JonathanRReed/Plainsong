@@ -1120,20 +1120,21 @@ export function DictationPopup() {
     finalLeftOnClipboard,
   ]);
 
-  // The "next profile" announcement: the profile name in gold on the HUD's
-  // own earned surface, and nothing else. It is the only gold text here
-  // outside a live recording, and it lasts MODE_CYCLE_NOTICE_MS.
+  // The "next profile" announcement. Picking a profile is a mode selector,
+  // which STYLE.md §5 makes a rubric control: rust and neutral, never gold.
+  // Gilding it competed with the one thing on this HUD that has earned gold
+  // -- the live recording moment -- and this notice fires while nothing is
+  // being recorded at all. Rust neume, rust rubric label, neutral surface,
+  // and the profile name in plain foreground. Lasts MODE_CYCLE_NOTICE_MS.
   const cycledModeNotice = cycledModeLabel ? (
     <div
       role="status"
       aria-live="polite"
-      className="settle-in flex items-center justify-center gap-2 rounded-2xl bg-gold/12 px-3 py-2"
+      className="settle-in flex items-center justify-center gap-2 rounded-2xl border border-foreground/10 bg-foreground/4.5 px-3 py-2"
     >
-      <span aria-hidden="true" className="neume neume-lit shrink-0" />
-      <span className="font-mono text-xs uppercase tracking-[0.14em] text-muted-foreground">
-        Next profile
-      </span>
-      <span className="text-sm font-medium text-gold-text">{cycledModeLabel}</span>
+      <span aria-hidden="true" className="neume neume-rust shrink-0" />
+      <span className="rubric">Next profile</span>
+      <span className="text-sm font-medium text-foreground">{cycledModeLabel}</span>
     </div>
   ) : null;
 

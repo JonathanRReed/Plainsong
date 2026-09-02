@@ -52,13 +52,36 @@ const DICTATION_BINDING_MOUSE_BUTTONS: readonly DictationBindingMouseButton[] = 
 
 const MODIFIER_TOKENS = new Set(["command", "control", "alt", "shift", "fn"]);
 
-/** Built-in mode presets in the order `cycleMode` walks them. */
+/**
+ * Built-in mode presets, in the order their tiles appear on the Dictation
+ * screen (`DICTATION_PROFILE_TILES` in `src/lib/dictation-profiles.ts`).
+ */
 export const DICTATION_MODE_CYCLE_ORDER = [
   "voice",
   "messages",
   "email",
   "notes",
   "meeting_follow_up",
+] as const;
+
+/**
+ * The two ready-made styles that have a profile tile of their own, in tile
+ * order. They are saved custom modes carrying reserved ids
+ * (`CODING_PROFILE_STYLE_ID` / `QUIET_PROFILE_STYLE_ID` in
+ * `src/lib/dictation-profiles.ts`), so they take part in the cycle only when
+ * the user has actually installed them -- but when they are installed they
+ * belong where their tiles sit, ahead of hand-rolled profiles, not wherever
+ * they happen to land in the saved list.
+ *
+ * The ids are repeated here rather than imported because `tsconfig.electron.json`
+ * sets `rootDir: "electron"` -- the main process cannot import from `src/`.
+ * `dictation-profile-cycle-order.test.ts` asserts this list plus
+ * `DICTATION_MODE_CYCLE_ORDER` equals the visible tiles, so the two cannot
+ * drift silently.
+ */
+export const DICTATION_READY_MADE_STYLE_IDS = [
+  "builtin-coding-copilot",
+  "builtin-quiet-focus",
 ] as const;
 
 export type DictationBuiltinModePreset = (typeof DICTATION_MODE_CYCLE_ORDER)[number];
@@ -485,27 +508,52 @@ export function resolveDictationModeOverride(
 }
 
 /**
- * The next mode after the current selection: the built-in presets in
- * `DICTATION_MODE_CYCLE_ORDER`, then every saved custom mode in table order,
- * wrapping back to the first built-in. A selection that no longer resolves
+ * The order `cycleMode` walks: the same order the profile tiles are shown in.
+ *
+ * The built-in presets first, then whichever of the two ready-made styles the
+ * user has installed (they own tiles between the built-ins and anything
+ * hand-rolled), then every other saved profile in table order. The "Custom"
+ * tile is deliberately absent: it is the builder for a new profile, not a
+ * profile you can be switched to.
+ *
+ * This used to be the five built-in presets and then the saved profiles in
+ * whatever order they happened to sit in, so Coding and Quiet -- which have
+ * their own tiles -- landed after hand-rolled profiles, and the cycle did not
+ * match the row the user was looking at.
+ */
+export function dictationModeCycleOrder(
+  customModes: DictationBindingCustomMode[],
+): Array<DictationModeSelection & { label: string }> {
+  const readyMade = DICTATION_READY_MADE_STYLE_IDS.map((id) =>
+    customModes.find((mode) => mode.id === id),
+  ).filter((mode): mode is DictationBindingCustomMode => mode !== undefined);
+  const readyMadeIds = new Set(readyMade.map((mode) => mode.id));
+  return [
+    ...DICTATION_MODE_CYCLE_ORDER.map((preset) => ({
+      modePreset: preset as string,
+      selectedCustomModeId: null as string | null,
+      label: BUILTIN_MODE_LABELS[preset],
+    })),
+    ...[...readyMade, ...customModes.filter((mode) => !readyMadeIds.has(mode.id))].map(
+      (mode) => ({
+        modePreset: "custom",
+        selectedCustomModeId: mode.id as string | null,
+        label: mode.name,
+      }),
+    ),
+  ];
+}
+
+/**
+ * The next mode after the current selection, walking `dictationModeCycleOrder`
+ * and wrapping back to the first tile. A selection that no longer resolves
  * (deleted custom mode, unknown preset) restarts at the first built-in mode.
  */
 export function cycleDictationMode(
   current: DictationModeSelection,
   customModes: DictationBindingCustomMode[],
 ): DictationModeSelection & { label: string } {
-  const order: Array<DictationModeSelection & { label: string }> = [
-    ...DICTATION_MODE_CYCLE_ORDER.map((preset) => ({
-      modePreset: preset,
-      selectedCustomModeId: null,
-      label: BUILTIN_MODE_LABELS[preset],
-    })),
-    ...customModes.map((mode) => ({
-      modePreset: "custom",
-      selectedCustomModeId: mode.id,
-      label: mode.name,
-    })),
-  ];
+  const order = dictationModeCycleOrder(customModes);
   const currentIndex = order.findIndex((entry) =>
     current.modePreset === "custom"
       ? entry.modePreset === "custom" &&

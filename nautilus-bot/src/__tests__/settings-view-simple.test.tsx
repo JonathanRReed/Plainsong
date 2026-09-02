@@ -1739,6 +1739,55 @@ describe("SettingsView performance behavior", () => {
     expect(backend.saveSettings).not.toHaveBeenCalled();
   });
 
+  // Hiding the "hold" option left a saved hold row rendering a <select> with
+  // no matching option, which browsers show as the first one -- so the row
+  // read "Follows the setting above" while the stored behavior was hold.
+  it("keeps a saved hold binding readable on a machine with no native helper", async () => {
+    const backend = await import("@/lib/backend");
+    vi.mocked(backend.getDictationShortcutCapabilityStatus).mockResolvedValue({
+      nativeShortcutAvailable: false,
+    });
+    vi.mocked(backend.getSettings).mockResolvedValue({
+      ...baseSettings,
+      shortcuts: {
+        ...baseSettings.shortcuts,
+        toggleDictation: "Ctrl+Shift+Space",
+        dictationBindings: [
+          {
+            id: "primary",
+            trigger: { kind: "key", accelerator: "Ctrl+Shift+Space" },
+            action: { kind: "dictation", modeId: null, behavior: "hold" },
+          },
+        ],
+      },
+    } as unknown as Awaited<ReturnType<typeof backend.getSettings>>);
+
+    render(
+      <ToastProvider>
+        <SettingsView />
+      </ToastProvider>,
+    );
+
+    await screen.findByText("How Plainsong listens, writes, and what it keeps.");
+    await screen.findByText("Dictation bindings");
+
+    const behavior = (await screen.findByLabelText(
+      "Dictation behavior",
+    )) as HTMLSelectElement;
+    // The stored value is still what the row shows, and the option it names
+    // exists -- disabled, saying why.
+    expect(behavior.value).toBe("hold");
+    const holdOption = within(behavior).getByRole("option", {
+      name: "Hold to record (needs the native helper)",
+    }) as HTMLOptionElement;
+    expect(holdOption.disabled).toBe(true);
+    expect(
+      screen.getByText(
+        /Hold needs the native shortcut helper, which is not running, so this binding presses to start and presses again to stop until it is\./,
+      ),
+    ).toBeInTheDocument();
+  });
+
   // ── Translate to English (roadmap item B7a) ────────────────────────────
   it("refuses translate-to-English on an English-only whisper model and says why", async () => {
     render(

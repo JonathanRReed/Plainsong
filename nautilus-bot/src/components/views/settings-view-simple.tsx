@@ -2192,6 +2192,14 @@ export function SettingsView() {
     const triggerType = bindingTriggerTypeValue(binding.trigger);
     const isRecording = recordingBindingId === binding.id;
     const issue = bindingIssuesById.get(binding.id);
+    // A saved `hold` row on a machine whose helper is not running: Electron's
+    // press-only fallback runs it as toggle (see
+    // `resolveDictationShortcutCapability`), so the row has to say so rather
+    // than silently reading as something else.
+    const holdWithoutHelper =
+      !nativeShortcutAvailable &&
+      binding.action.kind === "dictation" &&
+      binding.action.behavior === "hold";
     const triggerText =
       binding.trigger.kind === "key" && !binding.trigger.accelerator.trim()
         ? "None"
@@ -2289,9 +2297,16 @@ export function SettingsView() {
             >
               <option value="inherit">Follows the setting above</option>
               <option value="toggle">Press to start, press to stop</option>
-              {nativeShortcutAvailable && (
-                <option value="hold">Hold to record, release to stop</option>
-              )}
+              {/* Always rendered, disabled without the helper. Hiding it left
+                  a saved `hold` row showing a <select> with no matching
+                  option, which browsers render as the first one -- so the row
+                  read "Follows the setting above" while the stored behavior
+                  was still hold. */}
+              <option value="hold" disabled={!nativeShortcutAvailable}>
+                {nativeShortcutAvailable
+                  ? "Hold to record, release to stop"
+                  : "Hold to record (needs the native helper)"}
+              </option>
             </select>
           )}
           <Button
@@ -2304,6 +2319,13 @@ export function SettingsView() {
             Remove
           </Button>
         </div>
+        {holdWithoutHelper && (
+          <p className="text-sm text-muted-foreground">
+            Hold needs the native shortcut helper, which is not running, so
+            this binding presses to start and presses again to stop until it
+            is. Grant Accessibility to Plainsong to get hold back.
+          </p>
+        )}
         {issue && (
           <div className="flex items-start gap-2 rounded-xl border border-destructive/25 bg-destructive/10 px-3 py-2 text-sm text-destructive">
             <AlertCircle className="mt-0.5 h-4 w-4 shrink-0" />
