@@ -172,6 +172,11 @@ evidence is stale and must be recaptured before this becomes a candidate.
   files that still carry it load cleanly and are rewritten without it.
 
 ### Fixed
+- The wait in front of an insert is now capped once, not once per pass. A
+  dictation that both translates to English and then formats used to take a
+  full formatting timeout for each, so the real worst case before a word
+  appeared was twice the stated budget (12 s on the local split). Both passes
+  now share one budget; whatever the first spends is taken off the second.
 - Translate to English no longer runs a hidden AI pass on an English-only
   whisper model. Turning the switch on under a multilingual model and then
   switching to a `.en` build left the setting stored as on while the switch

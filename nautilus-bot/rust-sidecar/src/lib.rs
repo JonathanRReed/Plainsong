@@ -11258,6 +11258,28 @@ mod tests {
             prepare_call < last_timeout_call,
             "preparation must run before the timer starts, not inside it"
         );
+
+        // ...and every one of those budgets must be drawn from the ONE
+        // shared pre-insert budget, not taken fresh. Translate-to-English
+        // followed by a formatting pass used to take a full
+        // `dictation_format_timeout` each, so the real worst case in front of
+        // insertion was 2x the constant (12 s local) while everything around
+        // it said 6 s.
+        assert_eq!(
+            body.matches("pre_insert_budget.remaining(").count(),
+            3,
+            "every pre-insert model pass must draw from the shared budget"
+        );
+        let budget_start = body
+            .find("DictationPreInsertBudget::new()")
+            .expect("the shared pre-insert budget must be constructed");
+        let first_timeout_call = body
+            .find("tokio::time::timeout(")
+            .expect("a timeout call must exist");
+        assert!(
+            budget_start < first_timeout_call,
+            "the shared budget must be constructed before the first pre-insert pass"
+        );
     }
 
     #[test]
@@ -23192,11 +23214,20 @@ async fn stop_dictation_for_sidecar(
         format_outcome = crate::dictation_timing::DictationFormatOutcome::Applied;
     }
 
+    // One budget for the whole pre-insert stretch, not one per pass. A single
+    // dictation can run translate-to-English and then a formatting pass back
+    // to back; taking a fresh `dictation_format_timeout` for each made the
+    // real worst-case insertion delay twice the constant (12 s local). The
+    // clock starts inside the first pass -- provider resolution and prompt
+    // building stay outside it deliberately -- and every later pass gets what
+    // is left. See `DictationPreInsertBudget`.
+    let mut pre_insert_budget = crate::dictation_timing::DictationPreInsertBudget::new();
+
     // Translate-to-English through the AI lane (B7a). Runs before the mode
-    // transform / Smart Format pass so that pass formats English, under the
-    // same per-provider budget every other pre-insert model call gets. A
-    // failed or timed-out translation keeps the source-language words -- the
-    // user's speech must never be lost to a slow model -- and says so.
+    // transform / Smart Format pass so that pass formats English, out of the
+    // shared pre-insert budget above. A failed or timed-out translation keeps
+    // the source-language words -- the user's speech must never be lost to a
+    // slow model -- and says so.
     let mut translation_applied =
         translation_route == DictationTranslationRoute::WhisperNative && !final_text.is_empty();
     if translation_route == DictationTranslationRoute::AiLane
@@ -23212,7 +23243,10 @@ async fn stop_dictation_for_sidecar(
             enforce_remote_provider_policy(provider, remote_processing_enabled).map(|()| provider)
         }) {
             Ok(provider) => {
-                let format_timeout = dictation_format_timeout(provider);
+                let format_timeout = pre_insert_budget.remaining(
+                    dictation_format_timeout(provider),
+                    std::time::Instant::now(),
+                );
                 let translated = tokio::time::timeout(
                     format_timeout,
                     run_custom_dictation_transform_with_selected_provider(
@@ -23293,7 +23327,10 @@ async fn stop_dictation_for_sidecar(
                             .map(|()| provider)
                     }) {
                         Ok(provider) => {
-                            let format_timeout = dictation_format_timeout(provider);
+                            let format_timeout = pre_insert_budget.remaining(
+                                dictation_format_timeout(provider),
+                                std::time::Instant::now(),
+                            );
                             let transform = tokio::time::timeout(
                                 format_timeout,
                                 run_custom_dictation_transform_with_selected_provider(
@@ -23393,7 +23430,10 @@ async fn stop_dictation_for_sidecar(
                     .await
                     {
                         Ok(prepared) => {
-                            let format_timeout = dictation_format_timeout(prepared.provider);
+                            let format_timeout = pre_insert_budget.remaining(
+                                dictation_format_timeout(prepared.provider),
+                                std::time::Instant::now(),
+                            );
                             let formatting = tokio::time::timeout(
                                 format_timeout,
                                 execute_dictation_formatting_request(
