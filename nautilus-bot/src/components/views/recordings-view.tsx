@@ -2359,6 +2359,33 @@ export function RecordingsView() {
     setShowConsent(true);
   };
 
+  // `plainsong://meeting/start` (electron/main.ts) lands here: the same
+  // readiness gate and the same consent sheet as the New meeting button, and
+  // nothing records until the person clicks Start on that sheet. The ref keeps
+  // one subscription for the component's life while always calling the
+  // current closure.
+  const openMeetingCaptureRef = useRef(openMeetingCapture);
+  openMeetingCaptureRef.current = openMeetingCapture;
+  useEffect(() => {
+    let disposed = false;
+    let unlisten: (() => void) | undefined;
+    void listen("meeting-start-requested", () => {
+      if (!disposed) {
+        openMeetingCaptureRef.current();
+      }
+    }).then((dispose) => {
+      if (disposed) {
+        dispose?.();
+        return;
+      }
+      unlisten = dispose;
+    });
+    return () => {
+      disposed = true;
+      unlisten?.();
+    };
+  }, []);
+
   const handleStartRecording = async (options: { mic: boolean; systemAudio: boolean; template?: string }) => {
     const requestedReadiness = options.systemAudio
       ? fullCaptureReadiness

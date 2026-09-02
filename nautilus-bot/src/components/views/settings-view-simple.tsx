@@ -20,6 +20,7 @@ import { Button } from "@/components/ui/button";
 import { Switch } from "@/components/ui/switch";
 import { SettingsSwitch } from "@/components/ui/settings-control";
 import { CalendarSettingsSection } from "@/components/meetings/calendar-settings-section";
+import { LocalToolsSection } from "@/components/local-tools-section";
 import { Input } from "@/components/ui/input";
 import { Textarea } from "@/components/ui/textarea";
 import { Label } from "@/components/ui/label";
@@ -3826,6 +3827,19 @@ export function SettingsView() {
                         }
                       />
                     </div>
+
+                    <LocalToolsSection
+                      enabled={settings.automation?.localToolsEnabled ?? false}
+                      onEnabledChange={(checked) =>
+                        void updateSettings({
+                          ...settings,
+                          automation: {
+                            ...settings.automation,
+                            localToolsEnabled: checked,
+                          },
+                        })
+                      }
+                    />
 
                     <div className="pt-4 border-t space-y-5">
                       <p className="section-heading">Advanced</p>

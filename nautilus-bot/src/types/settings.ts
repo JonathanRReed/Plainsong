@@ -13,7 +13,18 @@ export interface Settings {
   privacy: PrivacySettings;
   shortcuts: KeyboardShortcuts;
   updates: UpdateSettings;
+  /**
+   * Local automation surfaces (the `plainsong` CLI, its read-only MCP server,
+   * and `plainsong://` deep links). Optional on the wire only because older
+   * settings files predate the section; Rust always serializes it.
+   */
+  automation?: AutomationSettings;
   theme: "light" | "dark" | "system";
+}
+
+export interface AutomationSettings {
+  /** Off by default. Mirrors `AutomationSettings` in rust-sidecar/src/settings.rs. */
+  localToolsEnabled: boolean;
 }
 
 export type DictationAppCategoryKey =

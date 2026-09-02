@@ -14,7 +14,15 @@ import {
 } from "electron/main";
 import { nativeImage, shell } from "electron/common";
 import { execFile, spawn } from "child_process";
-import { existsSync, readFileSync, unlinkSync, writeFileSync } from "fs";
+import {
+  existsSync,
+  lstatSync,
+  readFileSync,
+  readlinkSync,
+  symlinkSync,
+  unlinkSync,
+  writeFileSync,
+} from "fs";
 import path from "path";
 import { pathToFileURL } from "url";
 import { autoUpdater, type AppUpdater } from "electron-updater";
@@ -105,6 +113,22 @@ import {
   type MeetingFinalizationOutcome,
   type MeetingLifecycleEvent,
 } from "./meeting-lifecycle";
+import {
+  DeepLinkRateLimiter,
+  deepLinkActionName,
+  deepLinkFromArgv,
+  parseDeepLink,
+  resolveDictationModeSelection,
+  type DeepLinkCommand,
+} from "./deep-link-policy";
+import {
+  CLI_LINK_PATH,
+  describeCliToolStatus,
+  manualInstallCommand,
+  planCliInstall,
+  type CliInstallResult,
+  type ExistingLinkPath,
+} from "./cli-install";
 
 // Packaging is the only thing that decides development mode. This used to also
 // honour `NODE_ENV=development`, which meant an ambient environment variable
@@ -180,6 +204,9 @@ let minimizeToTrayEnabled = false;
 let alwaysOnTopEnabled = false;
 let showDictationOverlayEnabled = true;
 let showRecordingOverlayEnabled = true;
+// Mirror of `automation.localToolsEnabled`. Gates every `plainsong://` deep
+// link; the CLI/MCP read the same switch from settings.json themselves.
+let localToolsEnabled = false;
 let isQuitting = false;
 let forcedQuitTimer: ReturnType<typeof setTimeout> | null = null;
 const FORCED_QUIT_TIMEOUT_MS = 5_000;
@@ -237,12 +264,18 @@ type AppSettings = {
   transcription?: {
     dictationPushToTalk?: boolean;
     dictationHandsFreeEnabled?: boolean;
+    dictationModePreset?: string;
+    dictationSelectedCustomModeId?: string | null;
+    dictationCustomModes?: Array<{ id?: unknown }>;
   };
   ui?: {
     minimizeToTray?: boolean;
     alwaysOnTop?: boolean;
     showDictationPopup?: boolean;
     showRecordingPopup?: boolean;
+  };
+  automation?: {
+    localToolsEnabled?: boolean;
   };
 };
 
@@ -970,6 +1003,7 @@ function applyUiSettings(settings: AppSettings | null | undefined): void {
   alwaysOnTopEnabled = resolved.alwaysOnTop;
   showDictationOverlayEnabled = resolved.showDictationOverlay;
   showRecordingOverlayEnabled = resolved.showRecordingOverlay;
+  localToolsEnabled = settings?.automation?.localToolsEnabled === true;
   if (mainWindow && !mainWindow.isDestroyed()) {
     mainWindow.setAlwaysOnTop(alwaysOnTopEnabled);
   }
@@ -1283,6 +1317,14 @@ async function handleLocalCommand(
         "x-apple.systempreferences:com.apple.preference.security?Privacy_Calendars",
       );
       return { handled: true, result: true };
+    }
+    case "get_cli_tool_status":
+      return { handled: true, result: currentCliToolStatus() };
+    case "install_cli_tool": {
+      // Writes outside the app's own data: a real click in the main window,
+      // consumed before anything touches /usr/local/bin.
+      requireMainWindowGesture("Installing the command-line tool");
+      return { handled: true, result: installCliTool() };
     }
     case "select_export_location": {
       const parent = requireMainWindowGesture("Choosing an export folder");
@@ -1839,6 +1881,95 @@ function getMacosCalendarRuntime(): MacosCalendarRuntime {
   return macosCalendarRuntime;
 }
 
+function getCliBinaryName(): string {
+  return process.platform === "win32" ? "plainsong-cli.exe" : "plainsong-cli";
+}
+
+/** The `plainsong` command-line tool ships beside the sidecar. */
+function getCliBinaryPath(): string {
+  const binaryName = getCliBinaryName();
+  if (isDev) {
+    const debugPath = path.join(__dirname, "../rust-sidecar/target/debug", binaryName);
+    if (existsSync(debugPath)) {
+      return debugPath;
+    }
+    return path.join(__dirname, "../rust-sidecar/target/release", binaryName);
+  }
+  return path.join(process.resourcesPath, "sidecar", binaryName);
+}
+
+function inspectCliLinkPath(): ExistingLinkPath {
+  try {
+    const stat = lstatSync(CLI_LINK_PATH);
+    if (stat.isSymbolicLink()) {
+      return { kind: "symlink", target: readlinkSync(CLI_LINK_PATH) };
+    }
+    return stat.isDirectory() ? { kind: "directory" } : { kind: "file" };
+  } catch {
+    return null;
+  }
+}
+
+function currentCliToolStatus() {
+  const binaryPath = getCliBinaryPath();
+  return describeCliToolStatus({
+    binaryPath,
+    binaryExists: existsSync(binaryPath),
+    existing: inspectCliLinkPath(),
+  });
+}
+
+/**
+ * Symlink `/usr/local/bin/plainsong` at the packaged CLI. No privilege
+ * escalation: when the directory is not writable (root-owned on a stock
+ * macOS) the answer is the one-line command for the user to run, not an
+ * admin-password prompt carrying Plainsong's name (see cli-install.ts).
+ */
+function installCliTool(): CliInstallResult {
+  const binaryPath = getCliBinaryPath();
+  const plan = planCliInstall({
+    platform: process.platform,
+    binaryPath,
+    binaryExists: existsSync(binaryPath),
+    existing: inspectCliLinkPath(),
+  });
+  switch (plan.action) {
+    case "already_installed":
+      return { status: "installed", linkPath: CLI_LINK_PATH };
+    case "refuse":
+      if (plan.reason === "path_occupied") {
+        return {
+          status: "unavailable",
+          reason: `${CLI_LINK_PATH} already exists and is not a Plainsong link, so it was left alone.`,
+        };
+      }
+      if (plan.reason === "binary_missing") {
+        return {
+          status: "unavailable",
+          reason: "The command-line tool is not part of this build.",
+        };
+      }
+      return { status: "unavailable", reason: "The command-line tool installs on macOS and Linux only." };
+    case "link":
+    case "replace_link": {
+      try {
+        if (plan.action === "replace_link") {
+          unlinkSync(CLI_LINK_PATH);
+        }
+        symlinkSync(binaryPath, CLI_LINK_PATH);
+        return { status: "installed", linkPath: CLI_LINK_PATH };
+      } catch (error) {
+        const code = (error as NodeJS.ErrnoException).code;
+        const reason =
+          code === "EACCES" || code === "EPERM"
+            ? `Plainsong cannot write to ${path.dirname(CLI_LINK_PATH)} without administrator rights.`
+            : `Plainsong could not create the link (${code ?? "unknown error"}).`;
+        return { status: "manual", reason, command: manualInstallCommand(binaryPath) };
+      }
+    }
+  }
+}
+
 function getSidecarBinaryName(): string {
   return process.platform === "win32" ? "plainsong-sidecar.exe" : "plainsong-sidecar";
 }
@@ -2202,6 +2333,136 @@ ipcMain.handle("window:get-label", (event) => {
 });
 
 
+// ── plainsong:// deep links ─────────────────────────────────────────────────
+
+const deepLinkLimiter = new DeepLinkRateLimiter();
+// Links that arrived before the sidecar was up (a URL that launched the app).
+const pendingDeepLinks: string[] = [];
+const MAX_PENDING_DEEP_LINKS = 4;
+
+function recordAutomationAudit(action: string, outcome: string): void {
+  if (!ipcBridge) {
+    return;
+  }
+  ipcBridge
+    .invokeSidecar("record_automation_audit_event", { source: "deep_link", action, outcome })
+    .catch((error) => {
+      console.warn("[deep-link] audit write failed", { action, outcome, error });
+    });
+}
+
+async function performDeepLink(command: DeepLinkCommand): Promise<string> {
+  switch (command.kind) {
+    case "open":
+      showAndFocusMainWindow();
+      return "performed";
+    case "record": {
+      if (!ipcBridge) {
+        return "failed_no_sidecar";
+      }
+      // The same toggle the menu-bar item performs: a link never chooses a
+      // hold-to-talk or hands-free behaviour on the user's behalf.
+      const live = isDictationLive();
+      await ipcBridge.invoke(
+        live ? "stop_dictation" : "start_dictation",
+        live ? { stopReason: "deep_link" } : {},
+      );
+      return "performed";
+    }
+    case "stop": {
+      if (!ipcBridge) {
+        return "failed_no_sidecar";
+      }
+      if (!isDictationLive()) {
+        return "ignored_not_dictating";
+      }
+      await ipcBridge.invoke("stop_dictation", { stopReason: "deep_link" });
+      return "performed";
+    }
+    case "mode": {
+      if (!ipcBridge) {
+        return "failed_no_sidecar";
+      }
+      const settings = (await ipcBridge.invoke("get_settings")) as AppSettings;
+      const resolved = resolveDictationModeSelection(command.key, settings.transcription ?? {});
+      if (!resolved) {
+        return "ignored_unknown_mode";
+      }
+      if (!resolved.changed) {
+        return "performed";
+      }
+      await ipcBridge.invoke("save_settings", {
+        settings: {
+          ...settings,
+          transcription: { ...settings.transcription, ...resolved.selection },
+        },
+      });
+      return "performed";
+    }
+    case "meeting_start":
+      // Opens the consent sheet and nothing more; recording starts only when
+      // the person clicks Start there, exactly as with the New meeting button.
+      showAndFocusMainWindow();
+      broadcastRendererEvent("main-view-requested", { view: "recordings" });
+      broadcastRendererEvent("meeting-start-requested", {});
+      return "performed";
+    case "meeting_stop": {
+      if (!ipcBridge) {
+        return "failed_no_sidecar";
+      }
+      if (!activeMeetingRecordingId) {
+        return "ignored_no_meeting";
+      }
+      await ipcBridge.invokeSidecar("stop_recording", { recordingId: activeMeetingRecordingId });
+      return "performed";
+    }
+  }
+}
+
+/**
+ * Act on one `plainsong://` URL. The URL text itself is never logged or
+ * written to the audit log — only the parsed action and what became of it.
+ */
+async function handleDeepLink(rawUrl: string): Promise<void> {
+  if (!bootstrapComplete) {
+    if (pendingDeepLinks.length < MAX_PENDING_DEEP_LINKS) {
+      pendingDeepLinks.push(rawUrl);
+    }
+    return;
+  }
+  const parsed = parseDeepLink(rawUrl);
+  if (!parsed.ok) {
+    console.warn("[deep-link] ignored", { reason: parsed.reason });
+    return;
+  }
+  const action = deepLinkActionName(parsed.command);
+  if (!localToolsEnabled) {
+    console.warn("[deep-link] refused: Local tools is off in Settings > General", { action });
+    recordAutomationAudit(action, "refused_local_tools_off");
+    return;
+  }
+  if (!deepLinkLimiter.admit()) {
+    console.warn("[deep-link] dropped: too many links in a short time", { action });
+    recordAutomationAudit(action, "rate_limited");
+    return;
+  }
+  let outcome: string;
+  try {
+    outcome = await performDeepLink(parsed.command);
+  } catch (error) {
+    console.error("[deep-link] failed", { action, error });
+    outcome = "failed";
+  }
+  console.log("[deep-link]", { action, outcome });
+  recordAutomationAudit(action, outcome);
+}
+
+function flushPendingDeepLinks(): void {
+  for (const url of pendingDeepLinks.splice(0)) {
+    void handleDeepLink(url);
+  }
+}
+
 async function bootstrap() {
   const gotLock = app.requestSingleInstanceLock();
   if (!gotLock) {
@@ -2209,11 +2470,31 @@ async function bootstrap() {
     return;
   }
 
-  app.on("second-instance", () => {
+  app.on("second-instance", (_event, argv) => {
     showAndFocusMainWindow();
+    // Windows and Linux deliver a protocol launch as a second instance with
+    // the URL in argv; macOS delivers `open-url` below instead.
+    const url = deepLinkFromArgv(argv);
+    if (url) {
+      void handleDeepLink(url);
+    }
+  });
+
+  // Registered before `ready` so a URL that launched the app is caught and
+  // queued until the sidecar is up.
+  app.on("open-url", (event, url) => {
+    event.preventDefault();
+    void handleDeepLink(url);
   });
 
   await app.whenReady();
+
+  if (app.isPackaged) {
+    // Pairs with `protocols:` in electron-builder.yml (CFBundleURLTypes).
+    // Packaged-only: in development this would register the bare Electron
+    // binary as the handler for every `plainsong://` link on the machine.
+    app.setAsDefaultProtocolClient("plainsong");
+  }
 
   installRendererPermissionHandlers();
 
@@ -2441,6 +2722,7 @@ async function bootstrap() {
   prepareOverlayWindows();
   createTray();
   bootstrapComplete = true;
+  flushPendingDeepLinks();
 }
 
 void bootstrap();
