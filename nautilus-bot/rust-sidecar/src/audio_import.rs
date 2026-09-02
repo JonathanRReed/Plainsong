@@ -227,10 +227,7 @@ pub(crate) fn import_conversion_bytes_needed(duration_seconds: f64) -> u64 {
 /// `None` for an unmeasurable volume: a filesystem that cannot report free
 /// space must leave the import unpreflighted, not impossible. That matches
 /// what capture does in `audio.rs`.
-pub(crate) fn import_space_shortfall(
-    duration_seconds: f64,
-    available: Option<u64>,
-) -> Option<u64> {
+pub(crate) fn import_space_shortfall(duration_seconds: f64, available: Option<u64>) -> Option<u64> {
     let needed = import_conversion_bytes_needed(duration_seconds);
     match available {
         Some(available) if available < needed => Some(needed),
@@ -443,7 +440,10 @@ source bit depth: I16
     #[test]
     fn a_length_macos_will_not_state_is_a_refusal_and_names_the_reason() {
         let refusal = unreadable_duration_message(REAL_AFINFO_UNOPENABLE_STDERR);
-        assert!(refusal.contains("could not determine the length"), "{refusal}");
+        assert!(
+            refusal.contains("could not determine the length"),
+            "{refusal}"
+        );
         assert!(refusal.contains("will not decode it"), "{refusal}");
         assert!(refusal.contains("AudioFileOpenURL failed"), "{refusal}");
         // Nothing on stderr still refuses; it just has less to say.

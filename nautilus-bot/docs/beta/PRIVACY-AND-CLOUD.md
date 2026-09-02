@@ -6,7 +6,13 @@ analytics SDK, or Plainsong-operated audio relay.
 
 ## What stays local by default
 
-- temporary Dictation audio, which is removed after processing
+- Dictation audio. By default it is temporary and removed once the words have
+  been transcribed. Turning on "Keep dictation audio for Process again"
+  (Settings > Dictation) changes that: from then on each dictation's audio is
+  written into the recordings folder and kept until you delete that history
+  entry. Dictation auto-delete is set to "Never" by default, so nothing else
+  removes it — a year of dictations keeps a year of audio. With the vault on,
+  kept audio is encrypted into the vault like meeting audio.
 - Dictation history and corrections
 - Meeting audio according to your chosen storage and retention settings
 - transcripts, notes, summaries, action items, and follow-up drafts

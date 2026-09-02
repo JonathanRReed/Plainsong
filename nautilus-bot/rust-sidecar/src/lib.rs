@@ -7890,9 +7890,7 @@ async fn encrypt_finalized_recording_audio(
     let Some(operation) = operation else {
         return Ok(());
     };
-    if let Err(error) =
-        encrypt_recording_audio_operation(state, operation, &key, handle).await
-    {
+    if let Err(error) = encrypt_recording_audio_operation(state, operation, &key, handle).await {
         let mut db = state.db.lock().await;
         let _ = db.update_recording_status(recording_id, "error");
         let _ = db.log_audit_event(
@@ -27358,7 +27356,8 @@ async fn stop_recording_for_sidecar_inner(
         }
     }
 
-    if let Err(error) = encrypt_finalized_recording_audio(state.as_ref(), Some(handle), &recording_id).await
+    if let Err(error) =
+        encrypt_finalized_recording_audio(state.as_ref(), Some(handle), &recording_id).await
     {
         return Err(format!(
             "Recording was finalized, but vault encryption must be retried before transcription: {error}"
@@ -27748,16 +27747,37 @@ async fn import_audio_file_impl(
     // before the pipeline is allowed to read it. An imported file lands in the
     // recordings folder as the same kind of owned asset a meeting's audio does,
     // so skipping this left plaintext audio under a vault the UI says is on.
-    if let Err(error) = encrypt_finalized_recording_audio(state.as_ref(), Some(handle), &recording_id).await
+    if let Err(error) =
+        encrypt_finalized_recording_audio(state.as_ref(), Some(handle), &recording_id).await
     {
         let mut db = state.db.lock().await;
         let _ = db.update_recording_status(&recording_id, "error");
         drop(db);
-        return Err(format!(
+        let message = format!(
             "The audio was imported, but vault encryption must be retried before it can be transcribed: {error}"
-        ));
+        );
+        emit_meeting_lifecycle_phase(
+            state.as_ref(),
+            handle,
+            "error",
+            &recording_id,
+            Some(&message),
+        );
+        return Err(message);
     }
 
+    // The same pair the stop path emits, in the same order. The import
+    // previously emitted only `recording-status-changed`, so the renderer's
+    // meeting state machine never left `idle` for an import: no processing
+    // phase was ever shown, and the pipeline's own terminal `ready` or `error`
+    // phase arrived for a meeting the machine had never heard of.
+    emit_meeting_lifecycle_phase(
+        state.as_ref(),
+        handle,
+        "processing",
+        &recording_id,
+        Some("Processing transcript"),
+    );
     handle.emit_event(
         "recording-status-changed",
         serde_json::json!({
@@ -27997,12 +28017,8 @@ mod audio_import_tests {
         let destination = root.join("out.wav");
 
         let started = std::time::Instant::now();
-        let failure = run_afconvert(
-            &source,
-            &destination,
-            std::time::Duration::from_millis(0),
-        )
-        .unwrap_err();
+        let failure =
+            run_afconvert(&source, &destination, std::time::Duration::from_millis(0)).unwrap_err();
         // A zero budget is past its deadline on the first poll, so this is the
         // timeout path even though the file itself is trivial.
         assert!(failure.contains("Plainsong stopped it"), "{failure}");
@@ -31045,21 +31061,15 @@ pub async fn dispatch_command(
                 .get("offset")
                 .and_then(|value| value.as_u64())
                 .unwrap_or(0) as usize;
-            let mut db = state.db.lock().await;
+            let db = state.db.lock().await;
             let hits = db
                 .search_dictation_history(&query, limit, offset)
                 .map_err(|e| e.to_string())?;
-            // The query is the user's own words; only its shape is logged.
-            let _ = db.log_audit_event(
-                "dictation_history_searched",
-                Some(serde_json::json!({
-                    "query_terms": query.split_whitespace().count(),
-                    "query_chars": query.chars().count(),
-                    "hits": hits.len(),
-                    "offset": offset,
-                })),
-                "info",
-            );
+            // Deliberately not audited. Searching is a read that changes
+            // nothing, and the search field re-runs on a debounce and again on
+            // every change to the recordings list, so one minute of typing
+            // appended dozens of rows and buried the ones that record a change.
+            // "Process again", deletion and retention still write theirs.
             serde_json::to_value(hits).map_err(|e| e.to_string())
         }
         "reprocess_dictation" => {

@@ -495,6 +495,21 @@ describe("Models screen", () => {
     const names = options.map(
       (option) => option.querySelector("span > span")?.textContent ?? "",
     );
+
+    // Positive first, and exhaustive. A `?? ""` fallback means a selector that
+    // stops matching the name element yields a list of empty strings, and a
+    // suite that only asks "does any name contain base.en" passes on that
+    // happily while checking nothing at all. Naming every option the lane
+    // offers makes the list itself the assertion.
+    expect(names).toEqual([
+      "large-v3-turbo (fast + accurate)",
+      "Distil Whisper Large v3.5",
+      "Parakeet TDT 0.6B v3",
+    ]);
+    expect(names.every((name) => name.trim().length > 0)).toBe(true);
+
+    // And then the exclusions the list above already implies, spelled out so a
+    // future addition to the fixture cannot quietly bring one back.
     expect(names.some((name) => name.includes("base.en"))).toBe(false);
     expect(names.some((name) => name.includes("Apple Speech"))).toBe(false);
     expect(names.some((name) => name.includes("Parakeet TDT 0.6B v3"))).toBe(

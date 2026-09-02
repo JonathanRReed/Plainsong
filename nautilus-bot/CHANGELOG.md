@@ -161,6 +161,11 @@ evidence is stale and must be recaptured before this becomes a candidate.
   chunks, and a decode that would come back truncated is refused.
 
 ### Changed
+- Searching dictation history no longer writes an audit-log row. It is a read
+  that changes nothing, and the search field re-runs on a debounce and again
+  whenever the recordings list changes, so a minute of typing buried the rows
+  that record an actual change. "Process again", deletion and retention still
+  write theirs.
 - **The macOS sidecar now ships Candle's Metal backend** (`candle-metal`),
   so the Distil-Whisper and Whisper large-v3-turbo providers run on the GPU
   instead of CPU F32. Measured on an M4 Pro with a combined
