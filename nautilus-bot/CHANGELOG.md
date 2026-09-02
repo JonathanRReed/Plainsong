@@ -140,6 +140,14 @@ evidence is stale and must be recaptured before this becomes a candidate.
   not as having "gone silent," which previously read as a muting problem.
 
 ### Removed
+- The never-reachable "post the consent notice into the meeting chat for
+  you" automation for Zoom and Google Meet. Its keystroke senders sat behind
+  a gate that was hard-wired to off because nothing could prove the meeting
+  app's chat field had focus, so no build ever sent a notice. The start
+  sheet, the recording popup, and the beta docs now say plainly that
+  Plainsong does not post the notice; the notice text and its Copy button
+  stay. Automation can only come back with a positive focus-verification
+  design and on-device QA.
 - The ML punctuation/casing model (`punct_cap_seg_en`, ~210 MB) and the
   `text-recasepunct` build feature. Its restore function had no caller, and
   every shipped speech route already emits punctuated, cased text (see

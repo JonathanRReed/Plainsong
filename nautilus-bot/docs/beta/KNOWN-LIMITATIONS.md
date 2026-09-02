@@ -45,6 +45,9 @@ using sensitive content.
   identification.
 - Never use the beta to record a confidential conversation without the consent
   required by your organization and location.
+- Plainsong does not post the consent notice into the meeting chat for you.
+  The start sheet shows the notice text and a Copy button; sending it in
+  Zoom, Google Meet, or any other meeting is your action, every time.
 
 ## Updates and rollback
 

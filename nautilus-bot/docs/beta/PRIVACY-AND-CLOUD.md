@@ -38,6 +38,15 @@ Turning remote processing off revokes that authorization for new work. In-flight
 remote requests are cancelled and a result returned after revocation is not
 committed as an accepted local result.
 
+## The meeting consent notice
+
+Before a Meeting starts, Plainsong shows a short notice you can copy that
+tells participants the meeting is being recorded and transcribed. Plainsong
+does not post that notice into Zoom, Google Meet, or any other meeting chat on
+your behalf, and it does not type into or press keys in another app to do so.
+Sending the notice is your action. Plainsong records only whether the consent
+sheet was shown for that meeting.
+
 ## Permissions
 
 - Microphone is required for Dictation and mic-side Meeting capture.
