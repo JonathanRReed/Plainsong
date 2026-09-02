@@ -903,3 +903,237 @@ mod vocabulary_candidate_tests {
         assert_eq!(hint.as_prompt(), "Vocabulary: sig, OpenAI.");
     }
 }
+
+/// Runs the repo's dictation eval fixtures (`docs/evals/`) through the real
+/// pipeline so the ITN stage has evidence rather than assertions written from
+/// memory: every existing fixture line has to come out of the stage unchanged,
+/// and every new number line has to come out the way the fixture says.
+///
+/// The fixtures are read at test time, so adding a case is a JSON edit with no
+/// recompile.
+#[cfg(test)]
+mod fixture_evals {
+    use super::*;
+    use crate::text::format::DictationAppCategory;
+    use serde_json::Value;
+
+    fn load(name: &str) -> Value {
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../docs/evals")
+            .join(name);
+        let raw = std::fs::read_to_string(&path)
+            .unwrap_or_else(|error| panic!("read {}: {}", path.display(), error));
+        serde_json::from_str(&raw)
+            .unwrap_or_else(|error| panic!("parse {}: {}", path.display(), error))
+    }
+
+    fn field<'a>(case: &'a Value, key: &str) -> Option<&'a str> {
+        case.get(key).and_then(Value::as_str)
+    }
+
+    fn required<'a>(case: &'a Value, key: &str) -> &'a str {
+        field(case, key).unwrap_or_else(|| panic!("fixture case missing {key}: {case}"))
+    }
+
+    fn run_pipeline(
+        input: &str,
+        mode_preset: &str,
+        numbers_as_digits: bool,
+        dictionary_entries: &[DictationDictionaryEntry],
+    ) -> DictationPipelineResult {
+        apply_dictation_pipeline(DictationPipelineInput {
+            text: input,
+            dictionary_entries,
+            snippets: &[],
+            app_target: None,
+            mode_preset,
+            smart_formatting_enabled: true,
+            numbers_as_digits,
+            recent_inserted_text: None,
+            destination_category: DictationAppCategory::Other,
+        })
+    }
+
+    /// Every line of the parity fixture, through the ITN stage on its own.
+    /// A line with no `itnOutput` must come back byte-identical.
+    #[test]
+    fn parity_fixture_lines_survive_the_itn_stage() {
+        let fixture = load("dictation-parity-fixture.json");
+        let scenarios = fixture["scenarios"].as_array().expect("scenarios");
+        assert!(!scenarios.is_empty());
+
+        for scenario in scenarios {
+            let input = required(scenario, "inputText");
+            let expected = field(scenario, "itnOutput").unwrap_or(input);
+            let actual = crate::text::itn::inverse_text_normalize(input);
+            assert_eq!(
+                actual,
+                expected,
+                "scenario {}",
+                required(scenario, "scenarioId")
+            );
+        }
+    }
+
+    /// The formatting fixtures, through the whole local pipeline. With the
+    /// stage off they must still produce `expectedOutput`; with it on they
+    /// must produce `expectedNumbersAsDigitsOutput`, which defaults to the
+    /// same string (i.e. the stage changed nothing).
+    #[test]
+    fn quality_formatting_fixtures_do_not_regress() {
+        let fixture = load("dictation-quality-fixtures.json");
+        let cases = fixture["formattingCases"]
+            .as_array()
+            .expect("formattingCases");
+        assert!(!cases.is_empty());
+
+        for case in cases {
+            let id = required(case, "id");
+            let input = required(case, "inputText");
+            let mode_preset = field(case, "modePreset").unwrap_or("voice");
+            let expected = required(case, "expectedOutput");
+
+            let without = run_pipeline(input, mode_preset, false, &[]);
+            assert_eq!(without.text, expected, "case {id} with numbers off");
+
+            let expected_with = field(case, "expectedNumbersAsDigitsOutput").unwrap_or(expected);
+            let with = run_pipeline(input, mode_preset, true, &[]);
+            assert_eq!(with.text, expected_with, "case {id} with numbers on");
+        }
+    }
+
+    /// The dictionary fixtures, with the stage on: a learned correction has to
+    /// come out exactly as the user spelled it.
+    #[test]
+    fn quality_dictionary_fixtures_survive_the_itn_stage() {
+        let fixture = load("dictation-quality-fixtures.json");
+        let cases = fixture["dictionaryCases"]
+            .as_array()
+            .expect("dictionaryCases");
+        assert!(!cases.is_empty());
+
+        for case in cases {
+            let id = required(case, "id");
+            let input = required(case, "inputText");
+            let expected = required(case, "expectedOutput");
+            let app_target = field(case, "appTarget");
+            let entries: Vec<DictationDictionaryEntry> = case["rules"]
+                .as_array()
+                .expect("rules")
+                .iter()
+                .map(|rule| DictationDictionaryEntry {
+                    id: required(rule, "spokenForm").to_string(),
+                    spoken_form: required(rule, "spokenForm").to_string(),
+                    replacement: required(rule, "replacement").to_string(),
+                    app_scope: field(rule, "appScope").map(str::to_string),
+                    case_sensitive: rule["caseSensitive"].as_bool().unwrap_or(false),
+                    enabled: rule["enabled"].as_bool().unwrap_or(true),
+                    category_scope: None,
+                    created_at: chrono::Utc::now(),
+                    updated_at: chrono::Utc::now(),
+                })
+                .collect();
+
+            let result = apply_dictation_pipeline(DictationPipelineInput {
+                text: input,
+                dictionary_entries: &entries,
+                snippets: &[],
+                app_target,
+                mode_preset: "voice",
+                smart_formatting_enabled: false,
+                numbers_as_digits: true,
+                recent_inserted_text: None,
+                destination_category: DictationAppCategory::Other,
+            });
+            assert_eq!(result.text, expected, "case {id}");
+            if let Some(expected_count) = case["expectedAppliedCount"].as_u64() {
+                assert_eq!(
+                    result.dictionary_applied_count as u64, expected_count,
+                    "case {id} applied count"
+                );
+            }
+        }
+    }
+
+    /// The spoken-number cases added for this stage: the ITN output on its own
+    /// and, where the fixture gives one, the full pipeline result.
+    #[test]
+    fn quality_number_fixtures_match() {
+        let fixture = load("dictation-quality-fixtures.json");
+        let cases = fixture["numberCases"].as_array().expect("numberCases");
+        assert!(!cases.is_empty());
+
+        for case in cases {
+            let id = required(case, "id");
+            let input = required(case, "inputText");
+            let expected_itn = required(case, "expectedItnOutput");
+            assert_eq!(
+                crate::text::itn::inverse_text_normalize(input),
+                expected_itn,
+                "case {id} itn"
+            );
+
+            if let Some(expected_output) = field(case, "expectedOutput") {
+                let mode_preset = field(case, "modePreset").unwrap_or("voice");
+                let result = run_pipeline(input, mode_preset, true, &[]);
+                assert_eq!(result.text, expected_output, "case {id} pipeline");
+            }
+        }
+    }
+
+    /// Before/after for every fixture line, printed so the eval log can be
+    /// regenerated rather than retyped.
+    /// `cargo test --lib fixture_evals::report -- --nocapture`
+    #[test]
+    fn report_before_and_after() {
+        for (file, key) in [
+            ("dictation-parity-fixture.json", "scenarios"),
+            ("dictation-quality-fixtures.json", "formattingCases"),
+            ("dictation-quality-fixtures.json", "numberCases"),
+        ] {
+            let fixture = load(file);
+            let Some(cases) = fixture[key].as_array() else {
+                continue;
+            };
+            for case in cases {
+                let Some(input) = field(case, "inputText") else {
+                    continue;
+                };
+                let after = crate::text::itn::inverse_text_normalize(input);
+                let changed = if after == input { " " } else { "*" };
+                println!("{changed} [{key}] {input:?} -> {after:?}");
+            }
+        }
+    }
+
+    /// The stage's cost on a 200-word input, against the 6 s dictation budget.
+    /// Printed rather than asserted at a tight bound: this machine is shared,
+    /// so the number is provisional -- the assertion is only that the stage is
+    /// nowhere near the budget.
+    #[test]
+    fn stage_cost_on_two_hundred_words() {
+        let sentence = "we shipped one hundred twenty three builds and spent twelve dollars \
+                        fifty on march third at three thirty pm with twenty percent left over \
+                        for the team and one of them still owes me three point five days ";
+        let mut input = String::new();
+        while input.split_whitespace().count() < 200 {
+            input.push_str(sentence);
+        }
+        let words = input.split_whitespace().count();
+
+        // Warm the code paths before timing.
+        let _ = crate::text::itn::inverse_text_normalize(&input);
+
+        let runs = 200;
+        let started = std::time::Instant::now();
+        for _ in 0..runs {
+            let _ = crate::text::itn::inverse_text_normalize(&input);
+        }
+        let per_run = started.elapsed() / runs;
+        println!("itn stage: {words} words, {runs} runs, {per_run:?} per run");
+        assert!(
+            per_run < std::time::Duration::from_millis(50),
+            "ITN on {words} words took {per_run:?}, which is no longer negligible against the 6 s budget"
+        );
+    }
+}
