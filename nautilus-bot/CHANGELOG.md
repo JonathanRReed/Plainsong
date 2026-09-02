@@ -256,6 +256,13 @@ evidence is stale and must be recaptured before this becomes a candidate.
   files that still carry it load cleanly and are rewritten without it.
 
 ### Fixed
+- "Keep the model warm: off" now actually releases the built-in cleanup
+  model. It used to skip only the warm-up — the first dictation loaded the
+  model anyway and it stayed in memory for the rest of the session — so the
+  switch saved nothing after your first capture. With it off, the model is
+  unloaded a minute after the last dictation, and switching the dictation
+  lane to Ollama or a cloud provider releases it immediately. The Models
+  screen states what it holds while loaded.
 - The Models screen now says which processor the built-in cleanup model runs
   on, and Plainsong no longer starts a new install on that route where it
   would be too slow. On a Mac that falls back to the CPU a 200-word dictation

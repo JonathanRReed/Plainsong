@@ -11703,6 +11703,46 @@ mod tests {
         assert!(dictation_keep_warm_enabled("long"));
     }
 
+    /// Pointing the dictation lane somewhere else means nothing will ask the
+    /// bundled model for anything again, so its ~0.5 GB should not stay
+    /// resident for the rest of the session -- which is what happened while
+    /// `delete()` was the only thing that cleared the slot.
+    #[test]
+    fn leaving_the_bundled_lane_releases_the_resident_model() {
+        let bundled = llm::bundled_local::PROVIDER_SETTINGS_VALUE;
+        for destination in ["ollama", "openai", "anthropic", "apple_language_model"] {
+            assert!(
+                bundled_cleanup_runtime_should_unload(bundled, destination),
+                "leaving for {destination} must release the model"
+            );
+        }
+        // Staying put, and arriving from elsewhere, both keep it loaded: the
+        // next dictation is about to use it.
+        assert!(!bundled_cleanup_runtime_should_unload(bundled, bundled));
+        assert!(!bundled_cleanup_runtime_should_unload("ollama", bundled));
+        assert!(!bundled_cleanup_runtime_should_unload("ollama", "openai"));
+    }
+
+    /// The setting has to reach the provider, or "off" means nothing again.
+    #[test]
+    fn the_keep_warm_setting_reaches_the_bundled_provider() {
+        let _serialized = llm::bundled_local::KEEP_WARM_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let mut settings = settings::Settings::default();
+        settings.transcription.dictation_keep_warm = "off".to_string();
+        apply_bundled_cleanup_keep_warm(&settings);
+        assert!(!llm::bundled_local::keep_warm_enabled());
+        assert!(llm::bundled_local::should_schedule_idle_unload(
+            llm::bundled_local::keep_warm_enabled()
+        ));
+
+        // Restore the default the rest of the suite expects.
+        settings.transcription.dictation_keep_warm = "on".to_string();
+        apply_bundled_cleanup_keep_warm(&settings);
+        assert!(llm::bundled_local::keep_warm_enabled());
+    }
+
     #[tokio::test]
     async fn dictation_model_readiness_is_truthful_when_warmup_is_deferred_or_unneeded() {
         assert_eq!(
@@ -14275,6 +14315,32 @@ fn schedule_bundled_cleanup_prewarm(settings: &settings::Settings) {
         ),
         Err(error) => tracing::warn!("Bundled cleanup model warmup failed: {}", error),
     });
+}
+
+/// Mirror the keep-warm setting into the bundled cleanup provider.
+///
+/// `keep_warm: "off"` used to mean only "skip the prewarm": the first real
+/// cleanup loaded the model anyway and nothing short of deleting it ever let
+/// go, so the switch saved memory exactly until the first dictation. The
+/// provider now unloads itself after an idle interval when this is off, and
+/// this is where the setting reaches it -- at startup and on every save, the
+/// same two places the prewarm is scheduled from.
+fn apply_bundled_cleanup_keep_warm(settings: &settings::Settings) {
+    llm::bundled_local::set_keep_warm(dictation_keep_warm_enabled(
+        &settings.transcription.dictation_keep_warm,
+    ));
+}
+
+/// Whether switching the dictation lane from `previous` to `next` should drop
+/// the resident bundled model.
+///
+/// Pointing the lane at Ollama or a cloud provider means nothing will ask the
+/// bundled model for anything again, but its ~0.5 GB stayed resident for the
+/// rest of the session because only `delete()` cleared the slot. Leaving the
+/// route is the moment to let go of it.
+fn bundled_cleanup_runtime_should_unload(previous: &str, next: &str) -> bool {
+    previous == llm::bundled_local::PROVIDER_SETTINGS_VALUE
+        && next != llm::bundled_local::PROVIDER_SETTINGS_VALUE
 }
 
 /// What the Models screen needs to render the bundled cleanup model's row.
@@ -21245,6 +21311,7 @@ pub async fn build_app_state() -> Result<AppState, String> {
     )
     .await;
     schedule_dictation_model_prewarm(&settings_manager.settings().transcription);
+    apply_bundled_cleanup_keep_warm(settings_manager.settings());
     schedule_bundled_cleanup_prewarm(settings_manager.settings());
     schedule_apple_language_model_probe();
     let streaming_transcriber = Arc::new(streaming::StreamingTranscriber::new(Arc::clone(
@@ -21443,11 +21510,12 @@ async fn save_settings_for_sidecar(
 
     apply_transcription_settings_to_asr_manager(&state.asr_manager, &settings.transcription).await;
 
-    let (previous_provider, previous_meeting_custom_prompt) = {
+    let (previous_provider, previous_meeting_custom_prompt, previous_dictation_ai_provider) = {
         let sm = state.settings_manager.lock().await;
         (
             sm.settings().transcription.default_provider.clone(),
             sm.settings().transcription.meeting_custom_prompt.clone(),
+            sm.settings().privacy.dictation_ai.provider.clone(),
         )
     };
     if settings.transcription.default_provider != previous_provider {
@@ -21537,6 +21605,8 @@ async fn save_settings_for_sidecar(
         normalize_optional_trimmed(settings.transcription.meeting_custom_prompt.clone())
             != normalize_optional_trimmed(previous_meeting_custom_prompt);
     let remote_processing_enabled = settings.privacy.remote_processing_enabled;
+    // Read before the settings move into the manager below.
+    let dictation_ai_provider_after_save = settings.privacy.dictation_ai.provider.clone();
     if !remote_processing_enabled {
         state.remote_processing_gate.set_allowed(false);
     }
@@ -21547,7 +21617,20 @@ async fn save_settings_for_sidecar(
         settings_manager.save().map_err(|e| e.to_string())?;
         emit_settings_changed(handle, settings_manager.settings());
         schedule_dictation_model_prewarm(&settings_manager.settings().transcription);
+        apply_bundled_cleanup_keep_warm(settings_manager.settings());
         schedule_bundled_cleanup_prewarm(settings_manager.settings());
+    }
+
+    if bundled_cleanup_runtime_should_unload(
+        &previous_dictation_ai_provider,
+        &dictation_ai_provider_after_save,
+    ) {
+        // Synchronous and cheap: it drops one `Option` holding the weights.
+        llm::bundled_local::clear_cached_runtime();
+        tracing::info!(
+            "Dictation cleanup left {}; released the resident model",
+            llm::bundled_local::PROVIDER_SETTINGS_VALUE
+        );
     }
 
     if remote_processing_enabled {

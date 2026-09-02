@@ -210,6 +210,65 @@ pub fn max_new_tokens_for_input(input_tokens: usize) -> usize {
 }
 
 // ---------------------------------------------------------------------------
+// Residency
+// ---------------------------------------------------------------------------
+
+/// How long the model may stay loaded after a cleanup when keep-warm is off.
+///
+/// `keep_warm: "off"` only ever skipped the *prewarm*: the first `generate()`
+/// loaded the model anyway and nothing but `delete()` ever dropped it, so a
+/// user who turned keep-warm off to save memory still paid ~0.5 GB for the
+/// rest of the session after one dictation. A minute is long enough that a
+/// burst of dictations pays the load once, and short enough that the switch
+/// means what it says.
+pub const IDLE_UNLOAD_AFTER: std::time::Duration = std::time::Duration::from_secs(60);
+
+/// Mirrors `transcription.dictationKeepWarm`. Global because the setting is
+/// global: threading it through `ProviderTransport::new` would put a
+/// dictation-only preference into every provider's constructor.
+static KEEP_WARM: AtomicBool = AtomicBool::new(true);
+
+static LAST_USED: std::sync::Mutex<Option<std::time::Instant>> = std::sync::Mutex::new(None);
+
+pub fn set_keep_warm(enabled: bool) {
+    KEEP_WARM.store(enabled, Ordering::Relaxed);
+}
+
+/// Serializes the tests that write the process-wide keep-warm flag. Tests in a
+/// crate share one binary and run in parallel, so without this the settings
+/// test in `lib.rs` and the residency test here race each other.
+#[cfg(test)]
+pub(crate) static KEEP_WARM_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+pub fn keep_warm_enabled() -> bool {
+    KEEP_WARM.load(Ordering::Relaxed)
+}
+
+/// Record that a cleanup just used the resident model.
+pub fn note_use() {
+    *LAST_USED.lock().unwrap_or_else(|e| e.into_inner()) = Some(std::time::Instant::now());
+}
+
+/// Drop the resident model if nothing has used it for `min_idle`.
+///
+/// Returns whether it unloaded. A cleanup that arrived while the timer was
+/// running refreshes `LAST_USED` and schedules its own unload, so the answer
+/// here is simply "was I the last one".
+pub fn unload_if_idle_for(min_idle: std::time::Duration) -> bool {
+    let idle_since = *LAST_USED.lock().unwrap_or_else(|e| e.into_inner());
+    let stale = idle_since.is_none_or(|last| last.elapsed() >= min_idle);
+    if stale {
+        clear_cached_runtime();
+    }
+    stale
+}
+
+/// Whether a finished cleanup should arm the idle-unload timer.
+pub fn should_schedule_idle_unload(keep_warm: bool) -> bool {
+    !keep_warm
+}
+
+// ---------------------------------------------------------------------------
 // Backend
 // ---------------------------------------------------------------------------
 
@@ -1023,6 +1082,22 @@ impl super::transport::CompletionTransport for BundledLocalClient {
             )
         })?;
 
+        // The model is resident now whether or not a prewarm ever ran, so this
+        // -- not the prewarm -- is where keep-warm has to be honored.
+        note_use();
+        if should_schedule_idle_unload(keep_warm_enabled()) {
+            tokio::spawn(async {
+                tokio::time::sleep(IDLE_UNLOAD_AFTER).await;
+                if unload_if_idle_for(IDLE_UNLOAD_AFTER) {
+                    tracing::info!(
+                        "{} unloaded after {}s idle (keep-warm is off)",
+                        MODEL_DISPLAY_NAME,
+                        IDLE_UNLOAD_AFTER.as_secs()
+                    );
+                }
+            });
+        }
+
         Ok(super::transport::CompletionResponse {
             text,
             model: MODEL_ID.to_string(),
@@ -1595,6 +1670,46 @@ mod tests {
         if std::env::var("PLAINSONG_BUNDLED_CLEANUP_EVAL_ROOT").is_err() {
             std::fs::remove_dir_all(&models_root).ok();
         }
+    }
+
+    /// Keep-warm off means the model must actually let go of its ~0.5 GB, and
+    /// keep-warm on means it must not: before this, "off" only skipped the
+    /// prewarm and the first dictation loaded the model for the whole session
+    /// either way.
+    ///
+    /// One test rather than several because `LAST_USED` is global and the test
+    /// binary runs tests in parallel.
+    #[test]
+    fn the_idle_unload_honors_keep_warm_and_the_last_use() {
+        use std::time::Duration;
+
+        let _serialized = KEEP_WARM_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+
+        assert!(!should_schedule_idle_unload(true), "keep-warm on: stay");
+        assert!(should_schedule_idle_unload(false), "keep-warm off: unload");
+
+        note_use();
+        assert!(
+            !unload_if_idle_for(Duration::from_secs(60)),
+            "a model used a moment ago is not idle"
+        );
+        assert!(
+            unload_if_idle_for(Duration::ZERO),
+            "with no idle requirement the timer's own expiry unloads it"
+        );
+
+        // The interval itself: long enough to survive a burst of dictations,
+        // short enough that the switch means something.
+        assert_eq!(IDLE_UNLOAD_AFTER, Duration::from_secs(60));
+
+        // The flag starts where `TranscriptionSettings::default()` does.
+        assert!(keep_warm_enabled());
+        set_keep_warm(false);
+        assert!(!keep_warm_enabled());
+        set_keep_warm(true);
+        assert!(keep_warm_enabled());
     }
 
     /// The measured reason this answer exists: on CPU a 199-word dictation
