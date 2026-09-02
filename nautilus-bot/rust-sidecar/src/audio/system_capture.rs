@@ -301,6 +301,65 @@ impl SourceResampler {
     }
 }
 
+/// Mixed frames the capture thread drained and then threw away because the
+/// meeting was paused.
+///
+/// The mixer keeps counting through a pause — the devices are still open so
+/// resume is instant, and the frames are dropped after they are drained, not
+/// before. `captured_seconds` in the degradation sentence is derived from that
+/// count, so without this a meeting paused for twenty minutes claimed twenty
+/// minutes of captured audio the file does not contain.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub(crate) struct DiscardedPausedFrames(u64);
+
+impl DiscardedPausedFrames {
+    pub(crate) fn discard(&mut self, frames: u64) {
+        self.0 = self.0.saturating_add(frames);
+    }
+
+    /// Of `total_mixed` frames the mixer emitted, the ones that were kept.
+    pub(crate) fn captured(self, total_mixed: u64) -> u64 {
+        total_mixed.saturating_sub(self.0)
+    }
+}
+
+/// Release the mixer's alignment hold-back at teardown, and report how many
+/// frames it produced.
+///
+/// Both devices are gone by the time this runs, so whatever the mixer is still
+/// holding back has to be flushed and padded rather than truncating one track
+/// relative to the others — unless the meeting is stopping *while paused*. The
+/// hold-back is then audio the devices delivered during the pause, and
+/// appending it would put the paused sound at the end of the file the pause
+/// promised to keep it out of. It is drained either way, because the mixer's
+/// counters are what the degradation summary reads; only the samples are
+/// dropped.
+fn release_alignment_holdback(
+    mixer: &mut FrameMixer,
+    paused: bool,
+    mixed_out: &mut Vec<f32>,
+    mic_out: &mut Vec<f32>,
+    system_out: &mut Vec<f32>,
+) -> u64 {
+    let mixed_before = mixed_out.len();
+    let mic_before = mic_out.len();
+    let system_before = system_out.len();
+    let mut frames = 0u64;
+    loop {
+        let drained = mixer.drain_into(true, true, mixed_out, mic_out, system_out);
+        if drained == 0 {
+            break;
+        }
+        frames += drained as u64;
+    }
+    if paused {
+        mixed_out.truncate(mixed_before);
+        mic_out.truncate(mic_before);
+        system_out.truncate(system_before);
+    }
+    frames
+}
+
 /// Rolling-RMS silence watchdog for one capture source.
 ///
 /// cpal only reports device failures through the stream error callback, and a
@@ -2545,6 +2604,7 @@ impl MixedAudioCapture {
             let _ = activated_tx.send(Ok(()));
 
             let mut mixer = FrameMixer::new(capture_mic, capture_system);
+            let mut discarded_paused_frames = DiscardedPausedFrames::default();
             let mut mic_watchdog = capture_mic
                 .then(|| SourceSilenceWatchdog::new(target_sample_rate, &MIC_SILENCE_PROFILE));
             let mut system_watchdog = capture_system
@@ -2963,16 +3023,24 @@ impl MixedAudioCapture {
                 // every pass so the stop path still gets a truthful summary if
                 // the capture thread has to be abandoned at teardown.
                 let padded_now = mixer.counts();
-                published_mic_padded.store(padded_now.mic_padded, Ordering::Relaxed);
-                published_system_padded.store(padded_now.system_padded, Ordering::Relaxed);
-                published_mixed_frames.store(padded_now.mixed, Ordering::Relaxed);
-
                 // Paused: the devices keep running so resume is instant and
                 // the mixer's alignment survives, but the frames just drained
                 // go nowhere — not the file, not the preview, not the
                 // watchdogs (a pause is not a device that died, and it must
-                // not count toward the silence auto-stop either).
-                if paused.load(Ordering::Relaxed) {
+                // not count toward the silence auto-stop either), and not
+                // toward the captured seconds the degradation sentence quotes.
+                let is_paused = paused.load(Ordering::Relaxed);
+                if is_paused {
+                    discarded_paused_frames.discard(padded_now.mixed - padded_before.mixed);
+                }
+                published_mic_padded.store(padded_now.mic_padded, Ordering::Relaxed);
+                published_system_padded.store(padded_now.system_padded, Ordering::Relaxed);
+                published_mixed_frames.store(
+                    discarded_paused_frames.captured(padded_now.mixed),
+                    Ordering::Relaxed,
+                );
+
+                if is_paused {
                     output.truncate(mixed_before);
                     mic_output.truncate(mic_before);
                     system_output.truncate(system_before);
@@ -3026,11 +3094,19 @@ impl MixedAudioCapture {
                 }
             }
 
-            // Both devices are gone by now, so release whatever was still held
-            // back for alignment and pad the tail rather than truncating one
-            // track relative to the others.
-            while mixer.drain_into(true, true, &mut output, &mut mic_output, &mut system_output) > 0
-            {
+            // Release whatever the mixer was still holding back for alignment.
+            // A stop that lands while the meeting is paused keeps none of it:
+            // that hold-back is paused audio.
+            let stopped_while_paused = paused.load(Ordering::Relaxed);
+            let tail_frames = release_alignment_holdback(
+                &mut mixer,
+                stopped_while_paused,
+                &mut output,
+                &mut mic_output,
+                &mut system_output,
+            );
+            if stopped_while_paused {
+                discarded_paused_frames.discard(tail_frames);
             }
 
             if !output.is_empty() {
@@ -3052,7 +3128,10 @@ impl MixedAudioCapture {
             let counts = mixer.counts();
             published_mic_padded.store(counts.mic_padded, Ordering::Relaxed);
             published_system_padded.store(counts.system_padded, Ordering::Relaxed);
-            published_mixed_frames.store(counts.mixed, Ordering::Relaxed);
+            published_mixed_frames.store(
+                discarded_paused_frames.captured(counts.mixed),
+                Ordering::Relaxed,
+            );
             if counts.mic_padded > 0 || counts.system_padded > 0 {
                 tracing::warn!(
                     "Mixed audio capture padded starved sources with silence (mic={}, system={}, of {} mixed frames)",
@@ -3985,6 +4064,60 @@ mod tests {
         assert_eq!(counts.system, 600);
         assert_eq!(counts.system_padded, 400);
         assert_eq!(counts.mic_padded, 0);
+    }
+
+    #[test]
+    fn stopping_while_paused_keeps_none_of_the_alignment_hold_back() {
+        // Both sources have delivered, so the mixer is holding frames back for
+        // alignment. A stop that lands while the meeting is paused must not
+        // append them: they are audio the devices delivered during the pause.
+        let mut mixer = FrameMixer::new(true, true);
+        mixer.push_mic(&[0.4; 512]);
+        mixer.push_system(&[0.2; 128]);
+        let mut mixed = vec![0.9; 8];
+        let mut mic = vec![0.9; 8];
+        let mut system = vec![0.9; 8];
+
+        let frames =
+            release_alignment_holdback(&mut mixer, true, &mut mixed, &mut mic, &mut system);
+        assert_eq!(frames, 512, "the hold-back is still drained");
+        assert_eq!(mixed.len(), 8, "and then dropped, keeping what came before");
+        assert_eq!(mic.len(), 8);
+        assert_eq!(system.len(), 8);
+
+        // The same teardown on a meeting that was not paused keeps every frame.
+        let mut mixer = FrameMixer::new(true, true);
+        mixer.push_mic(&[0.4; 512]);
+        mixer.push_system(&[0.2; 128]);
+        let mut mixed = vec![0.9; 8];
+        let mut mic = vec![0.9; 8];
+        let mut system = vec![0.9; 8];
+        let frames =
+            release_alignment_holdback(&mut mixer, false, &mut mixed, &mut mic, &mut system);
+        assert_eq!(frames, 512);
+        assert_eq!(mixed.len(), 8 + 512);
+        assert_eq!(mic.len(), 8 + 512);
+        assert_eq!(system.len(), 8 + 512);
+    }
+
+    #[test]
+    fn paused_frames_do_not_count_toward_the_captured_seconds() {
+        // The mixer counts through a pause because the frames are dropped
+        // after they are drained. `captured_seconds` is what landed in the
+        // file, so the paused ones have to come back off.
+        let mut discarded = DiscardedPausedFrames::default();
+        assert_eq!(discarded.captured(48_000 * 600), 48_000 * 600);
+
+        discarded.discard(48_000 * 120);
+        discarded.discard(48_000 * 60);
+        assert_eq!(
+            discarded.captured(48_000 * 600),
+            48_000 * 420,
+            "ten minutes of mixed frames, three of them paused"
+        );
+
+        // Never negative, however the counters are read.
+        assert_eq!(discarded.captured(0), 0);
     }
 
     #[test]
