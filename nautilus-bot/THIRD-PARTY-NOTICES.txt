@@ -7,6 +7,7 @@ Regenerate from nautilus-bot/ with:
 Application package: plainsong@0.9.0-beta.3
 Rust dependency packages: 532
 npm production dependency packages: 79
+Downloadable model artifacts: 16
 
 The dependency indexes retain declared license identifiers and repository URLs
 even when no license file is available in the installed package or Cargo cache.
@@ -222,6 +223,150 @@ reproduced verbatim. The vendored CPAL source contains no NOTICE file.
    limitations under the License.
 
 ----- END rust-sidecar/vendor/cpal-0.18.1/LICENSE -----
+
+================================================================================
+MODEL WEIGHTS
+================================================================================
+None of these ship inside the application. Each is downloaded on request
+from the repository and revision named below, verified against a SHA-256
+pinned in the source, and stored in the user's own models directory. The
+terms are the upstream project's, not Plainsong's, and are reproduced here
+because several differ from the license of the code that runs them.
+
+Model artifacts: 16
+Artifacts whose upstream declares no license: 1 (ERes2NetV2 speaker embedding (int8))
+
+S1-mini by Superwhisper (GGUF)
+  Used for: Built-in dictation cleanup (the zero-setup route).
+  License: Apache-2.0, with an additional naming term
+  Repository: https://huggingface.co/superwhisper/s1-mini-GGUF
+  Revision: 34add00a48a2e5d24e5a4ee5405a99620a3a240c
+  Files: s1-mini-q4_k_m.gguf
+  Pinned in: rust-sidecar/src/llm/bundled_local.rs (artifacts)
+  Note: The license requires the model keep the name "S1-mini" by "Superwhisper", with that exact capitalization, wherever it is used. Its LICENSE and NOTICE files are downloaded alongside the weights and kept beside them on disk.
+
+S1-mini by Superwhisper (tokenizer and license texts)
+  Used for: Tokenizer for the built-in cleanup model, and its own terms.
+  License: Apache-2.0, with an additional naming term
+  Repository: https://huggingface.co/superwhisper/s1-mini
+  Revision: 88f6b15896c73bbb13a3b596e0afe8ea0d5150b4
+  Files: tokenizer.json, LICENSE, NOTICE
+  Pinned in: rust-sidecar/src/llm/bundled_local.rs (artifacts)
+
+Whisper (whisper.cpp GGML builds)
+  Used for: Speech recognition: tiny, tiny.en, base, base.en, small, small.en, medium, medium.en, large-v3 and large-v3-turbo.
+  License: MIT
+  Repository: https://huggingface.co/ggerganov/whisper.cpp
+  Revision: 5359861c739e955e79d9a303bcbc70fb988958b1
+  Files: ggml-<model>.bin, one per build listed above
+  Pinned in: rust-sidecar/src/asr/whisper.rs (WHISPER_MODELS)
+
+Whisper large-v3-turbo (Candle safetensors)
+  Used for: Speech recognition through the in-process Candle runtime.
+  License: MIT
+  Repository: https://huggingface.co/openai/whisper-large-v3-turbo
+  Revision: 41f01f3fe87f28c78e2fbf8b568835947dd65ed9
+  Files: model.safetensors, config.json, tokenizer.json, preprocessor_config.json
+  Pinned in: rust-sidecar/src/asr/whisper_candle.rs (WHISPER_CANDLE_HF_*, WHISPER_CANDLE_REQUIRED_FILES)
+
+Distil-Whisper distil-large-v3.5
+  Used for: Faster English-only speech recognition.
+  License: Apache-2.0
+  Repository: https://huggingface.co/distil-whisper/distil-large-v3.5
+  Revision: 728a7691f3ff1d3d971528d3203a6e9559165d41
+  Files: model.safetensors, config.json, tokenizer.json, preprocessor_config.json
+  Pinned in: rust-sidecar/src/asr/distil_whisper.rs (DISTIL_HF_*, DISTIL_REQUIRED_FILES)
+
+Parakeet TDT 0.6b v3 (sherpa-onnx int8 export)
+  Used for: Speech recognition on the fast local route.
+  License: CC-BY-4.0
+  Repository: https://huggingface.co/csukuangfj/sherpa-onnx-nemo-parakeet-tdt-0.6b-v3-int8
+  Revision: 2bda32ec70b097a55adaa07d9a7173915b43cc78
+  Files: encoder.int8.onnx, decoder.int8.onnx, joiner.int8.onnx, tokens.txt
+  Pinned in: rust-sidecar/src/asr/parakeet.rs (PARAKEET_V3_*)
+  Note: Attribution is a condition of use, not a courtesy: this notice, shipped with the app, is how it is met. Derived from NVIDIA's nvidia/parakeet-tdt-0.6b-v3.
+
+Parakeet TDT CTC 110m (legacy export)
+  Used for: Speech recognition for installs that still carry the earlier Parakeet download.
+  License: CC-BY-4.0
+  Repository: https://huggingface.co/csukuangfj/sherpa-onnx-nemo-parakeet_tdt_ctc_110m-en-36000
+  Revision: 3af92f152d32c836acabf38f4c993bc96b80eb2d
+  Files: model.onnx, tokens.txt
+  Pinned in: rust-sidecar/src/asr/parakeet.rs (legacy artifact URLs)
+
+Moonshine (ONNX)
+  Used for: Low-latency English speech recognition, tiny and base.
+  License: MIT
+  Repository: https://huggingface.co/UsefulSensors/moonshine
+  Revision: 48b4e427b587bcf67797a5be706d6ddc4a298149
+  Files: onnx/merged/tiny/float/encoder_model.onnx, onnx/merged/tiny/float/decoder_model_merged.onnx, onnx/merged/base/float/encoder_model.onnx, onnx/merged/base/float/decoder_model_merged.onnx
+  Pinned in: rust-sidecar/src/asr/moonshine.rs (MOONSHINE_ONNX_HF_*)
+
+Moonshine tiny (tokenizer)
+  Used for: Tokenizer for the Moonshine tiny model.
+  License: MIT
+  Repository: https://huggingface.co/UsefulSensors/moonshine-tiny
+  Revision: 390624ed33d594443aa4aa221f5b9f283b545b5a
+  Files: tokenizer.json
+  Pinned in: rust-sidecar/src/asr/moonshine.rs (MOONSHINE_TINY_HF_*)
+
+Moonshine base (tokenizer)
+  Used for: Tokenizer for the Moonshine base model.
+  License: MIT
+  Repository: https://huggingface.co/UsefulSensors/moonshine-base
+  Revision: 7a73d8d55ac0ba2ef3ae761593f6784b51f96dcf
+  Files: tokenizer.json
+  Pinned in: rust-sidecar/src/asr/moonshine.rs (MOONSHINE_BASE_HF_*)
+
+Qwen3-ASR 0.6B (ONNX int4 export)
+  Used for: Speech recognition on the multilingual local route.
+  License: Apache-2.0
+  Repository: https://huggingface.co/andrewleech/qwen3-asr-0.6b-onnx
+  Revision: main (each of the seven files is pinned by SHA-256 instead of by commit)
+  Files: encoder.int4.onnx, decoder_init.int4.onnx, decoder_step.int4.onnx, decoder_weights.int4.data, embed_tokens.bin, config.json, tokenizer.json
+  Pinned in: rust-sidecar/src/asr/qwen3_asr.rs (QWEN3_ASR_HF_*)
+  Note: This is the one model whose revision is a branch. Every file is verified against a pinned SHA-256 on download, so a republished branch is rejected rather than loaded; the digests live beside the URLs in the file below.
+
+Silero VAD
+  Used for: Voice-activity detection: deciding when speech starts and stops.
+  License: MIT
+  Repository: https://github.com/snakers4/silero-vad
+  Revision: 76e3dc408eb2a5c655c34e230d2d5459b4439daa
+  Files: src/silero_vad/data/silero_vad.onnx
+  Pinned in: rust-sidecar/src/download/mod.rs (SILERO_VAD_ONNX_URL)
+
+WeSpeaker ECAPA-TDNN 512 (VoxCeleb, LM)
+  Used for: Speaker embeddings for meeting diarization.
+  License: Apache-2.0
+  Repository: https://huggingface.co/Wespeaker/wespeaker-ecapa-tdnn512-LM
+  Revision: a2f3dcb1c8702caccc7a55ceb57f5e8d1842112b
+  Files: voxceleb_ECAPA512_LM.onnx
+  Pinned in: rust-sidecar/src/download/mod.rs (diarization_model_info)
+
+WeSpeaker ResNet34 (VoxCeleb, LM)
+  Used for: Speaker embeddings for meeting diarization.
+  License: Apache-2.0
+  Repository: https://huggingface.co/Wespeaker/wespeaker-resnet34-LM
+  Revision: f0c48c298fd835726c27956a5d617bad7115627e
+  Files: voxceleb_resnet34_LM.onnx
+  Pinned in: rust-sidecar/src/download/mod.rs (diarization_model_info)
+
+WeSpeaker CAM++ (VoxCeleb, LM)
+  Used for: Speaker embeddings for meeting diarization.
+  License: Apache-2.0
+  Repository: https://huggingface.co/Wespeaker/wespeaker-voxceleb-campplus-LM
+  Revision: c5e01c6fcffcce160861e7e79782828320192b5c
+  Files: voxceleb_CAM++_LM.onnx
+  Pinned in: rust-sidecar/src/download/mod.rs (diarization_model_info)
+
+ERes2NetV2 speaker embedding (int8)
+  Used for: Speaker embeddings for meeting diarization.
+  License: not declared by the repository this file is fetched from
+  Repository: https://huggingface.co/phoenix124/kept-models
+  Revision: 42de48f3d8cb1c33ad29f4dbe2db0801a0759ddf
+  Files: diarize-embedding-eres2netv2-int8.onnx
+  Pinned in: rust-sidecar/src/download/mod.rs (diarization_model_info)
+  Note: The mirror this artifact is pinned to declares no license, so none is asserted here. Until that is resolved upstream or the model is replaced, this entry records the gap rather than an assumption.
 
 ================================================================================
 RUST DEPENDENCY INDEX

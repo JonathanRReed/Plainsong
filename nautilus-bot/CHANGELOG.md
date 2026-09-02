@@ -256,6 +256,12 @@ evidence is stale and must be recaptured before this becomes a candidate.
   files that still carry it load cleanly and are rewritten without it.
 
 ### Fixed
+- THIRD-PARTY-NOTICES.txt now has a MODEL WEIGHTS section naming every model
+  Plainsong can download — repository, pinned revision, files and license —
+  including the terms that differ from the code's: Parakeet's CC-BY-4.0
+  attribution and S1-mini's naming clause. The section is generated from a
+  manifest and covered by the release license gate, and it records honestly
+  the one artifact whose upstream declares no license.
 - The built-in cleanup model's 473 MiB now appears in the sidecar's list of
   downloaded models, where it was missing entirely. The Models screen's
   "Speech models on this Mac" total still counts only speech models, since

@@ -5,6 +5,10 @@ import fs from "node:fs";
 import path from "node:path";
 import { pathToFileURL } from "node:url";
 import { sidecarCargoFeatureArgs } from "./sidecar-cargo-features.mjs";
+import {
+  MODEL_WEIGHTS,
+  renderModelWeightsSection,
+} from "./model-weights-manifest.mjs";
 
 const appRoot = path.resolve(import.meta.dirname, "..");
 const repositoryRoot = path.resolve(appRoot, "..");
@@ -506,6 +510,7 @@ function renderNotices({ rootPackage, rust, npm, cpalLicense, electron }) {
     `Application package: ${rootPackage.name}@${rootPackage.version}`,
     `Rust dependency packages: ${rust.packages.length}`,
     `npm production dependency packages: ${npm.packages.length}`,
+    `Downloadable model artifacts: ${MODEL_WEIGHTS.length}`,
     "",
     "The dependency indexes retain declared license identifiers and repository URLs",
     "even when no license file is available in the installed package or Cargo cache.",
@@ -520,6 +525,11 @@ function renderNotices({ rootPackage, rust, npm, cpalLicense, electron }) {
     "----- BEGIN rust-sidecar/vendor/cpal-0.18.1/LICENSE -----",
     withFinalNewline(cpalLicense),
     "----- END rust-sidecar/vendor/cpal-0.18.1/LICENSE -----",
+    "",
+    "================================================================================",
+    "MODEL WEIGHTS",
+    "================================================================================",
+    renderModelWeightsSection(),
     "",
     "================================================================================",
     "RUST DEPENDENCY INDEX",
@@ -596,6 +606,18 @@ function buildNotices() {
     throw new Error("generated notices do not contain the vendored CPAL license verbatim");
   }
 
+  // Every downloadable model must appear by name. The weights are the one
+  // class of third-party material with no dependency graph to derive them
+  // from, so a model added to the Rust source without an entry in
+  // scripts/model-weights-manifest.mjs would otherwise ship unmentioned.
+  for (const entry of MODEL_WEIGHTS) {
+    if (!notices.includes(entry.name) || !notices.includes(entry.revision)) {
+      throw new Error(
+        `generated notices do not name the model artifact ${entry.name} at ${entry.revision}`,
+      );
+    }
+  }
+
   return { notices, rust, npm };
 }
 
@@ -603,7 +625,7 @@ function generate() {
   const { notices, rust, npm } = buildNotices();
   fs.writeFileSync(outputPath, notices, "utf8");
   console.log(
-    `Wrote ${outputPath} (${fs.statSync(outputPath).size} bytes, ${rust.packages.length} Rust packages, ${npm.packages.length} npm production packages).`,
+    `Wrote ${outputPath} (${fs.statSync(outputPath).size} bytes, ${rust.packages.length} Rust packages, ${npm.packages.length} npm production packages, ${MODEL_WEIGHTS.length} model artifacts).`,
   );
 }
 
