@@ -25,6 +25,35 @@ export interface MeetingAttendee {
 export const MAX_MEETING_ATTENDEES = 40;
 const MAX_ATTENDEE_FIELD_LENGTH = 256;
 
+/**
+ * Characters that steer rendering rather than saying anything: C0/C1
+ * controls, the bidi marks and isolates (U+200E/U+200F, U+202A-U+202E,
+ * U+2066-U+2069), the zero-width joiners and the BOM.
+ *
+ * Whitespace collapsing does not touch them -- `\s` does not match U+202E --
+ * so a name of "Dana\u202Ekafo" used to survive the whole sanitizer. It
+ * matters because an attendee name is rendered beside other text in the
+ * meeting header, written verbatim into an export, and placed inside a fenced
+ * block in a prompt. A right-to-left override reverses everything drawn after
+ * it, which is how one line is made to read as another. The name is calendar
+ * text somebody else wrote: exactly the text that must not be able to.
+ *
+ * Mirrors `is_formatting_control` in rust-sidecar/src/models.rs.
+ */
+const FORMATTING_CONTROLS =
+  /[\u0000-\u001f\u007f-\u009f\u200b-\u200f\u202a-\u202e\u2066-\u2069\ufeff]/g;
+
+/**
+ * Strip the steering characters, then collapse runs of whitespace.
+ *
+ * In that order: a control character is not whitespace, so collapsing first
+ * would leave the override in, and stripping afterwards would leave a double
+ * space behind. Mirrors `collapse_whitespace` in rust-sidecar/src/models.rs.
+ */
+export function normalizeAttendeeText(value: string): string {
+  return value.replace(FORMATTING_CONTROLS, "").replace(/\s+/g, " ").trim();
+}
+
 interface CalendarAttendeeLike {
   name: string;
   email: string | null;
@@ -44,13 +73,13 @@ export function attendeeIdentityKey(attendee: {
   name: string;
   email?: string | null;
 }): string {
-  const email = attendee.email?.trim().toLowerCase();
+  const email = normalizeAttendeeText(attendee.email ?? "").toLowerCase();
   if (email) return `email:${email}`;
-  return `name:${attendee.name.replace(/\s+/g, " ").trim().toLowerCase()}`;
+  return `name:${normalizeAttendeeText(attendee.name).toLowerCase()}`;
 }
 
 function clip(value: string): string {
-  const collapsed = value.replace(/\s+/g, " ").trim();
+  const collapsed = normalizeAttendeeText(value);
   return collapsed.length > MAX_ATTENDEE_FIELD_LENGTH
     ? collapsed.slice(0, MAX_ATTENDEE_FIELD_LENGTH).trimEnd()
     : collapsed;
@@ -116,11 +145,11 @@ export function addManualAttendee(
   name: string,
   email?: string | null,
 ): MeetingAttendee[] {
-  const trimmed = name.replace(/\s+/g, " ").trim();
+  const trimmed = normalizeAttendeeText(name);
   if (!trimmed) return [...attendees];
   return sanitizeMeetingAttendees([
     ...attendees,
-    { name: trimmed, email: email?.trim() || null, isOrganizer: false },
+    { name: trimmed, email: normalizeAttendeeText(email ?? "") || null, isOrganizer: false },
   ]);
 }
 
@@ -142,7 +171,7 @@ export function attendeeNamesForContext(
   attendees: readonly MeetingAttendee[] | null | undefined,
 ): string[] {
   return (attendees ?? [])
-    .map((attendee) => attendee.name.replace(/\s+/g, " ").trim())
+    .map((attendee) => normalizeAttendeeText(attendee.name))
     .filter(Boolean);
 }
 
@@ -158,7 +187,7 @@ export function attendeeNameSuggestions(
   const names = attendeeNamesForContext(attendees);
   const organizers = (attendees ?? [])
     .filter((attendee) => attendee.isOrganizer)
-    .map((attendee) => attendee.name.replace(/\s+/g, " ").trim())
+    .map((attendee) => normalizeAttendeeText(attendee.name))
     .filter(Boolean);
   const seen = new Set<string>();
   return [...organizers, ...names].filter((name) => {

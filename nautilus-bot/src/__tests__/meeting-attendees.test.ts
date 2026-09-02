@@ -62,6 +62,48 @@ describe("sanitizeMeetingAttendees", () => {
   it("normalizes an empty address to null", () => {
     expect(sanitizeMeetingAttendees([attendee({ email: "   " })])[0].email).toBeNull();
   });
+
+  // A display name comes off somebody else's calendar invite. A right-to-left
+  // override reverses every glyph drawn after it -- in the header, in an
+  // export, and inside the fenced block of a prompt. Whitespace collapsing
+  // never saw these, so they used to survive the whole sanitizer.
+  it("strips bidi overrides, isolates and control characters", () => {
+    const sanitized = sanitizeMeetingAttendees([
+      attendee({
+        name: "Dana\u202E\u2066 Okafor\u0007",
+        email: "dana\u200B@example.com",
+      }),
+    ]);
+    expect(sanitized[0].name).toBe("Dana Okafor");
+    expect(sanitized[0].email).toBe("dana@example.com");
+
+    // A name that is nothing but steering characters is not a name.
+    expect(sanitizeMeetingAttendees([attendee({ name: "\u202E\uFEFF" })])).toEqual([]);
+  });
+
+  // The prompt path reads the same normalizer, so an override cannot ride a
+  // name into the fenced block a summary or a chat answer is grounded on.
+  it("keeps an override out of the names a prompt is given", () => {
+    expect(
+      attendeeNamesForContext([attendee({ name: "\u202DSam\u202C Ito" })]),
+    ).toEqual(["Sam Ito"]);
+  });
+
+  // One person typed with an override and the same person without are the
+  // same person, not two chips.
+  it("gives an overridden and a plain spelling of one name the same identity", () => {
+    expect(attendeeIdentityKey({ name: "Dana\u202E Okafor", email: null })).toBe(
+      attendeeIdentityKey({ name: "Dana Okafor", email: null }),
+    );
+  });
+
+  // Manual entry is the other way a name arrives, and it trims before the
+  // sanitizer sees it.
+  it("strips them from a hand-typed attendee too", () => {
+    expect(addManualAttendee([], "Sam\u202E Ito", "sam\u200B@example.com")).toEqual([
+      { name: "Sam Ito", email: "sam@example.com", isOrganizer: false },
+    ]);
+  });
 });
 
 describe("meetingAttendeesFromCalendar", () => {
