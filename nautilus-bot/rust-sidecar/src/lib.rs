@@ -1952,12 +1952,28 @@ async fn run_grounded_response_for_segments(
         .map_err(|error| error.to_string())
 }
 
+/// Speaker aliases a person set for this recording, as plain names. An action
+/// item may be owned by one of them even when the transcript never spells the
+/// name out, because the alias is the person's own labelling of that voice.
+async fn speaker_names_for_recording(state: &AppState, recording_id: &str) -> Vec<String> {
+    let db = state.db.lock().await;
+    db.get_speaker_aliases(recording_id)
+        .unwrap_or_default()
+        .into_values()
+        .filter_map(|(name, _, _)| {
+            let name = name?.trim().to_string();
+            (!name.is_empty()).then_some(name)
+        })
+        .collect()
+}
+
 async fn run_grounded_action_items_for_segments(
     state: &AppState,
     segments: Vec<AnalysisContextSegment>,
     notes: Option<&str>,
     model: Option<&str>,
     progress: Option<llm::OrchestrationProgressCallback>,
+    speaker_names: Vec<String>,
 ) -> Result<llm::GroundedActionItemsOutput, String> {
     let context = llm::GroundingContext::new(segments)?;
     let runtime = selected_analysis_runtime(state, settings::AiLane::Meetings, model, None).await?;
@@ -1969,7 +1985,8 @@ async fn run_grounded_action_items_for_segments(
         timeouts.request,
         timeouts.job,
         llm::OrchestrationOptions::default(),
-    );
+    )
+    .with_speaker_names(speaker_names);
     let orchestrator = match progress {
         Some(callback) => orchestrator.with_progress_callback(callback),
         None => orchestrator,
@@ -2197,9 +2214,16 @@ async fn extract_action_items_grounded_internal(
     progress: Option<llm::OrchestrationProgressCallback>,
 ) -> Result<GroundedActionItemsResult, String> {
     let (segments, notes, _, snapshot) = load_recording_analysis_input(state, recording_id).await?;
-    let output =
-        run_grounded_action_items_for_segments(state, segments, notes.as_deref(), model, progress)
-            .await?;
+    let speaker_names = speaker_names_for_recording(state, recording_id).await;
+    let output = run_grounded_action_items_for_segments(
+        state,
+        segments,
+        notes.as_deref(),
+        model,
+        progress,
+        speaker_names,
+    )
+    .await?;
     let items: Vec<GroundedActionItem> = output
         .items
         .into_iter()

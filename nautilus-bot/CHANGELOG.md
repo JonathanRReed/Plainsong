@@ -25,6 +25,13 @@ evidence is stale and must be recaptured before this becomes a candidate.
   .docx preview shows the Markdown the document is built from and says so.
   Asking for subtitles on a recording that has no transcript says that
   instead of writing an empty file.
+- Action-item owners and due dates are now shown as their own chips beside the
+  task in the meeting workspace, instead of being left inside the sentence as
+  "(Owner: … · Due: …)", and the JSON export carries each item split into
+  task, owner, and due date alongside the verbatim line. Plainsong only fills
+  an owner it can point at: the model is told to set one solely from a line it
+  cites, and an owner that neither the cited lines nor a speaker alias names
+  is dropped while the task itself is kept.
 - Meetings now play their own audio in the app, in step with the transcript:
   play/pause, a scrubber drawn over the stored waveform, 1×/1.5×/2× speed,
   ← → to skip five seconds, and Space to play or pause with the transcript

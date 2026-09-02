@@ -138,6 +138,7 @@ import {
   readMeetingIntegrity,
 } from "@/lib/meeting-recovery";
 import { actionItemsToMarkdownList } from "@/lib/markdown";
+import { ActionItemList } from "@/components/views/meetings/action-item-list";
 import { DocumentField } from "@/components/views/meetings/document-field";
 import { AudioIssueBanner } from "@/components/views/meetings/audio-issue-banner";
 import { EditableTitle } from "@/components/views/meetings/editable-title";
@@ -4508,6 +4509,9 @@ export function RecordingsView() {
                                 label="Action items"
                                 value={meetingActionItemsText}
                                 renderValue={actionItemsToMarkdownList(selectedMeetingActionItems)}
+                                renderBody={
+                                  <ActionItemList items={selectedMeetingActionItems} />
+                                }
                                 onChange={(next) => {
                                   setMeetingActionItemsText(next);
                                   setUserEditedActionItemsText(next);
