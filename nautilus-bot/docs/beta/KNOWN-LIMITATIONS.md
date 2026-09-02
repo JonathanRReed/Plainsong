@@ -60,6 +60,37 @@ using sensitive content.
 - Plainsong does not post the consent notice into the meeting chat for you.
   The start sheet shows the notice text and a Copy button; sending it in
   Zoom, Google Meet, or any other meeting is your action, every time.
+- Call detection is a heuristic. Every few seconds Plainsong looks at which
+  apps are running and offers to record when a known conferencing app (Zoom,
+  Microsoft Teams, Webex, FaceTime, Slack, Discord) has a second sign of a
+  call: a call window, or the default microphone being open by another app.
+  Google Meet is recognized only as a browser window whose title says Meet,
+  which needs Accessibility permission; without it Meet is never offered.
+  Zoom's in-call window title is read the same way, so without Accessibility
+  Zoom relies on the microphone sign alone. Both title checks look for the
+  English words ("Zoom Meeting", "Meet"); a Zoom or browser running in
+  another language is detected through the microphone sign only, and its
+  window closing is not noticed. Slack and Discord are usually
+  running all day, so another app using the microphone can make one of them
+  look like a call; the offer can be dismissed and nothing records without
+  your click. While hands-free dictation keeps the microphone open, the
+  microphone sign is unavailable and only window titles count. Detection
+  never starts a recording.
+- The two automatic stops are heuristics too. "Stop when the call app
+  quits" only applies to a meeting that began while a call was detected, and
+  fires when that app quits or its call window closes; the silence stop
+  measures room-level loudness over one-second windows and ends the meeting
+  only after every captured source has been under that level for the whole
+  fuse (15 minutes by default). A very quiet speaker far from the microphone
+  can read as silence; a noisy room can keep a meeting alive. Both stops
+  save and transcribe the audio exactly as pressing Stop would.
+- Pausing a meeting drops the audio for the length of the pause; it is not
+  recorded anywhere. The saved file skips the gap and the transcript marks
+  where it was. The transcript preview and both silence detectors stand
+  still while paused, and the elapsed clock excludes paused time.
+- Notifications use macOS Notification Center. The first one Plainsong shows
+  is what makes macOS ask whether to allow them; if you decline, none appear
+  and the in-app surfaces carry the same information.
 
 ## Updates and rollback
 

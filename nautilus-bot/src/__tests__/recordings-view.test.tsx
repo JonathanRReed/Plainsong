@@ -7,6 +7,7 @@ import type { Recording } from "@/types";
 import * as backend from "@/lib/backend";
 import type { ProductReadinessSnapshot } from "@/features/readiness/product-readiness";
 import { OPEN_SETTINGS_TAB_EVENT } from "@/lib/navigation";
+import { publishCallCaptureRequest } from "@/lib/call-capture-request";
 
 const speechSynthesisMock = {
   speak: vi.fn(),
@@ -2208,6 +2209,48 @@ describe("RecordingsView", () => {
     await screen.findByText("The record");
     expect(screen.getAllByText("Me + Them").length).toBeGreaterThan(0);
     expect(screen.getByLabelText("Meeting title")).toHaveValue("Weekly sync");
+  });
+
+  it("carries the accepted call offer's id and service into the capture", async () => {
+    // The sidecar binds this meeting's auto-stop to exactly this call. A
+    // capture that arrived without the id would let any call that happened to
+    // be live when it started stop it later.
+    startMeeting.mockResolvedValueOnce("r-live");
+    publishCallCaptureRequest({
+      callId: 12,
+      app: "zoom",
+      appLabel: "Zoom",
+      videoService: "zoom",
+      detectedAtMs: new Date(2026, 8, 2, 14, 5, 0).getTime(),
+    });
+
+    render(<RecordingsView />);
+
+    fireEvent.click(await screen.findByRole("button", { name: "Confirm meeting consent" }));
+
+    await waitFor(() => {
+      expect(startMeeting).toHaveBeenCalledWith(
+        expect.objectContaining({ detectedCallId: 12, videoService: "zoom" }),
+      );
+    });
+    await waitFor(() => {
+      expect(backend.renameRecording).toHaveBeenCalledWith("r-live", "Zoom call, 14:05");
+    });
+  });
+
+  it("starts a meeting nobody offered without binding it to a call", async () => {
+    startMeeting.mockResolvedValueOnce("r-live");
+
+    render(<RecordingsView />);
+
+    fireEvent.click(screen.getByRole("button", { name: "New meeting" }));
+    fireEvent.click(await screen.findByRole("button", { name: "Confirm meeting consent" }));
+
+    await waitFor(() => {
+      expect(startMeeting).toHaveBeenCalledWith(
+        expect.objectContaining({ detectedCallId: undefined, videoService: undefined }),
+      );
+    });
   });
 
   it("starts meeting capture after consent and stops an active meeting", async () => {

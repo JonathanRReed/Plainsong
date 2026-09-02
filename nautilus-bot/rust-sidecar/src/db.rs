@@ -226,9 +226,9 @@ fn insert_recording_row(
             id, title, project_id, duration, created_at, updated_at, source_type, audio_path, status,
             meeting_notes, meeting_template_id, meeting_capture_mode, notes_updated_at,
             consent_prompt_shown, consent_notice_mode, consent_notice_surface,
-            consent_notice_message, consent_notice_updated_at
+            consent_notice_message, consent_notice_updated_at, video_service
          )
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18)",
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19)",
         params![
             &recording.id,
             &recording.title,
@@ -253,7 +253,8 @@ fn insert_recording_row(
             recording
                 .consent_notice_updated_at
                 .as_ref()
-                .map(|value| value.to_rfc3339())
+                .map(|value| value.to_rfc3339()),
+            &recording.video_service
         ],
     )?;
     Ok(())
@@ -279,6 +280,14 @@ fn normalize_category_scope(value: Option<&str>) -> Result<Option<String>> {
     Ok(Some(
         crate::settings::dictation_app_category_to_key(category).to_string(),
     ))
+}
+
+/// The `pause_spans` column, parsed. Unreadable JSON is an empty list: a
+/// meeting whose pause record is corrupt is still a meeting, and a read must
+/// not fail over a marker the timeline can simply omit.
+fn parse_pause_spans(raw: Option<String>) -> Vec<crate::recording_pause::PauseSpan> {
+    raw.and_then(|json| serde_json::from_str(&json).ok())
+        .unwrap_or_default()
 }
 
 fn validated_summary_provenance(
@@ -1169,7 +1178,8 @@ impl Database {
                 consent_notice_mode TEXT,
                 consent_notice_surface TEXT,
                 consent_notice_message TEXT,
-                consent_notice_updated_at TEXT
+                consent_notice_updated_at TEXT,
+                video_service TEXT
             )",
             [],
         )?;
@@ -1650,6 +1660,14 @@ impl Database {
         // install pointed at an uninstalled Ollama produced no summary, no
         // action items, and no title, and the app said nothing at all.
         self.ensure_table_column("recordings", "analysis_failure", "TEXT")?;
+        // The pauses taken during capture, as a JSON list of spans. The audio
+        // file skips them, so this is the only record of where the gaps are
+        // and how long they were.
+        self.ensure_table_column("recordings", "pause_spans", "TEXT")?;
+        // The conferencing service the meeting was on, when the calendar event
+        // or the detected call it started from named one. A tag from a fixed
+        // list, not free text -- see `models::known_video_service`.
+        self.ensure_table_column("recordings", "video_service", "TEXT")?;
 
         // Chunked meeting transcription survives per-chunk ASR failures and
         // still returns a transcript, so "completed" alone never meant "the
@@ -2148,7 +2166,9 @@ impl Database {
                     recordings.consent_notice_updated_at,
                     meeting_artifacts.summary_provenance,
                     meeting_artifacts.action_items_provenance,
-                    recordings.analysis_failure
+                    recordings.analysis_failure,
+                    recordings.pause_spans,
+                    recordings.video_service
              FROM recordings
              LEFT JOIN meeting_artifacts ON meeting_artifacts.recording_id = recordings.id
              WHERE (?1 IS NULL OR recordings.project_id = ?1)
@@ -2206,6 +2226,8 @@ impl Database {
                     .get::<_, Option<String>>(22)?
                     .map(|value| value.trim().to_string())
                     .filter(|value| !value.is_empty()),
+                pause_spans: parse_pause_spans(row.get::<_, Option<String>>(23)?),
+                video_service: known_video_service(row.get::<_, Option<String>>(24)?.as_deref()),
             })
         })?;
 
@@ -2244,7 +2266,9 @@ impl Database {
                     recordings.consent_notice_updated_at,
                     meeting_artifacts.summary_provenance,
                     meeting_artifacts.action_items_provenance,
-                    recordings.analysis_failure
+                    recordings.analysis_failure,
+                    recordings.pause_spans,
+                    recordings.video_service
              FROM recordings
              LEFT JOIN meeting_artifacts ON meeting_artifacts.recording_id = recordings.id
              WHERE recordings.id = ?1",
@@ -2299,6 +2323,8 @@ impl Database {
                     .get::<_, Option<String>>(22)?
                     .map(|value| value.trim().to_string())
                     .filter(|value| !value.is_empty()),
+                pause_spans: parse_pause_spans(row.get::<_, Option<String>>(23)?),
+                video_service: known_video_service(row.get::<_, Option<String>>(24)?.as_deref()),
             })
         });
 
@@ -2490,9 +2516,9 @@ impl Database {
                 id, title, project_id, duration, created_at, updated_at, source_type, audio_path, status,
                 meeting_notes, meeting_template_id, meeting_capture_mode, notes_updated_at,
                 consent_prompt_shown, consent_notice_mode, consent_notice_surface,
-                consent_notice_message, consent_notice_updated_at
+                consent_notice_message, consent_notice_updated_at, video_service
              )
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18)",
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19)",
             params![
                 &recording.id,
                 &recording.title,
@@ -2517,7 +2543,8 @@ impl Database {
                 recording
                     .consent_notice_updated_at
                     .as_ref()
-                    .map(|value| value.to_rfc3339())
+                    .map(|value| value.to_rfc3339()),
+                &recording.video_service
             ],
         )?;
         for (role, path) in plan.paths() {
@@ -3480,6 +3507,24 @@ impl Database {
     /// `updated_at` is deliberately left alone: a failed analysis pass does not
     /// change the recording's own content, and bumping it would reorder the
     /// user's library on a background failure they did not cause.
+    /// Persist the pauses taken during a meeting's capture.
+    pub fn set_recording_pause_spans(
+        &mut self,
+        recording_id: &str,
+        spans: &[crate::recording_pause::PauseSpan],
+    ) -> Result<()> {
+        let json = if spans.is_empty() {
+            None
+        } else {
+            Some(serde_json::to_string(spans)?)
+        };
+        self.conn.execute(
+            "UPDATE recordings SET pause_spans = ?1 WHERE id = ?2",
+            params![json, recording_id],
+        )?;
+        Ok(())
+    }
+
     pub fn set_recording_analysis_failure(
         &mut self,
         recording_id: &str,
@@ -5806,6 +5851,78 @@ mod tests {
     }
 
     #[test]
+    fn pause_spans_round_trip_through_list_and_detail_reads() {
+        let mut db = in_memory_db();
+        db.create_recording(&sample_recording("meeting-paused", "inbox"))
+            .unwrap();
+        assert!(db
+            .get_recording("meeting-paused")
+            .expect("read")
+            .expect("row")
+            .pause_spans
+            .is_empty());
+
+        let spans = vec![
+            crate::recording_pause::PauseSpan {
+                started_at_ms: 1_000,
+                ended_at_ms: Some(4_000),
+                at_seconds: 1.0,
+            },
+            crate::recording_pause::PauseSpan {
+                started_at_ms: 9_000,
+                ended_at_ms: Some(9_500),
+                at_seconds: 6.0,
+            },
+        ];
+        db.set_recording_pause_spans("meeting-paused", &spans)
+            .expect("persist spans");
+        assert_eq!(
+            db.get_recording("meeting-paused")
+                .expect("read")
+                .expect("row")
+                .pause_spans,
+            spans
+        );
+        let listed = db.get_recordings(None).expect("list");
+        assert_eq!(listed[0].pause_spans, spans);
+
+        // Clearing writes NULL, not "[]", and reads back as no spans.
+        db.set_recording_pause_spans("meeting-paused", &[])
+            .expect("clear spans");
+        assert!(db
+            .get_recording("meeting-paused")
+            .expect("read")
+            .expect("row")
+            .pause_spans
+            .is_empty());
+        // Garbage in the column is treated as no spans rather than a failed read.
+        assert!(parse_pause_spans(Some("not json".to_string())).is_empty());
+    }
+
+    #[test]
+    fn a_pause_still_open_is_persisted_so_a_crash_keeps_the_marker() {
+        // Spans are written on every pause and resume, not only at stop, so a
+        // meeting that crashes while paused still has its markers. The open
+        // span (no `endedAtMs`) has to survive the round trip.
+        let mut db = in_memory_db();
+        db.create_recording(&sample_recording("meeting-open-pause", "inbox"))
+            .unwrap();
+        let open = vec![crate::recording_pause::PauseSpan {
+            started_at_ms: 12_000,
+            ended_at_ms: None,
+            at_seconds: 42.5,
+        }];
+        db.set_recording_pause_spans("meeting-open-pause", &open)
+            .expect("persist an open span");
+        let read = db
+            .get_recording("meeting-open-pause")
+            .expect("read")
+            .expect("row");
+        assert_eq!(read.pause_spans, open);
+        assert_eq!(read.pause_spans[0].ended_at_ms, None);
+    }
+
+    #[test]
     fn analysis_failure_round_trips_through_list_and_detail_reads() {
         let mut db = in_memory_db();
         db.create_recording(&sample_recording("meeting-1", "inbox"))
@@ -5880,6 +5997,55 @@ mod tests {
     }
 
     #[test]
+    fn the_video_service_tag_round_trips_and_only_known_keys_survive() {
+        let mut db = in_memory_db();
+        let mut tagged = sample_recording("meeting-zoom", "inbox");
+        tagged.video_service = Some("zoom".to_string());
+        db.create_recording(&tagged).unwrap();
+        assert_eq!(
+            db.get_recording("meeting-zoom")
+                .expect("read")
+                .expect("row")
+                .video_service
+                .as_deref(),
+            Some("zoom")
+        );
+        assert_eq!(
+            db.get_recordings(None).expect("list")[0]
+                .video_service
+                .as_deref(),
+            Some("zoom")
+        );
+
+        // A meeting that began from "New meeting" carries no tag.
+        db.create_recording(&sample_recording("meeting-plain", "inbox"))
+            .unwrap();
+        assert_eq!(
+            db.get_recording("meeting-plain")
+                .expect("read")
+                .expect("row")
+                .video_service,
+            None
+        );
+
+        // A key an older or newer build wrote that this one does not know is
+        // read as no tag rather than shown to the reader verbatim.
+        db.conn
+            .execute(
+                "UPDATE recordings SET video_service = 'carrier_pigeon' WHERE id = 'meeting-plain'",
+                [],
+            )
+            .expect("write an unknown key");
+        assert_eq!(
+            db.get_recording("meeting-plain")
+                .expect("read")
+                .expect("row")
+                .video_service,
+            None
+        );
+    }
+
+    #[test]
     fn recording_analysis_failure_serializes_as_camel_case() {
         let mut recording = sample_recording("meeting-4", "inbox");
         recording.analysis_failure = Some("summary: boom".to_string());
@@ -5925,6 +6091,8 @@ mod tests {
             consent_notice_message: None,
             consent_notice_updated_at: None,
             analysis_failure: None,
+            pause_spans: Vec::new(),
+            video_service: None,
         }
     }
 

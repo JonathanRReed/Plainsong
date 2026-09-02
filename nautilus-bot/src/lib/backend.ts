@@ -1,5 +1,6 @@
 import { invoke } from "@/lib/electron";
 import type {
+  PauseSpan,
   Recording,
   Project,
   Transcript,
@@ -257,6 +258,14 @@ export async function startRecording(options: {
   preferredInputDeviceId?: string;
   template?: string;
   meetingNotes?: string;
+  /**
+   * The `callId` of the detected call whose offer the reader accepted. The
+   * sidecar binds this meeting's auto-stop to that call and to no other, so a
+   * meeting started any other way must leave it out.
+   */
+  detectedCallId?: number;
+  /** The conferencing service, stored with the recording as its tag. */
+  videoService?: string;
 }): Promise<string> {
   return await invoke("begin_meeting_capture", { options });
 }
@@ -291,6 +300,92 @@ export async function getMeetingConsentNoticeStatus(): Promise<MeetingConsentNot
 
 export async function stopRecording(recordingId: string): Promise<void> {
   await invoke("end_meeting_capture", { recordingId });
+}
+
+/** Mirrors `RecordingPauseSnapshot` in rust-sidecar/src/audio.rs. */
+export interface RecordingPauseSnapshot {
+  paused: boolean;
+  closedPausedMs: number;
+  pauseStartedAtMs: number | null;
+  spans: PauseSpan[];
+}
+
+/**
+ * Pause the live meeting: the microphone (and system audio) stay open, but
+ * nothing captured until `resumeRecording` reaches the file, the preview, or
+ * the transcript. The sidecar answers with the pause ledger and also emits
+ * `meeting-recording-state-changed`, which is what every window renders from.
+ */
+export async function pauseRecording(recordingId: string): Promise<RecordingPauseSnapshot> {
+  return await invoke("pause_recording", { recordingId });
+}
+
+export async function resumeRecording(recordingId: string): Promise<RecordingPauseSnapshot> {
+  return await invoke("resume_recording", { recordingId });
+}
+
+/** Mirrors `ActiveCall` in rust-sidecar/src/meeting_detect.rs. */
+export interface DetectedCall {
+  callId: number;
+  app: string;
+  appLabel: string;
+  videoService: string | null;
+  bundleId: string;
+  /**
+   * Whether the call was found through a window rather than only through the
+   * microphone. The title itself never leaves the sidecar: for Google Meet it
+   * is the meeting's own name.
+   */
+  hasCallWindow: boolean;
+  confidence: "medium" | "high";
+  detectedAtMs: number;
+  detectedAt: string;
+  dismissed: boolean;
+}
+
+/** Mirrors `MeetingCallStatus` in rust-sidecar/src/meeting_detect.rs. */
+export interface MeetingCallStatus {
+  supported: boolean;
+  enabled: boolean;
+  accessibilityGranted: boolean;
+  activeCall: DetectedCall | null;
+}
+
+const EMPTY_MEETING_CALL_STATUS: MeetingCallStatus = {
+  supported: false,
+  enabled: false,
+  accessibilityGranted: false,
+  activeCall: null,
+};
+
+function normalizeMeetingCallStatus(value: unknown): MeetingCallStatus {
+  if (!value || typeof value !== "object") {
+    return EMPTY_MEETING_CALL_STATUS;
+  }
+  const status = value as Partial<MeetingCallStatus>;
+  const call = status.activeCall;
+  return {
+    supported: status.supported === true,
+    enabled: status.enabled === true,
+    accessibilityGranted: status.accessibilityGranted === true,
+    activeCall:
+      call && typeof call === "object" && typeof call.callId === "number"
+        ? (call as DetectedCall)
+        : null,
+  };
+}
+
+/** What the call detector currently sees. Cannot start anything. */
+export async function getMeetingCallStatus(): Promise<MeetingCallStatus> {
+  return normalizeMeetingCallStatus(await invoke("get_meeting_call_status"));
+}
+
+/**
+ * Wave away one detected call. Scoped to that call: the next call in the
+ * same app is offered again.
+ */
+export async function dismissDetectedCall(callId: number): Promise<MeetingCallStatus> {
+  return normalizeMeetingCallStatus(await invoke("dismiss_detected_call", { callId }));
 }
 
 export async function openRecordingAudio(recordingId: string): Promise<void> {

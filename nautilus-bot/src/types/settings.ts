@@ -13,7 +13,33 @@ export interface Settings {
   privacy: PrivacySettings;
   shortcuts: KeyboardShortcuts;
   updates: UpdateSettings;
+  /**
+   * Optional on the wire because a sidecar that predates them omits them;
+   * read through `resolveMeetingsSettings` / `resolveNotificationsSettings`
+   * in `src/lib/settings-sections.ts`, never directly.
+   */
+  meetings?: MeetingsSettings;
+  notifications?: NotificationsSettings;
   theme: "light" | "dark" | "system";
+}
+
+/**
+ * Meeting behaviours that live around a capture. Mirrors `MeetingsSettings`
+ * in rust-sidecar/src/settings.rs.
+ */
+export interface MeetingsSettings {
+  /** Notice a conferencing app with a call in progress and offer to record it. Local only. */
+  callDetectionEnabled: boolean;
+  /** End a meeting when the call app it was recorded alongside quits. */
+  autoStopWhenCallAppQuits: boolean;
+  /** End a meeting after this many minutes with nothing audible; 0 turns it off. */
+  autoStopAfterSilenceMinutes: number;
+}
+
+/** Which events may become an OS notification. Mirrors `NotificationsSettings` in settings.rs. */
+export interface NotificationsSettings {
+  meetingEvents: boolean;
+  dictationFailures: boolean;
 }
 
 export type DictationAppCategoryKey =

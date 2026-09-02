@@ -38,6 +38,43 @@ Turning remote processing off revokes that authorization for new work. In-flight
 remote requests are cancelled and a result returned after revocation is not
 committed as an accepted local result.
 
+## Call detection and notifications
+
+When "Offer to record a call it notices" is on (the default), the local
+sidecar reads the list of running applications on this Mac every few seconds
+and keeps only the bundle identifiers of known conferencing apps and
+browsers, and asks CoreAudio whether the default microphone is open by
+another process. CoreAudio answers that question without any permission and
+without naming the process.
+
+**What window titles are read.** Only with Accessibility permission, and
+only where a title decides something:
+
+- Zoom's window titles, every poll, to tell an in-call window ("Zoom
+  Meeting") from the home window.
+- A browser's window titles, but only when the microphone is already open by
+  another process, or when that browser is where the call currently being
+  offered was found. Without one of those reasons Plainsong does not ask a
+  browser for its windows at all — partly for your privacy, partly because
+  asking a Chromium browser switches it into full accessibility mode for the
+  rest of its life.
+
+**What is kept, and what leaves the sidecar.** Nothing about which apps you
+run is written to disk or sent anywhere, and nothing is kept beyond the
+current poll except the one call currently being offered, which is held in
+memory until it ends. A window title is used to answer one question — is
+this window still open — and is never included in the notification, in the
+in-app cue, or in the event the sidecar sends to the app's windows. That
+event carries the app (Zoom, Google Meet), its bundle identifier, when the
+call was noticed, and whether a window was involved at all; a Google Meet
+tab's title is the meeting's own name, and it stays in the sidecar. Turning
+the setting off stops the polling within a few seconds.
+
+macOS notifications carry the app name and the meeting's state (started,
+stopped, transcript ready, notes ready or failed) or a one-line reason a
+dictation was not delivered. They never contain transcript text, notes, or
+dictated words.
+
 ## The meeting consent notice
 
 Before a Meeting starts, Plainsong shows a short notice you can copy that

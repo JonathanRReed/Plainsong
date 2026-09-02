@@ -15,6 +15,8 @@ import {
   stopDictation,
 } from "@/lib/backend/dictation";
 import {
+  pauseRecording,
+  resumeRecording,
   startRecording,
   stopRecording,
 } from "@/lib/backend/recordings";
@@ -27,6 +29,7 @@ import type { DictationStateChangedEvent as SharedDictationStateChangedEvent } f
 import {
   INITIAL_MEETING_LIFECYCLE_STATE,
   meetingCaptureRestarted,
+  meetingElapsedSeconds,
   meetingPhaseIsCapturing,
   reduceMeetingLifecycleState,
   type MeetingLifecycleEvent,
@@ -42,6 +45,12 @@ interface RecordingState {
   isSystemAudioActive: boolean;
   meetingPhase: MeetingLifecyclePhase;
   meetingMessage: string | null;
+  /** Pause state of the live meeting; the clock below is derived from it. */
+  meetingPaused: boolean;
+  meetingClosedPausedMs: number;
+  meetingPauseStartedAtMs: number | null;
+  /** When the live capture began, for a clock that excludes pauses. */
+  meetingStartedAtMs: number | null;
 }
 
 type RecordingOverlayState = MeetingLifecycleEvent;
@@ -56,8 +65,15 @@ interface RecordingContextValue extends RecordingState {
     projectId: string;
     template?: string;
     meetingNotes?: string;
+    /** The detected call whose offer this capture answers, if any. */
+    detectedCallId?: number;
+    /** The conferencing service the meeting is on, when something knew it. */
+    videoService?: string;
   }) => Promise<string | null>;
   stopMeeting: () => Promise<void>;
+  /** Pause the live meeting: capture stays open, nothing is kept until resume. */
+  pauseMeeting: () => Promise<void>;
+  resumeMeeting: () => Promise<void>;
 }
 
 const INITIAL_STATE: RecordingState = {
@@ -68,6 +84,10 @@ const INITIAL_STATE: RecordingState = {
   isSystemAudioActive: false,
   meetingPhase: "idle",
   meetingMessage: null,
+  meetingPaused: false,
+  meetingClosedPausedMs: 0,
+  meetingPauseStartedAtMs: null,
+  meetingStartedAtMs: null,
 };
 
 const RecordingContext = createContext<RecordingContextValue | null>(null);
@@ -79,10 +99,13 @@ function lifecycleFromRecordingState(state: RecordingState): MeetingLifecycleSta
   return {
     phase: state.meetingPhase,
     recordingId: state.recordingId,
-    startedAtMs: null,
+    startedAtMs: state.meetingStartedAtMs,
     systemAudioActive: state.isSystemAudioActive,
     consentPromptShown: false,
     message: state.meetingMessage,
+    paused: state.meetingPaused,
+    closedPausedMs: state.meetingClosedPausedMs,
+    pauseStartedAtMs: state.meetingPauseStartedAtMs,
   };
 }
 
@@ -107,7 +130,27 @@ function reconcileMeetingState(
     isSystemAudioActive: next.systemAudioActive,
     meetingPhase: next.phase,
     meetingMessage: next.message,
+    meetingPaused: next.paused,
+    meetingClosedPausedMs: next.closedPausedMs,
+    meetingPauseStartedAtMs: next.pauseStartedAtMs,
+    meetingStartedAtMs: next.startedAtMs,
   };
+}
+
+/** The clock, from the state it is derived from: frozen while paused. */
+function meetingDurationFrom(state: RecordingState, startTime: number, now: number): number {
+  if (state.recordingMode !== "meeting") {
+    return Math.max(0, Math.floor((now - startTime) / 1000));
+  }
+  return meetingElapsedSeconds(
+    {
+      startedAtMs: state.meetingStartedAtMs ?? startTime,
+      paused: state.meetingPaused,
+      closedPausedMs: state.meetingClosedPausedMs,
+      pauseStartedAtMs: state.meetingPauseStartedAtMs,
+    },
+    now,
+  );
 }
 
 export function RecordingProvider({ children }: { children: ReactNode }) {
@@ -131,12 +174,14 @@ export function RecordingProvider({ children }: { children: ReactNode }) {
         : Date.now();
     setState((prev) => ({
       ...prev,
-      duration: Math.max(0, Math.floor((Date.now() - startTime) / 1000)),
+      meetingStartedAtMs:
+        prev.recordingMode === "meeting" ? prev.meetingStartedAtMs ?? startTime : prev.meetingStartedAtMs,
+      duration: meetingDurationFrom(prev, startTime, Date.now()),
     }));
     timerRef.current = setInterval(() => {
       setState((prev) => ({
         ...prev,
-        duration: Math.max(0, Math.floor((Date.now() - startTime) / 1000)),
+        duration: meetingDurationFrom(prev, startTime, Date.now()),
       }));
     }, 1000);
   }, [clearTimer]);
@@ -182,6 +227,8 @@ export function RecordingProvider({ children }: { children: ReactNode }) {
       projectId: string;
       template?: string;
       meetingNotes?: string;
+      detectedCallId?: number;
+      videoService?: string;
     }) => {
       try {
         const recordingId = await startRecording(options);
@@ -207,6 +254,29 @@ export function RecordingProvider({ children }: { children: ReactNode }) {
     },
     [startTimer]
   );
+
+  const setMeetingPaused = useCallback(async (paused: boolean) => {
+    const currentId = stateRef.current.recordingId;
+    if (!currentId || stateRef.current.recordingMode !== "meeting") return;
+    // The sidecar answers with the ledger and also broadcasts the lifecycle
+    // event every window renders from; applying the answer here only closes
+    // the gap before that event lands.
+    const snapshot = paused
+      ? await pauseRecording(currentId)
+      : await resumeRecording(currentId);
+    setState((prev) =>
+      reconcileMeetingState(prev, {
+        phase: "recording",
+        recordingId: currentId,
+        paused: snapshot.paused,
+        closedPausedMs: snapshot.closedPausedMs,
+        pauseStartedAtMs: snapshot.pauseStartedAtMs,
+      }),
+    );
+  }, []);
+
+  const pauseMeeting = useCallback(() => setMeetingPaused(true), [setMeetingPaused]);
+  const resumeMeeting = useCallback(() => setMeetingPaused(false), [setMeetingPaused]);
 
   const stopMeeting = useCallback(async () => {
     const currentId = stateRef.current.recordingId;
@@ -420,8 +490,19 @@ export function RecordingProvider({ children }: { children: ReactNode }) {
       stopDictation: stopDictationFn,
       startMeeting,
       stopMeeting,
+      pauseMeeting,
+      resumeMeeting,
     }),
-    [formattedDuration, startDictationFn, startMeeting, state, stopDictationFn, stopMeeting]
+    [
+      formattedDuration,
+      pauseMeeting,
+      resumeMeeting,
+      startDictationFn,
+      startMeeting,
+      state,
+      stopDictationFn,
+      stopMeeting,
+    ]
   );
 
   return <RecordingContext.Provider value={value}>{children}</RecordingContext.Provider>;

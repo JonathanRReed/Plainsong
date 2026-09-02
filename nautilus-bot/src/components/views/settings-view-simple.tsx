@@ -24,6 +24,11 @@ import { Input } from "@/components/ui/input";
 import { Textarea } from "@/components/ui/textarea";
 import { Label } from "@/components/ui/label";
 import {
+  MEETING_AUTO_STOP_SILENCE_MINUTES_MAX,
+  resolveMeetingsSettings,
+  resolveNotificationsSettings,
+} from "@/lib/settings-sections";
+import {
   Dialog,
   DialogContent,
   DialogDescription,
@@ -583,6 +588,10 @@ export function SettingsView() {
   const persistedSettingsRef = useRef<Settings | null>(null);
 
   const settings = draftSettings;
+  // Sections a sidecar may omit, resolved to the Rust defaults so the
+  // switches below never render an undefined as "off".
+  const meetingsSettings = resolveMeetingsSettings(settings);
+  const notificationsSettings = resolveNotificationsSettings(settings);
   // The newest draft, for effects that write a whole Settings object back.
   // Such an effect can run a commit behind — a provider's model list resolves
   // in a promise, and React flushes the effect that resolution scheduled
@@ -3825,6 +3834,125 @@ export function SettingsView() {
                           })
                         }
                       />
+                    </div>
+
+                    <div className="pt-4 border-t space-y-4">
+                      <div className="space-y-1">
+                        <p className="section-heading">Notifications</p>
+                        <p className="text-sm text-muted-foreground">
+                          macOS notifications, one sentence each. Clicking one
+                          opens the meeting or the dictation it is about.
+                        </p>
+                      </div>
+
+                      <SettingsSwitch
+                        className="py-0"
+                        label="Meeting events"
+                        description="When a meeting starts, stops, or stops on its own, and when its transcript and notes are ready or fail."
+                        checked={notificationsSettings.meetingEvents}
+                        onCheckedChange={(checked) =>
+                          void updateSettings({
+                            ...settings,
+                            notifications: {
+                              ...notificationsSettings,
+                              meetingEvents: checked,
+                            },
+                          })
+                        }
+                      />
+
+                      <SettingsSwitch
+                        className="py-0"
+                        label="Dictation problems while the mini window is hidden"
+                        description="A dictation that was refused or could not be inserted. The mini window already says so when it is on screen."
+                        checked={notificationsSettings.dictationFailures}
+                        onCheckedChange={(checked) =>
+                          void updateSettings({
+                            ...settings,
+                            notifications: {
+                              ...notificationsSettings,
+                              dictationFailures: checked,
+                            },
+                          })
+                        }
+                      />
+                    </div>
+
+                    <div className="pt-4 border-t space-y-4">
+                      <div className="space-y-1">
+                        <p className="section-heading">Meetings</p>
+                        <p className="text-sm text-muted-foreground">
+                          What Plainsong does around a meeting without being
+                          asked. It never starts recording on its own.
+                        </p>
+                      </div>
+
+                      <SettingsSwitch
+                        className="py-0"
+                        label="Offer to record a call it notices"
+                        description="Checks which apps are running on this Mac every few seconds — Zoom, Microsoft Teams, Google Meet in a browser, Webex, FaceTime, Slack, Discord — and offers to record when one has a call in progress. Local only; nothing is sent anywhere. Google Meet needs Accessibility access to read the browser window's title."
+                        checked={meetingsSettings.callDetectionEnabled}
+                        onCheckedChange={(checked) =>
+                          void updateSettings({
+                            ...settings,
+                            meetings: {
+                              ...meetingsSettings,
+                              callDetectionEnabled: checked,
+                            },
+                          })
+                        }
+                      />
+
+                      <SettingsSwitch
+                        className="py-0"
+                        label="Stop the meeting when the call app quits"
+                        description="A meeting recorded alongside a detected call ends when that app quits or its call window closes. The audio is saved and transcribed as usual."
+                        checked={meetingsSettings.autoStopWhenCallAppQuits}
+                        onCheckedChange={(checked) =>
+                          void updateSettings({
+                            ...settings,
+                            meetings: {
+                              ...meetingsSettings,
+                              autoStopWhenCallAppQuits: checked,
+                            },
+                          })
+                        }
+                      />
+
+                      <div className="space-y-2">
+                        <Label htmlFor="meeting-auto-stop-silence-minutes">
+                          Stop the meeting after minutes of silence
+                        </Label>
+                        <p className="text-sm text-muted-foreground">
+                          When nothing audible has come from any captured
+                          source for this long, the meeting stops and is
+                          saved. 0 turns this off. Paused time does not count.
+                        </p>
+                        <Input
+                          id="meeting-auto-stop-silence-minutes"
+                          type="number"
+                          min={0}
+                          max={MEETING_AUTO_STOP_SILENCE_MINUTES_MAX}
+                          className="w-32"
+                          value={meetingsSettings.autoStopAfterSilenceMinutes}
+                          onChange={(e) => {
+                            const raw = Number(e.target.value);
+                            const next = Number.isFinite(raw)
+                              ? Math.min(
+                                  Math.max(0, Math.round(raw)),
+                                  MEETING_AUTO_STOP_SILENCE_MINUTES_MAX,
+                                )
+                              : meetingsSettings.autoStopAfterSilenceMinutes;
+                            void updateSettings({
+                              ...settings,
+                              meetings: {
+                                ...meetingsSettings,
+                                autoStopAfterSilenceMinutes: next,
+                              },
+                            });
+                          }}
+                        />
+                      </div>
                     </div>
 
                     <div className="pt-4 border-t space-y-5">

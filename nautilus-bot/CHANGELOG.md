@@ -13,6 +13,34 @@ changed underneath `0.9.0-beta.2`. See `LAUNCH.md` for which qualification
 evidence is stale and must be recaptured before this becomes a candidate.
 
 ### Added
+- Plainsong now notices a live call and offers to record it. Every few
+  seconds the sidecar checks, locally, which apps are running; when Zoom,
+  Microsoft Teams, Webex, FaceTime, Slack, Discord, or a browser window
+  titled for Google Meet (Accessibility permission needed) has a second sign
+  of a call — its call window, or the microphone open by another app — a
+  macOS notification asks "Zoom call started. Record it with Plainsong?" and
+  the Meetings header shows the same offer beside the calendar cue. Clicking
+  either opens the usual consent sheet with the title prefilled ("Zoom call,
+  14:05"); nothing records without that click, and dismissing is per call.
+  Off switch and copy in Settings › General › Meetings.
+- A meeting recorded alongside a detected call stops on its own when that
+  app quits or its call window closes, and any meeting stops after 15
+  minutes with nothing audible on every captured source (Settings › General
+  › Meetings; 0 turns the silence stop off). Both go through the normal stop
+  path, so the audio is saved, hashed and transcribed, and a notification
+  says why ("Meeting stopped: Zoom closed").
+- Pause and resume a meeting from the recording mini window, the Meetings
+  header, or the live meeting card (⌘⇧P). The microphone and system audio
+  stay open, so resume is instant, but nothing captured while paused reaches
+  the file, the live preview, or the silence watchdogs; the clock stands
+  still, the saved audio skips the gap, and the transcript timeline marks it
+  as "[Paused 2 min 10 s]". Pauses are recorded on the meeting and in the
+  audit log.
+- macOS notifications for meeting events (started, stopped, stopped on its
+  own, transcript ready, notes ready or failed) and for a dictation that was
+  refused or could not be delivered while the dictation mini window is
+  hidden. One sentence each; clicking one opens the meeting or the dictation
+  view. Both classes have a switch in Settings › General › Notifications.
 - Onboarding now asks how meeting notes get written: local Ollama (with live
   detection), bring-your-own-key cloud AI, or transcripts only — instead of
   silently defaulting to an Ollama install that usually isn't there.
@@ -149,6 +177,37 @@ evidence is stale and must be recaptured before this becomes a candidate.
   files that still carry it load cleanly and are rewritten without it.
 
 ### Fixed
+- A meeting only stops itself for a call ending when it is the call whose
+  offer was actually accepted. A recording started any other way, or started
+  from an offer that was waved away, is no longer ended because some
+  unrelated conferencing app quit.
+- Call detection no longer announces "Google Meet call started" for a
+  browser tab that merely has the word "Meet" in its title. It now matches
+  Google's own title shapes and, for the browser route, also requires the
+  microphone to be open by another process.
+- A browser is only asked for its window titles when the microphone is
+  already open elsewhere or when it is where the current call was found;
+  reading them every few seconds switched Chromium into full accessibility
+  mode for good. Each window read now carries its own quarter-second
+  timeout, so an unresponsive browser costs a poll a fraction of a second
+  rather than a minute.
+- A meeting going quiet is now warned about at half the silence fuse ("No
+  audio for 7 minutes; Plainsong stops this meeting in 8 unless sound
+  resumes") instead of only in the sentence that announces the stop.
+- Pauses are written to the meeting as they happen rather than only at stop,
+  so a crash mid-meeting keeps the markers of where the gaps are.
+- Stopping a meeting while it is paused no longer appends the audio the
+  mixer was holding back from during the pause, and time spent paused no
+  longer counts toward the "captured seconds" a degraded meeting reports.
+- The "Zoom call started" notification no longer fires while Plainsong is
+  the frontmost app, where the Meetings header already shows the same offer;
+  and a shown notification is kept alive until it is clicked or dismissed,
+  so its click still opens the consent sheet minutes later.
+- A meeting recorded alongside a detected call, and one started from a
+  calendar event, now both carry that call's or event's conferencing service
+  on the recording.
+- Onboarding's line about call detection now names Slack and Discord, which
+  detection has always matched.
 - A mic failure mid-meeting in a "me and them" (microphone plus system
   audio) recording is now detected and noted on the meeting instead of being
   silently padded with silence and presented as a complete recording; a
@@ -202,6 +261,11 @@ evidence is stale and must be recaptured before this becomes a candidate.
   download existed to fix a problem no route has.
 
 ### Security
+- The window title a call was detected through no longer leaves the sidecar.
+  It was broadcast to every app window on `meeting-call-detected`, and for
+  Google Meet that title is the meeting's own name; only whether a window
+  was involved travels now. `docs/beta/PRIVACY-AND-CLOUD.md` says exactly
+  what detection reads and what it keeps.
 - Dictation now refuses to deliver into password boxes and other secure
   inputs. Before the direct Accessibility write, before the clipboard +
   Cmd+V fallback, and before the Cmd+C used to read a selection, the sidecar

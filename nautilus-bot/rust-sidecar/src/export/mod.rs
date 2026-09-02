@@ -388,6 +388,8 @@ mod tests {
             consent_notice_message: None,
             consent_notice_updated_at: Some(now),
             analysis_failure: None,
+            pause_spans: Vec::new(),
+            video_service: None,
         }
     }
 
