@@ -823,7 +823,7 @@ export function AsrProviderManager({ className }: AsrProviderManagerProps) {
       case "moonshine":
         return "Use the Download button to fetch the selected Moonshine bundle. Tiny is the smallest edge model; Base is the default stable option.";
       case "qwen3_asr":
-        return "Use the Download button to fetch the Qwen3-ASR 0.6B model (~1.9 GiB, 7 files). The autoregressive decoder with KV cache threading is implemented but not yet validated with real audio — transcription is gated off until end-to-end testing.";
+        return "Use the Download button to fetch the Qwen3-ASR 0.6B model (~1.9 GiB, 7 files). Experimental: English is verified in Plainsong; 30 languages including Chinese, Japanese and Korean are listed upstream; it runs slower than real time on the CPU.";
       case "windows_sdk_dictation":
         return "Use a Windows x86_64 build with Windows speech recognition components available, or pick another ASR provider";
       case "elevenlabs_scribe":

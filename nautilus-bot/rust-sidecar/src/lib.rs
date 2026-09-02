@@ -3184,14 +3184,6 @@ async fn ensure_asr_route_ready(
                 .to_string(),
         );
     }
-    if provider_type == asr::AsrProviderType::Qwen3Asr
-        && effective_provider == asr::AsrProviderType::Qwen3Asr
-    {
-        return Err(
-            "Qwen3-ASR is not launch-ready in this build (decoder implemented but not yet validated with real audio). Choose a stable local route such as Parakeet, Whisper, or Apple Native Speech."
-                .to_string(),
-        );
-    }
     let diagnostics = state
         .asr_manager
         .get_runtime_diagnostics(provider_type)

@@ -753,6 +753,14 @@ pub const PARAKEET_V3_LANGUAGES: &[&str] = &[
 
 const ENGLISH_ONLY_LANGUAGES: &[&str] = &["en"];
 
+/// The 30 languages the Qwen3-ASR model card lists. Mirrors
+/// `asr::qwen3_asr::QWEN3_ASR_LANGUAGES` (a test keeps the two in step) and
+/// `QWEN3_ASR_LANGUAGE_CODES` in src/lib/asr-capabilities.ts.
+pub const QWEN3_ASR_LANGUAGES: &[&str] = &[
+    "ar", "cs", "da", "de", "el", "en", "es", "fa", "fi", "fil", "fr", "hi", "hu", "id", "it",
+    "ja", "ko", "mk", "ms", "nl", "pl", "pt", "ro", "ru", "sv", "th", "tr", "vi", "yue", "zh",
+];
+
 /// Which languages the *selected* dictation model can actually transcribe.
 ///
 /// `None` means the model imposes no set Plainsong can enumerate -- a cloud
@@ -789,7 +797,7 @@ pub fn dictation_supported_languages(
             }
         }
         "moonshine" => Some(ENGLISH_ONLY_LANGUAGES),
-        "qwen3_asr" => Some(WHISPER_MULTILINGUAL_LANGUAGES),
+        "qwen3_asr" => Some(QWEN3_ASR_LANGUAGES),
         // Cloud and platform routes follow their own service/OS language list,
         // which Plainsong cannot enumerate locally.
         _ => None,
@@ -1696,6 +1704,37 @@ mod tests {
         normalize_loaded_transcription_settings(&mut retired_model);
         assert_eq!(retired_model.dictation_provider, "parakeet");
         assert_eq!(retired_model.dictation_model_id, "parakeet-tdt-0.6b-v3");
+    }
+
+    #[test]
+    fn qwen3_asr_language_list_matches_the_provider_and_names_cjk() {
+        let supported = dictation_supported_languages("qwen3_asr", "qwen3-asr-0.6b")
+            .expect("Qwen3-ASR enumerates its languages");
+        assert_eq!(supported.len(), 30);
+        for code in ["en", "zh", "ja", "ko", "yue", "fil"] {
+            assert!(supported.contains(&code), "missing {code}");
+        }
+        let mut from_provider: Vec<&str> = crate::asr::qwen3_asr::QWEN3_ASR_LANGUAGES
+            .iter()
+            .map(|(_, code)| *code)
+            .collect();
+        from_provider.sort_unstable();
+        let mut from_settings: Vec<&str> = supported.to_vec();
+        from_settings.sort_unstable();
+        assert_eq!(from_settings, from_provider);
+
+        assert!(validate_dictation_active_languages(
+            "qwen3_asr",
+            "qwen3-asr-0.6b",
+            &["zh".to_string(), "ja".to_string(), "ko".to_string()]
+        )
+        .is_ok());
+        assert!(validate_dictation_active_languages(
+            "qwen3_asr",
+            "qwen3-asr-0.6b",
+            &["uk".to_string()]
+        )
+        .is_err());
     }
 
     #[test]

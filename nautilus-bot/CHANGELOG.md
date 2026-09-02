@@ -31,6 +31,17 @@ evidence is stale and must be recaptured before this becomes a candidate.
 - An explicit, off-by-default "Also copy every dictation to the clipboard"
   toggle in Settings, with the plain-language caveat that turning it on
   replaces clipboard contents on every dictation and does not restore them.
+- Qwen3-ASR 0.6B (int4 ONNX, ~1.9 GiB) is now selectable as an
+  experimental local route for dictation and meetings, the only local
+  route here to Chinese, Japanese and Korean (30 languages listed
+  upstream). It had shipped downloadable but gated off because it was
+  never run on real audio; the first run found the mel layout transposed
+  and the chat-template prompt missing, both fixed. Validated on English
+  real audio (3.7% WER on the 44 s fixture against a Parakeet/whisper
+  cross-checked reference). It is not promoted and not the default: the
+  int4 decoders run on the CPU at roughly real time or slower (26-59 s for
+  44 s of speech on an M4 Pro, measured on a shared CPU, so provisional),
+  and the route's own copy says so.
 
 ### Changed
 - **Parakeet TDT 0.6B v3 is now the default and recommended dictation

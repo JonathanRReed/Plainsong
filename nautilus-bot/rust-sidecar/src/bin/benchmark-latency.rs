@@ -64,7 +64,8 @@ Options:
                         the primary but not gated against its thresholds
                         [default: scripts/fixtures/real-speech-44s.wav]
   --provider <NAME>     whisper, parakeet, moonshine, whisper_candle,
-                        distil_whisper, or macos_apple_speech [default: whisper]
+                        distil_whisper, macos_apple_speech, or qwen3_asr
+                        [default: whisper]
   --model <ID>          Model ID for the selected provider [default: provider default]
   --runs <1..100>       Timed transcription runs after one warm-up [default: 5]
   --out <PATH>          provider_transcription_only JSON report path
@@ -74,6 +75,8 @@ Options:
                         secondary fixtures, local format on/off, mocked
                         insertion)
                         [default: artifacts/qa/dictation-latency-e2e.json]
+  --print-transcript    Also print each fixture's full final transcript to
+                        stderr (the receipts only carry 160-char samples)
   -h, --help            Print this help without loading a model
 
 Output:
@@ -92,6 +95,7 @@ struct BenchmarkArgs {
     runs: usize,
     report_path: PathBuf,
     report_path_e2e: PathBuf,
+    print_transcript: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -126,6 +130,7 @@ fn provider_from_str(value: &str) -> Option<AsrProviderType> {
         "whisper_candle" => AsrProviderType::WhisperCandle,
         "distil_whisper" => AsrProviderType::DistilWhisper,
         "macos_apple_speech" => AsrProviderType::MacosAppleSpeech,
+        "qwen3_asr" => AsrProviderType::Qwen3Asr,
         _ => return None,
     })
 }
@@ -161,6 +166,7 @@ fn parse_args(args: &[String]) -> Result<ParseOutcome, String> {
     let mut runs = None;
     let mut report_path = None;
     let mut report_path_e2e = None;
+    let mut print_transcript = false;
     let mut index = 0;
 
     while index < args.len() {
@@ -193,6 +199,9 @@ fn parse_args(args: &[String]) -> Result<ParseOutcome, String> {
                 let value = next_value(args, &mut index, "--out-e2e")?;
                 set_once(&mut report_path_e2e, value, "--out-e2e")?;
             }
+            "--print-transcript" => {
+                print_transcript = true;
+            }
             "--" => {}
             unknown => {
                 return Err(format!("Unknown option '{unknown}'"));
@@ -205,7 +214,7 @@ fn parse_args(args: &[String]) -> Result<ParseOutcome, String> {
     let Some(provider_type) = provider_from_str(&provider_name) else {
         return Err(format!(
             "Unknown provider '{provider_name}'. Valid providers: whisper, parakeet, \
-             moonshine, whisper_candle, distil_whisper, macos_apple_speech"
+             moonshine, whisper_candle, distil_whisper, macos_apple_speech, qwen3_asr"
         ));
     };
 
@@ -245,6 +254,7 @@ fn parse_args(args: &[String]) -> Result<ParseOutcome, String> {
         report_path_e2e: PathBuf::from(
             report_path_e2e.unwrap_or_else(|| DEFAULT_REPORT_PATH_E2E.to_string()),
         ),
+        print_transcript,
     }))
 }
 
@@ -789,6 +799,14 @@ fn main() {
             }
         };
 
+        if args.print_transcript {
+            eprintln!("transcript [{}]: {}", primary.fixture, primary.last_transcript);
+            eprintln!(
+                "transcript [{}]: {}",
+                secondary.fixture, secondary.last_transcript
+            );
+        }
+
         let p50 = percentile(primary.asr_wall_ms.clone(), 50.0);
         let p95 = percentile(primary.asr_wall_ms.clone(), 95.0);
         let speedup = if p50 > 0 {
@@ -979,6 +997,20 @@ mod tests {
             !PathBuf::from(DEFAULT_WAV).is_absolute(),
             "default fixture paths must stay repo-relative, not canonicalized"
         );
+    }
+
+    #[test]
+    fn print_transcript_is_off_unless_asked_for() {
+        let parse = |extra: &[&str]| {
+            let mut args = vec!["--wav", "Cargo.toml", "--secondary-wav", "Cargo.toml"];
+            args.extend_from_slice(extra);
+            match parse_args(&strings(&args)).expect("parse benchmark args") {
+                ParseOutcome::Run(args) => args.print_transcript,
+                ParseOutcome::Help => panic!("expected runnable benchmark args"),
+            }
+        };
+        assert!(!parse(&[]));
+        assert!(parse(&["--print-transcript"]));
     }
 
     #[test]

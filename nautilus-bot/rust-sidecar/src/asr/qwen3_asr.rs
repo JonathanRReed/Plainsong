@@ -31,23 +31,32 @@
 //! 5. Loop: embedding lookup → decoder_step → next token logits + KV cache
 //! 6. Decode tokens, strip language prefix
 //!
-//! # Performance (0.6B int4, CPU)
+//! # Frontend and prompt contract
 //!
-//! - WER: 5.16% (LibriSpeech test-other) vs Parakeet TDT 0.6B INT8 at 5.45%
-//! - RTF: 0.17x (faster than real-time)
-//! - Model size: ~1.3 GB compressed (int4 variant)
+//! Both follow the export's own reference consumer
+//! (`andrewleech/qwen3-asr-onnx`, `src/mel.py` and `src/prompt.py`):
+//!
+//! - The mel frontend is Whisper's: centered STFT with reflect padding,
+//!   periodic Hann window, power spectrum, Slaney-normalized 128-bin mel
+//!   filterbank, `log10`, an 8-decade dynamic-range floor, `(x + 4) / 4`,
+//!   last frame dropped, laid out as `[1, n_mels, frames]`.
+//! - The prompt is the chat template
+//!   `<|im_start|>system\n<|im_end|>\n<|im_start|>user\n<|audio_start|>`
+//!   `<|audio_pad|>×N<|audio_end|><|im_end|>\n<|im_start|>assistant\n`, where
+//!   N is the encoder's output length. The role words are looked up in the
+//!   shipped tokenizer at load time rather than hard-coded.
+//! - The model answers `language <Name><asr_text><transcript>`; the
+//!   `<asr_text>` token splits the detected language from the text.
 //!
 //! # Status
 //!
-//! The encoder + decoder_init (prefill) and autoregressive decoder_step loop
-//! with KV cache threading are implemented. The decoder loop threads
-//! present_keys/present_values outputs from decoder_init into past_keys/
-//! past_values inputs for decoder_step by layer index, running until EOS or
-//! the token cap is reached.
-//!
-//! The implementation is not yet validated with real audio — transcription
-//! is gated out of active use (`is_provider_transcription_enabled` returns
-//! false) until end-to-end testing confirms correct output.
+//! Validated with real audio on 2026-09-01 (see the opt-in
+//! `qwen3_asr_real_audio_eval` test and item 7 of
+//! docs/model-inventory-upgrades.md): the first end-to-end run found the mel
+//! layout transposed and the chat-template prefix missing, both fixed here.
+//! Upstream reports 5.16% WER on LibriSpeech test-other for the int4 export.
+//! On CPU the int4 decoders run slower than real time; the measured numbers
+//! live in the route's tradeoff copy (src/lib/asr-capabilities.ts).
 
 use super::{
     AsrProvider, AsrProviderType, DownloadStatus, ModelInfo, TranscriptSegment, TranscriptionResult,
@@ -87,6 +96,66 @@ const QWEN3_ASR_SAMPLE_RATE: u32 = 16_000;
 /// 512 tokens is sufficient for ~60s of typical English audio.
 #[cfg(feature = "asr-parakeet")]
 const QWEN3_ASR_MAX_TOKENS: usize = 512;
+
+/// `<asr_text>`: separates the model's language tag from the transcript in
+/// its answer. `config.json` carries the id; this is the fallback when an
+/// older config omits it.
+const QWEN3_ASR_TEXT_TOKEN_ID: i64 = 151704;
+
+/// The 30 languages the Qwen3-ASR model card lists (the 22 Chinese dialects
+/// it also names all surface as `zh`/`yue`). Kept in one place so the
+/// settings language picker and the detected-language mapping agree.
+pub(crate) const QWEN3_ASR_LANGUAGES: &[(&str, &str)] = &[
+    ("Chinese", "zh"),
+    ("English", "en"),
+    ("Cantonese", "yue"),
+    ("Arabic", "ar"),
+    ("German", "de"),
+    ("French", "fr"),
+    ("Spanish", "es"),
+    ("Portuguese", "pt"),
+    ("Indonesian", "id"),
+    ("Italian", "it"),
+    ("Korean", "ko"),
+    ("Russian", "ru"),
+    ("Thai", "th"),
+    ("Vietnamese", "vi"),
+    ("Japanese", "ja"),
+    ("Turkish", "tr"),
+    ("Hindi", "hi"),
+    ("Malay", "ms"),
+    ("Dutch", "nl"),
+    ("Swedish", "sv"),
+    ("Danish", "da"),
+    ("Finnish", "fi"),
+    ("Polish", "pl"),
+    ("Czech", "cs"),
+    ("Filipino", "fil"),
+    ("Persian", "fa"),
+    ("Greek", "el"),
+    ("Hungarian", "hu"),
+    ("Macedonian", "mk"),
+    ("Romanian", "ro"),
+];
+
+/// ISO-style code for a language name the model emits, or the lowercased
+/// name when it is not one of the 30 the model card lists.
+fn language_code_for_name(name: &str) -> String {
+    let trimmed = name.trim();
+    QWEN3_ASR_LANGUAGES
+        .iter()
+        .find(|(label, _)| label.eq_ignore_ascii_case(trimmed))
+        .map(|(_, code)| (*code).to_string())
+        .unwrap_or_else(|| trimmed.to_lowercase())
+}
+
+/// Transcription seconds per audio second measured in Plainsong on an Apple
+/// M4 Pro with the int4 decoders on CPU (`benchmark-latency --provider
+/// qwen3_asr`, 44 s fixture, 3-run p50 on 2026-09-01). Above 1.0 means
+/// slower than real time. Provisional: the CPU was shared with other
+/// builds during the run; an uncontended run of the same fixture measured
+/// 0.58. Re-measure on a quiet machine before quoting it.
+const QWEN3_ASR_MEASURED_RTF: f64 = 1.33;
 
 fn qwen3_asr_artifact_max_bytes(local_name: &str) -> u64 {
     match local_name {
@@ -186,6 +255,40 @@ struct Qwen3AsrRuntime {
     embed_tokens: ndarray::Array2<f32>,
     config: Qwen3AsrConfig,
     tokenizer: tokenizers::Tokenizer,
+    roles: RoleTokens,
+}
+
+/// Token ids for the chat-template role words, resolved from the shipped
+/// tokenizer so the prompt cannot drift from the vocabulary it decodes with.
+#[cfg(feature = "asr-parakeet")]
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct RoleTokens {
+    system: Vec<i64>,
+    user: Vec<i64>,
+    assistant: Vec<i64>,
+    newline: Vec<i64>,
+}
+
+#[cfg(feature = "asr-parakeet")]
+impl RoleTokens {
+    fn from_tokenizer(tokenizer: &tokenizers::Tokenizer) -> Result<Self> {
+        let encode = |text: &str| -> Result<Vec<i64>> {
+            let encoding = tokenizer
+                .encode(text, false)
+                .map_err(|e| anyhow::anyhow!("Failed to tokenize {text:?}: {e}"))?;
+            let ids: Vec<i64> = encoding.get_ids().iter().map(|id| *id as i64).collect();
+            if ids.is_empty() {
+                anyhow::bail!("Qwen3-ASR tokenizer produced no ids for {text:?}");
+            }
+            Ok(ids)
+        };
+        Ok(Self {
+            system: encode("system")?,
+            user: encode("user")?,
+            assistant: encode("assistant")?,
+            newline: encode("\n")?,
+        })
+    }
 }
 
 #[cfg(feature = "asr-parakeet")]
@@ -213,9 +316,12 @@ struct DecoderConfig {
     hidden_size: usize,
 }
 
+/// Mel parameters as `config.json` states them. Every field is checked
+/// against the constants this frontend is built for at load time, so a
+/// re-exported model with a different frontend fails loudly instead of
+/// producing fluent nonsense.
 #[cfg(feature = "asr-parakeet")]
 #[derive(serde::Deserialize, Default)]
-#[allow(dead_code)]
 struct MelConfig {
     #[serde(default = "default_n_mels")]
     n_mels: usize,
@@ -248,12 +354,12 @@ fn default_fmax() -> f32 {
     8000.0
 }
 
+/// The special-token ids the prompt and the answer parser need. The pad id
+/// (`<|endoftext|>`) is deliberately not read: it doubles as an EOS id and
+/// arrives through `eos_token_ids`.
 #[cfg(feature = "asr-parakeet")]
 #[derive(serde::Deserialize, Default)]
-#[allow(dead_code)]
 struct SpecialTokens {
-    #[serde(default)]
-    pad_token_id: i64,
     #[serde(default)]
     im_start_token_id: i64,
     #[serde(default)]
@@ -264,8 +370,15 @@ struct SpecialTokens {
     audio_end_token_id: i64,
     #[serde(default)]
     audio_pad_token_id: i64,
+    #[serde(default = "default_asr_text_token_id")]
+    asr_text_token_id: i64,
     #[serde(default)]
     eos_token_ids: Vec<i64>,
+}
+
+#[cfg(feature = "asr-parakeet")]
+fn default_asr_text_token_id() -> i64 {
+    QWEN3_ASR_TEXT_TOKEN_ID
 }
 
 #[cfg(feature = "asr-parakeet")]
@@ -340,6 +453,22 @@ fn load_runtime(model_dir: &Path) -> Result<Qwen3AsrRuntime> {
             QWEN3_ASR_N_MELS
         ));
     }
+    if config.mel.n_fft != QWEN3_ASR_N_FFT || config.mel.hop_length != QWEN3_ASR_HOP_LENGTH {
+        return Err(anyhow::anyhow!(
+            "Qwen3-ASR config n_fft={} hop_length={} do not match the expected {}/{}",
+            config.mel.n_fft,
+            config.mel.hop_length,
+            QWEN3_ASR_N_FFT,
+            QWEN3_ASR_HOP_LENGTH
+        ));
+    }
+    if config.mel.sample_rate != 0 && config.mel.sample_rate != QWEN3_ASR_SAMPLE_RATE {
+        return Err(anyhow::anyhow!(
+            "Qwen3-ASR config sample_rate={} does not match expected {}",
+            config.mel.sample_rate,
+            QWEN3_ASR_SAMPLE_RATE
+        ));
+    }
 
     let tokenizer = tokenizers::Tokenizer::from_file(model_dir.join(QWEN3_ASR_LOCAL_TOKENIZER))
         .map_err(|e| anyhow::anyhow!("Failed to load Qwen3-ASR tokenizer: {}", e))?;
@@ -362,6 +491,7 @@ fn load_runtime(model_dir: &Path) -> Result<Qwen3AsrRuntime> {
     .context("Failed to load Qwen3-ASR decoder_step")?;
 
     let embed_tokens = load_embed_cache(&model_dir.join(QWEN3_ASR_LOCAL_EMBED_TOKENS), &config)?;
+    let roles = RoleTokens::from_tokenizer(&tokenizer)?;
 
     tracing::info!(
         "Qwen3-ASR loaded: encoder + decoder_init + decoder_step + embed_tokens {:?}",
@@ -376,6 +506,7 @@ fn load_runtime(model_dir: &Path) -> Result<Qwen3AsrRuntime> {
         embed_tokens,
         config,
         tokenizer,
+        roles,
     })
 }
 
@@ -430,8 +561,16 @@ fn prewarm_runtime(_model_dir: &Path) -> Result<()> {
 }
 
 // ---------------------------------------------------------------------------
-// Mel spectrogram computation (128-bin log-mel, matching Qwen3-ASR config)
+// Mel spectrogram computation: Whisper's frontend, as the export expects
 // ---------------------------------------------------------------------------
+
+/// Whisper-compatible 128-bin log-mel spectrogram laid out `[1, n_mels, T]`.
+///
+/// Mirrors the export's reference `src/mel.py` step for step: centered STFT
+/// (reflect padding of `n_fft / 2` on both sides, as `torch.stft` does),
+/// periodic Hann window, power spectrum, Slaney mel filterbank, `log10`
+/// floored at `1e-10`, values floored at `max - 8`, then `(x + 4) / 4`, and
+/// the last STFT frame dropped to match `WhisperFeatureExtractor`.
 #[cfg(feature = "asr-parakeet")]
 fn compute_log_mel_spectrogram(
     samples: &[f32],
@@ -439,92 +578,111 @@ fn compute_log_mel_spectrogram(
     fmax: f32,
 ) -> Result<ndarray::Array3<f32>> {
     use rustfft::FftPlanner;
-    use std::f32::consts::PI;
+    use std::f64::consts::PI;
 
     let n_fft = QWEN3_ASR_N_FFT;
     let hop = QWEN3_ASR_HOP_LENGTH;
     let n_mels = QWEN3_ASR_N_MELS;
     let sample_rate = QWEN3_ASR_SAMPLE_RATE as f32;
+    let pad = n_fft / 2;
 
-    // Hann window
-    let window: Vec<f64> = (0..n_fft)
-        .map(|i| 0.5 - 0.5 * (2.0 * PI * i as f32 / n_fft as f32).cos() as f64)
-        .collect();
-
-    let mel_bank =
-        crate::audio::mel::create_mel_filterbank_ln(n_fft, sample_rate, n_mels, fmin, fmax);
-
-    let num_frames = if samples.len() < n_fft {
-        1
+    // torch.stft(center=True) reflect-pads; reflection needs more than `pad`
+    // samples on each side, so a clip too short for that is zero-padded.
+    let mut padded: Vec<f64> = Vec::with_capacity(samples.len() + 2 * pad);
+    if samples.len() > pad {
+        padded.extend(samples[1..=pad].iter().rev().map(|s| *s as f64));
+        padded.extend(samples.iter().map(|s| *s as f64));
+        let tail_start = samples.len() - pad - 1;
+        padded.extend(
+            samples[tail_start..samples.len() - 1]
+                .iter()
+                .rev()
+                .map(|s| *s as f64),
+        );
     } else {
-        (samples.len() - n_fft) / hop + 1
-    };
+        padded.extend(std::iter::repeat_n(0.0, pad));
+        padded.extend(samples.iter().map(|s| *s as f64));
+        padded.extend(std::iter::repeat_n(0.0, pad));
+    }
 
-    let mut all_features = Vec::with_capacity(num_frames * n_mels);
+    let window: Vec<f64> = (0..n_fft)
+        .map(|i| 0.5 - 0.5 * (2.0 * PI * i as f64 / n_fft as f64).cos())
+        .collect();
+    let mel_bank =
+        crate::audio::mel::create_mel_filterbank_slaney(n_fft, sample_rate, n_mels, fmin, fmax);
+
+    let stft_frames = if padded.len() < n_fft {
+        0
+    } else {
+        1 + (padded.len() - n_fft) / hop
+    };
+    // WhisperFeatureExtractor drops the final frame.
+    let num_frames = stft_frames.saturating_sub(1);
+    if num_frames == 0 {
+        return Err(anyhow::anyhow!(
+            "Audio is too short for a Qwen3-ASR mel spectrogram ({} samples)",
+            samples.len()
+        ));
+    }
+
     let mut planner = FftPlanner::new();
     let fft = planner.plan_fft_forward(n_fft);
+    let mut log_mel = vec![0.0f64; n_mels * num_frames];
+    let mut buffer: Vec<rustfft::num_complex::Complex<f64>> = vec![Default::default(); n_fft];
+    let mut power = vec![0.0f64; n_fft / 2 + 1];
 
     for frame_idx in 0..num_frames {
         let start = frame_idx * hop;
-        let end = (start + n_fft).min(samples.len());
-
-        let mut buffer: Vec<rustfft::num_complex::Complex<f64>> = (0..n_fft)
-            .map(|i| {
-                if start + i < end {
-                    rustfft::num_complex::Complex::new(samples[start + i] as f64 * window[i], 0.0)
-                } else {
-                    rustfft::num_complex::Complex::new(0.0, 0.0)
-                }
-            })
-            .collect();
+        for (i, slot) in buffer.iter_mut().enumerate() {
+            *slot = rustfft::num_complex::Complex::new(padded[start + i] * window[i], 0.0);
+        }
         fft.process(&mut buffer);
-
-        let power_spectrum: Vec<f64> = buffer[..n_fft / 2 + 1]
-            .iter()
-            .map(|c| (c.norm_sqr() / n_fft as f64).max(1e-10))
-            .collect();
-
-        for mel_bank_row in &mel_bank {
-            let mut mel_energy = 0.0f64;
-            for (bin_idx, &weight) in mel_bank_row.iter().enumerate() {
-                if bin_idx < power_spectrum.len() {
-                    mel_energy += power_spectrum[bin_idx] * weight;
-                }
-            }
-            all_features.push((mel_energy + 1e-10).ln() as f32);
+        for (bin, slot) in power.iter_mut().enumerate() {
+            *slot = buffer[bin].norm_sqr();
+        }
+        for (mel_idx, mel_row) in mel_bank.iter().enumerate() {
+            let energy: f64 = mel_row
+                .iter()
+                .zip(power.iter())
+                .map(|(weight, value)| weight * value)
+                .sum();
+            log_mel[mel_idx * num_frames + frame_idx] = energy.max(1e-10).log10();
         }
     }
 
-    // CMVN (mean normalization per mel bin)
-    let num_features = all_features.len() / n_mels;
-    if num_features > 0 {
-        let mut means = vec![0.0f32; n_mels];
-        for frame_idx in 0..num_features {
-            for (mel_idx, mean) in means.iter_mut().enumerate() {
-                *mean += all_features[frame_idx * n_mels + mel_idx];
-            }
-        }
-        for mean in &mut means {
-            *mean /= num_features as f32;
-        }
-        for frame_idx in 0..num_features {
-            for (mel_idx, mean) in means.iter().enumerate() {
-                all_features[frame_idx * n_mels + mel_idx] -= mean;
-            }
-        }
-    }
+    let max = log_mel.iter().copied().fold(f64::MIN, f64::max);
+    let floor = max - 8.0;
+    let normalized: Vec<f32> = log_mel
+        .iter()
+        .map(|value| ((value.max(floor) + 4.0) / 4.0) as f32)
+        .collect();
 
-    ndarray::Array3::from_shape_vec((1, num_features, n_mels), all_features)
+    ndarray::Array3::from_shape_vec((1, n_mels, num_frames), normalized)
         .context("Failed to shape Qwen3-ASR mel spectrogram")
 }
 
 // ---------------------------------------------------------------------------
 // Prompt building and inference
 // ---------------------------------------------------------------------------
+/// The chat-template prompt the export's decoder was traced with:
+/// an empty system turn, a user turn holding the audio placeholders, and an
+/// open assistant turn for the model to fill.
 #[cfg(feature = "asr-parakeet")]
-fn build_prompt_ids(special: &SpecialTokens, audio_token_count: usize) -> Vec<i64> {
-    let mut ids = Vec::with_capacity(audio_token_count + 8);
+fn build_prompt_ids(
+    special: &SpecialTokens,
+    roles: &RoleTokens,
+    audio_token_count: usize,
+) -> Vec<i64> {
+    let mut ids = Vec::with_capacity(audio_token_count + 24);
     ids.push(special.im_start_token_id);
+    ids.extend_from_slice(&roles.system);
+    ids.extend_from_slice(&roles.newline);
+    ids.push(special.im_end_token_id);
+    ids.extend_from_slice(&roles.newline);
+
+    ids.push(special.im_start_token_id);
+    ids.extend_from_slice(&roles.user);
+    ids.extend_from_slice(&roles.newline);
     ids.push(special.audio_start_token_id);
     ids.extend(std::iter::repeat_n(
         special.audio_pad_token_id,
@@ -532,6 +690,11 @@ fn build_prompt_ids(special: &SpecialTokens, audio_token_count: usize) -> Vec<i6
     ));
     ids.push(special.audio_end_token_id);
     ids.push(special.im_end_token_id);
+    ids.extend_from_slice(&roles.newline);
+
+    ids.push(special.im_start_token_id);
+    ids.extend_from_slice(&roles.assistant);
+    ids.extend_from_slice(&roles.newline);
     ids
 }
 
@@ -557,22 +720,26 @@ fn extract_array_output_by_name(
     None
 }
 
+/// Greedy pick over the vocabulary at one sequence position of a
+/// `[1, seq, vocab]` logits tensor, read in place: the prefill logits cover
+/// the whole prompt (hundreds of positions × 151k vocabulary), so copying
+/// them out to find one row would cost more than the decoder step itself.
 #[cfg(feature = "asr-parakeet")]
 fn argmax_slice(logits: &ndarray::Array<f32, ndarray::IxDyn>, position: usize) -> Result<i64> {
-    let shape = logits.shape();
-    let vocab_size = *shape.last().unwrap_or(&1);
-    let flat: Vec<f32> = logits.iter().copied().collect();
-    let offset = position * vocab_size;
-    if offset + vocab_size > flat.len() {
+    let view = logits
+        .view()
+        .into_dimensionality::<ndarray::Ix3>()
+        .context("Qwen3-ASR logits are not [1, seq, vocab]")?;
+    if position >= view.shape()[1] {
         return Err(anyhow::anyhow!(
-            "argmax: position {} + vocab {} exceeds logits len {}",
+            "argmax: position {} exceeds logits sequence length {}",
             position,
-            vocab_size,
-            flat.len()
+            view.shape()[1]
         ));
     }
-    let slice = &flat[offset..offset + vocab_size];
-    Ok(slice
+    let row = view.index_axis(ndarray::Axis(0), 0);
+    let row = row.index_axis(ndarray::Axis(0), position);
+    Ok(row
         .iter()
         .enumerate()
         .max_by(|(_, a), (_, b)| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal))
@@ -580,8 +747,16 @@ fn argmax_slice(logits: &ndarray::Array<f32, ndarray::IxDyn>, position: usize) -
         .unwrap_or(0))
 }
 
+/// What one inference produced: the language the model tagged the audio
+/// with (from its `language <Name><asr_text>` answer prefix) and the text.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct Qwen3Decoded {
+    language: Option<String>,
+    text: String,
+}
+
 #[cfg(feature = "asr-parakeet")]
-fn run_qwen3_asr_onnx(model_dir: &Path, audio_path: &Path) -> Result<String> {
+fn run_qwen3_asr_onnx(model_dir: &Path, audio_path: &Path) -> Result<Qwen3Decoded> {
     use ndarray::{Array1, Array2};
     use ort::value::Tensor;
 
@@ -589,7 +764,10 @@ fn run_qwen3_asr_onnx(model_dir: &Path, audio_path: &Path) -> Result<String> {
         .context("Failed to load audio for Qwen3-ASR")?;
 
     if samples.is_empty() {
-        return Ok(String::new());
+        return Ok(Qwen3Decoded {
+            language: None,
+            text: String::new(),
+        });
     }
 
     let model_dir_key = model_dir.to_string_lossy().to_string();
@@ -633,7 +811,11 @@ fn run_qwen3_asr_onnx(model_dir: &Path, audio_path: &Path) -> Result<String> {
 
         // 3. Build prompt
         let audio_token_count = audio_features.shape()[1];
-        let prompt_ids = build_prompt_ids(&runtime.config.special_tokens, audio_token_count);
+        let prompt_ids = build_prompt_ids(
+            &runtime.config.special_tokens,
+            &runtime.roles,
+            audio_token_count,
+        );
         let seq_len = prompt_ids.len();
 
         let audio_start = prompt_ids
@@ -707,14 +889,18 @@ fn run_qwen3_asr_onnx(model_dir: &Path, audio_path: &Path) -> Result<String> {
             .eos_token_ids
             .contains(&current_token)
         {
-            return Ok(decode_tokens(&runtime.tokenizer, &output_tokens));
+            return Ok(decode_generation(
+                &runtime.tokenizer,
+                runtime.config.special_tokens.asr_text_token_id,
+                &output_tokens,
+            ));
         }
 
         // 5. Autoregressive decode loop with KV cache threading.
         //
         // decoder_step accepts:
         //   input_embeds  [1, 1, hidden_size]  f32
-        //   position_ids  [1]                  i64
+        //   position_ids  [1, 1]               i64
         //   past_keys     [28, 1, 8, seq, 128]  f32
         //   past_values   [28, 1, 8, seq, 128]  f32
         //
@@ -747,7 +933,7 @@ fn run_qwen3_asr_onnx(model_dir: &Path, audio_path: &Path) -> Result<String> {
             let embed_dyn = token_embed.into_dyn();
             let embed_tensor =
                 Tensor::from_array(embed_dyn).context("Failed to create input_embeds tensor")?;
-            let pos_arr = Array1::from_elem(1, pos);
+            let pos_arr: Array2<i64> = Array2::from_elem((1, 1), pos);
             let pos_tensor = Tensor::from_array(pos_arr.into_dyn())
                 .context("Failed to create position_ids tensor")?;
 
@@ -801,7 +987,11 @@ fn run_qwen3_asr_onnx(model_dir: &Path, audio_path: &Path) -> Result<String> {
             pos += 1;
         }
 
-        Ok(decode_tokens(&runtime.tokenizer, &output_tokens))
+        Ok(decode_generation(
+            &runtime.tokenizer,
+            runtime.config.special_tokens.asr_text_token_id,
+            &output_tokens,
+        ))
     }
 }
 
@@ -811,8 +1001,49 @@ fn decode_tokens(tokenizer: &tokenizers::Tokenizer, token_ids: &[i64]) -> String
     tokenizer.decode(&ids, true).unwrap_or_default()
 }
 
+/// Split the model's answer at `<asr_text>`: everything before it is the
+/// language tag (`language <Name>`), everything after is the transcript.
+/// Without the marker the whole answer is decoded and the textual prefix is
+/// stripped as a fallback.
+#[cfg(feature = "asr-parakeet")]
+fn decode_generation(
+    tokenizer: &tokenizers::Tokenizer,
+    asr_text_token_id: i64,
+    token_ids: &[i64],
+) -> Qwen3Decoded {
+    if let Some(split) = token_ids.iter().position(|id| *id == asr_text_token_id) {
+        let prefix = decode_tokens(tokenizer, &token_ids[..split]);
+        let language = prefix
+            .trim()
+            .strip_prefix("language ")
+            .map(|name| name.trim().to_string())
+            .filter(|name| !name.is_empty());
+        return Qwen3Decoded {
+            language,
+            text: decode_tokens(tokenizer, &token_ids[split + 1..])
+                .trim()
+                .to_string(),
+        };
+    }
+    let raw = decode_tokens(tokenizer, token_ids);
+    Qwen3Decoded {
+        language: fallback_language_name(&raw),
+        text: strip_language_prefix(&raw).trim().to_string(),
+    }
+}
+
+/// Language name from a `language <Name>...` answer that carried no
+/// `<asr_text>` marker: the leading run of letters after the tag. Only a
+/// fallback, so a missing newline can over-read into the transcript; the
+/// marker path above is what real output takes.
+fn fallback_language_name(raw: &str) -> Option<String> {
+    let rest = raw.strip_prefix("language ")?;
+    let name: String = rest.chars().take_while(|c| c.is_alphabetic()).collect();
+    (!name.is_empty()).then_some(name)
+}
+
 #[cfg(not(feature = "asr-parakeet"))]
-fn run_qwen3_asr_onnx(_model_dir: &Path, _audio_path: &Path) -> Result<String> {
+fn run_qwen3_asr_onnx(_model_dir: &Path, _audio_path: &Path) -> Result<Qwen3Decoded> {
     Err(anyhow::anyhow!(
         "Qwen3-ASR ONNX support is not compiled into this build. Rebuild with the `asr-parakeet` feature."
     ))
@@ -931,7 +1162,7 @@ impl AsrProvider for Qwen3AsrProvider {
     }
 
     fn description(&self) -> &str {
-        "Alibaba Qwen3-ASR 0.6B, native ONNX, multilingual (30+ languages), int4 quantized, no Python."
+        "Alibaba Qwen3-ASR 0.6B, native ONNX, int4 decoders on CPU. Experimental: 30 languages listed upstream (incl. Chinese, Japanese, Korean); English validated in Plainsong; slower than real time."
     }
 
     fn is_available(&self) -> bool {
@@ -955,24 +1186,19 @@ impl AsrProvider for Qwen3AsrProvider {
         ModelInfo {
             name: "Qwen3-ASR 0.6B".to_string(),
             version: "0.6b-int4".to_string(),
-            size_mb: 1300.0,
+            // MiB across the seven pinned files (2,020,098,572 bytes); the
+            // field is MiB despite its name, like every other provider's.
+            size_mb: 1927.0,
             parameters: "0.6B".to_string(),
-            languages: vec![
-                "en".to_string(),
-                "zh".to_string(),
-                "ja".to_string(),
-                "ko".to_string(),
-                "fr".to_string(),
-                "es".to_string(),
-                "de".to_string(),
-                "it".to_string(),
-                "pt".to_string(),
-                "ru".to_string(),
-                "ar".to_string(),
-                "hi".to_string(),
-            ],
+            languages: QWEN3_ASR_LANGUAGES
+                .iter()
+                .map(|(_, code)| (*code).to_string())
+                .collect(),
+            // Upstream figure for the int4 export on LibriSpeech test-other.
             word_error_rate: Some(5.16),
-            real_time_factor: Some(0.17),
+            // Measured in Plainsong on an Apple M4 Pro, CPU int4 decoders,
+            // 44 s fixture: see QWEN3_ASR_MEASURED_RTF.
+            real_time_factor: Some(QWEN3_ASR_MEASURED_RTF),
             license: "Apache-2.0".to_string(),
             source_url: format!("https://huggingface.co/{}", QWEN3_ASR_HF_REPO),
         }
@@ -990,12 +1216,17 @@ impl AsrProvider for Qwen3AsrProvider {
         let audio_for_dur = audio_path.to_path_buf();
         let audio_path_owned = audio_path.to_path_buf();
 
-        let raw_text =
+        let decoded =
             tokio::task::spawn_blocking(move || run_qwen3_asr_onnx(&model_dir, &audio_path_owned))
                 .await
                 .context("Qwen3-ASR inference task panicked")??;
 
-        let text = strip_language_prefix(&raw_text);
+        let text = decoded.text;
+        let language = decoded
+            .language
+            .as_deref()
+            .map(language_code_for_name)
+            .unwrap_or_else(|| "auto".to_string());
         let duration = Self::wav_duration_seconds(&audio_for_dur);
         let segment = TranscriptSegment {
             start_time: 0.0,
@@ -1007,7 +1238,7 @@ impl AsrProvider for Qwen3AsrProvider {
         Ok(TranscriptionResult {
             text,
             segments: vec![segment],
-            language: "auto".to_string(),
+            language,
             confidence: 0.9,
             processing_time_ms: start.elapsed().as_millis() as u64,
             model_name: self.model_id.clone(),
@@ -1101,6 +1332,20 @@ mod tests {
     }
 
     #[test]
+    fn fallback_language_name_reads_the_tag_without_slicing_bytes() {
+        assert_eq!(
+            fallback_language_name("language English\nHello world").as_deref(),
+            Some("English")
+        );
+        assert_eq!(
+            fallback_language_name("language Chinese\n你好世界").as_deref(),
+            Some("Chinese")
+        );
+        assert_eq!(fallback_language_name("你好世界"), None);
+        assert_eq!(fallback_language_name("language "), None);
+    }
+
+    #[test]
     fn strip_language_prefix_empty() {
         assert_eq!(strip_language_prefix(""), "");
     }
@@ -1116,6 +1361,55 @@ mod tests {
     #[test]
     fn strip_language_prefix_unknown_with_newline() {
         assert_eq!(strip_language_prefix("language Klingon\nQapla!"), "Qapla!");
+    }
+
+    #[cfg(feature = "asr-parakeet")]
+    #[test]
+    fn prompt_follows_the_export_chat_template() {
+        let special = SpecialTokens {
+            im_start_token_id: 151644,
+            im_end_token_id: 151645,
+            audio_start_token_id: 151669,
+            audio_end_token_id: 151670,
+            audio_pad_token_id: 151676,
+            asr_text_token_id: 151704,
+            eos_token_ids: vec![151643, 151645],
+        };
+        // The ids the export's prompt.py hard-codes for the role words.
+        let roles = RoleTokens {
+            system: vec![9125],
+            user: vec![882],
+            assistant: vec![77091],
+            newline: vec![198],
+        };
+        let ids = build_prompt_ids(&special, &roles, 3);
+        assert_eq!(
+            ids,
+            vec![
+                151644, 9125, 198, 151645, 198, // <|im_start|>system\n<|im_end|>\n
+                151644, 882, 198, 151669, // <|im_start|>user\n<|audio_start|>
+                151676, 151676, 151676, // <|audio_pad|> x3
+                151670, 151645, 198, // <|audio_end|><|im_end|>\n
+                151644, 77091, 198, // <|im_start|>assistant\n
+            ]
+        );
+        // audio_offset is the first pad's index in this sequence.
+        assert_eq!(
+            ids.iter().position(|id| *id == special.audio_pad_token_id),
+            Some(9)
+        );
+    }
+
+    #[test]
+    fn language_names_map_to_codes_the_picker_understands() {
+        assert_eq!(language_code_for_name("English"), "en");
+        assert_eq!(language_code_for_name("Chinese"), "zh");
+        assert_eq!(language_code_for_name("Japanese"), "ja");
+        assert_eq!(language_code_for_name("Korean"), "ko");
+        assert_eq!(language_code_for_name("Cantonese"), "yue");
+        assert_eq!(language_code_for_name(" Filipino "), "fil");
+        assert_eq!(language_code_for_name("Klingon"), "klingon");
+        assert_eq!(QWEN3_ASR_LANGUAGES.len(), 30);
     }
 
     #[test]
@@ -1135,6 +1429,188 @@ mod tests {
     fn qwen3_asr_artifact_max_bytes_are_bounded() {
         assert!(qwen3_asr_artifact_max_bytes(QWEN3_ASR_LOCAL_ENCODER) >= 700 * 1024 * 1024);
         assert!(qwen3_asr_artifact_max_bytes(QWEN3_ASR_LOCAL_TOKENIZER) >= 1024 * 1024);
+    }
+
+    /// Word error rate of `hypothesis` against `reference`, both normalized to
+    /// lowercase words with punctuation stripped, via word-level Levenshtein
+    /// distance. Test-only: it exists to score the real-audio eval below.
+    fn word_error_rate(reference: &str, hypothesis: &str) -> f64 {
+        fn words(text: &str) -> Vec<String> {
+            text.split_whitespace()
+                .map(|word| {
+                    word.chars()
+                        .filter(|c| c.is_alphanumeric() || *c == '\'')
+                        .collect::<String>()
+                        .to_lowercase()
+                })
+                .filter(|word| !word.is_empty())
+                .collect()
+        }
+        let reference = words(reference);
+        let hypothesis = words(hypothesis);
+        if reference.is_empty() {
+            return if hypothesis.is_empty() { 0.0 } else { 1.0 };
+        }
+        let mut previous: Vec<usize> = (0..=hypothesis.len()).collect();
+        for (i, reference_word) in reference.iter().enumerate() {
+            let mut current = vec![i + 1; hypothesis.len() + 1];
+            for (j, hypothesis_word) in hypothesis.iter().enumerate() {
+                let substitution = previous[j] + usize::from(reference_word != hypothesis_word);
+                current[j + 1] = substitution.min(previous[j + 1] + 1).min(current[j] + 1);
+            }
+            previous = current;
+        }
+        previous[hypothesis.len()] as f64 / reference.len() as f64
+    }
+
+    #[test]
+    fn word_error_rate_scores_normalized_words() {
+        assert_eq!(word_error_rate("Hello, world!", "hello world"), 0.0);
+        assert!((word_error_rate("a b c d", "a x c") - 0.5).abs() < 1e-9);
+        assert_eq!(word_error_rate("", ""), 0.0);
+    }
+
+    /// Repo fixture path, resolved from the crate root so the test does not
+    /// depend on the working directory `cargo test` happens to use.
+    fn fixture(name: &str) -> PathBuf {
+        Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../scripts/fixtures")
+            .join(name)
+    }
+
+    /// Reference transcripts for the real-audio eval. Neither fixture ships
+    /// a human transcript, so these are the Parakeet TDT 0.6B v3 output
+    /// cross-checked against whisper.cpp base.en (the two agree on every
+    /// content word); see the A4 validation record in
+    /// docs/model-inventory-upgrades.md.
+    const REAL_SPEECH_44S_REFERENCE: &str =
+        "Plainsong is a free and open source dictation app for the Mac. It listens when you press a hot, turns your words into text on your own machine, and types them into whatever app you are using. Nothing you say ever leaves your computer. You can dictate an email in your mail client, a message in Slack, a commit message in your journal, or a note in your editor, and PlainSong will adapt its formatting to where you are typing. It also captures meetings without a bot joining the call, giving you transcripts, summaries, and action items you can search later. The goal is simple, voice input everywhere, with no account, no subscription, and no cloud in the middle. This recording exists to benchmark transcription latency against realistic continuous speech instead of a synthetic tone.";
+    const LOCAL_QUALITY_GATE_REFERENCE: &str =
+        "This is a Nautilus local quality gate sample with enough spoken words for verification.";
+
+    /// Opt-in, network-bound, real-audio validation of the whole provider:
+    /// download through the app's own verified path, load the int4 runtime,
+    /// transcribe the repo's two speech fixtures, and score them against the
+    /// references above. Prints raw model output so the language-detection
+    /// prefix can be inspected, and the wall-clock latency of each run.
+    ///
+    /// Ignored by default because it fetches ~1.9 GiB into the real models
+    /// directory and runs CPU int4 inference. Run with:
+    ///
+    /// ```text
+    /// PLAINSONG_QWEN3_ASR_EVAL=1 cargo test --lib qwen3_asr_real_audio_eval -- --ignored --nocapture
+    /// ```
+    #[cfg(feature = "asr-parakeet")]
+    #[tokio::test]
+    #[ignore = "downloads ~1.9 GiB and runs int4 CPU inference; opt in with PLAINSONG_QWEN3_ASR_EVAL=1"]
+    async fn qwen3_asr_real_audio_eval() {
+        if std::env::var("PLAINSONG_QWEN3_ASR_EVAL").as_deref() != Ok("1") {
+            eprintln!("PLAINSONG_QWEN3_ASR_EVAL is not 1; skipping");
+            return;
+        }
+
+        let provider = Qwen3AsrProvider::new(None);
+        if !provider.is_available() {
+            eprintln!(
+                "Qwen3-ASR not present at {}; downloading through download_models()",
+                provider.model_dir.display()
+            );
+            let started = std::time::Instant::now();
+            let last_logged = std::sync::Mutex::new(-10.0f32);
+            provider
+                .download_models(Box::new(move |percent| {
+                    let mut last = last_logged.lock().unwrap();
+                    if percent - *last >= 5.0 {
+                        eprintln!("  download {percent:.1}%");
+                        *last = percent;
+                    }
+                }))
+                .await
+                .expect("Qwen3-ASR download through the verified app path");
+            eprintln!("download finished in {:?}", started.elapsed());
+        }
+        assert!(
+            provider.is_available(),
+            "all seven artifacts must be present"
+        );
+
+        let prewarm_started = std::time::Instant::now();
+        provider.prewarm().await.expect("prewarm");
+        eprintln!("cold runtime load: {:?}", prewarm_started.elapsed());
+
+        let cases = [
+            (
+                "local-quality-gate.wav",
+                fixture("local-quality-gate.wav"),
+                LOCAL_QUALITY_GATE_REFERENCE,
+            ),
+            (
+                "real-speech-44s.wav",
+                fixture("real-speech-44s.wav"),
+                REAL_SPEECH_44S_REFERENCE,
+            ),
+        ];
+        for (label, path, reference) in cases {
+            let raw_started = std::time::Instant::now();
+            let raw = run_qwen3_asr_onnx(&provider.model_dir, &path).expect("raw inference");
+            let raw_ms = raw_started.elapsed().as_millis();
+            eprintln!("[{label}] raw ({raw_ms} ms): {raw:?}");
+            assert_eq!(
+                raw.language.as_deref(),
+                Some("English"),
+                "[{label}] expected English to be auto-detected, got: {raw:?}"
+            );
+
+            let result_started = std::time::Instant::now();
+            let result = provider.transcribe(&path).await.expect("transcribe");
+            let result_ms = result_started.elapsed().as_millis();
+            let audio_seconds = Qwen3AsrProvider::wav_duration_seconds(&path);
+            eprintln!(
+                "[{label}] text ({result_ms} ms, {audio_seconds:.1} s audio, RTF {:.2}, language {}): {}",
+                result_ms as f64 / 1000.0 / audio_seconds,
+                result.language,
+                result.text
+            );
+            assert!(!result.text.trim().is_empty(), "[{label}] empty transcript");
+            assert_eq!(result.language, "en", "[{label}] language code");
+
+            let env_key = format!(
+                "PLAINSONG_QWEN3_ASR_REF_{}",
+                label
+                    .trim_end_matches(".wav")
+                    .replace('-', "_")
+                    .to_uppercase()
+            );
+            let reference = std::env::var(env_key).unwrap_or_else(|_| reference.to_string());
+            if !reference.trim().is_empty() {
+                let wer = word_error_rate(&reference, &result.text);
+                eprintln!("[{label}] WER vs reference: {:.1}%", wer * 100.0);
+                assert!(
+                    wer <= 0.15,
+                    "[{label}] WER {:.1}% exceeds the 15% acceptance bar",
+                    wer * 100.0
+                );
+            }
+        }
+
+        // Optional spot checks in other languages: colon-separated WAV paths
+        // whose raw output (language tag + text) is printed, never asserted,
+        // because they are operator-supplied and have no reference here.
+        if let Ok(extra) = std::env::var("PLAINSONG_QWEN3_ASR_EXTRA_WAVS") {
+            for path in extra.split(':').filter(|path| !path.is_empty()) {
+                let path = Path::new(path);
+                let started = std::time::Instant::now();
+                match run_qwen3_asr_onnx(&provider.model_dir, path) {
+                    Ok(raw) => eprintln!(
+                        "[extra {}] raw ({} ms, {:.1} s audio): {raw:?}",
+                        path.display(),
+                        started.elapsed().as_millis(),
+                        Qwen3AsrProvider::wav_duration_seconds(path)
+                    ),
+                    Err(error) => eprintln!("[extra {}] failed: {error:#}", path.display()),
+                }
+            }
+        }
     }
 
     #[test]
