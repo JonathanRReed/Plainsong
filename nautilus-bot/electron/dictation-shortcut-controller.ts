@@ -225,10 +225,21 @@ export function resolveDictationShortcutDecision(input: {
 // (helper killed mid-hold, tap outage, ...): stop recording after this long.
 export const DICTATION_HOLD_WATCHDOG_MS = 5 * 60 * 1000;
 
+/**
+ * What a start issued by this controller tells the sidecar beyond "start":
+ * today only the per-session mode a binding named (roadmap item B4). Mirrors
+ * `DictationStartOptions.mode_override` in rust-sidecar/src/models.rs.
+ */
+export type DictationShortcutStartOptions = {
+  modeOverride?: { preset: string; customModeId: string | null };
+};
+
 type DictationShortcutSignalInput = {
   behavior: DictationShortcutBehavior;
   capability: DictationShortcutCapability;
   signal: DictationShortcutSignal;
+  /** Applied to the `start_dictation` this signal may issue; ignored otherwise. */
+  startOptions?: DictationShortcutStartOptions;
 };
 
 export type DictationShortcutSignalRuntime = {
@@ -357,7 +368,10 @@ export function createDictationShortcutSignalRuntime(deps: {
       }
       let started = false;
       try {
-        await deps.invoke("start_dictation", {});
+        await deps.invoke(
+          "start_dictation",
+          input.startOptions ? { options: input.startOptions } : {},
+        );
         started = true;
       } finally {
         // A newer start may have superseded this one while we awaited; in that

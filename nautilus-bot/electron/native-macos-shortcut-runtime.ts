@@ -2,11 +2,11 @@
 import { spawn, type ChildProcessWithoutNullStreams } from "child_process";
 import { existsSync } from "fs";
 import { createInterface, type Interface } from "readline";
+import type { NativeHelperBindingEntry } from "./dictation-bindings";
 import {
   buildNativeShortcutHelperArgs,
   isNativeShortcutRawEvent,
   resolveNativeShortcutStatus,
-  resolveNativeShortcutHelperShortcut,
   type NativeShortcutController,
   type NativeShortcutRawEvent,
 } from "./native-macos-shortcut";
@@ -32,7 +32,8 @@ type NativeShortcutChild = Pick<
 export function startNativeMacosShortcutController(input: {
   platform: RuntimePlatform;
   helperPath?: string | null;
-  shortcut?: string | null;
+  /** The binding table the helper should watch for; empty means disabled. */
+  helperBindings: NativeHelperBindingEntry[];
   helperExists?: (helperPath: string) => boolean;
   spawnHelper?: (helperPath: string, args: string[]) => NativeShortcutChild;
   onEvent: (event: NativeShortcutRawEvent) => void;
@@ -60,17 +61,17 @@ export function startNativeMacosShortcutController(input: {
     };
   }
 
-  // An explicitly cleared shortcut ("") means the user disabled the dictation
-  // hotkey; do not silently fall back to the default binding.
-  if (typeof input.shortcut === "string" && input.shortcut.trim() === "") {
+  // An empty table means every dictation binding was removed (the user
+  // switched the hotkey off) or none can be watched; do not spawn a helper
+  // with nothing to do, and do not silently fall back to a default binding.
+  if (input.helperBindings.length === 0) {
     return {
       status: { available: false, reason: "shortcut_disabled" },
       dispose: () => {},
     };
   }
 
-  const shortcut = resolveNativeShortcutHelperShortcut(input.shortcut);
-  const args = buildNativeShortcutHelperArgs(shortcut);
+  const args = buildNativeShortcutHelperArgs(input.helperBindings);
   const child =
     input.spawnHelper?.(helperPath, args) ??
     spawn(helperPath, args, {

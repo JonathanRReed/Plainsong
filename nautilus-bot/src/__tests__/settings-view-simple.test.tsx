@@ -1488,4 +1488,172 @@ describe("SettingsView performance behavior", () => {
 
     expect(screen.queryByText(/Same keys as/)).not.toBeInTheDocument();
   });
+
+  // ── Dictation binding table (roadmap item B4) ──────────────────────────
+  it("lists every dictation binding with its action and flags a duplicate trigger", async () => {
+    const backend = await import("@/lib/backend");
+    vi.mocked(backend.getDictationShortcutCapabilityStatus).mockResolvedValue({
+      nativeShortcutAvailable: true,
+    });
+    vi.mocked(backend.getSettings).mockResolvedValue({
+      ...baseSettings,
+      shortcuts: {
+        ...baseSettings.shortcuts,
+        toggleDictation: "Ctrl+Shift+Space",
+        dictationBindings: [
+          {
+            id: "primary",
+            trigger: { kind: "key", accelerator: "Ctrl+Shift+Space" },
+            action: { kind: "dictation", modeId: null, behavior: "inherit" },
+          },
+          {
+            id: "email",
+            trigger: { kind: "key", accelerator: "Ctrl+Alt+E" },
+            action: { kind: "dictation", modeId: "email", behavior: "hold" },
+          },
+          {
+            id: "clash",
+            trigger: { kind: "key", accelerator: "Shift+Ctrl+Space" },
+            action: { kind: "cycleMode" },
+          },
+        ],
+      },
+    } as unknown as Awaited<ReturnType<typeof backend.getSettings>>);
+
+    render(
+      <ToastProvider>
+        <SettingsView />
+      </ToastProvider>,
+    );
+
+    await screen.findByText("How Plainsong listens, writes, and what it keeps.");
+    await screen.findByText("Dictation bindings");
+
+    const primaryAction = (await screen.findByLabelText(
+      "Dictation action",
+    )) as HTMLSelectElement;
+    expect(primaryAction.value).toBe("dictation");
+    const secondAction = (await screen.findByLabelText(
+      "Binding 2 action",
+    )) as HTMLSelectElement;
+    expect(secondAction.value).toBe("dictation:email");
+    expect(
+      (screen.getByLabelText("Binding 2 behavior") as HTMLSelectElement).value,
+    ).toBe("hold");
+    const thirdAction = (await screen.findByLabelText(
+      "Binding 3 action",
+    )) as HTMLSelectElement;
+    expect(thirdAction.value).toBe("cycleMode");
+
+    // The third binding is Ctrl+Shift+Space written in a different order, so
+    // it collides with the primary one and says so in the row.
+    expect(
+      await screen.findByText(
+        /Same trigger as Dictation — only one of them will work\./,
+      ),
+    ).toBeInTheDocument();
+  });
+
+  it("says a mouse binding needs the native helper while the helper is down", async () => {
+    const backend = await import("@/lib/backend");
+    vi.mocked(backend.getDictationShortcutCapabilityStatus).mockResolvedValue({
+      nativeShortcutAvailable: false,
+    });
+    vi.mocked(backend.getSettings).mockResolvedValue({
+      ...baseSettings,
+      shortcuts: {
+        ...baseSettings.shortcuts,
+        dictationBindings: [
+          {
+            id: "mouse",
+            trigger: { kind: "mouse", button: 4 },
+            action: { kind: "dictation", modeId: null, behavior: "hold" },
+          },
+        ],
+      },
+    } as unknown as Awaited<ReturnType<typeof backend.getSettings>>);
+
+    render(
+      <ToastProvider>
+        <SettingsView />
+      </ToastProvider>,
+    );
+
+    await screen.findByText("How Plainsong listens, writes, and what it keeps.");
+    await screen.findByText("Dictation bindings");
+
+    expect(
+      await screen.findByText(
+        /Mouse buttons need the native shortcut helper, which is not running\./,
+      ),
+    ).toBeInTheDocument();
+  });
+
+  it("saves a whole binding table, keeping the legacy toggleDictation key in step", async () => {
+    const backend = await import("@/lib/backend");
+    vi.mocked(backend.getDictationShortcutCapabilityStatus).mockResolvedValue({
+      nativeShortcutAvailable: true,
+    });
+    vi.mocked(backend.getSettings).mockResolvedValue({
+      ...baseSettings,
+      shortcuts: {
+        ...baseSettings.shortcuts,
+        toggleDictation: "Ctrl+Shift+Space",
+      },
+    } as unknown as Awaited<ReturnType<typeof backend.getSettings>>);
+
+    render(
+      <ToastProvider>
+        <SettingsView />
+      </ToastProvider>,
+    );
+
+    await screen.findByText("How Plainsong listens, writes, and what it keeps.");
+    await screen.findByText("Dictation bindings");
+
+    fireEvent.click(screen.getByRole("button", { name: "Add binding" }));
+
+    await waitFor(() => {
+      expect(backend.saveSettings).toHaveBeenCalled();
+    });
+    const saveCalls = vi.mocked(backend.saveSettings).mock.calls;
+    const saved = saveCalls[saveCalls.length - 1]?.[0] as unknown as {
+      shortcuts: {
+        toggleDictation: string;
+        dictationBindings: Array<{ trigger: { accelerator?: string } }>;
+      };
+    };
+    // The legacy key was migrated into the first row, and the new row is the
+    // empty recorder waiting for keys.
+    expect(saved.shortcuts.dictationBindings).toHaveLength(2);
+    expect(saved.shortcuts.dictationBindings[0].trigger.accelerator).toBe(
+      "Ctrl+Shift+Space",
+    );
+    expect(saved.shortcuts.dictationBindings[1].trigger.accelerator).toBe("");
+    expect(saved.shortcuts.toggleDictation).toBe("Ctrl+Shift+Space");
+  });
+
+  // ── Translate to English (roadmap item B7a) ────────────────────────────
+  it("refuses translate-to-English on an English-only whisper model and says why", async () => {
+    render(
+      <ToastProvider>
+        <SettingsView />
+      </ToastProvider>,
+    );
+
+    await screen.findByText("How Plainsong listens, writes, and what it keeps.");
+    fireEvent.click(screen.getByText("Transcription"));
+    await screen.findByText("Microphones");
+
+    // baseSettings selects whisper `base.en`, which has no translate task.
+    const toggle = await screen.findByRole("switch", {
+      name: "Translate to English",
+    });
+    expect(toggle).toBeDisabled();
+    expect(
+      screen.getByText(
+        /This model is English-only and cannot translate\./,
+      ),
+    ).toBeInTheDocument();
+  });
 });

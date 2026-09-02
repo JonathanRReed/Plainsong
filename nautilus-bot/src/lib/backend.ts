@@ -16,6 +16,7 @@ import type {
   MeetingTranscriptDetails,
 } from "@/types";
 import type { Settings } from "@/types/settings";
+import type { DictationBindingIssue } from "../../electron/dictation-bindings";
 
 export interface DictationStartOptions {
   saveToInbox: boolean;
@@ -56,6 +57,12 @@ export interface DictationHistoryDetails {
   transcriptionLatencyMs: number | null;
   insertLatencyMs: number | null;
   endToEndMs: number | null;
+  /** BCP-47 primary tag the recognizer reported for the spoken audio. */
+  detectedLanguage?: string | null;
+  /** `whisper_native` | `ai_lane` when translate-to-English ran; null when off. */
+  translationRoute?: string | null;
+  /** Whether the delivered text is the translated one. */
+  translationApplied?: boolean | null;
 }
 
 export interface DictationInsights {
@@ -1040,6 +1047,12 @@ export async function repairCursorInsertPermissions(): Promise<PermissionDiagnos
 
 export interface DictationShortcutCapabilityStatus {
   nativeShortcutAvailable: boolean;
+  /**
+   * Per-binding problems from Electron's last registration pass (see
+   * `validateDictationBindings` in electron/dictation-bindings.ts). Absent
+   * from older main processes.
+   */
+  bindingIssues?: DictationBindingIssue[];
 }
 
 /** Check whether the native hold-to-talk helper is available on this machine. */

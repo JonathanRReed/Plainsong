@@ -6,6 +6,7 @@ import {
   useState,
   type ChangeEvent,
   type KeyboardEvent,
+  type MouseEvent as ReactMouseEvent,
 } from "react";
 import { AsrProviderManager } from "@/components/asr-provider-manager";
 import { ModelsScreen } from "@/components/models/models-screen";
@@ -106,7 +107,28 @@ import type {
 import type { AsrProviderInfo } from "@/types";
 import type { Settings } from "@/types/settings";
 import { applyThemeScheme, normalizeThemeScheme } from "@/lib/theme-schemes";
-import { formatShortcutForDisplay, normalizeShortcut } from "@/lib/shortcuts";
+import {
+  defaultDictationShortcut,
+  formatShortcutForDisplay,
+  normalizeShortcut,
+} from "@/lib/shortcuts";
+import {
+  probeDictationAiLane,
+  resolveDictationRecognizer,
+  resolveTranslateToEnglishAvailability,
+} from "@/lib/dictation-translation";
+import {
+  describeDictationBindingTrigger,
+  DICTATION_MODE_CYCLE_ORDER,
+  dictationModeLabelFor,
+  findPrimaryDictationBinding,
+  resolveDictationBindings,
+  validateDictationBindings,
+  type DictationBinding,
+  type DictationBindingAction,
+  type DictationBindingIssue,
+  type DictationBindingTrigger,
+} from "../../../electron/dictation-bindings";
 import {
   normalizeShortcutAccelerator,
   SHORTCUT_FIELD_PRECEDENCE,
@@ -517,6 +539,22 @@ export function SettingsView() {
   const [, setAsrProviders] = useState<AsrProviderInfo[]>([]);
   const [nativeShortcutAvailable, setNativeShortcutAvailable] =
     useState(false);
+  // Problems Electron found with the binding table on its last registration
+  // pass (a mouse button with no helper, ...), merged with the local check
+  // below so a freshly recorded duplicate is flagged before the save lands.
+  const [remoteBindingIssues, setRemoteBindingIssues] = useState<
+    DictationBindingIssue[]
+  >([]);
+  // Which binding's recorder is listening for keys or a mouse button.
+  const [recordingBindingId, setRecordingBindingId] = useState<string | null>(
+    null,
+  );
+  // Whether the dictation AI lane can answer right now: `null` until the
+  // probe returns. Gates the translate-to-English toggle for models that
+  // translate through that lane.
+  const [dictationAiLaneReady, setDictationAiLaneReady] = useState<
+    boolean | null
+  >(null);
   const [shortcutConflicts, setShortcutConflicts] = useState<
     ShortcutConflict[]
   >([]);
@@ -1102,12 +1140,38 @@ export function SettingsView() {
     };
   }, [permissionDiagnostics]);
 
+  // Whether the dictation AI lane can answer, re-probed whenever the lane's
+  // provider or the remote-processing switch changes. Only the
+  // translate-to-English toggle reads it.
+  const dictationAiProvider = settings?.privacy.dictationAi.provider ?? null;
+  const remoteProcessingEnabledForProbe =
+    settings?.privacy.remoteProcessingEnabled ?? false;
+  useEffect(() => {
+    let mounted = true;
+    if (!dictationAiProvider) {
+      setDictationAiLaneReady(null);
+      return;
+    }
+    void probeDictationAiLane({
+      dictationAi: { provider: dictationAiProvider, modelId: null },
+      remoteProcessingEnabled: remoteProcessingEnabledForProbe,
+    }).then((ready) => {
+      if (mounted) {
+        setDictationAiLaneReady(ready);
+      }
+    });
+    return () => {
+      mounted = false;
+    };
+  }, [dictationAiProvider, remoteProcessingEnabledForProbe]);
+
   useEffect(() => {
     let mounted = true;
     getDictationShortcutCapabilityStatus()
       .then((status: DictationShortcutCapabilityStatus) => {
         if (mounted) {
           setNativeShortcutAvailable(status.nativeShortcutAvailable);
+          setRemoteBindingIssues(status.bindingIssues ?? []);
         }
       })
       .catch((err) => {
@@ -1123,6 +1187,7 @@ export function SettingsView() {
       (event) => {
         if (mounted) {
           setNativeShortcutAvailable(event.payload.nativeShortcutAvailable);
+          setRemoteBindingIssues(event.payload.bindingIssues ?? []);
         }
       },
     );
@@ -1950,6 +2015,279 @@ export function SettingsView() {
     );
   }
 
+  const dictationRecognizer = resolveDictationRecognizer(settings.transcription);
+  const translateAvailability = resolveTranslateToEnglishAvailability({
+    provider: dictationRecognizer.provider,
+    modelId: dictationRecognizer.modelId,
+    aiLaneReady: dictationAiLaneReady,
+  });
+
+  const dictationBindings = resolveDictationBindings(settings.shortcuts);
+  const dictationCustomModes = (settings.transcription.dictationCustomModes ?? []).map(
+    (mode) => ({ id: mode.id, name: mode.name }),
+  );
+  // Local validation first (it sees the row the user is editing right now);
+  // Electron's last verdict fills in anything it knows that this screen
+  // cannot, such as a helper that died since the page loaded.
+  const bindingIssuesById = new Map<string, DictationBindingIssue>();
+  for (const issue of [
+    ...validateDictationBindings(dictationBindings, {
+      nativeShortcutAvailable,
+      customModes: dictationCustomModes,
+    }),
+    ...remoteBindingIssues,
+  ]) {
+    if (!bindingIssuesById.has(issue.bindingId)) {
+      bindingIssuesById.set(issue.bindingId, issue);
+    }
+  }
+
+  const saveDictationBindings = (next: DictationBinding[]) => {
+    const primary = findPrimaryDictationBinding(next);
+    updateSettings(
+      {
+        ...settings,
+        shortcuts: {
+          ...settings.shortcuts,
+          dictationBindings: next,
+          // Kept in step for the legacy readers (menu bar, sidebar copy) and
+          // for the local conflict check against "Open window".
+          toggleDictation:
+            primary?.trigger.kind === "key" ? primary.trigger.accelerator : "",
+        },
+      },
+      { immediate: true },
+    );
+  };
+
+  const updateDictationBinding = (
+    bindingId: string,
+    patch: Partial<DictationBinding>,
+  ) => {
+    saveDictationBindings(
+      dictationBindings.map((binding) =>
+        binding.id === bindingId ? { ...binding, ...patch } : binding,
+      ),
+    );
+  };
+
+  const bindingActionValue = (action: DictationBindingAction): string => {
+    if (action.kind === "cycleMode") return "cycleMode";
+    if (action.kind === "cancel") return "cancel";
+    return action.modeId === null ? "dictation" : `dictation:${action.modeId}`;
+  };
+
+  const bindingActionFromValue = (
+    value: string,
+    current: DictationBindingAction,
+  ): DictationBindingAction => {
+    if (value === "cycleMode") return { kind: "cycleMode" };
+    if (value === "cancel") return { kind: "cancel" };
+    const behavior = current.kind === "dictation" ? current.behavior : "inherit";
+    if (value === "dictation") return { kind: "dictation", modeId: null, behavior };
+    return { kind: "dictation", modeId: value.slice("dictation:".length), behavior };
+  };
+
+  const bindingTriggerTypeValue = (trigger: DictationBindingTrigger): string => {
+    if (trigger.kind === "mouse") return `mouse:${trigger.button}`;
+    const lone = trigger.accelerator.trim().toLowerCase();
+    if (lone === "fn") return "modifier:Fn";
+    return "keys";
+  };
+
+  const bindingTriggerFromTypeValue = (
+    value: string,
+    current: DictationBindingTrigger,
+  ): DictationBindingTrigger => {
+    if (value.startsWith("mouse:")) {
+      const button = Number(value.slice("mouse:".length)) as 3 | 4 | 5;
+      return { kind: "mouse", button, modifiers: [] };
+    }
+    if (value === "modifier:Fn") {
+      return { kind: "key", accelerator: "Fn" };
+    }
+    // Back to keys: keep a recorded chord, otherwise leave it for the recorder.
+    return current.kind === "key" && bindingTriggerTypeValue(current) === "keys"
+      ? current
+      : { kind: "key", accelerator: "" };
+  };
+
+  const handleBindingRecorderKeyDown =
+    (bindingId: string) => (event: KeyboardEvent<HTMLInputElement>) => {
+      if (event.key === "Tab") {
+        return;
+      }
+      event.preventDefault();
+      event.stopPropagation();
+      if (event.key === "Escape") {
+        setRecordingBindingId(null);
+        return;
+      }
+      const nextShortcut = formatShortcutFromKeyboardEvent(event);
+      if (!nextShortcut) {
+        return;
+      }
+      updateDictationBinding(bindingId, {
+        trigger: { kind: "key", accelerator: nextShortcut },
+      });
+      setRecordingBindingId(null);
+    };
+
+  // Extra mouse buttons while a recorder is listening become a mouse trigger.
+  // DOM numbers them 1 (middle), 3 (back), 4 (forward); Plainsong uses 3-5.
+  const handleBindingRecorderMouseDown =
+    (bindingId: string) => (event: ReactMouseEvent<HTMLInputElement>) => {
+      const button =
+        event.button === 1 ? 3 : event.button === 3 ? 4 : event.button === 4 ? 5 : null;
+      if (button === null || recordingBindingId !== bindingId) {
+        return;
+      }
+      event.preventDefault();
+      const modifiers: string[] = [];
+      if (event.metaKey) modifiers.push("Cmd");
+      if (event.ctrlKey) modifiers.push("Ctrl");
+      if (event.altKey) modifiers.push("Alt");
+      if (event.shiftKey) modifiers.push("Shift");
+      updateDictationBinding(bindingId, { trigger: { kind: "mouse", button, modifiers } });
+      setRecordingBindingId(null);
+    };
+
+  const renderDictationBindingRow = (binding: DictationBinding, index: number) => {
+    const isPrimary =
+      binding.trigger.kind === "key" &&
+      binding.action.kind === "dictation" &&
+      binding.action.modeId === null &&
+      findPrimaryDictationBinding(dictationBindings)?.id === binding.id;
+    const rowLabel = isPrimary ? "Dictation" : `Binding ${index + 1}`;
+    const triggerType = bindingTriggerTypeValue(binding.trigger);
+    const isRecording = recordingBindingId === binding.id;
+    const issue = bindingIssuesById.get(binding.id);
+    const triggerText =
+      binding.trigger.kind === "key" && !binding.trigger.accelerator.trim()
+        ? "None"
+        : binding.trigger.kind === "key" && triggerType === "keys"
+          ? formatShortcutForDisplay(binding.trigger.accelerator)
+          : describeDictationBindingTrigger(binding.trigger);
+    return (
+      <div
+        key={binding.id}
+        className="flex flex-col gap-2 rounded-2xl border border-border/60 bg-muted/20 px-3 py-3"
+      >
+        <div className="flex flex-col gap-2 lg:flex-row lg:flex-wrap lg:items-center">
+          <span className="text-sm text-muted-foreground lg:w-24">{rowLabel}</span>
+          <select
+            aria-label={`${rowLabel} trigger type`}
+            className="h-9 rounded-md border bg-background px-2 text-sm"
+            value={triggerType}
+            onChange={(event) =>
+              updateDictationBinding(binding.id, {
+                trigger: bindingTriggerFromTypeValue(event.target.value, binding.trigger),
+              })
+            }
+          >
+            <option value="keys">Keys</option>
+            <option value="modifier:Fn">Fn on its own</option>
+            <option value="mouse:3">Middle mouse button</option>
+            <option value="mouse:4">Mouse button 4</option>
+            <option value="mouse:5">Mouse button 5</option>
+          </select>
+          <Input
+            value={isRecording ? "Listening..." : triggerText}
+            readOnly
+            aria-label={isPrimary ? "Dictation shortcut" : `${rowLabel} trigger`}
+            aria-invalid={issue ? true : undefined}
+            className={`h-9 w-40 text-center font-mono text-xs ${
+              isRecording
+                ? "border-primary ring-1 ring-primary"
+                : issue
+                  ? "border-destructive/60"
+                  : ""
+            }`}
+            onFocus={() => {
+              if (triggerType === "keys" || binding.trigger.kind === "mouse") {
+                setRecordingBindingId(binding.id);
+              }
+            }}
+            onBlur={() => {
+              if (recordingBindingId === binding.id) {
+                setRecordingBindingId(null);
+              }
+            }}
+            onKeyDown={handleBindingRecorderKeyDown(binding.id)}
+            onMouseDown={handleBindingRecorderMouseDown(binding.id)}
+          />
+          <select
+            aria-label={`${rowLabel} action`}
+            className="h-9 rounded-md border bg-background px-2 text-sm"
+            value={bindingActionValue(binding.action)}
+            onChange={(event) =>
+              updateDictationBinding(binding.id, {
+                action: bindingActionFromValue(event.target.value, binding.action),
+              })
+            }
+          >
+            <option value="dictation">Dictation in the current profile</option>
+            {DICTATION_MODE_CYCLE_ORDER.map((preset) => (
+              <option key={preset} value={`dictation:${preset}`}>
+                Dictation · {dictationModeLabelFor(preset, dictationCustomModes)}
+              </option>
+            ))}
+            {dictationCustomModes.map((mode) => (
+              <option key={mode.id} value={`dictation:${mode.id}`}>
+                Dictation · {mode.name}
+              </option>
+            ))}
+            <option value="cycleMode">Next profile</option>
+            <option value="cancel">Cancel dictation</option>
+          </select>
+          {binding.action.kind === "dictation" && (
+            <select
+              aria-label={`${rowLabel} behavior`}
+              className="h-9 rounded-md border bg-background px-2 text-sm"
+              value={binding.action.behavior}
+              onChange={(event) =>
+                updateDictationBinding(binding.id, {
+                  action: {
+                    ...(binding.action as Extract<
+                      DictationBindingAction,
+                      { kind: "dictation" }
+                    >),
+                    behavior: event.target.value as "toggle" | "hold" | "inherit",
+                  },
+                })
+              }
+            >
+              <option value="inherit">Follows the setting above</option>
+              <option value="toggle">Press to start, press to stop</option>
+              {nativeShortcutAvailable && (
+                <option value="hold">Hold to record, release to stop</option>
+              )}
+            </select>
+          )}
+          <Button
+            variant="ghost"
+            size="sm"
+            className="h-9 px-3"
+            aria-label={`Remove ${rowLabel.toLowerCase()} binding`}
+            onClick={() =>
+              saveDictationBindings(
+                dictationBindings.filter((candidate) => candidate.id !== binding.id),
+              )
+            }
+          >
+            Remove
+          </Button>
+        </div>
+        {issue && (
+          <div className="flex items-start gap-2 rounded-xl border border-destructive/25 bg-destructive/10 px-3 py-2 text-sm text-destructive">
+            <AlertCircle className="mt-0.5 h-4 w-4 shrink-0" />
+            <span>{issue.message}</span>
+          </div>
+        )}
+      </div>
+    );
+  };
+
   const renderShortcutsSection = () => (
     <div className="border-t pt-4">
       <div className="space-y-1">
@@ -1959,8 +2297,61 @@ export function SettingsView() {
           Mac, not just in Plainsong.
         </p>
       </div>
+      <div className="mt-4 space-y-1">
+        <p className="text-sm font-medium">Dictation bindings</p>
+        <p className="text-sm text-muted-foreground">
+          Each binding can start dictation in the current profile or a specific
+          one, move to the next profile, or cancel. Mouse buttons and Fn on its
+          own need the native shortcut helper
+          {nativeShortcutAvailable ? " (running)" : " (not running)"}.
+        </p>
+      </div>
+      <div className="mt-3 grid gap-3">
+        {dictationBindings.map(renderDictationBindingRow)}
+        {dictationBindings.length === 0 && (
+          <p className="text-sm text-rust">
+            No dictation binding. Add one, or the hotkey stays off until Plainsong
+            restarts.
+          </p>
+        )}
+        <div className="flex flex-wrap gap-2">
+          <Button
+            variant="outline"
+            size="sm"
+            onClick={() => {
+              const id = `binding-${Date.now().toString(36)}`;
+              saveDictationBindings([
+                ...dictationBindings,
+                {
+                  id,
+                  trigger: { kind: "key", accelerator: "" },
+                  action: { kind: "dictation", modeId: null, behavior: "inherit" },
+                },
+              ]);
+              setRecordingBindingId(id);
+            }}
+          >
+            Add binding
+          </Button>
+          <Button
+            variant="ghost"
+            size="sm"
+            onClick={() =>
+              saveDictationBindings([
+                {
+                  id: "primary",
+                  trigger: { kind: "key", accelerator: defaultDictationShortcut() },
+                  action: { kind: "dictation", modeId: null, behavior: "inherit" },
+                },
+              ])
+            }
+          >
+            Reset to default
+          </Button>
+        </div>
+      </div>
       <div className="mt-4 grid gap-3">
-        {SHORTCUT_FIELD_CONFIG.map(({ key, label }) => {
+        {SHORTCUT_FIELD_CONFIG.filter(({ key }) => key !== "toggleDictation").map(({ key, label }) => {
           const currentVal = settings.shortcuts[key]
             ? formatShortcutForDisplay(settings.shortcuts[key])
             : "None";
@@ -2099,6 +2490,30 @@ export function SettingsView() {
                   transcription: {
                     ...settings.transcription,
                     dictationAiFormatting: checked,
+                  },
+                })
+              }
+            />
+
+            <SettingsSwitch
+              className="py-0"
+              label="Translate to English"
+              description={
+                translateAvailability.enabled
+                  ? `Applies to the built-in profiles; a saved profile has its own switch. ${translateAvailability.description}`
+                  : translateAvailability.description
+              }
+              checked={
+                translateAvailability.enabled &&
+                Boolean(settings.transcription.dictationTranslateToEnglish)
+              }
+              disabled={!translateAvailability.enabled}
+              onCheckedChange={(checked) =>
+                void updateSettings({
+                  ...settings,
+                  transcription: {
+                    ...settings.transcription,
+                    dictationTranslateToEnglish: checked,
                   },
                 })
               }

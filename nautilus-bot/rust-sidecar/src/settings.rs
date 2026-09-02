@@ -148,6 +148,12 @@ pub struct TranscriptionSettings {
     pub dictation_live_preview_enabled: bool,
     /// Dictation: Smart Format, LLM polishes text before insert
     pub dictation_ai_formatting: bool,
+    /// Dictation: translate whatever was spoken into English before the text
+    /// is formatted and inserted. This is the built-in modes' setting; a saved
+    /// custom mode carries its own `translate_to_english` flag instead. How
+    /// the translation actually runs depends on the selected model -- see
+    /// `resolve_dictation_translation_route` in `lib.rs`.
+    pub dictation_translate_to_english: bool,
     /// Dictation mode preset: voice, messages, email, notes, meeting_follow_up,
     /// custom. (`translate_english` is only valid as a custom mode's
     /// `base_mode_preset`, not as the top-level preset — see
@@ -288,6 +294,9 @@ pub struct DictationCustomMode {
     pub ai_model_id: Option<String>,
     pub activation_app_matcher: Option<String>,
     pub activation_domain_matcher: Option<String>,
+    /// Translate the spoken words into English for this mode. Mirrors the
+    /// built-in modes' `dictation_translate_to_english`.
+    pub translate_to_english: bool,
 }
 
 impl Default for TranscriptionSettings {
@@ -343,6 +352,7 @@ impl Default for TranscriptionSettings {
             dictation_keep_warm: "on".to_string(),
             dictation_live_preview_enabled: true,
             dictation_ai_formatting: false,
+            dictation_translate_to_english: false,
             dictation_mode_preset: "voice".to_string(),
             dictation_selected_custom_mode_id: None,
             dictation_custom_modes: Vec::new(),
@@ -549,12 +559,110 @@ impl PrivacySettings {
     }
 }
 
+/// What physically fires a dictation binding.
+///
+/// Mirrors `DictationBindingTrigger` in `src/types/settings.ts`. A `key`
+/// accelerator uses the same `Cmd+Shift+Space` spelling as `toggle_dictation`;
+/// a lone modifier (`Fn`, `Cmd`, ...) is allowed and means "that modifier on
+/// its own", which only the native macOS helper can deliver. A `mouse` trigger
+/// names an extra mouse button (3, 4 or 5 -- middle, back, forward) plus any
+/// modifiers that must be held with it; those are helper-only too.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "camelCase")]
+pub enum DictationBindingTrigger {
+    Key {
+        accelerator: String,
+    },
+    Mouse {
+        button: u8,
+        #[serde(default)]
+        modifiers: Vec<String>,
+    },
+}
+
+/// What a dictation binding does when its trigger fires.
+///
+/// Mirrors `DictationBindingAction` in `src/types/settings.ts`. `Dictation`
+/// starts (or stops) a dictation session: `mode_id` is `None` for "whichever
+/// mode is selected", a built-in preset id, or a saved custom mode id, used for
+/// that session only; `behavior` is `toggle`, `hold`, or `inherit` (follow the
+/// activation setting). `CycleMode` moves the selected mode to the next one;
+/// `Cancel` discards a running session, the same as Escape.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "camelCase")]
+pub enum DictationBindingAction {
+    #[serde(rename_all = "camelCase")]
+    Dictation {
+        #[serde(default)]
+        mode_id: Option<String>,
+        #[serde(default = "default_dictation_binding_behavior")]
+        behavior: String,
+    },
+    CycleMode,
+    Cancel,
+}
+
+fn default_dictation_binding_behavior() -> String {
+    "inherit".to_string()
+}
+
+/// One entry of the dictation binding table (roadmap item B4). The first
+/// binding whose action is `Dictation { mode_id: None, .. }` with a `key`
+/// trigger is the "primary" binding, and `toggle_dictation` is kept equal to
+/// its accelerator so an older build that only reads that key still has a
+/// hotkey.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DictationBinding {
+    pub id: String,
+    pub trigger: DictationBindingTrigger,
+    pub action: DictationBindingAction,
+}
+
+/// The id the migration gives the binding built from the legacy
+/// `toggleDictation` key.
+pub const PRIMARY_DICTATION_BINDING_ID: &str = "primary";
+
+pub const DICTATION_BINDING_BEHAVIORS: &[&str] = &["inherit", "toggle", "hold"];
+pub const DICTATION_MOUSE_BUTTONS: &[u8] = &[3, 4, 5];
+const MAX_DICTATION_BINDINGS: usize = 16;
+
+#[cfg(test)]
+#[path = "settings_dictation_binding_tests.rs"]
+mod dictation_binding_tests;
+
+/// A malformed entry must not take the whole settings file down with it: an
+/// unreadable binding is dropped on load (and the file rewritten without it
+/// by the normal save path), the rest of the table survives.
+fn deserialize_tolerant_dictation_bindings<'de, D>(
+    deserializer: D,
+) -> Result<Vec<DictationBinding>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let raw: Vec<serde_json::Value> = Vec::deserialize(deserializer)?;
+    Ok(raw
+        .into_iter()
+        .filter_map(
+            |value| match serde_json::from_value::<DictationBinding>(value) {
+                Ok(binding) => Some(binding),
+                Err(error) => {
+                    tracing::warn!("Dropping an unreadable dictation binding: {}", error);
+                    None
+                }
+            },
+        )
+        .collect())
+}
+
 /// Keyboard shortcuts
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default, rename_all = "camelCase")]
 pub struct KeyboardShortcuts {
-    /// Toggle dictation mode. One binding per action; the retired
-    /// `toggleDictationAlternates` list is dropped on load (see
+    /// Toggle dictation mode. Since the binding table below arrived this is a
+    /// derived value -- the primary binding's accelerator, or empty when there
+    /// is no primary key binding -- written so a downgrade keeps a hotkey.
+    /// The retired `toggleDictationAlternates` list is dropped on load (see
     /// `REMOVED_SETTINGS_KEYS`).
     pub toggle_dictation: String,
     /// Open main window
@@ -566,6 +674,18 @@ pub struct KeyboardShortcuts {
     /// Copy the last dictation result to the clipboard again. Empty means
     /// unbound.
     pub recopy_last_dictation: String,
+    /// The dictation binding table. Empty on a file written before it existed;
+    /// `normalize_keyboard_shortcuts` builds the first entry from
+    /// `toggle_dictation` in that case.
+    ///
+    /// The field-level `default` matters: the struct-level one would fill an
+    /// absent `dictationBindings` with `KeyboardShortcuts::default()`'s
+    /// primary binding on the *product default* accelerator, and the
+    /// reconciliation below would then overwrite a pre-B4 file's own
+    /// `toggleDictation` with it. An empty vec is how "this file predates the
+    /// table" is spelled.
+    #[serde(default, deserialize_with = "deserialize_tolerant_dictation_bindings")]
+    pub dictation_bindings: Vec<DictationBinding>,
 }
 
 impl Default for KeyboardShortcuts {
@@ -575,6 +695,168 @@ impl Default for KeyboardShortcuts {
             open_window: "Ctrl+Shift+N".to_string(),
             repaste_last_dictation: default_repaste_shortcut().to_string(),
             recopy_last_dictation: default_recopy_shortcut().to_string(),
+            dictation_bindings: vec![primary_dictation_binding(default_dictation_shortcut())],
+        }
+    }
+}
+
+fn primary_dictation_binding(accelerator: &str) -> DictationBinding {
+    DictationBinding {
+        id: PRIMARY_DICTATION_BINDING_ID.to_string(),
+        trigger: DictationBindingTrigger::Key {
+            accelerator: accelerator.to_string(),
+        },
+        action: DictationBindingAction::Dictation {
+            mode_id: None,
+            behavior: "inherit".to_string(),
+        },
+    }
+}
+
+fn is_primary_dictation_binding(binding: &DictationBinding) -> bool {
+    matches!(binding.trigger, DictationBindingTrigger::Key { .. })
+        && matches!(
+            binding.action,
+            DictationBindingAction::Dictation { mode_id: None, .. }
+        )
+}
+
+const SHORTCUT_MODIFIER_TOKENS: &[&str] = &["cmd", "ctrl", "alt", "shift", "fn"];
+
+fn normalize_shortcut_token(token: &str) -> String {
+    match token.trim().to_ascii_lowercase().as_str() {
+        "⌘" | "cmd" | "command" | "meta" | "super" => "cmd".to_string(),
+        "⌃" | "ctrl" | "control" => "ctrl".to_string(),
+        "⌥" | "alt" | "option" | "opt" => "alt".to_string(),
+        "⇧" | "shift" => "shift".to_string(),
+        "fn" | "function" => "fn".to_string(),
+        "spacebar" | "space" => "space".to_string(),
+        other => other.to_string(),
+    }
+}
+
+/// Canonical form of a trigger for duplicate detection: modifiers sorted,
+/// tokens lower-cased, so `Shift+Cmd+Space` and `cmd shift space` collide.
+pub(crate) fn dictation_binding_trigger_key(trigger: &DictationBindingTrigger) -> String {
+    match trigger {
+        DictationBindingTrigger::Key { accelerator } => {
+            let tokens: Vec<String> = accelerator
+                .replace(['⌘', '⌃', '⌥', '⇧'], " ")
+                .split(|c: char| c == '+' || c.is_whitespace())
+                .filter(|part| !part.trim().is_empty())
+                .map(normalize_shortcut_token)
+                .collect();
+            let mut modifiers: Vec<&str> = tokens
+                .iter()
+                .map(String::as_str)
+                .filter(|token| SHORTCUT_MODIFIER_TOKENS.contains(token))
+                .collect();
+            modifiers.sort_unstable();
+            modifiers.dedup();
+            let keys: Vec<&str> = tokens
+                .iter()
+                .map(String::as_str)
+                .filter(|token| !SHORTCUT_MODIFIER_TOKENS.contains(token))
+                .collect();
+            format!("key:{}:{}", modifiers.join("+"), keys.join("+"))
+        }
+        DictationBindingTrigger::Mouse { button, modifiers } => {
+            let mut normalized: Vec<String> = modifiers
+                .iter()
+                .map(|modifier| normalize_shortcut_token(modifier))
+                .filter(|modifier| SHORTCUT_MODIFIER_TOKENS.contains(&modifier.as_str()))
+                .collect();
+            normalized.sort_unstable();
+            normalized.dedup();
+            format!("mouse:{}:{}", normalized.join("+"), button)
+        }
+    }
+}
+
+/// Validation the save path applies to the binding table. Mirrors
+/// `validateDictationBindings` in `electron/dictation-bindings.ts`, which
+/// additionally knows whether the native helper is present (a mouse or
+/// lone-modifier binding needs it); this side owns the checks that do not
+/// depend on the machine.
+pub(crate) fn validate_dictation_bindings(bindings: &[DictationBinding]) -> Result<(), String> {
+    if bindings.len() > MAX_DICTATION_BINDINGS {
+        return Err(format!(
+            "At most {} dictation bindings are supported.",
+            MAX_DICTATION_BINDINGS
+        ));
+    }
+    let mut seen_ids = std::collections::HashSet::new();
+    let mut seen_triggers = std::collections::HashSet::new();
+    for binding in bindings {
+        if binding.id.trim().is_empty() {
+            return Err("Every dictation binding needs an id.".to_string());
+        }
+        if !seen_ids.insert(binding.id.trim().to_string()) {
+            return Err(format!(
+                "Dictation binding id '{}' is used twice.",
+                binding.id
+            ));
+        }
+        match &binding.trigger {
+            DictationBindingTrigger::Key { accelerator } => {
+                let key = dictation_binding_trigger_key(&binding.trigger);
+                let body = key.trim_start_matches("key:");
+                let (modifiers, keys) = body.split_once(':').unwrap_or(("", ""));
+                if accelerator.trim().is_empty() || (modifiers.is_empty() && keys.is_empty()) {
+                    return Err("A key binding needs at least one key.".to_string());
+                }
+                if keys.contains('+') {
+                    return Err(format!(
+                        "'{}' names more than one non-modifier key.",
+                        accelerator
+                    ));
+                }
+                if modifiers.is_empty() && !keys.is_empty() {
+                    let is_function_key = keys.len() >= 2
+                        && keys.starts_with('f')
+                        && keys[1..].chars().all(|c| c.is_ascii_digit());
+                    if !is_function_key {
+                        return Err(format!(
+                            "'{}' would fire on ordinary typing. Add a modifier such as Cmd or Ctrl.",
+                            accelerator
+                        ));
+                    }
+                }
+            }
+            DictationBindingTrigger::Mouse { button, .. } => {
+                if !DICTATION_MOUSE_BUTTONS.contains(button) {
+                    return Err(format!(
+                        "Mouse button {} cannot be bound; use button 3, 4 or 5.",
+                        button
+                    ));
+                }
+            }
+        }
+        if !seen_triggers.insert(dictation_binding_trigger_key(&binding.trigger)) {
+            return Err(format!(
+                "Two dictation bindings use the same trigger ({}).",
+                describe_dictation_binding_trigger(&binding.trigger)
+            ));
+        }
+        if let DictationBindingAction::Dictation { behavior, .. } = &binding.action {
+            if !DICTATION_BINDING_BEHAVIORS.contains(&behavior.as_str()) {
+                return Err(format!(
+                    "Dictation binding behavior '{}' is not one of inherit, toggle, hold.",
+                    behavior
+                ));
+            }
+        }
+    }
+    Ok(())
+}
+
+fn describe_dictation_binding_trigger(trigger: &DictationBindingTrigger) -> String {
+    match trigger {
+        DictationBindingTrigger::Key { accelerator } => accelerator.clone(),
+        DictationBindingTrigger::Mouse { button, modifiers } => {
+            let mut parts = modifiers.clone();
+            parts.push(format!("Mouse {}", button));
+            parts.join("+")
         }
     }
 }
@@ -617,10 +899,115 @@ fn default_dictation_shortcut() -> &'static str {
     }
 }
 
-fn normalize_keyboard_shortcuts(shortcuts: &mut KeyboardShortcuts) {
-    if shortcuts.toggle_dictation.trim().is_empty() {
-        shortcuts.toggle_dictation = default_dictation_shortcut().to_string();
+/// Load-time reconciliation between the legacy `toggle_dictation` key and the
+/// binding table.
+///
+/// - A file with no bindings (written before B4) gets one built from
+///   `toggle_dictation`; an empty `toggle_dictation` on such a file falls back
+///   to the product default exactly as it did before the table existed.
+/// - A file with bindings treats them as the source of truth and rewrites
+///   `toggle_dictation` from the primary binding, so the legacy key can never
+///   disagree with what the app actually registers.
+pub(crate) fn normalize_keyboard_shortcuts(shortcuts: &mut KeyboardShortcuts) {
+    reconcile_keyboard_shortcuts(shortcuts, true);
+}
+
+/// The save-path counterpart of `normalize_keyboard_shortcuts`.
+///
+/// A writer that predates the binding table (the first-run wizard, a hand
+/// edit, an older build's settings screen) changes `toggle_dictation` and
+/// nothing else. When the incoming legacy key differs from what is stored
+/// while the binding table is unchanged, that key is the user's edit and is
+/// applied to the primary binding; otherwise the table is authoritative, as on
+/// load. An emptied table is honoured (no default springs back), because
+/// removing every binding is how the hotkey is switched off until the next
+/// launch, exactly as clearing the legacy key used to work.
+pub(crate) fn reconcile_saved_keyboard_shortcuts(
+    shortcuts: &mut KeyboardShortcuts,
+    previous: &KeyboardShortcuts,
+) {
+    let legacy_key_edited = shortcuts.toggle_dictation.trim() != previous.toggle_dictation.trim();
+    let bindings_unchanged = shortcuts.dictation_bindings == previous.dictation_bindings;
+    if legacy_key_edited && bindings_unchanged {
+        let legacy = shortcuts.toggle_dictation.trim().to_string();
+        let primary_index = shortcuts
+            .dictation_bindings
+            .iter()
+            .position(is_primary_dictation_binding);
+        match (primary_index, legacy.is_empty()) {
+            (Some(index), true) => {
+                shortcuts.dictation_bindings.remove(index);
+            }
+            (Some(index), false) => {
+                shortcuts.dictation_bindings[index].trigger = DictationBindingTrigger::Key {
+                    accelerator: legacy,
+                };
+            }
+            (None, true) => {}
+            (None, false) => {
+                shortcuts
+                    .dictation_bindings
+                    .insert(0, primary_dictation_binding(&legacy));
+            }
+        }
     }
+    reconcile_keyboard_shortcuts(shortcuts, false);
+}
+
+fn reconcile_keyboard_shortcuts(
+    shortcuts: &mut KeyboardShortcuts,
+    restore_default_when_empty: bool,
+) {
+    for binding in &mut shortcuts.dictation_bindings {
+        binding.id = binding.id.trim().to_string();
+        if let DictationBindingTrigger::Key { accelerator } = &mut binding.trigger {
+            *accelerator = accelerator.trim().to_string();
+        }
+        if let DictationBindingAction::Dictation { mode_id, behavior } = &mut binding.action {
+            *mode_id = mode_id
+                .as_deref()
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .map(str::to_string);
+            let normalized = behavior.trim().to_ascii_lowercase();
+            *behavior = if DICTATION_BINDING_BEHAVIORS.contains(&normalized.as_str()) {
+                normalized
+            } else {
+                "inherit".to_string()
+            };
+        }
+    }
+    shortcuts.dictation_bindings.retain(|binding| {
+        !binding.id.is_empty()
+            && match &binding.trigger {
+                DictationBindingTrigger::Key { accelerator } => !accelerator.is_empty(),
+                DictationBindingTrigger::Mouse { button, .. } => {
+                    DICTATION_MOUSE_BUTTONS.contains(button)
+                }
+            }
+    });
+
+    if shortcuts.dictation_bindings.is_empty() {
+        if restore_default_when_empty && shortcuts.toggle_dictation.trim().is_empty() {
+            shortcuts.toggle_dictation = default_dictation_shortcut().to_string();
+        }
+        let legacy = shortcuts.toggle_dictation.trim().to_string();
+        if !legacy.is_empty() {
+            shortcuts.dictation_bindings = vec![primary_dictation_binding(&legacy)];
+        }
+        shortcuts.toggle_dictation = legacy;
+        return;
+    }
+
+    shortcuts.toggle_dictation = shortcuts
+        .dictation_bindings
+        .iter()
+        .find(|binding| is_primary_dictation_binding(binding))
+        .and_then(|binding| match &binding.trigger {
+            DictationBindingTrigger::Key { accelerator } => Some(accelerator.clone()),
+            DictationBindingTrigger::Mouse { .. } => None,
+        })
+        .unwrap_or_default();
 }
 
 /// Collapse a stored provider name onto one that still exists.

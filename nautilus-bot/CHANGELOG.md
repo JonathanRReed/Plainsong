@@ -13,6 +13,29 @@ changed underneath `0.9.0-beta.2`. See `LAUNCH.md` for which qualification
 evidence is stale and must be recaptured before this becomes a candidate.
 
 ### Added
+- **More than one dictation shortcut.** Settings → Shortcuts now holds a list
+  of dictation bindings instead of a single hotkey. A binding can be a key
+  chord, an extra mouse button (3–5), or a modifier on its own (Fn, Cmd), and
+  it can start dictation in the current profile, start it in one named
+  profile for that session only, move to the next profile, or cancel. Each
+  binding chooses hold-to-talk or press-to-toggle, or follows the activation
+  setting. Mouse buttons and lone modifiers need the native shortcut helper
+  and say so in the row when it is not running; key bindings still fall back
+  to Electron's press-only registration, where hold degrades to toggle as
+  before. Existing settings migrate: the old `toggleDictation` key becomes
+  the first binding and is kept written for one release so a downgrade still
+  has a hotkey.
+- **Translate to English, per profile.** A dictation profile (and the
+  built-in profiles as a group) can now deliver English whatever language was
+  spoken. Multilingual whisper.cpp models translate inside their own decode
+  with nothing else running; every other recognizer transcribes in the spoken
+  language and the dictation AI provider translates before formatting and
+  insert, inside the same timeout the formatting pass gets. A translation
+  that fails or times out inserts the words as spoken and says so rather than
+  losing them. The switch is disabled with the reason when the model cannot
+  translate (`.en` whisper builds) or when no AI provider can answer. The
+  language the recognizer detected, the route, and whether the translation
+  actually landed are recorded in the dictation history details.
 - Onboarding now asks how meeting notes get written: local Ollama (with live
   detection), bring-your-own-key cloud AI, or transcripts only — instead of
   silently defaulting to an Ollama install that usually isn't there.

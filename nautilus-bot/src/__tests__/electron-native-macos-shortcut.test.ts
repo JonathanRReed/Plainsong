@@ -1,33 +1,47 @@
 import { describe, expect, it } from "vitest";
 import {
-  DEFAULT_NATIVE_MACOS_DICTATION_SHORTCUT,
   buildNativeShortcutHelperArgs,
+  isNativeShortcutRawEvent,
   normalizeNativeShortcutHelperShortcut,
   normalizeNativeShortcutEvent,
-  resolveNativeShortcutHelperShortcut,
   resolveNativeShortcutStatus,
 } from "../../electron/native-macos-shortcut";
 
 describe("normalizeNativeShortcutEvent", () => {
-  it("maps native key down to pressed", () => {
-    expect(normalizeNativeShortcutEvent({ type: "down", key: "Space" })).toEqual({
+  it("maps a binding's down to pressed", () => {
+    expect(normalizeNativeShortcutEvent({ event: "down", bindingId: "primary" })).toEqual({
       signal: "pressed",
-      key: "Space",
+      bindingId: "primary",
     });
   });
 
-  it("maps native key up to released", () => {
-    expect(normalizeNativeShortcutEvent({ type: "up", key: "Space" })).toEqual({
+  it("maps a binding's up to released", () => {
+    expect(normalizeNativeShortcutEvent({ event: "up", bindingId: "primary" })).toEqual({
       signal: "released",
-      key: "Space",
+      bindingId: "primary",
     });
   });
 
-  it("maps Escape down to cancelled", () => {
-    expect(normalizeNativeShortcutEvent({ type: "down", key: "Escape" })).toEqual({
+  it("maps the reserved escape id to cancelled", () => {
+    expect(normalizeNativeShortcutEvent({ event: "down", bindingId: "escape" })).toEqual({
       signal: "cancelled",
-      key: "Escape",
+      bindingId: "escape",
     });
+  });
+});
+
+describe("isNativeShortcutRawEvent (helper JSON protocol)", () => {
+  it("accepts the {event, bindingId} lines the helper prints", () => {
+    expect(isNativeShortcutRawEvent({ event: "down", bindingId: "primary" })).toBe(true);
+    expect(isNativeShortcutRawEvent({ event: "up", bindingId: "b2" })).toBe(true);
+  });
+
+  it("rejects the retired {type, key} shape and malformed lines", () => {
+    expect(isNativeShortcutRawEvent({ type: "down", key: "Space" })).toBe(false);
+    expect(isNativeShortcutRawEvent({ event: "noop", bindingId: "primary" })).toBe(false);
+    expect(isNativeShortcutRawEvent({ event: "down", bindingId: "" })).toBe(false);
+    expect(isNativeShortcutRawEvent("down")).toBe(false);
+    expect(isNativeShortcutRawEvent(null)).toBe(false);
   });
 });
 
@@ -48,27 +62,15 @@ describe("resolveNativeShortcutStatus", () => {
 });
 
 describe("buildNativeShortcutHelperArgs", () => {
-  it("passes the configured shortcut as a normalized argument", () => {
-    expect(buildNativeShortcutHelperArgs("Ctrl+Alt+Cmd+D")).toEqual([
-      "--shortcut",
-      "Ctrl+Alt+Cmd+D",
-    ]);
-    expect(buildNativeShortcutHelperArgs("⌃ ⌥ ⌘ d")).toEqual([
-      "--shortcut",
-      "Ctrl+Alt+Cmd+D",
-    ]);
-  });
-});
-
-describe("resolveNativeShortcutHelperShortcut", () => {
-  it("uses the shared native default when no shortcut is configured", () => {
-    expect(resolveNativeShortcutHelperShortcut(" ")).toBe(
-      DEFAULT_NATIVE_MACOS_DICTATION_SHORTCUT,
-    );
-  });
-
-  it("keeps a configured shortcut", () => {
-    expect(resolveNativeShortcutHelperShortcut(" Ctrl+Alt+D ")).toBe("Ctrl+Alt+D");
+  it("hands the whole binding table over as one JSON argument", () => {
+    const table = [
+      { id: "primary", kind: "key" as const, accelerator: "Ctrl+Alt+Cmd+D" },
+      { id: "mouse", kind: "mouse" as const, button: 4 as const, modifiers: ["Cmd"] },
+      { id: "fn", kind: "modifier" as const, modifier: "Fn" },
+    ];
+    const args = buildNativeShortcutHelperArgs(table);
+    expect(args[0]).toBe("--bindings");
+    expect(JSON.parse(args[1])).toEqual(table);
   });
 });
 

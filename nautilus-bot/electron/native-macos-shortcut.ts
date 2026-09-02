@@ -1,13 +1,22 @@
+import type { NativeHelperBindingEntry } from "./dictation-bindings";
+import { ESCAPE_NATIVE_BINDING_ID } from "./dictation-bindings";
+
+/**
+ * One line of the native helper's stdout: a trigger transition for one entry
+ * of the binding table it was handed (see
+ * scripts/native-macos-shortcut-helper.swift). A bare Escape press arrives
+ * with the reserved id `escape`.
+ */
 export type NativeShortcutRawEvent = {
-  type: "down" | "up";
-  key: string;
+  event: "down" | "up";
+  bindingId: string;
 };
 
 type NativeShortcutSignal = "pressed" | "released" | "cancelled";
 
 type NativeShortcutEvent = {
   signal: NativeShortcutSignal;
-  key: string;
+  bindingId: string;
 };
 
 export type NativeShortcutStatus = {
@@ -19,12 +28,6 @@ export type NativeShortcutController = {
   status: NativeShortcutStatus;
   dispose: () => void;
 };
-
-// Matches the product default the sidecar's normalize_keyboard_shortcuts
-// applies (Cmd+Shift+Space on macOS). Used only when settings carry no
-// dictation shortcut at all; an explicitly cleared ("") shortcut disables the
-// helper instead of silently falling back to this.
-export const DEFAULT_NATIVE_MACOS_DICTATION_SHORTCUT = "Cmd+Shift+Space";
 
 const MACOS_SYMBOL_SHORTCUT_TOKENS = /[⌘⌃⌥⇧]/g;
 
@@ -47,22 +50,22 @@ export function isNativeShortcutRawEvent(value: unknown): value is NativeShortcu
   }
   const event = value as Partial<NativeShortcutRawEvent>;
   return (
-    (event.type === "down" || event.type === "up") &&
-    typeof event.key === "string" &&
-    event.key.length > 0
+    (event.event === "down" || event.event === "up") &&
+    typeof event.bindingId === "string" &&
+    event.bindingId.length > 0
   );
 }
 
 export function normalizeNativeShortcutEvent(
   event: NativeShortcutRawEvent,
 ): NativeShortcutEvent {
-  if (event.type === "down" && event.key === "Escape") {
-    return { signal: "cancelled", key: event.key };
+  if (event.event === "down" && event.bindingId === ESCAPE_NATIVE_BINDING_ID) {
+    return { signal: "cancelled", bindingId: event.bindingId };
   }
 
   return {
-    signal: event.type === "up" ? "released" : "pressed",
-    key: event.key,
+    signal: event.event === "up" ? "released" : "pressed",
+    bindingId: event.bindingId,
   };
 }
 
@@ -79,14 +82,14 @@ export function resolveNativeShortcutStatus(input: {
   return { available: true, reason: null };
 }
 
-export function buildNativeShortcutHelperArgs(shortcut: string): string[] {
-  return ["--shortcut", normalizeNativeShortcutHelperShortcut(shortcut)];
-}
-
-export function resolveNativeShortcutHelperShortcut(shortcut?: string | null): string {
-  return normalizeNativeShortcutHelperShortcut(
-    shortcut?.trim() || DEFAULT_NATIVE_MACOS_DICTATION_SHORTCUT,
-  );
+/**
+ * The helper takes its whole binding table as one JSON argument. Key
+ * accelerators are normalized to the spelling its parser expects
+ * (`Cmd+Shift+Space`) before they get here — see
+ * `buildNativeHelperBindingTable`.
+ */
+export function buildNativeShortcutHelperArgs(table: NativeHelperBindingEntry[]): string[] {
+  return ["--bindings", JSON.stringify(table)];
 }
 
 export function normalizeNativeShortcutHelperShortcut(shortcut: string): string {

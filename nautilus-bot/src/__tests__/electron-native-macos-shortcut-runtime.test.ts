@@ -3,6 +3,10 @@ import { PassThrough } from "stream";
 import { describe, expect, it, vi } from "vitest";
 import { startNativeMacosShortcutController } from "../../electron/native-macos-shortcut-runtime";
 
+const PRIMARY_TABLE = [
+  { id: "primary", kind: "key" as const, accelerator: "Cmd+Shift+Space" },
+];
+
 type NativeShortcutTestChild = NonNullable<
   Parameters<typeof startNativeMacosShortcutController>[0]["spawnHelper"]
 > extends (...args: never[]) => infer Child
@@ -50,6 +54,7 @@ describe("startNativeMacosShortcutController", () => {
     const controller = startNativeMacosShortcutController({
       platform: "linux",
       helperPath: "/tmp/helper",
+      helperBindings: PRIMARY_TABLE,
       helperExists: () => true,
       spawnHelper,
       onEvent: vi.fn(),
@@ -62,13 +67,13 @@ describe("startNativeMacosShortcutController", () => {
     expect(spawnHelper).not.toHaveBeenCalled();
   });
 
-  it("does not spawn the helper when the dictation shortcut was explicitly cleared", () => {
+  it("does not spawn the helper when every dictation binding was removed", () => {
     const spawnHelper = vi.fn();
 
     const controller = startNativeMacosShortcutController({
       platform: "darwin",
       helperPath: "/tmp/plainsong-native-shortcut-helper",
-      shortcut: "",
+      helperBindings: [],
       helperExists: () => true,
       spawnHelper,
       onEvent: vi.fn(),
@@ -87,6 +92,7 @@ describe("startNativeMacosShortcutController", () => {
     const controller = startNativeMacosShortcutController({
       platform: "darwin",
       helperPath: "/tmp/helper",
+      helperBindings: PRIMARY_TABLE,
       helperExists: () => false,
       spawnHelper,
       onEvent: vi.fn(),
@@ -99,57 +105,47 @@ describe("startNativeMacosShortcutController", () => {
     expect(spawnHelper).not.toHaveBeenCalled();
   });
 
-  it("spawns the helper, forwards valid shortcut events, and disposes it", () => {
+  it("spawns the helper with the binding table, forwards its events, and disposes it", () => {
     const child = createNativeShortcutTestChild();
     const spawnHelper = vi.fn(() => child);
     const onEvent = vi.fn();
+    const table = [
+      { id: "primary", kind: "key" as const, accelerator: "Ctrl+Alt+Cmd+D" },
+      { id: "back-button", kind: "mouse" as const, button: 4 as const, modifiers: [] },
+      { id: "fn-alone", kind: "modifier" as const, modifier: "Fn" },
+    ];
 
     const controller = startNativeMacosShortcutController({
       platform: "darwin",
       helperPath: "/tmp/plainsong-native-shortcut-helper",
-      shortcut: "Ctrl+Alt+Cmd+D",
+      helperBindings: table,
       helperExists: () => true,
       spawnHelper,
       onEvent,
     });
 
     expect(controller.status).toEqual({ available: true, reason: null });
-    expect(spawnHelper).toHaveBeenCalledWith(
-      "/tmp/plainsong-native-shortcut-helper",
-      ["--shortcut", "Ctrl+Alt+Cmd+D"],
-    );
+    expect(spawnHelper).toHaveBeenCalledTimes(1);
+    const [helperPath, args] = spawnHelper.mock.calls[0] as unknown as [string, string[]];
+    expect(helperPath).toBe("/tmp/plainsong-native-shortcut-helper");
+    expect(args[0]).toBe("--bindings");
+    expect(JSON.parse(args[1])).toEqual(table);
 
+    child.stdout.write('{"event":"down","bindingId":"primary"}\n');
+    child.stdout.write('{"event":"noop","bindingId":"primary"}\n');
     child.stdout.write('{"type":"down","key":"D"}\n');
-    child.stdout.write('{"type":"noop","key":"D"}\n');
     child.stdout.write("not json\n");
-    child.stdout.write('{"type":"up","key":"D"}\n');
+    child.stdout.write('{"event":"up","bindingId":"primary"}\n');
+    child.stdout.write('{"event":"down","bindingId":"back-button"}\n');
 
-    expect(onEvent).toHaveBeenCalledTimes(2);
-    expect(onEvent).toHaveBeenNthCalledWith(1, { type: "down", key: "D" });
-    expect(onEvent).toHaveBeenNthCalledWith(2, { type: "up", key: "D" });
+    expect(onEvent).toHaveBeenCalledTimes(3);
+    expect(onEvent).toHaveBeenNthCalledWith(1, { event: "down", bindingId: "primary" });
+    expect(onEvent).toHaveBeenNthCalledWith(2, { event: "up", bindingId: "primary" });
+    expect(onEvent).toHaveBeenNthCalledWith(3, { event: "down", bindingId: "back-button" });
 
     controller.dispose();
 
     expect(child.kill).toHaveBeenCalledWith("SIGTERM");
-  });
-
-  it("spawns the helper with a normalized shortcut argument", () => {
-    const child = createNativeShortcutTestChild();
-    const spawnHelper = vi.fn(() => child);
-
-    startNativeMacosShortcutController({
-      platform: "darwin",
-      helperPath: "/tmp/plainsong-native-shortcut-helper",
-      shortcut: "control option command d",
-      helperExists: () => true,
-      spawnHelper,
-      onEvent: vi.fn(),
-    });
-
-    expect(spawnHelper).toHaveBeenCalledWith(
-      "/tmp/plainsong-native-shortcut-helper",
-      ["--shortcut", "Ctrl+Alt+Cmd+D"],
-    );
   });
 
   it("marks the helper unavailable after an unexpected helper exit", () => {
@@ -159,6 +155,7 @@ describe("startNativeMacosShortcutController", () => {
     const controller = startNativeMacosShortcutController({
       platform: "darwin",
       helperPath: "/tmp/plainsong-native-shortcut-helper",
+      helperBindings: PRIMARY_TABLE,
       helperExists: () => true,
       spawnHelper: () => child,
       onEvent: vi.fn(),
@@ -183,6 +180,7 @@ describe("startNativeMacosShortcutController", () => {
     const controller = startNativeMacosShortcutController({
       platform: "darwin",
       helperPath: "/tmp/plainsong-native-shortcut-helper",
+      helperBindings: PRIMARY_TABLE,
       helperExists: () => true,
       spawnHelper: () => child,
       onEvent: vi.fn(),
@@ -202,6 +200,7 @@ describe("startNativeMacosShortcutController", () => {
     const controller = startNativeMacosShortcutController({
       platform: "darwin",
       helperPath: "/tmp/plainsong-native-shortcut-helper",
+      helperBindings: PRIMARY_TABLE,
       helperExists: () => true,
       spawnHelper: () => child,
       onEvent: vi.fn(),
@@ -224,6 +223,7 @@ describe("startNativeMacosShortcutController", () => {
     const controller = startNativeMacosShortcutController({
       platform: "darwin",
       helperPath: "/tmp/plainsong-native-shortcut-helper",
+      helperBindings: PRIMARY_TABLE,
       helperExists: () => true,
       spawnHelper: () => child,
       onEvent: vi.fn(),
@@ -245,6 +245,7 @@ describe("startNativeMacosShortcutController", () => {
     const controller = startNativeMacosShortcutController({
       platform: "darwin",
       helperPath: "/tmp/plainsong-native-shortcut-helper",
+      helperBindings: PRIMARY_TABLE,
       helperExists: () => true,
       spawnHelper: () => child,
       onEvent: vi.fn(),
