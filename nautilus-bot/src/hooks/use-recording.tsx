@@ -65,6 +65,10 @@ interface RecordingContextValue extends RecordingState {
     projectId: string;
     template?: string;
     meetingNotes?: string;
+    /** The detected call whose offer this capture answers, if any. */
+    detectedCallId?: number;
+    /** The conferencing service the meeting is on, when something knew it. */
+    videoService?: string;
   }) => Promise<string | null>;
   stopMeeting: () => Promise<void>;
   /** Pause the live meeting: capture stays open, nothing is kept until resume. */
@@ -223,6 +227,8 @@ export function RecordingProvider({ children }: { children: ReactNode }) {
       projectId: string;
       template?: string;
       meetingNotes?: string;
+      detectedCallId?: number;
+      videoService?: string;
     }) => {
       try {
         const recordingId = await startRecording(options);

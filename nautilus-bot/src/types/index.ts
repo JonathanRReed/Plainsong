@@ -41,6 +41,12 @@ export interface Recording {
    * meeting that was never paused or that predates the feature.
    */
   pauseSpans?: PauseSpan[];
+  /**
+   * The conferencing service this meeting was on, when the calendar event or
+   * the detected call it started from named one. Mirrors `video_service` in
+   * rust-sidecar/src/models.rs, which only stores keys it recognizes.
+   */
+  videoService?: string | null;
 }
 
 /** Mirrors `PauseSpan` in rust-sidecar/src/recording_pause.rs. */

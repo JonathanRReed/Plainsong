@@ -8238,6 +8238,26 @@ mod tests {
     }
 
     #[test]
+    fn a_capture_carries_the_call_id_of_the_offer_it_came_from() {
+        // "New meeting" sends no call id, so nothing binds its auto-stop; the
+        // accepted offer sends exactly the call the reader clicked.
+        let plain = meeting_options_from_json(serde_json::json!({
+            "mic": true,
+            "systemAudio": false,
+            "projectId": "default"
+        }));
+        assert_eq!(plain.detected_call_id, None);
+
+        let from_offer = meeting_options_from_json(serde_json::json!({
+            "mic": true,
+            "systemAudio": false,
+            "projectId": "default",
+            "detectedCallId": 7
+        }));
+        assert_eq!(from_offer.detected_call_id, Some(7));
+    }
+
+    #[test]
     fn a_registered_capture_nonce_cannot_be_replayed() {
         // A well-formed UUID used to be accepted on its own, so anything that
         // could reach the command could mint its own admission. A registered
@@ -9341,6 +9361,7 @@ mod tests {
             consent_notice_updated_at: None,
             analysis_failure: None,
             pause_spans: Vec::new(),
+            video_service: None,
         }
     }
 
@@ -23024,6 +23045,7 @@ async fn stop_dictation_for_sidecar(
         consent_notice_updated_at: None,
         analysis_failure: None,
         pause_spans: Vec::new(),
+        video_service: None,
     };
 
     // Cursor delivery crosses native process and accessibility boundaries.
@@ -24623,6 +24645,7 @@ async fn start_recording_for_sidecar(
         consent_notice_updated_at: None,
         analysis_failure: None,
         pause_spans: Vec::new(),
+        video_service: models::known_video_service(options.video_service.as_deref()),
     };
 
     {
@@ -24877,7 +24900,12 @@ async fn start_recording_for_sidecar(
     // Tell Electron to show the recording overlay window.
     handle.window_command("show-recording-overlay", &serde_json::Value::Null);
 
-    spawn_meeting_capture_monitor(Arc::clone(state), handle.clone(), recording_id.clone());
+    spawn_meeting_capture_monitor(
+        Arc::clone(state),
+        handle.clone(),
+        recording_id.clone(),
+        options.detected_call_id,
+    );
 
     Ok(recording_id)
 }
@@ -25240,15 +25268,19 @@ fn spawn_meeting_capture_monitor(
     state: Arc<AppState>,
     handle: crate::sidecar_handle::SidecarHandle,
     recording_id: String,
+    detected_call_id: Option<u64>,
 ) {
-    // The call this meeting is recorded alongside, if detection had one when
-    // capture began. Bound once: a call that starts later is not this
-    // meeting's call, and its ending must not end this meeting.
+    // The call this meeting is recorded alongside: the one whose offer the
+    // reader accepted, and only that one. Bound once, by exact id — a call
+    // that merely happens to be live when capture begins is somebody else's
+    // call, and its ending must not end this meeting.
     let bound_call = state
         .meeting_call_detector
         .lock()
         .ok()
-        .and_then(|detector| detector.active().map(|call| (call.call_id, call.app_label)));
+        .and_then(|detector| {
+            meeting_detect::bind_detected_call(detector.active(), detected_call_id)
+        });
     tokio::spawn(async move {
         let mut writer_failure_reported = false;
         let mut low_space_reported = false;

@@ -258,6 +258,14 @@ export async function startRecording(options: {
   preferredInputDeviceId?: string;
   template?: string;
   meetingNotes?: string;
+  /**
+   * The `callId` of the detected call whose offer the reader accepted. The
+   * sidecar binds this meeting's auto-stop to that call and to no other, so a
+   * meeting started any other way must leave it out.
+   */
+  detectedCallId?: number;
+  /** The conferencing service, stored with the recording as its tag. */
+  videoService?: string;
 }): Promise<string> {
   return await invoke("begin_meeting_capture", { options });
 }

@@ -226,9 +226,9 @@ fn insert_recording_row(
             id, title, project_id, duration, created_at, updated_at, source_type, audio_path, status,
             meeting_notes, meeting_template_id, meeting_capture_mode, notes_updated_at,
             consent_prompt_shown, consent_notice_mode, consent_notice_surface,
-            consent_notice_message, consent_notice_updated_at
+            consent_notice_message, consent_notice_updated_at, video_service
          )
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18)",
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19)",
         params![
             &recording.id,
             &recording.title,
@@ -253,7 +253,8 @@ fn insert_recording_row(
             recording
                 .consent_notice_updated_at
                 .as_ref()
-                .map(|value| value.to_rfc3339())
+                .map(|value| value.to_rfc3339()),
+            &recording.video_service
         ],
     )?;
     Ok(())
@@ -1177,7 +1178,8 @@ impl Database {
                 consent_notice_mode TEXT,
                 consent_notice_surface TEXT,
                 consent_notice_message TEXT,
-                consent_notice_updated_at TEXT
+                consent_notice_updated_at TEXT,
+                video_service TEXT
             )",
             [],
         )?;
@@ -1662,6 +1664,10 @@ impl Database {
         // file skips them, so this is the only record of where the gaps are
         // and how long they were.
         self.ensure_table_column("recordings", "pause_spans", "TEXT")?;
+        // The conferencing service the meeting was on, when the calendar event
+        // or the detected call it started from named one. A tag from a fixed
+        // list, not free text -- see `models::known_video_service`.
+        self.ensure_table_column("recordings", "video_service", "TEXT")?;
 
         // Chunked meeting transcription survives per-chunk ASR failures and
         // still returns a transcript, so "completed" alone never meant "the
@@ -2161,7 +2167,8 @@ impl Database {
                     meeting_artifacts.summary_provenance,
                     meeting_artifacts.action_items_provenance,
                     recordings.analysis_failure,
-                    recordings.pause_spans
+                    recordings.pause_spans,
+                    recordings.video_service
              FROM recordings
              LEFT JOIN meeting_artifacts ON meeting_artifacts.recording_id = recordings.id
              WHERE (?1 IS NULL OR recordings.project_id = ?1)
@@ -2220,6 +2227,7 @@ impl Database {
                     .map(|value| value.trim().to_string())
                     .filter(|value| !value.is_empty()),
                 pause_spans: parse_pause_spans(row.get::<_, Option<String>>(23)?),
+                video_service: known_video_service(row.get::<_, Option<String>>(24)?.as_deref()),
             })
         })?;
 
@@ -2259,7 +2267,8 @@ impl Database {
                     meeting_artifacts.summary_provenance,
                     meeting_artifacts.action_items_provenance,
                     recordings.analysis_failure,
-                    recordings.pause_spans
+                    recordings.pause_spans,
+                    recordings.video_service
              FROM recordings
              LEFT JOIN meeting_artifacts ON meeting_artifacts.recording_id = recordings.id
              WHERE recordings.id = ?1",
@@ -2315,6 +2324,7 @@ impl Database {
                     .map(|value| value.trim().to_string())
                     .filter(|value| !value.is_empty()),
                 pause_spans: parse_pause_spans(row.get::<_, Option<String>>(23)?),
+                video_service: known_video_service(row.get::<_, Option<String>>(24)?.as_deref()),
             })
         });
 
@@ -2506,9 +2516,9 @@ impl Database {
                 id, title, project_id, duration, created_at, updated_at, source_type, audio_path, status,
                 meeting_notes, meeting_template_id, meeting_capture_mode, notes_updated_at,
                 consent_prompt_shown, consent_notice_mode, consent_notice_surface,
-                consent_notice_message, consent_notice_updated_at
+                consent_notice_message, consent_notice_updated_at, video_service
              )
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18)",
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19)",
             params![
                 &recording.id,
                 &recording.title,
@@ -2533,7 +2543,8 @@ impl Database {
                 recording
                     .consent_notice_updated_at
                     .as_ref()
-                    .map(|value| value.to_rfc3339())
+                    .map(|value| value.to_rfc3339()),
+                &recording.video_service
             ],
         )?;
         for (role, path) in plan.paths() {
@@ -5986,6 +5997,55 @@ mod tests {
     }
 
     #[test]
+    fn the_video_service_tag_round_trips_and_only_known_keys_survive() {
+        let mut db = in_memory_db();
+        let mut tagged = sample_recording("meeting-zoom", "inbox");
+        tagged.video_service = Some("zoom".to_string());
+        db.create_recording(&tagged).unwrap();
+        assert_eq!(
+            db.get_recording("meeting-zoom")
+                .expect("read")
+                .expect("row")
+                .video_service
+                .as_deref(),
+            Some("zoom")
+        );
+        assert_eq!(
+            db.get_recordings(None).expect("list")[0]
+                .video_service
+                .as_deref(),
+            Some("zoom")
+        );
+
+        // A meeting that began from "New meeting" carries no tag.
+        db.create_recording(&sample_recording("meeting-plain", "inbox"))
+            .unwrap();
+        assert_eq!(
+            db.get_recording("meeting-plain")
+                .expect("read")
+                .expect("row")
+                .video_service,
+            None
+        );
+
+        // A key an older or newer build wrote that this one does not know is
+        // read as no tag rather than shown to the reader verbatim.
+        db.conn
+            .execute(
+                "UPDATE recordings SET video_service = 'carrier_pigeon' WHERE id = 'meeting-plain'",
+                [],
+            )
+            .expect("write an unknown key");
+        assert_eq!(
+            db.get_recording("meeting-plain")
+                .expect("read")
+                .expect("row")
+                .video_service,
+            None
+        );
+    }
+
+    #[test]
     fn recording_analysis_failure_serializes_as_camel_case() {
         let mut recording = sample_recording("meeting-4", "inbox");
         recording.analysis_failure = Some("summary: boom".to_string());
@@ -6032,6 +6092,7 @@ mod tests {
             consent_notice_updated_at: None,
             analysis_failure: None,
             pause_spans: Vec::new(),
+            video_service: None,
         }
     }
 

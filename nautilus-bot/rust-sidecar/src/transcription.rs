@@ -210,6 +210,7 @@ mod tests {
             consent_notice_updated_at: None,
             analysis_failure: None,
             pause_spans: Vec::new(),
+            video_service: None,
         }
     }
 

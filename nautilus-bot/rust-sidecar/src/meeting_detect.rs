@@ -549,6 +549,25 @@ pub fn auto_stop_for_call_end(setting_enabled: bool, reason: Option<CallEndReaso
     setting_enabled && reason.is_some_and(CallEndReason::implies_call_over)
 }
 
+/// The call a starting meeting may bind its auto-stop to, and that call's app
+/// label for the sentence the auto-stop shows.
+///
+/// `requested` is the `callId` the reader's own gesture carried: the offer
+/// they accepted put it in the capture request, and a meeting started any
+/// other way has none. Only an exact match binds. Binding whatever call
+/// happened to be active at start instead was how a FaceTime call somebody had
+/// already waved away could stop an unrelated mic-only recording the moment
+/// FaceTime quit. A dismissed call never binds either — waving the offer away
+/// is the reader saying this recording is not that call's.
+pub fn bind_detected_call(
+    active: Option<&ActiveCall>,
+    requested: Option<u64>,
+) -> Option<(u64, &'static str)> {
+    let requested = requested?;
+    let call = active?;
+    (call.call_id == requested && !call.dismissed).then_some((call.call_id, call.app_label))
+}
+
 #[cfg(target_os = "macos")]
 pub use macos::{default_input_device_running_somewhere, sample_running_apps};
 
@@ -1192,6 +1211,30 @@ mod tests {
             Some(CallEndReason::DetectionDisabled)
         );
         assert!(!auto_stop_for_call_end(true, detector.ended_reason(1)));
+    }
+
+    #[test]
+    fn only_the_call_the_offer_came_from_binds_a_meetings_auto_stop() {
+        let call = detector_call_fixture();
+        assert_eq!(
+            bind_detected_call(Some(&call), Some(1)),
+            Some((1, "Zoom")),
+            "the accepted offer's own call binds"
+        );
+        // A meeting started from "New meeting" carries no call id, so the call
+        // that happens to be live binds nothing.
+        assert_eq!(bind_detected_call(Some(&call), None), None);
+        // A different call than the one offered (the first ended and another
+        // began while the consent dialog was open) binds nothing.
+        assert_eq!(bind_detected_call(Some(&call), Some(2)), None);
+        // Nothing is detected any more.
+        assert_eq!(bind_detected_call(None, Some(1)), None);
+
+        let dismissed = ActiveCall {
+            dismissed: true,
+            ..detector_call_fixture()
+        };
+        assert_eq!(bind_detected_call(Some(&dismissed), Some(1)), None);
     }
 
     #[test]
