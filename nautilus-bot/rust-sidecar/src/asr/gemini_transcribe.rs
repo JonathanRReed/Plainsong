@@ -30,7 +30,7 @@
 //!    the provider description says so rather than implying a guarantee.
 
 use super::{
-    cloud_asr_status_error,
+    cloud_asr_response_error,
     openai_cloud::{build_cloud_asr_client, CloudAsrHttpTimeouts},
     provider_speaker_id, read_cloud_asr_json, AsrProvider, AsrProviderType, DownloadStatus,
     ModelInfo, SpeakerTurn, TranscriptSegment, TranscriptionOptions, TranscriptionResult,
@@ -573,7 +573,7 @@ impl GeminiTranscribeProvider {
             .context("Gemini Files API upload request failed")?;
 
         if !start.status().is_success() {
-            return Err(cloud_asr_status_error("Gemini Files", start.status()));
+            return Err(cloud_asr_response_error("Gemini Files", start));
         }
 
         let upload_url = start
@@ -603,7 +603,7 @@ impl GeminiTranscribeProvider {
             .context("Gemini Files API byte upload failed")?;
 
         if !uploaded.status().is_success() {
-            return Err(cloud_asr_status_error("Gemini Files", uploaded.status()));
+            return Err(cloud_asr_response_error("Gemini Files", uploaded));
         }
 
         // The raw envelope, not the typed one: the caller pulls the file name
@@ -652,7 +652,7 @@ impl GeminiTranscribeProvider {
                 .await
                 .context("Gemini Files API status request failed")?;
             if !response.status().is_success() {
-                return Err(cloud_asr_status_error("Gemini Files", response.status()));
+                return Err(cloud_asr_response_error("Gemini Files", response));
             }
             let refreshed: GeminiFile = read_cloud_asr_json(response, "Gemini Files").await?;
             file = GeminiFile {
@@ -743,10 +743,9 @@ impl GeminiTranscribeProvider {
                 .await
                 .context("Gemini transcription request failed")?;
             if !response.status().is_success() {
-                return Err(cloud_asr_status_error(
-                    "Gemini Transcribe",
-                    response.status(),
-                ));
+                // Handed over whole: a Gemini error body can echo the prompt
+                // and the transcript. See `cloud_asr_response_error`.
+                return Err(cloud_asr_response_error("Gemini Transcribe", response));
             }
             let payload: Value = read_cloud_asr_json(response, "Gemini Transcribe").await?;
             let parsed = parse_gemini_value(&payload);
@@ -1179,13 +1178,19 @@ mod tests {
             .is_err());
     }
 
-    #[test]
-    fn provider_status_errors_never_include_response_body_content() {
-        let error =
-            super::cloud_asr_status_error("Gemini Transcribe", reqwest::StatusCode::FORBIDDEN);
-        let rendered = error.to_string();
+    /// A real 403 whose body carries the marker, because the previous version
+    /// of this test built no response at all and so could not have failed.
+    #[tokio::test]
+    async fn provider_status_errors_never_include_response_body_content() {
+        let response = crate::asr::cloud_asr_error_response_fixture(403, "Forbidden").await;
+        let error = super::cloud_asr_response_error("Gemini Transcribe", response);
+        let rendered = format!("{error:#}");
         assert!(rendered.contains("Gemini Transcribe"));
         assert!(rendered.contains("403"));
-        assert!(!rendered.contains("secret-transcript-marker"));
+        assert!(
+            !rendered.contains(crate::asr::CLOUD_ASR_BODY_MARKER),
+            "Gemini's error body reached the message: {rendered}"
+        );
+        assert_eq!(rendered, "Gemini Transcribe API returned HTTP 403");
     }
 }

@@ -25,7 +25,7 @@
 //!    so.
 
 use super::{
-    cloud_asr_status_error,
+    cloud_asr_response_error,
     openai_cloud::{build_cloud_asr_client, CloudAsrHttpTimeouts},
     provider_speaker_id, read_cloud_asr_json, AsrProvider, AsrProviderType, DownloadStatus,
     ModelInfo, SpeakerTurn, TranscriptSegment, TranscriptionOptions, TranscriptionResult,
@@ -480,8 +480,9 @@ impl DeepgramProvider {
             .context("Deepgram API request failed")?;
 
         if !response.status().is_success() {
-            let status = response.status();
-            return Err(cloud_asr_status_error("Deepgram", status));
+            // The response is handed over whole, so its body cannot reach the
+            // error message even by accident. See `cloud_asr_response_error`.
+            return Err(cloud_asr_response_error("Deepgram", response));
         }
 
         let payload: serde_json::Value = read_cloud_asr_json(response, "Deepgram").await?;
@@ -903,12 +904,19 @@ mod tests {
         assert!(!rendered.contains("not json"));
     }
 
-    #[test]
-    fn provider_status_errors_never_include_response_body_content() {
-        let error = super::cloud_asr_status_error("Deepgram", reqwest::StatusCode::UNAUTHORIZED);
-        let rendered = error.to_string();
+    /// A real 401 whose body carries the marker, because the previous version
+    /// of this test built no response at all and so could not have failed.
+    #[tokio::test]
+    async fn provider_status_errors_never_include_response_body_content() {
+        let response = crate::asr::cloud_asr_error_response_fixture(401, "Unauthorized").await;
+        let error = super::cloud_asr_response_error("Deepgram", response);
+        let rendered = format!("{error:#}");
         assert!(rendered.contains("Deepgram"));
         assert!(rendered.contains("401"));
-        assert!(!rendered.contains("secret-transcript-marker"));
+        assert!(
+            !rendered.contains(crate::asr::CLOUD_ASR_BODY_MARKER),
+            "Deepgram's error body reached the message: {rendered}"
+        );
+        assert_eq!(rendered, "Deepgram API returned HTTP 401");
     }
 }

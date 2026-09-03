@@ -55,6 +55,21 @@ pub(crate) fn cloud_asr_status_error(
     anyhow::anyhow!("{} API returned HTTP {}", provider_label, status.as_u16())
 }
 
+/// The error a non-2xx cloud ASR response becomes.
+///
+/// Takes the response **by value**, so from here on its body is unreachable
+/// rather than merely unread. A provider's error body can echo the audio's
+/// transcript, the prompt, or a keyterm list out of the user's personal
+/// dictionary, and none of that belongs in a message that ends up in a log or
+/// on screen. "Remember to pass only the status" is not a guarantee; consuming
+/// the response is.
+pub(crate) fn cloud_asr_response_error(
+    provider_label: &str,
+    response: reqwest::Response,
+) -> anyhow::Error {
+    cloud_asr_status_error(provider_label, response.status())
+}
+
 /// Warnings a provider raised about work it does *outside* the transcript.
 ///
 /// Today there is exactly one producer: the Gemini route uploads audio to
@@ -517,19 +532,89 @@ mod upload_streaming_tests {
     }
 }
 
+/// A marker no provider error may ever carry, used by the body-leak tests in
+/// this module and in each provider.
+#[cfg(test)]
+pub(crate) const CLOUD_ASR_BODY_MARKER: &str = "secret-transcript-marker";
+
+/// A real `reqwest::Response` with the given status and a body containing
+/// [`CLOUD_ASR_BODY_MARKER`], served over a loopback socket.
+///
+/// The tests that assert "the body never reaches the message" used to build no
+/// response at all: they called `cloud_asr_status_error(label, status)`, which
+/// has no body in scope, and then asserted the marker was absent from the
+/// result. That could not have failed. Serving a real response is what makes
+/// the assertion mean something -- the marker is genuinely present in the
+/// response the code is handed.
+#[cfg(test)]
+pub(crate) async fn cloud_asr_error_response_fixture(
+    status: u16,
+    reason: &str,
+) -> reqwest::Response {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    let body = format!(r#"{{"err_code":9,"err_msg":"{CLOUD_ASR_BODY_MARKER}"}}"#);
+    assert!(
+        body.contains(CLOUD_ASR_BODY_MARKER),
+        "the fixture body must actually carry the marker"
+    );
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind a loopback port for the fixture");
+    let address = listener.local_addr().expect("fixture address");
+    let head = format!(
+        "HTTP/1.1 {status} {reason}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+        body.len()
+    );
+    tokio::spawn(async move {
+        if let Ok((mut socket, _)) = listener.accept().await {
+            let mut request = [0u8; 1024];
+            let _ = socket.read(&mut request).await;
+            let _ = socket.write_all(head.as_bytes()).await;
+            let _ = socket.write_all(body.as_bytes()).await;
+            let _ = socket.shutdown().await;
+        }
+    });
+
+    reqwest::Client::new()
+        .get(format!("http://{address}/"))
+        .send()
+        .await
+        .expect("fixture response")
+}
+
 #[cfg(test)]
 mod cloud_response_security_tests {
-    use super::cloud_asr_status_error;
+    use super::{
+        cloud_asr_error_response_fixture, cloud_asr_response_error, CLOUD_ASR_BODY_MARKER,
+    };
 
-    #[test]
-    fn provider_status_errors_never_include_response_body_content() {
-        let marker = "secret-transcript-marker";
-        let error = cloud_asr_status_error("Test ASR", reqwest::StatusCode::BAD_REQUEST);
-        let rendered = error.to_string();
+    #[tokio::test]
+    async fn provider_status_errors_never_include_response_body_content() {
+        // First, proof that the marker really does arrive over the wire, so
+        // the assertion below is about the code and not about an empty body.
+        let served = cloud_asr_error_response_fixture(400, "Bad Request").await;
+        assert_eq!(served.status(), reqwest::StatusCode::BAD_REQUEST);
+        assert!(served
+            .text()
+            .await
+            .expect("fixture body")
+            .contains(CLOUD_ASR_BODY_MARKER));
+
+        let response = cloud_asr_error_response_fixture(400, "Bad Request").await;
+        let error = cloud_asr_response_error("Test ASR", response);
+        let rendered = format!("{error:#}");
 
         assert!(rendered.contains("Test ASR"));
         assert!(rendered.contains("400"));
-        assert!(!rendered.contains(marker));
+        assert!(
+            !rendered.contains(CLOUD_ASR_BODY_MARKER),
+            "a provider error body reached the message: {rendered}"
+        );
+        // Exact, not "does not contain the marker": the message may carry the
+        // provider and the status and nothing else, so a future addition of a
+        // URL, a key or a snippet fails here too.
+        assert_eq!(rendered, "Test ASR API returned HTTP 400");
     }
 }
 
