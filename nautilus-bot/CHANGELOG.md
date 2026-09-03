@@ -378,6 +378,13 @@ evidence is stale and must be recaptured before this becomes a candidate.
   files that still carry it load cleanly and are rewritten without it.
 
 ### Fixed
+- The route picker says what a cloud speech route costs and whose language
+  claim it is showing. The per-minute price only appeared in the model name
+  the sidecar sends, not in the line you read while choosing; and Deepgram and
+  Gemini had no language description at all, so the picker fell back to "the
+  selected model's languages". They now name the upstream claim -- Deepgram's
+  multilingual code-switching, Google's 85+ languages -- and mark it as
+  upstream's, without inventing a language list Plainsong has never tested.
 - Deepgram now transcribes the language you chose. Plainsong sent no language
   at all, and Deepgram's default is English, so a French meeting came back as
   English nonsense while the route advertised itself as multilingual. With the

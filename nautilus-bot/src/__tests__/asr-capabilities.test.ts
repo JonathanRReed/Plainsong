@@ -324,6 +324,36 @@ describe("language boundaries", () => {
     }
   });
 
+  it("says whose claim a diarizing cloud route's languages are", () => {
+    // Neither has a capability-table entry -- that table is about downloads,
+    // and a hosted route has none -- so both used to fall through to the
+    // generic "the selected model's languages", which tells a user nothing
+    // about a route they are paying per minute for.
+    expect(getAsrModelCapability("deepgram", "nova-3")).toBeNull();
+    expect(
+      getAsrModelCapability("gemini_transcribe", "gemini-3.5-transcribe"),
+    ).toBeNull();
+
+    for (const [provider, model, expected] of [
+      ["deepgram", "nova-3", "multilingual code-switching, listed by Deepgram"],
+      ["deepgram", "nova-3-medical", "English, listed by Deepgram"],
+      [
+        "gemini_transcribe",
+        "gemini-3.5-transcribe",
+        "85+ languages, listed by Google",
+      ],
+    ] as const) {
+      const boundary = resolveAsrLanguageBoundary(provider, model);
+      // Unenumerated, not enumerated: Plainsong has never exercised these
+      // sets, and a fabricated list in the session-language picker would be a
+      // capability claim the app cannot back.
+      expect(boundary.kind).toBe("unenumerated");
+      expect(boundary.label).toBe(expected);
+      expect(boundary.label).not.toBe("the selected model's languages");
+      expect(asrLanguageOptions(boundary)).toEqual([]);
+    }
+  });
+
   it("gives a hosted Whisper release its own published coverage", () => {
     expect(getAsrModelCapability("openai_cloud", "whisper-1")).toBeNull();
 

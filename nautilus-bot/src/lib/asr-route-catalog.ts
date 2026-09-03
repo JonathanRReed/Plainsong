@@ -377,12 +377,14 @@ function routeSummary(
     return "Cloud route for meeting-grade transcription with a simple BYOK setup.";
   }
   if (providerType === "deepgram") {
+    // The per-minute rate belongs in the picker, not only in the model label
+    // the sidecar sends: this is the line a user reads while choosing.
     return modelId === "nova-3-medical"
-      ? "Deepgram's clinical-vocabulary build, with the same speaker labels and word timestamps as Nova-3."
-      : "Fastest cloud route here, and the cheapest with speaker labels: meetings keep Deepgram's own speakers instead of running a second pass on this Mac.";
+      ? "Deepgram's clinical-vocabulary build, English only, with the same speaker labels and word timestamps as Nova-3. Billed to your Deepgram key at $0.0043/min."
+      : "Fastest cloud route here, and the cheapest with speaker labels: meetings keep Deepgram's own speakers instead of running a second pass on this Mac. Billed to your Deepgram key at $0.0043/min in English, $0.0052/min on any other language setting including auto.";
   }
   if (providerType === "gemini_transcribe") {
-    return "Lowest published word error rate of the cloud routes, with speaker labels and word timestamps. Its API refuses your dictionary on the same request, so meetings get speakers and dictation gets the dictionary.";
+    return "Lowest published word error rate of the cloud routes, with speaker labels and word timestamps. Its API refuses your dictionary on the same request, so meetings get speakers and dictation gets the dictionary. Billed to your Google key at $0.005/min.";
   }
   if (providerType === "macos_apple_speech") {
     return "On-device Apple Speech for direct dictation only; server fallback is disabled and meetings use a separate provider.";

@@ -744,6 +744,32 @@ const CLOUD_LANGUAGE_CODES_BY_ROUTE = new Map<string, readonly string[]>([
   ["groq:whisper-large-v3-turbo", WHISPER_LARGE_V3_LANGUAGE_CODES],
 ]);
 
+/**
+ * Routes that are multilingual but whose language list Plainsong has never
+ * confirmed, with a label that says whose claim it is.
+ *
+ * These have no entry in `ASR_MODEL_CAPABILITIES` -- that table is about
+ * downloads (size, pause behaviour), and a hosted route has no download and no
+ * published decoder behaviour to describe. Without something here they fell
+ * through to the generic "the selected model's languages", which tells a user
+ * nothing about a route they are paying per minute for. The labels below state
+ * the upstream claim and mark it as upstream's, which is the same standard
+ * `languageEvidence.basis: "upstream_listed"` holds the downloadable models to.
+ *
+ * They are deliberately not enumerated: Plainsong has not exercised these
+ * language sets, and a fabricated list in the session-language picker would be
+ * a capability claim the app cannot back.
+ */
+const UNENUMERATED_LANGUAGE_LABELS_BY_ROUTE = new Map<string, string>([
+  // Deepgram documents `language=multi` code-switching for Nova-3 without
+  // publishing a fixed set. Nova-3 Medical is the English clinical build.
+  ["deepgram:nova-3", "multilingual code-switching, listed by Deepgram"],
+  ["deepgram:nova-3-medical", "English, listed by Deepgram"],
+  // Google reports 2.6% average word error rate across 85+ languages
+  // (Artificial Analysis, announced 2026-08-26) without publishing the set.
+  ["gemini_transcribe:gemini-3.5-transcribe", "85+ languages, listed by Google"],
+]);
+
 /** The English name of every code the lists above can produce. */
 export const ASR_LANGUAGE_NAMES: Readonly<Record<string, string>> = {
   af: "Afrikaans", am: "Amharic", ar: "Arabic", as: "Assamese", az: "Azerbaijani",
@@ -816,6 +842,10 @@ export function resolveAsrLanguageBoundary(
 
   if (capability) {
     return { kind: "unenumerated", label: capability.languages.label };
+  }
+  const upstreamLabel = UNENUMERATED_LANGUAGE_LABELS_BY_ROUTE.get(route);
+  if (upstreamLabel) {
+    return { kind: "unenumerated", label: upstreamLabel };
   }
   return { kind: "unenumerated", label: "the selected model's languages" };
 }
