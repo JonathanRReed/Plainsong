@@ -25,8 +25,8 @@ evidence is stale and must be recaptured before this becomes a candidate.
   Plainsong already calls over Cohere's API, downloaded as int4 ONNX (2.0 GiB)
   and run on this machine with no key and no upload. Experimental and never a
   default. It is more accurate than the shipped Parakeet default on the repo's
-  own long fixture and roughly four times slower for a short utterance (1.0 s
-  against 0.27 s for 5.3 s of speech on an M4 Pro under load), it has no Metal
+  own long fixture and about five times slower for a short utterance (0.67 s
+  against 0.13 s for 5.3 s of speech on a quiet M4 Pro), it has no Metal
   path, it cannot detect a language so it transcribes as English until you
   choose one of its 14, and its segment times are estimated from sentence
   lengths rather than measured — which is why it is offered for dictation and

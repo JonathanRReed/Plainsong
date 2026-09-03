@@ -597,7 +597,7 @@ const ASR_MODEL_CAPABILITIES_WITHOUT_LANGUAGE_EVIDENCE: readonly Omit<
     tier: "more",
     pauseBehavior: "encoder_decoder",
     tradeoff:
-      "experimental \u2014 the same weights the Cohere cloud route uses, run offline on the CPU. Measured on an M4 Pro against the shipped Parakeet default on the same machine and in the same minutes: 1.0 s against 0.27 s for a 5.3 s utterance, and 11.6 s against 1.6 s for 44 s of speech. It also cannot detect a language, so it transcribes as English until you choose one, and its segment times are estimated from sentence lengths rather than measured, which is why it is not offered for meetings.",
+      "experimental \u2014 the same weights the Cohere cloud route uses, run offline on the CPU. Measured on a quiet M4 Pro against the shipped Parakeet default: 0.67 s against 0.13 s for a 5.3 s utterance, and 7.5 s against 1.0 s for 44 s of speech. It also cannot detect a language, so it transcribes as English until you choose one, and its segment times are estimated from sentence lengths rather than measured, which is why it is not offered for meetings.",
   },
   {
     providerType: "transcribe_cpp",

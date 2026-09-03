@@ -10,13 +10,42 @@ than an experiment:
 > measured Apple-Silicon latency on the 5 s fixture lands within ~1.5× of
 > Parakeet's.
 
-**It does not clear it. It is 3.8× Parakeet on the 5.3 s fixture and 7.1× on
-the 44 s fixture, so it ships as an experimental route and Parakeet TDT 0.6B v3
-stays the default.** The rest of this file is the evidence.
+**It does not clear it. On a quiet machine it is 5.1× Parakeet on the 5.3 s
+fixture and 7.3× on the 44 s fixture, so it ships as an experimental route and
+Parakeet TDT 0.6B v3 stays the default.** The rest of this file is the
+evidence.
 
 ---
 
-## Read this before quoting any number below
+## The quiet-machine run
+
+Taken 2026-09-03 07:10 UTC, after the sibling lanes finished, at a 1-minute
+load average of **26 falling to 22** on 14 cores. Three timed runs after a
+warm-up, same binary and fixtures as everything below.
+
+| Route | 5.3 s p50 | 5.3 s runs | 44 s p50 | 44 s runs | cold load | first inference |
+|---|---|---|---|---|---|---|
+| `parakeet` (shipped default) | **131 ms** | 139, 127, 131 | **1023 ms** | 986, 1023, 1036 | 870 ms | 140 ms |
+| `cohere_local` | **673 ms** | 675, 672, 673 | **7462 ms** | 7282, 7462, 7790 | 2258 ms | 3692 ms |
+| ratio | **5.14×** | | **7.29×** | | 2.6× | 26× |
+
+Two things to take from this rather than from the loaded run below.
+
+1. **The measurement is now tight.** Cohere's three runs span 3 ms and
+   Parakeet's span 12 ms, against a 1150 ms spread on the loaded machine. These
+   are the numbers to quote.
+2. **Quiet made the ratio worse, not better.** 5.14× against 3.76× under load:
+   Parakeet gains more from an idle machine than Cohere does, because Cohere's
+   1.9B-parameter encoder is compute-bound in a way Parakeet's 0.6B one is not.
+   Anyone hoping the loaded measurement was unfair to this route should read
+   this row and stop hoping.
+
+The 1.5× rule is missed by a factor of three. **Verdict: experimental,
+non-default, not offered for meetings.**
+
+---
+
+## The loaded runs, kept for the comparison they support
 
 **The machine was not quiet.** Every measurement here was taken on a shared
 M4 Pro running four other parity lanes, at a 1-minute load average between
@@ -61,13 +90,16 @@ Parakeet's 356 ms. The first inference is where ONNX Runtime pages in the
 
 ### The decision rule
 
-The rule is ~1.5× on the 5 s fixture. Measured 3.76×. Even taking the most
-favourable reading available — Cohere's best single run (992 ms) against
-Parakeet's worst (324 ms) — the ratio is 3.06×. There is no reading of this
-data under which the rule is met, so no amount of re-running on a quieter
-machine changes the conclusion; a quiet machine would speed both routes up.
+The rule is ~1.5× on the 5 s fixture. Measured 3.76× here and 5.14× on the
+quiet machine above. Even taking the most favourable reading anywhere in this
+file — Cohere's best loaded run (992 ms) against Parakeet's worst (324 ms) —
+the ratio is 3.06×. There is no reading of this data under which the rule is
+met.
 
-**Verdict: experimental, non-default, and not offered for meetings.**
+This section was written before the quiet re-run and predicted that a quiet
+machine "would speed both routes up" without changing the verdict. It did, and
+it moved the ratio the wrong way for this route. The prediction is left here
+rather than tidied away.
 
 ## Memory
 
@@ -216,8 +248,6 @@ In `rust-sidecar/src/asr/cohere_local.rs`:
 
 ## What is still owed
 
-- A quiet-machine re-run. It will not change the verdict (see above) but the
-  absolute numbers here should not be quoted as this model's speed.
 - A real WER, on a corpus with ground truth, before anyone repeats the
   leaderboard's 5.42% as a Plainsong measurement.
 - Any of the other 13 languages, exercised even once.
