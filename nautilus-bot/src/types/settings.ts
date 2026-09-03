@@ -40,6 +40,17 @@ export interface MeetingsSettings {
   autoStopWhenCallAppQuits: boolean;
   /** End a meeting after this many minutes with nothing audible; 0 turns it off. */
   autoStopAfterSilenceMinutes: number;
+  /**
+   * Keep a numeric voice signature per speaker on this Mac so a voice named
+   * once can be suggested later. Off by default; nothing is stored while off.
+   */
+  rememberVoices: boolean;
+  /**
+   * Apply a remembered name without asking when the match clears the stricter
+   * per-model threshold. Off by default, and meaningless while
+   * `rememberVoices` is off.
+   */
+  autoApplyConfidentVoices: boolean;
 }
 
 /** Which events may become an OS notification. Mirrors `NotificationsSettings` in settings.rs. */

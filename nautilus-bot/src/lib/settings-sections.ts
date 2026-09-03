@@ -15,6 +15,8 @@ const DEFAULT_MEETINGS_SETTINGS: MeetingsSettings = {
   callDetectionEnabled: true,
   autoStopWhenCallAppQuits: true,
   autoStopAfterSilenceMinutes: 15,
+  rememberVoices: false,
+  autoApplyConfidentVoices: false,
 };
 
 const DEFAULT_NOTIFICATIONS_SETTINGS: NotificationsSettings = {
@@ -30,6 +32,8 @@ export function resolveMeetingsSettings(
 ): MeetingsSettings {
   const meetings = settings?.meetings;
   const minutes = meetings?.autoStopAfterSilenceMinutes;
+  const rememberVoices =
+    meetings?.rememberVoices ?? DEFAULT_MEETINGS_SETTINGS.rememberVoices;
   return {
     callDetectionEnabled:
       meetings?.callDetectionEnabled ?? DEFAULT_MEETINGS_SETTINGS.callDetectionEnabled,
@@ -39,6 +43,11 @@ export function resolveMeetingsSettings(
       typeof minutes === "number" && Number.isFinite(minutes)
         ? Math.min(Math.max(0, Math.round(minutes)), MEETING_AUTO_STOP_SILENCE_MINUTES_MAX)
         : DEFAULT_MEETINGS_SETTINGS.autoStopAfterSilenceMinutes,
+    rememberVoices: rememberVoices,
+    // Mirrors `normalize_loaded_meetings_settings` in settings.rs: auto-apply
+    // refines remembering, so it cannot be on while remembering is off.
+    autoApplyConfidentVoices:
+      rememberVoices && (meetings?.autoApplyConfidentVoices ?? false),
   };
 }
 

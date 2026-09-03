@@ -1911,6 +1911,19 @@ pub struct MeetingsSettings {
     /// End a running meeting after this many minutes with nothing audible on
     /// any captured source. `0` turns it off.
     pub auto_stop_after_silence_minutes: u32,
+    /// Keep a numeric voice signature per speaker on this Mac, so a voice
+    /// named once can be suggested in later meetings.
+    ///
+    /// Off by default and never inferred: while it is off, diarization runs
+    /// exactly as before and no signature is written anywhere. Read by the
+    /// `run_diarization` handler and the post-meeting enrichment path in
+    /// lib.rs.
+    pub remember_voices: bool,
+    /// Apply a remembered name without asking when the match clears the
+    /// stricter per-model threshold. Off by default; the transcript still
+    /// marks such a name "auto" until a human confirms it. Meaningless while
+    /// `remember_voices` is off, and the readers check both.
+    pub auto_apply_confident_voices: bool,
 }
 
 impl Default for MeetingsSettings {
@@ -1919,6 +1932,8 @@ impl Default for MeetingsSettings {
             call_detection_enabled: true,
             auto_stop_when_call_app_quits: true,
             auto_stop_after_silence_minutes: 15,
+            remember_voices: false,
+            auto_apply_confident_voices: false,
         }
     }
 }
@@ -1951,6 +1966,12 @@ fn normalize_loaded_meetings_settings(meetings: &mut MeetingsSettings) {
     meetings.auto_stop_after_silence_minutes = meetings
         .auto_stop_after_silence_minutes
         .min(MEETING_AUTO_STOP_SILENCE_MINUTES_MAX);
+    // Auto-apply is a refinement of remembering, not an independent switch. A
+    // hand-edited file that turns it on while remembering is off would
+    // otherwise describe a state the code cannot produce.
+    if !meetings.remember_voices {
+        meetings.auto_apply_confident_voices = false;
+    }
 }
 
 /// Stable string identifier for a `DictationAppCategory`, used for
@@ -2936,6 +2957,47 @@ mod tests {
         assert_eq!(parsed.meetings.auto_stop_after_silence_minutes, 15);
         assert!(!parsed.notifications.meeting_events);
         assert!(parsed.notifications.dictation_failures);
+    }
+
+    /// Voiceprints are opt-in, so a settings file written before they existed
+    /// — which is every settings file on every machine today — must load with
+    /// both switches off. Nothing about remembering a voice may be inherited.
+    #[test]
+    fn settings_written_before_voiceprints_leave_them_off() {
+        let parsed: Settings = serde_json::from_str(
+            r#"{
+                "meetings": {
+                    "callDetectionEnabled": true,
+                    "autoStopWhenCallAppQuits": true,
+                    "autoStopAfterSilenceMinutes": 20
+                }
+            }"#,
+        )
+        .expect("pre-voiceprint settings should deserialize");
+        assert!(!parsed.meetings.remember_voices);
+        assert!(!parsed.meetings.auto_apply_confident_voices);
+        assert_eq!(parsed.meetings.auto_stop_after_silence_minutes, 20);
+    }
+
+    /// Auto-apply cannot outlive the switch it refines: a hand-edited file
+    /// that turns it on with remembering off is normalized back to off.
+    #[test]
+    fn auto_apply_is_turned_off_when_remembering_voices_is_off() {
+        let mut orphaned = MeetingsSettings {
+            remember_voices: false,
+            auto_apply_confident_voices: true,
+            ..MeetingsSettings::default()
+        };
+        super::normalize_loaded_meetings_settings(&mut orphaned);
+        assert!(!orphaned.auto_apply_confident_voices);
+
+        let mut enabled = MeetingsSettings {
+            remember_voices: true,
+            auto_apply_confident_voices: true,
+            ..MeetingsSettings::default()
+        };
+        super::normalize_loaded_meetings_settings(&mut enabled);
+        assert!(enabled.auto_apply_confident_voices);
     }
 
     #[test]

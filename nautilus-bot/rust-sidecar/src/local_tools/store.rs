@@ -557,4 +557,76 @@ mod tests {
             .unwrap()
             .is_none());
     }
+
+    /// Voiceprints are excluded from every local automation surface.
+    ///
+    /// The CLI and the MCP server exist so a terminal or an assistant can read
+    /// meetings; a stored voice signature is biometric-shaped data about a
+    /// person, and no read path here has any business returning it. The trait
+    /// has no method for it, which is the real guarantee — this test is the
+    /// belt: it writes a remembered voice with an unmistakable name and proves
+    /// that name reaches none of the surfaces, including the export.
+    #[test]
+    fn remembered_voices_never_reach_the_cli_mcp_or_export_surface() {
+        const SECRET_VOICE_NAME: &str = "ZZVoiceprintCanary";
+        let dir = crate::test_fs::TempDir::new("local-tools-voiceprints");
+        let path = dir.path().join("plainsong.db");
+        {
+            let mut db = Database::open_at_path(&path, None).unwrap();
+            db.create_recording(&recording("m1", "meeting", 9)).unwrap();
+            db.save_transcript(&transcript("m1", "We agreed to ship on Friday"))
+                .unwrap();
+            let profile_id = db
+                .remember_speaker_voice(
+                    SECRET_VOICE_NAME,
+                    "ecapa_tdnn_speaker",
+                    &[1.0, 0.0, 0.0],
+                    Some("m1"),
+                    None,
+                )
+                .unwrap();
+            db.set_cluster_voice_signature(
+                "m1",
+                "speaker_0",
+                &[1.0, 0.0, 0.0],
+                "ecapa_tdnn_speaker",
+            )
+            .unwrap();
+            db.set_cluster_voice_match("m1", "speaker_0", &profile_id, "confirmed")
+                .unwrap();
+        }
+        let store = ReadOnlyStore::open_at(&path, None).unwrap();
+
+        let mut rendered = vec![
+            serde_json::to_string(&store.list_meetings(&ListFilter::default()).unwrap()).unwrap(),
+            serde_json::to_string(&store.get_meeting("m1").unwrap()).unwrap(),
+            serde_json::to_string(&store.get_transcript("m1").unwrap()).unwrap(),
+            serde_json::to_string(&store.search("Friday", 10).unwrap()).unwrap(),
+            serde_json::to_string(&store.list_dictations(10, 0).unwrap()).unwrap(),
+            serde_json::to_string(&store.stats().unwrap()).unwrap(),
+        ];
+        for format in [
+            ExportFormat::Markdown,
+            ExportFormat::Text,
+            ExportFormat::Json,
+        ] {
+            rendered.push(
+                store
+                    .export_meeting("m1", format)
+                    .unwrap()
+                    .unwrap_or_default(),
+            );
+        }
+
+        for output in rendered {
+            assert!(
+                !output.contains(SECRET_VOICE_NAME),
+                "a remembered voice name reached a local-tools surface: {output}"
+            );
+            assert!(
+                !output.contains("voice_centroid") && !output.contains("speaker_profile"),
+                "voiceprint storage leaked into a local-tools surface: {output}"
+            );
+        }
+    }
 }

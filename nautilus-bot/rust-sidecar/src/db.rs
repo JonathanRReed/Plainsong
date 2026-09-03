@@ -3,6 +3,7 @@
 //! Manages recordings, transcripts, projects, and audit logs
 //! with full CRUD operations.
 
+use crate::diarization::voiceprints::{self, ClusterVoiceSignature, StoredVoiceProfile};
 use crate::models::*;
 use crate::recording_audio::{
     approved_regular_file, encrypted_path_for, historical_companion_candidates,
@@ -75,7 +76,13 @@ const AUDIT_LOG_APPEND_ONLY_TRIGGER_SQL: &str = "CREATE TRIGGER IF NOT EXISTS au
 /// Every application-owned table whose rows Reset Everything must remove.
 /// The delete SQL lives beside the classification so the schema-coverage test
 /// cannot classify a table as reset-scoped without also wiring it into purge.
-const RESET_SCOPED_TABLE_DELETES: [(&str, &str); 24] = [
+const RESET_SCOPED_TABLE_DELETES: [(&str, &str); 26] = [
+    // Samples before profiles: the foreign key points that way.
+    (
+        "speaker_profile_samples",
+        "DELETE FROM speaker_profile_samples",
+    ),
+    ("speaker_profiles", "DELETE FROM speaker_profiles"),
     ("speaker_aliases", "DELETE FROM speaker_aliases"),
     ("transcript_fts", "DELETE FROM transcript_fts"),
     ("dictation_history_fts", "DELETE FROM dictation_history_fts"),
@@ -1909,6 +1916,57 @@ impl Database {
                 updated_at TEXT NOT NULL,
                 PRIMARY KEY (recording_id, speaker_id)
             )",
+            [],
+        )?;
+        // Voiceprints, all opt-in (`meetings.rememberVoices`). These five
+        // columns hold the *cluster* side of the feature — one voice signature
+        // per speaker turn-group in one meeting — and are written only while
+        // the setting is on. The remembered-voice side lives in
+        // `speaker_profiles` below.
+        self.ensure_table_column("speaker_aliases", "voice_centroid", "BLOB")?;
+        self.ensure_table_column("speaker_aliases", "voice_centroid_model_id", "TEXT")?;
+        self.ensure_table_column("speaker_aliases", "voice_profile_id", "TEXT")?;
+        self.ensure_table_column("speaker_aliases", "voice_match_state", "TEXT")?;
+        self.ensure_table_column("speaker_aliases", "voice_rejected_profiles", "TEXT")?;
+
+        // A voice this Mac has been told to remember. Local only: never
+        // exported, never readable through the CLI or MCP server, removed by
+        // Reset Everything, and encrypted with the rest of the database when
+        // the vault is on.
+        self.conn.execute(
+            "CREATE TABLE IF NOT EXISTS speaker_profiles (
+                id TEXT PRIMARY KEY,
+                display_name TEXT NOT NULL,
+                linked_identity_hash TEXT,
+                embedding_model_id TEXT NOT NULL,
+                centroid BLOB NOT NULL,
+                sample_count INTEGER NOT NULL DEFAULT 0,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            )",
+            [],
+        )?;
+        self.conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_speaker_profiles_embedding_model
+             ON speaker_profiles(embedding_model_id)",
+            [],
+        )?;
+        // The samples a profile's centroid is the mean of. Capped per profile
+        // (`MAX_SAMPLES_PER_PROFILE`) so remembering a voice for a year does
+        // not grow without bound, and so one bad sample ages out.
+        self.conn.execute(
+            "CREATE TABLE IF NOT EXISTS speaker_profile_samples (
+                id TEXT PRIMARY KEY,
+                profile_id TEXT NOT NULL REFERENCES speaker_profiles(id) ON DELETE CASCADE,
+                embedding BLOB NOT NULL,
+                source_recording_id TEXT,
+                created_at TEXT NOT NULL
+            )",
+            [],
+        )?;
+        self.conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_speaker_profile_samples_profile
+             ON speaker_profile_samples(profile_id, created_at)",
             [],
         )?;
 
@@ -6148,6 +6206,403 @@ impl Database {
             .map_err(|e| e.into())
     }
 
+    // ── Voiceprints (opt-in, local only) ─────────────────────────────────
+    //
+    // Nothing in this block runs unless `meetings.rememberVoices` is on: the
+    // callers in lib.rs read the setting first, and the gating test
+    // `voiceprint_storage_is_untouched_while_the_setting_is_off` proves the
+    // rows stay empty when it is off.
+
+    /// Record one speaker cluster's voice signature against its alias row.
+    ///
+    /// Overwrites rather than accumulates: a cluster has exactly one current
+    /// signature, and re-running speaker identification replaces it.
+    pub fn set_cluster_voice_signature(
+        &mut self,
+        recording_id: &str,
+        speaker_id: &str,
+        centroid: &[f32],
+        embedding_model_id: &str,
+    ) -> Result<()> {
+        if !voiceprints::is_usable_embedding(centroid) {
+            anyhow::bail!("Refusing to store an unusable voice signature");
+        }
+        let blob = f32_slice_to_blob(centroid);
+        self.conn.execute(
+            "INSERT INTO speaker_aliases (
+                 recording_id, speaker_id, updated_at,
+                 voice_centroid, voice_centroid_model_id
+             ) VALUES (?1, ?2, ?3, ?4, ?5)
+             ON CONFLICT(recording_id, speaker_id) DO UPDATE SET
+                 voice_centroid = excluded.voice_centroid,
+                 voice_centroid_model_id = excluded.voice_centroid_model_id,
+                 updated_at = excluded.updated_at",
+            params![
+                recording_id,
+                speaker_id,
+                Utc::now().to_rfc3339(),
+                blob,
+                embedding_model_id
+            ],
+        )?;
+        Ok(())
+    }
+
+    /// Store every cluster signature this meeting produced — but only when the
+    /// user turned remembering on.
+    ///
+    /// The switch is a parameter rather than a settings lookup so that
+    /// "nothing is written while it is off" is a property a test can prove
+    /// against a real database, without a settings file or a running app.
+    /// Returns how many signatures were written.
+    pub fn record_cluster_voice_signatures(
+        &mut self,
+        recording_id: &str,
+        embedding_model_id: &str,
+        cluster_centroids: &HashMap<String, Vec<f32>>,
+        remember_voices: bool,
+    ) -> Result<usize> {
+        if !remember_voices {
+            return Ok(0);
+        }
+        let mut written = 0;
+        for (speaker_id, centroid) in cluster_centroids {
+            match self.set_cluster_voice_signature(
+                recording_id,
+                speaker_id,
+                centroid,
+                embedding_model_id,
+            ) {
+                Ok(()) => written += 1,
+                Err(error) => {
+                    // Best effort: a signature that could not be stored costs
+                    // a suggestion, not the meeting. The transcript is saved.
+                    tracing::warn!(
+                        "Could not store the voice signature for speaker {} of {}: {}",
+                        speaker_id,
+                        recording_id,
+                        error
+                    );
+                }
+            }
+        }
+        Ok(written)
+    }
+
+    /// Every speaker cluster in one recording that carries a voice signature.
+    pub fn get_cluster_voice_signatures(
+        &self,
+        recording_id: &str,
+    ) -> Result<Vec<ClusterVoiceSignature>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT speaker_id, name, voice_centroid, voice_centroid_model_id,
+                    voice_profile_id, voice_match_state, voice_rejected_profiles
+             FROM speaker_aliases
+             WHERE recording_id = ?1 AND voice_centroid IS NOT NULL
+             ORDER BY speaker_id",
+        )?;
+        let rows = stmt.query_map(params![recording_id], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, Option<String>>(1)?,
+                row.get::<_, Vec<u8>>(2)?,
+                row.get::<_, Option<String>>(3)?,
+                row.get::<_, Option<String>>(4)?,
+                row.get::<_, Option<String>>(5)?,
+                row.get::<_, Option<String>>(6)?,
+            ))
+        })?;
+
+        let mut signatures = Vec::new();
+        for row in rows {
+            let (speaker_id, name, blob, model_id, profile_id, match_state, rejected) = row?;
+            let Some(embedding_model_id) = model_id else {
+                continue;
+            };
+            signatures.push(ClusterVoiceSignature {
+                speaker_id,
+                name,
+                centroid: blob_to_f32_vec(&blob),
+                embedding_model_id,
+                applied_profile_id: profile_id,
+                match_state,
+                rejected_profile_ids: rejected
+                    .as_deref()
+                    .and_then(|value| serde_json::from_str::<Vec<String>>(value).ok())
+                    .unwrap_or_default(),
+            });
+        }
+        Ok(signatures)
+    }
+
+    /// Attach a remembered voice to a cluster. `state` is `"auto"` while the
+    /// app applied it on its own and `"confirmed"` once a human said so.
+    pub fn set_cluster_voice_match(
+        &mut self,
+        recording_id: &str,
+        speaker_id: &str,
+        profile_id: &str,
+        state: &str,
+    ) -> Result<()> {
+        self.conn.execute(
+            "UPDATE speaker_aliases
+             SET voice_profile_id = ?3, voice_match_state = ?4, updated_at = ?5
+             WHERE recording_id = ?1 AND speaker_id = ?2",
+            params![
+                recording_id,
+                speaker_id,
+                profile_id,
+                state,
+                Utc::now().to_rfc3339()
+            ],
+        )?;
+        Ok(())
+    }
+
+    /// Remember that the reader said "Not them" about one profile, so the same
+    /// wrong suggestion does not come back on every visit.
+    pub fn reject_cluster_voice_match(
+        &mut self,
+        recording_id: &str,
+        speaker_id: &str,
+        profile_id: &str,
+    ) -> Result<()> {
+        let existing: Option<String> = self
+            .conn
+            .query_row(
+                "SELECT voice_rejected_profiles FROM speaker_aliases
+                 WHERE recording_id = ?1 AND speaker_id = ?2",
+                params![recording_id, speaker_id],
+                |row| row.get(0),
+            )
+            .optional()?
+            .flatten();
+        let mut rejected: Vec<String> = existing
+            .as_deref()
+            .and_then(|value| serde_json::from_str::<Vec<String>>(value).ok())
+            .unwrap_or_default();
+        if !rejected.iter().any(|id| id == profile_id) {
+            rejected.push(profile_id.to_string());
+        }
+        let encoded = serde_json::to_string(&rejected)?;
+        self.conn.execute(
+            "UPDATE speaker_aliases
+             SET voice_rejected_profiles = ?3,
+                 voice_profile_id = CASE WHEN voice_profile_id = ?4 THEN NULL
+                                         ELSE voice_profile_id END,
+                 voice_match_state = CASE WHEN voice_profile_id = ?4 THEN NULL
+                                          ELSE voice_match_state END,
+                 updated_at = ?5
+             WHERE recording_id = ?1 AND speaker_id = ?2",
+            params![
+                recording_id,
+                speaker_id,
+                encoded,
+                profile_id,
+                Utc::now().to_rfc3339()
+            ],
+        )?;
+        Ok(())
+    }
+
+    /// Every remembered voice, newest name first.
+    pub fn list_speaker_profiles(&self) -> Result<Vec<StoredVoiceProfile>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT id, display_name, linked_identity_hash, embedding_model_id,
+                    centroid, sample_count, created_at, updated_at
+             FROM speaker_profiles
+             ORDER BY display_name COLLATE NOCASE, id",
+        )?;
+        let rows = stmt.query_map([], |row| {
+            Ok(StoredVoiceProfile {
+                id: row.get(0)?,
+                display_name: row.get(1)?,
+                linked_identity_hash: row.get(2)?,
+                embedding_model_id: row.get(3)?,
+                centroid: blob_to_f32_vec(&row.get::<_, Vec<u8>>(4)?),
+                sample_count: row.get(5)?,
+                created_at: row.get(6)?,
+                updated_at: row.get(7)?,
+            })
+        })?;
+        rows.collect::<Result<Vec<_>, _>>().map_err(|e| e.into())
+    }
+
+    /// Remember a voice, or fold a new sample into the one already stored
+    /// under this name and embedder.
+    ///
+    /// Names are matched case-insensitively so "dana" and "Dana" do not become
+    /// two profiles for one person, but a name remembered under a *different*
+    /// embedder gets its own profile: the two centroids live in unrelated
+    /// spaces and averaging them would produce a vector describing nobody.
+    pub fn remember_speaker_voice(
+        &mut self,
+        display_name: &str,
+        embedding_model_id: &str,
+        centroid: &[f32],
+        source_recording_id: Option<&str>,
+        linked_identity_hash: Option<&str>,
+    ) -> Result<String> {
+        let display_name = display_name.trim();
+        if display_name.is_empty() {
+            anyhow::bail!("A remembered voice needs a name");
+        }
+        if !voiceprints::is_usable_embedding(centroid) {
+            anyhow::bail!("Refusing to remember an unusable voice signature");
+        }
+        let existing: Option<String> = self
+            .conn
+            .query_row(
+                "SELECT id FROM speaker_profiles
+                 WHERE display_name = ?1 COLLATE NOCASE AND embedding_model_id = ?2",
+                params![display_name, embedding_model_id],
+                |row| row.get(0),
+            )
+            .optional()?;
+
+        let profile_id = match existing {
+            Some(id) => id,
+            None => {
+                let id = uuid::Uuid::new_v4().to_string();
+                let now = Utc::now().to_rfc3339();
+                self.conn.execute(
+                    "INSERT INTO speaker_profiles (
+                         id, display_name, linked_identity_hash, embedding_model_id,
+                         centroid, sample_count, created_at, updated_at
+                     ) VALUES (?1, ?2, ?3, ?4, ?5, 0, ?6, ?6)",
+                    params![
+                        id,
+                        display_name,
+                        linked_identity_hash,
+                        embedding_model_id,
+                        f32_slice_to_blob(centroid),
+                        now
+                    ],
+                )?;
+                id
+            }
+        };
+
+        self.add_speaker_profile_sample(&profile_id, centroid, source_recording_id)?;
+        Ok(profile_id)
+    }
+
+    /// Append one sample to a profile, prune to the cap, and recompute the
+    /// centroid from what is left.
+    pub fn add_speaker_profile_sample(
+        &mut self,
+        profile_id: &str,
+        embedding: &[f32],
+        source_recording_id: Option<&str>,
+    ) -> Result<()> {
+        if !voiceprints::is_usable_embedding(embedding) {
+            anyhow::bail!("Refusing to store an unusable voice sample");
+        }
+        let tx = self.conn.transaction()?;
+        let exists: i64 = tx.query_row(
+            "SELECT COUNT(*) FROM speaker_profiles WHERE id = ?1",
+            params![profile_id],
+            |row| row.get(0),
+        )?;
+        if exists == 0 {
+            anyhow::bail!("Remembered voice '{}' was not found", profile_id);
+        }
+        tx.execute(
+            "INSERT INTO speaker_profile_samples (
+                 id, profile_id, embedding, source_recording_id, created_at
+             ) VALUES (?1, ?2, ?3, ?4, ?5)",
+            params![
+                uuid::Uuid::new_v4().to_string(),
+                profile_id,
+                f32_slice_to_blob(embedding),
+                source_recording_id,
+                Utc::now().to_rfc3339()
+            ],
+        )?;
+        // Oldest first out. `rowid` breaks ties so two samples written inside
+        // the same RFC 3339 second still have a deterministic order.
+        tx.execute(
+            "DELETE FROM speaker_profile_samples
+             WHERE profile_id = ?1
+               AND rowid NOT IN (
+                   SELECT rowid FROM speaker_profile_samples
+                   WHERE profile_id = ?1
+                   ORDER BY created_at DESC, rowid DESC
+                   LIMIT ?2
+               )",
+            params![profile_id, voiceprints::MAX_SAMPLES_PER_PROFILE as i64],
+        )?;
+
+        let samples: Vec<Vec<f32>> = {
+            let mut stmt =
+                tx.prepare("SELECT embedding FROM speaker_profile_samples WHERE profile_id = ?1")?;
+            let rows = stmt.query_map(params![profile_id], |row| {
+                Ok(blob_to_f32_vec(&row.get::<_, Vec<u8>>(0)?))
+            })?;
+            rows.collect::<Result<Vec<_>, _>>()?
+        };
+        let centroid = voiceprints::centroid_of(&samples)
+            .ok_or_else(|| anyhow::anyhow!("Voice samples did not produce a usable centroid"))?;
+        tx.execute(
+            "UPDATE speaker_profiles
+             SET centroid = ?2, sample_count = ?3, updated_at = ?4
+             WHERE id = ?1",
+            params![
+                profile_id,
+                f32_slice_to_blob(&centroid),
+                samples.len() as i64,
+                Utc::now().to_rfc3339()
+            ],
+        )?;
+        tx.commit()?;
+        Ok(())
+    }
+
+    /// Forget one voice: the profile, its samples, and every cluster this Mac
+    /// had attached to it.
+    pub fn forget_speaker_voice(&mut self, profile_id: &str) -> Result<bool> {
+        let tx = self
+            .conn
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        tx.execute(
+            "DELETE FROM speaker_profile_samples WHERE profile_id = ?1",
+            params![profile_id],
+        )?;
+        let removed = tx.execute(
+            "DELETE FROM speaker_profiles WHERE id = ?1",
+            params![profile_id],
+        )?;
+        tx.execute(
+            "UPDATE speaker_aliases
+             SET voice_profile_id = NULL, voice_match_state = NULL
+             WHERE voice_profile_id = ?1",
+            params![profile_id],
+        )?;
+        tx.commit()?;
+        Ok(removed > 0)
+    }
+
+    /// Forget every voice, and every cluster signature that was kept so a
+    /// voice could be recognized again. Returns how many voices were removed.
+    pub fn forget_all_speaker_voices(&mut self) -> Result<usize> {
+        let tx = self
+            .conn
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        tx.execute("DELETE FROM speaker_profile_samples", [])?;
+        let removed = tx.execute("DELETE FROM speaker_profiles", [])?;
+        // The per-cluster signatures are voice data too. "Delete all" that
+        // left them behind would be a lie by omission.
+        tx.execute(
+            "UPDATE speaker_aliases
+             SET voice_centroid = NULL, voice_centroid_model_id = NULL,
+                 voice_profile_id = NULL, voice_match_state = NULL,
+                 voice_rejected_profiles = NULL",
+            [],
+        )?;
+        tx.commit()?;
+        Ok(removed)
+    }
+
     /// Delete a recording and all of its derived content: transcript, FTS rows,
     /// speaker aliases, meeting artifacts (summary/action items/chat), and
     /// vector embeddings. Returns the stored audio path so callers can remove
@@ -6510,6 +6965,13 @@ fn legacy_asset_metadata(
             (RecordingAudioLifecycle::Failed, None, None, Some(error))
         }
     }
+}
+
+fn f32_slice_to_blob(values: &[f32]) -> Vec<u8> {
+    values
+        .iter()
+        .flat_map(|value| value.to_le_bytes())
+        .collect()
 }
 
 fn blob_to_f32_vec(blob: &[u8]) -> Vec<f32> {
@@ -9183,8 +9645,24 @@ mod tests {
                      '2026-01-01', '2026-01-01'
                  );
                  INSERT INTO speaker_aliases (
-                     recording_id, speaker_id, name, sample_count, updated_at
-                 ) VALUES ('recording-1', 'speaker-1', 'Private Person', 1, '2026-01-01');
+                     recording_id, speaker_id, name, sample_count, updated_at,
+                     voice_centroid, voice_centroid_model_id
+                 ) VALUES (
+                     'recording-1', 'speaker-1', 'Private Person', 1, '2026-01-01',
+                     X'0000803F', 'ecapa_tdnn_speaker'
+                 );
+                 INSERT INTO speaker_profiles (
+                     id, display_name, embedding_model_id, centroid, sample_count,
+                     created_at, updated_at
+                 ) VALUES (
+                     'profile-1', 'Private Person', 'ecapa_tdnn_speaker', X'0000803F', 1,
+                     '2026-01-01', '2026-01-01'
+                 );
+                 INSERT INTO speaker_profile_samples (
+                     id, profile_id, embedding, source_recording_id, created_at
+                 ) VALUES (
+                     'sample-1', 'profile-1', X'0000803F', 'recording-1', '2026-01-01'
+                 );
                  INSERT INTO audit_log (id, timestamp, event, details, severity)
                      VALUES ('audit-1', '2026-01-01', 'private', '{}', 'info');
                  INSERT INTO runtime_events (id, event_type, payload, created_at)
@@ -10244,6 +10722,328 @@ mod tests {
         assert!(db.rename_speaker("r1", "speaker_0", "   ").is_err());
         assert!(db.rename_speaker("r1", "missing", "Bob").is_err());
         assert_eq!(db.get_speaker_aliases("r1").unwrap().len(), 1);
+    }
+
+    // ── Voiceprints ──────────────────────────────────────────────────────
+
+    fn unit(values: &[f32]) -> Vec<f32> {
+        let norm = values.iter().map(|v| v * v).sum::<f32>().sqrt();
+        values.iter().map(|v| v / norm).collect()
+    }
+
+    /// The promise on the switch: with remembering off, a finished meeting
+    /// leaves no trace of anyone's voice anywhere in the database.
+    #[test]
+    fn voiceprint_storage_is_untouched_while_the_setting_is_off() {
+        let mut db = in_memory_db();
+        db.create_recording(&sample_recording("r1", "inbox"))
+            .unwrap();
+        let mut centroids: HashMap<String, Vec<f32>> = HashMap::new();
+        centroids.insert("S1".to_string(), unit(&[1.0, 0.0, 0.0]));
+        centroids.insert("S2".to_string(), unit(&[0.0, 1.0, 0.0]));
+
+        let written = db
+            .record_cluster_voice_signatures("r1", "ecapa_tdnn_speaker", &centroids, false)
+            .unwrap();
+        assert_eq!(written, 0);
+        assert!(db.get_cluster_voice_signatures("r1").unwrap().is_empty());
+        assert!(db.list_speaker_profiles().unwrap().is_empty());
+        let signature_rows: i64 = db
+            .conn
+            .query_row(
+                "SELECT COUNT(*) FROM speaker_aliases WHERE voice_centroid IS NOT NULL",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(signature_rows, 0);
+
+        // And with it on, the same call writes both clusters.
+        let written = db
+            .record_cluster_voice_signatures("r1", "ecapa_tdnn_speaker", &centroids, true)
+            .unwrap();
+        assert_eq!(written, 2);
+        assert_eq!(db.get_cluster_voice_signatures("r1").unwrap().len(), 2);
+    }
+
+    #[test]
+    fn cluster_voice_signatures_round_trip_and_refuse_unusable_vectors() {
+        let mut db = in_memory_db();
+        db.create_recording(&sample_recording("r1", "inbox"))
+            .unwrap();
+        let centroid = unit(&[0.3, 0.4, 0.5]);
+        db.set_cluster_voice_signature("r1", "S1", &centroid, "ecapa_tdnn_speaker")
+            .unwrap();
+
+        let signatures = db.get_cluster_voice_signatures("r1").unwrap();
+        assert_eq!(signatures.len(), 1);
+        assert_eq!(signatures[0].speaker_id, "S1");
+        assert_eq!(signatures[0].embedding_model_id, "ecapa_tdnn_speaker");
+        for (stored, original) in signatures[0].centroid.iter().zip(centroid.iter()) {
+            assert!((stored - original).abs() < 1e-6, "blob round trip");
+        }
+        assert_eq!(signatures[0].applied_profile_id, None);
+        assert!(signatures[0].rejected_profile_ids.is_empty());
+
+        assert!(db
+            .set_cluster_voice_signature("r1", "S2", &[], "ecapa_tdnn_speaker")
+            .is_err());
+        assert!(db
+            .set_cluster_voice_signature("r1", "S2", &[0.0, 0.0], "ecapa_tdnn_speaker")
+            .is_err());
+        assert!(db
+            .set_cluster_voice_signature("r1", "S2", &[f32::NAN, 1.0], "ecapa_tdnn_speaker")
+            .is_err());
+        assert_eq!(db.get_cluster_voice_signatures("r1").unwrap().len(), 1);
+
+        // Re-running speaker identification replaces the signature rather than
+        // accumulating a second one for the same cluster.
+        let replacement = unit(&[0.0, 0.0, 1.0]);
+        db.set_cluster_voice_signature("r1", "S1", &replacement, "ecapa_tdnn_speaker")
+            .unwrap();
+        let signatures = db.get_cluster_voice_signatures("r1").unwrap();
+        assert_eq!(signatures.len(), 1);
+        assert!((signatures[0].centroid[2] - 1.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn remembering_a_voice_creates_one_profile_per_name_and_embedder() {
+        let mut db = in_memory_db();
+        let a = db
+            .remember_speaker_voice(
+                "  Dana  ",
+                "ecapa_tdnn_speaker",
+                &unit(&[1.0, 0.0, 0.0]),
+                Some("r1"),
+                None,
+            )
+            .unwrap();
+        // Same person, different capitalization: folded into the same profile.
+        let b = db
+            .remember_speaker_voice(
+                "dana",
+                "ecapa_tdnn_speaker",
+                &unit(&[0.9, 0.1, 0.0]),
+                Some("r2"),
+                None,
+            )
+            .unwrap();
+        assert_eq!(a, b);
+        // Same name, different embedder: a separate profile, because the two
+        // centroids live in unrelated spaces.
+        let c = db
+            .remember_speaker_voice(
+                "Dana",
+                "resnet34_speaker",
+                &unit(&[1.0, 0.0, 0.0]),
+                Some("r3"),
+                None,
+            )
+            .unwrap();
+        assert_ne!(a, c);
+
+        let profiles = db.list_speaker_profiles().unwrap();
+        assert_eq!(profiles.len(), 2);
+        let folded = profiles.iter().find(|p| p.id == a).unwrap();
+        assert_eq!(folded.display_name, "Dana", "the name is trimmed");
+        assert_eq!(folded.sample_count, 2);
+        assert_eq!(folded.linked_identity_hash, None);
+        let norm = folded
+            .centroid
+            .iter()
+            .map(|value| value * value)
+            .sum::<f32>()
+            .sqrt();
+        assert!((norm - 1.0).abs() < 1e-5, "the centroid stays unit length");
+
+        assert!(db
+            .remember_speaker_voice("   ", "ecapa_tdnn_speaker", &unit(&[1.0, 0.0]), None, None)
+            .is_err());
+        assert!(db
+            .remember_speaker_voice("Ravi", "ecapa_tdnn_speaker", &[0.0, 0.0], None, None)
+            .is_err());
+    }
+
+    #[test]
+    fn a_profile_keeps_at_most_the_sample_cap_and_averages_what_is_left() {
+        let mut db = in_memory_db();
+        let cap = crate::diarization::voiceprints::MAX_SAMPLES_PER_PROFILE;
+        let profile_id = db
+            .remember_speaker_voice("Dana", "ecapa_tdnn_speaker", &unit(&[1.0, 0.0]), None, None)
+            .unwrap();
+        for _ in 0..(cap + 5) {
+            db.add_speaker_profile_sample(&profile_id, &unit(&[0.0, 1.0]), Some("r1"))
+                .unwrap();
+        }
+        let stored: i64 = db
+            .conn
+            .query_row(
+                "SELECT COUNT(*) FROM speaker_profile_samples WHERE profile_id = ?1",
+                params![&profile_id],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(stored as usize, cap, "samples are capped");
+        let profile = db
+            .list_speaker_profiles()
+            .unwrap()
+            .into_iter()
+            .find(|p| p.id == profile_id)
+            .unwrap();
+        assert_eq!(profile.sample_count as usize, cap);
+        // The very first sample has aged out, so the centroid is now the
+        // second vector rather than a blend of the two.
+        assert!(profile.centroid[1] > 0.99, "oldest samples age out");
+
+        assert!(db
+            .add_speaker_profile_sample("no-such-profile", &unit(&[1.0, 0.0]), None)
+            .is_err());
+        assert!(db
+            .add_speaker_profile_sample(&profile_id, &[f32::NAN, 0.0], None)
+            .is_err());
+    }
+
+    #[test]
+    fn rejecting_a_voice_is_remembered_and_clears_an_applied_match() {
+        let mut db = in_memory_db();
+        db.create_recording(&sample_recording("r1", "inbox"))
+            .unwrap();
+        db.set_cluster_voice_signature("r1", "S1", &unit(&[1.0, 0.0]), "ecapa_tdnn_speaker")
+            .unwrap();
+        db.set_cluster_voice_match("r1", "S1", "p-dana", "auto")
+            .unwrap();
+        let before = &db.get_cluster_voice_signatures("r1").unwrap()[0];
+        assert_eq!(before.applied_profile_id.as_deref(), Some("p-dana"));
+        assert_eq!(before.match_state.as_deref(), Some("auto"));
+
+        db.reject_cluster_voice_match("r1", "S1", "p-dana").unwrap();
+        let after = &db.get_cluster_voice_signatures("r1").unwrap()[0];
+        assert_eq!(after.rejected_profile_ids, vec!["p-dana".to_string()]);
+        assert_eq!(after.applied_profile_id, None, "the wrong name is removed");
+        assert_eq!(after.match_state, None);
+
+        // A second rejection accumulates; the same one does not duplicate.
+        db.reject_cluster_voice_match("r1", "S1", "p-devon")
+            .unwrap();
+        db.reject_cluster_voice_match("r1", "S1", "p-dana").unwrap();
+        let after = &db.get_cluster_voice_signatures("r1").unwrap()[0];
+        assert_eq!(
+            after.rejected_profile_ids,
+            vec!["p-dana".to_string(), "p-devon".to_string()]
+        );
+    }
+
+    #[test]
+    fn forgetting_one_voice_removes_its_samples_and_detaches_its_clusters() {
+        let mut db = in_memory_db();
+        db.create_recording(&sample_recording("r1", "inbox"))
+            .unwrap();
+        let dana = db
+            .remember_speaker_voice("Dana", "ecapa_tdnn_speaker", &unit(&[1.0, 0.0]), None, None)
+            .unwrap();
+        let devon = db
+            .remember_speaker_voice(
+                "Devon",
+                "ecapa_tdnn_speaker",
+                &unit(&[0.0, 1.0]),
+                None,
+                None,
+            )
+            .unwrap();
+        db.set_cluster_voice_signature("r1", "S1", &unit(&[1.0, 0.0]), "ecapa_tdnn_speaker")
+            .unwrap();
+        db.set_cluster_voice_match("r1", "S1", &dana, "confirmed")
+            .unwrap();
+
+        assert!(db.forget_speaker_voice(&dana).unwrap());
+        assert!(!db.forget_speaker_voice(&dana).unwrap(), "already gone");
+        let remaining = db.list_speaker_profiles().unwrap();
+        assert_eq!(remaining.len(), 1);
+        assert_eq!(remaining[0].id, devon);
+        let orphaned_samples: i64 = db
+            .conn
+            .query_row(
+                "SELECT COUNT(*) FROM speaker_profile_samples WHERE profile_id = ?1",
+                params![&dana],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(orphaned_samples, 0);
+        let cluster = &db.get_cluster_voice_signatures("r1").unwrap()[0];
+        assert_eq!(cluster.applied_profile_id, None);
+        assert_eq!(cluster.match_state, None);
+        assert!(
+            !cluster.centroid.is_empty(),
+            "forgetting one voice keeps the meeting's own signature"
+        );
+    }
+
+    /// "Delete all" has to mean all: the profiles, their samples, and the
+    /// per-cluster signatures that are themselves voice data.
+    #[test]
+    fn forgetting_all_voices_also_clears_every_cluster_signature() {
+        let mut db = in_memory_db();
+        db.create_recording(&sample_recording("r1", "inbox"))
+            .unwrap();
+        let dana = db
+            .remember_speaker_voice("Dana", "ecapa_tdnn_speaker", &unit(&[1.0, 0.0]), None, None)
+            .unwrap();
+        db.remember_speaker_voice(
+            "Devon",
+            "ecapa_tdnn_speaker",
+            &unit(&[0.0, 1.0]),
+            None,
+            None,
+        )
+        .unwrap();
+        db.set_cluster_voice_signature("r1", "S1", &unit(&[1.0, 0.0]), "ecapa_tdnn_speaker")
+            .unwrap();
+        db.set_cluster_voice_match("r1", "S1", &dana, "confirmed")
+            .unwrap();
+        db.reject_cluster_voice_match("r1", "S2", "p-other")
+            .unwrap();
+
+        assert_eq!(db.forget_all_speaker_voices().unwrap(), 2);
+        assert!(db.list_speaker_profiles().unwrap().is_empty());
+        assert!(db.get_cluster_voice_signatures("r1").unwrap().is_empty());
+        let leftovers: i64 = db
+            .conn
+            .query_row(
+                "SELECT COUNT(*) FROM speaker_aliases
+                 WHERE voice_centroid IS NOT NULL
+                    OR voice_profile_id IS NOT NULL
+                    OR voice_match_state IS NOT NULL
+                    OR voice_rejected_profiles IS NOT NULL",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(leftovers, 0);
+        let samples: i64 = db
+            .conn
+            .query_row("SELECT COUNT(*) FROM speaker_profile_samples", [], |row| {
+                row.get(0)
+            })
+            .unwrap();
+        assert_eq!(samples, 0);
+    }
+
+    /// Deleting a meeting takes its cluster signatures with it, but leaves the
+    /// remembered voices alone — those belong to the person, not the meeting.
+    #[test]
+    fn deleting_a_recording_removes_its_signatures_and_keeps_remembered_voices() {
+        let mut db = in_memory_db();
+        db.create_recording(&sample_recording("r1", "inbox"))
+            .unwrap();
+        db.remember_speaker_voice("Dana", "ecapa_tdnn_speaker", &unit(&[1.0, 0.0]), None, None)
+            .unwrap();
+        db.set_cluster_voice_signature("r1", "S1", &unit(&[1.0, 0.0]), "ecapa_tdnn_speaker")
+            .unwrap();
+        db.update_recording_status("r1", "completed").unwrap();
+
+        db.delete_recording("r1").unwrap();
+        assert!(db.get_cluster_voice_signatures("r1").unwrap().is_empty());
+        assert_eq!(db.list_speaker_profiles().unwrap().len(), 1);
     }
 
     #[test]
