@@ -54,6 +54,11 @@ import {
   type DictationShortcutStartOptions,
 } from "./dictation-shortcut-controller";
 import { IpcBridge } from "./ipc-bridge";
+import os from "node:os";
+import {
+  captureMainProcessConsole,
+  diagnosticLogBuffer,
+} from "./diagnostic-log-buffer";
 import {
   normalizeNativeShortcutEvent,
   normalizeNativeShortcutHelperShortcut,
@@ -1345,6 +1350,45 @@ function prepareOverlayWindows(): void {
   }
 }
 
+/**
+ * A file name a reader can recognise a week later, with no account name in it.
+ */
+function supportBundleFileName(): string {
+  const stamp = new Date().toISOString().slice(0, 19).replace(/[:T]/g, "-");
+  return `plainsong-support-bundle-${stamp}.zip`;
+}
+
+/** Hardware and OS facts, none of which name the reader. */
+function supportBundleHost(): Record<string, unknown> {
+  const cpus = os.cpus();
+  return {
+    platform: process.platform,
+    osRelease: os.release(),
+    arch: process.arch,
+    logicalCpus: cpus.length,
+    cpuModel: cpus[0]?.model ?? null,
+    memoryGiB: Math.round((os.totalmem() / 1024 ** 3) * 10) / 10,
+  };
+}
+
+/**
+ * What this build can prove about itself.
+ *
+ * Not a signed release receipt -- Plainsong does not ship one into the app
+ * bundle yet -- so this says only what the running process knows: its version,
+ * the runtimes under it, and whether it is a packaged app at all.
+ */
+function supportBundleBuildIdentity(): Record<string, unknown> {
+  return {
+    appVersion: app.getVersion(),
+    packaged: app.isPackaged,
+    electron: process.versions.electron ?? null,
+    chrome: process.versions.chrome ?? null,
+    node: process.versions.node ?? null,
+    note: "Plainsong does not embed a signed release receipt in the app bundle; these are the versions the running process reports.",
+  };
+}
+
 async function handleLocalCommand(
   event: IpcMainInvokeEvent,
   command: string,
@@ -1634,6 +1678,55 @@ async function handleLocalCommand(
         handled: true,
         result: await ipcBridge.invokeSidecar("import_audio_file", {
           path: selectedPath,
+        }),
+      };
+    }
+    case "preview_support_bundle": {
+      // Read-only: says what a bundle would contain and how it would be
+      // redacted, so the reader decides before a file exists. No gesture is
+      // required because nothing is written and no dialog is opened.
+      if (!ipcBridge) {
+        throw new Error("Diagnostics service is not ready");
+      }
+      const description = (await ipcBridge.invokeSidecar(
+        "describe_support_bundle",
+        {},
+      )) as Record<string, unknown>;
+      return {
+        handled: true,
+        result: {
+          ...description,
+          logLineCount: diagnosticLogBuffer.size,
+          suggestedFileName: supportBundleFileName(),
+        },
+      };
+    }
+    case "create_support_bundle": {
+      // Gated like every other native modal in this handler, and for the same
+      // reason. The renderer never names the path: it asks for the picker, and
+      // the path the reader chooses goes from here straight to the sidecar.
+      const parent = requireMainWindowGesture("Creating a support bundle");
+      if (!ipcBridge) {
+        throw new Error("Diagnostics service is not ready");
+      }
+      const selection = await dialog.showSaveDialog(parent, {
+        title: "Save the support bundle",
+        buttonLabel: "Save bundle",
+        defaultPath: path.join(app.getPath("desktop"), supportBundleFileName()),
+        filters: [{ name: "Zip archive", extensions: ["zip"] }],
+        properties: ["createDirectory", "showOverwriteConfirmation"],
+      });
+      const targetPath = selection.canceled ? null : (selection.filePath ?? null);
+      if (!targetPath) {
+        return { handled: true, result: null };
+      }
+      return {
+        handled: true,
+        result: await ipcBridge.invokeSidecar("write_support_bundle_privileged", {
+          targetPath,
+          host: supportBundleHost(),
+          buildIdentity: supportBundleBuildIdentity(),
+          logLines: diagnosticLogBuffer.snapshot(),
         }),
       };
     }
@@ -3110,6 +3203,10 @@ function flushPendingDeepLinks(): void {
 }
 
 async function bootstrap() {
+  // Mirror this process's own logging into the in-memory tail the support
+  // bundle reads. Nothing is written to disk and nothing leaves the Mac;
+  // see electron/diagnostic-log-buffer.ts.
+  captureMainProcessConsole();
   const gotLock = app.requestSingleInstanceLock();
   if (!gotLock) {
     app.quit();

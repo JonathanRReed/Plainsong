@@ -78,6 +78,12 @@ runs of the same fixture took 25.6 s and, on a quieter machine, 11.4 s
 a quiet machine before quoting a single number; the route copy states
 the range.
 
+That re-measurement was attempted on 2026-09-02 (parity item B12) and
+could not be taken: the machine never dropped below load 25 across four
+hours while other lanes built and tested. The provisional range above
+therefore stands, correctly labelled. See
+`artifacts/qa/receipts-2026-09-02.md`.
+
 Output is punctuated and cased. Chinese, Japanese and Korean were
 spot-checked with macOS TTS clips (language tag and script correct); that
 is not a qualification, so the route's evidence lists English only. The

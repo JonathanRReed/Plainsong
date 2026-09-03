@@ -34,6 +34,7 @@ pub mod settings;
 pub mod sidecar_handle;
 mod store;
 mod streaming;
+pub mod support_bundle;
 #[cfg(test)]
 mod test_fs;
 pub mod text;
@@ -23347,6 +23348,51 @@ pub(crate) fn nautilus_data_root() -> Result<PathBuf, String> {
     Ok(root.canonicalize().unwrap_or(root))
 }
 
+/// One row per model file Plainsong pins a digest for: is it here, how big is
+/// it, and does it still carry a trusted integrity receipt.
+///
+/// Deliberately reports the model directory name and the file name and nothing
+/// else -- the full path names the reader's account, and the support bundle
+/// refuses to carry that.
+fn support_bundle_model_artifacts() -> Vec<serde_json::Value> {
+    let Some(models_root) =
+        crate::paths::data_dir().map(|dir| dir.join("Plainsong").join("models"))
+    else {
+        return Vec::new();
+    };
+    let mut artifacts = download::managed_model_integrity_artifacts(&models_root);
+    artifacts.extend(asr::model_integrity_artifacts(&models_root));
+    artifacts.extend(llm::bundled_local::model_integrity_artifacts(&models_root));
+
+    artifacts
+        .into_iter()
+        .map(|(path, sha256)| {
+            let present = path.is_file();
+            let bytes = if present {
+                std::fs::metadata(&path).map(|meta| meta.len()).unwrap_or(0)
+            } else {
+                0
+            };
+            let trusted =
+                present && download::is_model_artifact_trusted(&path, Some(sha256.as_str()));
+            serde_json::json!({
+                "model": path
+                    .parent()
+                    .and_then(|parent| parent.file_name())
+                    .map(|name| name.to_string_lossy().to_string())
+                    .unwrap_or_else(|| "unknown".to_string()),
+                "file": path
+                    .file_name()
+                    .map(|name| name.to_string_lossy().to_string())
+                    .unwrap_or_else(|| "unknown".to_string()),
+                "present": present,
+                "bytes": bytes,
+                "integrityReceiptTrusted": trusted,
+            })
+        })
+        .collect()
+}
+
 fn approved_path_roots() -> Result<Vec<PathBuf>, String> {
     let mut roots = Vec::new();
 
@@ -36127,6 +36173,130 @@ pub async fn dispatch_command(
             let db = state.db.lock().await;
             let result = db.get_audit_log().map_err(|e| e.to_string())?;
             serde_json::to_value(result).map_err(|e| e.to_string())
+        }
+
+        // ── Support bundle ──────────────────────────────────────────────────
+        // Both arms are main-process only (see
+        // `intentionallyUnreachableSidecarCommands` in
+        // scripts/verify-ipc-contract.mjs). `describe` is what the Settings
+        // screen shows before anything is written; `write` takes a path the
+        // reader just chose in a native save dialog, which is why the renderer
+        // may not name it.
+        "describe_support_bundle" => {
+            let audit_entry_count = {
+                let db = state.db.lock().await;
+                db.get_audit_log().map_err(|e| e.to_string())?.len()
+            };
+            let artifacts = support_bundle_model_artifacts();
+            Ok(serde_json::json!({
+                "schemaVersion": support_bundle::SCHEMA_VERSION,
+                "sections": support_bundle::sections(),
+                "redactionRules": support_bundle::REDACTION_RULES,
+                "excludedByDesign": support_bundle::EXCLUDED_BY_DESIGN,
+                "auditEntryCount": audit_entry_count.min(support_bundle::MAX_AUDIT_ENTRIES),
+                "modelArtifactCount": artifacts.len(),
+                "maxLogLines": support_bundle::MAX_LOG_LINES,
+            }))
+        }
+        "write_support_bundle_privileged" => {
+            let target_path = params
+                .get("targetPath")
+                .and_then(|value| value.as_str())
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .ok_or("Writing a support bundle requires a targetPath")?;
+            let target = PathBuf::from(target_path);
+            if !target.is_absolute() {
+                return Err(format!(
+                    "targetPath must be an absolute path, got '{}'",
+                    target_path
+                ));
+            }
+            // The dialog picks the file, so the parent must already exist; the
+            // leaf must not be a directory we would clobber.
+            let parent = target
+                .parent()
+                .ok_or_else(|| format!("targetPath has no parent directory: '{}'", target_path))?;
+            let canonical_parent = canonicalize_existing_absolute_path(
+                &parent.to_string_lossy(),
+                "targetPath parent",
+            )?;
+            if !canonical_parent.is_dir() {
+                return Err(format!(
+                    "targetPath parent must be an existing directory, got '{}'",
+                    canonical_parent.display()
+                ));
+            }
+            if target.is_dir() {
+                return Err(format!("targetPath is a directory: '{}'", target_path));
+            }
+            let file_name = target
+                .file_name()
+                .map(|name| name.to_string_lossy().to_string())
+                .ok_or_else(|| format!("targetPath has no file name: '{}'", target_path))?;
+            let destination = canonical_parent.join(&file_name);
+
+            let host = params
+                .get("host")
+                .cloned()
+                .unwrap_or(serde_json::Value::Null);
+            let build_identity = params
+                .get("buildIdentity")
+                .cloned()
+                .unwrap_or(serde_json::Value::Null);
+            let log_lines: Vec<String> = params
+                .get("logLines")
+                .and_then(|value| value.as_array())
+                .map(|lines| {
+                    lines
+                        .iter()
+                        .filter_map(|line| line.as_str().map(|text| text.to_string()))
+                        .collect()
+                })
+                .unwrap_or_default();
+
+            let settings_value = {
+                let sm = state.settings_manager.lock().await;
+                serde_json::to_value(sm.settings()).map_err(|e| e.to_string())?
+            };
+            let readiness = collect_permission_diagnostics(state.as_ref(), Vec::new()).await;
+            let readiness_value = serde_json::to_value(readiness).map_err(|e| e.to_string())?;
+            let models_value = serde_json::json!({
+                "artifacts": support_bundle_model_artifacts(),
+            });
+            let audit_entries: Vec<serde_json::Value> = {
+                let db = state.db.lock().await;
+                let mut entries = db.get_audit_log().map_err(|e| e.to_string())?;
+                // `get_audit_log` returns newest first; the bundle reads best
+                // oldest first, and `redact_audit_entries` keeps the tail.
+                entries.reverse();
+                entries
+                    .into_iter()
+                    .map(|entry| serde_json::to_value(entry).unwrap_or(serde_json::Value::Null))
+                    .collect()
+            };
+
+            let generated_at = chrono::Utc::now().to_rfc3339();
+            let files = support_bundle::build_files(
+                &generated_at,
+                &host,
+                &build_identity,
+                &settings_value,
+                &readiness_value,
+                &models_value,
+                &audit_entries,
+                &log_lines,
+            );
+            support_bundle::write_bundle(&destination, &files).map_err(|e| e.to_string())?;
+            let bytes = std::fs::metadata(&destination)
+                .map(|meta| meta.len())
+                .unwrap_or_default();
+            Ok(serde_json::json!({
+                "fileName": file_name,
+                "bytes": bytes,
+                "fileCount": files.len(),
+                "generatedAt": generated_at,
+            }))
         }
         // Main-process only (see `intentionallyUnreachableSidecarCommands` in
         // scripts/verify-ipc-contract.mjs): records what a `plainsong://` deep

@@ -78,6 +78,23 @@ and a notary ticket and will read slightly larger. Receipt, with the
 per-directory before/after:
 `artifacts/qa/shell-size-receipt-2026-09-02.md`.
 
+The receipts lane measured 383.92 MB on 2026-09-03, but that build predates
+the size work above (it branched before it landed), so it is not a reading of
+the current tree and is not a growth figure. The current number is the one
+above.
+
+We have also said we are small in memory: "1.9 MB idle RSS on the sidecar,
+0.45% average idle CPU". **The RSS half of that is wrong.** Re-measured on
+2026-09-03 against the packaged sidecar, idle with an empty data dir, it is
+**26.0 MiB** - roughly fourteen times the published figure, stable across ten
+samples (`artifacts/qa/receipts-2026-09-02.md`). Do not repeat 1.9 MB. The idle
+CPU figure was re-taken on a quiet machine and holds: 0.07% average with call
+detection on, 0.10% with it off, so the poll costs nothing measurable.
+
+26 MiB idle is still small for a process that hosts an ASR runtime, but it is
+not the headline the old number implied, and nobody else publishes idle RSS
+anyway - so it is a number we have rather than a comparison we win.
+
 87 MB came off the installed application in one afternoon by removing two
 things nothing could reach: Chromium's UI translations for 54 languages the
 product has never been translated into (46 MB) and a second, unreachable copy

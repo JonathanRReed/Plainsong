@@ -120,6 +120,19 @@ evidence is stale and must be recaptured before this becomes a candidate.
   never passed as command-line arguments, and the audit log records how many
   terms the recognizer was actually given rather than how many were built.
   See `artifacts/qa/speechanalyzer-vocab-2026-09-02.md`.
+- Settings → Privacy & Security → Diagnostics can write a support bundle. It
+  is a zip you can open and read: app and macOS versions, this Mac's chip and
+  memory, your settings reduced to switches and short names, which macOS
+  permissions Plainsong has, which model files are on disk and whether each
+  still passes its integrity check, the tail of the local audit log, and the
+  last few hundred log lines from this session. "Show what is included" lists
+  every file and every redaction rule before anything is written, and the
+  button opens a save dialog — Plainsong writes where you choose and uploads
+  nothing. Audio, transcripts, dictated text, meeting notes, prompts,
+  dictionary entries, snippets, credentials and file paths are never in it,
+  and if a redaction rule fails to remove a home path or an email address the
+  app refuses to write the file at all. Previously only a source checkout
+  could produce one.
 - Dictation history is searchable, and a saved dictation can be run through
   the recognizer again. The search field over Recent dictations matches both
   what was delivered and (where it was kept) what the recognizer heard,
@@ -707,6 +720,12 @@ evidence is stale and must be recaptured before this becomes a candidate.
   Upstream is CC-BY-4.0 and gated; that is stated as upstream's terms, not as
   the mirror's, and the artifact is counted among those awaiting a human
   answer.
+- Moonshine Tiny can transcribe. It shares no decoder geometry with Moonshine
+  Base — six layers of 36-wide attention heads against base's eight of 52 —
+  but the key/value cache was built to base's shape for both, so selecting
+  Tiny failed on the first decode step with "Got invalid dimensions for input:
+  past_key_values.0.decoder.key". The cache is now sized from the decoder's
+  own ONNX input shape, with a per-model table as the fallback.
 - THIRD-PARTY-NOTICES.txt now has a MODEL WEIGHTS section naming every model
   Plainsong can download — repository, pinned revision, files and license —
   including the terms that differ from the code's: Parakeet's CC-BY-4.0

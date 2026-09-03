@@ -3,6 +3,7 @@ import { spawn, ChildProcess } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { createInterface } from "node:readline";
 import { getCommandTimeoutMs, getCommandWorkKey } from "./ipc-command-policy";
+import { diagnosticLogBuffer } from "./diagnostic-log-buffer";
 import { buildSidecarEnv } from "./sidecar-env";
 import { trustedSenderFrameUrl } from "./trusted-sender";
 import {
@@ -119,6 +120,7 @@ const ALLOWED_RENDERER_COMMANDS = new Set<string>([
   "cancel_apple_speech_language_install",
   "capture_selected_text_for_playback",
   "check_for_updates",
+  "create_support_bundle",
   "check_system_audio_availability",
   "clear_provider_secret",
   "create_backup_default",
@@ -239,6 +241,7 @@ const ALLOWED_RENDERER_COMMANDS = new Set<string>([
   "open_recording_audio",
   "pause_recording",
   "prepare_meeting_brief",
+  "preview_support_bundle",
   "prepare_recording_playback",
   "queue_dictation_correction_suggestion",
   "recopy_dictation_result",
@@ -417,7 +420,11 @@ export class IpcBridge {
     });
 
     this.process.stderr!.on("data", (chunk: Buffer) => {
-      process.stderr.write(`[sidecar] ${chunk.toString()}`);
+      const text = chunk.toString();
+      process.stderr.write(`[sidecar] ${text}`);
+      // Kept in memory only, for the support bundle the reader may ask for.
+      // See electron/diagnostic-log-buffer.ts.
+      diagnosticLogBuffer.record("sidecar", text);
     });
 
     this.process.stdin!.on("error", (error: NodeJS.ErrnoException) => {

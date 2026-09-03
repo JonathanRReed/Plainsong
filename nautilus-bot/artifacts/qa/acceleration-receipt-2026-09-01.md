@@ -114,6 +114,17 @@ key tensor count: 24`. `moonshine.rs` hard-codes `MOONSHINE_NUM_LAYERS = 8`
 (base); the tiny export has 6 layers (24 past-key tensors). Pre-existing
 provider bug, unrelated to CoreML; not fixed here.
 
+> **Correction (2026-09-03, parity item B12.3.)** The layer count was not the
+> cause. The number of cache tensors was already derived from the decoder's own
+> `past_key_values.*` input names, so a six-layer model already got six layers'
+> worth; `MOONSHINE_NUM_LAYERS` only fed the warning quoted above. The failing
+> dimension is index 3, the head dimension: Base is 8 heads x 52, Tiny is
+> 8 x 36, and both were built at 52. With the head dimension read from the
+> decoder's declared input shape, Tiny transcribes
+> `scripts/fixtures/local-quality-gate.wav`; with it forced back to 52 the same
+> message returns with `index: 3 Got: 52 Expected: 36`. Moonshine Tiny is
+> therefore now benchmarkable, and the row above is owed a measurement.
+
 `moonshine-base` (provider default), same binaries:
 
 | Features | cold prep | warmup | 5.3 s p50 / p95 | 44 s p50 / p95 | load |
@@ -248,6 +259,22 @@ Candle code path is the same with `ort-coreml` off (the feature only touches
 measurement. A quiet-machine `bun run benchmark:latency --provider
 distil_whisper` with the shipped binary is owed before these figures are
 quoted as release numbers.
+
+> **Follow-up (2026-09-03, parity item B12.2.)** Attempted and not completed.
+> `benchmark-latency` was rebuilt through `scripts/cargo-sidecar.mjs` with the
+> shipped feature set (sha256 `974ac43f...02eb`); it built and staged without a
+> prompt, but **the blocker above recurred at run time, exactly as described**.
+> Pointed at a data dir with the real models symlinked in, the binary sat at
+> 0.0% CPU and 7.4 MB RSS for 20 minutes with `pgrep SecurityAgent` showing a
+> live keychain dialog. Nothing was clicked; the process was killed and the
+> prompt left for the machine's owner. So this is not a one-off: any freshly
+> built, ad-hoc-signed binary that has to read the model-integrity MAC key will
+> hang here, which makes as-shipped latency unmeasurable by an unattended agent
+> on this machine until either the binary is Developer ID signed or the
+> integrity path grows a documented offline mode. Worth noting too that
+> `coldModelPreparationMs` is measured across exactly this call, so the 14-20 s
+> cold-prep figures in table (a) above may be partly keychain wait rather than
+> Metal shader compilation. See `artifacts/qa/receipts-2026-09-02.md`.
 
 Gates run through the wrapper with the shipped feature set
 (`--features candle-metal`), from `nautilus-bot/`:

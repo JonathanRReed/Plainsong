@@ -1709,6 +1709,50 @@ export async function selectExportLocation(): Promise<ApprovedLocationSummary | 
   return await invoke("select_export_location");
 }
 
+/** One file the support bundle writes, and what it holds. */
+export interface SupportBundleSection {
+  file: string;
+  description: string;
+}
+
+/**
+ * What a support bundle would contain, before one exists.
+ *
+ * The Settings screen shows this so the reader decides with the file list and
+ * the redaction rules in front of them, rather than after a zip is already on
+ * their Desktop.
+ */
+export interface SupportBundlePreview {
+  schemaVersion: number;
+  sections: SupportBundleSection[];
+  redactionRules: string[];
+  excludedByDesign: string[];
+  auditEntryCount: number;
+  modelArtifactCount: number;
+  maxLogLines: number;
+  logLineCount: number;
+  suggestedFileName: string;
+}
+
+export interface SupportBundleResult {
+  fileName: string;
+  bytes: number;
+  fileCount: number;
+  generatedAt: string;
+}
+
+export async function previewSupportBundle(): Promise<SupportBundlePreview> {
+  return await invoke("preview_support_bundle");
+}
+
+/**
+ * Opens a native save dialog and writes the bundle where the reader chooses.
+ * Resolves to `null` when they cancel.
+ */
+export async function createSupportBundle(): Promise<SupportBundleResult | null> {
+  return await invoke("create_support_bundle");
+}
+
 type CloudProvider = "one_drive" | "google_drive" | "proton_drive" | "i_cloud";
 
 export interface BackupConfig {
