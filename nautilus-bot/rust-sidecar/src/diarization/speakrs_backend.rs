@@ -392,7 +392,11 @@ mod tests {
             .iter()
             .filter(|segment| segment.speaker_id == "S1")
             .collect();
-        assert_eq!(speaker_00.len(), 1, "one turn, not two overlapping: {segments:?}");
+        assert_eq!(
+            speaker_00.len(),
+            1,
+            "one turn, not two overlapping: {segments:?}"
+        );
         assert_eq!(speaker_00[0].start_time, 0.0);
         assert_eq!(speaker_00[0].end_time, 8.0);
         // The interleaved speaker is still there; the merge covers their span

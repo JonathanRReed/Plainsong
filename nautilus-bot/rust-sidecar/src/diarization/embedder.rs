@@ -465,32 +465,6 @@ fn finalize_embedding(array: ArrayViewD<'_, f32>) -> Result<Array1<f32>> {
     Ok(Array1::from(normalized))
 }
 
-#[cfg(not(feature = "diarization"))]
-pub struct SpeakerEmbeddingExtractor;
-
-#[cfg(not(feature = "diarization"))]
-impl SpeakerEmbeddingExtractor {
-    pub fn with_model(_model_id: &str) -> Result<Self> {
-        Ok(Self)
-    }
-
-    #[expect(
-        dead_code,
-        reason = "only called from the feature-gated availability probe in diarization/mod.rs; the stub keeps the feature-on API shape"
-    )]
-    pub fn is_model_available(&self) -> bool {
-        false
-    }
-
-    pub async fn extract_embeddings(
-        &self,
-        _audio_path: &Path,
-        _segments: &[(f64, f64)],
-    ) -> Result<Vec<(f64, f64, Array1<f32>)>> {
-        Ok(Vec::new())
-    }
-}
-
 /// Cluster embeddings to identify unique speakers
 pub struct EmbeddingClusterer {
     /// Threshold for clustering (cosine similarity)

@@ -45,6 +45,7 @@
     "gate:size": "node scripts/size-gate.mjs --app release/mac-arm64/Plainsong.app --max-mb 450",
     "gate:cold-start": "node scripts/cold-start-gate.mjs --threshold-ms 2500 --ready-output-pattern \"App rendered\" --electron-logging --isolate-plainsong-data -- release/mac-arm64/Plainsong.app/Contents/MacOS/Plainsong",
     "gate:ipc-contract": "node scripts/verify-ipc-contract.mjs",
+    "gate:rust-features": "node scripts/gate-rust-features.mjs",
     "gate:dead-code": "bunx --no-install knip --reporter compact --no-progress && node scripts/verify-dead-code-hygiene.mjs",
     "gate:release:local": "bun run lint && bun run test && bun run test:rust && bun run gate:ipc-contract && bun run electron:build && bun run gate:release:dependencies",
     "qa:cloud-asr:smoke": "node scripts/live-cloud-asr-smoke.mjs --out artifacts/cloud-asr-smoke.json",

@@ -8,11 +8,19 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::Path;
 
+/// The ONNX embedding + clustering backend. Gated because it is the only part
+/// of this module that needs `ndarray` and `ort`, both of which are optional
+/// dependencies pulled in by the `diarization` feature; the module's types,
+/// readiness rules and transcript merge are feature-independent and stay
+/// compiled in so every call site keeps one shape. Same pattern as
+/// `asr::whisper` / `asr::whisper_stub`.
+#[cfg(feature = "diarization")]
 mod embedder;
 /// EXPERIMENTAL alternative backend; see the module docs. Off by default.
 #[cfg(feature = "diarization-speakrs")]
 mod speakrs_backend;
 
+#[cfg(feature = "diarization")]
 pub use embedder::{generate_segments, EmbeddingClusterer};
 
 #[cfg(feature = "diarization")]
@@ -84,7 +92,22 @@ impl DiarizationEngine {
         self.diarize_real(audio_path, duration).await
     }
 
+    /// Without the `diarization` feature there is no ONNX runtime to embed with
+    /// and no clusterer compiled in. Say that, rather than running an empty
+    /// pipeline to the same conclusion by a longer route.
+    #[cfg(not(feature = "diarization"))]
+    async fn diarize_real(
+        &mut self,
+        _audio_path: &Path,
+        _duration: f64,
+    ) -> Result<DiarizationResult> {
+        Err(anyhow::anyhow!(
+            "Speaker diarization is not compiled into this build (the `diarization` feature is off)."
+        ))
+    }
+
     /// Real diarization using speaker embeddings and clustering
+    #[cfg(feature = "diarization")]
     async fn diarize_real(
         &mut self,
         audio_path: &Path,
@@ -103,12 +126,8 @@ impl DiarizationEngine {
         let extractor = embedder::SpeakerEmbeddingExtractor::with_model(&self.model_id)
             .context("Failed to create embedding extractor")?;
 
-        #[cfg(feature = "diarization")]
         let embeddings: Vec<(f64, f64, Array1<f32>)> =
             extractor.extract_embeddings(audio_path, &segments).await?;
-
-        #[cfg(not(feature = "diarization"))]
-        let embeddings = extractor.extract_embeddings(audio_path, &segments).await?;
 
         if embeddings.is_empty() {
             return Err(anyhow::anyhow!(
@@ -379,16 +398,12 @@ pub fn is_model_available(model_id: &str) -> bool {
     if model_id == crate::download::SPEAKRS_MODEL_ID {
         return speakrs_backend::is_available();
     }
-    #[cfg(feature = "diarization")]
-    {
-        is_embedding_model_available_in(&diarization_models_dir(), model_id)
-    }
-    #[cfg(not(feature = "diarization"))]
-    {
-        let _ = model_id;
-        tracing::warn!("Diarization feature not compiled in");
-        false
-    }
+    // `cfg!` rather than `#[cfg]`: a build without the feature has no ONNX
+    // runtime and no clusterer compiled in, so nothing it finds on disk can
+    // actually run and readiness has to be false -- but the rule itself stays
+    // compiled either way, so there is one function to test instead of two.
+    cfg!(feature = "diarization")
+        && is_embedding_model_available_in(&diarization_models_dir(), model_id)
 }
 
 /// The model a run will actually use, and what to tell the user when that is
@@ -650,6 +665,7 @@ mod tests {
         assert!(message.contains("Real diarization model is not available"));
     }
 
+    #[cfg(feature = "diarization")]
     #[test]
     fn test_embedding_clusterer() {
         use ndarray::array;
@@ -670,6 +686,7 @@ mod tests {
         assert_ne!(labels[0], labels[2]);
     }
 
+    #[cfg(feature = "diarization")]
     #[test]
     fn test_ahc_centroid_linkage_prevents_transitive_merge() {
         use ndarray::array;
@@ -708,6 +725,7 @@ mod tests {
         assert_eq!(unique.len(), 3);
     }
 
+    #[cfg(feature = "diarization")]
     fn reference_ahc_centroid_linkage(
         embeddings: &[(f64, f64, ndarray::Array1<f32>)],
         threshold: f32,
@@ -803,6 +821,7 @@ mod tests {
         labels
     }
 
+    #[cfg(feature = "diarization")]
     #[test]
     fn ahc_clustering_matches_reference_and_is_deterministic() {
         use ndarray::array;
@@ -877,6 +896,7 @@ mod tests {
         );
     }
 
+    #[cfg(feature = "diarization")]
     #[test]
     fn merge_keeps_short_runs_removed_by_smoothing_anonymous() {
         let clusterer = EmbeddingClusterer::new();
