@@ -374,6 +374,14 @@ evidence is stale and must be recaptured before this becomes a candidate.
   files that still carry it load cleanly and are rewritten without it.
 
 ### Fixed
+- "Installing language…" has a Cancel beside it, and stops on its own if
+  macOS goes quiet. The Apple language install waited on the OS with no
+  deadline and no way out: an install that never finished held the button,
+  the progress line and a background helper process until Plainsong was
+  quit. It now stops after twenty minutes, or after three minutes with no
+  progress reported, and Cancel ends it immediately. Live Apple dictation
+  gets the same treatment: a helper that stops responding is ended and says
+  so instead of hanging.
 - A meeting transcribed with Apple Speech can no longer be saved without
   timestamps. The meeting route decided that SpeechAnalyzer would run and
   then let the transcription decide again a moment later; if the language

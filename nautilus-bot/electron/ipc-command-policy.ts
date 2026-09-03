@@ -22,6 +22,9 @@ const ANALYSIS_COMMANDS = new Set<string>([
 const FAST_COMMANDS = new Set<string>([
   "acknowledge_incomplete_transcript",
   "cancel_analysis_run",
+  // Sets one flag on an in-flight language install; the reader who pressed
+  // Cancel is watching the button.
+  "cancel_apple_speech_language_install",
   "check_for_updates",
   "check_system_audio_availability",
   // Flips one flag on the call detector; the cue that sent it is waiting to

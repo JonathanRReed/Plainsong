@@ -14,6 +14,7 @@ const downloadBundledCleanupModelMock = vi.fn();
 const deleteBundledCleanupModelMock = vi.fn();
 const getAppleLanguageModelAvailabilityMock = vi.fn();
 const installAppleSpeechLanguageMock = vi.fn();
+const cancelAppleSpeechLanguageInstallMock = vi.fn();
 const readinessContext = vi.hoisted(() => ({
   refresh: vi.fn(async () => {}),
   productReadiness: {
@@ -52,6 +53,7 @@ vi.mock("@/lib/backend/ai", () => ({
 vi.mock("@/lib/backend/settings", () => ({
   installAppleSpeechLanguage: (locale?: string) =>
     installAppleSpeechLanguageMock(locale),
+  cancelAppleSpeechLanguageInstall: () => cancelAppleSpeechLanguageInstallMock(),
 }));
 
 vi.mock("@/lib/electron", () => ({
@@ -305,6 +307,7 @@ describe("Models screen", () => {
       readiness: SPEECH_ANALYZER_READINESS,
       notes: [],
     });
+    cancelAppleSpeechLanguageInstallMock.mockResolvedValue(undefined);
   });
 
   it("never offers a dictation-only provider for meeting notes", async () => {
@@ -768,6 +771,67 @@ describe("Models screen", () => {
     await waitFor(() =>
       expect(installAppleSpeechLanguageMock).toHaveBeenCalledTimes(1),
     );
+  });
+
+  /**
+   * macOS owns the download and it can run for minutes. Without a way out,
+   * "Installing language…" was a state the reader could only leave by
+   * quitting.
+   */
+  it("lets the reader stop a language install that is taking too long", async () => {
+    let releaseInstall: (value: unknown) => void = () => {};
+    installAppleSpeechLanguageMock.mockImplementation(
+      () =>
+        new Promise<unknown>((resolve) => {
+          releaseInstall = resolve;
+        }),
+    );
+    getAsrProviderInventoryMock.mockResolvedValue(
+      inventoryFixture({
+        macos_apple_speech: {
+          platformReadiness: {
+            ...SPEECH_ANALYZER_READINESS,
+            speechAnalyzerAssetsInstalled: false,
+            speechAnalyzerAssetStatus: "supported",
+            speechAnalyzerInstalledLocales: [],
+            engine: "sf_speech_recognizer",
+          },
+        } as Partial<AsrProviderInventory>,
+      }),
+    );
+
+    render(<Harness />);
+    await screen.findByRole("region", { name: "Speech for dictation" });
+    fireEvent.click(
+      within(appleSpeechDrawerRow()).getByRole("button", {
+        name: "Use for dictation",
+      }),
+    );
+
+    const dictation = await screen.findByRole("region", {
+      name: "Speech for dictation",
+    });
+    fireEvent.click(
+      await within(dictation).findByRole("button", { name: "Install language" }),
+    );
+
+    // While it runs, the button says so and a way out appears beside it.
+    await screen.findByRole("button", { name: "Installing language…" });
+    fireEvent.click(await screen.findByRole("button", { name: "Cancel" }));
+
+    await waitFor(() =>
+      expect(cancelAppleSpeechLanguageInstallMock).toHaveBeenCalledTimes(1),
+    );
+    await screen.findByRole("button", { name: "Stopping…" });
+
+    // The install call returns (the sidecar reports a cancelled install), and
+    // the screen goes back to offering it rather than staying stuck.
+    releaseInstall({
+      install: null,
+      readiness: SPEECH_ANALYZER_READINESS,
+      notes: ["Apple Speech language install failed: cancelled"],
+    });
+    await screen.findByRole("button", { name: "Install language" });
   });
 
   it("keeps an engine whose permission was denied visible but unpickable", async () => {

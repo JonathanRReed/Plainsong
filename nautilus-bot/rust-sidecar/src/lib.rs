@@ -33304,6 +33304,14 @@ pub async fn dispatch_command(
                     .await?;
             serde_json::to_value(result).map_err(|e| e.to_string())
         }
+        // The install is macOS' download and can run for minutes; the reader
+        // who started it needs a way to stop waiting on it. Takes no
+        // parameters and reads nothing: it sets a flag the in-flight install
+        // loop checks, which kills the helper.
+        "cancel_apple_speech_language_install" => {
+            crate::asr::platform::macos_speech::cancel_language_install();
+            Ok(serde_json::Value::Null)
+        }
         "request_apple_speech_permission" => {
             let result = request_apple_speech_permission_impl(state.as_ref()).await?;
             handle.emit_event(

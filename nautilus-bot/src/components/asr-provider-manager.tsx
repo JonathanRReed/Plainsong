@@ -19,6 +19,7 @@ import {
   saveSettings,
   getPermissionDiagnostics,
   openPermissionSettings,
+  cancelAppleSpeechLanguageInstall,
   installAppleSpeechLanguage,
   openInstalledPlainsongApp,
   requestAppleSpeechPermission,
@@ -119,6 +120,8 @@ export function AsrProviderManager({ className }: AsrProviderManagerProps) {
   const [showAdvancedTools, setShowAdvancedTools] = useState(false);
   const [permissionActionBusy, setPermissionActionBusy] = useState(false);
   const [languageInstallBusy, setLanguageInstallBusy] = useState(false);
+  const [languageInstallCancelling, setLanguageInstallCancelling] =
+    useState(false);
   const [languageInstallProgress, setLanguageInstallProgress] =
     useState<AppleSpeechLanguageInstallProgress | null>(null);
   const [languageInstallError, setLanguageInstallError] = useState<
@@ -1010,8 +1013,28 @@ export function AsrProviderManager({ className }: AsrProviderManagerProps) {
     };
   }, []);
 
+  /**
+   * Stops the running install.
+   *
+   * macOS owns the download and it can run for minutes; without this the only
+   * way out of "Installing language…" was to quit. The install call itself
+   * returns with a `cancelled` error, so the button state is cleared by the
+   * same `finally` as every other ending.
+   */
+  const cancelAppleSpeechLanguageAssets = async () => {
+    setLanguageInstallCancelling(true);
+    try {
+      await cancelAppleSpeechLanguageInstall();
+    } catch (error) {
+      setLanguageInstallError(
+        error instanceof Error ? error.message : String(error),
+      );
+    }
+  };
+
   const installAppleSpeechLanguageAssets = async () => {
     setLanguageInstallBusy(true);
+    setLanguageInstallCancelling(false);
     setLanguageInstallError(null);
     setLanguageInstallProgress(null);
     try {
@@ -1028,6 +1051,7 @@ export function AsrProviderManager({ className }: AsrProviderManagerProps) {
       );
     } finally {
       setLanguageInstallBusy(false);
+      setLanguageInstallCancelling(false);
       setLanguageInstallProgress(null);
     }
   };
@@ -1231,6 +1255,18 @@ export function AsrProviderManager({ className }: AsrProviderManagerProps) {
                         ? "Installing language…"
                         : "Install language"}
                     </Button>
+                    {languageInstallBusy ? (
+                      <Button
+                        size="sm"
+                        variant="ghost"
+                        disabled={languageInstallCancelling}
+                        onClick={() =>
+                          void cancelAppleSpeechLanguageAssets()
+                        }
+                      >
+                        {languageInstallCancelling ? "Stopping…" : "Cancel"}
+                      </Button>
+                    ) : null}
                     {languageInstallProgress ? (
                       <span className="text-sm text-muted-foreground">
                         {languageInstallProgress.message}

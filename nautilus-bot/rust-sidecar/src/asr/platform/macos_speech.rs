@@ -12,11 +12,12 @@ use std::ffi::OsString;
 use std::path::PathBuf;
 #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
 use std::process::{Command, Output, Stdio};
-use std::sync::atomic::{AtomicU8, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
 #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
 use std::sync::{Condvar, Mutex, OnceLock};
+use std::time::Duration;
 #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
-use std::time::{Duration, Instant};
+use std::time::Instant;
 #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
 use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
 #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
@@ -173,6 +174,91 @@ pub fn selected_engine(readiness: &AppleSpeechReadiness) -> AppleSpeechEngine {
 /// formatted string, so it stays dictation-only exactly as before.
 pub fn supports_meetings(readiness: &AppleSpeechReadiness) -> bool {
     readiness.ready && selected_engine(readiness) == AppleSpeechEngine::SpeechAnalyzer
+}
+
+/// How long a language install may run in total before the helper is killed.
+///
+/// Generous on purpose: the download is Apple's, over the reader's connection,
+/// at a size this app does not control. The point is that a wedged helper
+/// eventually dies rather than holding a child process and the "Installing
+/// language…" button for the life of the app.
+pub const INSTALL_TOTAL_BUDGET: Duration = Duration::from_secs(20 * 60);
+
+/// How long the install may go without saying anything before it is killed.
+///
+/// The helper emits `progress` lines as macOS reports them, so silence this
+/// long means it is no longer making progress, not that the download is
+/// merely large.
+pub const INSTALL_PROGRESS_IDLE: Duration = Duration::from_secs(3 * 60);
+
+/// How long a live session may go with no helper output at all -- no partial,
+/// no error, no exit -- before the helper is killed. Silence is normal in
+/// dictation; silence for this long is a wedged process.
+pub const LIVE_HELPER_IDLE_TIMEOUT: Duration = Duration::from_secs(5 * 60);
+
+/// How long to wait for a killed or finished helper to actually exit before
+/// killing it again and stopping the wait.
+pub const HELPER_EXIT_GRACE: Duration = Duration::from_secs(5);
+
+/// How often the install loop wakes to notice a cancel or an expired wait.
+/// Short enough that "Cancel" feels immediate, long enough to be free.
+pub const INSTALL_CANCEL_POLL: Duration = Duration::from_millis(250);
+
+/// Why a language install stopped waiting on the helper.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum InstallWaitExpiry {
+    /// The whole install ran past `INSTALL_TOTAL_BUDGET`.
+    TotalBudget,
+    /// No progress line for `INSTALL_PROGRESS_IDLE`.
+    NoProgress,
+}
+
+impl InstallWaitExpiry {
+    pub fn message(self) -> &'static str {
+        match self {
+            Self::TotalBudget => {
+                "The macOS language install ran too long and was stopped. Try again, or install the language from System Settings."
+            }
+            Self::NoProgress => {
+                "The macOS language install stopped reporting progress and was stopped. Try again, or install the language from System Settings."
+            }
+        }
+    }
+}
+
+/// Whether a language install has waited long enough to give up.
+///
+/// Pure, so the policy is testable without a Mac or a real download: the two
+/// clocks are passed in rather than read.
+pub fn install_wait_expiry(
+    total_elapsed: Duration,
+    since_last_progress: Duration,
+) -> Option<InstallWaitExpiry> {
+    if total_elapsed >= INSTALL_TOTAL_BUDGET {
+        return Some(InstallWaitExpiry::TotalBudget);
+    }
+    if since_last_progress >= INSTALL_PROGRESS_IDLE {
+        return Some(InstallWaitExpiry::NoProgress);
+    }
+    None
+}
+
+/// Set by `cancel_language_install`, cleared when an install starts.
+///
+/// A flag rather than a channel because the install is a single OS-owned
+/// operation with one button behind it: there is nothing to route, and the
+/// reader who pressed "Cancel" is the same one who pressed "Install".
+static APPLE_SPEECH_INSTALL_CANCELLED: AtomicBool = AtomicBool::new(false);
+
+/// Asks the running language install to stop. Safe to call when none is
+/// running: the next install clears the flag before it spawns.
+pub fn cancel_language_install() {
+    APPLE_SPEECH_INSTALL_CANCELLED.store(true, Ordering::Relaxed);
+}
+
+/// Reads and clears the cancel flag.
+fn take_install_cancellation() -> bool {
+    APPLE_SPEECH_INSTALL_CANCELLED.swap(false, Ordering::Relaxed)
 }
 
 /// Refuses a helper result that did not come from the engine the caller
@@ -1199,7 +1285,35 @@ pub async fn start_live_dictation_session(
         let mut final_sent = false;
         let mut accumulator = SpeechAnalyzerPartialAccumulator::new();
 
-        while let Ok(Some(line)) = lines.next_line().await {
+        loop {
+            // Unbounded before: a helper that stopped saying anything held the
+            // child process, both channels and this task until the app quit.
+            // Silence is normal in dictation, so the window is generous; what
+            // it catches is a wedged process, not a quiet speaker.
+            let line = match tokio::time::timeout(LIVE_HELPER_IDLE_TIMEOUT, lines.next_line()).await
+            {
+                Ok(Ok(Some(line))) => line,
+                Ok(_) => break,
+                Err(_) => {
+                    terminal_message = Some(
+                        typed_error_with_details(
+                            "timeout",
+                            "Apple live dictation stopped responding and was ended.",
+                            true,
+                            BTreeMap::from([
+                                ("operation".to_string(), "live_dictation".to_string()),
+                                (
+                                    "idle_seconds".to_string(),
+                                    LIVE_HELPER_IDLE_TIMEOUT.as_secs().to_string(),
+                                ),
+                            ]),
+                        )
+                        .to_string(),
+                    );
+                    let _ = child.kill().await;
+                    break;
+                }
+            };
             if line.trim().is_empty() {
                 continue;
             }
@@ -1269,7 +1383,7 @@ pub async fn start_live_dictation_session(
             }
         }
 
-        let child_status = child.wait().await.ok();
+        let child_status = reap_helper(&mut child).await;
         let stderr_text = stderr_task.await.unwrap_or_default();
         if !final_sent {
             let status_note = child_status
@@ -1342,6 +1456,9 @@ pub async fn install_language_assets<F>(
 where
     F: FnMut(AppleSpeechAssetProgress),
 {
+    // A cancel that arrived while nothing was installing must not cancel the
+    // install the reader just asked for.
+    take_install_cancellation();
     let helper = resolve_helper_binary_path()?;
     let mut command = TokioCommand::new(&helper);
     command.arg("--install-assets");
@@ -1397,7 +1514,49 @@ where
     let mut lines = BufReader::new(stdout).lines();
     let mut install: Option<AppleSpeechAssetInstall> = None;
     let mut helper_error: Option<anyhow::Error> = None;
-    while let Ok(Some(line)) = lines.next_line().await {
+    // Neither layer used to bound this: the Swift helper blocks on a semaphore
+    // with no deadline, and this loop awaited the next line forever. An
+    // install that macOS never finished held a child process, the progress
+    // event stream and the "Installing language…" button for the life of the
+    // app, with no way to stop it.
+    let started = Instant::now();
+    let mut last_progress = Instant::now();
+    let mut stop_reason: Option<anyhow::Error> = None;
+    loop {
+        if take_install_cancellation() {
+            stop_reason = Some(typed_error(
+                "cancelled",
+                "The macOS language install was cancelled.",
+                false,
+            ));
+            break;
+        }
+        let line = match tokio::time::timeout(INSTALL_CANCEL_POLL, lines.next_line()).await {
+            Ok(Ok(Some(line))) => line,
+            // The helper closed stdout, or the pipe broke: fall through to the
+            // exit handling below, which reports whatever it did or did not say.
+            Ok(_) => break,
+            Err(_) => {
+                if let Some(expiry) =
+                    install_wait_expiry(started.elapsed(), last_progress.elapsed())
+                {
+                    stop_reason = Some(typed_error_with_details(
+                        "timeout",
+                        expiry.message(),
+                        true,
+                        BTreeMap::from([
+                            ("operation".to_string(), "install_assets".to_string()),
+                            (
+                                "waited_seconds".to_string(),
+                                started.elapsed().as_secs().to_string(),
+                            ),
+                        ]),
+                    ));
+                    break;
+                }
+                continue;
+            }
+        };
         if line.trim().is_empty() {
             continue;
         }
@@ -1406,10 +1565,12 @@ where
             break;
         }
         if let Some(progress) = parse_asset_progress_line(&line) {
+            last_progress = Instant::now();
             on_progress(progress);
             continue;
         }
         if let Ok(payload) = serde_json::from_str::<HelperAssetInstallPayload>(&line) {
+            last_progress = Instant::now();
             install = Some(AppleSpeechAssetInstall {
                 locale: payload.locale,
                 installed: payload.installed,
@@ -1419,10 +1580,16 @@ where
         }
     }
 
-    let status = child.wait().await.ok();
+    if stop_reason.is_some() {
+        let _ = child.kill().await;
+    }
+    let status = reap_helper(&mut child).await;
     let stderr_text = stderr_task.await.unwrap_or_default();
     invalidate_readiness_cache();
 
+    if let Some(error) = stop_reason {
+        return Err(error);
+    }
     if let Some(error) = helper_error {
         return Err(error);
     }
@@ -1574,6 +1741,38 @@ pub fn speech_authorization_status() -> SpeechAuthorizationStatus {
 #[cfg(not(all(target_os = "macos", target_arch = "aarch64")))]
 pub fn speech_authorization_status() -> SpeechAuthorizationStatus {
     SpeechAuthorizationStatus::Unavailable
+}
+
+/// Waits for a helper to exit, killing it if it will not.
+///
+/// `child.wait()` on its own is unbounded, so a helper that ignored the first
+/// kill (or finished its stdout and then hung) would keep this task alive
+/// forever after the reader had already been told the operation ended.
+#[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+async fn reap_helper(child: &mut tokio::process::Child) -> Option<std::process::ExitStatus> {
+    reap_helper_within(child, HELPER_EXIT_GRACE).await
+}
+
+/// `reap_helper` with the grace passed in, so a test can prove the kill
+/// without waiting the production window.
+#[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+async fn reap_helper_within(
+    child: &mut tokio::process::Child,
+    grace: Duration,
+) -> Option<std::process::ExitStatus> {
+    match tokio::time::timeout(grace, child.wait()).await {
+        Ok(status) => status.ok(),
+        Err(_) => {
+            let _ = child.kill().await;
+            match tokio::time::timeout(grace, child.wait()).await {
+                Ok(status) => status.ok(),
+                Err(_) => {
+                    tracing::warn!("macOS Speech helper did not exit after being killed");
+                    None
+                }
+            }
+        }
+    }
 }
 
 #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
@@ -2001,16 +2200,24 @@ fn is_executable_file(path: &Path) -> bool {
 #[cfg(test)]
 mod tests {
     use super::{
-        engine_mismatch_refusal, map_authorization_status_payload, parse_helper_error_line,
-        parse_single_payload, parse_speech_analyzer_live_line, readiness_from_probe,
-        resolve_meeting_capability, selected_engine, serialize_helper_error, supports_meetings,
+        cancel_language_install, engine_mismatch_refusal, install_wait_expiry,
+        map_authorization_status_payload, parse_helper_error_line, parse_single_payload,
+        parse_speech_analyzer_live_line, readiness_from_probe, resolve_meeting_capability,
+        selected_engine, serialize_helper_error, supports_meetings, take_install_cancellation,
         typed_error, AppleSpeechEngine, AppleSpeechMeetingCapability, AppleSpeechReadiness,
         AppleSpeechReadinessStatus, HelperErrorPayload, HelperProbePayload,
-        HelperTranscriptPayload, SpeechAnalyzerLiveEvent, SpeechAnalyzerPartialAccumulator,
-        SpeechAuthorizationStatus, StreamingPartial, StreamingPartialSink, HELPER_PROTOCOL_VERSION,
+        HelperTranscriptPayload, InstallWaitExpiry, SpeechAnalyzerLiveEvent,
+        SpeechAnalyzerPartialAccumulator, SpeechAuthorizationStatus, StreamingPartial,
+        StreamingPartialSink, HELPER_PROTOCOL_VERSION, INSTALL_PROGRESS_IDLE, INSTALL_TOTAL_BUDGET,
     };
     #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
-    use super::{resolve_helper_binary_path_for_executable, HELPER_TARGET_NAME};
+    use super::{
+        reap_helper_within, resolve_helper_binary_path_for_executable, BufReader, Instant, Stdio,
+        TokioCommand, HELPER_TARGET_NAME,
+    };
+    use std::time::Duration;
+    #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+    use tokio::io::AsyncBufReadExt;
 
     /// Every JSON literal below was captured verbatim from the compiled
     /// helper on this Mac (macOS 27.0, build 26A5406e, SDK 26.2) rather than
@@ -2559,6 +2766,100 @@ mod tests {
             parse_single_payload(json, "probe").expect("probe should match Rust contract");
         assert!(!probe.speech_analyzer_available);
         assert!(probe.operating_system_version.is_none());
+    }
+
+    /// The install is macOS' download, so the budget is generous -- but it is
+    /// a budget. Before this the helper could sit forever holding a child
+    /// process, the progress stream and the "Installing language…" button.
+    #[test]
+    fn a_language_install_gives_up_on_a_total_budget_and_on_silence() {
+        // Downloading, slowly, but still talking: keep waiting.
+        assert_eq!(
+            install_wait_expiry(Duration::from_secs(15 * 60), Duration::from_secs(30)),
+            None
+        );
+        // Still inside the total budget, but macOS has said nothing for longer
+        // than a large download goes quiet.
+        assert_eq!(
+            install_wait_expiry(Duration::from_secs(5 * 60), INSTALL_PROGRESS_IDLE),
+            Some(InstallWaitExpiry::NoProgress)
+        );
+        // Reporting progress the whole time, but past the outer bound.
+        assert_eq!(
+            install_wait_expiry(INSTALL_TOTAL_BUDGET, Duration::from_secs(1)),
+            Some(InstallWaitExpiry::TotalBudget)
+        );
+        assert!(INSTALL_PROGRESS_IDLE < INSTALL_TOTAL_BUDGET);
+        for expiry in [
+            InstallWaitExpiry::NoProgress,
+            InstallWaitExpiry::TotalBudget,
+        ] {
+            // The reader is looking at a spinner; the message has to say what
+            // happened and what to do next.
+            assert!(expiry.message().contains("System Settings"));
+        }
+    }
+
+    /// A cancel that arrived while nothing was installing must not cancel the
+    /// install the reader asks for next.
+    #[test]
+    fn a_stale_cancel_does_not_stop_the_next_install() {
+        cancel_language_install();
+        assert!(take_install_cancellation());
+        assert!(!take_install_cancellation());
+    }
+
+    /// `child.wait()` is unbounded: a helper that ignored its stdin close, or
+    /// wedged after closing stdout, kept the task alive for the life of the
+    /// app. Proven against a stub child rather than the real helper, which
+    /// cannot be pointed somewhere else on purpose.
+    #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+    #[tokio::test]
+    async fn a_helper_that_will_not_exit_is_killed_rather_than_waited_on() {
+        let mut child = TokioCommand::new("/bin/sleep")
+            .arg("600")
+            .stdout(Stdio::piped())
+            .spawn()
+            .expect("spawn a stub helper that never exits on its own");
+
+        let started = Instant::now();
+        let status = reap_helper_within(&mut child, Duration::from_millis(200)).await;
+
+        assert!(
+            status.is_some(),
+            "a helper that will not exit must be killed and reaped"
+        );
+        assert!(
+            started.elapsed() < Duration::from_secs(10),
+            "the wait must be bounded, took {:?}",
+            started.elapsed()
+        );
+    }
+
+    /// The shape the install and live loops rely on: a helper that says
+    /// nothing has to fall out of the read rather than parking the task.
+    #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+    #[tokio::test]
+    async fn a_silent_helper_times_out_instead_of_blocking_the_reader() {
+        let mut child = TokioCommand::new("/bin/sleep")
+            .arg("600")
+            .stdout(Stdio::piped())
+            .spawn()
+            .expect("spawn a stub helper that emits nothing");
+        let stdout = child.stdout.take().expect("stub helper stdout");
+        let mut lines = BufReader::new(stdout).lines();
+
+        assert!(
+            tokio::time::timeout(Duration::from_millis(200), lines.next_line())
+                .await
+                .is_err(),
+            "a silent helper must expire the read rather than return"
+        );
+
+        let _ = child.kill().await;
+        assert!(reap_helper_within(&mut child, Duration::from_secs(5))
+            .await
+            .is_some());
     }
 
     #[cfg(all(target_os = "macos", target_arch = "aarch64"))]

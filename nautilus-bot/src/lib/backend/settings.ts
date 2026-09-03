@@ -1,5 +1,6 @@
 export {
   applyGlobalShortcutsNow,
+  cancelAppleSpeechLanguageInstall,
   clearProviderSecret,
   getDictationShortcutCapabilityStatus,
   getPermissionDiagnostics,

@@ -1298,6 +1298,17 @@ export async function installAppleSpeechLanguage(
   );
 }
 
+/**
+ * Asks an in-flight language install to stop.
+ *
+ * macOS owns the download and it can run for minutes, so the reader who
+ * started it needs a way out that is not "quit the app". Safe when nothing is
+ * installing: the next install clears the flag before it starts.
+ */
+export async function cancelAppleSpeechLanguageInstall(): Promise<void> {
+  await invoke("cancel_apple_speech_language_install");
+}
+
 export async function repairCursorInsertPermissions(): Promise<PermissionDiagnostics> {
   return await invoke("repair_cursor_insert_permissions");
 }

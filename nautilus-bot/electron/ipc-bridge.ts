@@ -115,6 +115,7 @@ const ALLOWED_RENDERER_COMMANDS = new Set<string>([
   "benchmark_asr_providers_bytes",
   "begin_meeting_capture",
   "cancel_analysis_run",
+  "cancel_apple_speech_language_install",
   "capture_selected_text_for_playback",
   "check_for_updates",
   "check_system_audio_availability",
