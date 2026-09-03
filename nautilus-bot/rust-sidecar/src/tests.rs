@@ -7212,3 +7212,73 @@ fn token_list_validator_accepts_sentencepiece_style_tokens() {
     assert!(is_valid_token_list_artifact(&tokens, 8));
     let _ = std::fs::remove_dir_all(&root);
 }
+
+/// The arm list `scripts/verify-ipc-contract.mjs` reads, and the three literal
+/// anchors it slices on.
+///
+/// The gate is what actually compares this list to `ALLOWED_RENDERER_COMMANDS`
+/// in electron/ipc-bridge.ts, in both directions -- a renderer command with no
+/// arm, and an arm no renderer can reach. It does that by finding
+/// `dispatch_command` in dispatch.rs, then its `match method {`, then the
+/// fallback arm, and reading the arms between them at their own indentation.
+///
+/// If any of those three anchors moves, the gate *throws* rather than
+/// reporting drift, and the allowlist silently stops being checked. That
+/// failure mode is new: before lib.rs was split there was no separate file for
+/// the anchors to drift out of. So `cargo test` pins them here and says which
+/// one went, instead of leaving the gate to fail with a stack trace.
+fn dispatcher_arms() -> Vec<String> {
+    const DISPATCH: &str = include_str!("dispatch.rs");
+    const SIGNATURE: &str = "pub async fn dispatch_command(";
+    const MATCH_BLOCK: &str = "    match method {";
+    const FALLBACK: &str = "        _ => Err(format!(\"Unknown command: {}\", method)),";
+
+    let start = DISPATCH.find(SIGNATURE).expect(
+        "verify-ipc-contract.mjs looks for `pub async fn dispatch_command(` in dispatch.rs",
+    );
+    let match_start = DISPATCH[start..]
+        .find(MATCH_BLOCK)
+        .map(|offset| start + offset)
+        .expect("verify-ipc-contract.mjs looks for `match method {` inside dispatch_command");
+    let end = DISPATCH[match_start..]
+        .find(FALLBACK)
+        .map(|offset| match_start + offset)
+        .expect("verify-ipc-contract.mjs looks for the `Unknown command` fallback arm");
+
+    // The same pattern the gate uses, at the same indentation: eight spaces, so
+    // a match nested inside an arm body cannot contribute a command name.
+    Regex::new(r#"(?m)^ {8}"([a-z0-9_:]+)"(?:\s*\|\s*"[a-z0-9_:]+")*\s*=>"#)
+        .expect("valid dispatcher arm pattern")
+        .captures_iter(&DISPATCH[match_start..end])
+        .map(|captures| captures[1].to_string())
+        .collect()
+}
+
+#[test]
+fn the_ipc_contract_gate_can_still_read_the_dispatcher() {
+    let arms = dispatcher_arms();
+    // A floor, not a pin: commands come and go, but a slice that finds almost
+    // nothing means the anchors matched something that is not the router.
+    assert!(
+        arms.len() > 100,
+        "the gate would check {} commands, which is not the whole router",
+        arms.len()
+    );
+}
+
+#[test]
+fn no_command_is_dispatched_twice() {
+    // A second arm for a command already handled above it is unreachable, and
+    // the gate cannot see it: both arms extract to the same name, so the set it
+    // compares against the allowlist is unchanged either way.
+    let arms = dispatcher_arms();
+    let mut seen = HashSet::new();
+    let duplicated = arms
+        .iter()
+        .filter(|command| !seen.insert(command.as_str()))
+        .collect::<Vec<_>>();
+    assert!(
+        duplicated.is_empty(),
+        "these commands have more than one arm, so all but the first are dead: {duplicated:?}"
+    );
+}
