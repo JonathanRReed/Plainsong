@@ -82,13 +82,16 @@ framework. Every competitor above also ships a small-model option (Handy's
 Moonshine V2 Tiny is ~31 MB against our 148 MB `base.en`), so their realistic
 floor is far below ours.
 
-We have also said we are small in memory — 1.9 MB idle RSS on the sidecar,
-0.45% average idle CPU. Those two figures are **carried over from an older
-measurement and have not been re-taken**. A quiet-machine re-measurement was
-attempted on 2026-09-02 and abandoned: the machine never dropped below load 25
-(`artifacts/qa/receipts-2026-09-02.md`). Treat both as unverified until that
-re-run happens. Even once verified, nobody else publishes idle RSS, so it is a
-number we have rather than a comparison we win.
+We have also said we are small in memory: "1.9 MB idle RSS on the sidecar,
+0.45% average idle CPU". **The RSS half of that is wrong.** Re-measured on
+2026-09-03 against the packaged sidecar, idle with an empty data dir, it is
+**26.0 MiB** — roughly fourteen times the published figure, stable across ten
+samples (`artifacts/qa/receipts-2026-09-02.md`). Do not repeat 1.9 MB. The idle
+CPU figure has not been re-taken on a quiet machine and remains unverified.
+
+26 MiB idle is still small for a process that hosts an ASR runtime, but it is
+not the headline the old number implied, and nobody else publishes idle RSS
+anyway — so it is a number we have rather than a comparison we win.
 
 **Do not publish a comparison table.** On these figures we lose most rows, and
 the table invites exactly the diff that embarrasses us.

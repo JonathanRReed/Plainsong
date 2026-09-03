@@ -262,12 +262,19 @@ quoted as release numbers.
 
 > **Follow-up (2026-09-03, parity item B12.2.)** Attempted and not completed.
 > `benchmark-latency` was rebuilt through `scripts/cargo-sidecar.mjs` with the
-> shipped feature set (sha256 `974ac43f...02eb`) and **no keychain prompt
-> appeared this time**, so the blocker recorded above did not recur. The run
-> was stopped by machine load instead: the 1-minute average stayed between 27
-> and 279 for four hours while other lanes built. The binary and an isolated
-> model directory are staged for a re-run. See
-> `artifacts/qa/receipts-2026-09-02.md`.
+> shipped feature set (sha256 `974ac43f...02eb`); it built and staged without a
+> prompt, but **the blocker above recurred at run time, exactly as described**.
+> Pointed at a data dir with the real models symlinked in, the binary sat at
+> 0.0% CPU and 7.4 MB RSS for 20 minutes with `pgrep SecurityAgent` showing a
+> live keychain dialog. Nothing was clicked; the process was killed and the
+> prompt left for the machine's owner. So this is not a one-off: any freshly
+> built, ad-hoc-signed binary that has to read the model-integrity MAC key will
+> hang here, which makes as-shipped latency unmeasurable by an unattended agent
+> on this machine until either the binary is Developer ID signed or the
+> integrity path grows a documented offline mode. Worth noting too that
+> `coldModelPreparationMs` is measured across exactly this call, so the 14-20 s
+> cold-prep figures in table (a) above may be partly keychain wait rather than
+> Metal shader compilation. See `artifacts/qa/receipts-2026-09-02.md`.
 
 Gates run through the wrapper with the shipped feature set
 (`--features candle-metal`), from `nautilus-bot/`:
