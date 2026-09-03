@@ -8,30 +8,47 @@
 //!
 //! ## Module map
 //!
-//! This file used to hold ~38k lines of handler bodies. The split below is
-//! move-only: nothing was renamed, and `lib.rs` re-exports each module so every
-//! existing call site and test path still resolves through the crate root.
+//! This file held 37,881 lines of handler bodies. The split was move-only:
+//! nothing was renamed, and `lib.rs` re-exports every module with a glob, so
+//! each moved item still resolves by its old unqualified name from here and
+//! from every test. Items had to be widened to `pub(crate)` for a glob to carry
+//! them; that is the only change any of them saw.
 //!
-//! | module | what lives there |
-//! | --- | --- |
-//! | `dispatch` | `dispatch_command` and its match over every JSON-RPC method |
-//! | `analysis` | meeting analysis passes, grounded summary/action items, relationship memory |
-//! | `dictation_text` | dictation transcript sanitising, mode/prompt resolution, snippet and command text |
-//! | `text_insert` | the macOS accessibility, clipboard and keystroke path that puts text at the cursor |
-//! | `asr_routing` | provider/model selection and fallback for the meeting and dictation lanes |
-//! | `streaming_partials` | live-preview partial decoding, VAD-aligned chunk cuts, streaming events |
-//! | `recording_vault` | recording-audio encryption, vault key migration, runtime playback staging |
-//! | `retention` | dictation and meeting retention policies, meeting auto-naming |
-//! | `model_cache` | on-disk model artifact validation and cache repair |
-//! | `audio_import_runtime` | `import_audio_file` and its `afconvert` staging |
-//! | `meeting_pipeline` | the post-stop meeting transcription pipeline |
+//! | module | lines | what lives there |
+//! | --- | --- | --- |
+//! | `dispatch` | 4,081 | `dispatch_command` and its match over every JSON-RPC method |
+//! | `dictation_session` | 2,976 | one dictation session: start capture, stop, deliver, fail cleanly |
+//! | `text_insert` | 2,163 | the AX, clipboard and keystroke path that puts text at the cursor |
+//! | `recording_lifecycle` | 1,968 | meeting start preconditions and failures, pause, capture monitors, stop |
+//! | `recording_vault` | 1,933 | recording-audio encryption, vault keys, playback staging |
+//! | `dictation_text` | 1,798 | transcript sanitising, rewrites, snippets, mode and prompt resolution |
+//! | `analysis` | 1,463 | the meeting analysis passes, grounded output, relationship memory |
+//! | `meeting_transcribe` | 1,265 | chunked transcription, diarizer choice, transcript assembly |
+//! | `retention` | 1,210 | retention policies, owned-audio deletion, meeting auto-naming |
+//! | `dictation_reprocess` | 1,105 | reprocessing a kept dictation, selected-text transforms |
+//! | `settings_values` | 792 | normalising every stored settings string, model warm-up |
+//! | `meeting_pipeline` | 716 | the post-stop transcribe/diarize/persist/analyse pipeline |
+//! | `audio_import_runtime` | 691 | `import_audio_file` and its `afconvert` staging |
+//! | `speakers` | 676 | speaker aliases, voice clusters, person names |
+//! | `asr_routing` | 676 | provider and model selection, route policy, fallback |
+//! | `permissions` | 675 | permission requests, Setup diagnostics, cursor-insert repair |
+//! | `dictation_live_preview` | 657 | engine choice and the preview task, which may only emit a preview |
+//! | `streaming_partials` | 460 | partial-decode scheduling, VAD-aligned chunk cuts, stream events |
+//! | `dictation_commands` | 391 | spoken-command context capture and execution |
+//! | `model_cache` | 357 | on-disk model artifact validation and cache repair |
+//! | `export_paths` | 323 | template export, approved roots, the path guard |
+//! | `provider_models` | 179 | one model-catalogue fetch per remote provider |
+//! | `tests` | 7,284 | the handler tests that still cover what is left in this file |
 //!
-//! What stays here: the crate docs, the module declarations, `AppState` and the
-//! other shared types, the sidecar lifecycle entry points (`build_app_state`,
-//! `start_dictation_for_sidecar`, `stop_dictation_for_sidecar`,
-//! `start_recording_for_sidecar`, `stop_recording_for_sidecar`, settings and
-//! permission handling), and the re-exports that keep the seam invisible to
-//! callers.
+//! What stays here: the crate docs, the module declarations and re-exports,
+//! `AppState` and the shared types the modules operate on, and the sidecar
+//! lifecycle the binary drives -- `build_app_state`, `save_settings_for_sidecar`,
+//! `reset_app_state_for_sidecar`, the startup reconcilers, and shutdown.
+//!
+//! `dispatch_command` is still a match of inline handler bodies, not a thin
+//! router. Lifting ~190 arms into handler functions is a logic edit rather than
+//! a move, so it is deliberately not part of the split; it is now a change
+//! inside one 4k-line file instead of a conflict with every other lane.
 
 pub mod admission;
 mod analysis;
