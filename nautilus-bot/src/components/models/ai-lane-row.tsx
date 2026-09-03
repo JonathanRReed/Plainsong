@@ -82,15 +82,16 @@ export function AiLaneRow({
         {zeroSetup ? (
           <p className="text-sm leading-6 text-muted-foreground">
             Nothing to install and no key to paste. It cleans up dictation only
-            — it cannot write meeting notes, and it does not run custom modes
-            or dictation commands, which fall back to Plainsong&apos;s built-in
-            text transforms.
+            — it cannot write meeting notes, and it does not run saved
+            profiles or dictation commands, which fall back to
+            Plainsong&apos;s built-in text transforms.
           </p>
         ) : null}
         {!remoteProcessingEnabled && isRemoteAnalysisProvider(value.provider) ? (
           <p className="text-sm leading-6 text-rust">
             This one runs in the cloud, but cloud AI is turned off — so nothing
-            will be written until you allow it in AI &amp; Keys.
+            will be written until you allow it under Settings &rarr; Privacy
+            &amp; Security.
           </p>
         ) : null}
       </div>

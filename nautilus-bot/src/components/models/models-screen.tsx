@@ -55,6 +55,7 @@ import { LivePreviewEngineRow } from "@/components/models/live-preview-engine-ro
 import { MoreModelsDrawer } from "@/components/models/more-models-drawer";
 import { PresetPicker } from "@/components/models/preset-picker";
 import { SpeechLaneRow } from "@/components/models/speech-lane-row";
+import { SettingsSelect } from "@/components/ui/settings-control";
 import {
   AppleLanguageModelRow,
   BundledCleanupModelRow,
@@ -84,11 +85,11 @@ interface ModelsScreenProps {
 const AI_LANE_COPY: Record<AiLaneKey, { label: string; help: string }> = {
   meetingsAi: {
     label: "Who writes summaries, answers, and actions",
-    help: "Runs once a meeting has ended, so it can afford a slower, smarter model.",
+    help: "Runs once a meeting has ended, so it can afford a slower, smarter AI model.",
   },
   dictationAi: {
     label: "Who cleans up dictation",
-    help: "Runs on every capture behind a short timeout, so a smaller, faster model usually wins here. Built-in needs nothing installed; Ollama and the cloud providers can also run custom modes and dictation commands. A dictation mode that carries its own AI provider overrides this while that mode is selected.",
+    help: "Runs on every capture behind a short timeout, so a smaller, faster AI model usually wins here. Built-in needs nothing installed; Ollama and the cloud services can also run saved profiles and dictation commands. A saved profile that names its own AI service overrides this while that profile is selected.",
   },
 };
 
@@ -748,6 +749,31 @@ export function ModelsScreen({
 
           {inventoryUnavailable ? null : (
             <div className="py-5">
+              {/* The ordering control belongs next to the list it reorders.
+                  It used to live on the Transcription tab's diagnostics card
+                  under the name "Meeting quality policy", two tabs from the
+                  meetings list, where it read like a second engine picker. */}
+              <SettingsSelect
+                className="mb-4 max-w-md"
+                label="Which meeting engine to offer first"
+                description="Only reorders the list below; it never switches engines on its own. “The best one on this Mac” keeps cloud engines out of the top of the list even when you have a key for one."
+                value={meetingRoutePolicy}
+                onChange={(value) =>
+                  onPatchSettings((previous) => ({
+                    ...previous,
+                    transcription: {
+                      ...previous.transcription,
+                      meetingRoutePolicy:
+                        value === "best_available" ? "best_available" : "prefer_local",
+                    },
+                  }))
+                }
+              >
+                <option value="prefer_local">The best one on this Mac</option>
+                <option value="best_available">
+                  The best one you have a key for
+                </option>
+              </SettingsSelect>
               <SpeechLaneRow
                 title="Speech for meetings"
                 implication="Runs over a whole recording after the fact, so it can be slower than the dictation engine."

@@ -5,10 +5,7 @@ import { normalizeDownloadStatus } from "@/lib/download-status";
 import { formatModelSize, getAsrModelCapability } from "@/lib/asr-capabilities";
 import { getProviderSelectionStatus } from "@/lib/asr-provider-selection";
 import { describeAppleSpeechEngine } from "@/lib/asr-route-catalog";
-import {
-  mergeSelectionStateUpdate,
-  selectionStateFromSettings,
-} from "@/lib/asr-route-selection";
+import { selectionStateFromSettings } from "@/lib/asr-route-selection";
 import {
   refreshAsrRuntimeProbes,
   repairLocalModelCache,
@@ -45,7 +42,6 @@ import {
   SelectTrigger,
   SelectValue,
 } from "@/components/ui/select";
-import { Switch } from "@/components/ui/switch";
 import { Label } from "@/components/ui/label";
 import type {
   AppleSpeechLanguageInstallProgress,
@@ -76,21 +72,15 @@ interface AsrProviderManagerProps {
 }
 
 export function AsrProviderManager({ className }: AsrProviderManagerProps) {
-  const [meetingRoutePolicy, setMeetingRoutePolicy] = useState<
-    "prefer_local" | "best_available"
-  >("prefer_local");
   const [inventory, setInventory] = useState<AsrProviderInventory[]>([]);
   const [providers, setProviders] = useState<AsrProviderInfo[]>([]);
   const [defaultProvider, setDefaultProvider] =
     useState<AsrProviderType>("whisper");
-  const [defaultModelId, setDefaultModelId] = useState("distil-large-v3.5");
   const [useSharedAsrSelection, setUseSharedAsrSelection] = useState(true);
   const [dictationProvider, setDictationProvider] =
     useState<AsrProviderType>("distil_whisper");
-  const [dictationModelId, setDictationModelId] = useState("distil-large-v3.5");
   const [meetingProvider, setMeetingProvider] =
     useState<AsrProviderType>("distil_whisper");
-  const [meetingModelId, setMeetingModelId] = useState("distil-large-v3.5");
   const [isLoading, setIsLoading] = useState(false);
   const [benchmarkResults, setBenchmarkResults] = useState<BenchmarkResult[]>(
     [],
@@ -113,10 +103,6 @@ export function AsrProviderManager({ className }: AsrProviderManagerProps) {
   const [repairSummary, setRepairSummary] = useState<string | null>(null);
   const [platformSettings, setPlatformSettings] =
     useState<PlatformOptimizationSettings | null>(null);
-  const [platformSaveBusy, setPlatformSaveBusy] = useState(false);
-  const [platformSaveError, setPlatformSaveError] = useState<string | null>(
-    null,
-  );
   const [showAdvancedTools, setShowAdvancedTools] = useState(false);
   const [permissionActionBusy, setPermissionActionBusy] = useState(false);
   const [languageInstallBusy, setLanguageInstallBusy] = useState(false);
@@ -375,12 +361,20 @@ export function AsrProviderManager({ className }: AsrProviderManagerProps) {
     }
   };
 
+  /**
+   * Writes `platformOptimization` back after the loader or the readiness
+   * effect has normalized it.
+   *
+   * Nothing on screen edits these keys any more -- the "Compatibility &
+   * Runtime Tuning" card that did was removed because every control in it was
+   * inert on a macOS build (see docs/settings-inventory-2026-09-03.md). What is
+   * left is housekeeping, so a failure is logged rather than surfaced: there is
+   * no control for the user to retry.
+   */
   const persistPlatformSettings = async (
     next: PlatformOptimizationSettings,
   ) => {
     const normalizedNext = withNormalizedManualPriority(next);
-    setPlatformSaveBusy(true);
-    setPlatformSaveError(null);
     try {
       const settings = await getSettings();
       await saveSettings({
@@ -392,10 +386,7 @@ export function AsrProviderManager({ className }: AsrProviderManagerProps) {
       });
       setPlatformSettings(normalizedNext);
     } catch (error) {
-      const message = error instanceof Error ? error.message : String(error);
-      setPlatformSaveError(message);
-    } finally {
-      setPlatformSaveBusy(false);
+      console.error("Failed to save platform optimization settings:", error);
     }
   };
 
@@ -453,77 +444,12 @@ export function AsrProviderManager({ className }: AsrProviderManagerProps) {
       );
 
       setDefaultProvider(selection.defaultProvider);
-      setDefaultModelId(selection.defaultModelId);
       setUseSharedAsrSelection(selection.useSharedAsrSelection);
       setDictationProvider(selection.dictationProvider);
-      setDictationModelId(selection.dictationModelId);
       setMeetingProvider(selection.meetingProvider);
-      setMeetingModelId(selection.meetingModelId);
-      setMeetingRoutePolicy(selection.meetingRoutePolicy);
     } catch (error) {
       console.error("Failed to load ASR selection settings:", error);
     }
-  };
-
-  const persistSelectionSettings = async (updates: {
-    useSharedAsrSelection?: boolean;
-    defaultProvider?: AsrProviderType;
-    selectedModelId?: string;
-    dictationProvider?: AsrProviderType;
-    dictationModelId?: string;
-    meetingProvider?: AsrProviderType;
-    meetingModelId?: string;
-    meetingRoutePolicy?: "prefer_local" | "best_available";
-  }) => {
-    const settings = await getSettings();
-    const selection = mergeSelectionStateUpdate(
-      selectionProviders,
-      {
-        defaultProvider,
-        defaultModelId,
-        useSharedAsrSelection,
-        dictationProvider,
-        dictationModelId,
-        meetingProvider,
-        meetingModelId,
-        meetingRoutePolicy,
-      },
-      {
-        defaultProvider: updates.defaultProvider,
-        defaultModelId: updates.selectedModelId,
-        useSharedAsrSelection: updates.useSharedAsrSelection,
-        dictationProvider: updates.dictationProvider,
-        dictationModelId: updates.dictationModelId,
-        meetingProvider: updates.meetingProvider,
-        meetingModelId: updates.meetingModelId,
-        meetingRoutePolicy: updates.meetingRoutePolicy,
-      },
-    );
-
-    await saveSettings({
-      ...settings,
-      transcription: {
-        ...settings.transcription,
-        useSharedAsrSelection: selection.useSharedAsrSelection,
-        defaultProvider: selection.defaultProvider,
-        selectedModelId: selection.defaultModelId,
-        dictationProvider: selection.dictationProvider,
-        dictationModelId: selection.dictationModelId,
-        meetingProvider: selection.meetingProvider,
-        meetingModelId: selection.meetingModelId,
-        meetingRoutePolicy: selection.meetingRoutePolicy,
-      },
-    });
-
-    setUseSharedAsrSelection(selection.useSharedAsrSelection);
-    setDefaultProvider(selection.defaultProvider);
-    setDefaultModelId(selection.defaultModelId);
-    setDictationProvider(selection.dictationProvider);
-    setDictationModelId(selection.dictationModelId);
-    setMeetingProvider(selection.meetingProvider);
-    setMeetingModelId(selection.meetingModelId);
-    setMeetingRoutePolicy(selection.meetingRoutePolicy);
-    await loadInventory();
   };
 
   const selectionProviders = inventory.length > 0 ? inventory : providers;
@@ -600,7 +526,6 @@ export function AsrProviderManager({ className }: AsrProviderManagerProps) {
     try {
       await invoke("set_default_asr_provider", { providerType });
       setDefaultProvider(providerType);
-      setDefaultModelId(selected?.selectedModelId ?? providerType);
       setProviderErrors((previous) => {
         const next = { ...previous };
         delete next[providerType];
@@ -666,15 +591,6 @@ export function AsrProviderManager({ className }: AsrProviderManagerProps) {
             : provider,
         ),
       );
-      if (defaultProvider === providerType) {
-        setDefaultModelId(modelId);
-      }
-      if (dictationProvider === providerType) {
-        setDictationModelId(modelId);
-      }
-      if (meetingProvider === providerType) {
-        setMeetingModelId(modelId);
-      }
       const updatedProviders = await loadProviders();
       await loadSelectionSettings(updatedProviders);
     } catch (error) {
@@ -900,7 +816,7 @@ export function AsrProviderManager({ className }: AsrProviderManagerProps) {
     const routeLabel = providerDisplayName(providerType);
     if (!provider && lightweightProvider) {
       return (
-        <p className="text-xs text-muted-foreground">
+        <p className="text-sm text-muted-foreground">
           {label}: {routeLabel} is{" "}
           {inventoryReadiness(lightweightProvider).label.toLowerCase()}.
         </p>
@@ -914,7 +830,7 @@ export function AsrProviderManager({ className }: AsrProviderManagerProps) {
       permissionDiagnostics?.speechRecognitionReady
     ) {
       return (
-        <p className="text-xs text-muted-foreground">
+        <p className="text-sm text-muted-foreground">
           {label}: {routeLabel} is ready.
         </p>
       );
@@ -922,7 +838,7 @@ export function AsrProviderManager({ className }: AsrProviderManagerProps) {
     const selection = getProviderSelectionStatus(provider);
     if (selection.reason === null) {
       return (
-        <p className="text-xs text-muted-foreground">
+        <p className="text-sm text-muted-foreground">
           {label}: {routeLabel} is ready.
         </p>
       );
@@ -930,11 +846,11 @@ export function AsrProviderManager({ className }: AsrProviderManagerProps) {
     const canRequestSpeechPermission = providerType === "macos_apple_speech";
     return (
       <div className="space-y-2">
-        <p className="text-xs text-rust">
+        <p className="text-sm text-rust">
           {label}:{" "}
           {provider.runtimeMessage ?? `${routeLabel} is not ready yet.`}{" "}
           {provider.runtimeDetails.setupAction ??
-            "Choose another provider if you need to keep working."}
+            "Choose another speech engine if you need to keep working."}
         </p>
         {canRequestSpeechPermission ? (
           <div className="flex flex-wrap gap-2">
@@ -1253,7 +1169,7 @@ export function AsrProviderManager({ className }: AsrProviderManagerProps) {
                 {appleSpeechReadiness.message}
               </p>
               {appleSpeechReadiness.setupAction ? (
-                <p className="mt-1 text-xs text-muted-foreground">
+                <p className="mt-1 text-sm text-muted-foreground">
                   {appleSpeechReadiness.setupAction}
                 </p>
               ) : null}
@@ -1316,7 +1232,7 @@ export function AsrProviderManager({ className }: AsrProviderManagerProps) {
             <p className="text-sm font-medium text-rust">
               Apple Speech transcription is ready.
             </p>
-            <p className="text-xs text-rust/90">
+            <p className="text-sm text-rust/90">
               Cursor insertion is not ready yet. Enable Plainsong in Privacy &
               Security &gt; Accessibility so it can insert text into the target
               app.
@@ -1333,7 +1249,7 @@ export function AsrProviderManager({ className }: AsrProviderManagerProps) {
             <p className="text-sm font-medium text-rust">
               Apple Speech transcription is ready.
             </p>
-            <p className="text-xs text-rust/90">
+            <p className="text-sm text-rust/90">
               Native Cmd+V fallback is available. Direct Accessibility text
               insertion is not currently verified for this app copy.
             </p>
@@ -1345,7 +1261,7 @@ export function AsrProviderManager({ className }: AsrProviderManagerProps) {
             <p className="text-sm font-medium text-rust">
               Latest dictation fell back to clipboard-only.
             </p>
-            <p className="text-xs text-rust/90">
+            <p className="text-sm text-rust/90">
               {lastCursorInsertFailure}
             </p>
           </div>
@@ -1357,7 +1273,7 @@ export function AsrProviderManager({ className }: AsrProviderManagerProps) {
               You are running Plainsong from the mounted DMG, not the installed
               app.
             </p>
-            <p className="text-xs text-rust/90">
+            <p className="text-sm text-rust/90">
               macOS permissions granted to the installed app do not apply to the
               disk image copy. Open the installed app in{" "}
               <code>/Applications</code>, then quit this DMG copy.
@@ -1462,7 +1378,7 @@ export function AsrProviderManager({ className }: AsrProviderManagerProps) {
         {visibleAppleNativeNotes.length ? (
           <div className="space-y-1">
             {visibleAppleNativeNotes.map((note) => (
-              <p key={note} className="text-xs text-rust">
+              <p key={note} className="text-sm text-rust">
                 {note}
               </p>
             ))}
@@ -1542,7 +1458,7 @@ export function AsrProviderManager({ className }: AsrProviderManagerProps) {
             </Button>
           </div>
         </div>
-        <p className="text-xs text-muted-foreground">{insertDetail}</p>
+        <p className="text-sm text-muted-foreground">{insertDetail}</p>
       </div>
     );
   };
@@ -1896,39 +1812,6 @@ export function AsrProviderManager({ className }: AsrProviderManagerProps) {
               </CardDescription>
             </CardHeader>
             <CardContent className="space-y-4">
-              <div className="max-w-md space-y-1.5 rounded-xl border bg-background/70 p-4">
-                <Label className="text-sm text-muted-foreground">
-                  Meeting quality policy
-                </Label>
-                <Select
-                  value={meetingRoutePolicy}
-                  onValueChange={(value) => {
-                    void persistSelectionSettings({
-                      meetingRoutePolicy: value as
-                        | "prefer_local"
-                        | "best_available",
-                    }).catch((error) => {
-                      console.error(
-                        "Failed to update meeting route policy:",
-                        error,
-                      );
-                    });
-                  }}
-                >
-                  <SelectTrigger className="w-full" aria-label="Meeting quality policy">
-                    <SelectValue />
-                  </SelectTrigger>
-                  <SelectContent>
-                    <SelectItem value="prefer_local">Prefer local</SelectItem>
-                    <SelectItem value="best_available">Best available</SelectItem>
-                  </SelectContent>
-                </Select>
-                <p className="text-sm leading-6 text-muted-foreground">
-                  Which meeting engine Models offers first: the strongest
-                  local one, or a cloud route when you have a key for it.
-                </p>
-              </div>
-
               {inventory.length === 0 && isLoading ? (
                 <div className="rounded-xl border bg-muted/10 p-6 text-center">
                   <p className="text-sm text-muted-foreground">
@@ -1942,10 +1825,13 @@ export function AsrProviderManager({ className }: AsrProviderManagerProps) {
 
               <div className="space-y-1">
                 {useSharedAsrSelection
-                  ? renderRouteStatus("Shared route", defaultProvider)
-                  : renderRouteStatus("Dictation route", dictationProvider)}
+                  ? renderRouteStatus(
+                      "Speech engine (dictation and meetings)",
+                      defaultProvider,
+                    )
+                  : renderRouteStatus("Dictation engine", dictationProvider)}
                 {!useSharedAsrSelection
-                  ? renderRouteStatus("Meeting route", meetingProvider)
+                  ? renderRouteStatus("Meeting engine", meetingProvider)
                   : null}
               </div>
             </CardContent>
@@ -1970,272 +1856,6 @@ export function AsrProviderManager({ className }: AsrProviderManagerProps) {
               </Button>
             </CardContent>
           </Card>
-          {showAdvancedTools && platformSettings ? (
-            <Card>
-              <CardHeader className="pb-3">
-                <CardTitle className="font-serif text-lg font-semibold">
-                  Compatibility & Runtime Tuning
-                </CardTitle>
-                <CardDescription>
-                  Optional macOS and Windows tuning for compatibility, local
-                  performance, and repair.
-                </CardDescription>
-              </CardHeader>
-              <CardContent className="space-y-4">
-                <div className="grid gap-3 md:grid-cols-2">
-                  <div className="space-y-1.5">
-                    <Label className="text-sm text-muted-foreground">Mode</Label>
-                    <Select
-                      value={platformSettings.mode}
-                      disabled={platformSaveBusy}
-                      onValueChange={(value) => {
-                        const next: PlatformOptimizationSettings = {
-                          ...platformSettings,
-                          mode: value as "auto" | "manual",
-                        };
-                        void persistPlatformSettings(next);
-                      }}
-                    >
-                      <SelectTrigger className="w-full" aria-label="Mode">
-                        <SelectValue />
-                      </SelectTrigger>
-                      <SelectContent>
-                        <SelectItem value="auto">Auto</SelectItem>
-                        <SelectItem value="manual">Manual</SelectItem>
-                      </SelectContent>
-                    </Select>
-                  </div>
-                  <div className="space-y-1.5">
-                    <Label className="text-sm text-muted-foreground">
-                      Fallback policy
-                    </Label>
-                    <Select
-                      value={platformSettings.fallbackPolicy}
-                      disabled={platformSaveBusy}
-                      onValueChange={(value) => {
-                        const next: PlatformOptimizationSettings = {
-                          ...platformSettings,
-                          fallbackPolicy: value as
-                            | "local_only"
-                            | "allow_cloud"
-                            | "fail_fast",
-                        };
-                        void persistPlatformSettings(next);
-                      }}
-                    >
-                      <SelectTrigger className="w-full" aria-label="Fallback policy">
-                        <SelectValue />
-                      </SelectTrigger>
-                      <SelectContent>
-                        <SelectItem value="local_only">Local only</SelectItem>
-                        <SelectItem value="allow_cloud">Allow cloud</SelectItem>
-                        <SelectItem value="fail_fast">Fail fast</SelectItem>
-                      </SelectContent>
-                    </Select>
-                  </div>
-                </div>
-
-                <div className="grid gap-3 md:grid-cols-2">
-                  <div className="flex items-center justify-between rounded-md border px-3 py-2.5">
-                    <Label className="text-sm">Allow MLX acceleration routes</Label>
-                    <Switch
-                      checked={platformSettings.macos.mlxEnabled}
-                      disabled={platformSaveBusy}
-                      onCheckedChange={(checked) => {
-                        const next: PlatformOptimizationSettings = {
-                          ...platformSettings,
-                          macos: {
-                            ...platformSettings.macos,
-                            mlxEnabled: checked,
-                          },
-                        };
-                        void persistPlatformSettings(next);
-                      }}
-                    />
-                  </div>
-                  <div className="flex items-center justify-between rounded-md border px-3 py-2.5">
-                    <Label className="text-sm">Windows Foundry Local</Label>
-                    <Switch
-                      checked={platformSettings.windows.foundryEnabled}
-                      disabled={platformSaveBusy}
-                      onCheckedChange={(checked) => {
-                        const next: PlatformOptimizationSettings = {
-                          ...platformSettings,
-                          windows: {
-                            ...platformSettings.windows,
-                            foundryEnabled: checked,
-                          },
-                        };
-                        void persistPlatformSettings(next);
-                      }}
-                    />
-                  </div>
-                </div>
-
-                {platformSettings.mode === "manual" ? (
-                  <div className="space-y-2">
-                    <p className="text-xs text-muted-foreground">
-                      Manual engine priority (top to bottom)
-                    </p>
-                    {platformSettings.manualEnginePriority.length === 0 ? (
-                      <p className="text-xs text-muted-foreground">
-                        No override engines configured yet.
-                      </p>
-                    ) : null}
-                    {platformSettings.manualEnginePriority.map(
-                      (engineId, index) => (
-                        <div
-                          key={`${engineId}-${index}`}
-                          className="flex flex-wrap items-center gap-2"
-                        >
-                          <Select
-                            value={engineId}
-                            disabled={platformSaveBusy}
-                            onValueChange={(value) => {
-                              const nextPriority = [
-                                ...platformSettings.manualEnginePriority,
-                              ];
-                              nextPriority[index] = value;
-                              const next: PlatformOptimizationSettings = {
-                                ...platformSettings,
-                                manualEnginePriority: nextPriority,
-                              };
-                              void persistPlatformSettings(next);
-                            }}
-                          >
-                            <SelectTrigger className="min-w-0 flex-1" aria-label={`Engine priority ${index + 1}`}>
-                              <SelectValue />
-                            </SelectTrigger>
-                            <SelectContent>
-                              {manualEngineOptions
-                                .filter(
-                                  (option) =>
-                                    option.value === engineId ||
-                                    !platformSettings.manualEnginePriority.includes(
-                                      option.value,
-                                    ),
-                                )
-                                .map((option) => (
-                                  <SelectItem key={option.value} value={option.value}>
-                                    {option.label}
-                                  </SelectItem>
-                                ))}
-                            </SelectContent>
-                          </Select>
-                          <Button
-                            size="sm"
-                            variant="outline"
-                            disabled={platformSaveBusy || index === 0}
-                            onClick={() => {
-                              if (index === 0) return;
-                              const nextPriority = [
-                                ...platformSettings.manualEnginePriority,
-                              ];
-                              [nextPriority[index - 1], nextPriority[index]] = [
-                                nextPriority[index],
-                                nextPriority[index - 1],
-                              ];
-                              void persistPlatformSettings({
-                                ...platformSettings,
-                                manualEnginePriority: nextPriority,
-                              });
-                            }}
-                          >
-                            Up
-                          </Button>
-                          <Button
-                            size="sm"
-                            variant="outline"
-                            disabled={
-                              platformSaveBusy ||
-                              index ===
-                                platformSettings.manualEnginePriority.length - 1
-                            }
-                            onClick={() => {
-                              if (
-                                index ===
-                                platformSettings.manualEnginePriority.length - 1
-                              )
-                                return;
-                              const nextPriority = [
-                                ...platformSettings.manualEnginePriority,
-                              ];
-                              [nextPriority[index], nextPriority[index + 1]] = [
-                                nextPriority[index + 1],
-                                nextPriority[index],
-                              ];
-                              void persistPlatformSettings({
-                                ...platformSettings,
-                                manualEnginePriority: nextPriority,
-                              });
-                            }}
-                          >
-                            Down
-                          </Button>
-                          <Button
-                            size="sm"
-                            variant="outline"
-                            disabled={platformSaveBusy}
-                            onClick={() => {
-                              const nextPriority =
-                                platformSettings.manualEnginePriority.filter(
-                                  (_value, currentIndex) =>
-                                    currentIndex !== index,
-                                );
-                              void persistPlatformSettings({
-                                ...platformSettings,
-                                manualEnginePriority: nextPriority,
-                              });
-                            }}
-                          >
-                            Remove
-                          </Button>
-                        </div>
-                      ),
-                    )}
-                    <Button
-                      size="sm"
-                      variant="outline"
-                      disabled={
-                        platformSaveBusy ||
-                        platformSettings.manualEnginePriority.length >=
-                          manualEngineOptions.length
-                      }
-                      onClick={() => {
-                        const nextOption = manualEngineOptions.find(
-                          (option) =>
-                            !platformSettings.manualEnginePriority.includes(
-                              option.value,
-                            ),
-                        );
-                        if (!nextOption) return;
-                        void persistPlatformSettings({
-                          ...platformSettings,
-                          manualEnginePriority: [
-                            ...platformSettings.manualEnginePriority,
-                            nextOption.value,
-                          ],
-                        });
-                      }}
-                    >
-                      Add engine
-                    </Button>
-                    <p className="text-[11px] text-muted-foreground">
-                      Advanced routing is for runtime tuning only. Native Apple
-                      and Windows speech are selected in the main route picker
-                      above.
-                    </p>
-                  </div>
-                ) : null}
-
-                {platformSaveError ? (
-                  <p className="text-xs text-destructive">
-                    {platformSaveError}
-                  </p>
-                ) : null}
-              </CardContent>
-            </Card>
-          ) : null}
           {showAdvancedTools ? (
             <Card>
               <CardHeader className="pb-3">
@@ -2257,7 +1877,7 @@ export function AsrProviderManager({ className }: AsrProviderManagerProps) {
                   {repairingCache ? "Repairing..." : "Repair local cache"}
                 </Button>
                 {repairSummary ? (
-                  <p className="text-xs text-muted-foreground">
+                  <p className="text-sm text-muted-foreground">
                     {repairSummary}
                   </p>
                 ) : null}
@@ -2272,8 +1892,8 @@ export function AsrProviderManager({ className }: AsrProviderManagerProps) {
                     <p className="text-muted-foreground">
                       Loading providers...
                     </p>
-                    <p className="text-xs text-muted-foreground mt-2">
-                      This may take up to 15 seconds on first load
+                    <p className="mt-2 text-sm text-muted-foreground">
+                      This may take up to 15 seconds on first load.
                     </p>
                   </CardContent>
                 </Card>
@@ -2338,7 +1958,7 @@ export function AsrProviderManager({ className }: AsrProviderManagerProps) {
                     {isBenchmarking ? "Running..." : "Run Benchmark"}
                   </Button>
                   {benchmarkError && (
-                    <p className="mt-3 rounded-md bg-rust/10 p-2 text-xs text-rust">
+                    <p className="mt-3 rounded-md bg-rust/10 p-2 text-sm text-rust">
                       {benchmarkError}
                     </p>
                   )}

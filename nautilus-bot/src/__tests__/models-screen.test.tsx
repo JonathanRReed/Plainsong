@@ -416,6 +416,32 @@ describe("Models screen", () => {
     ).toBeInTheDocument();
   });
 
+  /**
+   * Moved here from the Transcription tab's diagnostics card, where it was
+   * called "Meeting quality policy" and stood two tabs away from the list it
+   * reorders -- so it read like a second meetings engine picker.
+   */
+  it("puts the meetings ordering control beside the meetings list and persists it", async () => {
+    render(<Harness />);
+
+    const picker = await screen.findByRole("combobox", {
+      name: "Which meeting engine to offer first",
+    });
+    const describedBy = picker.getAttribute("aria-describedby");
+    expect(describedBy).toBeTruthy();
+    expect(
+      document.getElementById(describedBy as string)?.textContent,
+    ).toMatch(/only reorders the list below/i);
+
+    fireEvent.change(picker, { target: { value: "best_available" } });
+
+    await waitFor(() => {
+      expect(lastSaved().transcription.meetingRoutePolicy).toBe(
+        "best_available",
+      );
+    });
+  });
+
   it("surfaces the canonical selected-route blocker above the model controls", async () => {
     readinessContext.productReadiness = {
       ...readinessContext.productReadiness,

@@ -42,7 +42,7 @@ describe("update components", () => {
     render(<UpdateStatusWidget />);
 
     expect(await screen.findByText("Update Available")).toBeInTheDocument();
-    expect(screen.getByText("Version 1.2.3 is available")).toBeInTheDocument();
+    expect(screen.getByText("Version 1.2.3 is available.")).toBeInTheDocument();
 
     fireEvent.click(screen.getByRole("button", { name: /install update/i }));
 
@@ -127,7 +127,7 @@ describe("update components", () => {
   it("lets anyone enable the beta channel", async () => {
     render(<BetaChannelToggle />);
 
-    const betaSwitch = await screen.findByRole("switch", { name: "Beta Channel" });
+    const betaSwitch = await screen.findByRole("switch", { name: "Beta updates" });
     expect(betaSwitch).not.toBeDisabled();
     expect(betaSwitch).not.toBeChecked();
 

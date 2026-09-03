@@ -33,7 +33,13 @@ export function CalendarSettingsSection() {
 
   return (
     <div className="pt-4 border-t space-y-4">
-      <p className="section-heading">Calendar</p>
+      <div className="space-y-1">
+        <p className="section-heading">Calendar</p>
+        <p className="text-sm text-muted-foreground">
+          macOS has already given Plainsong read access to your calendars. This
+          is where you narrow that down or switch it back off.
+        </p>
+      </div>
       <SettingsSwitch
         className="py-0"
         label="Suggest meetings from your calendar"
@@ -60,7 +66,11 @@ export function CalendarSettingsSection() {
                   key={entry.id}
                   className="py-1.5"
                   label={entry.title}
-                  description={entry.accountName || undefined}
+                  description={
+                    entry.accountName
+                      ? `From ${entry.accountName}. On means its events can be suggested as meetings.`
+                      : "On means its events can be suggested as meetings."
+                  }
                   checked={!ignored.has(entry.id)}
                   onCheckedChange={(checked) =>
                     setCalendarIgnored(entry.id, !checked)

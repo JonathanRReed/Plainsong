@@ -122,7 +122,7 @@ export function isKnownAnalysisProvider(provider: string | undefined): boolean {
 export function describeAnalysisDestination(provider: string | undefined): string {
   return (
     ANALYSIS_PROVIDER_DESTINATIONS[provider ?? ""]?.label ??
-    "an unrecognized analysis provider"
+    "an AI service this build does not recognize"
   );
 }
 
