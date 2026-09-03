@@ -213,6 +213,12 @@ pub struct TranscriptionOptions {
     /// the caller translates the transcript afterwards. See
     /// `resolve_dictation_translation_route` in `lib.rs`.
     pub translate_to_english: bool,
+    /// The Apple Speech engine this request requires, when its correctness
+    /// depends on one of the two. The meeting route sets `SpeechAnalyzer`
+    /// because it is the only one that returns timed segments; every other
+    /// caller leaves this `None` and either engine is a correct answer.
+    /// Ignored by every provider but Apple Speech.
+    pub apple_speech_required_engine: Option<platform::macos_speech::AppleSpeechEngine>,
 }
 
 #[async_trait]

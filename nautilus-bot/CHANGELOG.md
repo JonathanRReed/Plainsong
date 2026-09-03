@@ -374,6 +374,19 @@ evidence is stale and must be recaptured before this becomes a candidate.
   files that still carry it load cleanly and are rewritten without it.
 
 ### Fixed
+- A meeting transcribed with Apple Speech can no longer be saved without
+  timestamps. The meeting route decided that SpeechAnalyzer would run and
+  then let the transcription decide again a moment later; if the language
+  assets or their reservation changed in between, the older recognizer ran
+  and returned text with no timed segments, and the meeting was saved with a
+  transcript and no timeline, silently. The engine is now carried down from
+  the decision that cleared the meeting, and a result without timestamps is
+  refused with a message naming which engine ran instead of being written to
+  the meeting.
+- Apple Speech is offered for meetings the first time you look, instead of
+  after some other screen happens to refresh. Whether the route was
+  meeting-capable was answered "no" until something had probed, so a Mac
+  that could serve meetings was told it needed macOS 26 — which it had.
 - Plainsong builds again on a Mac whose Xcode predates macOS 26. The Apple
   Speech helper referenced the SpeechAnalyzer API unconditionally, so an
   older SDK failed to compile it and the whole app stopped building. The

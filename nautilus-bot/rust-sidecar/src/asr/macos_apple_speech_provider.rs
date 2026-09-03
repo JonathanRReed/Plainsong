@@ -1,6 +1,6 @@
 use super::{
-    platform::{self, PlatformEngine},
-    AsrProvider, DownloadStatus, ModelInfo, TranscriptionResult,
+    platform::{self, transcription::PlatformTranscriptionOptions, PlatformEngine},
+    AsrProvider, DownloadStatus, ModelInfo, TranscriptionOptions, TranscriptionResult,
 };
 use anyhow::Result;
 use async_trait::async_trait;
@@ -11,6 +11,32 @@ pub struct MacosAppleSpeechProvider;
 impl MacosAppleSpeechProvider {
     pub fn new() -> Self {
         Self
+    }
+
+    /// The one place the route's result is shaped, so the batch and bytes
+    /// paths cannot drift apart on which fields they carry.
+    fn result_from(
+        transcription: platform::transcription::PlatformTranscription,
+    ) -> TranscriptionResult {
+        TranscriptionResult {
+            text: transcription.text,
+            // Empty on the SFSpeechRecognizer path, populated on the
+            // SpeechAnalyzer path; the meeting chunker offsets and merges
+            // whatever arrives here.
+            segments: transcription.segments,
+            language: transcription.language,
+            confidence: transcription.confidence,
+            processing_time_ms: transcription.processing_time_ms,
+            model_name: "Apple Speech (On-Device)".to_string(),
+            model_id: "macos_apple_speech".to_string(),
+            requested_provider: super::AsrProviderType::MacosAppleSpeech,
+            actual_provider: super::AsrProviderType::MacosAppleSpeech,
+            requested_engine: Some(PlatformEngine::MacosAppleSpeech.id().to_string()),
+            actual_engine: Some(PlatformEngine::MacosAppleSpeech.id().to_string()),
+            optimization_applied: false,
+            fallback_reason: None,
+            vocabulary_hint_terms_applied: 0,
+        }
     }
 }
 
@@ -67,54 +93,43 @@ impl AsrProvider for MacosAppleSpeechProvider {
     }
 
     async fn transcribe(&self, audio_path: &Path) -> Result<TranscriptionResult> {
-        let result = platform::transcription::transcribe_with_engine(
-            PlatformEngine::MacosAppleSpeech,
-            Some(audio_path),
-            None,
-        )?;
-        Ok(TranscriptionResult {
-            text: result.text,
-            // Empty on the SFSpeechRecognizer path, populated on the
-            // SpeechAnalyzer path; the meeting chunker offsets and merges
-            // whatever arrives here.
-            segments: result.segments,
-            language: result.language,
-            confidence: result.confidence,
-            processing_time_ms: result.processing_time_ms,
-            model_name: "Apple Speech (On-Device)".to_string(),
-            model_id: "macos_apple_speech".to_string(),
-            requested_provider: super::AsrProviderType::MacosAppleSpeech,
-            actual_provider: super::AsrProviderType::MacosAppleSpeech,
-            requested_engine: Some(PlatformEngine::MacosAppleSpeech.id().to_string()),
-            actual_engine: Some(PlatformEngine::MacosAppleSpeech.id().to_string()),
-            optimization_applied: false,
-            fallback_reason: None,
-            vocabulary_hint_terms_applied: 0,
-        })
+        Ok(Self::result_from(
+            platform::transcription::transcribe_with_engine(
+                PlatformEngine::MacosAppleSpeech,
+                Some(audio_path),
+                None,
+            )?,
+        ))
     }
 
     async fn transcribe_bytes(&self, audio_data: &[u8]) -> Result<TranscriptionResult> {
-        let result = platform::transcription::transcribe_with_engine(
-            PlatformEngine::MacosAppleSpeech,
-            None,
-            Some(audio_data),
-        )?;
-        Ok(TranscriptionResult {
-            text: result.text,
-            segments: result.segments,
-            language: result.language,
-            confidence: result.confidence,
-            processing_time_ms: result.processing_time_ms,
-            model_name: "Apple Speech (On-Device)".to_string(),
-            model_id: "macos_apple_speech".to_string(),
-            requested_provider: super::AsrProviderType::MacosAppleSpeech,
-            actual_provider: super::AsrProviderType::MacosAppleSpeech,
-            requested_engine: Some(PlatformEngine::MacosAppleSpeech.id().to_string()),
-            actual_engine: Some(PlatformEngine::MacosAppleSpeech.id().to_string()),
-            optimization_applied: false,
-            fallback_reason: None,
-            vocabulary_hint_terms_applied: 0,
-        })
+        Ok(Self::result_from(
+            platform::transcription::transcribe_with_engine(
+                PlatformEngine::MacosAppleSpeech,
+                None,
+                Some(audio_data),
+            )?,
+        ))
+    }
+
+    /// The only provider that reads `apple_speech_required_engine`: it is the
+    /// only one with two engines whose results differ in a way a caller can
+    /// depend on (timed segments or none at all).
+    async fn transcribe_bytes_with_options(
+        &self,
+        audio_data: &[u8],
+        options: &TranscriptionOptions,
+    ) -> Result<TranscriptionResult> {
+        Ok(Self::result_from(
+            platform::transcription::transcribe_with_engine_options(
+                PlatformEngine::MacosAppleSpeech,
+                None,
+                Some(audio_data),
+                PlatformTranscriptionOptions {
+                    apple_speech_required_engine: options.apple_speech_required_engine,
+                },
+            )?,
+        ))
     }
 
     fn download_status(&self) -> DownloadStatus {

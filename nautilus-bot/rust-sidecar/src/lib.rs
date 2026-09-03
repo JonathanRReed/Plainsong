@@ -4259,6 +4259,9 @@ async fn reprocess_dictation_impl(
             destination_category,
         ),
         translate_to_english: translation_route == DictationTranslationRoute::WhisperNative,
+        // Dictation is served correctly by either Apple engine; only the
+        // meeting route depends on SpeechAnalyzer's timed segments.
+        apple_speech_required_engine: None,
     };
 
     if let Ok(mut overlay) = state.dictation_overlay_state.lock() {
@@ -25659,6 +25662,9 @@ async fn stop_dictation_for_sidecar(
             destination_category,
         ),
         translate_to_english: translation_route == DictationTranslationRoute::WhisperNative,
+        // Dictation is served correctly by either Apple engine; only the
+        // meeting route depends on SpeechAnalyzer's timed segments.
+        apple_speech_required_engine: None,
     };
     let vocabulary_hint_terms_built = transcription_options
         .vocabulary_hint

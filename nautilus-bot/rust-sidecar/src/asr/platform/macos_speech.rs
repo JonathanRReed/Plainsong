@@ -12,7 +12,7 @@ use std::ffi::OsString;
 use std::path::PathBuf;
 #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
 use std::process::{Command, Output, Stdio};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicU8, Ordering};
 #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
 use std::sync::{Condvar, Mutex, OnceLock};
 #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
@@ -72,6 +72,15 @@ impl AppleSpeechEngine {
         match self {
             Self::SpeechAnalyzer => "SpeechAnalyzer",
             Self::SfSpeechRecognizer => "SFSpeechRecognizer",
+        }
+    }
+
+    /// The inverse of `id`, for reading the engine the helper reported back.
+    pub fn from_id(id: &str) -> Option<Self> {
+        match id {
+            "speech_analyzer" => Some(Self::SpeechAnalyzer),
+            "sf_speech_recognizer" => Some(Self::SfSpeechRecognizer),
+            _ => None,
         }
     }
 }
@@ -166,15 +175,141 @@ pub fn supports_meetings(readiness: &AppleSpeechReadiness) -> bool {
     readiness.ready && selected_engine(readiness) == AppleSpeechEngine::SpeechAnalyzer
 }
 
+/// Refuses a helper result that did not come from the engine the caller
+/// required.
+///
+/// Two ways the contract can break, and both are silent without this: the
+/// helper reports a different engine than the one it was told to run, or it
+/// reports SpeechAnalyzer and returns no timed segments. Either one produces a
+/// text-only result, and a text-only result reaching the meeting chunker
+/// becomes a saved transcript with zero timestamps and no error anywhere.
+///
+/// Pure, so the contract is testable without a Mac.
+pub fn engine_mismatch_refusal(
+    required_engine: Option<AppleSpeechEngine>,
+    reported_engine: Option<&str>,
+    segment_count: usize,
+) -> Option<anyhow::Error> {
+    let required = required_engine?;
+    if reported_engine != Some(required.id()) {
+        return Some(typed_error_with_details(
+            "engine_mismatch",
+            format!(
+                "Apple Speech ran {} after {} was required, so the transcript has no usable timestamps.",
+                reported_engine
+                    .and_then(AppleSpeechEngine::from_id)
+                    .map(AppleSpeechEngine::display_name)
+                    .unwrap_or("an unknown engine"),
+                required.display_name()
+            ),
+            true,
+            BTreeMap::from([
+                ("required_engine".to_string(), required.id().to_string()),
+                (
+                    "reported_engine".to_string(),
+                    reported_engine.unwrap_or("unknown").to_string(),
+                ),
+            ]),
+        ));
+    }
+    if required == AppleSpeechEngine::SpeechAnalyzer && segment_count == 0 {
+        return Some(typed_error_with_details(
+            "engine_mismatch",
+            "Apple Speech reported SpeechAnalyzer but returned no timed segments, so the transcript has no usable timestamps."
+                .to_string(),
+            true,
+            BTreeMap::from([("required_engine".to_string(), required.id().to_string())]),
+        ));
+    }
+    None
+}
+
+/// What the last readiness probe found about the Apple Speech meeting route.
+///
+/// Three states, not two: "nothing has probed yet" is not the same answer as
+/// "probed, and this Mac cannot serve meetings", and collapsing them is what
+/// made a perfectly capable macOS 26 Mac drop Apple Speech from the meeting
+/// candidates until something else happened to refresh the inventory.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AppleSpeechMeetingCapability {
+    /// No probe has run in this process yet.
+    Unknown,
+    Supported,
+    Unsupported,
+}
+
+const MEETING_CAPABILITY_UNKNOWN: u8 = 0;
+const MEETING_CAPABILITY_SUPPORTED: u8 = 1;
+const MEETING_CAPABILITY_UNSUPPORTED: u8 = 2;
+
 /// Set by every readiness probe so the meeting-route policy can ask whether
 /// Apple Speech is meeting-capable without spawning the helper on a hot path.
-/// False until the first probe, which is the honest default: nothing has looked
-/// yet.
-static SPEECH_ANALYZER_MEETINGS_SUPPORTED: AtomicBool = AtomicBool::new(false);
+static SPEECH_ANALYZER_MEETING_CAPABILITY: AtomicU8 = AtomicU8::new(MEETING_CAPABILITY_UNKNOWN);
 
-/// Whether the last readiness probe found a meeting-capable Apple Speech route.
+/// What the process currently knows, without looking.
+pub fn meeting_capability() -> AppleSpeechMeetingCapability {
+    match SPEECH_ANALYZER_MEETING_CAPABILITY.load(Ordering::Relaxed) {
+        MEETING_CAPABILITY_SUPPORTED => AppleSpeechMeetingCapability::Supported,
+        MEETING_CAPABILITY_UNSUPPORTED => AppleSpeechMeetingCapability::Unsupported,
+        _ => AppleSpeechMeetingCapability::Unknown,
+    }
+}
+
+fn store_meeting_capability(supported: bool) {
+    SPEECH_ANALYZER_MEETING_CAPABILITY.store(
+        if supported {
+            MEETING_CAPABILITY_SUPPORTED
+        } else {
+            MEETING_CAPABILITY_UNSUPPORTED
+        },
+        Ordering::Relaxed,
+    );
+}
+
+/// The meeting-capability policy, with the probe passed in so it is testable
+/// without a Mac.
+///
+/// `Unknown` means nothing has looked yet, and the honest response to that is
+/// to look -- not to answer "no". Answering "no" is what dropped Apple Speech
+/// from the meeting candidates before any inventory refresh and then refused
+/// it with a message about macOS 26 that had never been checked.
+pub fn resolve_meeting_capability(
+    cached: AppleSpeechMeetingCapability,
+    probe: impl FnOnce() -> bool,
+) -> bool {
+    match cached {
+        AppleSpeechMeetingCapability::Supported => true,
+        AppleSpeechMeetingCapability::Unsupported => false,
+        AppleSpeechMeetingCapability::Unknown => probe(),
+    }
+}
+
+/// Whether the Apple Speech route may serve meetings.
+///
+/// Reads the flag every readiness probe refreshes; when nothing has probed
+/// yet, it runs one bounded probe (`readiness()` spawns the helper with a
+/// 10-second timeout and coalesces concurrent callers) and remembers the
+/// answer, so the cost is paid at most once per process.
 pub fn meetings_supported() -> bool {
-    SPEECH_ANALYZER_MEETINGS_SUPPORTED.load(Ordering::Relaxed)
+    resolve_meeting_capability(meeting_capability(), || {
+        let supported = supports_meetings(&readiness());
+        store_meeting_capability(supported);
+        supported
+    })
+}
+
+/// Test-only: pin the capability so a policy test can assert both branches
+/// instead of only whichever one the machine running the suite happens to be.
+#[cfg(test)]
+pub fn set_meeting_capability_for_test(capability: AppleSpeechMeetingCapability) {
+    SPEECH_ANALYZER_MEETING_CAPABILITY.store(
+        match capability {
+            AppleSpeechMeetingCapability::Unknown => MEETING_CAPABILITY_UNKNOWN,
+            AppleSpeechMeetingCapability::Supported => MEETING_CAPABILITY_SUPPORTED,
+            AppleSpeechMeetingCapability::Unsupported => MEETING_CAPABILITY_UNSUPPORTED,
+        },
+        Ordering::Relaxed,
+    );
 }
 
 /// Progress from an in-flight language-asset install.
@@ -809,7 +944,7 @@ fn readiness_with_policy(force_refresh: bool) -> AppleSpeechReadiness {
 
     // The meeting-route policy reads this flag instead of spawning the helper
     // on a route-resolution path; every probe refreshes it.
-    SPEECH_ANALYZER_MEETINGS_SUPPORTED.store(supports_meetings(&readiness), Ordering::Relaxed);
+    store_meeting_capability(supports_meetings(&readiness));
 
     let mut state = mutex
         .lock()
@@ -889,15 +1024,27 @@ pub fn probe_from_readiness(readiness: &AppleSpeechReadiness) -> EngineProbe {
     }
 }
 
+/// Transcribes one file through the Apple Speech helper.
+///
+/// `required_engine` is the engine the *caller's* decision depends on. Passing
+/// it skips the engine re-decision here and holds the helper to it: the
+/// meeting gate reads a cached capability flag and this function used to probe
+/// again, so an asset or reservation change in between could route a meeting
+/// to SFSpeechRecognizer, which returns no segments -- a saved transcript with
+/// zero timestamps and no error anywhere. `None` keeps the old behaviour for
+/// dictation, where either engine is a correct answer.
 #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
-pub fn transcribe_file(audio_path: &Path) -> Result<MacosSpeechTranscript> {
+pub fn transcribe_file(
+    audio_path: &Path,
+    required_engine: Option<AppleSpeechEngine>,
+) -> Result<MacosSpeechTranscript> {
     let probe = authorized_probe(false)?;
     // Named explicitly rather than left to the helper's own `auto`, so the
     // engine that runs is the one this side decided and reported.
-    let engine = if probe.speech_analyzer_usable() {
-        AppleSpeechEngine::SpeechAnalyzer
-    } else {
-        AppleSpeechEngine::SfSpeechRecognizer
+    let engine = match required_engine {
+        Some(engine) => engine,
+        None if probe.speech_analyzer_usable() => AppleSpeechEngine::SpeechAnalyzer,
+        None => AppleSpeechEngine::SfSpeechRecognizer,
     };
     let helper = resolve_helper_binary_path()?;
     let mut arguments = vec![
@@ -925,6 +1072,13 @@ pub fn transcribe_file(audio_path: &Path) -> Result<MacosSpeechTranscript> {
             true,
         ));
     }
+    if let Some(message) = engine_mismatch_refusal(
+        required_engine,
+        payload.engine.as_deref(),
+        payload.segments.len(),
+    ) {
+        return Err(message);
+    }
 
     Ok(MacosSpeechTranscript {
         text: payload.text,
@@ -936,7 +1090,10 @@ pub fn transcribe_file(audio_path: &Path) -> Result<MacosSpeechTranscript> {
 }
 
 #[cfg(not(all(target_os = "macos", target_arch = "aarch64")))]
-pub fn transcribe_file(_audio_path: &Path) -> Result<MacosSpeechTranscript> {
+pub fn transcribe_file(
+    _audio_path: &Path,
+    _required_engine: Option<AppleSpeechEngine>,
+) -> Result<MacosSpeechTranscript> {
     Err(typed_error(
         "helper_missing",
         "macOS Apple Speech native engine is unavailable in this build.",
@@ -1844,10 +2001,11 @@ fn is_executable_file(path: &Path) -> bool {
 #[cfg(test)]
 mod tests {
     use super::{
-        map_authorization_status_payload, meetings_supported, parse_helper_error_line,
+        engine_mismatch_refusal, map_authorization_status_payload, parse_helper_error_line,
         parse_single_payload, parse_speech_analyzer_live_line, readiness_from_probe,
-        selected_engine, serialize_helper_error, supports_meetings, typed_error, AppleSpeechEngine,
-        AppleSpeechReadiness, AppleSpeechReadinessStatus, HelperErrorPayload, HelperProbePayload,
+        resolve_meeting_capability, selected_engine, serialize_helper_error, supports_meetings,
+        typed_error, AppleSpeechEngine, AppleSpeechMeetingCapability, AppleSpeechReadiness,
+        AppleSpeechReadinessStatus, HelperErrorPayload, HelperProbePayload,
         HelperTranscriptPayload, SpeechAnalyzerLiveEvent, SpeechAnalyzerPartialAccumulator,
         SpeechAuthorizationStatus, StreamingPartial, StreamingPartialSink, HELPER_PROTOCOL_VERSION,
     };
@@ -2020,9 +2178,85 @@ mod tests {
         assert!(!supports_meetings(&analyzer_readiness(
             false, false, false, true
         )));
-        // Nothing has probed in this test process, so the cached flag the
-        // meeting-route policy reads is still its honest default.
-        assert!(!meetings_supported());
+    }
+
+    /// "Nothing has probed yet" is not an answer, and treating it as "no" is
+    /// what dropped Apple Speech from the meeting candidates on a Mac that
+    /// could serve them, until some unrelated inventory refresh happened to
+    /// run first.
+    #[test]
+    fn an_unprobed_meeting_capability_looks_instead_of_answering_no() {
+        let mut probes = 0;
+        assert!(resolve_meeting_capability(
+            AppleSpeechMeetingCapability::Unknown,
+            || {
+                probes += 1;
+                true
+            }
+        ));
+        assert_eq!(probes, 1, "an unknown capability must probe exactly once");
+
+        // A probe that ran and found nothing is a real answer; do not re-probe.
+        assert!(!resolve_meeting_capability(
+            AppleSpeechMeetingCapability::Unsupported,
+            || panic!("a probed capability must not probe again")
+        ));
+        assert!(resolve_meeting_capability(
+            AppleSpeechMeetingCapability::Supported,
+            || panic!("a probed capability must not probe again")
+        ));
+    }
+
+    /// The meeting gate decides the engine from one probe and the route used
+    /// to decide again from another. Between the two, assets can be released
+    /// or a reservation lost, and SFSpeechRecognizer returns no segments: a
+    /// saved meeting with a full transcript, no timestamps, and no error.
+    #[test]
+    fn a_required_engine_refuses_anything_that_did_not_run_it() {
+        let refusal = |required, reported: Option<&str>, segments| {
+            engine_mismatch_refusal(required, reported, segments).map(|error| error.to_string())
+        };
+
+        // Dictation names no engine: either one is a correct answer.
+        assert!(refusal(None, Some("sf_speech_recognizer"), 0).is_none());
+        assert!(refusal(None, None, 0).is_none());
+
+        // The contract holds: SpeechAnalyzer ran and returned timed segments.
+        assert!(refusal(
+            Some(AppleSpeechEngine::SpeechAnalyzer),
+            Some("speech_analyzer"),
+            3
+        )
+        .is_none());
+        assert!(refusal(
+            Some(AppleSpeechEngine::SfSpeechRecognizer),
+            Some("sf_speech_recognizer"),
+            0
+        )
+        .is_none());
+
+        // A different engine ran than the one required.
+        let swapped = refusal(
+            Some(AppleSpeechEngine::SpeechAnalyzer),
+            Some("sf_speech_recognizer"),
+            0,
+        )
+        .expect("a swapped engine must be refused");
+        assert!(swapped.contains("engine_mismatch"), "{swapped}");
+        assert!(swapped.contains("SFSpeechRecognizer"), "{swapped}");
+        assert!(swapped.contains("SpeechAnalyzer"), "{swapped}");
+
+        // An older helper that reports no engine at all is not proof either.
+        assert!(refusal(Some(AppleSpeechEngine::SpeechAnalyzer), None, 4).is_some());
+
+        // The right engine, but nothing a meeting transcript can be built from.
+        let untimed = refusal(
+            Some(AppleSpeechEngine::SpeechAnalyzer),
+            Some("speech_analyzer"),
+            0,
+        )
+        .expect("a segment-less SpeechAnalyzer result must be refused");
+        assert!(untimed.contains("no timed segments"), "{untimed}");
     }
 
     #[test]

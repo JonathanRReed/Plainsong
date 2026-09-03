@@ -64,12 +64,42 @@ impl Drop for ManagedAudioPath {
     }
 }
 
+/// Per-request constraints a native route has to honour.
+///
+/// `apple_speech_required_engine` is how a caller whose correctness depends on
+/// one of Apple's two engines (the meeting route needs SpeechAnalyzer's timed
+/// segments) names it instead of letting the route re-decide.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct PlatformTranscriptionOptions {
+    pub apple_speech_required_engine: Option<super::macos_speech::AppleSpeechEngine>,
+}
+
 pub fn transcribe_with_engine(
     engine: PlatformEngine,
     file_path: Option<&Path>,
     audio_data: Option<&[u8]>,
 ) -> Result<PlatformTranscription> {
-    transcribe_with_engine_in_temp_dir(engine, file_path, audio_data, &std::env::temp_dir())
+    transcribe_with_engine_options(
+        engine,
+        file_path,
+        audio_data,
+        PlatformTranscriptionOptions::default(),
+    )
+}
+
+pub fn transcribe_with_engine_options(
+    engine: PlatformEngine,
+    file_path: Option<&Path>,
+    audio_data: Option<&[u8]>,
+    options: PlatformTranscriptionOptions,
+) -> Result<PlatformTranscription> {
+    transcribe_with_engine_in_temp_dir(
+        engine,
+        file_path,
+        audio_data,
+        &std::env::temp_dir(),
+        options,
+    )
 }
 
 fn transcribe_with_engine_in_temp_dir(
@@ -77,6 +107,7 @@ fn transcribe_with_engine_in_temp_dir(
     file_path: Option<&Path>,
     audio_data: Option<&[u8]>,
     temp_dir: &Path,
+    options: PlatformTranscriptionOptions,
 ) -> Result<PlatformTranscription> {
     let resolved_audio = resolve_audio_path(file_path, audio_data, temp_dir)?;
     let engine_audio = prepare_audio_for_engine(engine, &resolved_audio.path, temp_dir)?;
@@ -84,7 +115,10 @@ fn transcribe_with_engine_in_temp_dir(
 
     match engine {
         PlatformEngine::MacosAppleSpeech => {
-            let transcript = super::macos_speech::transcribe_file(&engine_audio.path)?;
+            let transcript = super::macos_speech::transcribe_file(
+                &engine_audio.path,
+                options.apple_speech_required_engine,
+            )?;
             let offset = engine_audio.prepended_silence_seconds;
             Ok(PlatformTranscription {
                 text: transcript.text,
@@ -285,7 +319,7 @@ fn create_private_file(path: &Path) -> std::io::Result<std::fs::File> {
 mod tests {
     use super::{
         stage_macos_speech_input, stage_macos_speech_input_at, transcribe_with_engine_in_temp_dir,
-        PREPENDED_SILENCE_MS,
+        PlatformTranscriptionOptions, PREPENDED_SILENCE_MS,
     };
     use crate::asr::platform::PlatformEngine;
 
@@ -405,6 +439,7 @@ mod tests {
             None,
             Some(b"not a wave file"),
             &root,
+            PlatformTranscriptionOptions::default(),
         )
         .expect_err("malformed WAV bytes must fail before helper execution");
         assert!(error.to_string().contains("for macOS Speech input staging"));

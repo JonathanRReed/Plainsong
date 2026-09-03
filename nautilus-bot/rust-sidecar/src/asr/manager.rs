@@ -1018,23 +1018,73 @@ impl AsrManager {
         // Apple Speech reaches meetings only through SpeechAnalyzer, which is
         // the only one of its two engines that returns the per-segment
         // timestamps the meeting transcript is assembled from.
-        if provider_type == AsrProviderType::MacosAppleSpeech
-            && !crate::asr::platform::macos_speech::meetings_supported()
-        {
-            return Err(anyhow::anyhow!(
-                "Apple Speech serves meetings only through SpeechAnalyzer, which needs macOS 26 or later with the language installed. Choose a meeting-capable provider."
-            ));
+        let mut options = TranscriptionOptions::default();
+        if provider_type == AsrProviderType::MacosAppleSpeech {
+            // `meetings_supported` can run a bounded probe when nothing has
+            // looked yet, so it does not hold a runtime worker.
+            let meeting_capable =
+                tokio::task::spawn_blocking(crate::asr::platform::macos_speech::meetings_supported)
+                    .await
+                    .unwrap_or(false);
+            if !meeting_capable {
+                return Err(anyhow::anyhow!(
+                    "Apple Speech serves meetings only through SpeechAnalyzer, which needs macOS 26 or later with the language installed. Choose a meeting-capable provider."
+                ));
+            }
+            // Carried down rather than re-decided inside the route. The gate
+            // above reads a probe result; the route used to run its own probe
+            // moments later, so an asset or reservation change in between put
+            // SFSpeechRecognizer on a meeting the gate had cleared for
+            // SpeechAnalyzer.
+            options.apple_speech_required_engine =
+                Some(crate::asr::platform::macos_speech::AppleSpeechEngine::SpeechAnalyzer);
         }
         let mlx_enabled = *self.meeting_mlx_enabled.read().await;
-        self.transcribe_inner(
-            provider_type,
-            None,
-            Some(audio_data),
-            selected_model,
-            Some(mlx_enabled),
-            &TranscriptionOptions::default(),
+        let result = self
+            .transcribe_inner(
+                provider_type,
+                None,
+                Some(audio_data),
+                selected_model,
+                Some(mlx_enabled),
+                &options,
+            )
+            .await?;
+
+        if let Some(refusal) =
+            Self::untimestamped_meeting_refusal(provider_type, &result.text, result.segments.len())
+        {
+            return Err(anyhow::anyhow!(refusal));
+        }
+        Ok(result)
+    }
+
+    /// Why an Apple Speech result cannot become a meeting transcript.
+    ///
+    /// A meeting transcript is assembled from per-chunk segments with real
+    /// start/end times. SFSpeechRecognizer returns one formatted string and no
+    /// segments, so text with no segments means the engine that ran was not
+    /// the one the gate chose -- and letting it through saved a meeting with a
+    /// full transcript, zero timestamps and no error anywhere. The last net
+    /// under the required-engine check the helper call already makes, so a new
+    /// path into the meeting route cannot reintroduce the same silence.
+    ///
+    /// Pure, so the policy is testable without a Mac.
+    fn untimestamped_meeting_refusal(
+        provider_type: AsrProviderType,
+        text: &str,
+        segment_count: usize,
+    ) -> Option<String> {
+        if provider_type != AsrProviderType::MacosAppleSpeech
+            || text.trim().is_empty()
+            || segment_count > 0
+        {
+            return None;
+        }
+        Some(
+            "Apple Speech returned a transcript with no timestamps, so SFSpeechRecognizer ran instead of SpeechAnalyzer. The meeting was not saved with an untimed transcript. Install the language for SpeechAnalyzer, or choose another meeting provider."
+                .to_string(),
         )
-        .await
     }
 
     /// Get info for all providers (Parallelized)
@@ -2461,14 +2511,35 @@ mod tests {
     /// Apple Speech reaches meeting transcription only through SpeechAnalyzer,
     /// the one of its two engines that returns per-segment timestamps.
     ///
-    /// Which branch runs depends on the machine the suite is on, so both are
-    /// asserted: a Mac without a meeting-capable route must be refused before
-    /// any audio is decoded, and one with it must not be refused by *that*
-    /// gate. Neither branch ever transcribes: the bytes are not audio.
+    /// Both branches are asserted, with the capability pinned for each rather
+    /// than left to whichever machine runs the suite: read from the process
+    /// flag, the "capable" branch never ran anywhere, because nothing has
+    /// probed in a fresh test process. Neither branch ever transcribes: the
+    /// bytes are not audio.
     #[tokio::test]
     async fn apple_speech_reaches_meeting_transcription_only_through_speech_analyzer() {
+        use crate::asr::platform::macos_speech::{
+            meeting_capability, set_meeting_capability_for_test, AppleSpeechMeetingCapability,
+        };
+
         let manager = AsrManager::new();
-        let error = manager
+        let restore = meeting_capability();
+
+        set_meeting_capability_for_test(AppleSpeechMeetingCapability::Unsupported);
+        let refused = manager
+            .transcribe_bytes_for_meeting(
+                AsrProviderType::MacosAppleSpeech,
+                b"not audio",
+                Some("macos_apple_speech"),
+            )
+            .await
+            .expect_err("a route without SpeechAnalyzer must be refused");
+        assert!(refused.to_string().contains("serves meetings only"));
+        assert!(refused.to_string().contains("SpeechAnalyzer"));
+        assert!(refused.to_string().contains("macOS 26"));
+
+        set_meeting_capability_for_test(AppleSpeechMeetingCapability::Supported);
+        let decoded = manager
             .transcribe_bytes_for_meeting(
                 AsrProviderType::MacosAppleSpeech,
                 b"not audio",
@@ -2476,13 +2547,35 @@ mod tests {
             )
             .await
             .expect_err("bytes that are not audio must never transcribe");
+        assert!(
+            !decoded.to_string().contains("serves meetings only"),
+            "a meeting-capable route must get past the capability gate: {decoded}"
+        );
 
-        if crate::asr::platform::macos_speech::meetings_supported() {
-            assert!(!error.to_string().contains("serves meetings only"));
-        } else {
-            assert!(error.to_string().contains("SpeechAnalyzer"));
-            assert!(error.to_string().contains("macOS 26"));
-        }
+        set_meeting_capability_for_test(restore);
+    }
+
+    /// The last net under the required-engine check: a text-only Apple Speech
+    /// result means SFSpeechRecognizer ran, and saving it produces a meeting
+    /// with a full transcript, zero timestamps and no error anywhere.
+    #[test]
+    fn an_apple_meeting_result_without_timestamps_is_refused() {
+        let refusal = |provider, text: &str, segments| {
+            AsrManager::untimestamped_meeting_refusal(provider, text, segments)
+        };
+
+        let refused = refusal(AsrProviderType::MacosAppleSpeech, "hello there", 0)
+            .expect("text with no segments must be refused");
+        assert!(refused.contains("SFSpeechRecognizer"), "{refused}");
+        assert!(refused.contains("SpeechAnalyzer"), "{refused}");
+
+        // Timestamps present: this is what SpeechAnalyzer returns.
+        assert!(refusal(AsrProviderType::MacosAppleSpeech, "hello there", 2).is_none());
+        // Nothing was recognized; that is a different (already handled) case
+        // and not evidence about which engine ran.
+        assert!(refusal(AsrProviderType::MacosAppleSpeech, "   ", 0).is_none());
+        // Every other provider's meeting segments come from its own path.
+        assert!(refusal(AsrProviderType::Whisper, "hello there", 0).is_none());
     }
 
     #[tokio::test]

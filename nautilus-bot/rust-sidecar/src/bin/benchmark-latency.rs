@@ -856,6 +856,9 @@ fn main() {
         let options = TranscriptionOptions {
             vocabulary_hint: args.vocabulary_hint.clone(),
             translate_to_english: false,
+            // The benchmark measures whichever engine this Mac resolves, the
+            // same as dictation does; it does not pin one.
+            apple_speech_required_engine: None,
         };
         let warmup_started = Instant::now();
         let warmup_result = provider
