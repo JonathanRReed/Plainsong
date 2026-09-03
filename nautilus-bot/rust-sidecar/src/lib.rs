@@ -19397,7 +19397,12 @@ fn whole_file_meeting_limits(provider: asr::AsrProviderType) -> Option<WholeFile
         }),
         // Gemini's own cap: one hour per request, dropping to thirty minutes
         // when diarization or word timestamps are on -- which is exactly what
-        // the meeting lane asks for.
+        // the meeting lane asks for. Thirty minutes of the app's own meeting
+        // WAV (mono 16-bit PCM at the capture device's rate) is 57.6 MB at
+        // 16 kHz, 172.8 MB at 48 kHz and 345.6 MB at 96 kHz, so the duration
+        // ceiling binds first at every rate a capture device offers; the byte
+        // cap is a backstop against a file that is not what we think it is,
+        // well under the Files API's own 2 GB.
         asr::AsrProviderType::GeminiTranscribe => Some(WholeFileMeetingLimits {
             max_seconds: 30.0 * 60.0,
             max_bytes: 512 * 1024 * 1024,

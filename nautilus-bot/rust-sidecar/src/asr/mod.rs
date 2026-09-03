@@ -55,6 +55,58 @@ pub(crate) fn cloud_asr_status_error(
     anyhow::anyhow!("{} API returned HTTP {}", provider_label, status.as_u16())
 }
 
+/// Read size for a streamed upload. Large enough that a long meeting is not
+/// thousands of tiny frames, small enough that peak memory is a constant.
+pub(crate) const UPLOAD_CHUNK_BYTES: usize = 256 * 1024;
+
+/// Stream a WAV off disk as a request body, with its length.
+///
+/// The meeting lane sends whole recordings to the cloud providers, and a
+/// meeting is written as mono 16-bit PCM at the capture device's own sample
+/// rate: thirty minutes at 48 kHz is 172.8 MB, two hours is 691 MB. Reading
+/// that into a `Vec` to hand to `.body()` holds all of it in memory at once.
+/// A streamed body keeps peak usage at one [`UPLOAD_CHUNK_BYTES`] buffer
+/// regardless of meeting length.
+///
+/// The length comes from the already-open handle rather than a separate
+/// `metadata()` call on the path, so the number a caller declares in a header
+/// and the bytes this stream yields describe the same file.
+pub(crate) async fn streaming_wav_body(path: &Path) -> Result<(reqwest::Body, u64)> {
+    use anyhow::Context;
+
+    let file = tokio::fs::File::open(path)
+        .await
+        .with_context(|| format!("Failed to open {} for upload", path.display()))?;
+    let byte_len = file
+        .metadata()
+        .await
+        .with_context(|| format!("Failed to size {} for upload", path.display()))?
+        .len();
+    Ok((
+        reqwest::Body::wrap_stream(upload_chunk_stream(file)),
+        byte_len,
+    ))
+}
+
+/// The chunking behind [`streaming_wav_body`], separated so the memory bound
+/// it exists for can be asserted without a network client.
+pub(crate) fn upload_chunk_stream(
+    file: tokio::fs::File,
+) -> impl futures_util::Stream<Item = std::io::Result<Vec<u8>>> {
+    use tokio::io::AsyncReadExt;
+
+    futures_util::stream::try_unfold(file, |mut file| async move {
+        let mut buffer = vec![0u8; UPLOAD_CHUNK_BYTES];
+        let read = file.read(&mut buffer).await?;
+        if read == 0 {
+            Ok::<_, std::io::Error>(None)
+        } else {
+            buffer.truncate(read);
+            Ok(Some((buffer, file)))
+        }
+    })
+}
+
 pub(crate) fn model_integrity_artifacts(models_root: &Path) -> Vec<(PathBuf, String)> {
     let mut artifacts = Vec::new();
     artifacts.extend(distil_whisper::model_integrity_artifacts(models_root));
@@ -290,6 +342,63 @@ pub trait AsrProvider: Send + Sync {
 }
 
 pub struct AsrProviderFactory;
+
+/// The upload path exists to keep a whole meeting out of memory, so that is
+/// what is asserted: bounded chunks, in order, adding up to the file, with the
+/// declared length matching what will actually be sent.
+#[cfg(test)]
+mod upload_streaming_tests {
+    use super::{streaming_wav_body, upload_chunk_stream, UPLOAD_CHUNK_BYTES};
+    use futures_util::StreamExt;
+
+    #[tokio::test]
+    async fn a_large_upload_is_read_in_bounded_chunks_not_all_at_once() {
+        let path = std::env::temp_dir().join(format!(
+            "plainsong-upload-stream-{}.wav",
+            uuid::Uuid::new_v4()
+        ));
+        // Two and a half read buffers: large enough that "read whole" and
+        // "read in chunks" are distinguishable, small enough to stay a unit
+        // test.
+        let payload: Vec<u8> = (0..UPLOAD_CHUNK_BYTES * 5 / 2)
+            .map(|index| (index % 251) as u8)
+            .collect();
+        tokio::fs::write(&path, &payload)
+            .await
+            .expect("fixture write");
+
+        let (_body, declared) = streaming_wav_body(&path).await.expect("streaming body");
+        assert_eq!(
+            declared,
+            payload.len() as u64,
+            "the length a caller declares in a header must be the file's own"
+        );
+
+        let file = tokio::fs::File::open(&path).await.expect("reopen fixture");
+        let chunks: Vec<Vec<u8>> = upload_chunk_stream(file)
+            .map(|chunk| chunk.expect("chunk read"))
+            .collect()
+            .await;
+
+        assert!(
+            chunks.len() > 1,
+            "a file larger than one buffer must arrive in more than one chunk,              or it was read whole after all"
+        );
+        for chunk in &chunks {
+            assert!(
+                chunk.len() <= UPLOAD_CHUNK_BYTES,
+                "peak memory is one buffer, not the length of the meeting"
+            );
+        }
+        assert_eq!(
+            chunks.concat(),
+            payload,
+            "the streamed bytes must be the file's bytes, in order"
+        );
+
+        let _ = tokio::fs::remove_file(&path).await;
+    }
+}
 
 #[cfg(test)]
 mod cloud_response_security_tests {

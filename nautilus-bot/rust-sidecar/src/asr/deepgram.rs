@@ -35,7 +35,6 @@ use anyhow::{Context, Result};
 use async_trait::async_trait;
 use serde::Deserialize;
 use std::{path::Path, time::Duration};
-use tokio::io::AsyncReadExt;
 
 const DEEPGRAM_LISTEN_URL: &str = "https://api.deepgram.com/v1/listen";
 
@@ -58,10 +57,6 @@ const DEEPGRAM_WHOLE_FILE_HTTP_TIMEOUTS: CloudAsrHttpTimeouts = CloudAsrHttpTime
     read: Duration::from_secs(10 * 60),
     total: Duration::from_secs(15 * 60),
 };
-
-/// Read size for the streamed upload. Large enough that a long meeting is not
-/// thousands of tiny frames, small enough that peak memory is a constant.
-const UPLOAD_CHUNK_BYTES: usize = 256 * 1024;
 
 pub struct DeepgramProvider {
     model_id: String,
@@ -493,32 +488,6 @@ impl DeepgramProvider {
     }
 }
 
-/// Stream a WAV off disk as a request body.
-///
-/// The meeting lane sends whole recordings through this provider, and a
-/// two-hour mono meeting is several hundred megabytes; reading it into a `Vec`
-/// and then handing that to `multipart` would hold two copies of it in memory
-/// at once. A streamed body keeps peak usage at one `UPLOAD_CHUNK_BYTES`
-/// buffer regardless of meeting length. The request goes out without a
-/// `Content-Length` as a result (chunked on HTTP/1.1, plain DATA frames on
-/// HTTP/2), which this endpoint accepts.
-async fn streaming_wav_body(path: &Path) -> Result<reqwest::Body> {
-    let file = tokio::fs::File::open(path)
-        .await
-        .with_context(|| format!("Failed to open {} for Deepgram upload", path.display()))?;
-    let stream = futures_util::stream::try_unfold(file, |mut file| async move {
-        let mut buffer = vec![0u8; UPLOAD_CHUNK_BYTES];
-        let read = file.read(&mut buffer).await?;
-        if read == 0 {
-            Ok::<_, std::io::Error>(None)
-        } else {
-            buffer.truncate(read);
-            Ok(Some((buffer, file)))
-        }
-    });
-    Ok(reqwest::Body::wrap_stream(stream))
-}
-
 #[async_trait]
 impl AsrProvider for DeepgramProvider {
     fn name(&self) -> &str {
@@ -557,7 +526,10 @@ impl AsrProvider for DeepgramProvider {
             "Deepgram API key not set. Add it in Settings → API Keys or set DEEPGRAM_API_KEY.",
         )?;
         let start = std::time::Instant::now();
-        let body = streaming_wav_body(audio_path).await?;
+        // Streamed rather than read into a `Vec`: see `streaming_wav_body`.
+        // Deepgram's batch endpoint accepts the resulting chunked request, so
+        // the declared length is not needed here.
+        let (body, _byte_len) = super::streaming_wav_body(audio_path).await?;
         let (parsed, keyterm_count) = self
             .send(
                 &self.whole_file_client,

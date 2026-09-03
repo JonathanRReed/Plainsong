@@ -67,6 +67,35 @@ const GEMINI_WHOLE_FILE_HTTP_TIMEOUTS: CloudAsrHttpTimeouts = CloudAsrHttpTimeou
 const FILE_ACTIVE_POLL_INTERVAL: Duration = Duration::from_millis(750);
 const FILE_ACTIVE_POLL_LIMIT: Duration = Duration::from_secs(5 * 60);
 
+/// The audio one request uploads.
+///
+/// Two shapes because the two lanes arrive differently. Dictation already
+/// holds its chunk in memory (a few seconds of PCM), so copying it again would
+/// buy nothing. A meeting is a file on disk written as mono 16-bit PCM at the
+/// capture device's own sample rate: thirty minutes -- Gemini's ceiling for a
+/// diarized request -- is 172.8 MB at 48 kHz, and that used to be read into a
+/// `Vec` in full before the upload began.
+enum GeminiUploadSource {
+    Memory(Vec<u8>),
+    File(std::path::PathBuf),
+}
+
+impl GeminiUploadSource {
+    /// The request body and the exact number of bytes it will yield. The
+    /// resumable upload declares that count in a header before the bytes go
+    /// out, so it has to be known up front either way -- streaming does not
+    /// cost the caller the length.
+    async fn into_body(self) -> Result<(reqwest::Body, u64)> {
+        match self {
+            GeminiUploadSource::Memory(bytes) => {
+                let byte_len = bytes.len() as u64;
+                Ok((reqwest::Body::from(bytes), byte_len))
+            }
+            GeminiUploadSource::File(path) => super::streaming_wav_body(&path).await,
+        }
+    }
+}
+
 pub struct GeminiTranscribeProvider {
     model_id: String,
     client: reqwest::Client,
@@ -387,9 +416,9 @@ impl GeminiTranscribeProvider {
         client: &reqwest::Client,
         timeouts: CloudAsrHttpTimeouts,
         api_key: &str,
-        audio_data: Vec<u8>,
+        audio: GeminiUploadSource,
     ) -> Result<GeminiFile> {
-        let byte_count = audio_data.len();
+        let (audio_body, byte_count) = audio.into_body().await?;
         let start = client
             .post(format!("{GEMINI_API_BASE}{GEMINI_FILES_UPLOAD_PATH}"))
             .header("x-goog-api-key", api_key)
@@ -417,12 +446,20 @@ impl GeminiTranscribeProvider {
             .map(str::to_string)
             .context("Gemini Files API did not return an upload URL")?;
 
+        // CONTENT_LENGTH is set explicitly because a streamed body has no
+        // length of its own, and this endpoint is a resumable upload that was
+        // told the total up front in `X-Goog-Upload-Header-Content-Length`.
+        // Without it the request would go out chunked, which is a different
+        // wire shape from the one this upload was started with. The count and
+        // the bytes come from the same open file handle (see
+        // `streaming_wav_body`), so they cannot disagree.
         let uploaded = client
             .post(upload_url)
             .header("X-Goog-Upload-Offset", "0")
             .header("X-Goog-Upload-Command", "upload, finalize")
             .header(reqwest::header::CONTENT_TYPE, "audio/wav")
-            .body(audio_data)
+            .header(reqwest::header::CONTENT_LENGTH, byte_count)
+            .body(audio_body)
             .timeout(timeouts.total)
             .send()
             .await
@@ -515,7 +552,7 @@ impl GeminiTranscribeProvider {
         &self,
         client: &reqwest::Client,
         timeouts: CloudAsrHttpTimeouts,
-        audio_data: Vec<u8>,
+        audio: GeminiUploadSource,
         options: &TranscriptionOptions,
     ) -> Result<TranscriptionResult> {
         let api_key = Self::api_key().context(
@@ -523,9 +560,7 @@ impl GeminiTranscribeProvider {
         )?;
         let start = std::time::Instant::now();
 
-        let uploaded = self
-            .upload_file(client, timeouts, &api_key, audio_data)
-            .await?;
+        let uploaded = self.upload_file(client, timeouts, &api_key, audio).await?;
         let file_name = uploaded.name.clone();
         let active = self.wait_for_active(client, &api_key, uploaded).await;
 
@@ -638,13 +673,13 @@ impl AsrProvider for GeminiTranscribeProvider {
     }
 
     async fn transcribe(&self, audio_path: &Path) -> Result<TranscriptionResult> {
-        let audio_data = tokio::fs::read(audio_path)
-            .await
-            .context("Failed to read audio file for Gemini Transcribe")?;
         self.transcribe_impl(
             &self.whole_file_client,
             GEMINI_WHOLE_FILE_HTTP_TIMEOUTS,
-            audio_data,
+            // Streamed off disk, never read into a `Vec`: this is the meeting
+            // lane, and a thirty-minute recording is 172.8 MB of mono 16-bit
+            // PCM at a 48 kHz capture rate.
+            GeminiUploadSource::File(audio_path.to_path_buf()),
             &TranscriptionOptions {
                 // The whole-file path exists for the meeting lane, which is the
                 // only caller that wants speaker labels.
@@ -659,7 +694,7 @@ impl AsrProvider for GeminiTranscribeProvider {
         self.transcribe_impl(
             &self.client,
             GEMINI_HTTP_TIMEOUTS,
-            audio_data.to_vec(),
+            GeminiUploadSource::Memory(audio_data.to_vec()),
             &TranscriptionOptions::default(),
         )
         .await
@@ -673,7 +708,7 @@ impl AsrProvider for GeminiTranscribeProvider {
         self.transcribe_impl(
             &self.client,
             GEMINI_HTTP_TIMEOUTS,
-            audio_data.to_vec(),
+            GeminiUploadSource::Memory(audio_data.to_vec()),
             options,
         )
         .await
@@ -861,6 +896,45 @@ mod tests {
         let rendered = format!("{error:#}");
         assert!(rendered.contains("Gemini"));
         assert!(!rendered.contains("not json"));
+    }
+
+    /// The resumable upload declares the total byte count in a header before
+    /// any bytes go out, and then sends a streamed body whose length reqwest
+    /// cannot infer. If those two disagree the request fails at send time, so
+    /// the count and the bytes must come from the same place.
+    #[tokio::test]
+    async fn an_upload_declares_exactly_the_bytes_it_will_send() {
+        let payload = vec![7u8; 4096];
+        let (_body, declared) = super::GeminiUploadSource::Memory(payload.clone())
+            .into_body()
+            .await
+            .expect("in-memory body");
+        assert_eq!(declared, payload.len() as u64);
+
+        let path = std::env::temp_dir().join(format!(
+            "plainsong-gemini-upload-{}.wav",
+            uuid::Uuid::new_v4()
+        ));
+        tokio::fs::write(&path, &payload)
+            .await
+            .expect("fixture write");
+        let (_body, declared) = super::GeminiUploadSource::File(path.clone())
+            .into_body()
+            .await
+            .expect("streamed body");
+        assert_eq!(
+            declared,
+            payload.len() as u64,
+            "the meeting lane must declare the file's own size, not a guess"
+        );
+        let _ = tokio::fs::remove_file(&path).await;
+
+        // A meeting that is not on disk is a failed transcription, not a
+        // zero-byte upload.
+        assert!(super::GeminiUploadSource::File(path)
+            .into_body()
+            .await
+            .is_err());
     }
 
     #[test]

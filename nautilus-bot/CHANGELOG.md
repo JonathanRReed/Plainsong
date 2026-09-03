@@ -378,6 +378,11 @@ evidence is stale and must be recaptured before this becomes a candidate.
   files that still carry it load cleanly and are rewritten without it.
 
 ### Fixed
+- A meeting sent to Gemini Transcribe is no longer loaded into memory whole.
+  The recording is streamed to Google's Files API in 256 KB reads, the way
+  the Deepgram route already did, so peak memory is one buffer instead of the
+  length of the meeting -- 172.8 MB for a thirty-minute recording captured at
+  48 kHz.
 - Turning speaker separation off now also stops the meeting being sent as one
   diarized request. The whole-recording request exists only to get usable
   speaker labels out of a cloud provider, but it was gated on "keep the
