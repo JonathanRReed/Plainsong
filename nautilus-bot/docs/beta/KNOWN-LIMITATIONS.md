@@ -117,6 +117,14 @@ using sensitive content.
   is in `artifacts/qa/diarization-speakrs-spike-2026-09-02.md`; that
   alternative backend is a build-time experiment and is not in any build you
   can install.
+- The CAM++ speaker model runs without ONNX graph optimization, because the
+  ONNX Runtime this build links rewrites part of that model's graph
+  incorrectly. Turning the rewrite off is what makes CAM++ match the runtime
+  the model was published against; it costs about 5% more time per embedding on
+  that model only. Speaker separation is unaffected, and the other three
+  speaker models are untouched. The measurement, including what the defect did
+  before this was found, is in
+  `artifacts/qa/campplus-divergence-2026-09-02.md`.
 - Local meeting routes: Parakeet TDT 0.6B v3 (25 European languages) is the
   recommended route. For a language it does not cover, the multilingual
   whisper.cpp models small, medium, large-v3 and large-v3-turbo can run

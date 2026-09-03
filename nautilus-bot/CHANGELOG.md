@@ -464,6 +464,20 @@ evidence is stale and must be recaptured before this becomes a candidate.
   checksum. Any live-preview engine file that was on disk and not ready got
   "did not match its pinned checksum"; a short file now says the download did
   not finish, and a whole one says Plainsong could not verify it.
+- CAM++ speaker embeddings were being computed by a corrupted graph, and are
+  now correct. The ONNX Runtime the sidecar links rewrote CAM++'s 52 no-op
+  padding nodes into its averaging layers in a way that changed how the last,
+  partial averaging window is divided — wrong at almost every input length,
+  including the two-second window Plainsong actually uses. The error there was
+  small enough to look like nothing (the affected embeddings are 0.97–0.99
+  similar to the correct ones), so speaker separation still worked; at other
+  window lengths the same defect destroys the embedding entirely. CAM++ now
+  runs with that rewrite turned off and matches the runtime the model was
+  published against exactly, at every length tested, for about 5% more time per
+  embedding on that one model. The other three speaker models were never
+  affected and are unchanged. Speaker profiles you already saved with CAM++
+  still match. Measured in
+  `artifacts/qa/campplus-divergence-2026-09-02.md`.
 - The diarization model chosen in Settings is now the one the automatic
   post-meeting speaker pass uses. It previously always ran ECAPA-TDNN no
   matter what the picker said; only the explicit "identify speakers" action

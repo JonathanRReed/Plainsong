@@ -22,6 +22,16 @@ pub mod voiceprints;
 #[cfg(feature = "diarization-speakrs")]
 mod speakrs_backend;
 
+/// Per-model ONNX session policy and input-length guard for the embedders.
+/// See `artifacts/qa/campplus-divergence-2026-09-02.md`.
+#[cfg(feature = "diarization")]
+mod embedding_window;
+
+/// Test-only reproduction of the CAM++ Rust-vs-Python ONNX Runtime divergence.
+/// See `artifacts/qa/campplus-divergence-2026-09-02.md`.
+#[cfg(all(test, feature = "diarization"))]
+mod ort_parity;
+
 #[cfg(feature = "diarization")]
 pub use embedder::{
     generate_segments, EmbeddingClusterer, SEGMENT_OVERLAP_SECONDS, SEGMENT_SECONDS,
