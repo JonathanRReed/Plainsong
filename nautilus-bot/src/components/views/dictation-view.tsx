@@ -5276,8 +5276,9 @@ export function DictationView() {
                       Loads the dictation model as soon as a session starts, so
                       the first result does not wait on a cold load. Off loads
                       it during that first result instead, which makes only
-                      that one slower. Either way the model stays in memory
-                      until you quit.
+                      that one slower. The speech model stays in memory until
+                      you quit either way; with this off, the built-in cleanup
+                      model is released a minute after your last dictation.
                     </p>
                   </div>
 
