@@ -443,6 +443,10 @@ evidence is stale and must be recaptured before this becomes a candidate.
 - The AI formatting pass is now told to keep numerals, currency, times and
   dates exactly as written, so it cannot spell out what Numbers as digits
   just wrote.
+- The model manager now lists the GGUF weights under
+  `models/transcribe_cpp`, and deleting one removes the file and its
+  integrity receipt. They were downloadable but invisible, so up to 1.42 GiB
+  could sit on disk with nothing in the app able to show or reclaim it.
 - A meeting only stops itself for a call ending when it is the call whose
   offer was actually accepted. A recording started any other way, or started
   from an offer that was waved away, is no longer ended because some

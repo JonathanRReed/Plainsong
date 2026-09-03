@@ -18758,6 +18758,8 @@ fn asr_provider_to_settings_value(provider: asr::AsrProviderType) -> &'static st
         asr::AsrProviderType::Groq => "groq",
         asr::AsrProviderType::CohereTranscribe => "cohere_transcribe",
         asr::AsrProviderType::Qwen3Asr => "qwen3_asr",
+        #[cfg(feature = "asr-transcribe-cpp")]
+        asr::AsrProviderType::TranscribeCpp => "transcribe_cpp",
     }
 }
 
@@ -18775,6 +18777,8 @@ fn asr_provider_from_settings_value(value: &str) -> Option<asr::AsrProviderType>
         "groq" => Some(asr::AsrProviderType::Groq),
         "cohere_transcribe" => Some(asr::AsrProviderType::CohereTranscribe),
         "qwen3_asr" => Some(asr::AsrProviderType::Qwen3Asr),
+        #[cfg(feature = "asr-transcribe-cpp")]
+        "transcribe_cpp" => Some(asr::AsrProviderType::TranscribeCpp),
         _ => None,
     }
 }
