@@ -136,7 +136,9 @@ private func emit<T: Encodable>(_ payload: T) {
     // empty stdout would read to the caller as "helper produced nothing".
     FileHandle.standardOutput.write(
       Data(
-        #"{"protocol_version":1,"type":"error","code":"store_unavailable","message":"Could not encode the calendar response.","retryable":false,"authorization":"unknown"}"#
+        #"""
+        {"protocol_version":\#(protocolVersion),"type":"error","code":"store_unavailable","message":"Could not encode the calendar response.","retryable":false,"authorization":"unknown"}
+        """#
           .utf8
       )
     )
