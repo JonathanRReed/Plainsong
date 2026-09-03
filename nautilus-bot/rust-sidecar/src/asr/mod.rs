@@ -11,6 +11,8 @@ pub mod parakeet;
 pub mod parakeet_tdt;
 pub mod platform;
 pub mod qwen3_asr;
+#[cfg(feature = "asr-transcribe-cpp")]
+pub mod transcribe_cpp;
 #[cfg(feature = "asr-whisper")]
 pub mod whisper;
 #[cfg(not(feature = "asr-whisper"))]
@@ -58,6 +60,8 @@ pub(crate) fn model_integrity_artifacts(models_root: &Path) -> Vec<(PathBuf, Str
     artifacts.extend(parakeet::model_integrity_artifacts(models_root));
     artifacts.extend(whisper_candle::model_integrity_artifacts(models_root));
     artifacts.extend(qwen3_asr::model_integrity_artifacts(models_root));
+    #[cfg(feature = "asr-transcribe-cpp")]
+    artifacts.extend(transcribe_cpp::model_integrity_artifacts(models_root));
     artifacts
 }
 
@@ -259,6 +263,69 @@ mod cloud_response_security_tests {
     }
 }
 
+/// The transcribe.cpp spike is compiled out of the default build, and this is
+/// the test that proves it rather than trusting the `#[cfg]`s to be spelled
+/// right. Both halves run: the default build asserts the route cannot be
+/// named, and the feature build asserts it appears exactly once and as an
+/// extra route, not a replacement.
+#[cfg(test)]
+mod transcribe_cpp_feature_gate_tests {
+    use super::AsrProviderType;
+
+    #[cfg(not(feature = "asr-transcribe-cpp"))]
+    #[test]
+    fn the_default_build_has_no_transcribe_cpp_route_at_all() {
+        // There is no variant, so a settings file or an IPC payload naming it
+        // cannot deserialize into one.
+        assert!(serde_json::from_str::<AsrProviderType>("\"transcribe_cpp\"").is_err());
+        assert!(AsrProviderType::all()
+            .iter()
+            .all(|provider| provider.display_name() != "transcribe.cpp (experimental)"));
+        assert!(AsrProviderType::all()
+            .iter()
+            .flat_map(|provider| provider.model_options())
+            .all(|option| !option.id.contains("q8_0")));
+    }
+
+    #[cfg(feature = "asr-transcribe-cpp")]
+    #[test]
+    fn the_spike_build_adds_exactly_one_experimental_route_and_replaces_nothing() {
+        let all = AsrProviderType::all();
+        assert!(all.contains(&AsrProviderType::TranscribeCpp));
+        // Every route the default build offers is still there.
+        for provider in [
+            AsrProviderType::Whisper,
+            AsrProviderType::Parakeet,
+            AsrProviderType::WhisperCandle,
+            AsrProviderType::DistilWhisper,
+            AsrProviderType::MacosAppleSpeech,
+            AsrProviderType::Moonshine,
+            AsrProviderType::WindowsSdkDictation,
+            AsrProviderType::ElevenLabsScribe,
+            AsrProviderType::OpenAiCloud,
+            AsrProviderType::Groq,
+            AsrProviderType::CohereTranscribe,
+            AsrProviderType::Qwen3Asr,
+        ] {
+            assert!(all.contains(&provider), "{provider:?} disappeared");
+        }
+        assert_eq!(
+            serde_json::from_str::<AsrProviderType>("\"transcribe_cpp\"").unwrap(),
+            AsrProviderType::TranscribeCpp
+        );
+        // One model in the picker: the Nemotron streaming GGUF the benchmark
+        // loads is deliberately not a route.
+        assert_eq!(AsrProviderType::TranscribeCpp.model_options().len(), 1);
+        assert_eq!(
+            AsrProviderType::TranscribeCpp.default_model_id(),
+            super::transcribe_cpp::PARAKEET_GGUF_MODEL_ID
+        );
+        assert!(AsrProviderType::TranscribeCpp
+            .provider_secret_name()
+            .is_none());
+    }
+}
+
 /// ASR Provider type
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Hash)]
 #[serde(rename_all = "snake_case")]
@@ -275,6 +342,11 @@ pub enum AsrProviderType {
     Groq,
     CohereTranscribe,
     Qwen3Asr,
+    /// The transcribe.cpp spike route (feature `asr-transcribe-cpp`, OFF by
+    /// default). It exists in the enum only when the spike is compiled in, so
+    /// a default build cannot name it, offer it, or persist it.
+    #[cfg(feature = "asr-transcribe-cpp")]
+    TranscribeCpp,
 }
 
 impl AsrProviderType {
@@ -292,6 +364,8 @@ impl AsrProviderType {
             AsrProviderType::Groq,
             AsrProviderType::CohereTranscribe,
             AsrProviderType::Qwen3Asr,
+            #[cfg(feature = "asr-transcribe-cpp")]
+            AsrProviderType::TranscribeCpp,
         ]
     }
 
@@ -309,6 +383,8 @@ impl AsrProviderType {
             AsrProviderType::Groq => "Groq Whisper (Cloud)",
             AsrProviderType::CohereTranscribe => "Cohere Transcribe",
             AsrProviderType::Qwen3Asr => "Qwen3-ASR (Local)",
+            #[cfg(feature = "asr-transcribe-cpp")]
+            AsrProviderType::TranscribeCpp => "transcribe.cpp (experimental)",
         }
     }
 
@@ -333,6 +409,8 @@ impl AsrProviderType {
             AsrProviderType::Groq => "whisper-large-v3-turbo",
             AsrProviderType::CohereTranscribe => "cohere-transcribe-03-2026",
             AsrProviderType::Qwen3Asr => "qwen3-asr-0.6b",
+            #[cfg(feature = "asr-transcribe-cpp")]
+            AsrProviderType::TranscribeCpp => transcribe_cpp::PARAKEET_GGUF_MODEL_ID,
         }
     }
 
@@ -351,6 +429,10 @@ impl AsrProviderType {
             | AsrProviderType::Moonshine
             | AsrProviderType::WindowsSdkDictation
             | AsrProviderType::Qwen3Asr => None,
+            // Local weights on disk; no credential slot, like every other
+            // local route.
+            #[cfg(feature = "asr-transcribe-cpp")]
+            AsrProviderType::TranscribeCpp => None,
         }
     }
 
@@ -484,6 +566,8 @@ impl AsrProviderType {
                 id: "qwen3-asr-0.6b".to_string(),
                 label: "Qwen3-ASR 0.6B int4 (multilingual, fast)".to_string(),
             }],
+            #[cfg(feature = "asr-transcribe-cpp")]
+            AsrProviderType::TranscribeCpp => transcribe_cpp::route_model_options(),
         }
     }
 }
@@ -530,6 +614,10 @@ impl AsrProviderFactory {
             AsrProviderType::Qwen3Asr => {
                 Box::new(qwen3_asr::Qwen3AsrProvider::new(selected_model_id))
             }
+            #[cfg(feature = "asr-transcribe-cpp")]
+            AsrProviderType::TranscribeCpp => Box::new(transcribe_cpp::TranscribeCppProvider::new(
+                selected_model_id,
+            )),
         }
     }
 }

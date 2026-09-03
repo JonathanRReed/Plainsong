@@ -140,6 +140,32 @@ export const MODEL_WEIGHTS = [
     pinnedIn: "rust-sidecar/src/asr/parakeet.rs (legacy artifact URLs)",
   },
   {
+    name: "Parakeet TDT 0.6B v3 (GGUF Q8_0)",
+    usedFor:
+      "Speech recognition through the optional transcribe.cpp Metal runtime, which is off by default and compiled out of the release build.",
+    repository:
+      "https://huggingface.co/handy-computer/parakeet-tdt-0.6b-v3-gguf",
+    revision: "85ac09ea12fc4b1112fa76810059364bc6adc9de",
+    license: "CC-BY-4.0",
+    note:
+      "Attribution is a condition of use, not a courtesy: this notice, shipped with the app, is how it is met. A GGUF conversion of NVIDIA's nvidia/parakeet-tdt-0.6b-v3; the GGUF repository's own card metadata declares cc-by-4.0, matching the source weights, verified 2026-09-02.",
+    files: ["parakeet-tdt-0.6b-v3-Q8_0.gguf"],
+    pinnedIn: "rust-sidecar/src/asr/transcribe_cpp.rs (MODEL_SPECS)",
+  },
+  {
+    name: "Nemotron 3.5 ASR Streaming 0.6B (GGUF Q8_0)",
+    usedFor:
+      "Proving the transcribe.cpp streaming runtime path from `benchmark-latency`. It is never offered as a transcription route.",
+    repository:
+      "https://huggingface.co/handy-computer/nemotron-3.5-asr-streaming-0.6b-gguf",
+    revision: "6d44e540bc31b0de1dbe174a3cea87f53a7f22fb",
+    license: "OpenMDW-1.1 (NVIDIA Open Model License terms)",
+    note:
+      "NVIDIA ships this model under OpenMDW-1.1 rather than the CC-BY-4.0 of the Parakeet weights beside it. It is downloadable only behind the optional transcribe.cpp runtime and is not selectable as a route, so nothing redistributes it.",
+    files: ["nemotron-3.5-asr-streaming-0.6b-Q8_0.gguf"],
+    pinnedIn: "rust-sidecar/src/asr/transcribe_cpp.rs (MODEL_SPECS)",
+  },
+  {
     name: "Moonshine (ONNX)",
     usedFor: "Low-latency English speech recognition, tiny and base.",
     repository: "https://huggingface.co/UsefulSensors/moonshine",

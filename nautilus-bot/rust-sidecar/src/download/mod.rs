@@ -1557,6 +1557,38 @@ impl DownloadManager {
             }
         }
 
+        // Check transcribe.cpp models. Flat, like the Qwen3 bundle, but every
+        // model is one self-contained GGUF, so each file is its own entry
+        // rather than a summed bundle -- `delete_model` removes a file, so a
+        // directory-shaped entry would be listed and then refuse to delete.
+        //
+        // Deliberately NOT behind `#[cfg(feature = "asr-transcribe-cpp")]`: the
+        // directory is left on disk by any build that ever ran the spike, and a
+        // release build that cannot list it is a release build in which 1.42 GiB
+        // of weights are invisible and undeletable from the model manager.
+        let transcribe_cpp_dir = self.models_dir.join("transcribe_cpp");
+        if transcribe_cpp_dir.exists() {
+            let mut entries = tokio::fs::read_dir(&transcribe_cpp_dir).await?;
+            while let Some(entry) = entries.next_entry().await? {
+                let path = entry.path();
+                if !path.is_file() || is_internal_model_metadata_file(&path) {
+                    continue;
+                }
+                let Ok(metadata) = entry.metadata().await else {
+                    continue;
+                };
+                models.push(DownloadedModel {
+                    name: entry.file_name().to_string_lossy().to_string(),
+                    provider: "transcribe_cpp".to_string(),
+                    path,
+                    size_bytes: metadata.len(),
+                    downloaded_at: metadata
+                        .modified()
+                        .unwrap_or_else(|_| std::time::SystemTime::now()),
+                });
+            }
+        }
+
         Ok(models)
     }
 
@@ -2363,6 +2395,69 @@ mod tests {
             4_000 + 900 + 80 + 20,
             "every pinned file counts toward the footprint; the receipt does not"
         );
+
+        std::fs::remove_dir_all(&models_dir).ok();
+    }
+
+    /// The transcribe.cpp GGUFs were invisible to the model manager: the
+    /// listing had no branch for `models/transcribe_cpp`, and `delete_model`
+    /// only ever removes something the listing surfaced, so 1.42 GiB of weights
+    /// could be downloaded and then neither seen nor reclaimed.
+    #[tokio::test]
+    async fn downloaded_model_listing_shows_and_can_delete_each_transcribe_cpp_gguf() {
+        let models_dir = std::env::temp_dir()
+            .join("plainsong-download-transcribe-cpp-listing")
+            .join(uuid::Uuid::new_v4().to_string());
+        let dir = models_dir.join("transcribe_cpp");
+        std::fs::create_dir_all(&dir).expect("create transcribe_cpp dir");
+        let parakeet = dir.join("parakeet-tdt-0.6b-v3-Q8_0.gguf");
+        let nemotron = dir.join("nemotron-3.5-asr-streaming-0.6b-Q8_0.gguf");
+        std::fs::write(&parakeet, vec![0u8; 4096]).expect("parakeet gguf");
+        std::fs::write(&nemotron, vec![0u8; 2048]).expect("nemotron gguf");
+        std::fs::write(model_integrity_receipt_path(&parakeet), b"receipt").expect("receipt");
+
+        let manager = DownloadManager {
+            client: build_download_client().expect("client"),
+            models_dir: models_dir.clone(),
+        };
+        let listed = manager
+            .list_downloaded_models()
+            .await
+            .expect("listing should succeed");
+
+        let spike: Vec<&DownloadedModel> = listed
+            .iter()
+            .filter(|model| model.provider == "transcribe_cpp")
+            .collect();
+        assert_eq!(
+            spike.len(),
+            2,
+            "one entry per GGUF, and the receipt is not one, got {spike:?}"
+        );
+        let listed_parakeet = spike
+            .iter()
+            .find(|model| model.path == parakeet)
+            .expect("the Parakeet GGUF must be listed");
+        assert_eq!(listed_parakeet.name, "parakeet-tdt-0.6b-v3-Q8_0.gguf");
+        assert_eq!(listed_parakeet.size_bytes, 4096);
+        assert!(spike.iter().any(|model| model.path == nemotron));
+
+        // Every entry names a file, so the path the listing hands back is one
+        // `delete_model` can actually remove -- with its receipt.
+        for model in [parakeet.clone(), nemotron.clone()] {
+            manager
+                .delete_model(&model)
+                .await
+                .unwrap_or_else(|error| panic!("delete {}: {error}", model.display()));
+            assert!(!model.exists());
+        }
+        assert!(!model_integrity_receipt_path(&parakeet).exists());
+        assert!(manager
+            .list_downloaded_models()
+            .await
+            .expect("listing should succeed")
+            .iter()
+            .all(|model| model.provider != "transcribe_cpp"));
 
         std::fs::remove_dir_all(&models_dir).ok();
     }

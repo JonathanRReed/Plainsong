@@ -20,6 +20,10 @@ const SIDECAR_MODEL_SOURCES = [
   "rust-sidecar/src/asr/parakeet.rs",
   "rust-sidecar/src/asr/moonshine.rs",
   "rust-sidecar/src/asr/qwen3_asr.rs",
+  // The optional transcribe.cpp runtime pins its GGUFs here. It is compiled
+  // out of the default feature set, but the notices cover what the app can
+  // download, not what today's cargo flags happen to build.
+  "rust-sidecar/src/asr/transcribe_cpp.rs",
   "rust-sidecar/src/download/mod.rs",
 ];
 
