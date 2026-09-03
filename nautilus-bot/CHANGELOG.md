@@ -259,9 +259,10 @@ evidence is stale and must be recaptured before this becomes a candidate.
   from ICU, which is untouched. And `app.asar` carried a second copy of every
   package the renderer imports — React, Radix, Base UI, 19 MB of Lucide icons —
   even though Vite compiles all of it into `dist/` before packaging; the
-  archive is now 4.1 MB instead of 44.9 MB. Receipt, with the per-directory
-  before/after and the idle memory and cold-start measurements:
-  `artifacts/qa/shell-size-receipt-2026-09-02.md`.
+  archive is now 4.1 MB instead of 44.9 MB. Starting the app takes the same
+  time it did and uses the same memory — nothing that was removed was ever
+  loaded. Receipt, with the per-directory before/after and the load caveats
+  the timings carry: `artifacts/qa/shell-size-receipt-2026-09-02.md`.
 - The download's disk image is compressed with lzfse instead of zlib: 3 MB
   smaller and quicker to mount and drag out of, since lzfse decompresses
   faster than zlib as well as packing tighter. Every Mac Plainsong supports

@@ -58,26 +58,54 @@ Do not use star counts, fundraising estimates, review scores, legal allegations,
 or competitor incident claims in public copy unless they are re-verified from a
 primary source during the release review.
 
-## Install size, measured 2026-07-28
+## Install size
 
-Read from the GitHub releases API, exact bytes, not vendor marketing. Ours is
-`bun run gate:size` on the packaged signed build.
+Competitor figures read from the GitHub releases API on 2026-07-28, exact
+bytes, not vendor marketing. Ours is `bun run gate:size` plus a `hdiutil`
+measurement of the disk image.
 
 | Product | Download | Note |
 | --- | --- | --- |
 | Handy `v0.9.4` aarch64 | 17 MB | MIT, Tauri, also Intel/Windows/Linux |
 | VoiceInk `v2.1` | 30 MB | closest architectural comparison: macOS-only, Apple Silicon, local-first |
 | Muesli `v0.8.0` | 90 MB | does both surfaces, as we do |
-| **Plainsong `0.9.0-beta.1` candidate** | **136 MB** | 352 MB installed, ~493 MB once `base.en` lands |
+| Plainsong `0.9.0-beta.1` candidate | 136 MB | 352 MB installed — superseded, kept for the trend |
+| **Plainsong at `parity-waves`, 2026-09-02** | **123 MB** | **297 MB installed**; unsigned pack build, and the download figure is `hdiutil` on that bundle (129,218,471 bytes), not a release artifact |
 
-There is no architecture defence: 275 MB of our 352 MB installed is the Electron
-framework. Every competitor above also ships a small-model option (Handy's
-Moonshine V2 Tiny is ~31 MB against our 148 MB `base.en`), so their realistic
-floor is far below ours. We are large on disk and small in memory — 1.9 MB idle
-RSS on the sidecar, 0.45% average idle CPU — but nobody else publishes idle RSS,
-so that is a number we have rather than a comparison we win.
+The 2026-09-02 numbers are an **unsigned `electron:pack` build** measured on an
+M4 Pro running macOS 27.0; a signed, notarized `release:mac` adds signatures
+and a notary ticket and will read slightly larger. Receipt, with the
+per-directory before/after:
+`artifacts/qa/shell-size-receipt-2026-09-02.md`.
 
-**Do not publish a comparison table.** On these figures we lose most rows, and
+87 MB came off the installed application in one afternoon by removing two
+things nothing could reach: Chromium's UI translations for 54 languages the
+product has never been translated into (46 MB) and a second, unreachable copy
+of every renderer dependency inside `app.asar` (41 MB). The download fell by a
+further 3 MB from switching the disk image to lzfse. None of that changes the
+shape of the problem.
+
+There is still no architecture defence: **227 MB of the 297 MB installed is the
+Electron framework** — 183 MB of Chromium binary, 24 MB of its graphics
+libraries, 19 MB of framework resources — 39 MB of what is left is the Rust
+sidecar, and 19 MB is the Chromium licence file we are required to distribute.
+Everything Plainsong itself wrote is now 4 MB, and it was 4 MB before. The
+remaining trims are Electron's to give, which is the case for the Tauri
+migration rather than against it: the ceiling on this approach is roughly where
+we now stand. Every
+competitor above also ships a small-model option (Handy's Moonshine V2 Tiny is
+~31 MB against our 148 MB `base.en`), so their realistic floor is far below
+ours.
+
+The "1.9 MB idle RSS on the sidecar, 0.45% average idle CPU" this section used
+to claim is **withdrawn until it is re-measured.** The 2026-09-02 attempt could
+not reproduce it — the sidecar read 10–15 MB RSS across ten runs — and the
+machine was swapping too hard for any of those runs to settle the question
+either. Do not use an idle-memory figure in copy until a quiet-machine
+measurement exists. It was never a comparison we won in any case: nobody else
+publishes one.
+
+**Do not publish a comparison table.** Even at 297 MB we lose most rows, and
 the table invites exactly the diff that embarrasses us.
 
 

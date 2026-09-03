@@ -23,6 +23,13 @@ using sensitive content.
 - Native Me + Them system-audio capture requires macOS 14.7 or later. Older
   supported macOS versions require an already configured virtual loopback
   device such as BlackHole, or should use microphone-only Meetings.
+- Plainsong's interface is English only, and so is everything the window
+  frame around it says. Menus that come from Chromium rather than from
+  Plainsong — the right-click menu in a text field, the file picker, the
+  spell-check submenu — now appear in English too, even on a Mac set to
+  another language; the translations for 54 other languages were 46 MB of a
+  product none of them had been translated into. Dates, times and numbers are
+  unaffected and still follow your Mac's own region settings.
 
 ## Dictation
 
