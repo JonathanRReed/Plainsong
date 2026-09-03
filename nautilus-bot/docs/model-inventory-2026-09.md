@@ -111,7 +111,8 @@ Fetched 2026-09-02. Prices are list pay-as-you-go and change.
 | Announced | 2026-08-26, public preview in the Gemini API; successor to Chirp 3 |
 | Endpoint | `POST https://generativelanguage.googleapis.com/v1beta/interactions` |
 | Models | `gemini-3.5-transcribe` (files), `gemini-3.5-transcribe-live` (websocket, no diarization — not used here) |
-| Request | `{"model":…, "input":[{"type":"audio","data"|"uri":…, "mime_type":"audio/wav"}], "generation_config":{"transcription_config":{"language_codes":[…], "custom_vocabulary":[…], "mode":{"type":"verbatim","diarization_mode":"speaker","timestamp_granularities":["word"]}}}}` |
+| Upload | **Files API only.** The transcription guide documents no inline-audio form: resumable upload to `POST /upload/v1beta/files` (`X-Goog-Upload-Protocol: resumable`, `X-Goog-Upload-Command: start` → an upload URL in the `x-goog-upload-url` response header → `upload, finalize`), poll `GET /v1beta/{name}` until `state` is `ACTIVE`, then pass the `uri`. <https://ai.google.dev/gemini-api/docs/files> |
+| Request | `{"model":…, "input":[{"type":"audio","uri":…, "mime_type":"audio/wav"}], "generation_config":{"transcription_config":{"language_codes":[…], "custom_vocabulary":[…], "mode":{"type":"verbatim","diarization_mode":"speaker","timestamp_granularities":["word"]}}}}` |
 | Response | transcript at `interaction.output_text`; per-word detail in `steps[].content[].annotations[]` entries of `"type":"word_info"` with `text`, `speaker` (`"spk_1"`), `start_offset`/`end_offset` (`"0.100s"` duration strings) |
 | Diarization | up to 8 speakers; "attribution for 3 or more speakers is experimental" |
 | **Mutual exclusion** | `custom_vocabulary` **cannot** be combined with `diarization_mode` or `timestamp_granularities`. Confirmed by Google staff on 2026-09-01 in <https://discuss.ai.google.dev/t/gemini-3-5-transcribe-documented-custom-vocabulary-diarization-timestamps-configuration-is-rejected-by-the-interactions-api/180240> — HTTP 400 `custom_vocabulary is incompatible with timestamps.` / `… with diarization.` The docs are being corrected, not the API. |
@@ -239,23 +240,31 @@ provider first.
 1. `deepgram` provider (`nova-3`, `nova-3-medical`) — batch upload, `diarize`,
    `keyterm`, `smart_format`, `utterances`, word timestamps, unconditional
    `mip_opt_out=true`.
-2. `gemini_transcribe` provider (`gemini-3.5-transcribe`) — inline base64 audio,
-   word timestamps, diarization, custom vocabulary on the dictation path only.
+2. `gemini_transcribe` provider (`gemini-3.5-transcribe`) — Files API upload,
+   word timestamps, diarization, custom vocabulary on the dictation path only,
+   and the upload deleted again after each transcription.
 3. Provider speaker labels are carried through the meeting transcript contract
    as ordinary `speaker_id` values (`S1`, `S2`, …), so the existing rename/alias
    flow works on them unchanged, and the meeting header names which diarizer
    produced them.
+4. Settings → API keys now lists the transcription services. It had entries
+   only for the language-model providers, while every cloud speech route's
+   setup text said to add a key there — and since the packaged app strips API
+   keys out of the sidecar's environment, the keychain was the only route and
+   it was unreachable. ElevenLabs, Groq and Cohere were affected as well.
 
 **The limitation to know about.** The meeting lane transcribes in 90-second
 chunks, and a provider's speaker numbering is scoped to one request — "speaker
 0" in chunk 4 is not necessarily "speaker 0" in chunk 1. So provider labels are
-only used when the whole recording went out in **one** request; otherwise they
-are discarded and Plainsong's own diarizer runs, and the audit log records
-which. Deepgram gets a whole-file path (it accepts 2 GB uploads and the sidecar
-streams the WAV from disk rather than buffering it), so ordinary meetings do use
-its labels. Gemini stays chunked — its 30-minute-with-diarization ceiling and
-inline-payload limit make a whole-file path a bigger job than this lane had room
-for — so a Gemini meeting over 90 seconds falls back to local diarization.
+only used when the whole recording went out in **one** request. To make that
+the normal case rather than a curiosity, a single-source meeting now goes to a
+diarizing provider whole, within that provider's own documented ceiling:
+Deepgram up to four hours (streamed off disk, so a two-hour meeting is not
+buffered in memory), Gemini up to thirty minutes (Google's cap for a request
+that asks for diarization or word timestamps). Past the ceiling, or when the
+single request fails, the meeting falls back to 90-second chunks with
+Plainsong's own diarizer, and both the audit log and the meeting header say
+which one ran.
 
 ---
 

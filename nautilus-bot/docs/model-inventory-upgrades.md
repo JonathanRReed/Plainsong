@@ -279,10 +279,12 @@ Full research, with prices, licences, endpoints and sources:
 4. **Soniox `stt-async-v5`.** ~$0.10/hr with diarization, language ID and smart
    formatting bundled, 60+ languages. Verify its data-retention terms first —
    the 2026-09-02 pass did not.
-5. **A whole-file meeting path for Gemini.** Gemini speaker labels are only used
-   today when the meeting fits in one 90 s chunk, because a provider's speaker
-   numbering is scoped to one request. Deepgram got a whole-file streamed path;
-   Gemini needs the Files API plus a 30-minute ceiling check to get one.
+5. **Provider diarization past the single-request ceiling.** A provider
+   numbers speakers per request, so its labels are only used when the whole
+   meeting went out in one — Deepgram to four hours, Gemini to thirty minutes.
+   A longer meeting falls back to Plainsong's own diarizer. Closing that gap
+   means matching speakers across requests (a voiceprint carried between
+   chunks), which is a real piece of work and not a config change.
 6. **Sortformer 4spk v2** (`nvidia/diar_streaming_sortformer_4spk-v2`,
    CC-BY-4.0, 13.24 DER on DIHARD III) only if someone exports it to ONNX. Hard
    cap of 4 speakers.
