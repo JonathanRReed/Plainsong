@@ -832,7 +832,11 @@ export function AsrProviderManager({ className }: AsrProviderManagerProps) {
       case "distil_whisper":
         return "Use the Download button to fetch the Distil-Whisper Large v3.5 model (no Python needed)";
       case "macos_apple_speech":
-        return "Grant Plainsong Speech Recognition access in macOS System Settings > Privacy & Security > Speech Recognition";
+        // The old line was a bare instruction, and macOS named this
+        // permission in the era when speech recognition meant sending audio
+        // to Apple. On this route nothing is sent anywhere, so the sentence
+        // has to say what the grant is actually for before it asks for it.
+        return "Grant Speech Recognition in System Settings > Privacy & Security > Speech Recognition. It is consent to on-device processing, not permission to use a server.";
       case "moonshine":
         return "Use the Download button to fetch the selected Moonshine bundle. Tiny is the smallest edge model; Base is the default stable option.";
       case "qwen3_asr":
@@ -1375,7 +1379,10 @@ export function AsrProviderManager({ className }: AsrProviderManagerProps) {
                   {permissionBadgeLabel(row.key, row.ready)}
                 </Badge>
               </div>
-              <p className="text-xs text-muted-foreground">{row.detail}</p>
+              {/* A sentence, so it sits on the text-sm body floor (STYLE.md */}
+              {/* section 2 and section 7); these details grew from labels into */}
+              {/* explanations and text-xs no longer fit them. */}
+              <p className="text-sm text-muted-foreground">{row.detail}</p>
               {!row.ready &&
               !(
                 row.key === "keyboardEvents" && appleNativeAccessibilityTrusted

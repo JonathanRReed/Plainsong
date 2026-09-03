@@ -162,7 +162,7 @@ const PERMISSION_GATES: PermissionGate[] = [
     key: "speech",
     label: "Speech recognition",
     purpose:
-      "Optional -- only needed when you explicitly choose Apple Speech for on-device dictation. Plainsong never uses it as a fallback route.",
+      "Optional -- only needed when you explicitly choose Apple Speech for on-device dictation. macOS transcribes on this Mac; the permission records your consent to that, not permission to use a server. Plainsong never uses this route as a fallback.",
     section: "speech",
     settingsLabel: "Speech Recognition",
     optional: true,

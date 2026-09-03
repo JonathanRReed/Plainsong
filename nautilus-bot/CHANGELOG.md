@@ -516,6 +516,18 @@ evidence is stale and must be recaptured before this becomes a candidate.
   audio to Apple; Plainsong runs both Apple engines with server recognition
   off, so the row now says it records your consent to on-device processing
   rather than only that it is "required for transcription".
+- Every other place Plainsong asks for Speech Recognition now says the same
+  thing. The setup line the Models screen shows when the permission is
+  undecided or denied, the Speech recognition tile in Settings, and the
+  first-run permission step all now say that macOS transcribes on this Mac and
+  that the permission is Plainsong's record of your consent to that, not
+  permission to use a server. Only the one row said it before, so the reader
+  who met the request anywhere else still met the old meaning. The permission
+  gate itself is unchanged and deliberately so: on macOS 26 or newer,
+  SpeechAnalyzer will transcribe with the permission still undecided, and
+  Plainsong refuses anyway — in the app and in the helper process that does the
+  recognizing — because that grant is the only consent record this route has.
+  `docs/beta/KNOWN-LIMITATIONS.md` says so too.
 - "Installing language…" has a Cancel beside it, and stops on its own if
   macOS goes quiet. The Apple language install waited on the OS with no
   deadline and no way out: an install that never finished held the button,

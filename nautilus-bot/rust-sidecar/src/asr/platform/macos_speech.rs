@@ -1007,12 +1007,18 @@ fn readiness_from_probe(payload: &HelperProbePayload) -> AppleSpeechReadiness {
         SpeechAuthorizationStatus::NotDetermined => (
             AppleSpeechReadinessStatus::AuthorizationNotDetermined,
             "Speech Recognition permission has not been decided.".to_string(),
-            Some("Request Speech Recognition permission from the installed Plainsong app.".to_string()),
+            Some(
+                "Request Speech Recognition permission from the installed Plainsong app. It records your consent to on-device processing; both Apple engines run on this Mac with Apple's server fallback off."
+                    .to_string(),
+            ),
         ),
         SpeechAuthorizationStatus::Denied => (
             AppleSpeechReadinessStatus::AuthorizationDenied,
             "Speech Recognition permission is denied.".to_string(),
-            Some("Enable Plainsong in System Settings > Privacy & Security > Speech Recognition.".to_string()),
+            Some(
+                "Enable Plainsong in System Settings > Privacy & Security > Speech Recognition. It records your consent to on-device processing; both Apple engines run on this Mac with Apple's server fallback off."
+                    .to_string(),
+            ),
         ),
         SpeechAuthorizationStatus::Restricted => (
             AppleSpeechReadinessStatus::AuthorizationRestricted,
@@ -2659,6 +2665,38 @@ mod tests {
         assert_eq!(analyzer.contextual_strings_applied, 3);
         assert_eq!(analyzer.engine.as_deref(), Some("speech_analyzer"));
         assert!(analyzer.text.contains("Plain song"), "{}", analyzer.text);
+    }
+
+    /// The Models screen asks for a permission macOS named in the era when
+    /// speech recognition meant sending audio to Apple. Neither engine does
+    /// that here -- SpeechAnalyzer transcribes with the permission still
+    /// undecided, and both run with server fallback off -- so the sentence
+    /// that asks for the grant has to say what the grant is for. Plainsong
+    /// keeps refusing until it is granted, in the app and in the helper: it is
+    /// the only record of consent to on-device processing this route has.
+    #[test]
+    fn asking_for_speech_recognition_says_it_is_consent_not_a_server_grant() {
+        let mut probe: HelperProbePayload = parse_single_payload(HELPER_PROBE_CAPTURE, "probe")
+            .expect("the real helper probe should match the Rust contract");
+
+        for (authorization, code) in [("not_determined", 0), ("denied", 1)] {
+            probe.authorization = authorization.to_string();
+            probe.authorization_code = code;
+            let readiness = readiness_from_probe(&probe);
+            assert!(!readiness.ready, "{authorization}");
+            let action = readiness
+                .setup_action
+                .as_deref()
+                .unwrap_or_else(|| panic!("{authorization} must offer a next action"));
+            assert!(
+                action.contains("consent to on-device processing"),
+                "{authorization}: {action}"
+            );
+            assert!(
+                action.contains("server fallback off"),
+                "{authorization}: {action}"
+            );
+        }
     }
 
     /// The meeting gate decides the engine from one probe and the route used
