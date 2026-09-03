@@ -1,0 +1,124 @@
+{
+  "generatedAt": "2026-09-03T06:25:14.064Z",
+  "candidateIdentity": {
+    "schemaVersion": 1,
+    "complete": true,
+    "missing": [],
+    "appComponents": [
+      {
+        "name": "Contents/Resources/app.asar",
+        "bytes": 4313979,
+        "sha256": "70254ea7e0d6f6f9ad5b8bfe413f1e7109600129de4291fc231c4789271cf559"
+      },
+      {
+        "name": "Contents/Resources/sidecar/plainsong-sidecar",
+        "bytes": 41255024,
+        "sha256": "e2271c1fba9ee3bf9aaa2919788a3eaa9b412d35161893f844f0a14f424810a8"
+      },
+      {
+        "name": "Contents/MacOS/Plainsong",
+        "bytes": 54656,
+        "sha256": "9829607406102bbebd835c035251bb7aaa751ddca4d68d46a1728a36d4734674"
+      },
+      {
+        "name": "Contents/Resources/shortcut-helper/plainsong-native-shortcut-helper",
+        "bytes": 135008,
+        "sha256": "91720e369904be17d6b45fb6f23773f4b1b54d02f0c5132c3dcf8c120743f8f2"
+      },
+      {
+        "name": "Contents/Resources/sidecar/nautilus-macos-speech-helper-aarch64-apple-darwin",
+        "bytes": 400240,
+        "sha256": "b86b9cdb129dbe3d20f81d47ceb50e2559f475c0f9cc07a4e490ac54db413702"
+      },
+      {
+        "name": "Contents/Resources/app-update.yml",
+        "bytes": 157,
+        "sha256": "01d995d4e0c318b960e27044c4811f324f7431d003eb53e750329626ec065bf6"
+      },
+      {
+        "name": "Contents/Info.plist",
+        "bytes": 5057,
+        "sha256": "871f57aff0599f72f5d855b24597184f5fe3744fceed1ec8f36d879dc5f59365"
+      }
+    ],
+    "artifacts": [
+      {
+        "name": "Plainsong-0.9.0-beta.3-arm64.dmg",
+        "bytes": 129140311,
+        "sha256": "1fcbe41d104219e389d7d2079800c671ef09182a4be37eb229bf8eda86298fb7"
+      },
+      {
+        "name": "Plainsong-0.9.0-beta.3-arm64-mac.zip",
+        "bytes": 130152737,
+        "sha256": "9372835a491ad7be9d2a45afe901b004046bfb6da328238d17a010041acf6985"
+      },
+      {
+        "name": "Plainsong-0.9.0-beta.3-arm64-mac.zip.blockmap",
+        "bytes": 137651,
+        "sha256": "29cdafae7df24291e8179b247fa7b15682b89f6fdc019a2dec2bd52dfa1b0c17"
+      },
+      {
+        "name": "beta-mac.yml",
+        "bytes": 376,
+        "sha256": "b6fb9a223a4644c827c933a4b34c6358588fd1f55d70aa62bf9766126a652a6b"
+      }
+    ],
+    "appComponentsSha256": "039f2bf4a00e20e3114efb81ac6bca3f7aa9271f0a9aba59df426946feb556fe",
+    "releaseSha256": "ce10111934bf27fdd508569b5eae2d41b4e494c3a9ebffca5ff027c2b7ca060f"
+  },
+  "mode": "full",
+  "pass": true,
+  "paths": {
+    "app": "/Users/jonathanreed/Downloads/Plainsong/.claude/worktrees/agent-a7989c7610bb925cf/nautilus-bot/release/mac-arm64/Plainsong.app",
+    "appInfoPlist": "/Users/jonathanreed/Downloads/Plainsong/.claude/worktrees/agent-a7989c7610bb925cf/nautilus-bot/release/mac-arm64/Plainsong.app/Contents/Info.plist",
+    "appUpdate": "/Users/jonathanreed/Downloads/Plainsong/.claude/worktrees/agent-a7989c7610bb925cf/nautilus-bot/release/mac-arm64/Plainsong.app/Contents/Resources/app-update.yml",
+    "manifest": "/Users/jonathanreed/Downloads/Plainsong/.claude/worktrees/agent-a7989c7610bb925cf/nautilus-bot/release/beta-mac.yml"
+  },
+  "packageVersion": "0.9.0-beta.3",
+  "appVersion": "0.9.0-beta.3",
+  "updateConfig": {
+    "provider": "generic",
+    "url": "https://updates.plainsong.jonathanrreed.com/beta/",
+    "useMultipleRangeRequest": false,
+    "updaterCacheDirName": "plainsong-updater"
+  },
+  "releaseChannel": "beta",
+  "channel": {
+    "requestedManifest": "beta-mac.yml",
+    "packagedManifest": "beta-mac.yml"
+  },
+  "manifest": {
+    "version": "0.9.0-beta.3",
+    "releaseDate": "2026-09-03T06:19:51.067Z",
+    "zipName": "Plainsong-0.9.0-beta.3-arm64-mac.zip",
+    "zipPath": "/Users/jonathanreed/Downloads/Plainsong/.claude/worktrees/agent-a7989c7610bb925cf/nautilus-bot/release/Plainsong-0.9.0-beta.3-arm64-mac.zip",
+    "expectedSha512": "zbW/PQDCCu56ntguN4CYvntYqZV6cIzKTmYgZBOokHUR1ye4qnxW5tTFT58AA10ANiXfN0+HH8jCTYpvfNyuYQ==",
+    "actualSha512": "zbW/PQDCCu56ntguN4CYvntYqZV6cIzKTmYgZBOokHUR1ye4qnxW5tTFT58AA10ANiXfN0+HH8jCTYpvfNyuYQ==",
+    "expectedSize": 130152737,
+    "actualSize": 130152737,
+    "blockmapPath": "/Users/jonathanreed/Downloads/Plainsong/.claude/worktrees/agent-a7989c7610bb925cf/nautilus-bot/release/Plainsong-0.9.0-beta.3-arm64-mac.zip.blockmap"
+  },
+  "checks": {
+    "appUpdateMetadataExists": true,
+    "appInfoPlistExists": true,
+    "appVersionPresent": true,
+    "packageVersionMatchesPackagedApp": true,
+    "providerIsGeneric": true,
+    "betaFeedUrlMatchesExpected": true,
+    "multipleRangeRequestsDisabled": true,
+    "releaseChannelIsBeta": true,
+    "packagedChannelMatchesRelease": true,
+    "channelResolverLoaded": true,
+    "installedChannelRequestsPackagedManifest": true,
+    "releaseManifestExists": true,
+    "betaChannelManifestEmitted": true,
+    "versionMatchesPackagedApp": true,
+    "zipPathPresent": true,
+    "zipArtifactExists": true,
+    "zipSha512Present": true,
+    "zipSha512MatchesManifest": true,
+    "zipSizePresent": true,
+    "zipSizeMatchesManifest": true,
+    "blockmapExists": true
+  }
+}
