@@ -371,6 +371,12 @@ evidence is stale and must be recaptured before this becomes a candidate.
   files that still carry it load cleanly and are rewritten without it.
 
 ### Fixed
+- The streaming live preview no longer shows a word twice. When the recognizer
+  reported a shorter settled prefix than the popup was already showing —
+  ordinary flicker, and deliberately ignored — the tail that came with it was
+  pasted on unchanged, so "ship the" followed by "ship" + " the release" was
+  drawn as "ship the the release". The tail is now re-cut at the boundary the
+  popup kept.
 - The diarization model chosen in Settings is now the one the automatic
   post-meeting speaker pass uses. It previously always ran ECAPA-TDNN no
   matter what the picker said; only the explicit "identify speakers" action

@@ -447,12 +447,24 @@ impl StreamingPartialTracker {
         let incoming_stable = partial.stable_prefix.as_str();
         let keep_existing =
             incoming_stable.len() < self.stable.len() && self.stable.starts_with(incoming_stable);
-        let next_stable = if keep_existing {
-            self.stable.clone()
+        let (next_stable, next_volatile) = if keep_existing {
+            // Keeping the longer committed prefix means the incoming split
+            // point is behind ours, so the incoming *suffix* still contains
+            // words we already show as committed. Re-split the incoming whole
+            // text at our own boundary instead of pasting the two halves
+            // together, which would render "ship the" + " the release".
+            let incoming_whole = format!("{incoming_stable}{}", partial.volatile_suffix);
+            let tail = incoming_whole
+                .strip_prefix(self.stable.as_str())
+                .map(str::to_string)
+                // The recognizer rewrote something inside the prefix we are
+                // holding, so there is no boundary to cut at. Showing the raw
+                // suffix repeats fewer words than pasting the whole thing.
+                .unwrap_or_else(|| partial.volatile_suffix.clone());
+            (self.stable.clone(), tail)
         } else {
-            incoming_stable.to_string()
+            (incoming_stable.to_string(), partial.volatile_suffix.clone())
         };
-        let next_volatile = partial.volatile_suffix.clone();
         if next_stable == self.stable && next_volatile == self.volatile {
             return false;
         }
@@ -727,6 +739,7 @@ mod streaming_seam_tests {
         );
         assert_eq!(tracker.stable(), "ship the release");
         assert_eq!(tracker.volatile(), "");
+        assert_eq!(tracker.display(), "ship the release");
     }
 
     #[test]
@@ -765,7 +778,69 @@ mod streaming_seam_tests {
             elapsed_audio_s: 1.7,
         }));
         assert_eq!(tracker.stable(), "ship the");
-        assert_eq!(tracker.volatile(), " the release");
+        // The tail is re-cut at the boundary we kept, so the two words the
+        // incoming suffix re-sent are not shown twice.
+        assert_eq!(tracker.volatile(), " release");
+        assert_eq!(
+            tracker.display(),
+            "ship the release",
+            "holding the longer prefix must not duplicate the words the \
+             incoming suffix repeats"
+        );
+    }
+
+    #[test]
+    fn a_rewrite_under_a_held_prefix_falls_back_to_the_incoming_suffix() {
+        let mut tracker = StreamingPartialTracker::new();
+        assert!(tracker.accept(&Partial {
+            stable_prefix: "ship the".to_string(),
+            volatile_suffix: " rel".to_string(),
+            elapsed_audio_s: 1.1,
+        }));
+        // Shorter *and* a prefix of what is shown, so the flicker guard holds
+        // "ship the" -- but the incoming whole text ("ship a release") no
+        // longer starts with it, so there is no boundary to cut at. Showing
+        // the raw suffix is the least-wrong fallback, and it must never
+        // repeat the held prefix.
+        assert!(tracker.accept(&Partial {
+            stable_prefix: "ship".to_string(),
+            volatile_suffix: " a release".to_string(),
+            elapsed_audio_s: 1.7,
+        }));
+        assert_eq!(tracker.stable(), "ship the");
+        assert_eq!(tracker.display(), "ship the a release");
+        assert!(
+            !tracker.display().contains("ship the ship"),
+            "the held prefix must not appear twice"
+        );
+    }
+
+    #[test]
+    fn every_flicker_guarded_step_renders_each_word_once() {
+        // A recognizer whose committed boundary walks backwards and forwards
+        // over the same utterance. Whatever the split, `display()` must stay
+        // a plain prefix of the finished sentence.
+        let mut tracker = StreamingPartialTracker::new();
+        let steps = [
+            ("ship", " the"),
+            ("ship the", " rel"),
+            ("ship", " the release"),
+            ("ship the", " release"),
+            ("ship the release", ""),
+        ];
+        for (stable_prefix, volatile_suffix) in steps {
+            tracker.accept(&Partial {
+                stable_prefix: stable_prefix.to_string(),
+                volatile_suffix: volatile_suffix.to_string(),
+                elapsed_audio_s: 1.0,
+            });
+            assert!(
+                "ship the release".starts_with(tracker.display().as_str()),
+                "rendered {:?}, which is not a prefix of the utterance",
+                tracker.display()
+            );
+        }
+        assert_eq!(tracker.display(), "ship the release");
     }
 
     #[test]
@@ -795,11 +870,13 @@ mod streaming_seam_tests {
             elapsed_audio_s: 0.6,
         };
         assert!(tracker.accept(&partial));
+        assert_eq!(tracker.display(), "ship the");
         assert!(!tracker.accept(&partial), "no change, no emit");
         assert!(!tracker.accept(&Partial {
             elapsed_audio_s: 1.2,
             ..partial.clone()
         }));
+        assert_eq!(tracker.display(), "ship the");
     }
 
     #[test]
@@ -820,6 +897,7 @@ mod streaming_seam_tests {
             volatile_suffix: String::new(),
             elapsed_audio_s: 0.6,
         }));
+        assert_eq!(tracker.display(), "first sentence");
     }
 
     #[test]
