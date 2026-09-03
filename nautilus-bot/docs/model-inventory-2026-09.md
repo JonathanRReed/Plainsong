@@ -5,6 +5,16 @@ leaderboard page fetched on that date, or a measurement taken in this repo
 (marked as such). Nothing here is a Plainsong qualification unless it says
 "verified in Plainsong".
 
+**Amended 2026-09-03 by lane V1.** The boards were re-fetched, the Voxtral
+family was surveyed on Hugging Face and measured on this Mac, and four claims
+below turned out to be wrong or incomplete. Every amendment is marked
+`[V1 2026-09-03]` in place rather than rewritten over, and the measurements are
+in `artifacts/qa/model-selection-2026-09-03.md`. The short version: Voxtral is
+more accurate and roughly ten times slower on Apple Silicon, it emits no
+timestamps at all so it cannot serve meetings, it shipped as a *cloud* route
+instead, and the "every open diarizer needs PyTorch" paragraph in §3.2 no longer
+holds.
+
 Two standing caveats:
 
 - **Leaderboard WER is not your WER.** Artificial Analysis and the Open ASR
@@ -33,7 +43,8 @@ throughput multiple over real time.
 | MAI-Transcribe-1.5 | Microsoft AI | 2.4% | — | no |
 | Pulse Pro | Smallest AI | 2.4% | — | no |
 | **Gemini 3.5 Transcribe** | Google | **2.6%** | — | **added this lane** |
-| Voxtral Small | Mistral | 2.8% (best open weights) | — | no |
+| Voxtral Small | Mistral | 2.8% (best open weights) | 65.6x | no — 24B, ~50 GB at BF16 |
+| **Voxtral Mini Transcribe 2** | Mistral | **3.6%** | 83.3x | **yes, added by lane V1** ($0.003/min) |
 | Nova-3 | Deepgram | — | **607.7× real time** (fastest listed) | **added this lane** |
 
 Deepgram's Nova-3 is the speed leader on that page by a wide margin and is not
@@ -41,6 +52,11 @@ in the accuracy top five; Gemini 3.5 Transcribe is in the accuracy top five and
 is the only one of them that also returns diarization and word timestamps from
 a documented public API at a published per-minute price. Those two are the ones
 this lane implemented; §2 says why the others were left out.
+
+`[V1 2026-09-03]` The speed column above was blank when this table was
+written. It is filled in from the 2026-09-03 fetch, and it matters: Voxtral
+Small is the *slowest* of the accuracy leaders on that board, not the fastest,
+which is the opposite of the premise lane V1 was asked to test.
 
 Already shipped in Plainsong before this lane: OpenAI `gpt-transcribe` /
 `whisper-1` / `gpt-4o(-mini)-transcribe`, Groq `whisper-large-v3(-turbo)`,
@@ -64,6 +80,9 @@ wall-clock numbers this repo measures.
 | Canary-Qwen-2.5B | 2.5B | 5.63% | 1 (en) | 418 | CC-BY-4.0 | NeMo only | no |
 | Qwen3-ASR-1.7B | 1.7B | 5.76% | 52 | — | Apache-2.0 | ONNX exists for 0.6B | 0.6B only |
 | **Parakeet TDT 0.6B v3** | 0.6B | 6.32% | 25 | **3332** | CC-BY-4.0 | ONNX (shipped), GGUF via transcribe.cpp | **yes, default** |
+| **Voxtral Mini 3B 2507** | 3B | — | 8 | — | **Apache-2.0** | **GGUF via transcribe.cpp** | no — measured by V1: 12.5-13.7x Parakeet's latency, 4.9x its memory, and no timestamps at all |
+| **Voxtral Mini 4B Realtime 2602** | ~4.4B | — | 13 | — | **Apache-2.0** | **GGUF via transcribe.cpp** | no — measured by V1, 12-19x Parakeet's latency |
+| **MOSS-Transcribe-Diarize** | 0.9B | — | 2 (en, zh) | — | **Apache-2.0** | **GGUF via transcribe.cpp** | no, but see §3.2 — it diarizes *and* transcribes in one 987 MB file |
 | Kyutai STT | 1–2.6B | 6.40% | 2 | — | CC-BY-4.0 | none published | no |
 | Whisper large-v3 | 1.55B | — | 99 | 68 | MIT | whisper.cpp (shipped), Candle (shipped) | **yes** |
 | Meta Omnilingual ASR | 0.3–7B | varies | 1600+ | — | Apache-2.0 | none published | no |
@@ -158,15 +177,32 @@ still per minute at Nova-3 mono, and a much simpler one-shot HTTP shape) and
 Gemini (accuracy leader). Its published data-retention terms were not verified
 in this pass, which must happen before it is added.
 
-### 2.5 Mistral Voxtral API — not implemented
+### 2.5 Mistral Voxtral API — **implemented by lane V1 (2026-09-03)**
 
-`POST https://api.mistral.ai/v1/audio/transcriptions`, `voxtral-mini-transcribe`
-(V2, 26-02 card), $0.003/min, ~4% WER on FLEURS, returns speaker labels and
-start/end times. <https://mistral.ai/news/voxtral-transcribe-2/>. Attractive on
-price and it is the vendor of the best open-weights model on the AA board
-(Voxtral Small, 2.8%). Not added this lane purely on budget; it is the next
-cloud provider to add, ahead of Soniox, because Plainsong already registers a
-`mistral` credential slot.
+`POST https://api.mistral.ai/v1/audio/transcriptions`, `voxtral-mini-2602`
+(the pinned snapshot behind the `voxtral-mini-latest` alias), $0.003/min,
+3.59% AA-WER at 83.3x on the 2026-09-03 board, returns speaker labels and
+start/end times. <https://mistral.ai/news/voxtral-transcribe-2/>,
+<https://docs.mistral.ai/capabilities/audio/speech_to_text/offline_transcription>.
+
+`[V1 2026-09-03]` Added, as `mistral_voxtral`. It is cheaper *and* more
+accurate than Deepgram Nova-3 (3.59% at $3/1k min against 5.18% at $4.30/1k
+min) and it returns speaker labels, so it is the third diarizing cloud route
+and the cheapest one. Deepgram keeps the top of the picker, because Deepgram is
+7.3x faster on the same board and that ordering was measured rather than
+guessed.
+
+Two things the request shape forces, both handled in
+`rust-sidecar/src/asr/mistral_voxtral.rs` and both tested:
+
+| | |
+|---|---|
+| Encoding | `multipart/form-data`, unlike Deepgram's raw body — the meeting lane streams the WAV into one multipart part with a declared length |
+| **Mutual exclusion** | `timestamp_granularities` **cannot** be sent with `language` ("currently not compatible", Mistral's own docs). The meeting lane needs timestamps, so a meeting request auto-detects the language; dictation, which needs none, sends the user's choice. Same shape as the Gemini exclusion in §2.2, handled the same way. |
+| Speaker labels | on `segments[].speaker`, not per word (unlike Deepgram). Renumbered to `S1`, `S2`, … in first-appearance order. |
+| Vocabulary hints | `context_bias[]`, capped by Mistral at 100 terms; "optimized for English, other languages experimental" |
+| Limits | 3 hours per request, 1 GB per file |
+| Data terms | Mistral's transcription docs do not state a training-data position on the transcription endpoint. **This was not verified** and the route's copy claims nothing about it. Anyone relying on it for confidential audio should read Mistral's current terms first. |
 
 ---
 
@@ -195,10 +231,30 @@ Sources: <https://huggingface.co/pyannote/speaker-diarization-community-1>,
 <https://www.pyannote.ai/blog/community-1>,
 <https://huggingface.co/nvidia/diar_streaming_sortformer_4spk-v2>.
 
-The honest summary: **every end-to-end open diarizer that would be a real
-upgrade over Plainsong's embedding pipeline needs PyTorch.** Sortformer is NeMo.
-community-1 is pyannote.audio. Neither has a maintained ONNX export of the whole
-pipeline. Swapping embedders (which is what Plainsong can do today) changes the
+The honest summary as written on 2026-09-02: **every end-to-end open diarizer
+that would be a real upgrade over Plainsong's embedding pipeline needs
+PyTorch.** Sortformer is NeMo. community-1 is pyannote.audio. Neither has a
+maintained ONNX export of the whole pipeline.
+
+`[V1 2026-09-03]` **That is no longer true, and it is the most useful thing
+lane V1 found.** transcribe.cpp — already a dependency of this repo, behind the
+off-by-default `asr-transcribe-cpp` feature — ships two end-to-end diarizer
+ports with published GGUFs:
+
+| Model | What it does | Size (Q8_0) | Licence | Measured by upstream |
+|---|---|---:|---|---|
+| `handy-computer/diar_streaming_sortformer_4spk-v2.1-gguf` | diarization only, no text; 4-speaker hard cap | 139 MB | NVIDIA Open Model Licence | 14.59% DER on AMI IHM against a 14.83% NeMo reference under the identical protocol |
+| `handy-computer/MOSS-Transcribe-Diarize-gguf` | transcription **and** speaker attribution in one pass, English + Chinese, segment timestamps | 987 MB | **Apache-2.0** | 388 ms for 11 s of audio, 1.27 s for 35 s, on an M4 Max on Metal |
+
+The Sortformer port ships only near-reference tiers (F32/F16/Q8_0) on purpose:
+its output depends on discrete speaker-cache decisions, and k-quant weight error
+can deterministically permute speaker labels mid-stream.
+
+Neither is implemented here — lane V1's brief was model selection, not a
+diarization rewrite, and §3.1's real problem is still segmentation rather than
+embeddings. But "it needs PyTorch, so it is out" is no longer the reason to
+skip them, and the next diarization lane should start from this row rather than
+from §3.2's original conclusion. Swapping embedders (which is what Plainsong can do today) changes the
 embedding quality but not the segmentation, and segmentation — fixed 2 s windows
 with no overlap handling — is where this pipeline actually loses.
 
@@ -317,6 +373,25 @@ Replace it only when one of these is true, with a receipt:
   research found a Nemotron ASR release that beats Parakeet TDT v3 on the Open
   ASR Leaderboard with a runtime this app can load. Do not swap on the strength
   of a name.
+- `[V1 2026-09-03]` **Voxtral (local, GGUF via transcribe.cpp)** — no, measured
+  and rejected. Voxtral Mini 3B at Q4_K_M, its own fastest tier, on this M4 Pro
+  through the same runtime on the same Metal device: **1285 ms p50 against
+  Parakeet's 94 ms** on the 5.3 s fixture (13.7x) and 4447 ms against 542 ms on
+  the 44 s fixture (8.2x), with 4.5 GiB of peak RSS against 0.9 GiB and a
+  2.8 GiB download against 0.7 GiB. The rule is ~1.5x. It also reports
+  `max_timestamp_kind = None` at load, so it cannot serve meetings at any
+  speed. And on this repo's own two fixtures it was not more accurate than the
+  shipped route: word-identical on the long one, one proper noun worse on the
+  short one. Both Voxtral GGUFs are carried in `MODEL_SPECS` as benchmark-only
+  entries — nameable from `benchmark-latency`, never offered in the picker — so
+  the measurement can be reproduced without the route existing. Numbers:
+  `artifacts/qa/model-selection-2026-09-03.md`.
+- `[V1 2026-09-03]` **Cohere Transcribe 03-2026 via transcribe.cpp on Metal**
+  — the open question this document should be judged on next. The route that
+  shipped on 2026-09-03 runs int4 ONNX on the **CPU** at 5.1x Parakeet, which
+  is why it stayed experimental. The same weights have an official GGUF port at
+  1.55 GB (Q4_K_M) that runs on Metal through a runtime this repo already
+  links. Nobody has measured that combination.
 
 ### (b) Best local model for meetings (long-form, multilingual, timestamps)
 
@@ -359,8 +434,12 @@ because meetings are long):
 3. **ElevenLabs Scribe v2** (already shipped) — best WER of the incumbents
    (2.2%) but returns no speaker labels, so meetings still pay for local
    diarization on top.
-4. Soniox and Voxtral Mini Transcribe are cheaper than all of the above with
-   diarization included; they are the next two to add.
+4. `[V1 2026-09-03]` **Mistral Voxtral Mini Transcribe 2** — added. $0.18/hour
+   with diarization included, the cheapest diarizing route here, and more
+   accurate than Deepgram (3.59% against 5.18%). It ranks third in the meeting
+   picker rather than first because Deepgram is 7.3x faster and Gemini is a
+   point more accurate. Soniox remains unimplemented and is now the only one of
+   the two left to add.
 
 Skipped on terms: **AssemblyAI** (§2.3).
 

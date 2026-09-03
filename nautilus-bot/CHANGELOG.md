@@ -22,6 +22,17 @@ evidence is stale and must be recaptured before this becomes a candidate.
   true now rather than this.
 
 ### Added
+- Mistral Voxtral as a cloud transcription route (BYOK). Voxtral Mini
+  Transcribe 2 at $0.003/min — the cheapest route in Plainsong that returns
+  speaker labels, and cheaper and more accurate than Deepgram Nova-3 on
+  Artificial Analysis's own board (3.59% against 5.18%, fetched 2026-09-03).
+  13 languages, segment timestamps, and up to 100 of your dictionary terms
+  sent as context bias. Mistral's API refuses a language and timestamps on the
+  same request, so meetings detect the language and dictation sends the one
+  you chose; the route copy says so. Settings › API Keys now offers a Mistral
+  slot, which the app has accepted in the keychain for some time with no way
+  to enter it. Evidence and the comparison that chose this route over running
+  Voxtral locally: `artifacts/qa/model-selection-2026-09-03.md`.
 - A second, fully offline route for Cohere Transcribe: the same 03-2026 model
   Plainsong already calls over Cohere's API, downloaded as int4 ONNX (2.0 GiB)
   and run on this machine with no key and no upload. Experimental and never a

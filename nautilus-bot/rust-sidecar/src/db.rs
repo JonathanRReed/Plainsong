@@ -6199,7 +6199,7 @@ impl Database {
     }
 
     /// `diarizer` is the stable identifier of whatever produced these speaker
-    /// labels -- `deepgram`, `gemini_transcribe`, or
+    /// labels -- `deepgram`, `gemini_transcribe`, `mistral_voxtral`, or
     /// `plainsong:<embedding model id>`. It is written in the same transaction
     /// as the segments so the record and the labels cannot disagree.
     /// Store diarized segments, the speaker aliases they imply, and the name of

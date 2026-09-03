@@ -3277,6 +3277,7 @@ export function SettingsView() {
                       can reach them. They have no model catalogue endpoint;
                       the ASR model is chosen on the Models screen. */}
                   <option value="deepgram">Deepgram (transcription)</option>
+                  <option value="mistral">Mistral (transcription)</option>
                   <option value="elevenlabs">ElevenLabs (transcription)</option>
                   <option value="groq">Groq (transcription)</option>
                   <option value="cohere">Cohere (transcription)</option>

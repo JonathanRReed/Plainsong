@@ -22,17 +22,18 @@ import { compareStrings } from "@/lib/format-locale";
 describe("ASR capability mappings", () => {
   it("recognises only the engines this build can still run", () => {
     // 12 engines that shipped before September 2026, plus Deepgram, Gemini
-    // Transcribe and the offline Cohere Transcribe route, plus
-    // `transcribe_cpp`, which only a sidecar built with
+    // Transcribe, Mistral Voxtral and the offline Cohere Transcribe route,
+    // plus `transcribe_cpp`, which only a sidecar built with
     // `--features asr-transcribe-cpp` ever reports. The renderer keeps a name
     // for that one so a developer build's route renders instead of silently
     // vanishing from the picker; nothing in a release build sends it.
-    expect(ASR_PROVIDER_TYPES).toHaveLength(16);
+    expect(ASR_PROVIDER_TYPES).toHaveLength(17);
     expect(isKnownAsrProvider("whisper")).toBe(true);
     expect(isKnownAsrProvider("parakeet")).toBe(true);
     expect(isKnownAsrProvider("macos_apple_speech")).toBe(true);
     expect(isKnownAsrProvider("deepgram")).toBe(true);
     expect(isKnownAsrProvider("gemini_transcribe")).toBe(true);
+    expect(isKnownAsrProvider("mistral_voxtral")).toBe(true);
     expect(isKnownAsrProvider("transcribe_cpp")).toBe(true);
     expect(isKnownAsrProvider("cohere_local")).toBe(true);
   });
@@ -44,6 +45,7 @@ describe("ASR capability mappings", () => {
     // that shipped before September 2026 returns labels at all.
     expect(providerReturnsSpeakerLabels("deepgram")).toBe(true);
     expect(providerReturnsSpeakerLabels("gemini_transcribe")).toBe(true);
+    expect(providerReturnsSpeakerLabels("mistral_voxtral")).toBe(true);
     for (const providerType of [
       "openai_cloud",
       "groq",
@@ -72,6 +74,21 @@ describe("ASR capability mappings", () => {
     expect(isMeetingEligibleModel("deepgram", "nova-3")).toBe(true);
     expect(isMeetingEligibleModel("deepgram", "nova-3-medical")).toBe(true);
     expect(isMeetingEligibleModel("deepgram", "flux")).toBe(false);
+  });
+
+  it("keeps the websocket-only Voxtral model out of the meeting lane", () => {
+    // voxtral-mini-realtime-2602 is Mistral's realtime route; it cannot
+    // diarize and is not served by the batch /v1/audio/transcriptions
+    // endpoint the provider posts to. voxtral-mini-2507 is the deprecated
+    // v25.07 predecessor.
+    expect(isMeetingEligibleModel("mistral_voxtral", "voxtral-mini-2602")).toBe(true);
+    expect(
+      isMeetingEligibleModel("mistral_voxtral", "voxtral-mini-realtime-2602"),
+    ).toBe(false);
+    expect(isMeetingEligibleModel("mistral_voxtral", "voxtral-mini-2507")).toBe(false);
+    // The moving alias is not a model id the meeting lane accepts either; the
+    // sidecar normalizes it to the pinned snapshot before it gets here.
+    expect(isMeetingEligibleModel("mistral_voxtral", "voxtral-mini-latest")).toBe(false);
   });
 
   it("rejects the deleted Python-backed engines a stale settings file may still name", () => {

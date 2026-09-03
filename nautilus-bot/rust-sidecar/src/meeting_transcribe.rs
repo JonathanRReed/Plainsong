@@ -616,6 +616,22 @@ pub(crate) fn whole_file_meeting_limits(
             max_seconds: 30.0 * 60.0,
             max_bytes: 512 * 1024 * 1024,
         }),
+        // Mistral publishes both numbers: "recordings up to 3 hours per
+        // request" and audio files "up to 1GB each" (docs.mistral.ai, fetched
+        // 2026-09-03). The byte cap below is Mistral's. The duration ceiling
+        // is Plainsong's, and lower than Mistral's, for the same reason
+        // Deepgram's is: three hours of the app's meeting WAV (mono 16-bit
+        // PCM) is 1.04 GB at 48 kHz, past Mistral's own 1 GB, so a stated
+        // three-hour ceiling would be unreachable on a 48 kHz capture and the
+        // byte cap would silently bind instead. Two hours is 230 MB at 16 kHz
+        // and 691 MB at 48 kHz, inside the byte cap at every rate a capture
+        // device offers, so the number written here is the number that
+        // applies. A recording past either falls back to ninety-second chunks
+        // with Plainsong's own diarizer.
+        asr::AsrProviderType::MistralVoxtral => Some(WholeFileMeetingLimits {
+            max_seconds: 2.0 * 60.0 * 60.0,
+            max_bytes: 1_000_000_000,
+        }),
         _ => None,
     }
 }

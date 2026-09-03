@@ -7,6 +7,7 @@ pub mod gemini_transcribe;
 pub mod groq;
 pub mod macos_apple_speech_provider;
 pub mod manager;
+pub mod mistral_voxtral;
 pub mod moonshine;
 pub mod openai_cloud;
 pub mod parakeet;
@@ -244,7 +245,8 @@ pub struct TranscriptionResult {
     pub text: String,
     pub segments: Vec<TranscriptSegment>,
     /// Speaker turns the provider itself reported, empty for every provider
-    /// that does not diarize (which is all of them except Deepgram and Gemini).
+    /// that does not diarize (which is all of them except Deepgram, Gemini and
+    /// Mistral Voxtral).
     #[serde(default)]
     pub speaker_turns: Vec<SpeakerTurn>,
     pub language: String,
@@ -1441,6 +1443,11 @@ pub enum AsrProviderType {
     Qwen3Asr,
     Deepgram,
     GeminiTranscribe,
+    /// Mistral's Voxtral Mini Transcribe 2 over the batch
+    /// `/v1/audio/transcriptions` endpoint. The cheapest cloud route here that
+    /// returns speaker labels, and the vendor of the best open-weights model
+    /// on the Artificial Analysis board: see `asr/mistral_voxtral.rs`.
+    MistralVoxtral,
     /// The transcribe.cpp spike route (feature `asr-transcribe-cpp`, OFF by
     /// default). It exists in the enum only when the spike is compiled in, so
     /// a default build cannot name it, offer it, or persist it.
@@ -1466,6 +1473,7 @@ impl AsrProviderType {
             AsrProviderType::Qwen3Asr,
             AsrProviderType::Deepgram,
             AsrProviderType::GeminiTranscribe,
+            AsrProviderType::MistralVoxtral,
             #[cfg(feature = "asr-transcribe-cpp")]
             AsrProviderType::TranscribeCpp,
         ]
@@ -1488,6 +1496,7 @@ impl AsrProviderType {
             AsrProviderType::Qwen3Asr => "Qwen3-ASR (Local)",
             AsrProviderType::Deepgram => "Deepgram Nova",
             AsrProviderType::GeminiTranscribe => "Google Gemini Transcribe",
+            AsrProviderType::MistralVoxtral => "Mistral Voxtral",
             #[cfg(feature = "asr-transcribe-cpp")]
             AsrProviderType::TranscribeCpp => "transcribe.cpp (experimental)",
         }
@@ -1527,6 +1536,12 @@ impl AsrProviderType {
             // websocket model, it cannot diarize, and this provider posts to
             // the batch interactions endpoint.
             AsrProviderType::GeminiTranscribe => "gemini-3.5-transcribe",
+            // Verified live against
+            // https://docs.mistral.ai/capabilities/audio/speech_to_text/offline_transcription
+            // on 2026-09-03. `voxtral-mini-2602` is the pinned snapshot behind
+            // Mistral's `voxtral-mini-latest` alias; the realtime model is a
+            // websocket route this batch provider cannot serve.
+            AsrProviderType::MistralVoxtral => mistral_voxtral::VOXTRAL_MINI_TRANSCRIBE_MODEL_ID,
             #[cfg(feature = "asr-transcribe-cpp")]
             AsrProviderType::TranscribeCpp => transcribe_cpp::PARAKEET_GGUF_MODEL_ID,
         }
@@ -1541,6 +1556,7 @@ impl AsrProviderType {
             AsrProviderType::CohereTranscribe => Some("cohere"),
             AsrProviderType::Deepgram => Some("deepgram"),
             AsrProviderType::GeminiTranscribe => Some("gemini"),
+            AsrProviderType::MistralVoxtral => Some("mistral"),
             AsrProviderType::Whisper
             | AsrProviderType::Parakeet
             | AsrProviderType::WhisperCandle
@@ -1706,6 +1722,11 @@ impl AsrProviderType {
                 id: "gemini-3.5-transcribe".to_string(),
                 label: "Gemini 3.5 Transcribe ($0.005/min)".to_string(),
             }],
+            AsrProviderType::MistralVoxtral => vec![ModelOption {
+                id: mistral_voxtral::VOXTRAL_MINI_TRANSCRIBE_MODEL_ID.to_string(),
+                label: "Voxtral Mini Transcribe 2 ($0.003/min, speaker labels included)"
+                    .to_string(),
+            }],
             #[cfg(feature = "asr-transcribe-cpp")]
             AsrProviderType::TranscribeCpp => transcribe_cpp::route_model_options(),
         }
@@ -1762,6 +1783,9 @@ impl AsrProviderFactory {
             }
             AsrProviderType::GeminiTranscribe => Box::new(
                 gemini_transcribe::GeminiTranscribeProvider::new(selected_model_id),
+            ),
+            AsrProviderType::MistralVoxtral => Box::new(
+                mistral_voxtral::MistralVoxtralProvider::new(selected_model_id),
             ),
             #[cfg(feature = "asr-transcribe-cpp")]
             AsrProviderType::TranscribeCpp => Box::new(transcribe_cpp::TranscribeCppProvider::new(

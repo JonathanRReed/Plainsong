@@ -1276,6 +1276,7 @@ fn normalize_transcription_provider_value(provider: &str) -> String {
         "qwen3_asr" => "qwen3_asr".to_string(),
         "deepgram" => "deepgram".to_string(),
         "gemini_transcribe" => "gemini_transcribe".to_string(),
+        "mistral_voxtral" => "mistral_voxtral".to_string(),
         // Only when the spike is compiled in. A default build has no engine
         // that answers to this name, so it must land on `whisper` through the
         // fallback below rather than become a ghost route in the settings file.
@@ -1351,6 +1352,13 @@ fn normalize_transcription_model_id(provider: &str, model_id: &str) -> String {
             "" | "gemini-3.5-transcribe-live" => "gemini-3.5-transcribe".to_string(),
             value => value.to_string(),
         },
+        "mistral_voxtral" => {
+            // voxtral-mini-latest is a moving alias and the realtime model is
+            // a websocket route the batch endpoint cannot serve; both
+            // normalize to the pinned snapshot (see mistral_voxtral.rs's
+            // sanitize_mistral_model_id).
+            crate::asr::mistral_voxtral::sanitize_mistral_model_id(model_id).to_string()
+        }
         // `route_spec_for`, not `spec_for`: the latter also resolves the
         // Nemotron streaming GGUF that the benchmark loads to prove the runtime
         // path and that `model_options()` deliberately never offers. Normalizing

@@ -166,6 +166,32 @@ export const MODEL_WEIGHTS = [
     pinnedIn: "rust-sidecar/src/asr/transcribe_cpp.rs (MODEL_SPECS)",
   },
   {
+    name: "Voxtral Mini 3B 2507 (GGUF Q4_K_M)",
+    usedFor:
+      "Measuring Mistral's open-weights Voxtral against the shipped Parakeet default on this hardware, from `benchmark-latency`. It is never offered as a transcription route: see artifacts/qa/model-selection-2026-09-03.md.",
+    repository:
+      "https://huggingface.co/handy-computer/Voxtral-Mini-3B-2507-gguf",
+    revision: "5690205813042c07cbaa86d2a9dcc585fcd31304",
+    license: "Apache-2.0",
+    note:
+      "A GGUF conversion of Mistral's mistralai/Voxtral-Mini-3B-2507. The GGUF repository's own card metadata declares apache-2.0, matching the source weights, verified 2026-09-03. Downloadable only behind the optional transcribe.cpp runtime and not selectable as a route, so nothing redistributes it.",
+    files: ["Voxtral-Mini-3B-2507-Q4_K_M.gguf"],
+    pinnedIn: "rust-sidecar/src/asr/transcribe_cpp.rs (MODEL_SPECS)",
+  },
+  {
+    name: "Voxtral Mini 4B Realtime 2602 (GGUF Q4_K_M)",
+    usedFor:
+      "Measuring Mistral's open-weights streaming Voxtral against the shipped streaming route on this hardware, from `benchmark-latency`. It is never offered as a transcription route.",
+    repository:
+      "https://huggingface.co/handy-computer/Voxtral-Mini-4B-Realtime-2602-gguf",
+    revision: "b3e1c979e3775cbd0a49a65878a0ec7f06789ed7",
+    license: "Apache-2.0",
+    note:
+      "A GGUF conversion of Mistral's mistralai/Voxtral-Mini-4B-Realtime-2602, apache-2.0 on both the source and the conversion, verified 2026-09-03. Downloadable only behind the optional transcribe.cpp runtime and not selectable as a route.",
+    files: ["Voxtral-Mini-4B-Realtime-2602-Q4_K_M.gguf"],
+    pinnedIn: "rust-sidecar/src/asr/transcribe_cpp.rs (MODEL_SPECS)",
+  },
+  {
     name: "Moonshine (ONNX)",
     usedFor: "Low-latency English speech recognition, tiny and base.",
     repository: "https://huggingface.co/UsefulSensors/moonshine",
