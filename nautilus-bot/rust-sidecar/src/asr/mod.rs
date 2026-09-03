@@ -353,6 +353,16 @@ pub struct TranscriptionOptions {
     /// 2026-09-01), so dictation gets the dictionary and meetings get the
     /// speakers, and neither lane can silently take the other's shape.
     pub request_speaker_labels: bool,
+    /// The transcription language the user selected, as they wrote it
+    /// (`"en"`, `"en-US"`, `"fr"`); `None` is the default, meaning auto.
+    ///
+    /// Local routes ignore it and auto-detect -- whisper.cpp deliberately
+    /// passes `None` to its decoder -- but a cloud API has to be *told*
+    /// something, and its default is rarely "detect". Deepgram's is English:
+    /// with no `language` parameter, a French meeting came back as English
+    /// nonsense while the route advertised itself as multilingual. Providers
+    /// that read this map it onto their own vocabulary.
+    pub language: Option<String>,
 }
 
 #[async_trait]
@@ -362,6 +372,23 @@ pub trait AsrProvider: Send + Sync {
     fn is_available(&self) -> bool;
     fn model_info(&self) -> ModelInfo;
     async fn transcribe(&self, audio_path: &Path) -> Result<TranscriptionResult>;
+    /// `transcribe` with per-request options, for the whole-file meeting route.
+    ///
+    /// The default drops them, exactly like `transcribe_bytes_with_options`, so
+    /// a provider with nothing to do with them needs no change. Providers with
+    /// a whole-file meeting route override it: without this the caller's
+    /// options were discarded on the path, and the two providers that have such
+    /// a route had to hard-code `request_speaker_labels: true` inside their own
+    /// `transcribe` -- a second copy of the caller's intent that nothing kept
+    /// in step, and a language or vocabulary hint that could never arrive.
+    async fn transcribe_path_with_options(
+        &self,
+        audio_path: &Path,
+        options: &TranscriptionOptions,
+    ) -> Result<TranscriptionResult> {
+        let _ = options;
+        self.transcribe(audio_path).await
+    }
     async fn transcribe_bytes(&self, audio_data: &[u8]) -> Result<TranscriptionResult>;
     /// `transcribe_bytes` with per-request options. The default drops the
     /// options on the floor, so a provider that has no use for them (no
@@ -832,7 +859,8 @@ impl AsrProviderType {
             AsrProviderType::Deepgram => vec![
                 ModelOption {
                     id: "nova-3".to_string(),
-                    label: "Nova-3 (recommended, $0.0043/min)".to_string(),
+                    label: "Nova-3 (recommended, $0.0043/min English, $0.0052/min other languages)"
+                        .to_string(),
                 },
                 ModelOption {
                     id: "nova-3-medical".to_string(),

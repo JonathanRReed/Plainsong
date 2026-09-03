@@ -51,6 +51,10 @@ pub struct AsrManager {
     /// Per-slot MLX flags, these are the authoritative source for routing.
     dictation_mlx_enabled: RwLock<bool>,
     meeting_mlx_enabled: RwLock<bool>,
+    /// `transcription.language` as the user set it, mirrored here so the
+    /// meeting lane -- which builds its own options and never sees the
+    /// settings -- can tell a cloud provider what to listen for.
+    transcription_language: RwLock<Option<String>>,
     silence_skip_enabled: RwLock<bool>,
     platform_optimization: RwLock<crate::settings::PlatformOptimizationSettings>,
     last_runtime_errors: RwLock<HashMap<AsrProviderType, String>>,
@@ -98,6 +102,7 @@ impl AsrManager {
             mlx_accelerated_providers: RwLock::new(HashSet::new()),
             dictation_mlx_enabled: RwLock::new(false),
             meeting_mlx_enabled: RwLock::new(false),
+            transcription_language: RwLock::new(None),
             last_runtime_errors: RwLock::new(HashMap::new()),
             provider_inventory_cache: RwLock::new(None),
             provider_info_cache: RwLock::new(None),
@@ -235,6 +240,14 @@ impl AsrManager {
     pub async fn set_meeting_mlx_enabled(&self, enabled: bool) {
         *self.meeting_mlx_enabled.write().await = enabled;
         self.invalidate_provider_info_cache().await;
+    }
+
+    pub async fn set_transcription_language(&self, language: Option<String>) {
+        *self.transcription_language.write().await = language;
+    }
+
+    pub async fn transcription_language(&self) -> Option<String> {
+        self.transcription_language.read().await.clone()
     }
 
     pub async fn dictation_mlx_enabled(&self) -> bool {
@@ -771,7 +784,7 @@ impl AsrManager {
         let provider = Self::provider_with_model(actual_provider, Some(model_id));
         let request = async {
             match (file_path, audio_data) {
-                (Some(path), None) => provider.transcribe(path).await,
+                (Some(path), None) => provider.transcribe_path_with_options(path, options).await,
                 (None, Some(bytes)) => provider.transcribe_bytes_with_options(bytes, options).await,
                 _ => Err(anyhow::anyhow!("Invalid transcription input")),
             }
@@ -1028,7 +1041,7 @@ impl AsrManager {
             Some(audio_data),
             selected_model,
             Some(mlx_enabled),
-            &meeting_transcription_options(),
+            &meeting_transcription_options(self.transcription_language().await),
         )
         .await
     }
@@ -1039,11 +1052,11 @@ impl AsrManager {
     /// a provider's speaker numbering is scoped to one request, so this is the
     /// only shape in which its diarization covers the whole recording.
     ///
-    /// A path-mode transcription reaches the provider through
-    /// `AsrProvider::transcribe`, which takes no options, so the two providers
-    /// with a whole-file meeting route ask for speaker labels inside their own
-    /// `transcribe`. The options below only apply if the engine/provider
-    /// fallback chain ever serves this request through a bytes-mode call.
+    /// The options below reach the provider whichever way the request is
+    /// served: path mode goes through `AsrProvider::transcribe_path_with_options`
+    /// and bytes mode through `transcribe_bytes_with_options`. They used to be
+    /// dropped on the path, which is why the two whole-file providers each
+    /// hard-coded `request_speaker_labels: true` inside their own `transcribe`.
     pub async fn transcribe_path_for_meeting(
         &self,
         provider_type: AsrProviderType,
@@ -1062,10 +1075,7 @@ impl AsrManager {
             None,
             selected_model,
             Some(mlx_enabled),
-            &TranscriptionOptions {
-                request_speaker_labels: true,
-                ..TranscriptionOptions::default()
-            },
+            &meeting_transcription_options(self.transcription_language().await),
         )
         .await
     }
@@ -1963,9 +1973,13 @@ fn runtime_diagnostics_for_provider(
 ///
 /// No vocabulary hint: the personal dictionary is a dictation feature, and
 /// Gemini's API refuses it on the same request as timestamps anyway.
-fn meeting_transcription_options() -> TranscriptionOptions {
+///
+/// The language is carried because a cloud provider has to be told one; see
+/// `TranscriptionOptions::language`.
+fn meeting_transcription_options(language: Option<String>) -> TranscriptionOptions {
     TranscriptionOptions {
         request_speaker_labels: true,
+        language,
         ..TranscriptionOptions::default()
     }
 }
@@ -2278,12 +2292,39 @@ mod tests {
         // timeline, its playhead and any chance of a diarization merge -- a
         // regression that would look like "speakers stopped working" rather
         // than "timestamps stopped arriving".
-        let options = meeting_transcription_options();
+        let options = meeting_transcription_options(None);
         assert!(options.request_speaker_labels);
         // And never the personal dictionary: it is a dictation feature, and
         // Gemini's API refuses it alongside timestamps.
         assert!(options.vocabulary_hint.is_none());
         assert!(!options.translate_to_english);
+    }
+
+    /// A meeting's options have to reach the provider, on the path as well as
+    /// on the bytes route.
+    ///
+    /// They used to be dropped in path mode, so the whole-file providers
+    /// hard-coded `request_speaker_labels: true` inside their own `transcribe`
+    /// and nothing else -- a language, a keyterm list -- could ever arrive.
+    #[tokio::test]
+    async fn a_meeting_carries_the_selected_language_to_the_provider() {
+        assert_eq!(meeting_transcription_options(None).language, None);
+        assert_eq!(
+            meeting_transcription_options(Some("fr".to_string())).language,
+            Some("fr".to_string())
+        );
+
+        // And the manager is where the meeting lane learns it, because it
+        // builds its own options and never sees the settings.
+        let manager = AsrManager::new();
+        assert_eq!(manager.transcription_language().await, None);
+        manager
+            .set_transcription_language(Some("de".to_string()))
+            .await;
+        assert_eq!(
+            manager.transcription_language().await,
+            Some("de".to_string())
+        );
     }
 
     #[test]

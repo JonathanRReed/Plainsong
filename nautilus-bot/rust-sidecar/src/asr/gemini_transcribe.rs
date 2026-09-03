@@ -814,6 +814,24 @@ impl AsrProvider for GeminiTranscribeProvider {
     }
 
     async fn transcribe(&self, audio_path: &Path) -> Result<TranscriptionResult> {
+        // The whole-file path exists for the meeting lane, which is the only
+        // caller that wants speaker labels. A caller with real options goes
+        // through `transcribe_path_with_options` instead.
+        self.transcribe_path_with_options(
+            audio_path,
+            &TranscriptionOptions {
+                request_speaker_labels: true,
+                ..TranscriptionOptions::default()
+            },
+        )
+        .await
+    }
+
+    async fn transcribe_path_with_options(
+        &self,
+        audio_path: &Path,
+        options: &TranscriptionOptions,
+    ) -> Result<TranscriptionResult> {
         self.transcribe_impl(
             &self.whole_file_client,
             GEMINI_WHOLE_FILE_HTTP_TIMEOUTS,
@@ -821,12 +839,7 @@ impl AsrProvider for GeminiTranscribeProvider {
             // lane, and a thirty-minute recording is 172.8 MB of mono 16-bit
             // PCM at a 48 kHz capture rate.
             GeminiUploadSource::File(audio_path.to_path_buf()),
-            &TranscriptionOptions {
-                // The whole-file path exists for the meeting lane, which is the
-                // only caller that wants speaker labels.
-                request_speaker_labels: true,
-                ..TranscriptionOptions::default()
-            },
+            options,
         )
         .await
     }

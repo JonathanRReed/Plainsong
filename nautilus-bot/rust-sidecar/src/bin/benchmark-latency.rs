@@ -857,6 +857,8 @@ fn main() {
             vocabulary_hint: args.vocabulary_hint.clone(),
             translate_to_english: false,
             request_speaker_labels: false,
+            // The benchmark measures the shipped default, which is auto.
+            language: None,
         };
         let warmup_started = Instant::now();
         let warmup_result = provider

@@ -378,6 +378,16 @@ evidence is stale and must be recaptured before this becomes a candidate.
   files that still carry it load cleanly and are rewritten without it.
 
 ### Fixed
+- Deepgram now transcribes the language you chose. Plainsong sent no language
+  at all, and Deepgram's default is English, so a French meeting came back as
+  English nonsense while the route advertised itself as multilingual. With the
+  transcription language set to English it asks for Deepgram's English model;
+  on anything else, including auto, it asks Nova-3 to code-switch. Deepgram
+  prices those differently ($0.0043/min against $0.0052/min) and the picker
+  now says so. Nova-3 Medical is English-only and is always asked for English.
+- A whole-meeting request now carries the options the caller built for it.
+  They were discarded on the from-disk path, which is the one a whole meeting
+  takes, so the language could not reach it and neither could keyterms.
 - The whole-meeting Deepgram limit says what it is. Plainsong claimed a
   "Deepgram four-hour ceiling"; Deepgram documents no duration limit at all,
   only a 2 GB request size and a ten-minute processing timeout. Four hours of

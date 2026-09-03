@@ -115,9 +115,14 @@ fn build_deepgram_query(
     model_id: &str,
     diarize: bool,
     keyterms: &[String],
+    language: Option<&str>,
 ) -> Vec<(&'static str, String)> {
     let mut query: Vec<(&'static str, String)> = vec![
         ("model", model_id.to_string()),
+        (
+            "language",
+            deepgram_language(model_id, language).to_string(),
+        ),
         ("smart_format", "true".to_string()),
         ("utterances", "true".to_string()),
         ("mip_opt_out", "true".to_string()),
@@ -135,10 +140,51 @@ fn build_deepgram_query(
 /// percent-encoded. A keyterm is arbitrary text out of the user's personal
 /// dictionary, so it is encoded by the URL parser rather than concatenated
 /// into a query string by hand.
-fn build_deepgram_url(model_id: &str, diarize: bool, keyterms: &[String]) -> Result<reqwest::Url> {
-    let query = build_deepgram_query(model_id, diarize, keyterms);
+fn build_deepgram_url(
+    model_id: &str,
+    diarize: bool,
+    keyterms: &[String],
+    language: Option<&str>,
+) -> Result<reqwest::Url> {
+    let query = build_deepgram_query(model_id, diarize, keyterms, language);
     reqwest::Url::parse_with_params(DEEPGRAM_LISTEN_URL, &query)
         .context("Failed to build the Deepgram request URL")
+}
+
+/// The `language` value a request carries.
+///
+/// Deepgram's default when the parameter is absent is English, and nothing was
+/// sending it -- so every request was English-only while the route advertised
+/// itself as multilingual and the picker offered it to everyone. A French
+/// meeting came back as English nonsense with nothing saying why.
+///
+/// `multi` is Nova-3's code-switching mode. It is not free: Deepgram prices
+/// multilingual at $0.0052/min against $0.0043/min monolingual (fetched
+/// 2026-09-02), so it is sent when the user's language setting says the audio
+/// may not be English -- including "auto", because auto that quietly means
+/// English is the bug this fixes -- and `en` when they have chosen English.
+/// The route copy states both rates.
+///
+/// `nova-3-medical` is always asked for `en`: it is an English clinical model,
+/// and asking it for a mode it does not offer would fail the request rather
+/// than degrade. If that ever changes, the change belongs here.
+pub(crate) fn deepgram_language(model_id: &str, selected: Option<&str>) -> &'static str {
+    if model_id.trim() != "nova-3" {
+        return "en";
+    }
+    let Some(selected) = selected.map(str::trim).filter(|value| !value.is_empty()) else {
+        return "multi";
+    };
+    let primary = selected
+        .split(['-', '_'])
+        .next()
+        .unwrap_or_default()
+        .to_ascii_lowercase();
+    if primary == "en" {
+        "en"
+    } else {
+        "multi"
+    }
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -417,7 +463,12 @@ impl DeepgramProvider {
             .as_ref()
             .map(|hint| deepgram_keyterms(hint.terms()))
             .unwrap_or_default();
-        let url = build_deepgram_url(&self.model_id, options.request_speaker_labels, &keyterms)?;
+        let url = build_deepgram_url(
+            &self.model_id,
+            options.request_speaker_labels,
+            &keyterms,
+            options.language.as_deref(),
+        )?;
         let response = client
             .post(url)
             .header(reqwest::header::AUTHORIZATION, format!("Token {api_key}"))
@@ -497,6 +548,9 @@ impl AsrProvider for DeepgramProvider {
     fn description(&self) -> &str {
         "Cloud speech-to-text via Deepgram's Nova-3 batch API. Returns speaker labels and \
          word timestamps, and accepts keyterm prompting from your personal dictionary. \
+         With the transcription language set to English it uses Deepgram's English model \
+         ($0.0043/min); on any other setting, including auto, it asks Nova-3 to \
+         code-switch, which Deepgram prices at $0.0052/min. Nova-3 Medical is English-only. \
          Every request opts out of Deepgram's model improvement programme. \
          Requires DEEPGRAM_API_KEY from https://console.deepgram.com"
     }
@@ -522,6 +576,29 @@ impl AsrProvider for DeepgramProvider {
     }
 
     async fn transcribe(&self, audio_path: &Path) -> Result<TranscriptionResult> {
+        // The whole-file path exists for the meeting lane, which is the only
+        // caller that wants speaker labels. A caller that has real options
+        // goes through `transcribe_path_with_options` instead.
+        self.transcribe_path_with_options(
+            audio_path,
+            &TranscriptionOptions {
+                request_speaker_labels: true,
+                ..TranscriptionOptions::default()
+            },
+        )
+        .await
+    }
+
+    /// The whole-recording meeting route, with the caller's options.
+    ///
+    /// The options used to be discarded on this path, so the language never
+    /// arrived and a keyterm list could not have arrived even if the meeting
+    /// lane built one.
+    async fn transcribe_path_with_options(
+        &self,
+        audio_path: &Path,
+        options: &TranscriptionOptions,
+    ) -> Result<TranscriptionResult> {
         let api_key = Self::api_key().context(
             "Deepgram API key not set. Add it in Settings → API Keys or set DEEPGRAM_API_KEY.",
         )?;
@@ -535,12 +612,7 @@ impl AsrProvider for DeepgramProvider {
                 &self.whole_file_client,
                 DEEPGRAM_WHOLE_FILE_HTTP_TIMEOUTS,
                 &api_key,
-                &TranscriptionOptions {
-                    // The whole-file path exists for the meeting lane, which
-                    // is the only caller that wants speaker labels.
-                    request_speaker_labels: true,
-                    ..TranscriptionOptions::default()
-                },
+                options,
                 body,
             )
             .await?;
@@ -572,7 +644,7 @@ impl AsrProvider for DeepgramProvider {
 #[cfg(test)]
 mod tests {
     use super::{
-        build_deepgram_query, deepgram_keyterms, parse_deepgram_transcript,
+        build_deepgram_query, deepgram_keyterms, deepgram_language, parse_deepgram_transcript,
         sanitize_deepgram_model_id, DeepgramProvider, DEEPGRAM_HTTP_TIMEOUTS,
         DEEPGRAM_WHOLE_FILE_HTTP_TIMEOUTS,
     };
@@ -622,7 +694,7 @@ mod tests {
     fn every_request_opts_out_of_the_model_improvement_programme() {
         for diarize in [true, false] {
             for model in ["nova-3", "nova-3-medical"] {
-                let query = build_deepgram_query(model, diarize, &[]);
+                let query = build_deepgram_query(model, diarize, &[], None);
                 assert!(
                     query.contains(&("mip_opt_out", "true".to_string())),
                     "mip_opt_out missing for model={model} diarize={diarize}"
@@ -633,11 +705,17 @@ mod tests {
 
     #[test]
     fn query_carries_diarization_formatting_and_utterances() {
-        let query = build_deepgram_query("nova-3", true, &strings(&["Plainsong", "neume"]));
+        let query = build_deepgram_query(
+            "nova-3",
+            true,
+            &strings(&["Plainsong", "neume"]),
+            Some("en"),
+        );
         assert_eq!(
             query,
             vec![
                 ("model", "nova-3".to_string()),
+                ("language", "en".to_string()),
                 ("smart_format", "true".to_string()),
                 ("utterances", "true".to_string()),
                 ("mip_opt_out", "true".to_string()),
@@ -647,8 +725,45 @@ mod tests {
             ]
         );
 
-        let undiarized = build_deepgram_query("nova-3", false, &[]);
+        let undiarized = build_deepgram_query("nova-3", false, &[], None);
         assert!(!undiarized.iter().any(|(name, _)| *name == "diarize"));
+    }
+
+    /// Deepgram's default with no `language` parameter is English, so a route
+    /// that sent none was English-only while `model_info().languages` claimed
+    /// multilingual and the picker offered it to everyone.
+    #[test]
+    fn the_request_states_a_language_instead_of_letting_deepgram_assume_english() {
+        // Every request carries one, whatever the caller asked for.
+        for model in ["nova-3", "nova-3-medical"] {
+            for language in [None, Some("en"), Some("fr")] {
+                let query = build_deepgram_query(model, false, &[], language);
+                assert!(
+                    query.iter().any(|(name, _)| *name == "language"),
+                    "no language for model={model} language={language:?}"
+                );
+            }
+        }
+
+        // Auto is not English: it is exactly the case where the audio may not
+        // be, so Nova-3 is asked to code-switch.
+        assert_eq!(deepgram_language("nova-3", None), "multi");
+        assert_eq!(deepgram_language("nova-3", Some("")), "multi");
+        assert_eq!(deepgram_language("nova-3", Some("  ")), "multi");
+        assert_eq!(deepgram_language("nova-3", Some("fr")), "multi");
+        assert_eq!(deepgram_language("nova-3", Some("pt-BR")), "multi");
+
+        // A user who chose English gets the monolingual model, which is also
+        // the cheaper one ($0.0043/min against $0.0052/min).
+        assert_eq!(deepgram_language("nova-3", Some("en")), "en");
+        assert_eq!(deepgram_language("nova-3", Some("en-US")), "en");
+        assert_eq!(deepgram_language("nova-3", Some("EN_gb")), "en");
+
+        // The clinical model is English-only, so it is never asked for a mode
+        // it does not offer -- that would fail the request, not degrade it.
+        for language in [None, Some("fr"), Some("en")] {
+            assert_eq!(deepgram_language("nova-3-medical", language), "en");
+        }
     }
 
     #[test]

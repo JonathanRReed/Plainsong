@@ -4218,6 +4218,7 @@ async fn reprocess_dictation_impl(
         ),
         translate_to_english: translation_route == DictationTranslationRoute::WhisperNative,
         request_speaker_labels: false,
+        language: settings_snapshot.transcription.language.clone(),
     };
 
     if let Ok(mut overlay) = state.dictation_overlay_state.lock() {
@@ -24654,6 +24655,9 @@ async fn apply_transcription_settings_to_asr_manager(
     asr_manager
         .set_meeting_mlx_enabled(transcription.meeting_mlx_enabled)
         .await;
+    asr_manager
+        .set_transcription_language(transcription.language.clone())
+        .await;
     asr_manager.set_default_provider(default_provider).await;
     asr_manager
         .set_silence_skip_enabled(transcription.silence_skip_enabled)
@@ -26659,6 +26663,7 @@ async fn stop_dictation_for_sidecar(
         ),
         translate_to_english: translation_route == DictationTranslationRoute::WhisperNative,
         request_speaker_labels: false,
+        language: settings_snapshot.transcription.language.clone(),
     };
     let vocabulary_hint_terms_built = transcription_options
         .vocabulary_hint
@@ -33072,6 +33077,10 @@ pub async fn dispatch_command(
             state
                 .asr_manager
                 .set_meeting_mlx_enabled(transcription.meeting_mlx_enabled)
+                .await;
+            state
+                .asr_manager
+                .set_transcription_language(transcription.language.clone())
                 .await;
             Ok(serde_json::Value::Null)
         }
