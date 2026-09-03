@@ -23,7 +23,7 @@ allowed to serve.
   `build.rs` does — `xcrun swiftc -O -target arm64-apple-macosx13.0`,
   `MACOSX_DEPLOYMENT_TARGET=13.0`, ad-hoc signed with
   `macos_speech_helper.entitlements.plist` (Speech recognition only, nothing
-  else). Binary sha256 `d18cb796…50c7`.
+  else). Binary sha256 `28cc21d0…5649`.
 - Source: this lane's branch at `12139d03`, cut from `parity-waves` at
   `c865ba8f`.
 - **Machine state: shared with other parity lanes.** The 1-minute load average
@@ -193,8 +193,10 @@ machine.
 `#available(macOS 26, *)` guard, the timestamp attribute, the refusal when
 assets are missing, the `--live` default staying on the old protocol, the two
 new typed error codes, every new probe field's type, that a resolved
-`speech_analyzer` engine implies `speech_analyzer_available`, and that an
-unknown `--engine` returns a typed `malformed_request`.
+`speech_analyzer` engine implies `speech_analyzer_available`, and that both an
+unknown `--engine` and `--live --engine auto` return a typed
+`malformed_request` — live mode refuses to auto-select rather than resolving
+to one engine silently.
 
 ## What a reader still has to do on-device
 

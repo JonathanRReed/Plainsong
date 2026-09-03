@@ -432,6 +432,19 @@ if (!sourceOnly) {
     fail(`unknown --engine did not return its typed error: ${JSON.stringify(badEnginePayload)}`);
   }
 
+  // Live mode does not auto-select: the two engines emit different event
+  // shapes, so a caller has to name one.
+  const liveAuto = run(
+    helperPath,
+    ["--live", "--sample-rate", "16000", "--engine", "auto"],
+    { allowFailure: true },
+  );
+  if (liveAuto.status === 0) fail("--live --engine auto must exit non-zero");
+  const liveAutoPayload = parseLastJsonLine(liveAuto.stdout, "--live --engine auto");
+  if (liveAutoPayload.type !== "error" || liveAutoPayload.code !== "malformed_request") {
+    fail(`--live --engine auto did not return its typed error: ${JSON.stringify(liveAutoPayload)}`);
+  }
+
   const signature = run("/usr/bin/codesign", ["-d", "--entitlements", ":-", helperPath], {
     allowFailure: true,
   });

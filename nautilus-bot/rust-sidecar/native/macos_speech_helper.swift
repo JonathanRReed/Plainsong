@@ -1679,12 +1679,17 @@ private struct ArgumentParser {
       index += 1
       switch option {
       case "--engine":
+        // `auto` is rejected here rather than quietly resolved: live mode does
+        // not auto-select, because the two engines emit different event
+        // shapes, and a caller that asked for `auto` and silently got the
+        // older protocol would have no way to notice.
         guard engine == nil, index < arguments.count,
-          let parsed = EngineRequest(rawValue: arguments[index])
+          let parsed = EngineRequest(rawValue: arguments[index]),
+          parsed != .auto
         else {
           fail(
             .malformedRequest,
-            "--engine requires one of: auto, speech_analyzer, sf_speech_recognizer.",
+            "--live --engine requires speech_analyzer or sf_speech_recognizer; live mode does not auto-select.",
             details: ["usage": usage]
           )
         }
