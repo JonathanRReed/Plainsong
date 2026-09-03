@@ -66,6 +66,40 @@ candle-transformers = { version = "0.10", optional = true }
 # Tokenizers for HuggingFace models
 tokenizers = { version = "0.23", optional = true }
 
+# transcribe.cpp: one ggml runtime that hosts Parakeet TDT, Whisper, Nemotron
+# streaming, Qwen3-ASR, Cohere Transcribe, Voxtral and Moonshine v2 from a
+# single GGUF loader. Pulled in only by the `asr-transcribe-cpp` spike feature
+# (OFF by default, not in the release feature list) so the shipped binary is
+# unchanged; see artifacts/qa/transcribe-cpp-spike-2026-09-02.md for the
+# measurement and the adopt/defer recommendation. MIT-licensed, same as this
+# crate.
+#
+# The crates.io release, NOT the git rev it was cut from. A `git` source is not
+# resolvable from a cargo cache that only holds registry crates, so
+# `cargo metadata --locked --offline` failed for EVERY feature set -- including
+# the default and release ones that compile none of this -- which took
+# `lint:rust`, `test:rust`, `licenses:generate` and `release:mac` with it on an
+# offline box. Registry sources resolve from the local cache, and the lockfile
+# gains a checksum a git source cannot carry.
+#
+# Same bytes: transcribe-cpp 0.2.3 and transcribe-cpp-sys 0.2.3 were published
+# from 63a44d9239d610b3908e8a66b384924cd4a77217 (their `.cargo_vcs_info.json`
+# records that sha, which was the `release: 0.2.3` commit this used to pin),
+# and their `Cargo.toml.orig`, Rust sources, `include/`, `src/`, `cmake/` and
+# vendored `ggml/` trees diff clean against that checkout.
+#
+# `default-features = false, features = ["metal"]` rather than a `whisper-gpu`-
+# style `transcribe-cpp?/metal` feature in `default`. That shape was tried and
+# reverted: a `dep?/feature` reference from an ENABLED feature pulls the optional
+# crate into the release resolve graph even though nothing compiles it, which put
+# transcribe-cpp and transcribe-cpp-sys into the shipped THIRD-PARTY-NOTICES
+# (532 -> 534 Rust packages) -- notices for two crates the shipped binary does
+# not contain. Upstream's build.rs only forwards -DTRANSCRIBE_METAL on Apple
+# targets and documents `metal` as a no-op elsewhere, so naming it here does not
+# make this dependency macOS-only. A CPU measurement needs no rebuild either
+# way: PLAINSONG_TRANSCRIBE_CPP_BACKEND=cpu pins the device at runtime.
+transcribe-cpp = { version = "0.2.3", default-features = false, features = ["metal"], optional = true }
+
 # Audio preprocessing. Not optional: the mixed ("Me + Them") capture path
 # resamples whichever of the mic/loopback devices is running at the lower rate
 # onto the session's target rate, so this has to be present in every build, not
@@ -102,6 +136,13 @@ urlencoding = "2.1"
 hostname = "0.4"
 zip = { version = "8.6", default-features = false, features = ["deflate"] }
 walkdir = "2.5"
+
+# Speaker diarization via pyannote community-1 (spike, OFF by default).
+# Optional and gated behind the `diarization-speakrs` Cargo feature; see the
+# feature comment below for the build status on this platform. `online` is
+# deliberately disabled: it pulls hf-hub, which would fetch model weights
+# outside the pinned-hash download manager.
+speakrs = { version = "0.5.0", optional = true, default-features = false, features = ["default-linalg"] }
 
 # Optional progress bars
 indicatif = { version = "0.18", optional = true }
@@ -143,6 +184,14 @@ asr-whisper = ["whisper-rs", "download-manager"]
 asr-parakeet = ["ort", "ndarray", "download-manager", "audio-processing", "rustfft", "tokenizers"]
 asr-canary = ["candle-core", "candle-nn", "candle-transformers", "tokenizers", "download-manager", "audio-processing"]
 asr-all = ["asr-whisper", "asr-parakeet", "asr-canary", "diarization"]
+
+# transcribe.cpp spike (OFF by default, and deliberately NOT in
+# scripts/sidecar-cargo-features.mjs, so neither the release build nor the
+# default `cargo build` compiles a byte of it). Adds one experimental local
+# route: Parakeet TDT 0.6B v3 in GGUF on Metal, through the same ggml runtime
+# Handy ships. Evidence lives in
+# artifacts/qa/transcribe-cpp-spike-2026-09-02.md.
+asr-transcribe-cpp = ["transcribe-cpp", "download-manager"]
 
 # Whisper GPU acceleration (Metal — macOS only). No CUDA feature is wired;
 # non-macOS builds must use --no-default-features and re-enable
@@ -213,6 +262,9 @@ desktop-shell = []
 
 # Speaker diarization (requires ONNX runtime)
 diarization = ["ort", "ndarray", "rustfft"]
+# EXPERIMENTAL, OFF by default and NOT shipped: swap the embedding+AHC
+# diarizer for speakrs (pyannote community-1 in Rust on ONNX Runtime).
+diarization-speakrs = ["diarization", "dep:speakrs"]
 
 [patch.crates-io]
 # CPAL 0.18.1's macOS loopback implementation links the macOS 14.2 process-tap

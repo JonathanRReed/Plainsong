@@ -1555,64 +1555,78 @@ struct DiarizationModelOption {
     installed: bool,
 }
 
-fn diarization_model_path(model_id: &str) -> Option<std::path::PathBuf> {
-    let models_dir = crate::paths::data_dir()
-        .unwrap_or_else(|| std::path::PathBuf::from("."))
-        .join("Plainsong")
-        .join("models")
-        .join("diarization");
-    match model_id {
-        "ecapa_tdnn_speaker" => Some(models_dir.join("ecapa_tdnn_speaker.onnx")),
-        "resnet34_speaker" => Some(models_dir.join("resnet34_speaker.onnx")),
-        "campplus_speaker" => Some(models_dir.join("campplus_speaker.onnx")),
-        "eres2netv2_speaker" => Some(models_dir.join("eres2netv2_speaker.onnx")),
-        _ => None,
-    }
-}
-
 fn list_diarization_models() -> Vec<DiarizationModelOption> {
-    vec![
+    #[allow(unused_mut)]
+    let mut models = vec![
         DiarizationModelOption {
             id: "ecapa_tdnn_speaker",
-            label: "ECAPA-TDNN 512",
+            label: diarization::model_label("ecapa_tdnn_speaker"),
             description: "Fast and accurate, recommended for most use cases (~25 MB)",
-            installed: diarization_model_path("ecapa_tdnn_speaker")
-                .map(|p| download::is_diarization_model_artifact_trusted("ecapa_tdnn_speaker", &p))
-                .unwrap_or(false),
+            installed: diarization::is_model_available("ecapa_tdnn_speaker"),
         },
         DiarizationModelOption {
             id: "resnet34_speaker",
-            label: "ResNet34",
+            label: diarization::model_label("resnet34_speaker"),
             description: "Balanced performance, good accuracy with moderate speed (~30 MB)",
-            installed: diarization_model_path("resnet34_speaker")
-                .map(|p| download::is_diarization_model_artifact_trusted("resnet34_speaker", &p))
-                .unwrap_or(false),
+            installed: diarization::is_model_available("resnet34_speaker"),
         },
         DiarizationModelOption {
             id: "campplus_speaker",
-            label: "CAM++",
+            label: diarization::model_label("campplus_speaker"),
             description: "Highest accuracy, best for challenging audio conditions (~35 MB)",
-            installed: diarization_model_path("campplus_speaker")
-                .map(|p| download::is_diarization_model_artifact_trusted("campplus_speaker", &p))
-                .unwrap_or(false),
+            installed: diarization::is_model_available("campplus_speaker"),
         },
         DiarizationModelOption {
             id: "eres2netv2_speaker",
-            label: "ERes2NetV2 (int8)",
+            label: diarization::model_label("eres2netv2_speaker"),
             description: "Modern int8-quantized embedder, 192-dim, compact (~28 MB)",
-            installed: diarization_model_path("eres2netv2_speaker")
-                .map(|p| download::is_diarization_model_artifact_trusted("eres2netv2_speaker", &p))
-                .unwrap_or(false),
+            installed: diarization::is_model_available("eres2netv2_speaker"),
         },
-    ]
+    ];
+
+    // Only offered when the backend is compiled in, so the picker never lists
+    // a model this build has no code to run. The label says "experimental"
+    // because it is: no shipped build enables it, and Plainsong has no DER
+    // number of its own for either backend yet.
+    #[cfg(feature = "diarization-speakrs")]
+    models.push(DiarizationModelOption {
+        id: download::SPEAKRS_MODEL_ID,
+        label: diarization::model_label(download::SPEAKRS_MODEL_ID),
+        description: SPEAKRS_PICKER_DESCRIPTION,
+        installed: diarization::is_model_available(download::SPEAKRS_MODEL_ID),
+    });
+
+    models
 }
+
+/// What the picker says about the experimental speakrs entry, shown in the
+/// option itself and therefore before anything is downloaded.
+///
+/// The licensing sentence is here rather than only in a Rust doc comment and a
+/// QA receipt: the person who needs to know that these weights are mirrored
+/// without a declared license is the one deciding whether to fetch them.
+#[cfg(feature = "diarization-speakrs")]
+const SPEAKRS_PICKER_DESCRIPTION: &str = concat!(
+    "Full pyannote pipeline with overlap handling, via speakrs. Slower than ",
+    "the embedding models and unmeasured on your audio (~60 MB, ten files). ",
+    "Model weights mirrored without a declared license; upstream terms are ",
+    "CC-BY-4.0 and gated. Not offered in shipped builds until resolved."
+);
 
 #[allow(non_snake_case)]
 fn is_diarization_model_available(modelId: Option<String>) -> bool {
-    let id = modelId.as_deref().unwrap_or("ecapa_tdnn_speaker");
-    diarization_model_path(id)
-        .map(|p| download::is_diarization_model_artifact_trusted(id, &p))
-        .unwrap_or(false)
+    let id = modelId
+        .as_deref()
+        .unwrap_or(diarization::DEFAULT_EMBEDDING_MODEL_ID);
+    // An id this build does not offer is not "available": a run would silently
+    // load ECAPA-TDNN for it, but telling the UI "yes, you have that model"
+    // about a model that does not exist is a different claim. Ids that *are*
+    // offered delegate, so the picker's badge, this probe and the gate on the
+    // automatic pass give one answer instead of three.
+    if !list_diarization_models().iter().any(|model| model.id == id) {
+        return false;
+    }
+    diarization::is_model_available(id)
 }
 
 async fn smoke_test_cursor_insert_impl(
@@ -19382,6 +19396,8 @@ fn asr_provider_to_settings_value(provider: asr::AsrProviderType) -> &'static st
         asr::AsrProviderType::Qwen3Asr => "qwen3_asr",
         asr::AsrProviderType::Deepgram => "deepgram",
         asr::AsrProviderType::GeminiTranscribe => "gemini_transcribe",
+        #[cfg(feature = "asr-transcribe-cpp")]
+        asr::AsrProviderType::TranscribeCpp => "transcribe_cpp",
     }
 }
 
@@ -19401,6 +19417,8 @@ fn asr_provider_from_settings_value(value: &str) -> Option<asr::AsrProviderType>
         "qwen3_asr" => Some(asr::AsrProviderType::Qwen3Asr),
         "deepgram" => Some(asr::AsrProviderType::Deepgram),
         "gemini_transcribe" => Some(asr::AsrProviderType::GeminiTranscribe),
+        #[cfg(feature = "asr-transcribe-cpp")]
+        "transcribe_cpp" => Some(asr::AsrProviderType::TranscribeCpp),
         _ => None,
     }
 }
@@ -30672,8 +30690,9 @@ async fn run_meeting_transcription_pipeline(
             // The post-processing guard keeps retention and reset from removing
             // this recording while best-effort enrichment is still reading it.
             let mut diarization_updated = false;
+            let mut diarization_fallback_notice: Option<String> = None;
             if transcript_persisted {
-                let (enable_diarization, local_diarization_model_id) = {
+                let (enable_diarization, diarization_model_id) = {
                     let sm = state_clone.settings_manager.lock().await;
                     let transcription = &sm.settings().transcription;
                     (
@@ -30684,14 +30703,26 @@ async fn run_meeting_transcription_pipeline(
                             .unwrap_or_else(|| "ecapa_tdnn_speaker".to_string()),
                     )
                 };
+                // The automatic pass runs the model the user picked, not
+                // always the default one, and readiness is asked per model
+                // (the experimental speakrs backend needs a bundle, not one
+                // .onnx). `resolve_model_for_run` answers both questions at
+                // once: whether anything local can run at all, and which model
+                // it will be.
+                let resolved_local_model =
+                    diarization::resolve_model_for_run(&diarization_model_id);
                 let diarizer = resolve_meeting_diarizer(
                     enable_diarization,
                     prefer_provider_diarization,
                     transcript_has_source_aware_speakers(&transcript.segments),
                     transcribed_by_provider,
                     provider_speaker_turns.len(),
-                    diarization::DiarizationEngine::is_real_available(),
+                    resolved_local_model.is_some(),
                 );
+                let local_diarization_model_id = resolved_local_model
+                    .as_ref()
+                    .map(|resolved| resolved.model_id.clone())
+                    .unwrap_or_else(|| diarization_model_id.clone());
                 let diarizer_record = diarizer.record_value(&local_diarization_model_id);
 
                 // Both branches produce a `DiarizationResult` and hand it to
@@ -30738,6 +30769,16 @@ async fn run_meeting_transcription_pipeline(
                             Ok(true) => {
                                 transcript.segments = enriched_segments;
                                 diarization_updated = true;
+                                // Only once labels are actually stored: a
+                                // notice about which model produced them is a
+                                // lie if none were produced. Only the local
+                                // branch can substitute a model, so a provider
+                                // pass carries no notice.
+                                if diarizer == MeetingDiarizer::Local {
+                                    diarization_fallback_notice = resolved_local_model
+                                        .as_ref()
+                                        .and_then(|resolved| resolved.fallback_notice.clone());
+                                }
                                 let mut db = state_clone.db.lock().await;
                                 if let Err(error) = db.log_audit_event(
                                     "meeting_diarization_applied",
@@ -30807,6 +30848,26 @@ async fn run_meeting_transcription_pipeline(
                                 "updatedAt": chrono::Utc::now().to_rfc3339(),
                             }),
                         );
+                        // The completed event has already gone out (completion
+                        // is durable before diarization starts), so a model
+                        // substitution rides the same "a finished meeting can
+                        // still carry a note" path the degraded transcript uses.
+                        if let Some(notice) = diarization_fallback_notice.as_deref() {
+                            tracing::warn!(
+                                "Diarization for {} fell back to the default model: {}",
+                                recording_id_clone,
+                                notice
+                            );
+                            handle_clone.emit_event(
+                                "recording-status-changed",
+                                serde_json::json!({
+                                    "recordingId": &recording_id_clone,
+                                    "status": "completed",
+                                    "message": notice,
+                                    "updatedAt": chrono::Utc::now().to_rfc3339(),
+                                }),
+                            );
+                        }
                     }
 
                     if let Some(reason) = degraded_reason.as_deref() {
@@ -32780,12 +32841,25 @@ pub async fn dispatch_command(
                 .diarization_model_id
                 .clone()
                 .unwrap_or_else(|| "ecapa_tdnn_speaker".to_string());
-            let diarization =
-                diarization::run_diarization_with_model(&resolved.primary, &diarization_model_id)
-                    .await
-                    .map_err(|e| e.to_string())?;
+            // Same rule as the automatic pass: run the model the user picked,
+            // or say plainly that the default ran instead. Without this the
+            // explicit action either failed outright or -- once the fallback
+            // existed -- would have swapped models behind the user's back.
+            let resolved_model = diarization::resolve_model_for_run(&diarization_model_id)
+                .ok_or_else(|| {
+                    format!(
+                        "{} is not downloaded, and neither is the default speaker model. Download one under Settings, Speaker separation model.",
+                        diarization::model_label(&diarization_model_id)
+                    )
+                })?;
+            let diarization = diarization::run_diarization_with_model(
+                &resolved.primary,
+                &resolved_model.model_id,
+            )
+            .await
+            .map_err(|e| e.to_string())?;
 
-            let engine = diarization::DiarizationEngine::with_model(&diarization_model_id);
+            let engine = diarization::DiarizationEngine::with_model(&resolved_model.model_id);
             engine.merge_with_transcript(&diarization, &mut transcript.segments);
             let inferred_aliases = infer_speaker_aliases_from_segments(&transcript.segments);
             let alias_updates = diarization
@@ -32838,6 +32912,22 @@ pub async fn dispatch_command(
                     "updatedAt": chrono::Utc::now().to_rfc3339(),
                 }),
             );
+            if let Some(notice) = resolved_model.fallback_notice.as_deref() {
+                tracing::warn!(
+                    "Diarization for {} fell back to the default model: {}",
+                    recording_id,
+                    notice
+                );
+                handle.emit_event(
+                    "recording-status-changed",
+                    serde_json::json!({
+                        "recordingId": &recording_id,
+                        "status": "completed",
+                        "message": notice,
+                        "updatedAt": chrono::Utc::now().to_rfc3339(),
+                    }),
+                );
+            }
             serde_json::to_value(diarization).map_err(|e| e.to_string())
         }
         "download_diarization_model" => {
@@ -32852,6 +32942,24 @@ pub async fn dispatch_command(
             let progress_handle = handle.clone();
             let id_for_cb = id.clone();
             let manager = download::DownloadManager::new().map_err(|e| e.to_string())?;
+            #[cfg(feature = "diarization-speakrs")]
+            if id == download::SPEAKRS_MODEL_ID {
+                manager
+                    .download_speakrs_bundle(move |progress: download::DownloadProgress| {
+                        progress_handle.emit_event(
+                            "model-download-progress",
+                            serde_json::json!({
+                                "modelName": &id_for_cb,
+                                "percentage": progress.percentage,
+                                "bytesDownloaded": progress.bytes_downloaded,
+                                "totalBytes": progress.total_bytes,
+                            }),
+                        );
+                    })
+                    .await
+                    .map_err(|e| e.to_string())?;
+                return Ok(serde_json::Value::Null);
+            }
             manager
                 .download_diarization_model_by_id(
                     &id,
@@ -34845,5 +34953,113 @@ mod playback_preparation_tests {
             0
         );
         let _ = std::fs::remove_dir_all(&dir);
+    }
+}
+
+#[cfg(test)]
+mod diarization_model_picker_tests {
+    use super::*;
+
+    /// Every option the picker offers has to be a model this build can run and
+    /// download. The experimental speakrs backend is compiled out by default,
+    /// so the default build must not list it: offering it there would let a
+    /// user select a model that fails at run time with "unknown diarization
+    /// model".
+    #[test]
+    fn default_build_offers_only_the_embedding_models() {
+        let ids: Vec<&str> = list_diarization_models()
+            .iter()
+            .map(|model| model.id)
+            .collect();
+
+        #[cfg(not(feature = "diarization-speakrs"))]
+        {
+            assert_eq!(
+                ids,
+                vec![
+                    "ecapa_tdnn_speaker",
+                    "resnet34_speaker",
+                    "campplus_speaker",
+                    "eres2netv2_speaker",
+                ]
+            );
+            assert!(!ids.iter().any(|id| id.contains("speakrs")));
+        }
+
+        #[cfg(feature = "diarization-speakrs")]
+        {
+            // Appended last, after the four embedding models, so the default
+            // stays first in the picker.
+            assert_eq!(ids.len(), 5);
+            assert_eq!(ids[0], "ecapa_tdnn_speaker");
+            assert_eq!(ids[4], download::SPEAKRS_MODEL_ID);
+        }
+    }
+
+    /// Copy rule (STYLE.md §6): the label says what it is and that it is
+    /// experimental; the description makes no accuracy claim, because
+    /// Plainsong has published no DER for either backend.
+    #[cfg(feature = "diarization-speakrs")]
+    #[test]
+    fn speakrs_option_is_labelled_experimental_and_claims_no_accuracy() {
+        let models = list_diarization_models();
+        let speakrs = models
+            .iter()
+            .find(|model| model.id == download::SPEAKRS_MODEL_ID)
+            .expect("speakrs option present when the backend is compiled in");
+
+        assert!(speakrs.label.contains("experimental"));
+        assert!(speakrs.label.contains("community-1"));
+        for claim in [
+            "most accurate",
+            "best accuracy",
+            "highest accuracy",
+            "recommended",
+        ] {
+            assert!(
+                !speakrs.description.to_lowercase().contains(claim),
+                "description must not claim {claim:?} without a measurement"
+            );
+        }
+        // It costs a ten-file download; say so where the user chooses.
+        assert!(speakrs.description.contains("ten files"));
+    }
+
+    /// The licensing state has to be in the copy the user reads before pressing
+    /// Download, not only in a doc comment and a QA receipt.
+    #[cfg(feature = "diarization-speakrs")]
+    #[test]
+    fn speakrs_option_states_the_licensing_gap_before_download() {
+        let models = list_diarization_models();
+        let speakrs = models
+            .iter()
+            .find(|model| model.id == download::SPEAKRS_MODEL_ID)
+            .expect("speakrs option present when the backend is compiled in");
+
+        assert!(speakrs
+            .description
+            .contains("mirrored without a declared license"));
+        assert!(speakrs.description.contains("CC-BY-4.0"));
+        assert!(speakrs.description.contains("gated"));
+        assert!(speakrs
+            .description
+            .contains("Not offered in shipped builds until resolved"));
+    }
+
+    /// Availability is per model: asking about speakrs must not be answered by
+    /// the ECAPA-TDNN `.onnx` check, and an unknown id is never "available".
+    #[test]
+    fn availability_is_answered_per_model_id() {
+        assert!(!is_diarization_model_available(Some(
+            "not_a_real_model".to_string()
+        )));
+
+        #[cfg(feature = "diarization-speakrs")]
+        assert_eq!(
+            is_diarization_model_available(Some(download::SPEAKRS_MODEL_ID.to_string())),
+            download::is_speakrs_bundle_trusted(
+                &diarization::diarization_models_dir().join(download::SPEAKRS_BUNDLE_DIR)
+            )
+        );
     }
 }
