@@ -12,6 +12,14 @@ package has been built; this section is a source-level record of what
 changed underneath `0.9.0-beta.2`. See `LAUNCH.md` for which qualification
 evidence is stale and must be recaptured before this becomes a candidate.
 
+### Documented
+- Plainsong's own speaker separation cannot report a turn shorter than five
+  seconds: it discards any turn under that length as noise. On a five-minute
+  synthetic conversation with three-second turns that costs 59% of frames and
+  leaves 121 of 300 seconds unattributed. Nothing changed in the app; this is a
+  measurement of what it already did, now written into KNOWN-LIMITATIONS with
+  the evidence in `artifacts/qa/diarization-segmentation-2026-09-02.md`.
+
 ### Added
 - A second, fully offline route for Cohere Transcribe: the same 03-2026 model
   Plainsong already calls over Cohere's API, downloaded as int4 ONNX (2.0 GiB)
