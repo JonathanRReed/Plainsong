@@ -375,12 +375,38 @@ evidence is stale and must be recaptured before this becomes a candidate.
   files that still carry it load cleanly and are rewritten without it.
 
 ### Fixed
+- The diarization model chosen in Settings is now the one the automatic
+  post-meeting speaker pass uses. It previously always ran ECAPA-TDNN no
+  matter what the picker said; only the explicit "identify speakers" action
+  honoured the setting.
+- Choosing a speaker model you have not downloaded no longer costs you speaker
+  labels. "Is this model ready" was answered by checking ECAPA-TDNN whatever
+  model was asked about, so picking CAM++ (or ResNet34, or ERes2NetV2) without
+  downloading it passed the check and then failed inside the run, silently, on
+  every meeting. Readiness now checks the model you picked; if it is missing,
+  the meeting is diarized with the downloaded default and says so — "Speaker
+  labels used ECAPA-TDNN 512 because CAM++ is not downloaded." With nothing
+  downloaded at all, no speaker labels are claimed.
+- The MODEL WEIGHTS section of THIRD-PARTY-NOTICES.txt now also accounts for
+  the pyannote community-1 bundle the experimental diarization backend fetches.
+  No shipped build enables that backend, but its pin lives in the sidecar
+  source, and the notices record what the mirror actually declares: nothing.
+  Upstream is CC-BY-4.0 and gated; that is stated as upstream's terms, not as
+  the mirror's, and the artifact is counted among those awaiting a human
+  answer.
 - THIRD-PARTY-NOTICES.txt now has a MODEL WEIGHTS section naming every model
   Plainsong can download — repository, pinned revision, files and license —
   including the terms that differ from the code's: Parakeet's CC-BY-4.0
   attribution and S1-mini's naming clause. The section is generated from a
   manifest and covered by the release license gate, and it records honestly
   the one artifact whose upstream declares no license.
+- Speaker models now appear in the list of downloaded models, and can be
+  deleted. The four speaker embedders and any experimental pyannote bundle were
+  downloaded into the models directory and then never enumerated, so they were
+  invisible in the Models screen and there was no path to delete them. Deleting
+  a multi-file model (a speaker bundle, Qwen3-ASR, the built-in cleanup model)
+  now removes the whole directory instead of failing; the managed models
+  directory itself is refused.
 - The built-in cleanup model's 473 MiB now appears in the sidecar's list of
   downloaded models, where it was missing entirely. The Models screen's
   "Speech models on this Mac" total still counts only speech models, since
