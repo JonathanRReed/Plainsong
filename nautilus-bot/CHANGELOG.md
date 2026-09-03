@@ -359,6 +359,12 @@ evidence is stale and must be recaptured before this becomes a candidate.
   files that still carry it load cleanly and are rewritten without it.
 
 ### Fixed
+- Moonshine Tiny can transcribe. It shares no decoder geometry with Moonshine
+  Base — six layers of 36-wide attention heads against base's eight of 52 —
+  but the key/value cache was built to base's shape for both, so selecting
+  Tiny failed on the first decode step with "Got invalid dimensions for input:
+  past_key_values.0.decoder.key". The cache is now sized from the decoder's
+  own ONNX input shape, with a per-model table as the fallback.
 - THIRD-PARTY-NOTICES.txt now has a MODEL WEIGHTS section naming every model
   Plainsong can download — repository, pinned revision, files and license —
   including the terms that differ from the code's: Parakeet's CC-BY-4.0

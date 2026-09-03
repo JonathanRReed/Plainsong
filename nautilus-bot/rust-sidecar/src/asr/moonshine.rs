@@ -44,12 +44,74 @@ const MOONSHINE_BOS: i64 = 1;
 const MOONSHINE_EOS: i64 = 2;
 #[cfg(feature = "asr-parakeet")]
 const MOONSHINE_MAX_TOKENS: usize = 192;
-#[cfg(feature = "asr-parakeet")]
-const MOONSHINE_NUM_LAYERS: usize = 8;
-#[cfg(feature = "asr-parakeet")]
-const MOONSHINE_NUM_KEY_VALUE_HEADS: usize = 8;
-#[cfg(feature = "asr-parakeet")]
-const MOONSHINE_HEAD_DIM: usize = 52;
+
+/// Decoder geometry, per model. Moonshine's two sizes do not share it:
+/// base is 8 layers of 416-wide attention (8 heads x 52), tiny is 6 layers of
+/// 288-wide attention (8 heads x 36).
+///
+/// These were hardcoded to base's numbers, so selecting Moonshine Tiny built
+/// the key/value cache at base's head dimension and ONNX Runtime rejected the
+/// very first decode step with `Got invalid dimensions for input:
+/// past_key_values.0.decoder.key`. Tiny could not transcribe at all.
+///
+/// The live values are read off the decoder's own ONNX input shapes
+/// ([`cache_dims_from_shape`]) so a re-export with different geometry works
+/// without a code change; this table is the fallback for an export that leaves
+/// those dimensions symbolic, and the expected layer count for the sanity
+/// check below.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct MoonshineGeometry {
+    pub(crate) num_layers: usize,
+    pub(crate) num_key_value_heads: usize,
+    pub(crate) head_dim: usize,
+}
+
+pub(crate) fn moonshine_geometry(model_id: &str) -> MoonshineGeometry {
+    match normalize_moonshine_model_id(model_id).as_str() {
+        MOONSHINE_TINY_MODEL_ID => MoonshineGeometry {
+            num_layers: 6,
+            num_key_value_heads: 8,
+            head_dim: 36,
+        },
+        _ => MoonshineGeometry {
+            num_layers: 8,
+            num_key_value_heads: 8,
+            head_dim: 52,
+        },
+    }
+}
+
+/// The layer count implied by the decoder's `past_key_values.*` inputs.
+///
+/// The merged decoder takes four cache tensors per layer (encoder key/value,
+/// decoder key/value), so the count divides by four. Returns `None` when the
+/// export does not follow that shape rather than guessing.
+pub(crate) fn layer_count_from_past_key_names(names: &[String]) -> Option<usize> {
+    if names.is_empty() || names.len() % 4 != 0 {
+        return None;
+    }
+    Some(names.len() / 4)
+}
+
+/// `(num_key_value_heads, head_dim)` read off a `past_key_values.*` input's
+/// declared shape `[batch, heads, sequence, head_dim]`.
+///
+/// Batch and sequence are symbolic in these exports and come back as `-1`;
+/// heads and head_dim are concrete, which is exactly the pair that differs
+/// between tiny and base. Returns `None` if either is symbolic, so the caller
+/// falls back to [`moonshine_geometry`] instead of building a zero-width
+/// cache.
+pub(crate) fn cache_dims_from_shape(shape: &[i64]) -> Option<(usize, usize)> {
+    if shape.len() != 4 {
+        return None;
+    }
+    let heads = shape[1];
+    let head_dim = shape[3];
+    if heads <= 0 || head_dim <= 0 {
+        return None;
+    }
+    Some((heads as usize, head_dim as usize))
+}
 
 #[cfg(feature = "asr-parakeet")]
 struct MoonshineRuntime {
@@ -287,7 +349,7 @@ pub(crate) fn model_integrity_artifacts(models_root: &Path) -> Vec<(PathBuf, Str
 // Native ONNX inference (feature-gated via asr-parakeet since it shares ort)
 // ---------------------------------------------------------------------------
 #[cfg(feature = "asr-parakeet")]
-fn run_moonshine_onnx(model_dir: &Path, audio_path: &Path) -> Result<String> {
+fn run_moonshine_onnx(model_dir: &Path, audio_path: &Path, model_id: &str) -> Result<String> {
     use ndarray::{Array, IxDyn};
     use ort::value::Tensor;
 
@@ -402,19 +464,50 @@ fn run_moonshine_onnx(model_dir: &Path, audio_path: &Path) -> Result<String> {
         let enc_mask_tensor = Tensor::from_array(enc_mask_arr)
             .context("Failed to create Moonshine encoder attention mask tensor")?;
 
+        // Cache geometry comes from the model in front of us, not from a
+        // constant: tiny and base disagree on head_dim (36 vs 52), and reading
+        // the wrong one makes ONNX Runtime reject the first decode step.
+        let fallback_geometry = moonshine_geometry(model_id);
+        let declared_cache_dims = decoder
+            .inputs()
+            .iter()
+            .find(|input| input.name().starts_with("past_key_values."))
+            .and_then(|input| match input.dtype() {
+                ort::value::ValueType::Tensor { shape, .. } => {
+                    cache_dims_from_shape(&shape.iter().copied().collect::<Vec<i64>>())
+                }
+                _ => None,
+            });
+        let (num_key_value_heads, head_dim) = declared_cache_dims.unwrap_or((
+            fallback_geometry.num_key_value_heads,
+            fallback_geometry.head_dim,
+        ));
+        if declared_cache_dims.is_none() && !past_key_names.is_empty() {
+            tracing::debug!(
+                "Moonshine decoder left its cache dimensions symbolic; using the \
+                 {} table ({} heads x {})",
+                model_id,
+                num_key_value_heads,
+                head_dim
+            );
+        }
+
         let mut token_ids: Vec<i64> = vec![MOONSHINE_BOS];
         let mut past_arrays: Vec<Array<f32, IxDyn>> = past_key_names
             .iter()
-            .map(|_| {
-                Array::zeros(IxDyn(&[
-                    0,
-                    MOONSHINE_NUM_KEY_VALUE_HEADS,
-                    1,
-                    MOONSHINE_HEAD_DIM,
-                ]))
-            })
+            .map(|_| Array::zeros(IxDyn(&[0, num_key_value_heads, 1, head_dim])))
             .collect();
-        if !past_key_names.is_empty() && past_key_names.len() != MOONSHINE_NUM_LAYERS * 4 {
+        if let Some(layers) = layer_count_from_past_key_names(&past_key_names) {
+            if layers != fallback_geometry.num_layers {
+                tracing::warn!(
+                    "Moonshine '{}' decoder exposes {} layers; the table expected {}. \
+                     Using the model's own count.",
+                    model_id,
+                    layers,
+                    fallback_geometry.num_layers
+                );
+            }
+        } else if !past_key_names.is_empty() {
             tracing::warn!(
                 "Unexpected Moonshine past key tensor count: {}",
                 past_key_names.len()
@@ -566,7 +659,7 @@ fn moonshine_max_tokens_for_audio(sample_count: usize) -> usize {
 }
 
 #[cfg(not(feature = "asr-parakeet"))]
-fn run_moonshine_onnx(_model_dir: &Path, _audio_path: &Path) -> Result<String> {
+fn run_moonshine_onnx(_model_dir: &Path, _audio_path: &Path, _model_id: &str) -> Result<String> {
     Err(anyhow::anyhow!(
         "Moonshine ONNX requires the `asr-parakeet` feature. Rebuild with that feature enabled."
     ))
@@ -700,17 +793,22 @@ impl AsrProvider for MoonshineProvider {
                 writer.finalize().context("Failed to finalize temp WAV")?;
             }
             let temp_path_for_cleanup = temp_path.clone();
-            let result =
-                tokio::task::spawn_blocking(move || run_moonshine_onnx(&model_dir, &temp_path))
-                    .await
-                    .context("Moonshine inference task panicked");
+            let model_id_for_run = self.model_id.clone();
+            let result = tokio::task::spawn_blocking(move || {
+                run_moonshine_onnx(&model_dir, &temp_path, &model_id_for_run)
+            })
+            .await
+            .context("Moonshine inference task panicked");
             let _ = std::fs::remove_file(&temp_path_for_cleanup);
             result??
         } else {
             let audio_path_owned = audio_path.to_path_buf();
-            tokio::task::spawn_blocking(move || run_moonshine_onnx(&model_dir, &audio_path_owned))
-                .await
-                .context("Moonshine inference task panicked")??
+            let model_id_for_run = self.model_id.clone();
+            tokio::task::spawn_blocking(move || {
+                run_moonshine_onnx(&model_dir, &audio_path_owned, &model_id_for_run)
+            })
+            .await
+            .context("Moonshine inference task panicked")??
         };
 
         let duration = Self::wav_duration_seconds(&audio_for_dur);
@@ -799,10 +897,114 @@ impl AsrProvider for MoonshineProvider {
 #[cfg(test)]
 mod tests {
     use super::{
+        cache_dims_from_shape, layer_count_from_past_key_names, moonshine_geometry,
         moonshine_repo_files, MoonshineProvider, MOONSHINE_BASE_HF_REPO, MOONSHINE_LOCAL_TOKENIZER,
         MOONSHINE_ONNX_HF_REPO, MOONSHINE_TINY_HF_REPO,
     };
     use crate::asr::AsrProvider;
+
+    /// Proves the fix against the real weights.
+    ///
+    /// Ignored by default: it needs the 120 MB tiny export on disk. Run it with
+    /// the model directory and a 16 kHz WAV in the environment:
+    ///
+    /// ```text
+    /// PLAINSONG_MOONSHINE_TINY_DIR=/path/to/moonshine_tiny \
+    /// PLAINSONG_MOONSHINE_FIXTURE=scripts/fixtures/local-quality-gate.wav \
+    ///   cargo test --lib moonshine_tiny_transcribes_the_fixture -- --ignored --nocapture
+    /// ```
+    ///
+    /// Before the geometry fix this failed at the first decode step with
+    /// `Got invalid dimensions for input: past_key_values.0.decoder.key`.
+    #[cfg(feature = "asr-parakeet")]
+    #[test]
+    #[ignore = "needs the 120 MB Moonshine Tiny export on disk"]
+    fn moonshine_tiny_transcribes_the_fixture() {
+        let Ok(model_dir) = std::env::var("PLAINSONG_MOONSHINE_TINY_DIR") else {
+            panic!("set PLAINSONG_MOONSHINE_TINY_DIR to the moonshine_tiny model directory");
+        };
+        let Ok(fixture) = std::env::var("PLAINSONG_MOONSHINE_FIXTURE") else {
+            panic!("set PLAINSONG_MOONSHINE_FIXTURE to a 16 kHz mono WAV");
+        };
+        let text = super::run_moonshine_onnx(
+            std::path::Path::new(&model_dir),
+            std::path::Path::new(&fixture),
+            "moonshine-tiny",
+        )
+        .expect("Moonshine Tiny should decode with its own cache geometry");
+        println!("moonshine-tiny transcript: {text}");
+        assert!(
+            text.split_whitespace().count() >= 3,
+            "expected words, got {text:?}"
+        );
+    }
+
+    #[test]
+    fn tiny_and_base_do_not_share_decoder_geometry() {
+        // The bug: tiny was decoded with base's 8 layers and 52-wide heads, so
+        // the very first `past_key_values.0.decoder.key` had the wrong shape.
+        let tiny = moonshine_geometry("moonshine-tiny");
+        let base = moonshine_geometry("moonshine-base");
+        assert_eq!(tiny.num_layers, 6);
+        assert_eq!(tiny.head_dim, 36);
+        assert_eq!(base.num_layers, 8);
+        assert_eq!(base.head_dim, 52);
+        assert_ne!(tiny.head_dim, base.head_dim);
+    }
+
+    #[test]
+    fn an_unknown_model_id_falls_back_to_base_geometry() {
+        assert_eq!(
+            moonshine_geometry("moonshine"),
+            moonshine_geometry("moonshine-base")
+        );
+        assert_eq!(
+            moonshine_geometry("something-else"),
+            moonshine_geometry("moonshine-base")
+        );
+    }
+
+    #[test]
+    fn layer_count_comes_from_the_decoder_input_names() {
+        let names = |layers: usize| -> Vec<String> {
+            let mut out = Vec::new();
+            for layer in 0..layers {
+                for suffix in [
+                    "decoder.key",
+                    "decoder.value",
+                    "encoder.key",
+                    "encoder.value",
+                ] {
+                    out.push(format!("past_key_values.{layer}.{suffix}"));
+                }
+            }
+            out
+        };
+        assert_eq!(layer_count_from_past_key_names(&names(6)), Some(6));
+        assert_eq!(layer_count_from_past_key_names(&names(8)), Some(8));
+        assert_eq!(layer_count_from_past_key_names(&[]), None);
+        // Not a multiple of four: refuse rather than guess.
+        assert_eq!(
+            layer_count_from_past_key_names(&["past_key_values.0.decoder.key".to_string()]),
+            None
+        );
+    }
+
+    #[test]
+    fn cache_dims_are_read_from_a_concrete_onnx_shape() {
+        // `[batch, heads, sequence, head_dim]` with batch and sequence symbolic.
+        assert_eq!(cache_dims_from_shape(&[-1, 8, -1, 36]), Some((8, 36)));
+        assert_eq!(cache_dims_from_shape(&[-1, 8, -1, 52]), Some((8, 52)));
+    }
+
+    #[test]
+    fn a_symbolic_or_malformed_shape_yields_no_dims() {
+        // Falling back to the table beats building a zero-width cache.
+        assert_eq!(cache_dims_from_shape(&[-1, -1, -1, -1]), None);
+        assert_eq!(cache_dims_from_shape(&[-1, 8, -1, 0]), None);
+        assert_eq!(cache_dims_from_shape(&[-1, 8, 36]), None);
+        assert_eq!(cache_dims_from_shape(&[]), None);
+    }
 
     #[test]
     fn tiny_tokenizer_uses_model_specific_repo() {
