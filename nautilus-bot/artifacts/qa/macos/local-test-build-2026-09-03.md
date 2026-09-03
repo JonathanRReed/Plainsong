@@ -288,6 +288,46 @@ its thirteen launches could have observed a restart either way. So "1 of 3" is
 the whole sample, and the recovery path did its job. Recorded because it is
 real and unexplained, not because it blocked anything.
 
+### Correction, 2026-09-03: the sidecar did not exit early
+
+The paragraph above is wrong about *when* that restart happened, and the error
+came from how this receipt's log was written. `smoke.mjs` saves
+`stdout + "\n" + stderr`, so the file is two streams concatenated, not one
+chronological log. `[sidecar] restarting in …` is a `console.log` (stdout) and
+`[sidecar] exited: …` is a `console.warn` (stderr), so the restart line lands
+next to `[main] App rendered` in the file while actually happening 18 seconds
+later, next to the exit line down in the stderr half. Both smoke logs that did
+*not* restart show the same `[sidecar] exited: code=null signal=SIGTERM`, right
+beside Chromium's `GPU process exited unexpectedly: exit_code=15` — the whole
+process group coming down.
+
+Re-run against this same signed bundle, 15 launches held open 20 s each
+against a fresh isolated data directory, load average ~48 (a shared build
+host):
+
+| | |
+|---|---|
+| launches with a mid-session sidecar exit | **0 / 15** |
+| launches with exactly one `[sidecar] spawning:` line | 15 / 15 |
+| launches logging `[sidecar] restarting in 1000ms (attempt 1/5)` | 12 / 15 |
+| … of those, restarts logged more than 10 ms after the teardown SIGTERM | 0 |
+
+Every restart line was within 1–10 ms of the harness's own SIGTERM at ~20.0 s.
+No replacement sidecar was ever spawned, because `shutdown()` clears the
+pending restart timer a moment later — which is also why the receipt's "strays
+after quit: none" column is correct.
+
+So the cause is a teardown race, not a startup fault: an external SIGTERM to
+the process group can reach the sidecar before Electron's own quit path marks
+the bridge as shutting down, and the bridge then classified a deliberate
+teardown as a crash. Fixed in `electron/sidecar-recovery-policy.ts`
+(`shouldRestartTerminatedSidecar`): a sidecar killed by SIGTERM, SIGINT or
+SIGHUP that Plainsong did not send is no longer replaced. SIGKILL, a non-zero
+exit, and the unresponsive-recycle path still are.
+
+Nothing here changes the signing, gate or timing results elsewhere in this
+receipt.
+
 ## What is signed, what is not, and what that means for you
 
 **Signed.** `Plainsong.app` and the DMG both carry

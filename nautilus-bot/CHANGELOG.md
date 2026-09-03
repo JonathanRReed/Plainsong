@@ -472,6 +472,16 @@ evidence is stale and must be recaptured before this becomes a candidate.
   files that still carry it load cleanly and are rewritten without it.
 
 ### Fixed
+- Quitting Plainsong no longer schedules a sidecar it is about to throw away.
+  When the whole process group is signalled — a macOS logout or restart, or a
+  QA harness stopping the app — the sidecar can die before Electron's own quit
+  path has marked itself as shutting down, and the app read that as a fault and
+  logged `[sidecar] restarting in 1000ms (attempt 1/5)` on the way out. The
+  replacement was always cancelled a moment later, so nothing was left running,
+  but the line reads like a crash that never happened and sent one review after
+  a ghost. A sidecar killed by SIGTERM, SIGINT or SIGHUP that Plainsong did not
+  send is now treated as the app going away; SIGKILL, a non-zero exit and a
+  recycle Plainsong initiated itself still get their replacement.
 - Remembered voices now store what Settings says they store. A per-meeting
   voice signature is written only for a speaker who is given a name — by you,
   or by "Apply a confident match without asking" — instead of for every
