@@ -83,6 +83,11 @@ private struct TranscriptPayload: Encodable {
   let confidence: Double
   let isFinal: Bool
   let engine: String
+  /// How many vocabulary terms this request actually handed the recognizer.
+  /// Zero when the caller sent none, and zero on any path that cannot take
+  /// them, so the count is a report of what happened rather than an echo of
+  /// what was asked for.
+  let contextualStringsApplied: Int
   /// Per-segment timestamps. Always empty on the `SFSpeechRecognizer` path,
   /// which reports one formatted string and no usable segment ranges; filled
   /// in on the SpeechAnalyzer path, where the meeting transcript contract
@@ -130,6 +135,9 @@ private struct LiveTranscriptPayload: Encodable {
   let language: String
   let confidence: Double
   let isFinal: Bool
+  /// Same meaning as on `TranscriptPayload`: terms actually handed to the
+  /// recognizer for this session, not terms received.
+  let contextualStringsApplied: Int
 }
 
 private let encoder: JSONEncoder = {
@@ -198,6 +206,87 @@ private func normalizedLocaleIdentifier(_ identifier: String) -> String {
 private func requestedLocale(_ identifier: String?) -> Locale {
   let trimmed = identifier?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
   return Locale(identifier: trimmed.isEmpty ? Locale.current.identifier : trimmed)
+}
+
+// MARK: - Vocabulary hints (contextual strings)
+//
+// Both Apple engines take a list of spellings to bias recognition toward:
+// `SFSpeechRecognitionRequest.contextualStrings` on the older engine and
+// `AnalysisContext.contextualStrings[.general]` on SpeechAnalyzer. The terms
+// come from the user's personal dictionary, so they are user text and never
+// travel as command-line arguments -- the caller writes them to a private
+// JSON file and passes only its path.
+
+/// Caps on the list handed to the recognizer, mirroring the Rust-side
+/// `VOCABULARY_HINT_MAX_TERMS` / `VOCABULARY_HINT_MAX_CHARS` in
+/// `dictation_parity.rs`. Applied here as well as there: the helper is a
+/// separate binary, and neither side should assume the other trimmed.
+private let contextualStringsMaxTerms = 60
+private let contextualStringsMaxCharacters = 600
+
+/// The additive request body for `--contextual-strings-file`. `protocol_version`
+/// stays 1: a helper that predates this option ignores a file it is never told
+/// about, and a caller that predates it simply passes no file.
+private struct ContextualStringsRequest: Decodable {
+  let protocolVersion: Int?
+  let contextualStrings: [String]
+}
+
+/// Trims, drops anything that is not a usable term, and applies the caps in
+/// order so the result is deterministic for a given input.
+private func cappedContextualStrings(_ raw: [String]) -> [String] {
+  var accepted: [String] = []
+  var characters = 0
+  for candidate in raw {
+    let term = candidate.split(whereSeparator: { $0.isWhitespace }).joined(separator: " ")
+    if term.isEmpty { continue }
+    if term.unicodeScalars.contains(where: { CharacterSet.controlCharacters.contains($0) }) {
+      continue
+    }
+    if accepted.count >= contextualStringsMaxTerms { break }
+    if characters + term.count > contextualStringsMaxCharacters { break }
+    characters += term.count
+    accepted.append(term)
+  }
+  return accepted
+}
+
+/// Reads the caller's vocabulary terms from a file. Any problem is a
+/// `malformed_request`: silently transcribing without the terms would report a
+/// hint that never reached the recognizer.
+private func loadContextualStrings(path: String?) -> [String] {
+  guard let path else { return [] }
+  let url = URL(fileURLWithPath: path)
+  let data: Data
+  do {
+    data = try Data(contentsOf: url)
+  } catch {
+    fail(
+      .malformedRequest,
+      "Could not read the contextual strings file.",
+      details: ["path": path, "error": error.localizedDescription]
+    )
+  }
+  let decoder = JSONDecoder()
+  decoder.keyDecodingStrategy = .convertFromSnakeCase
+  let request: ContextualStringsRequest
+  do {
+    request = try decoder.decode(ContextualStringsRequest.self, from: data)
+  } catch {
+    fail(
+      .malformedRequest,
+      "The contextual strings file is not a valid helper request.",
+      details: ["path": path, "error": error.localizedDescription]
+    )
+  }
+  if let version = request.protocolVersion, version != protocolVersion {
+    fail(
+      .malformedRequest,
+      "The contextual strings file declares an unsupported protocol version.",
+      details: ["protocol_version": String(version)]
+    )
+  }
+  return cappedContextualStrings(request.contextualStrings)
 }
 
 // MARK: - SpeechAnalyzer (macOS 26+)
@@ -308,6 +397,17 @@ private func analyzerTranscriber(
     reportingOptions: volatileResults ? [.volatileResults] : [],
     attributeOptions: [.audioTimeRange, .transcriptionConfidence]
   )
+}
+
+/// The `AnalysisContext` carrying this request's vocabulary terms, or `nil`
+/// when there are none -- an empty context is the same as no context, and
+/// building one anyway would make "sent" indistinguishable from "not sent".
+@available(macOS 26, *)
+private func analyzerContext(contextualStrings: [String]) -> AnalysisContext? {
+  guard !contextualStrings.isEmpty else { return nil }
+  let context = AnalysisContext()
+  context.contextualStrings[.general] = contextualStrings
+  return context
 }
 
 @available(macOS 26, *)
@@ -529,7 +629,8 @@ private func analyzerReadyLocale(_ locale: Locale) async -> Result<Locale, Analy
 @available(macOS 26, *)
 private func analyzerTranscribeFile(
   url: URL,
-  locale: Locale
+  locale: Locale,
+  contextualStrings: [String]
 ) async -> Result<AnalyzerTranscript, AnalyzerFailure> {
   let resolvedLocale: Locale
   switch await analyzerReadyLocale(locale) {
@@ -556,6 +657,25 @@ private func analyzerTranscribeFile(
 
   let transcriber = analyzerTranscriber(locale: resolvedLocale, volatileResults: false)
   let analyzer = SpeechAnalyzer(modules: [transcriber])
+  // `SpeechAnalyzer(modules:)` takes no context, so the batch path sets it
+  // before any audio is analyzed. A refusal here is reported rather than
+  // swallowed: transcribing without the terms while the caller was told they
+  // were applied is the one outcome this whole path exists to prevent.
+  if let context = analyzerContext(contextualStrings: contextualStrings) {
+    do {
+      try await analyzer.setContext(context)
+    } catch {
+      return .failure(
+        AnalyzerFailure(
+          code: .recognitionFailed,
+          message:
+            "SpeechAnalyzer refused the vocabulary terms for this request: \(error.localizedDescription)",
+          retryable: true,
+          details: analyzerErrorDetails(error)
+        )
+      )
+    }
+  }
   let collector = Task { () throws -> [AnalyzerSegment] in
     var collected: [AnalyzerSegment] = []
     for try await result in transcriber.results {
@@ -643,7 +763,8 @@ private func convertedAnalyzerBuffer(
 @available(macOS 26, *)
 private func analyzerLiveSession(
   sampleRate: Double,
-  locale: Locale
+  locale: Locale,
+  contextualStrings: [String]
 ) async -> Result<AnalyzerTranscript, AnalyzerFailure> {
   let resolvedLocale: Locale
   switch await analyzerReadyLocale(locale) {
@@ -719,7 +840,13 @@ private func analyzerLiveSession(
     return finalized
   }
 
-  let analyzer = SpeechAnalyzer(inputSequence: inputStream, modules: [transcriber])
+  // The streaming initializer takes the context directly, so the terms are in
+  // place before the first buffer rather than after it.
+  let analyzer = SpeechAnalyzer(
+    inputSequence: inputStream,
+    modules: [transcriber],
+    analysisContext: analyzerContext(contextualStrings: contextualStrings) ?? AnalysisContext()
+  )
 
   // stdin reads block, so they run on a dedicated thread instead of one of
   // Swift concurrency's cooperative threads.
@@ -1153,7 +1280,13 @@ private func recognitionErrorDetails(_ error: Error) -> [String: String] {
 }
 
 private final class RecognitionState: @unchecked Sendable {
+  private let contextualStringsApplied: Int
   private let lock = NSLock()
+
+  init(contextualStringsApplied: Int) {
+    self.contextualStringsApplied = contextualStringsApplied
+  }
+
   private var text = ""
   private var confidence = 0.0
   private var error: Error?
@@ -1193,7 +1326,8 @@ private final class RecognitionState: @unchecked Sendable {
         text: candidate,
         language: language,
         confidence: confidence,
-        isFinal: result.isFinal
+        isFinal: result.isFinal,
+        contextualStringsApplied: contextualStringsApplied
       )
       lastEmittedText = candidate
     }
@@ -1229,7 +1363,8 @@ private func audioDurationSeconds(_ url: URL) -> Double {
 private func runFileRecognition(
   inputPath: String,
   localeIdentifier: String?,
-  engineRequest: EngineRequest
+  engineRequest: EngineRequest,
+  contextualStringsPath: String?
 ) {
   let inputURL = URL(fileURLWithPath: inputPath)
   var isDirectory: ObjCBool = false
@@ -1248,6 +1383,10 @@ private func runFileRecognition(
   // `recognitionContext` is) would only ever cover SFSpeechRecognizer.
   requireSpeechAuthorization()
 
+  // Read before the engine is chosen so a malformed vocabulary file is
+  // refused the same way on both engines.
+  let contextualStrings = loadContextualStrings(path: contextualStringsPath)
+
   #if !NO_SPEECH_ANALYZER
     if #available(macOS 26, *) {
       let locale = requestedLocale(localeIdentifier)
@@ -1256,7 +1395,11 @@ private func runFileRecognition(
         facts: runBlocking { await collectAnalyzerFacts(locale: locale) }
       )
       if engine == .speechAnalyzer {
-        runAnalyzerFileRecognition(url: inputURL, locale: locale)
+        runAnalyzerFileRecognition(
+          url: inputURL,
+          locale: locale,
+          contextualStrings: contextualStrings
+        )
       }
     } else if engineRequest == .speechAnalyzer {
       fail(
@@ -1284,9 +1427,10 @@ private func runFileRecognition(
   request.taskHint = .dictation
   request.requiresOnDeviceRecognition = true
   request.addsPunctuation = true
+  request.contextualStrings = contextualStrings
 
   let semaphore = DispatchSemaphore(value: 0)
-  let state = RecognitionState()
+  let state = RecognitionState(contextualStringsApplied: contextualStrings.count)
   let task = context.recognizer.recognitionTask(with: request) { result, error in
     let update = state.consume(result: result, error: error, language: context.language)
     if update.shouldSignal {
@@ -1350,6 +1494,7 @@ private func runFileRecognition(
         confidence: snapshot.confidence,
         isFinal: true,
         engine: HelperEngine.sfSpeechRecognizer.rawValue,
+        contextualStringsApplied: contextualStrings.count,
         segments: []
       )
     )
@@ -1367,8 +1512,18 @@ private func runFileRecognition(
 /// Runs the SpeechAnalyzer batch path and exits; only returns to the caller
 /// when the caller is expected to keep going (it never is).
 @available(macOS 26, *)
-private func runAnalyzerFileRecognition(url: URL, locale: Locale) -> Never {
-  switch runBlocking({ await analyzerTranscribeFile(url: url, locale: locale) }) {
+private func runAnalyzerFileRecognition(
+  url: URL,
+  locale: Locale,
+  contextualStrings: [String]
+) -> Never {
+  switch runBlocking({
+    await analyzerTranscribeFile(
+      url: url,
+      locale: locale,
+      contextualStrings: contextualStrings
+    )
+  }) {
   case .failure(let failure):
     fail(failure.code, failure.message, retryable: failure.retryable, details: failure.details)
   case .success(let transcript):
@@ -1382,6 +1537,7 @@ private func runAnalyzerFileRecognition(url: URL, locale: Locale) -> Never {
           confidence: transcript.confidence,
           isFinal: true,
           engine: HelperEngine.speechAnalyzer.rawValue,
+          contextualStringsApplied: contextualStrings.count,
           segments: transcript.segments.map { segment in
             SegmentPayload(
               text: segment.text,
@@ -1438,7 +1594,8 @@ private func runAnalyzerAssetInstall(locale: Locale) -> Never {
 private func runLiveRecognition(
   sampleRate: Double,
   localeIdentifier: String?,
-  engineRequest: EngineRequest
+  engineRequest: EngineRequest,
+  contextualStringsPath: String?
 ) {
   // Unlike `--transcribe-file`, live mode does not default to `auto`: the
   // SpeechAnalyzer stream emits a different event shape (volatile/finalized
@@ -1448,6 +1605,8 @@ private func runLiveRecognition(
   // Same reason as `runFileRecognition`: the analyzer branch never returns, so
   // the check has to happen before it rather than inside `recognitionContext`.
   requireSpeechAuthorization()
+
+  let contextualStrings = loadContextualStrings(path: contextualStringsPath)
 
   if engineRequest == .speechAnalyzer {
     #if !NO_SPEECH_ANALYZER
@@ -1460,7 +1619,8 @@ private func runLiveRecognition(
       }
       runAnalyzerLiveRecognition(
         sampleRate: sampleRate,
-        locale: requestedLocale(localeIdentifier)
+        locale: requestedLocale(localeIdentifier),
+        contextualStrings: contextualStrings
       )
     #else
       fail(
@@ -1477,6 +1637,7 @@ private func runLiveRecognition(
   request.taskHint = .dictation
   request.requiresOnDeviceRecognition = true
   request.addsPunctuation = true
+  request.contextualStrings = contextualStrings
 
   guard
     let format = AVAudioFormat(
@@ -1494,7 +1655,7 @@ private func runLiveRecognition(
   }
 
   let semaphore = DispatchSemaphore(value: 0)
-  let state = RecognitionState()
+  let state = RecognitionState(contextualStringsApplied: contextualStrings.count)
   let task = context.recognizer.recognitionTask(with: request) { result, error in
     let update = state.consume(result: result, error: error, language: context.language)
     if let payload = update.payload {
@@ -1605,8 +1766,18 @@ private func runLiveRecognition(
 /// in the same shape the SFSpeechRecognizer live path uses, so a consumer that
 /// only wants the finished text needs no new parsing.
 @available(macOS 26, *)
-private func runAnalyzerLiveRecognition(sampleRate: Double, locale: Locale) -> Never {
-  switch runBlocking({ await analyzerLiveSession(sampleRate: sampleRate, locale: locale) }) {
+private func runAnalyzerLiveRecognition(
+  sampleRate: Double,
+  locale: Locale,
+  contextualStrings: [String]
+) -> Never {
+  switch runBlocking({
+    await analyzerLiveSession(
+      sampleRate: sampleRate,
+      locale: locale,
+      contextualStrings: contextualStrings
+    )
+  }) {
   case .failure(let failure):
     fail(failure.code, failure.message, retryable: failure.retryable, details: failure.details)
   case .success(let transcript):
@@ -1619,7 +1790,8 @@ private func runAnalyzerLiveRecognition(sampleRate: Double, locale: Locale) -> N
           text: transcript.text,
           language: transcript.language,
           confidence: transcript.confidence,
-          isFinal: true
+          isFinal: true,
+          contextualStringsApplied: contextualStrings.count
         )
       )
     } catch {
@@ -1639,8 +1811,18 @@ private enum HelperCommand {
   case probe(locale: String?)
   case requestAuthorization(locale: String?)
   case installAssets(locale: String?)
-  case transcribeFile(path: String, locale: String?, engine: EngineRequest)
-  case live(sampleRate: Double, locale: String?, engine: EngineRequest)
+  case transcribeFile(
+    path: String,
+    locale: String?,
+    engine: EngineRequest,
+    contextualStringsPath: String?
+  )
+  case live(
+    sampleRate: Double,
+    locale: String?,
+    engine: EngineRequest,
+    contextualStringsPath: String?
+  )
 }
 
 private struct ArgumentParser {
@@ -1680,7 +1862,12 @@ private struct ArgumentParser {
       let path = arguments[index]
       index += 1
       let options = parseLocaleAndEngine(defaultEngine: .auto)
-      return .transcribeFile(path: path, locale: options.locale, engine: options.engine)
+      return .transcribeFile(
+        path: path,
+        locale: options.locale,
+        engine: options.engine,
+        contextualStringsPath: options.contextualStringsPath
+      )
     case "--live":
       return parseLive()
     default:
@@ -1692,19 +1879,38 @@ private struct ArgumentParser {
         )
       }
       let options = parseLocaleAndEngine(defaultEngine: .auto)
-      return .transcribeFile(path: first, locale: options.locale, engine: options.engine)
+      return .transcribeFile(
+        path: first,
+        locale: options.locale,
+        engine: options.engine,
+        contextualStringsPath: options.contextualStringsPath
+      )
     }
   }
 
   private mutating func parseLocaleAndEngine(
     defaultEngine: EngineRequest
-  ) -> (locale: String?, engine: EngineRequest) {
+  ) -> (locale: String?, engine: EngineRequest, contextualStringsPath: String?) {
     var locale: String?
     var engine: EngineRequest?
+    var contextualStringsPath: String?
     while index < arguments.count {
       let option = arguments[index]
       index += 1
       switch option {
+      // The vocabulary terms themselves never appear here: they are user text
+      // from the personal dictionary, and a process argument list is readable
+      // by anyone on the machine. Only the path to a private file travels.
+      case "--contextual-strings-file":
+        guard contextualStringsPath == nil, index < arguments.count else {
+          fail(
+            .malformedRequest,
+            "--contextual-strings-file requires one file path.",
+            details: ["usage": usage]
+          )
+        }
+        contextualStringsPath = arguments[index]
+        index += 1
       case "--locale":
         guard locale == nil, index < arguments.count else {
           fail(
@@ -1735,7 +1941,7 @@ private struct ArgumentParser {
         )
       }
     }
-    return (locale, engine ?? defaultEngine)
+    return (locale, engine ?? defaultEngine, contextualStringsPath)
   }
 
   private mutating func parseLocaleOnly() -> String? {
@@ -1763,10 +1969,21 @@ private struct ArgumentParser {
     var sampleRate: Double?
     var locale: String?
     var engine: EngineRequest?
+    var contextualStringsPath: String?
     while index < arguments.count {
       let option = arguments[index]
       index += 1
       switch option {
+      case "--contextual-strings-file":
+        guard contextualStringsPath == nil, index < arguments.count else {
+          fail(
+            .malformedRequest,
+            "--contextual-strings-file requires one file path.",
+            details: ["usage": usage]
+          )
+        }
+        contextualStringsPath = arguments[index]
+        index += 1
       case "--engine":
         // `auto` is rejected here rather than quietly resolved: live mode does
         // not auto-select, because the two engines emit different event
@@ -1830,12 +2047,13 @@ private struct ArgumentParser {
     return .live(
       sampleRate: sampleRate,
       locale: locale,
-      engine: engine ?? .sfSpeechRecognizer
+      engine: engine ?? .sfSpeechRecognizer,
+      contextualStringsPath: contextualStringsPath
     )
   }
 
   private var usage: String {
-    "macos_speech_helper --probe [--locale <id>] | --request-authorization [--locale <id>] | --install-assets [--locale <id>] | --transcribe-file <path> [--locale <id>] [--engine auto|speech_analyzer|sf_speech_recognizer] | --live --sample-rate <hz> [--locale <id>] [--engine speech_analyzer|sf_speech_recognizer]"
+    "macos_speech_helper --probe [--locale <id>] | --request-authorization [--locale <id>] | --install-assets [--locale <id>] | --transcribe-file <path> [--locale <id>] [--engine auto|speech_analyzer|sf_speech_recognizer] [--contextual-strings-file <path>] | --live --sample-rate <hz> [--locale <id>] [--engine speech_analyzer|sf_speech_recognizer] [--contextual-strings-file <path>]"
   }
 }
 
@@ -1879,8 +2097,18 @@ case .installAssets(let locale):
       details: ["operation": "install_assets"]
     )
   #endif
-case .transcribeFile(let path, let locale, let engine):
-  runFileRecognition(inputPath: path, localeIdentifier: locale, engineRequest: engine)
-case .live(let sampleRate, let locale, let engine):
-  runLiveRecognition(sampleRate: sampleRate, localeIdentifier: locale, engineRequest: engine)
+case .transcribeFile(let path, let locale, let engine, let contextualStringsPath):
+  runFileRecognition(
+    inputPath: path,
+    localeIdentifier: locale,
+    engineRequest: engine,
+    contextualStringsPath: contextualStringsPath
+  )
+case .live(let sampleRate, let locale, let engine, let contextualStringsPath):
+  runLiveRecognition(
+    sampleRate: sampleRate,
+    localeIdentifier: locale,
+    engineRequest: engine,
+    contextualStringsPath: contextualStringsPath
+  )
 }

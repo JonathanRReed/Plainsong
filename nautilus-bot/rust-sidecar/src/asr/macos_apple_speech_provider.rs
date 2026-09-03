@@ -35,7 +35,11 @@ impl MacosAppleSpeechProvider {
             actual_engine: Some(PlatformEngine::MacosAppleSpeech.id().to_string()),
             optimization_applied: false,
             fallback_reason: None,
-            vocabulary_hint_terms_applied: 0,
+            // What the helper says it handed the recognizer, not what was
+            // sent: an older helper that does not know the option reports
+            // zero, and the audit log must not claim the dictionary reached
+            // a recognizer that never saw it.
+            vocabulary_hint_terms_applied: transcription.vocabulary_hint_terms_applied,
         }
     }
 }
@@ -115,6 +119,13 @@ impl AsrProvider for MacosAppleSpeechProvider {
     /// The only provider that reads `apple_speech_required_engine`: it is the
     /// only one with two engines whose results differ in a way a caller can
     /// depend on (timed segments or none at all).
+    ///
+    /// It also passes the vocabulary hint through, which it did not use to.
+    /// Both Apple engines take a bias list; measured on macOS 27.0 the older
+    /// SFSpeechRecognizer engine acts on it (5.93% -> 2.96% WER on the repo's
+    /// 44 s fixture with a three-term hint) and SpeechAnalyzer accepts it with
+    /// no observable change. Sending it to both is what makes the reported
+    /// applied count honest for whichever one runs.
     async fn transcribe_bytes_with_options(
         &self,
         audio_data: &[u8],
@@ -127,6 +138,9 @@ impl AsrProvider for MacosAppleSpeechProvider {
                 Some(audio_data),
                 PlatformTranscriptionOptions {
                     apple_speech_required_engine: options.apple_speech_required_engine,
+                    contextual_strings: platform::macos_speech::contextual_strings_for_helper(
+                        options.vocabulary_hint.as_ref(),
+                    ),
                 },
             )?,
         ))

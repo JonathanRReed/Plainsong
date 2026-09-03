@@ -40,6 +40,9 @@ pub struct PlatformTranscription {
     /// Per-segment timestamps, when the engine returns them. Empty for
     /// SFSpeechRecognizer and for the Windows dictation route.
     pub segments: Vec<TranscriptSegment>,
+    /// Vocabulary-hint terms the native engine reports it actually took.
+    /// Always zero on routes that have no bias list at all.
+    pub vocabulary_hint_terms_applied: usize,
 }
 
 #[derive(Debug)]
@@ -87,9 +90,14 @@ impl Drop for ManagedAudioPath {
 /// `apple_speech_required_engine` is how a caller whose correctness depends on
 /// one of Apple's two engines (the meeting route needs SpeechAnalyzer's timed
 /// segments) names it instead of letting the route re-decide.
-#[derive(Debug, Clone, Copy, Default)]
+///
+/// `contextual_strings` is the recognizer vocabulary bias for this request,
+/// already normalized and capped by
+/// `macos_speech::contextual_strings_for_helper`.
+#[derive(Debug, Clone, Default)]
 pub struct PlatformTranscriptionOptions {
     pub apple_speech_required_engine: Option<super::macos_speech::AppleSpeechEngine>,
+    pub contextual_strings: Vec<String>,
 }
 
 pub fn transcribe_with_engine(
@@ -136,6 +144,7 @@ fn transcribe_with_engine_in_temp_dir(
             let transcript = super::macos_speech::transcribe_file(
                 &engine_audio.path,
                 options.apple_speech_required_engine,
+                &options.contextual_strings,
             )?;
             let offset = engine_audio.prepended_silence_seconds;
             Ok(PlatformTranscription {
@@ -144,6 +153,7 @@ fn transcribe_with_engine_in_temp_dir(
                 confidence: transcript.confidence,
                 processing_time_ms: started.elapsed().as_millis() as u64,
                 engine: transcript.engine,
+                vocabulary_hint_terms_applied: transcript.vocabulary_hint_terms_applied,
                 segments: transcript
                     .segments
                     .into_iter()
@@ -165,6 +175,7 @@ fn transcribe_with_engine_in_temp_dir(
                 confidence,
                 processing_time_ms: started.elapsed().as_millis() as u64,
                 engine: None,
+                vocabulary_hint_terms_applied: 0,
                 segments: Vec::new(),
             })
         }

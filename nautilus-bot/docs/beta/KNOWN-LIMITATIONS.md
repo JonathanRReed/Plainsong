@@ -55,6 +55,13 @@ using sensitive content.
   reported — and with Accessibility granted an ordinary field in another app
   still takes dictation while Terminal has secure entry on. And the check is
   macOS-only — Windows insertion has no equivalent probe yet.
+- Vocabulary hints from your dictation dictionary reach the Apple Speech route
+  but do not always change what it hears. Measured on macOS 27.0: the older
+  SFSpeechRecognizer engine acts on them (a three-term hint halved the word
+  error rate on the repo's speech fixture), while macOS 26's SpeechAnalyzer
+  accepts the same terms and returns exactly the same transcript. Plainsong
+  sends them to both and records how many terms the recognizer was given, not
+  whether it used them; see `artifacts/qa/speechanalyzer-vocab-2026-09-02.md`.
 - Some apps may reject direct insertion even after transcription succeeds.
   Plainsong preserves the recognized text and offers copy-based recovery rather
   than discarding it or claiming it was inserted.
