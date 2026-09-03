@@ -16281,6 +16281,84 @@ mod tests {
         }
     }
 
+    /// The meeting lane's provider list, pinned across both languages.
+    ///
+    /// `provider_is_dictation_only` is the inverse of
+    /// `meeting_provider_is_supported`, and settings normalization rewrites a
+    /// meeting selection it calls dictation-only back to Parakeet. So a
+    /// provider the renderer offers for meetings but Rust does not is a
+    /// selection the user makes and the sidecar silently throws away -- which
+    /// is exactly what happened to Deepgram and Gemini Transcribe, taking the
+    /// whole-file and provider-diarization paths with it.
+    ///
+    /// whisper.cpp is the one deliberate asymmetry and is asserted as such:
+    /// its meeting support is per model, so it is meeting-grade in Rust
+    /// (`meeting_provider_is_supported`) while the renderer decides it through
+    /// `isWhisperMeetingModel` instead of the set.
+    #[test]
+    fn every_meeting_grade_provider_matches_in_both_languages() {
+        let renderer = renderer_provider_set("MEETING_GRADE_PROVIDER_SET");
+        let sidecar = asr::AsrProviderType::all()
+            .into_iter()
+            .filter(|provider| meeting_provider_is_supported(*provider))
+            .map(|provider| asr_provider_to_settings_value(provider).to_string())
+            .collect::<std::collections::BTreeSet<String>>();
+
+        assert!(
+            !renderer.is_empty(),
+            "MEETING_GRADE_PROVIDER_SET parsed empty; the source scan is broken, not the code"
+        );
+
+        // Names the renderer knows that this build did not compile in. Only
+        // `transcribe_cpp` is ever allowed here, and only when its feature is
+        // off: it is the one route gated behind a Cargo feature.
+        let not_in_this_build = renderer
+            .iter()
+            .filter(|name| asr_provider_from_settings_value(name).is_none())
+            .cloned()
+            .collect::<std::collections::BTreeSet<String>>();
+        let expected_missing: std::collections::BTreeSet<String> =
+            if cfg!(feature = "asr-transcribe-cpp") {
+                std::collections::BTreeSet::new()
+            } else {
+                ["transcribe_cpp".to_string()].into_iter().collect()
+            };
+        assert_eq!(
+            not_in_this_build, expected_missing,
+            "the only renderer meeting provider this build may not know is the \
+             feature-gated transcribe.cpp route"
+        );
+
+        let mut expected = renderer;
+        for name in &expected_missing {
+            expected.remove(name);
+        }
+        // whisper.cpp: meeting-grade as a provider in Rust, per model in the
+        // renderer. Asserted rather than tolerated so the exception cannot
+        // quietly grow a second member.
+        expected.insert("whisper".to_string());
+
+        assert_eq!(
+            sidecar, expected,
+            "meeting_provider_is_supported() and MEETING_GRADE_PROVIDER_SET in \
+             src/lib/asr-capabilities.ts must name the same providers"
+        );
+
+        for provider in [
+            asr::AsrProviderType::Deepgram,
+            asr::AsrProviderType::GeminiTranscribe,
+        ] {
+            assert!(
+                !provider_is_dictation_only(provider),
+                "{provider:?} must not be rewritten out of a meeting selection"
+            );
+            assert!(!meeting_route_is_dictation_only(
+                provider,
+                provider.default_model_id()
+            ));
+        }
+    }
+
     /// The refusal a "local only" install depends on, asserted at every gate a
     /// cloud route has to pass rather than only at the policy function.
     #[test]
@@ -19661,6 +19739,14 @@ fn provider_allows_automatic_dictation_fallback(provider: asr::AsrProviderType) 
     provider != asr::AsrProviderType::MacosAppleSpeech
 }
 
+/// Whether a provider can serve the meeting lane at all.
+///
+/// Pinned against the renderer's `MEETING_GRADE_PROVIDER_SET` by
+/// `every_meeting_grade_provider_matches_in_both_languages`. The two lists
+/// diverging is not cosmetic: `provider_is_dictation_only` is its inverse, and
+/// settings normalization rewrites a meeting selection the sidecar calls
+/// dictation-only back to Parakeet, so a provider missing here is a meeting
+/// route the user chose and cannot keep.
 fn meeting_provider_is_supported(provider: asr::AsrProviderType) -> bool {
     matches!(
         provider,
@@ -19671,12 +19757,28 @@ fn meeting_provider_is_supported(provider: asr::AsrProviderType) -> bool {
             | asr::AsrProviderType::Groq
             | asr::AsrProviderType::CohereTranscribe
             | asr::AsrProviderType::Qwen3Asr
+            | asr::AsrProviderType::Deepgram
+            | asr::AsrProviderType::GeminiTranscribe
             // whisper.cpp is meeting-capable per model, not per provider:
             // see `WHISPER_MEETING_MODEL_IDS`. It never enters the meeting
             // lane on its own (`preferred_meeting_provider_candidates`), only
             // when the meeting slot names one of those models outright.
             | asr::AsrProviderType::Whisper
-    )
+    ) || {
+        // Only exists when the spike is compiled in; a default build has no
+        // such variant to match. It returns the same segment rows with
+        // timestamps as the shipped local routes (see transcribe_cpp.rs's
+        // segment contract), which is what the meeting lane needs, and the
+        // renderer already lists it.
+        #[cfg(feature = "asr-transcribe-cpp")]
+        {
+            provider == asr::AsrProviderType::TranscribeCpp
+        }
+        #[cfg(not(feature = "asr-transcribe-cpp"))]
+        {
+            false
+        }
+    }
 }
 
 /// The whisper.cpp ggml models allowed in the meeting lane.

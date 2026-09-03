@@ -378,6 +378,13 @@ evidence is stale and must be recaptured before this becomes a candidate.
   files that still carry it load cleanly and are rewritten without it.
 
 ### Fixed
+- Deepgram and Gemini Transcribe can actually be chosen for meetings. The
+  sidecar's list of meeting-capable providers never gained either one, so
+  both counted as dictation-only: settings normalization rewrote a Deepgram
+  meeting selection back to Parakeet on the next save, and the whole-file
+  request and provider speaker labels those routes exist for could never run.
+  Both are meeting providers now, and the list is pinned against the picker's
+  own in both directions.
 - Deepgram and Gemini Transcribe are treated as the cloud routes they are.
   The sidecar's one privacy classification -- the list that decides whether
   audio leaves this Mac -- still named only the four cloud providers that
