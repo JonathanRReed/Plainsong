@@ -19,6 +19,7 @@ const SIDECAR_SOURCE: &str = concat!(
     include_str!("dispatch.rs"),
     include_str!("text_insert.rs"),
     include_str!("analysis.rs"),
+    include_str!("recording_vault.rs"),
 );
 
 /// The source of one top-level item, from its declaration to the next one.
