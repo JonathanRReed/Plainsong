@@ -229,7 +229,7 @@ describe("TranscriptViewer", () => {
     });
     fireEvent.click(screen.getByRole("button", { name: "Save speaker name" }));
 
-    expect(onRenameSpeaker).toHaveBeenCalledWith("me", "Alice");
+    expect(onRenameSpeaker).toHaveBeenCalledWith("me", "Alice", false);
     expect(screen.getByLabelText("Speaker name")).toHaveValue("Alice");
     expect(screen.queryByText("Alice")).not.toBeInTheDocument();
 

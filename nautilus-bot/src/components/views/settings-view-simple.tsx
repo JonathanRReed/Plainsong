@@ -23,6 +23,7 @@ import { Switch } from "@/components/ui/switch";
 import { SettingsSwitch } from "@/components/ui/settings-control";
 import { CalendarSettingsSection } from "@/components/meetings/calendar-settings-section";
 import { LocalToolsSection } from "@/components/local-tools-section";
+import { RememberedVoicesSection } from "@/components/remembered-voices-section";
 import { Input } from "@/components/ui/input";
 import { Textarea } from "@/components/ui/textarea";
 import { Label } from "@/components/ui/label";
@@ -4439,6 +4440,39 @@ export function SettingsView() {
                           }}
                         />
                       </div>
+
+                      <RememberedVoicesSection
+                        rememberVoices={meetingsSettings.rememberVoices}
+                        autoApplyConfidentVoices={
+                          meetingsSettings.autoApplyConfidentVoices
+                        }
+                        onRememberVoicesChange={(checked) =>
+                          void updateSettings({
+                            ...settings,
+                            meetings: {
+                              ...meetingsSettings,
+                              rememberVoices: checked,
+                              // Auto-apply refines remembering, so turning
+                              // remembering off takes it with it. This mirrors
+                              // `normalize_loaded_meetings_settings` in
+                              // settings.rs rather than leaving the file in a
+                              // state the sidecar would normalize behind us.
+                              autoApplyConfidentVoices: checked
+                                ? meetingsSettings.autoApplyConfidentVoices
+                                : false,
+                            },
+                          })
+                        }
+                        onAutoApplyChange={(checked) =>
+                          void updateSettings({
+                            ...settings,
+                            meetings: {
+                              ...meetingsSettings,
+                              autoApplyConfidentVoices: checked,
+                            },
+                          })
+                        }
+                      />
                     </div>
                     <LocalToolsSection
                       enabled={settings.automation?.localToolsEnabled ?? false}

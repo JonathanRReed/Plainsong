@@ -17,6 +17,7 @@ import { useToast } from "@/components/toast";
 import { ConsentDialog } from "@/components/recording-overlay";
 import {
   TranscriptSearch,
+  type SpeakerVoiceState,
   type TranscriptMatch,
   type TranscriptProvenance,
 } from "@/components/transcript-viewer";
@@ -58,7 +59,15 @@ import {
   updateRecordingTemplate,
 } from "@/lib/backend/recordings";
 import { exportRecordingV2, openExportPath } from "@/lib/backend/exports";
-import { isDiarizationModelAvailable, renameSpeaker, runDiarization } from "@/lib/backend/asr";
+import {
+  isDiarizationModelAvailable,
+  rejectSpeakerVoice,
+  rememberSpeakerVoice,
+  renameSpeaker,
+  runDiarization,
+  suggestSpeakerVoices,
+} from "@/lib/backend/asr";
+import { resolveMeetingsSettings } from "@/lib/settings-sections";
 import { speakTextAloud, stopSpeakingText } from "@/lib/text-to-speech";
 import type {
   CompanyMemoryProfile,
@@ -1115,6 +1124,12 @@ export function RecordingsView() {
   const [customMeetingTemplates, setCustomMeetingTemplates] = useState<
     CustomMeetingTemplate[]
   >([]);
+  // Voiceprints. Empty and off until the setting says otherwise, so the
+  // transcript looks exactly as it did before the feature existed.
+  const [rememberVoicesEnabled, setRememberVoicesEnabled] = useState(false);
+  const [speakerVoices, setSpeakerVoices] = useState<
+    Record<string, SpeakerVoiceState>
+  >({});
   const [templateEditorOpen, setTemplateEditorOpen] = useState(false);
   // null while creating a new template; the template being edited otherwise.
   const [templateEditorTarget, setTemplateEditorTarget] =
@@ -1322,6 +1337,7 @@ export function RecordingsView() {
         .then((settings) => {
           if (!disposed) {
             setCustomMeetingTemplates(settings.transcription.meetingCustomTemplates ?? []);
+            setRememberVoicesEnabled(resolveMeetingsSettings(settings).rememberVoices);
           }
         })
         .catch((error) => {
@@ -1732,6 +1748,85 @@ export function RecordingsView() {
       cancelled = true;
     };
   }, []);
+
+  /**
+   * Ask the sidecar what it recognizes in this meeting's speaker clusters.
+   *
+   * Returns `enabled: false` (and so an empty map) whenever "Remember voices"
+   * is off, which is how the chips disappear entirely rather than sitting
+   * there disabled. Never throws into the caller: a failed suggestion is a
+   * missing chip, not a broken transcript.
+   */
+  const refreshSpeakerVoices = useCallback(async (recordingId: string) => {
+    try {
+      const result = await suggestSpeakerVoices(recordingId);
+      const next: Record<string, SpeakerVoiceState> = {};
+      if (result.enabled) {
+        for (const cluster of result.clusters) {
+          next[cluster.speakerId] = {
+            matchState: cluster.matchState,
+            suggestion: cluster.suggestion
+              ? {
+                  profileId: cluster.suggestion.profileId,
+                  displayName: cluster.suggestion.displayName,
+                  percent: cluster.suggestion.percent,
+                }
+              : null,
+          };
+        }
+      }
+      setSpeakerVoices(next);
+    } catch (error) {
+      console.warn("Failed to load remembered-voice suggestions:", error);
+      setSpeakerVoices({});
+    }
+  }, []);
+
+  // Re-asked whenever the open meeting changes. Cheap: it compares stored
+  // centroids, it does not re-run the embedder over the audio.
+  useEffect(() => {
+    if (!selectedRecording) {
+      setSpeakerVoices({});
+      return;
+    }
+    void refreshSpeakerVoices(selectedRecording.id);
+  }, [selectedRecording, refreshSpeakerVoices]);
+
+  const handleConfirmSpeakerVoice = async (speakerId: string, profileId: string) => {
+    if (!selectedRecording) {
+      return;
+    }
+    try {
+      const { displayName } = await rememberSpeakerVoice({
+        recordingId: selectedRecording.id,
+        speakerId,
+        profileId,
+      });
+      setSpeakerNames((prev) => ({ ...prev, [speakerId]: displayName }));
+      await refreshSpeakerVoices(selectedRecording.id);
+      toast(`Speaker named ${displayName}.`, "success");
+    } catch (error) {
+      const message =
+        error instanceof Error ? error.message : "Couldn't confirm that voice.";
+      toast(message, "error");
+      throw error;
+    }
+  };
+
+  const handleRejectSpeakerVoice = async (speakerId: string, profileId: string) => {
+    if (!selectedRecording) {
+      return;
+    }
+    try {
+      await rejectSpeakerVoice(selectedRecording.id, speakerId, profileId);
+      await refreshSpeakerVoices(selectedRecording.id);
+    } catch (error) {
+      const message =
+        error instanceof Error ? error.message : "Couldn't dismiss that suggestion.";
+      toast(message, "error");
+      throw error;
+    }
+  };
 
   const handleRefreshTranscriptPanel = async () => {
     if (!selectedRecording) {
@@ -2670,7 +2765,11 @@ export function RecordingsView() {
     });
   };
 
-  const handleRenameSpeaker = async (speakerId: string, newName: string) => {
+  const handleRenameSpeaker = async (
+    speakerId: string,
+    newName: string,
+    remember?: boolean
+  ) => {
     if (!selectedRecording) {
       const error = new Error("No recording is open for speaker renaming.");
       toast(error.message, "error");
@@ -2678,6 +2777,18 @@ export function RecordingsView() {
     }
 
     try {
+      if (remember) {
+        // One call: it renames the speaker through the same path below and
+        // stores the voice, so the two can never disagree.
+        await rememberSpeakerVoice({
+          recordingId: selectedRecording.id,
+          speakerId,
+          name: newName,
+        });
+        setSpeakerNames((prev) => ({ ...prev, [speakerId]: newName }));
+        await refreshSpeakerVoices(selectedRecording.id);
+        return;
+      }
       await renameSpeaker(selectedRecording.id, speakerId, newName);
       setSpeakerNames((prev) => ({ ...prev, [speakerId]: newName }));
     } catch (error) {
@@ -5907,6 +6018,10 @@ export function RecordingsView() {
                       activeMatchIndex={activeTranscriptMatchIndex}
                       onMatchesChange={handleTranscriptMatchesChange}
                       onRenameSpeaker={handleRenameSpeaker}
+                      speakerVoices={speakerVoices}
+                      rememberVoicesEnabled={rememberVoicesEnabled}
+                      onConfirmSpeakerVoice={handleConfirmSpeakerVoice}
+                      onRejectSpeakerVoice={handleRejectSpeakerVoice}
                       onEditSegment={async (segmentIds, newText) => {
                         if (!selectedRecording || segmentIds.length === 0) return;
                         try {
