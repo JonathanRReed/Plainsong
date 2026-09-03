@@ -1,4 +1,8 @@
-import type { AsrProviderInfo, AsrProviderType } from "@/types";
+import type {
+  AppleSpeechReadiness,
+  AsrProviderInfo,
+  AsrProviderType,
+} from "@/types";
 import { compareStrings } from "@/lib/format-locale";
 
 export type DictationRoutePreference = "local" | "cloud";
@@ -70,12 +74,32 @@ const MEETING_GRADE_PROVIDER_SET = new Set<AsrProviderType>([
 // whisper.cpp is deliberately absent: its meeting support is per model (see
 // `WHISPER_MEETING_MODEL_IDS` below), so the provider is neither dictation-only
 // nor meeting-grade as a whole.
+//
+// Apple Speech is listed here as its default, which is what a Mac without
+// SpeechAnalyzer has. On macOS 26+ with the language installed it runs
+// SpeechAnalyzer, which does return per-segment timestamps, and
+// `appleSpeechServesMeetings` below is what tells the two apart. Nothing here
+// can decide it, because it depends on the machine.
 const DICTATION_ONLY_PROVIDER_SET = new Set<AsrProviderType>([
   "macos_apple_speech",
   "windows_sdk_dictation",
   "moonshine",
   "whisper_candle",
 ]);
+
+/**
+ * Whether the Apple Speech route on *this* Mac can serve meetings.
+ *
+ * Only its SpeechAnalyzer engine returns the per-segment timestamps a meeting
+ * transcript is assembled from, and only when the route is otherwise ready.
+ * Mirrors `supports_meetings` in rust-sidecar/src/asr/platform/macos_speech.rs,
+ * which is the check the sidecar actually enforces.
+ */
+export function appleSpeechServesMeetings(
+  readiness: AppleSpeechReadiness | null | undefined,
+): boolean {
+  return Boolean(readiness?.ready) && readiness?.engine === "speech_analyzer";
+}
 
 /**
  * The whisper.cpp ggml models the meeting lane accepts. Mirrors
@@ -182,8 +206,18 @@ export function isSharedMeetingCompatible(providerType: AsrProviderType, modelId
   return isMeetingEligibleProvider(providerType) && isMeetingEligibleModel(providerType, modelId);
 }
 
-export function providerCapabilityLabel(providerType: AsrProviderType) {
+export function providerCapabilityLabel(
+  providerType: AsrProviderType,
+  appleSpeechMeetingCapable = false,
+) {
   if (isMeetingGradeProvider(providerType)) {
+    return "Meeting-grade";
+  }
+
+  if (
+    providerType === "macos_apple_speech" &&
+    appleSpeechMeetingCapable
+  ) {
     return "Meeting-grade";
   }
 
@@ -208,6 +242,13 @@ export function providerRecommendation(provider: AsrProviderInfo) {
       return "Ready for meeting-grade transcription.";
     }
     return "Best used for meetings once the runtime is ready.";
+  }
+
+  if (
+    provider.providerType === "macos_apple_speech" &&
+    appleSpeechServesMeetings(provider.platformReadiness)
+  ) {
+    return "Ready for dictation and meetings through Apple's SpeechAnalyzer, with nothing to download.";
   }
 
   if (isDictationOnlyProvider(provider.providerType)) {

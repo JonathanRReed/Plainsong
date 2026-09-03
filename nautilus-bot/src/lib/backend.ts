@@ -15,6 +15,7 @@ import type {
   ActionItemsProvenance,
   SearchHit,
   MeetingTranscriptDetails,
+  AppleSpeechLanguageInstallResult,
 } from "@/types";
 import type { Settings } from "@/types/settings";
 import type { MeetingAttendee } from "@/lib/attendees";
@@ -1278,6 +1279,34 @@ export async function requestDictationPermissions(): Promise<PermissionDiagnosti
 
 export async function requestAppleSpeechPermission(): Promise<PermissionDiagnostics> {
   return await invoke("request_apple_speech_permission");
+}
+
+/**
+ * Asks macOS to install one language's SpeechAnalyzer assets.
+ *
+ * The only download this route ever starts, and only when the reader asks:
+ * transcription refuses a missing language instead of fetching it. Progress
+ * arrives on the `apple-speech-language-install-progress` event.
+ */
+export async function installAppleSpeechLanguage(
+  locale?: string,
+): Promise<AppleSpeechLanguageInstallResult> {
+  const trimmed = locale?.trim();
+  return await invoke(
+    "install_apple_speech_language",
+    trimmed ? { locale: trimmed } : {},
+  );
+}
+
+/**
+ * Asks an in-flight language install to stop.
+ *
+ * macOS owns the download and it can run for minutes, so the reader who
+ * started it needs a way out that is not "quit the app". Safe when nothing is
+ * installing: the next install clears the flag before it starts.
+ */
+export async function cancelAppleSpeechLanguageInstall(): Promise<void> {
+  await invoke("cancel_apple_speech_language_install");
 }
 
 export async function repairCursorInsertPermissions(): Promise<PermissionDiagnostics> {

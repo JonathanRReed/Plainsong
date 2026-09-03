@@ -446,6 +446,44 @@ describe("Platform optimization settings", () => {
     expect(screen.getByText("Ready for transcription")).toBeInTheDocument();
   });
 
+  /**
+   * macOS named this permission when speech recognition meant sending audio to
+   * Apple. Plainsong runs both Apple engines with server recognition off, so
+   * telling the reader only that it is "required for transcription" left the
+   * older meaning standing (STYLE.md §6: copy describes what the app actually
+   * does; no unearned implications either way).
+   */
+  it("says what granting Speech Recognition actually permits", async () => {
+    getSettingsMock.mockResolvedValue({
+      transcription: {
+        defaultProvider: "macos_apple_speech",
+        selectedModelId: "macos_apple_speech",
+        useSharedAsrSelection: true,
+        dictationProvider: "macos_apple_speech",
+        dictationModelId: "macos_apple_speech",
+        meetingProvider: "macos_apple_speech",
+        meetingModelId: "macos_apple_speech",
+        platformOptimization: {
+          mode: "auto",
+          fallbackPolicy: "local_only",
+          macos: { appleNativeEnabled: true, mlxEnabled: true },
+          windows: { foundryEnabled: false, windowsSdkDictationEnabled: false },
+          manualEnginePriority: [],
+        },
+      },
+    });
+
+    render(<AsrProviderManager />);
+
+    const detail = await screen.findByText(/records your consent to on-device processing/i);
+    expect(detail).toBeInTheDocument();
+    expect(detail.textContent).toMatch(/not permission to use a server/i);
+    // The claim it replaced said nothing about where the audio goes.
+    expect(
+      screen.queryByText("Required for Apple Speech transcription."),
+    ).not.toBeInTheDocument();
+  });
+
   it("persists meeting route policy changes", async () => {
     render(<AsrProviderManager />);
 

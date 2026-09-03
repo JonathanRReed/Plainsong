@@ -4,6 +4,7 @@ import { cn } from "@/lib/utils";
 import { normalizeDownloadStatus } from "@/lib/download-status";
 import { formatModelSize, getAsrModelCapability } from "@/lib/asr-capabilities";
 import { getProviderSelectionStatus } from "@/lib/asr-provider-selection";
+import { describeAppleSpeechEngine } from "@/lib/asr-route-catalog";
 import {
   mergeSelectionStateUpdate,
   selectionStateFromSettings,
@@ -18,6 +19,8 @@ import {
   saveSettings,
   getPermissionDiagnostics,
   openPermissionSettings,
+  cancelAppleSpeechLanguageInstall,
+  installAppleSpeechLanguage,
   openInstalledPlainsongApp,
   requestAppleSpeechPermission,
   repairCursorInsertPermissions,
@@ -45,6 +48,7 @@ import {
 import { Switch } from "@/components/ui/switch";
 import { Label } from "@/components/ui/label";
 import type {
+  AppleSpeechLanguageInstallProgress,
   AsrBenchmarkEntry,
   PlatformOptimizationSettings,
   AsrProviderInfo,
@@ -115,6 +119,14 @@ export function AsrProviderManager({ className }: AsrProviderManagerProps) {
   );
   const [showAdvancedTools, setShowAdvancedTools] = useState(false);
   const [permissionActionBusy, setPermissionActionBusy] = useState(false);
+  const [languageInstallBusy, setLanguageInstallBusy] = useState(false);
+  const [languageInstallCancelling, setLanguageInstallCancelling] =
+    useState(false);
+  const [languageInstallProgress, setLanguageInstallProgress] =
+    useState<AppleSpeechLanguageInstallProgress | null>(null);
+  const [languageInstallError, setLanguageInstallError] = useState<
+    string | null
+  >(null);
   const [permissionDiagnostics, setPermissionDiagnostics] =
     useState<PermissionDiagnostics | null>(null);
   const benchmarkFileInputRef = useRef<HTMLInputElement | null>(null);
@@ -964,6 +976,85 @@ export function AsrProviderManager({ className }: AsrProviderManagerProps) {
     selectionProviderByType("macos_apple_speech")?.platformReadiness ??
     providerByType("macos_apple_speech")?.platformReadiness ??
     null;
+
+  // The language install is the only download this route ever starts, so the
+  // action is offered only when macOS actually has something to fetch:
+  // SpeechAnalyzer is usable, it covers this language, and the assets are not
+  // already on disk.
+  const appleSpeechLanguageInstallable = Boolean(
+    appleSpeechReadiness?.speechAnalyzerAvailable &&
+      appleSpeechReadiness?.speechAnalyzerLocaleSupported &&
+      !appleSpeechReadiness?.speechAnalyzerAssetsInstalled,
+  );
+
+  useEffect(() => {
+    let disposed = false;
+    let unlisten: (() => void) | null = null;
+
+    void (async () => {
+      const next = await listen<AppleSpeechLanguageInstallProgress>(
+        "apple-speech-language-install-progress",
+        (event) => {
+          if (!disposed) {
+            setLanguageInstallProgress({ ...event.payload });
+          }
+        },
+      );
+      if (disposed) {
+        next();
+        return;
+      }
+      unlisten = next;
+    })();
+
+    return () => {
+      disposed = true;
+      unlisten?.();
+    };
+  }, []);
+
+  /**
+   * Stops the running install.
+   *
+   * macOS owns the download and it can run for minutes; without this the only
+   * way out of "Installing language…" was to quit. The install call itself
+   * returns with a `cancelled` error, so the button state is cleared by the
+   * same `finally` as every other ending.
+   */
+  const cancelAppleSpeechLanguageAssets = async () => {
+    setLanguageInstallCancelling(true);
+    try {
+      await cancelAppleSpeechLanguageInstall();
+    } catch (error) {
+      setLanguageInstallError(
+        error instanceof Error ? error.message : String(error),
+      );
+    }
+  };
+
+  const installAppleSpeechLanguageAssets = async () => {
+    setLanguageInstallBusy(true);
+    setLanguageInstallCancelling(false);
+    setLanguageInstallError(null);
+    setLanguageInstallProgress(null);
+    try {
+      const result = await installAppleSpeechLanguage(
+        appleSpeechReadiness?.locale ?? undefined,
+      );
+      if (result.notes.length > 0) {
+        setLanguageInstallError(result.notes.join(" "));
+      }
+      await refreshAppleNativeReadiness();
+    } catch (error) {
+      setLanguageInstallError(
+        error instanceof Error ? error.message : String(error),
+      );
+    } finally {
+      setLanguageInstallBusy(false);
+      setLanguageInstallCancelling(false);
+      setLanguageInstallProgress(null);
+    }
+  };
   const selectedRouteUsesAppleNative = useSharedAsrSelection
     ? defaultProvider === "macos_apple_speech"
     : dictationProvider === "macos_apple_speech" ||
@@ -1030,7 +1121,13 @@ export function AsrProviderManager({ className }: AsrProviderManagerProps) {
       ready: permissionDiagnostics?.speechRecognitionReady ?? false,
       action: "Open Speech Settings",
       onClick: () => void openPermissionSettings("speech"),
-      detail: "Required for Apple Speech transcription.",
+      // macOS named this permission in the era when speech recognition meant
+      // sending audio to Apple. It does not mean that here: Plainsong runs
+      // both Apple engines with server recognition off, so granting it lets
+      // macOS transcribe on this Mac and nothing else. Saying only "required
+      // for transcription" left the reader to assume the older meaning.
+      detail:
+        "macOS asks for this before it will transcribe. It records your consent to on-device processing; it is not permission to use a server, and Plainsong keeps Apple's server fallback off.",
     },
     {
       key: "accessibility",
@@ -1148,15 +1245,53 @@ export function AsrProviderManager({ className }: AsrProviderManagerProps) {
                   {appleSpeechReadiness.setupAction}
                 </p>
               ) : null}
-              {appleSpeechReadiness.speechAnalyzerAvailable ? (
-                <p className="mt-1 text-xs text-muted-foreground">
-                  SpeechAnalyzer API detected
-                  {appleSpeechReadiness.operatingSystemVersion
-                    ? ` (macOS ${appleSpeechReadiness.operatingSystemVersion})`
-                    : ""}
-                  . The newer streaming-capable Speech framework route is
-                  available on this device.
-                </p>
+              <p className="mt-1 text-sm text-muted-foreground">
+                {describeAppleSpeechEngine(appleSpeechReadiness)}
+              </p>
+              {appleSpeechLanguageInstallable ? (
+                <div className="mt-2 space-y-1">
+                  <div className="flex flex-wrap items-center gap-2">
+                    <Button
+                      size="sm"
+                      variant="outline"
+                      disabled={languageInstallBusy}
+                      onClick={() => void installAppleSpeechLanguageAssets()}
+                    >
+                      {languageInstallBusy
+                        ? "Installing language…"
+                        : "Install language"}
+                    </Button>
+                    {languageInstallBusy ? (
+                      <Button
+                        size="sm"
+                        variant="ghost"
+                        disabled={languageInstallCancelling}
+                        onClick={() =>
+                          void cancelAppleSpeechLanguageAssets()
+                        }
+                      >
+                        {languageInstallCancelling ? "Stopping…" : "Cancel"}
+                      </Button>
+                    ) : null}
+                    {languageInstallProgress ? (
+                      <span className="text-sm text-muted-foreground">
+                        {languageInstallProgress.message}
+                        {languageInstallProgress.stage === "downloading"
+                          ? ` ${Math.round(
+                              languageInstallProgress.fraction * 100,
+                            )}%`
+                          : ""}
+                      </span>
+                    ) : null}
+                  </div>
+                  <p className="text-sm text-muted-foreground">
+                    macOS downloads and stores the language; Plainsong does not
+                    control its size and keeps no copy.
+                  </p>
+                </div>
+              ) : null}
+              {languageInstallError ? (
+                <p className="mt-1 text-sm text-rust">{languageInstallError}</p>
               ) : null}
             </div>
           ) : null}

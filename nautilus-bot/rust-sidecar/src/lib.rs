@@ -1227,6 +1227,70 @@ async fn request_apple_speech_permission_impl(
     Ok(collect_permission_diagnostics(state, notes).await)
 }
 
+/// What the Models screen gets back after asking macOS for a language.
+#[derive(Debug, Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct AppleSpeechLanguageInstallResult {
+    install: Option<crate::asr::platform::macos_speech::AppleSpeechAssetInstall>,
+    readiness: crate::asr::platform::macos_speech::AppleSpeechReadiness,
+    notes: Vec<String>,
+}
+
+/// What to tell the reader when a language install ended without installing.
+///
+/// Stopping on purpose is not a failure: reporting it as one puts a serialized
+/// error payload in front of somebody who pressed Cancel and already knows
+/// what happened. Everything else keeps the underlying error, which carries
+/// the code and details the Models screen needs to say what to do next.
+fn apple_speech_install_note(error: &anyhow::Error) -> String {
+    if crate::asr::platform::macos_speech::typed_error_code(error).as_deref() == Some("cancelled") {
+        return "Language install stopped.".to_string();
+    }
+    format!("Apple Speech language install failed: {}", error)
+}
+
+/// Installs the SpeechAnalyzer assets for one language.
+///
+/// This is the only place in the app that starts an Apple language download,
+/// and it only runs when the reader asks for it. Progress is emitted as it
+/// arrives rather than buffered, because the download is the OS's and can take
+/// minutes.
+async fn install_apple_speech_language_impl(
+    state: &AppState,
+    handle: &crate::sidecar_handle::SidecarHandle,
+    locale: Option<&str>,
+) -> Result<AppleSpeechLanguageInstallResult, String> {
+    let mut notes = Vec::new();
+    let install =
+        match crate::asr::platform::macos_speech::install_language_assets(locale, |progress| {
+            handle.emit_event(
+                "apple-speech-language-install-progress",
+                serde_json::json!({
+                    "stage": progress.stage,
+                    "locale": progress.locale,
+                    "fraction": progress.fraction,
+                    "message": progress.message,
+                }),
+            );
+        })
+        .await
+        {
+            Ok(install) => Some(install),
+            Err(error) => {
+                notes.push(apple_speech_install_note(&error));
+                None
+            }
+        };
+
+    crate::asr::platform::macos_speech::invalidate_readiness_cache();
+    state.asr_manager.invalidate_provider_info_cache().await;
+    Ok(AppleSpeechLanguageInstallResult {
+        install,
+        readiness: crate::asr::platform::macos_speech::fresh_readiness(),
+        notes,
+    })
+}
+
 async fn repair_cursor_insert_permissions_impl(
     state: &AppState,
 ) -> Result<PermissionDiagnostics, String> {
@@ -4217,6 +4281,9 @@ async fn reprocess_dictation_impl(
             destination_category,
         ),
         translate_to_english: translation_route == DictationTranslationRoute::WhisperNative,
+        // Dictation is served correctly by either Apple engine; only the
+        // meeting route depends on SpeechAnalyzer's timed segments.
+        apple_speech_required_engine: None,
     };
 
     if let Ok(mut overlay) = state.dictation_overlay_state.lock() {
@@ -14120,6 +14187,106 @@ mod tests {
         );
     }
 
+    /// SpeechAnalyzer's live stream reports two kinds of text: finalized spans
+    /// that will not change, and a volatile tail that is the model's current
+    /// guess and is routinely replaced by different words. The streaming
+    /// partial type in `asr::platform::macos_speech` carries both, and its
+    /// combining accessor deliberately joins them for a *preview*.
+    ///
+    /// Nothing may feed that into the insertion path. Text typed into someone
+    /// else's app cannot be taken back, so a guess inserted and then revised
+    /// leaves the wrong words in a message, a commit, or a patient note. The
+    /// finished transcript arrives separately, on the `final` event.
+    ///
+    /// Asserted against the source because the SpeechAnalyzer live session has
+    /// no consumer yet: this is the guard the eventual one has to get past, and
+    /// getting past it means deciding explicitly which of the two texts is
+    /// delivered.
+    ///
+    /// Scoped by identifier, not by substring, because the transcribe.cpp
+    /// streaming live preview is a *different* recognizer with neighbouring
+    /// names: its own partial tracker in `asr` would match a bare substring
+    /// search for the SpeechAnalyzer type, and both partial structs happen to
+    /// spell their tail field the same way. That preview is legitimate and UI
+    /// only, and it is fenced off the delivery path by
+    /// `dictation_insertion_never_reads_a_streaming_partial`, which scans the
+    /// stop-dictation body itself. So the whole-file sweep below names only
+    /// symbols unique to SpeechAnalyzer, and the field name the two share is
+    /// checked against the insertion path instead -- where it is the only
+    /// place it could do harm anyway.
+    #[test]
+    fn no_volatile_streaming_text_reaches_the_insertion_path() {
+        const SOURCE: &str = include_str!("lib.rs");
+
+        /// Substring hits inside a longer identifier are a different name, not
+        /// this one.
+        fn names_identifier(haystack: &str, needle: &str) -> bool {
+            let is_ident = |c: char| c.is_alphanumeric() || c == '_';
+            let mut from = 0;
+            while let Some(offset) = haystack[from..].find(needle) {
+                let at = from + offset;
+                let after = at + needle.len();
+                let bounded_left = !haystack[..at].ends_with(is_ident);
+                let bounded_right = !haystack[after..].starts_with(is_ident);
+                if bounded_left && bounded_right {
+                    return true;
+                }
+                from = after;
+            }
+            false
+        }
+
+        // Split so this guard's own text is not what it finds: `include_str!`
+        // includes this function, and `concat!` joins at compile time while
+        // the source holds the halves apart.
+        for volatile in [
+            concat!("Streaming", "Partial"),
+            concat!("combined_", "text"),
+            concat!("SpeechAnalyzer", "PartialAccumulator"),
+            // The seam itself: wiring it is what forces the choice.
+            concat!("start_live_", "dictation_session"),
+        ] {
+            assert!(
+                !names_identifier(SOURCE, volatile),
+                "'{volatile}' carries SpeechAnalyzer's volatile guess; it must not reach the \
+                 sidecar's delivery path. If live dictation is being wired, deliver \
+                 `finalized_text()` (or the closing `final` event) and update this guard to name \
+                 what may cross."
+            );
+        }
+
+        // Spelled the same on both partial structs, so it is only meaningful
+        // where insertion actually happens.
+        let insertion = owned_stop_dictation_body();
+        let shared_tail_field = concat!("volatile_", "suffix");
+        assert!(
+            !names_identifier(insertion, shared_tail_field),
+            "the dictation stop path must never read '{shared_tail_field}': whichever recognizer \
+             produced it, a volatile tail is a guess and the inserted text is the batch decode"
+        );
+    }
+
+    /// A reader who pressed Cancel does not need the serialized error payload
+    /// the sidecar uses to route failures; they need to know it stopped.
+    #[test]
+    fn a_cancelled_language_install_reads_as_stopped_not_failed() {
+        let cancelled = crate::asr::platform::macos_speech::install_language_cancelled_error();
+        assert_eq!(
+            super::apple_speech_install_note(&cancelled),
+            "Language install stopped."
+        );
+
+        // Anything else keeps the underlying error, which carries the code and
+        // details the Models screen needs to say what to do next.
+        let failed = anyhow::anyhow!("the helper exited");
+        let note = super::apple_speech_install_note(&failed);
+        assert!(
+            note.starts_with("Apple Speech language install failed"),
+            "{note}"
+        );
+        assert!(note.contains("the helper exited"), "{note}");
+    }
+
     #[test]
     fn missing_command_context_never_fails_the_stop() {
         // A selection-scoped command spoken with nothing selected is a soft
@@ -16324,6 +16491,46 @@ mod tests {
             resolve_transcription_provider_and_model(&transcription, TranscriptionScope::Meeting);
         assert_eq!(meeting_provider, asr::AsrProviderType::Parakeet);
         assert_eq!(meeting_model_id, "parakeet-tdt-0.6b-v3");
+    }
+
+    #[test]
+    fn apple_speech_reaches_meetings_only_when_speech_analyzer_can_serve_them() {
+        // The whole point of the flag: Apple Speech is the one provider whose
+        // meeting eligibility depends on the machine, because only its
+        // SpeechAnalyzer engine returns the per-segment timestamps the meeting
+        // transcript is assembled from.
+        assert!(!meeting_provider_is_supported_with(
+            asr::AsrProviderType::MacosAppleSpeech,
+            false
+        ));
+        assert!(meeting_provider_is_supported_with(
+            asr::AsrProviderType::MacosAppleSpeech,
+            true
+        ));
+
+        // Nothing else changes with the flag, in either direction.
+        for provider in [
+            asr::AsrProviderType::Parakeet,
+            asr::AsrProviderType::DistilWhisper,
+            asr::AsrProviderType::Whisper,
+            asr::AsrProviderType::Qwen3Asr,
+            asr::AsrProviderType::OpenAiCloud,
+            asr::AsrProviderType::Moonshine,
+            asr::AsrProviderType::WhisperCandle,
+            asr::AsrProviderType::WindowsSdkDictation,
+        ] {
+            assert_eq!(
+                meeting_provider_is_supported_with(provider, false),
+                meeting_provider_is_supported_with(provider, true),
+                "{provider:?} must not depend on the Apple Speech flag"
+            );
+        }
+
+        // Windows dictation stays dictation-only regardless.
+        assert!(!meeting_provider_is_supported_with(
+            asr::AsrProviderType::WindowsSdkDictation,
+            true
+        ));
     }
 
     #[test]
@@ -20447,6 +20654,28 @@ fn provider_allows_automatic_dictation_fallback(provider: asr::AsrProviderType) 
 }
 
 fn meeting_provider_is_supported(provider: asr::AsrProviderType) -> bool {
+    meeting_provider_is_supported_with(
+        provider,
+        crate::asr::platform::macos_speech::meetings_supported(),
+    )
+}
+
+/// Whether a provider may serve meetings, given whether the Apple Speech route
+/// is currently meeting-capable.
+///
+/// Apple Speech is the one provider whose answer depends on the machine: it
+/// reaches meetings only through SpeechAnalyzer (macOS 26+ with the language
+/// installed), which is the only one of its two engines that returns the
+/// per-segment timestamps `transcribe_recording_in_chunks` offsets and merges.
+/// SFSpeechRecognizer stays dictation-only, as it has always been. The flag is
+/// passed in rather than read here so the policy is testable without a Mac.
+fn meeting_provider_is_supported_with(
+    provider: asr::AsrProviderType,
+    apple_speech_meeting_capable: bool,
+) -> bool {
+    if provider == asr::AsrProviderType::MacosAppleSpeech {
+        return apple_speech_meeting_capable;
+    }
     matches!(
         provider,
         asr::AsrProviderType::Parakeet
@@ -20521,10 +20750,16 @@ fn ensure_meeting_route_supported(
         return Ok(());
     }
 
+    let apple_speech_choice = if crate::asr::platform::macos_speech::meetings_supported() {
+        "Apple Speech, "
+    } else {
+        ""
+    };
     Err(format!(
-        "Meetings require a meeting-grade ASR route. '{}' with model '{}' is dictation-only or unsupported for meetings. Choose Parakeet, whisper.cpp small/medium/large-v3/large-v3-turbo, Distil Whisper, Qwen3-ASR, ElevenLabs, OpenAI, Groq, or Cohere in Settings -> ASR / Providers.",
+        "Meetings require a meeting-grade ASR route. '{}' with model '{}' is dictation-only or unsupported for meetings. Choose {}Parakeet, whisper.cpp small/medium/large-v3/large-v3-turbo, Distil Whisper, Qwen3-ASR, ElevenLabs, OpenAI, Groq, or Cohere in Settings -> ASR / Providers.",
         provider.display_name(),
-        model_id
+        model_id,
+        apple_speech_choice
     ))
 }
 
@@ -20569,6 +20804,12 @@ fn preferred_meeting_provider_candidates(
                 && meeting_model_id.is_some_and(|model_id| {
                     meeting_model_is_supported(asr::AsrProviderType::Whisper, model_id)
                 })
+        } else if provider == asr::AsrProviderType::MacosAppleSpeech {
+            // Same rule as whisper.cpp, for the same reason: eligible is not
+            // the same as chosen. Inheriting it from the dictation or default
+            // slot would silently move an existing reader's meetings onto a
+            // different engine the first time they updated to macOS 26.
+            meeting_provider == Some(provider) && meeting_provider_is_supported(provider)
         } else {
             meeting_provider_is_supported(provider)
         };
@@ -27121,6 +27362,9 @@ async fn stop_dictation_for_sidecar(
             destination_category,
         ),
         translate_to_english: translation_route == DictationTranslationRoute::WhisperNative,
+        // Dictation is served correctly by either Apple engine; only the
+        // meeting route depends on SpeechAnalyzer's timed segments.
+        apple_speech_required_engine: None,
     };
     let vocabulary_hint_terms_built = transcription_options
         .vocabulary_hint
@@ -35095,6 +35339,26 @@ pub async fn dispatch_command(
                 serde_json::json!({ "reason": "dictation_permissions_requested" }),
             );
             serde_json::to_value(result).map_err(|e| e.to_string())
+        }
+        "install_apple_speech_language" => {
+            let locale = params
+                .get("locale")
+                .and_then(serde_json::Value::as_str)
+                .map(str::trim)
+                .filter(|locale| !locale.is_empty())
+                .map(ToString::to_string);
+            let result =
+                install_apple_speech_language_impl(state.as_ref(), handle, locale.as_deref())
+                    .await?;
+            serde_json::to_value(result).map_err(|e| e.to_string())
+        }
+        // The install is macOS' download and can run for minutes; the reader
+        // who started it needs a way to stop waiting on it. Takes no
+        // parameters and reads nothing: it sets a flag the in-flight install
+        // loop checks, which kills the helper.
+        "cancel_apple_speech_language_install" => {
+            crate::asr::platform::macos_speech::cancel_language_install();
+            Ok(serde_json::Value::Null)
         }
         "request_apple_speech_permission" => {
             let result = request_apple_speech_permission_impl(state.as_ref()).await?;

@@ -1,5 +1,6 @@
 export {
   applyGlobalShortcutsNow,
+  cancelAppleSpeechLanguageInstall,
   clearProviderSecret,
   getDictationShortcutCapabilityStatus,
   getPermissionDiagnostics,
@@ -7,6 +8,7 @@ export {
   getSettings,
   getShortcutConflicts,
   hasProviderSecret,
+  installAppleSpeechLanguage,
   lockVault,
   migrateToEncryptedStorage,
   openInstalledPlainsongApp,

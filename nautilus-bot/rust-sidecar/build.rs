@@ -51,30 +51,38 @@ fn build_macos_speech_helper() {
         });
     }
 
+    let mut swiftc_arguments: Vec<&str> = vec!["swiftc", "-O", "-target", SWIFT_TARGET];
+    // `@available(macOS 26, *)` only guards the *runtime*: the SpeechAnalyzer
+    // symbols behind it still have to resolve while compiling, so an SDK older
+    // than macOS 26 cannot build that section at all and the whole app would
+    // stop building on an otherwise fine machine. Probe the SDK and compile the
+    // SFSpeechRecognizer-only variant instead when it is too old; that variant
+    // reports `speech_analyzer_available: false`, which the Rust side already
+    // treats as "this Mac runs SFSpeechRecognizer".
+    if !sdk_has_speech_analyzer() {
+        swiftc_arguments.extend(["-D", "NO_SPEECH_ANALYZER"]);
+    }
+    swiftc_arguments.extend([
+        path_str(&source),
+        "-framework",
+        "Speech",
+        "-framework",
+        "Foundation",
+        "-framework",
+        "AVFoundation",
+        "-Xlinker",
+        "-sectcreate",
+        "-Xlinker",
+        "__TEXT",
+        "-Xlinker",
+        "__info_plist",
+        "-Xlinker",
+        path_str(&helper_plist),
+        "-o",
+        path_str(&helper_path),
+    ]);
     let output = Command::new("xcrun")
-        .args([
-            "swiftc",
-            "-O",
-            "-target",
-            SWIFT_TARGET,
-            path_str(&source),
-            "-framework",
-            "Speech",
-            "-framework",
-            "Foundation",
-            "-framework",
-            "AVFoundation",
-            "-Xlinker",
-            "-sectcreate",
-            "-Xlinker",
-            "__TEXT",
-            "-Xlinker",
-            "__info_plist",
-            "-Xlinker",
-            path_str(&helper_plist),
-            "-o",
-            path_str(&helper_path),
-        ])
+        .args(&swiftc_arguments)
         .env("MACOSX_DEPLOYMENT_TARGET", "13.0")
         .output()
         .unwrap_or_else(|error| {
@@ -154,6 +162,65 @@ fn build_macos_speech_helper() {
                 "macOS Speech helper returned an invalid capability probe: {}",
                 probe_text.trim()
             );
+        }
+    }
+}
+
+/// Whether the active macOS SDK is new enough to *compile* the SpeechAnalyzer
+/// section of the helper.
+///
+/// The deployment target stays 13.0 either way; this only decides which
+/// symbols exist in the binary. A missing or unparsable `xcrun` answer is
+/// treated as "too old", because building the smaller helper is always safe
+/// while building the larger one against an old SDK is a hard compile error.
+#[cfg(target_os = "macos")]
+fn sdk_has_speech_analyzer() -> bool {
+    const FIRST_SDK_WITH_SPEECH_ANALYZER: u32 = 26;
+
+    println!("cargo:rerun-if-env-changed=SDKROOT");
+    println!("cargo:rerun-if-env-changed=DEVELOPER_DIR");
+
+    let Ok(output) = Command::new("xcrun")
+        .args(["--sdk", "macosx", "--show-sdk-version"])
+        .output()
+    else {
+        println!(
+            "cargo:warning=Could not run 'xcrun --sdk macosx --show-sdk-version'; \
+             building the SFSpeechRecognizer-only macOS Speech helper."
+        );
+        return false;
+    };
+    if !output.status.success() {
+        println!(
+            "cargo:warning=Could not read the macOS SDK version; \
+             building the SFSpeechRecognizer-only macOS Speech helper."
+        );
+        return false;
+    }
+
+    let reported = String::from_utf8_lossy(&output.stdout);
+    let major = reported
+        .trim()
+        .split('.')
+        .next()
+        .and_then(|value| value.parse::<u32>().ok());
+    match major {
+        Some(major) if major >= FIRST_SDK_WITH_SPEECH_ANALYZER => true,
+        Some(major) => {
+            println!(
+                "cargo:warning=macOS SDK {} predates the SpeechAnalyzer API (needs {}); \
+                 building the SFSpeechRecognizer-only macOS Speech helper.",
+                major, FIRST_SDK_WITH_SPEECH_ANALYZER
+            );
+            false
+        }
+        None => {
+            println!(
+                "cargo:warning=Unrecognized macOS SDK version '{}'; \
+                 building the SFSpeechRecognizer-only macOS Speech helper.",
+                reported.trim()
+            );
+            false
         }
     }
 }

@@ -11,6 +11,10 @@ import {
   listDownloadedModels,
 } from "@/lib/backend/asr";
 import {
+  cancelAppleSpeechLanguageInstall,
+  installAppleSpeechLanguage,
+} from "@/lib/backend/settings";
+import {
   deleteBundledCleanupModel,
   deleteLivePreviewEngineModel,
   downloadBundledCleanupModel,
@@ -112,6 +116,8 @@ export function ModelsScreen({
     null,
   );
   const [busyRouteId, setBusyRouteId] = useState<string | null>(null);
+  const [cancellingLanguageInstall, setCancellingLanguageInstall] =
+    useState(false);
   const [bundledStatus, setBundledStatus] =
     useState<BundledCleanupModelStatus | null>(null);
   const [bundledBusy, setBundledBusy] = useState(false);
@@ -548,6 +554,29 @@ export function ModelsScreen({
     [inventory, onPatchSettings],
   );
 
+  /**
+   * Stops a running language install.
+   *
+   * The sidecar kills the helper, so the in-flight `installAppleSpeechLanguage`
+   * call returns with a cancelled note and the row's own `finally` clears the
+   * busy state -- there is nothing to unwind here.
+   */
+  const handleCancelLanguageInstall = useCallback(async () => {
+    setCancellingLanguageInstall(true);
+    try {
+      await cancelAppleSpeechLanguageInstall();
+    } catch (error) {
+      setActionError(
+        error instanceof Error
+          ? error.message
+          : "Could not stop the language install.",
+      );
+      if (mountedRef.current) {
+        setCancellingLanguageInstall(false);
+      }
+    }
+  }, []);
+
   const handleApplyPreset = useCallback(
     (preset: ModelPreset) => {
       setActionError(null);
@@ -564,6 +593,32 @@ export function ModelsScreen({
 
       if (action === "connect_api_key") {
         onOpenKeySettings();
+        return;
+      }
+      if (action === "install_language") {
+        // macOS owns the download and its size; this only asks for it and
+        // then re-reads what the machine now has.
+        setBusyRouteId(route.routeId);
+        setCancellingLanguageInstall(false);
+        setActionError(null);
+        try {
+          const result = await installAppleSpeechLanguage();
+          if (result.notes.length > 0) {
+            setActionError(result.notes.join(" "));
+          }
+          await Promise.all([refresh(), refreshProductReadiness()]);
+        } catch (error) {
+          setActionError(
+            error instanceof Error
+              ? error.message
+              : `Could not install the language for ${route.label}.`,
+          );
+        } finally {
+          if (mountedRef.current) {
+            setBusyRouteId(null);
+            setCancellingLanguageInstall(false);
+          }
+        }
         return;
       }
       if (action !== "download") {
@@ -671,6 +726,10 @@ export function ModelsScreen({
                 onSelect={(route) => handleSelectRoute("dictation", route)}
                 onAction={(route) => void handleRouteAction(route)}
                 actionBusy={busyRouteId === activeDictationRoute?.routeId}
+                onCancelLanguageInstall={() =>
+                  void handleCancelLanguageInstall()
+                }
+                cancelLanguageInstallBusy={cancellingLanguageInstall}
                 readinessOverride={dictationReadinessOverride}
                 explainPauseBehavior
               />
@@ -699,6 +758,10 @@ export function ModelsScreen({
                 onSelect={(route) => handleSelectRoute("meeting", route)}
                 onAction={(route) => void handleRouteAction(route)}
                 actionBusy={busyRouteId === activeMeetingRoute?.routeId}
+                onCancelLanguageInstall={() =>
+                  void handleCancelLanguageInstall()
+                }
+                cancelLanguageInstallBusy={cancellingLanguageInstall}
                 readinessOverride={meetingReadinessOverride}
                 explainPauseBehavior={false}
               />

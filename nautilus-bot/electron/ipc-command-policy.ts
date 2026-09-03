@@ -22,6 +22,9 @@ const ANALYSIS_COMMANDS = new Set<string>([
 const FAST_COMMANDS = new Set<string>([
   "acknowledge_incomplete_transcript",
   "cancel_analysis_run",
+  // Sets one flag on an in-flight language install; the reader who pressed
+  // Cancel is watching the button.
+  "cancel_apple_speech_language_install",
   "check_for_updates",
   "check_system_audio_availability",
   // Flips one flag on the call detector; the cue that sent it is waiting to
@@ -81,6 +84,9 @@ const EXTENDED_COMMANDS = new Set<string>([
   // multi-hour source needs more than the default minute.
   "import_audio_file",
   "import_dictation_dictionary_csv",
+  // Asks macOS to download a whole speech language pack. The size is Apple's,
+  // not this app's, so it gets the same headroom as a model download.
+  "install_apple_speech_language",
   "install_update",
   "migrate_to_encrypted_storage",
   "refresh_asr_runtime_probes",

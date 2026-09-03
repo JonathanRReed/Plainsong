@@ -45,6 +45,23 @@ evidence is stale and must be recaptured before this becomes a candidate.
   as before. Settings gains "What draws the live preview" (whichever is
   available / streaming / re-transcribe) under the existing Live preview
   control.
+- Apple Speech runs macOS 26's SpeechAnalyzer where it can. On a Mac with
+  the language already installed, "Apple Speech (on-device, no download)"
+  now transcribes through Apple's purpose-built long-form engine instead of
+  the older recognizer: it returns per-segment timestamps, so it can serve
+  meetings as well as dictation, and it still downloads nothing and still
+  never falls back to a server. The Models screen says which of the two
+  engines will actually run and why, rather than only that the newer
+  framework exists, and offers "Install language" when SpeechAnalyzer is
+  present but that language's assets are not — macOS owns that download and
+  its size, and Plainsong keeps no copy. Older macOS keeps the recognizer it
+  has always used, which stays dictation-only because it reports no
+  timestamps. Meetings only move to Apple Speech when you pick it for
+  meetings yourself. Measured on this Mac (macOS 27.0, shared and loaded):
+  4.4% word error rate on the repo's 44 s speech fixture and 0.0% on the
+  5.3 s one, 1.26 s to transcribe 44 seconds of audio, and live results
+  finalizing about 114 ms after the last audio arrives. See
+  `artifacts/qa/speechanalyzer-receipt-2026-09-02.md`.
 - Dictation history is searchable, and a saved dictation can be run through
   the recognizer again. The search field over Recent dictations matches both
   what was delivered and (where it was kept) what the recognizer heard,
@@ -478,6 +495,39 @@ evidence is stale and must be recaptured before this becomes a candidate.
   affected and are unchanged. Speaker profiles you already saved with CAM++
   still match. Measured in
   `artifacts/qa/campplus-divergence-2026-09-02.md`.
+- The Speech Recognition permission row says what granting it actually
+  permits. macOS named that permission when speech recognition meant sending
+  audio to Apple; Plainsong runs both Apple engines with server recognition
+  off, so the row now says it records your consent to on-device processing
+  rather than only that it is "required for transcription".
+- "Installing language…" has a Cancel beside it, and stops on its own if
+  macOS goes quiet. The Apple language install waited on the OS with no
+  deadline and no way out: an install that never finished held the button,
+  the progress line and a background helper process until Plainsong was
+  quit. It now stops after twenty minutes, or after three minutes with no
+  progress reported, and Cancel ends it immediately — and reads as "Language
+  install stopped", not as a failure. Live Apple dictation gets the same
+  treatment: a helper that stops responding is ended and says so instead of
+  hanging.
+- A meeting transcribed with Apple Speech can no longer be saved without
+  timestamps. The meeting route decided that SpeechAnalyzer would run and
+  then let the transcription decide again a moment later; if the language
+  assets or their reservation changed in between, the older recognizer ran
+  and returned text with no timed segments, and the meeting was saved with a
+  transcript and no timeline, silently. The engine is now carried down from
+  the decision that cleared the meeting, and a result without timestamps is
+  refused with a message naming which engine ran instead of being written to
+  the meeting.
+- Apple Speech is offered for meetings the first time you look, instead of
+  after some other screen happens to refresh. Whether the route was
+  meeting-capable was answered "no" until something had probed, so a Mac
+  that could serve meetings was told it needed macOS 26 — which it had.
+- Plainsong builds again on a Mac whose Xcode predates macOS 26. The Apple
+  Speech helper referenced the SpeechAnalyzer API unconditionally, so an
+  older SDK failed to compile it and the whole app stopped building. The
+  build now checks the SDK and, when it is too old, compiles the helper
+  without that section: the app then runs the older recognizer and says so,
+  exactly as it does on macOS 13-15.
 - The diarization model chosen in Settings is now the one the automatic
   post-meeting speaker pass uses. It previously always ran ECAPA-TDNN no
   matter what the picker said; only the explicit "identify speakers" action

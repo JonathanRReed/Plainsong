@@ -3,8 +3,10 @@ import {
   buildAsrRouteCatalog,
   getLaneRoutes,
   getRecommendedLaneRoute,
+  laneProviderOrder,
 } from "@/lib/asr-route-catalog";
 import type {
+  AppleSpeechEngine,
   AppleSpeechReadinessStatus,
   AsrProviderInfo,
 } from "@/types";
@@ -101,8 +103,17 @@ const providers: AsrProviderInfo[] = [
   },
 ];
 
-function appleProvider(status: AppleSpeechReadinessStatus): AsrProviderInfo {
+/**
+ * @param engine which Apple engine this Mac would run. `speech_analyzer` is
+ *   macOS 26+ with the language installed, which is the only configuration
+ *   that reaches the meeting lane.
+ */
+function appleProvider(
+  status: AppleSpeechReadinessStatus,
+  engine: AppleSpeechEngine = "sf_speech_recognizer",
+): AsrProviderInfo {
   const ready = status === "ready";
+  const analyzer = engine === "speech_analyzer";
   return {
     providerType: "macos_apple_speech",
     name: "Apple Speech (On-Device)",
@@ -145,8 +156,14 @@ function appleProvider(status: AppleSpeechReadinessStatus): AsrProviderInfo {
       recognizerAvailable: status !== "recognizer_unavailable",
       message: `Apple Speech status: ${status}`,
       setupAction: ready ? null : "Fix Apple Speech setup.",
-      speechAnalyzerAvailable: false,
-      operatingSystemVersion: null,
+      speechAnalyzerAvailable: analyzer,
+      speechAnalyzerLocaleSupported: analyzer,
+      speechAnalyzerAssetsInstalled: analyzer,
+      speechAnalyzerAssetStatus: analyzer ? "installed" : "unavailable",
+      speechAnalyzerLocales: analyzer ? ["en_US", "fr_FR"] : [],
+      speechAnalyzerInstalledLocales: analyzer ? ["en_US"] : [],
+      engine,
+      operatingSystemVersion: analyzer ? "27.0.0" : null,
     },
   };
 }
@@ -540,19 +557,87 @@ describe("asr-route-catalog", () => {
     expect(route.hosting).toBe("platform");
   });
 
-  it("surfaces SpeechAnalyzer availability in the readiness detail for macOS 26+", () => {
-    const provider = appleProvider("ready");
-    provider.platformReadiness!.speechAnalyzerAvailable = true;
-    provider.platformReadiness!.operatingSystemVersion = "26.0.0";
-    const route = buildAsrRouteCatalog([provider], "prefer_local")[0];
+  it("names the engine that will run, not just that SpeechAnalyzer exists", () => {
+    const route = buildAsrRouteCatalog(
+      [appleProvider("ready", "speech_analyzer")],
+      "prefer_local",
+    )[0];
 
-    expect(route.readinessDetail).toContain("SpeechAnalyzer API available");
-    expect(route.readinessDetail).toContain("macOS 26.0.0");
+    expect(route.readinessDetail).toContain("Runs SpeechAnalyzer");
+    expect(route.readinessDetail).toContain("macOS 27.0.0");
+    expect(route.readinessDetail).toContain("Nothing to download");
   });
 
-  it("omits SpeechAnalyzer detail when the API is not available", () => {
+  it("says which language is missing when SpeechAnalyzer is there but its assets are not", () => {
+    const provider = appleProvider("ready", "speech_analyzer");
+    provider.platformReadiness!.speechAnalyzerAssetsInstalled = false;
+    provider.platformReadiness!.speechAnalyzerAssetStatus = "supported";
+    provider.platformReadiness!.engine = "sf_speech_recognizer";
+    const route = buildAsrRouteCatalog([provider], "prefer_local")[0];
+
+    expect(route.readinessDetail).toContain("Runs SFSpeechRecognizer");
+    expect(route.readinessDetail).toContain("Install the en_US language");
+    expect(route.laneCompatibility.meeting).toBe(false);
+  });
+
+  it("says SpeechAnalyzer needs a newer macOS when the API is absent", () => {
     const route = buildAsrRouteCatalog([appleProvider("ready")], "prefer_local")[0];
 
-    expect(route.readinessDetail).not.toContain("SpeechAnalyzer");
+    expect(route.readinessDetail).toContain("Runs SFSpeechRecognizer");
+    expect(route.readinessDetail).toContain("needs macOS 26 or later");
+  });
+
+  it("keeps Apple Speech out of the meeting lane on the SFSpeechRecognizer path", () => {
+    const route = buildAsrRouteCatalog([appleProvider("ready")], "prefer_local")[0];
+
+    expect(route.laneCompatibility.dictation).toBe(true);
+    expect(route.laneCompatibility.meeting).toBe(false);
+    expect(route.laneCompatibility.shared).toBe(false);
+    expect(route.capabilityBadge).toBe("Best for dictation");
+    expect(route.summary).toContain("dictation only");
+    expect(
+      getLaneRoutes([route], "meeting", "prefer_local").map((entry) => entry.routeId),
+    ).toEqual([]);
+  });
+
+  it("lets Apple Speech into the meeting lane once SpeechAnalyzer is the engine", () => {
+    const routes = buildAsrRouteCatalog(
+      [appleProvider("ready", "speech_analyzer")],
+      "prefer_local",
+    );
+    const route = routes[0];
+
+    expect(route.laneCompatibility.meeting).toBe(true);
+    expect(route.laneCompatibility.shared).toBe(true);
+    expect(route.capabilityBadge).toBe("Shared");
+    expect(route.summary).toContain("per-segment timestamps");
+    expect(
+      getLaneRoutes(routes, "meeting", "prefer_local").map((entry) => entry.routeId),
+    ).toEqual([route.routeId]);
+  });
+
+  it("ranks Apple Speech behind the measured local meeting routes but ahead of cloud", () => {
+    const routes = buildAsrRouteCatalog(
+      [...providers, appleProvider("ready", "speech_analyzer")],
+      "prefer_local",
+    );
+    const meetingProviders = getLaneRoutes(routes, "meeting", "prefer_local").map(
+      (entry) => entry.providerType,
+    );
+
+    expect(meetingProviders).toContain("macos_apple_speech");
+    expect(meetingProviders.indexOf("macos_apple_speech")).toBeGreaterThan(
+      meetingProviders.indexOf("parakeet"),
+    );
+
+    // The cloud routes in this fixture are not meeting-eligible models, so the
+    // ordering against them is asserted on the lane order itself.
+    const order = laneProviderOrder("meeting", "prefer_local");
+    expect(order.indexOf("macos_apple_speech")).toBeGreaterThan(
+      order.indexOf("distil_whisper"),
+    );
+    expect(order.indexOf("macos_apple_speech")).toBeLessThan(
+      order.indexOf("openai_cloud"),
+    );
   });
 });
