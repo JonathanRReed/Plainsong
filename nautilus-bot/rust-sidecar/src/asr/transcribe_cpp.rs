@@ -953,6 +953,11 @@ impl AsrProvider for TranscribeCppProvider {
         Ok(TranscriptionResult {
             text,
             segments,
+            // Parakeet through this runtime returns text and timings, never
+            // speaker attribution. Empty is the only honest value: a meeting
+            // on this route gets Plainsong's own diarizer, and
+            // `resolve_meeting_diarizer` reads this to know that.
+            speaker_turns: Vec::new(),
             language: run.language.unwrap_or_else(|| "en".to_string()),
             confidence,
             processing_time_ms: start.elapsed().as_millis() as u64,
