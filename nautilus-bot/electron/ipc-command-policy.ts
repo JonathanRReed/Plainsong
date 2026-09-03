@@ -62,6 +62,10 @@ const FAST_COMMANDS = new Set<string>([
   // Sits directly in front of a user-initiated capture start: a slow registry
   // write must fail fast rather than delay the meeting behind it.
   "register_capture_admission",
+  // One small settings write plus a preflight permission read. It sits in
+  // front of the first-run wizard opening or closing, so a slow answer is a
+  // visibly stuck launch.
+  "record_onboarding_state",
   "resume_recording",
 ]);
 

@@ -505,6 +505,42 @@ evidence is stale and must be recaptured before this becomes a candidate.
   files that still carry it load cleanly and are rewritten without it.
 
 ### Fixed
+- First-run setup never appeared for anyone who had run an earlier Plainsong
+  build, and Plainsong now decides whether to show it from whether the app
+  actually works rather than from a flag. The flag was
+  `nautilus_onboarding_complete` in the renderer's localStorage, which lives in
+  the Electron user-data directory that every development build shares with the
+  packaged app: install the signed DMG onto a Mac that had ever opened
+  Plainsong and it read "already onboarded" off months of old runs, skipped the
+  wizard in silence, and left the reader to find and grant every macOS
+  permission themselves. Setup state is now a durable, inspectable record in
+  `settings.json` (`onboarding`: when setup finished, on which version, and
+  which grants were visible at the time), written only by the sidecar. But the
+  record does not decide either: on every launch Plainsong checks whether
+  dictation can actually run — microphone permission, a dictation model on
+  disk, and Accessibility when the configured insertion mode needs it — and
+  offers setup when it cannot, so a permission revoked in September gets help
+  rather than a stranded app. A profile still carrying the old flag is believed
+  only where the app is demonstrably working, and the record is written for it
+  then. "Skip setup for now" is now recorded as a deferral against exactly what
+  was missing, so it stays quiet about that and speaks up again when something
+  else breaks; Settings › General › Setup › "Show setup again" reopens it at
+  any time. The same fix covers the write-only
+  `nautilus_meeting_onboarding_complete` flag. Evidence, captured against the
+  packaged app on a fresh data directory and on one carrying the legacy flag:
+  `artifacts/qa/onboarding-first-run-2026-09-03.md`.
+- The first-run permissions step now explains each macOS grant instead of
+  listing four switch names. All six Plainsong asks for are there — Microphone,
+  Accessibility (plus the keyboard fallback granted from the same list),
+  Screen & System Audio, Speech Recognition, Calendar and Notifications — and
+  each row says in one sentence what Plainsong does with it, in another what
+  still works without it, shows whether it is on right now, and offers a button
+  to that exact System Settings pane. The state re-checks when the window comes
+  back, so a switch flipped in System Settings updates here without a relaunch.
+  Optional grants are marked and never drawn as faults, and Notifications says
+  plainly that Plainsong cannot read that answer — macOS decides it the first
+  time a notification is shown and does not report it back — rather than
+  guessing at "not granted".
 - Speaker separation can now report a turn as short as three seconds, where it
   used to need five. The old floor deleted most of an ordinary conversation:
   on a five-minute recording with three-second turns it got 59% of frames wrong

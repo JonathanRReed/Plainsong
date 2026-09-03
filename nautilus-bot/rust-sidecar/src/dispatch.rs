@@ -2712,6 +2712,34 @@ pub async fn dispatch_command(
                     .map_err(|e| e.to_string())?;
             save_settings_for_sidecar(state.as_ref(), handle, settings).await
         }
+        "record_onboarding_state" => {
+            let event = params
+                .get("event")
+                .and_then(|value| value.as_str())
+                .unwrap_or_default();
+            let meetings_completed = params
+                .get("meetingsCompleted")
+                .and_then(|value| value.as_bool())
+                .unwrap_or(false);
+            let unmet: Vec<String> = params
+                .get("unmet")
+                .and_then(|value| value.as_array())
+                .map(|values| {
+                    values
+                        .iter()
+                        .filter_map(|value| value.as_str().map(ToString::to_string))
+                        .collect()
+                })
+                .unwrap_or_default();
+            record_onboarding_state_for_sidecar(
+                state.as_ref(),
+                handle,
+                event,
+                meetings_completed,
+                &unmet,
+            )
+            .await
+        }
         "run_storage_retention_maintenance" => {
             let recording_id_filter = params
                 .get("recordingId")

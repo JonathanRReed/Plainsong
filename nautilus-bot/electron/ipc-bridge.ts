@@ -245,6 +245,9 @@ const ALLOWED_RENDERER_COMMANDS = new Set<string>([
   "prepare_recording_playback",
   "queue_dictation_correction_suggestion",
   "recopy_dictation_result",
+  // Writes the install's first-run record. Sidecar-owned: the renderer names
+  // the event, the sidecar stamps the clock, the version and the grants.
+  "record_onboarding_state",
   "refresh_asr_runtime_probes",
   "reindex_embeddings",
   "reject_dictation_correction_suggestion",

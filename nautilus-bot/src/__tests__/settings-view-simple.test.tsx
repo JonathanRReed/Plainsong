@@ -1397,7 +1397,7 @@ describe("SettingsView performance behavior", () => {
     fireEvent.click(screen.getByText("Storage"));
     await screen.findByText("Setup");
 
-    fireEvent.click(screen.getByRole("button", { name: /rerun onboarding/i }));
+    fireEvent.click(screen.getByRole("button", { name: /show setup again/i }));
     fireEvent.click(screen.getByRole("button", { name: /fix dictation setup/i }));
     fireEvent.click(screen.getByRole("button", { name: /set up meetings/i }));
 

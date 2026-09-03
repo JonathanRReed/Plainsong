@@ -4,7 +4,6 @@ import {
   dictationShortcutConflictMessage,
   FirstRunWizard,
 } from "@/components/first-run-wizard";
-import { MEETING_ONBOARDING_STORAGE_KEY } from "@/lib/onboarding";
 import { AI_NOTES_OPT_OUT_STORAGE_KEY } from "@/lib/ai-notes-preference";
 import { listen } from "@/lib/electron";
 import type { AsrProviderInfo } from "@/types";
@@ -212,7 +211,24 @@ vi.mock("@/lib/backend/recordings", () => ({
   })),
 }));
 
+/**
+ * The calendar row on the permissions step reads a snapshot; the probe cannot
+ * raise a macOS prompt (see electron/main.ts's get_calendar_snapshot), so the
+ * wizard calls it on mount like the other two.
+ */
+vi.mock("@/lib/backend/calendar", () => ({
+  getCalendarSnapshot: vi.fn(async () => ({
+    authorization: "authorized" as const,
+    observedAt: 0,
+    events: [],
+    calendars: [],
+    errorCode: null,
+  })),
+  openCalendarPrivacySettings: vi.fn(async () => {}),
+}));
+
 vi.mock("@/lib/backend/settings", () => ({
+  recordOnboardingState: vi.fn(async () => ({})),
   getPermissionDiagnostics: vi.fn(async () => ({
     microphoneReady: true,
     microphonePermissionReady: true,
@@ -482,6 +498,7 @@ describe("FirstRunWizard", () => {
     expect(onComplete).toHaveBeenCalledWith({
       markOnboardingComplete: true,
       meetingsCompleted: true,
+      deferred: false,
     });
     expect(downloadAsrModels).not.toHaveBeenCalled();
   });
@@ -652,6 +669,7 @@ describe("FirstRunWizard", () => {
       expect(onComplete).toHaveBeenCalledWith({
         markOnboardingComplete: true,
         meetingsCompleted: true,
+        deferred: false,
       });
     });
 
@@ -887,6 +905,7 @@ describe("FirstRunWizard", () => {
       expect(onComplete).toHaveBeenCalledWith({
         markOnboardingComplete: false,
         meetingsCompleted: false,
+        deferred: false,
       });
     });
 
@@ -922,6 +941,7 @@ describe("FirstRunWizard", () => {
       expect(onComplete).toHaveBeenCalledWith({
         markOnboardingComplete: false,
         meetingsCompleted: false,
+        deferred: false,
       });
     });
     expect(screen.queryByRole("alert")).not.toBeInTheDocument();
@@ -1023,12 +1043,19 @@ describe("FirstRunWizard", () => {
       expect(onComplete).toHaveBeenCalledWith({
         markOnboardingComplete: false,
         meetingsCompleted: true,
+        deferred: false,
       });
     });
 
     expect(currentSettings.transcription.useSharedAsrSelection).toBe(false);
     expect(currentSettings.transcription.meetingModelId).toBe("distil-large-v3");
-    expect(storage.get(MEETING_ONBOARDING_STORAGE_KEY)).toBe("true");
+    // The stamp is durable now: it goes into settings.json through the
+    // sidecar, not into a renderer localStorage every dev build shares with
+    // the packaged app.
+    const backend = await import("@/lib/backend/settings");
+    expect(backend.recordOnboardingState).toHaveBeenCalledWith({
+      event: "meetings_completed",
+    });
   });
 
   it("finishes meeting setup when settings save but the local marker cannot be stored", async () => {
@@ -1067,6 +1094,7 @@ describe("FirstRunWizard", () => {
       expect(onComplete).toHaveBeenCalledWith({
         markOnboardingComplete: false,
         meetingsCompleted: true,
+        deferred: false,
       });
     });
   });
@@ -1149,6 +1177,7 @@ describe("FirstRunWizard", () => {
       expect(onComplete).toHaveBeenCalledWith({
         markOnboardingComplete: false,
         meetingsCompleted: true,
+        deferred: false,
       });
     });
     expect(currentSettings.transcription.meetingAudioStorageMode).toBe("transcript_only");
@@ -1174,6 +1203,7 @@ describe("FirstRunWizard", () => {
       expect(onComplete).toHaveBeenCalledWith({
         markOnboardingComplete: false,
         meetingsCompleted: false,
+        deferred: false,
       });
     });
   });
@@ -1195,12 +1225,20 @@ describe("FirstRunWizard", () => {
 
     render(<FirstRunWizard mode="dictation" onComplete={vi.fn()} />);
 
-    fireEvent.click(await screen.findByRole("button", { name: "Fix Speech recognition" }));
+    fireEvent.click(
+      await screen.findByRole("button", {
+        name: "Open macOS Speech Recognition settings for Speech Recognition",
+      }),
+    );
 
     await waitFor(() => {
       expect(openPermissionSettings).toHaveBeenCalledWith("speech");
     });
-    expect(screen.getByText("Opened macOS Speech Recognition settings.")).toBeInTheDocument();
+    expect(
+      screen.getByText(
+        "Opened macOS Speech Recognition settings. Plainsong re-checks when you come back.",
+      ),
+    ).toBeInTheDocument();
   });
 
   it("opens the installed app when the wizard detects the DMG copy", async () => {
@@ -1253,8 +1291,12 @@ describe("FirstRunWizard", () => {
 
     await screen.findByText("Keyboard fallback");
     // Ready via postEventReady even though the always-false automationReady
-    // would otherwise show a permanent, unfixable red gate.
-    expect(screen.queryByRole("button", { name: "Fix Keyboard fallback" })).not.toBeInTheDocument();
+    // would otherwise show a permanent, unfixable rust gate.
+    expect(
+      screen.queryByRole("button", {
+        name: "Open macOS Accessibility settings for Keyboard fallback",
+      }),
+    ).not.toBeInTheDocument();
 
     getPermissionDiagnostics.mockResolvedValueOnce({
       microphoneReady: true,
@@ -1268,7 +1310,11 @@ describe("FirstRunWizard", () => {
     });
     fireEvent.click(screen.getByRole("button", { name: "Re-check permissions" }));
 
-    fireEvent.click(await screen.findByRole("button", { name: "Fix Keyboard fallback" }));
+    fireEvent.click(
+      await screen.findByRole("button", {
+        name: "Open macOS Accessibility settings for Keyboard fallback",
+      }),
+    );
 
     await waitFor(() => {
       expect(openPermissionSettings).toHaveBeenCalledWith("accessibility");
@@ -1292,10 +1338,14 @@ describe("FirstRunWizard", () => {
 
     render(<FirstRunWizard mode="dictation" onComplete={vi.fn()} />);
 
-    await screen.findByText("Speech recognition");
-    expect(screen.getByText("Optional")).toBeInTheDocument();
+    await screen.findByText("Speech Recognition");
+    // Every optional row is marked, and none of them is drawn as a fault.
+    expect(screen.getAllByText("Optional").length).toBeGreaterThan(0);
     expect(
-      screen.getByText(/only needed when you explicitly choose apple speech/i)
+      screen.getByText(/the apple speech route refuses to transcribe/i),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByText(/plainsong never falls back to this one on its own/i),
     ).toBeInTheDocument();
   });
 

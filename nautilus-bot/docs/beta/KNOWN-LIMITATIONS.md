@@ -251,7 +251,10 @@ using sensitive content.
   name "auto" until you confirm it, and a name you typed is never overwritten.
 - Notifications use macOS Notification Center. The first one Plainsong shows
   is what makes macOS ask whether to allow them; if you decline, none appear
-  and the in-app surfaces carry the same information.
+  and the in-app surfaces carry the same information. macOS does not report
+  that answer back to an app, so this is the one permission the setup screen
+  cannot show a state for -- it says so there rather than guessing, and offers
+  the Notifications pane so you can check or change it yourself.
 
 ## Updates and rollback
 

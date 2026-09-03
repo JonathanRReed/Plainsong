@@ -62,6 +62,9 @@ pub struct Settings {
     /// existed simply has no `ai` key, and `#[serde(default)]` on this struct
     /// fills it in without a migration.
     pub ai: AiSettings,
+    /// What this *install* has recorded about first-run setup. Written only by
+    /// the sidecar (`record_onboarding_state`), never by a renderer save.
+    pub onboarding: OnboardingSettings,
 }
 
 impl Default for Settings {
@@ -79,8 +82,168 @@ impl Default for Settings {
             automation: AutomationSettings::default(),
             theme: "system".to_string(),
             ai: AiSettings::default(),
+            onboarding: OnboardingSettings::default(),
         }
     }
+}
+
+/// What the first-run wizard recorded, kept where "has this install been set
+/// up" actually belongs: next to the rest of the install's state, in
+/// settings.json.
+///
+/// It used to be a `nautilus_onboarding_complete` boolean in the renderer's
+/// localStorage. That store lives in the Electron user-data directory, which
+/// every development build shares with the packaged app, so an installed copy
+/// inherited "already onboarded" from months of dev runs and skipped the
+/// wizard in silence. It is also invisible: nobody can look at a leveldb log
+/// and say what an install thinks it has.
+///
+/// Nothing here is a permission to skip setup on its own. `onboarding_gate.ts`
+/// decides that from what the app can actually do right now; this record only
+/// says what happened and when, so a stale claim can be recognized as stale.
+#[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq, Eq)]
+#[serde(default, rename_all = "camelCase")]
+pub struct OnboardingSettings {
+    /// RFC 3339, in UTC. `None` means this install has never finished the
+    /// first-run wizard.
+    pub completed_at: Option<String>,
+    /// The Plainsong version that wrote `completed_at`. `"legacy-local-storage"`
+    /// marks a record adopted from the retired renderer flag.
+    pub completed_version: Option<String>,
+    /// RFC 3339, in UTC. Set when the meetings half of setup was finished;
+    /// replaces the write-only `nautilus_meeting_onboarding_complete` flag.
+    pub meetings_completed_at: Option<String>,
+    /// The macOS grants Plainsong could see at the moment setup finished.
+    /// A record of that moment, never a claim about now.
+    pub granted_at_completion: OnboardingGrants,
+    /// RFC 3339, in UTC. Set when the reader closed the wizard with setup still
+    /// incomplete.
+    pub deferred_at: Option<String>,
+    /// The requirement ids that were unmet when the reader deferred. The gate
+    /// stays quiet while the unmet set is a subset of this one, and speaks up
+    /// again when something new breaks. Ids are
+    /// `onboarding_gate.ts`'s `OnboardingRequirementId`.
+    pub deferred_unmet: Vec<String>,
+}
+
+/// One reading of the macOS grants, taken by the sidecar itself.
+///
+/// Every field is a tri-state: `None` is "not observed", which is not the same
+/// as denied. Mirrors `OnboardingGrants` in `src/types/settings.ts`.
+#[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq, Eq)]
+#[serde(default, rename_all = "camelCase")]
+pub struct OnboardingGrants {
+    pub microphone: Option<bool>,
+    pub accessibility: Option<bool>,
+    pub post_event: Option<bool>,
+    pub speech_recognition: Option<bool>,
+    pub system_audio: Option<bool>,
+}
+
+/// The version string written into a record this build stamps.
+pub(crate) const ONBOARDING_RECORD_VERSION: &str = env!("CARGO_PKG_VERSION");
+
+/// What `completed_version` says for a record adopted from the old renderer
+/// flag rather than written by a wizard run. Kept distinguishable on purpose:
+/// "we believed a localStorage boolean, and the app was working at the time"
+/// is a weaker claim than "the wizard finished here".
+pub(crate) const ONBOARDING_LEGACY_VERSION: &str = "legacy-local-storage";
+
+/// How many deferred requirement ids are kept. Small on purpose: the whole set
+/// of requirements is three, and an unbounded list from the renderer is a
+/// place for junk to accumulate.
+const MAX_DEFERRED_UNMET: usize = 8;
+/// Longest requirement id kept. Ids are short constants on the TypeScript side.
+const MAX_DEFERRED_UNMET_LEN: usize = 64;
+
+/// Stamp a finished wizard run.
+///
+/// The clock, the version and the observed grants are arguments rather than
+/// read in here so the transition is a pure function with a test.
+pub(crate) fn record_onboarding_completed(
+    onboarding: &mut OnboardingSettings,
+    now_rfc3339: &str,
+    version: &str,
+    meetings_completed: bool,
+    grants: OnboardingGrants,
+) {
+    onboarding.completed_at = Some(now_rfc3339.to_string());
+    onboarding.completed_version = Some(version.to_string());
+    if meetings_completed {
+        onboarding.meetings_completed_at = Some(now_rfc3339.to_string());
+    }
+    onboarding.granted_at_completion = grants;
+    // Finishing answers whatever was deferred; leaving the old list behind
+    // would keep the gate quiet about a requirement that is unmet again.
+    onboarding.deferred_at = None;
+    onboarding.deferred_unmet.clear();
+}
+
+/// Stamp the meetings half of setup, without claiming the whole wizard ran.
+///
+/// The two were separate localStorage flags before
+/// (`nautilus_meeting_onboarding_complete`), and they stay separate: someone
+/// who set up meetings from the Meetings-only wizard has not been through
+/// dictation setup.
+pub(crate) fn record_meetings_onboarding_completed(
+    onboarding: &mut OnboardingSettings,
+    now_rfc3339: &str,
+) {
+    onboarding.meetings_completed_at = Some(now_rfc3339.to_string());
+}
+
+/// Adopt the retired renderer flag as a real record.
+///
+/// Only ever called once the readiness gate has satisfied itself that the app
+/// actually works on this Mac — the flag alone proves nothing, which is the
+/// bug this whole record exists to close. An install that already has a record
+/// keeps it.
+pub(crate) fn adopt_legacy_onboarding_record(
+    onboarding: &mut OnboardingSettings,
+    now_rfc3339: &str,
+    grants: OnboardingGrants,
+) -> bool {
+    if onboarding.completed_at.is_some() {
+        return false;
+    }
+    onboarding.completed_at = Some(now_rfc3339.to_string());
+    onboarding.completed_version = Some(ONBOARDING_LEGACY_VERSION.to_string());
+    onboarding.granted_at_completion = grants;
+    true
+}
+
+/// Stamp a wizard the reader closed with setup unfinished, and what was unmet
+/// when they did.
+pub(crate) fn record_onboarding_deferred(
+    onboarding: &mut OnboardingSettings,
+    now_rfc3339: &str,
+    unmet: &[String],
+) {
+    onboarding.deferred_at = Some(now_rfc3339.to_string());
+    onboarding.deferred_unmet = sanitize_deferred_unmet(unmet);
+}
+
+/// Trim, de-duplicate, sort and cap the requirement ids a renderer sends.
+///
+/// Sorted so the stored list reads the same however the renderer ordered it,
+/// and so a settings.json diff is stable.
+fn sanitize_deferred_unmet(unmet: &[String]) -> Vec<String> {
+    let mut ids: Vec<String> = unmet
+        .iter()
+        .map(|value| value.trim())
+        .filter(|value| {
+            !value.is_empty()
+                && value.len() <= MAX_DEFERRED_UNMET_LEN
+                && value
+                    .chars()
+                    .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_')
+        })
+        .map(ToString::to_string)
+        .collect();
+    ids.sort();
+    ids.dedup();
+    ids.truncate(MAX_DEFERRED_UNMET);
+    ids
 }
 
 /// Settings for the chat surfaces that talk to an AI lane.
@@ -2585,6 +2748,11 @@ impl SettingsManager {
         // the same treatment `update_settings` gives a fresh write.
         settings.ai.saved_prompts =
             sanitize_saved_prompts(std::mem::take(&mut settings.ai.saved_prompts));
+        // Same treatment for the onboarding record: a hand-edited or
+        // pre-upgrade file gets the deferred ids trimmed, sorted and capped
+        // exactly as a fresh write would.
+        settings.onboarding.deferred_unmet =
+            sanitize_deferred_unmet(&settings.onboarding.deferred_unmet);
         normalize_loaded_meetings_settings(&mut settings.meetings);
         apply_zero_setup_dictation_default(
             &mut settings.privacy,
@@ -2693,6 +2861,10 @@ impl Default for SettingsManager {
 
 #[cfg(test)]
 mod tests {
+    use super::{
+        adopt_legacy_onboarding_record, record_onboarding_completed, record_onboarding_deferred,
+        OnboardingGrants, OnboardingSettings, ONBOARDING_LEGACY_VERSION,
+    };
     use super::{
         apply_zero_setup_dictation_default, default_dictation_numbers_as_digits,
         dictation_app_category_from_key, dictation_app_category_to_key,
@@ -5030,5 +5202,245 @@ mod tests {
         let category =
             resolve_dictation_app_category_with_overrides(&transcription, Some("Gmail"), None);
         assert_eq!(category, DictationAppCategory::Email);
+    }
+
+    // --- first-run record -------------------------------------------------
+    //
+    // The record that replaced `nautilus_onboarding_complete` in the
+    // renderer's localStorage. These cover the two things that went wrong
+    // there: a file written before the section existed, and a value that
+    // outlived what it claimed.
+
+    fn onboarding_test_dir(name: &str) -> std::path::PathBuf {
+        let suffix = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("system time before epoch")
+            .as_nanos();
+        let root = std::env::temp_dir().join(format!("nautilus-settings-{name}-{suffix}"));
+        fs::create_dir_all(&root).expect("create settings test directory");
+        root
+    }
+
+    /// A settings.json written before the section existed -- which is every
+    /// settings.json on every Mac Plainsong has ever run on -- loads, keeps
+    /// what it recorded, and reports that this install has never finished
+    /// setup. That "never" is the honest answer: the old flag lived somewhere
+    /// else entirely.
+    #[test]
+    fn a_settings_file_without_an_onboarding_section_loads_as_never_onboarded() {
+        let root = onboarding_test_dir("onboarding-absent");
+        let settings_path = root.join("settings.json");
+        fs::write(
+            &settings_path,
+            r#"{
+                "theme": "dark",
+                "transcription": { "defaultProvider": "parakeet" }
+            }"#,
+        )
+        .expect("write pre-onboarding settings");
+
+        let manager =
+            SettingsManager::load_from_path(settings_path).expect("load pre-onboarding settings");
+        let onboarding = &manager.settings().onboarding;
+        assert_eq!(onboarding.completed_at, None);
+        assert_eq!(onboarding.completed_version, None);
+        assert_eq!(onboarding.meetings_completed_at, None);
+        assert_eq!(
+            onboarding.granted_at_completion,
+            OnboardingGrants::default()
+        );
+        assert!(onboarding.deferred_unmet.is_empty());
+        // Everything else in the file still survives the load.
+        assert_eq!(manager.settings().theme, "dark");
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    /// A file that already carries a record round-trips it, and the deferred
+    /// list is normalized on the way in: trimmed, de-duplicated, sorted,
+    /// capped, and stripped of ids that are not requirement ids.
+    #[test]
+    fn an_onboarding_record_round_trips_and_its_deferred_ids_are_sanitized() {
+        let root = onboarding_test_dir("onboarding-present");
+        let settings_path = root.join("settings.json");
+        fs::write(
+            &settings_path,
+            r#"{
+                "onboarding": {
+                    "completedAt": "2026-06-19T10:04:00Z",
+                    "completedVersion": "0.9.0-beta.1",
+                    "meetingsCompletedAt": "2026-06-19T10:06:00Z",
+                    "grantedAtCompletion": {
+                        "microphone": true,
+                        "accessibility": true,
+                        "speechRecognition": false
+                    },
+                    "deferredAt": "2026-06-19T10:07:00Z",
+                    "deferredUnmet": [
+                        "  microphone_permission  ",
+                        "dictation_model",
+                        "microphone_permission",
+                        "Not An Id",
+                        ""
+                    ]
+                }
+            }"#,
+        )
+        .expect("write settings with a record");
+
+        let manager =
+            SettingsManager::load_from_path(settings_path).expect("load settings with a record");
+        let onboarding = &manager.settings().onboarding;
+        assert_eq!(
+            onboarding.completed_at.as_deref(),
+            Some("2026-06-19T10:04:00Z")
+        );
+        assert_eq!(
+            onboarding.completed_version.as_deref(),
+            Some("0.9.0-beta.1")
+        );
+        assert_eq!(
+            onboarding.meetings_completed_at.as_deref(),
+            Some("2026-06-19T10:06:00Z")
+        );
+        assert_eq!(onboarding.granted_at_completion.microphone, Some(true));
+        assert_eq!(onboarding.granted_at_completion.accessibility, Some(true));
+        assert_eq!(
+            onboarding.granted_at_completion.speech_recognition,
+            Some(false)
+        );
+        // Never written by that file, so never observed -- not "denied".
+        assert_eq!(onboarding.granted_at_completion.system_audio, None);
+        assert_eq!(
+            onboarding.deferred_unmet,
+            vec![
+                "dictation_model".to_string(),
+                "microphone_permission".to_string()
+            ]
+        );
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    /// Completing stamps the clock, the version and the grants of that moment,
+    /// and clears whatever the reader had deferred -- a deferral answers a
+    /// specific set of unmet requirements, and finishing answers all of them.
+    #[test]
+    fn completing_onboarding_stamps_the_moment_and_clears_a_deferral() {
+        let mut onboarding = OnboardingSettings {
+            deferred_at: Some("2026-09-01T00:00:00Z".to_string()),
+            deferred_unmet: vec!["dictation_model".to_string()],
+            ..OnboardingSettings::default()
+        };
+
+        record_onboarding_completed(
+            &mut onboarding,
+            "2026-09-03T12:00:00Z",
+            "0.9.0-beta.3",
+            true,
+            OnboardingGrants {
+                microphone: Some(true),
+                accessibility: Some(true),
+                post_event: Some(true),
+                speech_recognition: Some(false),
+                system_audio: None,
+            },
+        );
+
+        assert_eq!(
+            onboarding.completed_at.as_deref(),
+            Some("2026-09-03T12:00:00Z")
+        );
+        assert_eq!(
+            onboarding.completed_version.as_deref(),
+            Some("0.9.0-beta.3")
+        );
+        assert_eq!(
+            onboarding.meetings_completed_at.as_deref(),
+            Some("2026-09-03T12:00:00Z")
+        );
+        assert_eq!(onboarding.granted_at_completion.microphone, Some(true));
+        assert_eq!(onboarding.deferred_at, None);
+        assert!(onboarding.deferred_unmet.is_empty());
+    }
+
+    /// Finishing dictation-only setup does not claim the meetings half was
+    /// done. The two were separate flags before and stay separate here.
+    #[test]
+    fn completing_dictation_only_leaves_the_meetings_stamp_alone() {
+        let mut onboarding = OnboardingSettings::default();
+        record_onboarding_completed(
+            &mut onboarding,
+            "2026-09-03T12:00:00Z",
+            "0.9.0-beta.3",
+            false,
+            OnboardingGrants::default(),
+        );
+        assert!(onboarding.completed_at.is_some());
+        assert_eq!(onboarding.meetings_completed_at, None);
+    }
+
+    /// The legacy renderer flag becomes a real record exactly once, and says
+    /// where it came from. An install that already has a record is not
+    /// overwritten by one -- the wizard's own stamp is the stronger claim.
+    #[test]
+    fn the_legacy_flag_is_adopted_once_and_never_overwrites_a_real_record() {
+        let mut fresh = OnboardingSettings::default();
+        assert!(adopt_legacy_onboarding_record(
+            &mut fresh,
+            "2026-09-03T12:00:00Z",
+            OnboardingGrants {
+                microphone: Some(true),
+                ..OnboardingGrants::default()
+            },
+        ));
+        assert_eq!(fresh.completed_at.as_deref(), Some("2026-09-03T12:00:00Z"));
+        assert_eq!(
+            fresh.completed_version.as_deref(),
+            Some(ONBOARDING_LEGACY_VERSION)
+        );
+
+        let mut already = OnboardingSettings {
+            completed_at: Some("2026-06-19T10:04:00Z".to_string()),
+            completed_version: Some("0.9.0-beta.1".to_string()),
+            ..OnboardingSettings::default()
+        };
+        assert!(!adopt_legacy_onboarding_record(
+            &mut already,
+            "2026-09-03T12:00:00Z",
+            OnboardingGrants::default(),
+        ));
+        assert_eq!(
+            already.completed_at.as_deref(),
+            Some("2026-06-19T10:04:00Z")
+        );
+        assert_eq!(already.completed_version.as_deref(), Some("0.9.0-beta.1"));
+    }
+
+    /// A deferral records what was unmet, so the gate can tell "the same thing
+    /// the reader already said no to" from "something new is broken".
+    #[test]
+    fn deferring_records_the_unmet_requirements_it_was_answering() {
+        let mut onboarding = OnboardingSettings::default();
+        record_onboarding_deferred(
+            &mut onboarding,
+            "2026-09-03T12:00:00Z",
+            &[
+                "cursor_insertion".to_string(),
+                "dictation_model".to_string(),
+                "cursor_insertion".to_string(),
+            ],
+        );
+        assert_eq!(
+            onboarding.deferred_at.as_deref(),
+            Some("2026-09-03T12:00:00Z")
+        );
+        assert_eq!(
+            onboarding.deferred_unmet,
+            vec![
+                "cursor_insertion".to_string(),
+                "dictation_model".to_string()
+            ]
+        );
     }
 }

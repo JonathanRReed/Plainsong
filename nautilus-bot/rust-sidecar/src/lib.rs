@@ -3411,20 +3411,113 @@ fn preserve_privileged_privacy_settings(
     incoming.vault_salt = current.vault_salt.clone();
 }
 
+/// Read the macOS grants Plainsong can see right now, for the first-run record.
+///
+/// Preflight reads only — the same ones `get_permission_diagnostics` serves —
+/// so recording a completion never raises a system prompt of its own. Every
+/// field stays a tri-state: `None` means "this build cannot observe it", which
+/// is not the same as denied. System audio is left unobserved because the only
+/// honest answer needs a capture test, and a record is not the place to run
+/// one.
+async fn observed_onboarding_grants(state: &AppState) -> settings::OnboardingGrants {
+    let diagnostics = crate::permissions::collect_permission_diagnostics(state, Vec::new()).await;
+    settings::OnboardingGrants {
+        microphone: Some(diagnostics.microphone_permission_ready),
+        accessibility: Some(diagnostics.accessibility_ready),
+        post_event: Some(diagnostics.post_event_ready),
+        speech_recognition: Some(diagnostics.speech_recognition_ready),
+        system_audio: None,
+    }
+}
+
+/// Write the install's first-run record.
+///
+/// The renderer says *what happened* ("the wizard finished", "the reader
+/// deferred with these unmet"); the clock, the version and the observed grants
+/// come from here. That split is the point: a record whose contents the
+/// renderer could dictate would be exactly as trustworthy as the localStorage
+/// boolean it replaces.
+async fn record_onboarding_state_for_sidecar(
+    state: &AppState,
+    handle: &crate::sidecar_handle::SidecarHandle,
+    event: &str,
+    meetings_completed: bool,
+    unmet: &[String],
+) -> Result<serde_json::Value, String> {
+    let now = chrono::Utc::now().to_rfc3339();
+    let grants = match event {
+        "completed" | "migrated" => observed_onboarding_grants(state).await,
+        _ => settings::OnboardingGrants::default(),
+    };
+
+    let (record, changed, full_settings) = {
+        let mut manager = state.settings_manager.lock().await;
+        let onboarding = &mut manager.settings_mut().onboarding;
+        let changed = match event {
+            "completed" => {
+                settings::record_onboarding_completed(
+                    onboarding,
+                    &now,
+                    settings::ONBOARDING_RECORD_VERSION,
+                    meetings_completed,
+                    grants,
+                );
+                true
+            }
+            "migrated" => settings::adopt_legacy_onboarding_record(onboarding, &now, grants),
+            "meetings_completed" => {
+                settings::record_meetings_onboarding_completed(onboarding, &now);
+                true
+            }
+            "deferred" => {
+                settings::record_onboarding_deferred(onboarding, &now, unmet);
+                true
+            }
+            other => {
+                return Err(format!(
+                    "Unknown onboarding event: {other}. Expected completed, meetings_completed, deferred or migrated."
+                ));
+            }
+        };
+        if changed {
+            manager.save().map_err(|e| e.to_string())?;
+        }
+        (
+            manager.settings().onboarding.clone(),
+            changed,
+            manager.settings().clone(),
+        )
+    };
+
+    if changed {
+        // The gate reads readiness, and readiness reads settings; without this
+        // a second window (the overlay) would keep the pre-completion record.
+        emit_settings_changed(handle, &full_settings);
+    }
+
+    serde_json::to_value(record).map_err(|e| e.to_string())
+}
+
 /// Sidecar-compatible save_settings: applies normalized settings and emits frontend events.
 async fn save_settings_for_sidecar(
     state: &AppState,
     handle: &crate::sidecar_handle::SidecarHandle,
     mut settings: settings::Settings,
 ) -> Result<serde_json::Value, String> {
-    let (privileged_privacy, previous_shortcuts) = {
+    let (privileged_privacy, previous_shortcuts, previous_onboarding) = {
         let manager = state.settings_manager.lock().await;
         (
             manager.settings().privacy.clone(),
             manager.settings().shortcuts.clone(),
+            manager.settings().onboarding.clone(),
         )
     };
     preserve_privileged_privacy_settings(&privileged_privacy, &mut settings.privacy);
+    // The first-run record is the sidecar's, not the renderer's. Every settings
+    // write from the renderer is a read-modify-write of the whole document, so
+    // one built from a stale or hand-made `Settings` literal would silently
+    // erase the record and put the install back where this bug started.
+    settings.onboarding = previous_onboarding;
     // Keeps the legacy `toggleDictation` key and the binding table telling the
     // same story whichever one the writer edited; see the function's doc for
     // which side wins when.

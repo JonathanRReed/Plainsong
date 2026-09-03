@@ -15,6 +15,7 @@ export {
   openInstalledPlainsongApp,
   openPermissionSettings,
   previewSupportBundle,
+  recordOnboardingState,
   requestAppleSpeechPermission,
   requestDictationPermissions,
   repairCursorInsertPermissions,
@@ -29,6 +30,8 @@ export {
 } from "../backend";
 export type {
   DictationShortcutCapabilityStatus,
+  OnboardingStateEvent,
+  PermissionSettingsSection,
   PermissionDiagnostics,
   SecurityStatus,
   SetupVerificationResult,

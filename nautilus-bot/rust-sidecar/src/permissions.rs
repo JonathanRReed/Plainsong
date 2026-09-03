@@ -435,6 +435,12 @@ pub(crate) fn open_permission_settings_impl(section: &str) -> Result<(), String>
             "system_audio" => {
                 "x-apple.systempreferences:com.apple.preference.security?Privacy_ScreenCapture"
             }
+            // Notifications are not a Privacy & Security row, so this is the
+            // Notifications pane itself rather than a `Privacy_` anchor. The
+            // reader lands where Plainsong's own alert style is set.
+            "notifications" => {
+                "x-apple.systempreferences:com.apple.Notifications-Settings.extension"
+            }
             _ => "x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility",
         };
 
