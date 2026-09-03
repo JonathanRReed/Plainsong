@@ -61,6 +61,8 @@
     "qa:packaged:macos:app-matrix:preflight": "node scripts/capture-packaged-macos-app-matrix-preflight.mjs",
     "qa:packaged:macos:app-matrix:insertion": "node scripts/run-packaged-macos-app-matrix-insertion.mjs",
     "qa:packaged:macos:release-audit": "node scripts/capture-packaged-macos-release-audit.mjs",
+    "qa:diarization:fixture": "node scripts/make-diarization-eval-fixture.mjs",
+    "qa:diarization:score": "node scripts/score-diarization-eval.mjs",
     "qa:source-gates": "node scripts/capture-source-gates.mjs",
     "qa:packaged:macos:idle-cpu": "node scripts/capture-packaged-macos-idle-cpu.mjs",
     "qa:packaged:macos:update-metadata": "node scripts/verify-packaged-macos-update-metadata.mjs",
