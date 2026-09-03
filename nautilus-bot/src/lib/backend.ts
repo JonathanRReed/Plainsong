@@ -1445,6 +1445,49 @@ export async function deleteBundledCleanupModel(): Promise<BundledCleanupModelSt
 }
 
 /**
+ * The streaming engine that can draw the dictation live preview.
+ *
+ * These weights are deliberately not an ASR route: nothing can select them for
+ * dictation or meeting transcription, and the text they produce is never
+ * inserted. They only make the preview arrive while you are still speaking
+ * instead of a re-decode behind you.
+ *
+ * `supported` is false in a build with no streaming engine compiled in, which
+ * is a different sentence from "not downloaded" and gets a different UI.
+ */
+export interface LivePreviewEngineStatus {
+  /** Whether this build has a streaming engine at all. */
+  supported: boolean;
+  /** Whether its weights are on disk AND carry a trusted integrity receipt. */
+  ready: boolean;
+  modelId: string | null;
+  displayName: string | null;
+  /** Human-readable engine name, e.g. the runtime plus the model family. */
+  engineName: string | null;
+  license: string | null;
+  upstreamUrl: string | null;
+  downloadBytes: number;
+  bytesOnDisk: number;
+  /** The language codes the pinned weights declare. */
+  languages: string[];
+  /** Audio per streaming chunk, in milliseconds. */
+  chunkMs: number | null;
+  path: string | null;
+}
+
+export async function getLivePreviewEngineStatus(): Promise<LivePreviewEngineStatus> {
+  return await invoke("get_live_preview_engine_status");
+}
+
+export async function downloadLivePreviewEngineModel(): Promise<LivePreviewEngineStatus> {
+  return await invoke("download_live_preview_engine_model");
+}
+
+export async function deleteLivePreviewEngineModel(): Promise<LivePreviewEngineStatus> {
+  return await invoke("delete_live_preview_engine_model");
+}
+
+/**
  * Whether Apple's on-device model can run here.
  *
  * Probed once at sidecar startup and cached, because the answer only changes

@@ -1009,4 +1009,96 @@ describe("DictationPopup", () => {
     expect(notice.querySelector(".neume-rust")).toBeTruthy();
     expect(screen.getByText("Notes").className).toMatch(/text-foreground/);
   });
+  it("renders a streaming preview's settled words apart from the tail it may still change", async () => {
+    await act(async () => {
+      render(<DictationPopup />);
+    });
+
+    await waitFor(() => {
+      expect(popupMocks.listeners.get("dictation-state-changed")).toBeDefined();
+    });
+
+    const handler = popupMocks.listeners.get("dictation-state-changed");
+
+    await act(async () => {
+      handler?.({
+        payload: {
+          phase: "recording",
+          startedAtMs: Date.now(),
+          sessionId: 11,
+          partialText: "ship the release",
+          partialStableText: "ship the",
+          partialVolatileText: " release",
+          partialEngine: "streaming",
+        },
+      });
+    });
+
+    const settled = await screen.findByText("ship the");
+    const volatileTail = screen.getByText("release");
+    // The committed half reads as text; the half the recognizer may still
+    // rewrite is muted. No new colours -- the muted foreground the rest of
+    // the popup already uses.
+    expect(settled.className).not.toMatch(/text-muted-foreground/);
+    expect(volatileTail.className).toMatch(/text-muted-foreground/);
+    expect(volatileTail.className).not.toMatch(/gold|rust/);
+  });
+
+  it("renders a re-decode preview as one run, because none of it is settled", async () => {
+    await act(async () => {
+      render(<DictationPopup />);
+    });
+
+    await waitFor(() => {
+      expect(popupMocks.listeners.get("dictation-state-changed")).toBeDefined();
+    });
+
+    await act(async () => {
+      popupMocks.listeners.get("dictation-state-changed")?.({
+        payload: {
+          phase: "recording",
+          startedAtMs: Date.now(),
+          sessionId: 12,
+          partialText: "ship the release",
+        },
+      });
+    });
+
+    const preview = await screen.findByText("ship the release");
+    expect(preview.querySelector("span")).toBeNull();
+  });
+
+  it("drops the streaming preview split when the session goes idle", async () => {
+    await act(async () => {
+      render(<DictationPopup />);
+    });
+
+    await waitFor(() => {
+      expect(popupMocks.listeners.get("dictation-state-changed")).toBeDefined();
+    });
+
+    const handler = popupMocks.listeners.get("dictation-state-changed");
+
+    await act(async () => {
+      handler?.({
+        payload: {
+          phase: "recording",
+          startedAtMs: Date.now(),
+          sessionId: 13,
+          partialText: "ship the release",
+          partialStableText: "ship the",
+          partialVolatileText: " release",
+          partialEngine: "streaming",
+        },
+      });
+    });
+    expect(await screen.findByText("ship the")).toBeInTheDocument();
+
+    await act(async () => {
+      handler?.({ payload: { phase: "idle", sessionId: 13 } });
+    });
+
+    expect(screen.queryByText("ship the")).not.toBeInTheDocument();
+    expect(screen.queryByText("release")).not.toBeInTheDocument();
+  });
 });

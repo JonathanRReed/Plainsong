@@ -414,6 +414,15 @@ export function DictationPopup() {
   const [elapsed, setElapsed] = useState(0);
   const [message, setMessage] = useState<string | null>(null);
   const [preview, setPreview] = useState<string | null>(null);
+  /**
+   * The streaming engine's preview, split into the words it has committed to
+   * and the tail it may still rewrite. Null for the re-decode engine, which
+   * has no such split to offer -- every one of its partials can change.
+   */
+  const [previewParts, setPreviewParts] = useState<{
+    stable: string;
+    volatile: string;
+  } | null>(null);
   const [outcome, setOutcome] = useState<string | null>(null);
   const [displayMode, setDisplayMode] = useState<DisplayMode>("full");
   const [_handsFreeEnabled, _setHandsFreeEnabled] = useState(false);
@@ -543,6 +552,7 @@ export function DictationPopup() {
       setPhase("idle");
       setMessage(null);
       setPreview(null);
+      setPreviewParts(null);
       setOutcome(null);
       resetCompletionState();
       return;
@@ -585,9 +595,18 @@ export function DictationPopup() {
     setPhase(payload.phase);
     setMessage(sanitizedMessage);
     setPreview(payload.partialText ?? payload.preview ?? null);
+    setPreviewParts(
+      payload.partialStableText != null || payload.partialVolatileText != null
+        ? {
+            stable: payload.partialStableText ?? "",
+            volatile: payload.partialVolatileText ?? "",
+          }
+        : null,
+    );
     setOutcome(payload.outcome ?? null);
     if (payload.phase === "idle") {
       resetCompletionState();
+      setPreviewParts(null);
       lastSessionIdRef.current = null;
       lastActiveStartedAtRef.current = null;
       sessionClockStartedAtRef.current = null;
@@ -1410,11 +1429,25 @@ export function DictationPopup() {
                 <p className="font-mono text-[11px] font-medium uppercase tracking-[0.16em] text-muted-foreground">
                   Live text
                 </p>
+                {/* The streaming engine tells the two halves apart, so the
+                    popup does too: settled words in the reading colour, the
+                    tail the recognizer may still change in the muted one. The
+                    re-decode engine has no such split -- every partial it
+                    sends can change -- so its text renders as one run. */}
                 <p
                   key={preview}
                   className="ink-in mt-2 text-sm leading-6 text-foreground line-clamp-4"
                 >
-                  {preview}
+                  {previewParts ? (
+                    <>
+                      <span>{previewParts.stable}</span>
+                      <span className="text-muted-foreground">
+                        {previewParts.volatile}
+                      </span>
+                    </>
+                  ) : (
+                    preview
+                  )}
                 </p>
               </div>
             )}
