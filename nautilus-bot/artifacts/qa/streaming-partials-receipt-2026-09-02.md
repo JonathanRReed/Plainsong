@@ -48,6 +48,17 @@ session's own final text was **byte-identical** to a batch decode of the same
 weights — `This is a Nautilus local quality gate sample with enough spoken words
 for verification.` in both, in all nine runs below.
 
+Read that for exactly what it is: a `benchmark-latency --stream` measurement.
+The harness feeds the whole fixture, feeds the chunker's remainder and calls
+`finalize()`, so the text it compares is a *finished* stream. The shipped
+preview path did neither when this receipt was first written, so its last
+partial was an uncommitted tail over audio one chunk short of the capture; it
+now closes the same way the harness does (`finish_streaming_utterance`), which
+is what makes this comparison say anything about the shipped path at all. Even
+then it is a comparison of two previews of the same weights, not evidence about
+the text Plainsong inserts: that is always the batch decode from the user's own
+dictation engine, which is usually not these weights.
+
 ## Environment
 
 - Hardware: Apple M4 Pro, 14 logical CPUs, 24 GB.
@@ -132,8 +143,11 @@ first partial of a session cannot arrive before it.
 
 1. 320 ms beat 560 ms on both p50 and p95 in all three rounds, and beat
    1120 ms in all three. That ordering is the one this receipt would act on.
-2. The preview's final text was byte-identical to the batch decode of the same
-   weights, in all nine runs.
+2. The *benchmark harness's* final text — a stream that was fed its remainder
+   and finalized — was byte-identical to the batch decode of the same weights,
+   in all nine runs. Nothing here measured the shipped preview's own final
+   text; it is only since `finish_streaming_utterance` that the shipped path
+   closes a stream the same way.
 3. The sidecar never approached saturating a core in an uncontended round.
 
 What does *not* hold is the rest of the ordering: in round 3 the 1120 ms

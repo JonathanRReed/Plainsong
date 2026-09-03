@@ -377,6 +377,18 @@ evidence is stale and must be recaptured before this becomes a candidate.
   pasted on unchanged, so "ship the" followed by "ship" + " the release" was
   drawn as "ship the the release". The tail is now re-cut at the boundary the
   popup kept.
+- The streaming live preview now hears the last half-second of what you said.
+  It fed the recognizer only whole chunks and never closed the stream, so up
+  to 560 ms of speech reached nothing and the last words stayed uncommitted.
+  It now feeds the remainder and finalizes once before the recognizer is put
+  down. What gets typed is unchanged either way: that is still the finished
+  transcription made after you stop.
+- A live preview that stops answering can no longer leave a second copy of its
+  model loaded. The stop path gave up after two seconds and *detached* the
+  task rather than cancelling it, so the next dictation could open a second
+  ~1 GB engine beside the first. The task is now aborted, and only one preview
+  engine may be resident at a time — a dictation that cannot get the slot goes
+  without a streaming preview instead.
 - The diarization model chosen in Settings is now the one the automatic
   post-meeting speaker pass uses. It previously always ran ECAPA-TDNN no
   matter what the picker said; only the explicit "identify speakers" action
