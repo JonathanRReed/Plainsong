@@ -11,12 +11,30 @@ function builderConfig(): string {
   return readFileSync(path.join(repoRoot, "electron-builder.yml"), "utf8");
 }
 
+interface PackageManifest {
+  version: string;
+  dependencies?: Record<string, string>;
+  devDependencies?: Record<string, string>;
+}
+
+function packageManifest(): PackageManifest {
+  return JSON.parse(
+    readFileSync(path.join(repoRoot, "package.json"), "utf8"),
+  ) as PackageManifest;
+}
+
 function packageVersion(): string {
-  return (
-    JSON.parse(readFileSync(path.join(repoRoot, "package.json"), "utf8")) as {
-      version: string;
-    }
-  ).version;
+  return packageManifest().version;
+}
+
+/** The `electronLanguages:` list, in order. */
+function electronLanguages(): string[] {
+  const config = builderConfig();
+  const block = /^electronLanguages:\n((?:\s+- \S+\n)+)/m.exec(config);
+  expect(block, "electron-builder.yml no longer pins electronLanguages").not.toBe(
+    null,
+  );
+  return [...block![1].matchAll(/^\s+- (\S+)$/gm)].map(([, value]) => value);
 }
 
 describe("encodeBundleBuildVersion", () => {
@@ -104,6 +122,32 @@ describe("electron-builder macOS packaging", () => {
 
     expect(dmg).toContain("sign: true");
     expect(dmg).toContain("writeUpdateInfo: false");
+  });
+});
+
+describe("what the packaged bundle is allowed to contain", () => {
+  it("ships Chromium's English locale and nothing else", () => {
+    // 46 MB of the installed application was Chromium UI strings for 54
+    // languages Plainsong itself has never been translated into. The list is
+    // pinned rather than merely non-empty: adding a language here is a claim
+    // that something in the product is written in it.
+    expect(electronLanguages()).toEqual(["en", "en-US"]);
+  });
+
+  it("has nothing in the renderer that would need another Chromium locale", () => {
+    // The premise of the line above. If an i18n runtime ever arrives, this
+    // fails and whoever added it has to decide which locales ship.
+    const manifest = packageManifest();
+    const declared = Object.keys({
+      ...manifest.dependencies,
+      ...manifest.devDependencies,
+    });
+    const localizationRuntimes = declared.filter((name) =>
+      /^(i18next|react-i18next|react-intl|@formatjs\/|@lingui\/|vue-i18n|polyglot|intl-messageformat)/.test(
+        name,
+      ),
+    );
+    expect(localizationRuntimes).toEqual([]);
   });
 });
 
