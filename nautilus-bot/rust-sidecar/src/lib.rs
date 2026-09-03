@@ -14915,6 +14915,46 @@ mod tests {
     }
 
     #[test]
+    fn apple_speech_reaches_meetings_only_when_speech_analyzer_can_serve_them() {
+        // The whole point of the flag: Apple Speech is the one provider whose
+        // meeting eligibility depends on the machine, because only its
+        // SpeechAnalyzer engine returns the per-segment timestamps the meeting
+        // transcript is assembled from.
+        assert!(!meeting_provider_is_supported_with(
+            asr::AsrProviderType::MacosAppleSpeech,
+            false
+        ));
+        assert!(meeting_provider_is_supported_with(
+            asr::AsrProviderType::MacosAppleSpeech,
+            true
+        ));
+
+        // Nothing else changes with the flag, in either direction.
+        for provider in [
+            asr::AsrProviderType::Parakeet,
+            asr::AsrProviderType::DistilWhisper,
+            asr::AsrProviderType::Whisper,
+            asr::AsrProviderType::Qwen3Asr,
+            asr::AsrProviderType::OpenAiCloud,
+            asr::AsrProviderType::Moonshine,
+            asr::AsrProviderType::WhisperCandle,
+            asr::AsrProviderType::WindowsSdkDictation,
+        ] {
+            assert_eq!(
+                meeting_provider_is_supported_with(provider, false),
+                meeting_provider_is_supported_with(provider, true),
+                "{provider:?} must not depend on the Apple Speech flag"
+            );
+        }
+
+        // Windows dictation stays dictation-only regardless.
+        assert!(!meeting_provider_is_supported_with(
+            asr::AsrProviderType::WindowsSdkDictation,
+            true
+        ));
+    }
+
+    #[test]
     fn fresh_settings_resolve_the_meeting_lane_to_parakeet_v3() {
         let transcription = settings::Settings::default().transcription;
         assert_eq!(transcription.meeting_provider, "parakeet");
@@ -18388,6 +18428,28 @@ fn provider_allows_automatic_dictation_fallback(provider: asr::AsrProviderType) 
 }
 
 fn meeting_provider_is_supported(provider: asr::AsrProviderType) -> bool {
+    meeting_provider_is_supported_with(
+        provider,
+        crate::asr::platform::macos_speech::meetings_supported(),
+    )
+}
+
+/// Whether a provider may serve meetings, given whether the Apple Speech route
+/// is currently meeting-capable.
+///
+/// Apple Speech is the one provider whose answer depends on the machine: it
+/// reaches meetings only through SpeechAnalyzer (macOS 26+ with the language
+/// installed), which is the only one of its two engines that returns the
+/// per-segment timestamps `transcribe_recording_in_chunks` offsets and merges.
+/// SFSpeechRecognizer stays dictation-only, as it has always been. The flag is
+/// passed in rather than read here so the policy is testable without a Mac.
+fn meeting_provider_is_supported_with(
+    provider: asr::AsrProviderType,
+    apple_speech_meeting_capable: bool,
+) -> bool {
+    if provider == asr::AsrProviderType::MacosAppleSpeech {
+        return apple_speech_meeting_capable;
+    }
     matches!(
         provider,
         asr::AsrProviderType::Parakeet
@@ -18462,10 +18524,16 @@ fn ensure_meeting_route_supported(
         return Ok(());
     }
 
+    let apple_speech_choice = if crate::asr::platform::macos_speech::meetings_supported() {
+        "Apple Speech, "
+    } else {
+        ""
+    };
     Err(format!(
-        "Meetings require a meeting-grade ASR route. '{}' with model '{}' is dictation-only or unsupported for meetings. Choose Parakeet, whisper.cpp small/medium/large-v3/large-v3-turbo, Distil Whisper, Qwen3-ASR, ElevenLabs, OpenAI, Groq, or Cohere in Settings -> ASR / Providers.",
+        "Meetings require a meeting-grade ASR route. '{}' with model '{}' is dictation-only or unsupported for meetings. Choose {}Parakeet, whisper.cpp small/medium/large-v3/large-v3-turbo, Distil Whisper, Qwen3-ASR, ElevenLabs, OpenAI, Groq, or Cohere in Settings -> ASR / Providers.",
         provider.display_name(),
-        model_id
+        model_id,
+        apple_speech_choice
     ))
 }
 

@@ -27,7 +27,14 @@ impl AsrProvider for MacosAppleSpeechProvider {
     }
 
     fn description(&self) -> &str {
-        "Dictation-only transcription through Apple's Speech framework with server fallback disabled."
+        // Which sentence is true depends on which engine this Mac will run.
+        // SpeechAnalyzer returns per-segment timestamps, so the route is
+        // meeting-capable; SFSpeechRecognizer does not, so it is not.
+        if platform::macos_speech::meetings_supported() {
+            "On-device transcription through Apple's SpeechAnalyzer engine: nothing to download, per-segment timestamps, and no server fallback."
+        } else {
+            "Dictation-only transcription through Apple's Speech framework with server fallback disabled."
+        }
     }
 
     fn is_available(&self) -> bool {
@@ -35,12 +42,23 @@ impl AsrProvider for MacosAppleSpeechProvider {
     }
 
     fn model_info(&self) -> ModelInfo {
+        // The language list is whatever SpeechAnalyzer reports on this Mac at
+        // probe time, not a list this repo maintains: Apple ships the assets
+        // and the set differs per machine and per OS version. Falls back to
+        // "system" when the probe has nothing to say (older macOS, or the
+        // helper could not run).
+        let readiness = platform::macos_speech::readiness();
+        let languages = if readiness.speech_analyzer_locales.is_empty() {
+            vec!["system".to_string()]
+        } else {
+            readiness.speech_analyzer_locales.clone()
+        };
         ModelInfo {
             name: "Apple Speech (On-Device)".to_string(),
             version: "system".to_string(),
             size_mb: 0.0,
             parameters: "OS managed".to_string(),
-            languages: vec!["system".to_string()],
+            languages,
             word_error_rate: None,
             real_time_factor: None,
             license: "Apple platform terms".to_string(),
@@ -56,7 +74,10 @@ impl AsrProvider for MacosAppleSpeechProvider {
         )?;
         Ok(TranscriptionResult {
             text: result.text,
-            segments: Vec::new(),
+            // Empty on the SFSpeechRecognizer path, populated on the
+            // SpeechAnalyzer path; the meeting chunker offsets and merges
+            // whatever arrives here.
+            segments: result.segments,
             language: result.language,
             confidence: result.confidence,
             processing_time_ms: result.processing_time_ms,
@@ -80,7 +101,7 @@ impl AsrProvider for MacosAppleSpeechProvider {
         )?;
         Ok(TranscriptionResult {
             text: result.text,
-            segments: Vec::new(),
+            segments: result.segments,
             language: result.language,
             confidence: result.confidence,
             processing_time_ms: result.processing_time_ms,

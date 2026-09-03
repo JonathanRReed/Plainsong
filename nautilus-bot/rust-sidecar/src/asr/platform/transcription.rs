@@ -1,8 +1,14 @@
 use super::PlatformEngine;
+use crate::asr::TranscriptSegment;
 use anyhow::{Context, Result};
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::time::Instant;
+
+/// How much silence `stage_macos_speech_input` prepends before handing audio
+/// to the macOS Speech helper. Segment timestamps come back relative to the
+/// staged file, so this is subtracted before they are reported.
+const PREPENDED_SILENCE_MS: u32 = 750;
 
 #[derive(Debug, Clone)]
 pub struct PlatformTranscription {
@@ -10,12 +16,21 @@ pub struct PlatformTranscription {
     pub language: String,
     pub confidence: f64,
     pub processing_time_ms: u64,
+    /// Which engine inside the platform route actually ran, when the route
+    /// has more than one (Apple Speech: SpeechAnalyzer or SFSpeechRecognizer).
+    pub engine: Option<String>,
+    /// Per-segment timestamps, when the engine returns them. Empty for
+    /// SFSpeechRecognizer and for the Windows dictation route.
+    pub segments: Vec<TranscriptSegment>,
 }
 
 #[derive(Debug)]
 struct ManagedAudioPath {
     path: PathBuf,
     remove_on_drop: bool,
+    /// Silence prepended to this file relative to the caller's audio, so
+    /// timestamps the engine reports can be shifted back onto the original.
+    prepended_silence_seconds: f64,
 }
 
 impl ManagedAudioPath {
@@ -23,6 +38,7 @@ impl ManagedAudioPath {
         Self {
             path: path.to_path_buf(),
             remove_on_drop: false,
+            prepended_silence_seconds: 0.0,
         }
     }
 
@@ -30,7 +46,13 @@ impl ManagedAudioPath {
         Self {
             path,
             remove_on_drop: true,
+            prepended_silence_seconds: 0.0,
         }
+    }
+
+    fn with_prepended_silence(mut self, seconds: f64) -> Self {
+        self.prepended_silence_seconds = seconds;
+        self
     }
 }
 
@@ -60,25 +82,45 @@ fn transcribe_with_engine_in_temp_dir(
     let engine_audio = prepare_audio_for_engine(engine, &resolved_audio.path, temp_dir)?;
     let started = Instant::now();
 
-    let (text, language, confidence) = match engine {
+    match engine {
         PlatformEngine::MacosAppleSpeech => {
-            super::macos_speech::transcribe_file(&engine_audio.path)
+            let transcript = super::macos_speech::transcribe_file(&engine_audio.path)?;
+            let offset = engine_audio.prepended_silence_seconds;
+            Ok(PlatformTranscription {
+                text: transcript.text,
+                language: transcript.language,
+                confidence: transcript.confidence,
+                processing_time_ms: started.elapsed().as_millis() as u64,
+                engine: transcript.engine,
+                segments: transcript
+                    .segments
+                    .into_iter()
+                    .map(|segment| TranscriptSegment {
+                        start_time: (segment.start_seconds - offset).max(0.0),
+                        end_time: (segment.end_seconds - offset).max(0.0),
+                        text: segment.text,
+                        confidence: segment.confidence,
+                    })
+                    .collect(),
+            })
         }
         PlatformEngine::WindowsSdkDictation => {
-            super::windows_sdk_dictation::transcribe_file(&engine_audio.path)
+            let (text, language, confidence) =
+                super::windows_sdk_dictation::transcribe_file(&engine_audio.path)?;
+            Ok(PlatformTranscription {
+                text,
+                language,
+                confidence,
+                processing_time_ms: started.elapsed().as_millis() as u64,
+                engine: None,
+                segments: Vec::new(),
+            })
         }
         _ => Err(anyhow::anyhow!(
             "Engine '{}' does not expose a native transcription path",
             engine.id()
         )),
-    }?;
-
-    Ok(PlatformTranscription {
-        text,
-        language,
-        confidence,
-        processing_time_ms: started.elapsed().as_millis() as u64,
-    })
+    }
 }
 
 fn prepare_audio_for_engine(
@@ -104,8 +146,6 @@ fn stage_macos_speech_input_at(
     audio_path: &Path,
     staged_path: PathBuf,
 ) -> Result<ManagedAudioPath> {
-    const PREPENDED_SILENCE_MS: u32 = 750;
-
     let mut reader = hound::WavReader::open(audio_path).with_context(|| {
         format!(
             "Failed to open '{}' for macOS Speech input staging",
@@ -196,7 +236,7 @@ fn stage_macos_speech_input_at(
         )
     })?;
 
-    Ok(staged_audio)
+    Ok(staged_audio.with_prepended_silence(PREPENDED_SILENCE_MS as f64 / 1000.0))
 }
 
 fn resolve_audio_path(
@@ -243,13 +283,50 @@ fn create_private_file(path: &Path) -> std::io::Result<std::fs::File> {
 
 #[cfg(test)]
 mod tests {
-    use super::{stage_macos_speech_input, transcribe_with_engine_in_temp_dir};
+    use super::{
+        stage_macos_speech_input, stage_macos_speech_input_at, transcribe_with_engine_in_temp_dir,
+        PREPENDED_SILENCE_MS,
+    };
     use crate::asr::platform::PlatformEngine;
 
     fn temp_root(label: &str) -> std::path::PathBuf {
         let root = std::env::temp_dir().join(format!("nautilus-{label}-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&root).expect("create test temp directory");
         root
+    }
+
+    /// The staged file the macOS Speech helper reads starts with silence, so
+    /// every timestamp SpeechAnalyzer reports is shifted by that much. The
+    /// staged path carries the offset so `transcribe_with_engine` can shift
+    /// segments back onto the caller's audio; without it a meeting transcript
+    /// would be 750 ms late on every chunk.
+    #[test]
+    fn staged_macos_speech_input_reports_the_silence_it_prepended() {
+        let root = temp_root("stage-offset");
+        let input_path = root.join("input.wav");
+        let spec = hound::WavSpec {
+            channels: 1,
+            sample_rate: 16_000,
+            bits_per_sample: 16,
+            sample_format: hound::SampleFormat::Int,
+        };
+        let mut writer = hound::WavWriter::create(&input_path, spec).expect("write test wav");
+        for _ in 0..16_000 {
+            writer.write_sample(0_i16).expect("write sample");
+        }
+        writer.finalize().expect("finalize test wav");
+
+        let staged = stage_macos_speech_input_at(&input_path, root.join("staged.wav"))
+            .expect("stage macOS Speech input");
+        assert!(
+            (staged.prepended_silence_seconds - PREPENDED_SILENCE_MS as f64 / 1000.0).abs() < 1e-9
+        );
+
+        // A file that is passed through untouched carries no offset.
+        let borrowed = super::ManagedAudioPath::borrowed(&input_path);
+        assert_eq!(borrowed.prepended_silence_seconds, 0.0);
+
+        let _ = std::fs::remove_dir_all(root);
     }
 
     #[test]

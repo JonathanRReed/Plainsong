@@ -12,6 +12,7 @@ use std::ffi::OsString;
 use std::path::PathBuf;
 #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
 use std::process::{Command, Output, Stdio};
+use std::sync::atomic::{AtomicBool, Ordering};
 #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
 use std::sync::{Condvar, Mutex, OnceLock};
 #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
@@ -36,6 +37,43 @@ pub enum SpeechAuthorizationStatus {
     Restricted,
     Unavailable,
     Unknown(isize),
+}
+
+/// Which of the two Apple engines the helper will actually run.
+///
+/// `SpeechAnalyzer` (macOS 26+) is the purpose-built long-form on-device
+/// engine: per-segment timestamps, volatile/finalized streaming, and no bytes
+/// to download beyond the OS-managed locale assets. `SfSpeechRecognizer` is
+/// the older path, which is all a macOS 13-15 install has and which returns no
+/// usable segment timestamps.
+#[derive(Debug, Clone, Copy, Default, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum AppleSpeechEngine {
+    SpeechAnalyzer,
+    /// The default for anything that has not probed: an old macOS, a
+    /// non-Apple-Silicon build, or a settings file written before this field
+    /// existed all describe a machine that can only run SFSpeechRecognizer.
+    #[default]
+    SfSpeechRecognizer,
+}
+
+impl AppleSpeechEngine {
+    /// The `--engine` value the helper accepts, and the value the helper's own
+    /// probe reports.
+    pub fn id(self) -> &'static str {
+        match self {
+            Self::SpeechAnalyzer => "speech_analyzer",
+            Self::SfSpeechRecognizer => "sf_speech_recognizer",
+        }
+    }
+
+    /// The framework name, for copy that has to say which engine runs.
+    pub fn display_name(self) -> &'static str {
+        match self {
+            Self::SpeechAnalyzer => "SpeechAnalyzer",
+            Self::SfSpeechRecognizer => "SFSpeechRecognizer",
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, Deserialize, Serialize, PartialEq, Eq)]
@@ -68,12 +106,98 @@ pub struct AppleSpeechReadiness {
     pub recognizer_available: bool,
     pub message: String,
     pub setup_action: Option<String>,
-    /// Whether the new SpeechAnalyzer API (macOS 26+) is available.
+    /// Whether the helper can actually run SpeechAnalyzer here: the macOS 26+
+    /// API exists and `SpeechTranscriber` reports itself usable.
     #[serde(default)]
     pub speech_analyzer_available: bool,
+    /// Whether SpeechAnalyzer supports the requested locale at all.
+    #[serde(default)]
+    pub speech_analyzer_locale_supported: bool,
+    /// Whether that locale's assets are on disk. Nothing is downloaded to make
+    /// this true; the Models screen's "Install language" action is what asks
+    /// macOS for them.
+    #[serde(default)]
+    pub speech_analyzer_assets_installed: bool,
+    /// Raw asset state from `AssetInventory`, plus the helper's
+    /// `installed_not_allocated` case: macOS only reports `installed` once the
+    /// locale is allocated to the process, and that allocation does not
+    /// survive the helper exiting.
+    #[serde(default)]
+    pub speech_analyzer_asset_status: String,
+    /// Every locale SpeechAnalyzer supports on this Mac, from
+    /// `SpeechTranscriber.supportedLocales` at probe time.
+    #[serde(default)]
+    pub speech_analyzer_locales: Vec<String>,
+    /// The subset of those whose assets macOS already has.
+    #[serde(default)]
+    pub speech_analyzer_installed_locales: Vec<String>,
+    /// The engine this route will run for the probed locale.
+    #[serde(default)]
+    pub engine: AppleSpeechEngine,
     /// The OS version string reported by the helper (e.g. "26.0.0").
     #[serde(default)]
     pub operating_system_version: Option<String>,
+}
+
+/// Which engine the Apple Speech route runs for the probed locale.
+///
+/// Pure so the decision is testable without a Mac: SpeechAnalyzer only when
+/// the helper reports the API usable, the locale supported, and its assets
+/// already on disk. Anything else is the SFSpeechRecognizer path, which is
+/// what every macOS 13-15 install gets.
+pub fn selected_engine(readiness: &AppleSpeechReadiness) -> AppleSpeechEngine {
+    if readiness.speech_analyzer_available
+        && readiness.speech_analyzer_locale_supported
+        && readiness.speech_analyzer_assets_installed
+    {
+        AppleSpeechEngine::SpeechAnalyzer
+    } else {
+        AppleSpeechEngine::SfSpeechRecognizer
+    }
+}
+
+/// Whether the Apple Speech route may serve meetings.
+///
+/// A meeting transcript is assembled from per-chunk segments with real
+/// start/end times (`transcribe_recording_in_chunks` offsets and merges them).
+/// Only the SpeechAnalyzer path returns those; SFSpeechRecognizer returns one
+/// formatted string, so it stays dictation-only exactly as before.
+pub fn supports_meetings(readiness: &AppleSpeechReadiness) -> bool {
+    readiness.ready && selected_engine(readiness) == AppleSpeechEngine::SpeechAnalyzer
+}
+
+/// Set by every readiness probe so the meeting-route policy can ask whether
+/// Apple Speech is meeting-capable without spawning the helper on a hot path.
+/// False until the first probe, which is the honest default: nothing has looked
+/// yet.
+static SPEECH_ANALYZER_MEETINGS_SUPPORTED: AtomicBool = AtomicBool::new(false);
+
+/// Whether the last readiness probe found a meeting-capable Apple Speech route.
+pub fn meetings_supported() -> bool {
+    SPEECH_ANALYZER_MEETINGS_SUPPORTED.load(Ordering::Relaxed)
+}
+
+/// One timed span of a SpeechAnalyzer transcript.
+#[derive(Debug, Clone, Deserialize, PartialEq)]
+pub struct MacosSpeechSegment {
+    pub text: String,
+    #[serde(default)]
+    pub start_seconds: f64,
+    #[serde(default)]
+    pub end_seconds: f64,
+    #[serde(default)]
+    pub confidence: f64,
+}
+
+/// A finished Apple Speech transcription. `segments` is empty on the
+/// SFSpeechRecognizer path, which has no usable segment ranges to report.
+#[derive(Debug, Clone, Default)]
+pub struct MacosSpeechTranscript {
+    pub text: String,
+    pub language: String,
+    pub confidence: f64,
+    pub engine: Option<String>,
+    pub segments: Vec<MacosSpeechSegment>,
 }
 
 #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
@@ -113,16 +237,43 @@ struct HelperProbePayload {
     #[serde(default)]
     speech_analyzer_available: bool,
     #[serde(default)]
+    speech_analyzer_locale_supported: bool,
+    #[serde(default)]
+    speech_analyzer_assets_installed: bool,
+    #[serde(default)]
+    speech_analyzer_asset_status: String,
+    #[serde(default)]
+    speech_analyzer_locales: Vec<String>,
+    #[serde(default)]
+    speech_analyzer_installed_locales: Vec<String>,
+    // The helper also reports the `engine` it would resolve. Rust does not
+    // parse it: `selected_engine` recomputes the same decision from the facts
+    // above, which is the version that can be tested without a Mac, and one
+    // source of truth beats two that can drift.
+    #[serde(default)]
     operating_system_version: Option<String>,
 }
 
-#[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+impl HelperProbePayload {
+    /// Whether SpeechAnalyzer can run for the probed locale right now.
+    fn speech_analyzer_usable(&self) -> bool {
+        self.speech_analyzer_available
+            && self.speech_analyzer_locale_supported
+            && self.speech_analyzer_assets_installed
+    }
+}
+
+#[cfg(any(test, all(target_os = "macos", target_arch = "aarch64")))]
 #[derive(Debug, Clone, Deserialize)]
 struct HelperTranscriptPayload {
     text: String,
     language: String,
     confidence: f64,
     is_final: bool,
+    #[serde(default)]
+    engine: Option<String>,
+    #[serde(default)]
+    segments: Vec<MacosSpeechSegment>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -135,6 +286,139 @@ pub struct LiveSpeechEvent {
     pub language: String,
     pub confidence: f64,
     pub is_final: bool,
+}
+
+/// One SpeechAnalyzer live event, exactly as the helper emits it on
+/// `--live --engine speech_analyzer`.
+///
+/// `volatile` spans are the model's current guess for audio it has not
+/// finalized and are replaced wholesale by the next event; `finalized` spans
+/// never change again.
+#[derive(Debug, Clone, Deserialize, PartialEq)]
+pub struct SpeechAnalyzerLiveEvent {
+    pub protocol_version: u32,
+    #[serde(rename = "type")]
+    pub payload_type: String,
+    pub kind: String,
+    pub text: String,
+    pub language: String,
+    #[serde(default)]
+    pub start_seconds: f64,
+    #[serde(default)]
+    pub end_seconds: f64,
+    #[serde(default)]
+    pub confidence: f64,
+}
+
+impl SpeechAnalyzerLiveEvent {
+    pub fn is_finalized(&self) -> bool {
+        self.kind == "finalized"
+    }
+}
+
+/// A streaming dictation partial: text that will not change again, plus the
+/// model's current guess for the tail.
+///
+/// This is the shape the streaming dictation path consumes. Nothing in the
+/// sidecar drives it yet -- the live streaming session is not wired to
+/// dictation -- so it exists here as the seam the helper side is tested
+/// against.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct StreamingPartial {
+    pub stable_prefix: String,
+    pub volatile_suffix: String,
+}
+
+impl StreamingPartial {
+    /// The whole preview, stable text first.
+    pub fn combined_text(&self) -> String {
+        match (
+            self.stable_prefix.is_empty(),
+            self.volatile_suffix.is_empty(),
+        ) {
+            (true, _) => self.volatile_suffix.clone(),
+            (_, true) => self.stable_prefix.clone(),
+            _ => format!("{} {}", self.stable_prefix, self.volatile_suffix),
+        }
+    }
+}
+
+/// Receives streaming partials. The consumer lives outside this module; this
+/// trait is the plug point so the helper side and its accumulator can land and
+/// be tested independently.
+pub trait StreamingPartialSink: Send {
+    fn accept_partial(&mut self, partial: StreamingPartial);
+}
+
+/// Folds the helper's volatile/finalized events into a growing stable prefix
+/// and a replaceable volatile tail.
+#[derive(Debug, Default)]
+pub struct SpeechAnalyzerPartialAccumulator {
+    stable_prefix: String,
+    volatile_suffix: String,
+}
+
+impl SpeechAnalyzerPartialAccumulator {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Applies one event and returns the partial it produces.
+    ///
+    /// A finalized span is appended to the stable prefix and clears the
+    /// volatile tail, because SpeechAnalyzer finalizes the span the volatile
+    /// guess covered. A volatile span replaces the tail outright.
+    pub fn apply(&mut self, event: &SpeechAnalyzerLiveEvent) -> StreamingPartial {
+        if event.is_finalized() {
+            append_transcript_piece(&mut self.stable_prefix, &event.text);
+            self.volatile_suffix.clear();
+        } else {
+            self.volatile_suffix = event.text.clone();
+        }
+        self.snapshot()
+    }
+
+    pub fn snapshot(&self) -> StreamingPartial {
+        StreamingPartial {
+            stable_prefix: self.stable_prefix.trim().to_string(),
+            volatile_suffix: self.volatile_suffix.trim().to_string(),
+        }
+    }
+
+    /// The finalized transcript so far, with the volatile guess discarded.
+    pub fn finalized_text(&self) -> String {
+        self.stable_prefix.trim().to_string()
+    }
+}
+
+/// Joins one transcript span onto another, respecting the leading space
+/// SpeechAnalyzer already puts on continuation spans.
+fn append_transcript_piece(target: &mut String, piece: &str) {
+    if piece.trim().is_empty() {
+        return;
+    }
+    if target.is_empty() {
+        target.push_str(piece.trim_start());
+        return;
+    }
+    if !target.ends_with(' ') && !piece.starts_with(' ') {
+        target.push(' ');
+    }
+    target.push_str(piece);
+}
+
+/// Parses one helper line as a SpeechAnalyzer live event, or `None` when the
+/// line is something else (a typed error, the closing `final`, a blank line).
+pub fn parse_speech_analyzer_live_line(line: &str) -> Option<SpeechAnalyzerLiveEvent> {
+    let event = serde_json::from_str::<SpeechAnalyzerLiveEvent>(line).ok()?;
+    if event.protocol_version == HELPER_PROTOCOL_VERSION
+        && event.payload_type == "live"
+        && matches!(event.kind.as_str(), "volatile" | "finalized")
+    {
+        Some(event)
+    } else {
+        None
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -303,6 +587,18 @@ fn readiness_from_probe(payload: &HelperProbePayload) -> AppleSpeechReadiness {
             "Speech Recognition authorization is unavailable.".to_string(),
             Some("Choose another dictation provider.".to_string()),
         ),
+        // SpeechAnalyzer is checked first because it does not depend on any of
+        // the SFSpeechRecognizer facts below: a locale SFSpeechRecognizer
+        // cannot serve on-device is still transcribable when SpeechAnalyzer
+        // supports it and its assets are installed.
+        SpeechAuthorizationStatus::Authorized if payload.speech_analyzer_usable() => (
+            AppleSpeechReadinessStatus::Ready,
+            format!(
+                "Apple Speech is ready for on-device transcription in locale '{}' through SpeechAnalyzer, with nothing to download.",
+                payload.locale
+            ),
+            None,
+        ),
         SpeechAuthorizationStatus::Authorized if !payload.locale_supported => (
             AppleSpeechReadinessStatus::UnsupportedLocale,
             format!("Apple Speech does not support locale '{}'.", payload.locale),
@@ -324,14 +620,14 @@ fn readiness_from_probe(payload: &HelperProbePayload) -> AppleSpeechReadiness {
         SpeechAuthorizationStatus::Authorized => (
             AppleSpeechReadinessStatus::Ready,
             format!(
-                "Apple Speech is ready for on-device dictation in locale '{}'.",
+                "Apple Speech is ready for on-device dictation in locale '{}' through SFSpeechRecognizer.",
                 payload.locale
             ),
             None,
         ),
     };
 
-    AppleSpeechReadiness {
+    let mut readiness = AppleSpeechReadiness {
         status,
         ready: status == AppleSpeechReadinessStatus::Ready,
         platform_supported: true,
@@ -344,8 +640,16 @@ fn readiness_from_probe(payload: &HelperProbePayload) -> AppleSpeechReadiness {
         message,
         setup_action,
         speech_analyzer_available: payload.speech_analyzer_available,
+        speech_analyzer_locale_supported: payload.speech_analyzer_locale_supported,
+        speech_analyzer_assets_installed: payload.speech_analyzer_assets_installed,
+        speech_analyzer_asset_status: payload.speech_analyzer_asset_status.clone(),
+        speech_analyzer_locales: payload.speech_analyzer_locales.clone(),
+        speech_analyzer_installed_locales: payload.speech_analyzer_installed_locales.clone(),
+        engine: AppleSpeechEngine::SfSpeechRecognizer,
         operating_system_version: payload.operating_system_version.clone(),
-    }
+    };
+    readiness.engine = selected_engine(&readiness);
+    readiness
 }
 
 #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
@@ -380,6 +684,12 @@ fn readiness_from_probe_error(error: &anyhow::Error) -> AppleSpeechReadiness {
             "Re-check Apple Speech readiness or choose another dictation provider.".to_string()
         }),
         speech_analyzer_available: false,
+        speech_analyzer_locale_supported: false,
+        speech_analyzer_assets_installed: false,
+        speech_analyzer_asset_status: String::new(),
+        speech_analyzer_locales: Vec::new(),
+        speech_analyzer_installed_locales: Vec::new(),
+        engine: AppleSpeechEngine::SfSpeechRecognizer,
         operating_system_version: None,
     }
 }
@@ -420,6 +730,10 @@ fn readiness_with_policy(force_refresh: bool) -> AppleSpeechReadiness {
     let readiness = helper_probe(false)
         .map(|payload| readiness_from_probe(&payload))
         .unwrap_or_else(|error| readiness_from_probe_error(&error));
+
+    // The meeting-route policy reads this flag instead of spawning the helper
+    // on a route-resolution path; every probe refreshes it.
+    SPEECH_ANALYZER_MEETINGS_SUPPORTED.store(supports_meetings(&readiness), Ordering::Relaxed);
 
     let mut state = mutex
         .lock()
@@ -465,6 +779,12 @@ pub fn readiness() -> AppleSpeechReadiness {
         message: "Apple Speech dictation requires macOS on Apple Silicon.".to_string(),
         setup_action: Some("Choose a dictation provider supported on this platform.".to_string()),
         speech_analyzer_available: false,
+        speech_analyzer_locale_supported: false,
+        speech_analyzer_assets_installed: false,
+        speech_analyzer_asset_status: String::new(),
+        speech_analyzer_locales: Vec::new(),
+        speech_analyzer_installed_locales: Vec::new(),
+        engine: AppleSpeechEngine::SfSpeechRecognizer,
         operating_system_version: None,
     }
 }
@@ -494,12 +814,21 @@ pub fn probe_from_readiness(readiness: &AppleSpeechReadiness) -> EngineProbe {
 }
 
 #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
-pub fn transcribe_file(audio_path: &Path) -> Result<(String, String, f64)> {
-    ensure_speech_authorized(false)?;
+pub fn transcribe_file(audio_path: &Path) -> Result<MacosSpeechTranscript> {
+    let probe = authorized_probe(false)?;
+    // Named explicitly rather than left to the helper's own `auto`, so the
+    // engine that runs is the one this side decided and reported.
+    let engine = if probe.speech_analyzer_usable() {
+        AppleSpeechEngine::SpeechAnalyzer
+    } else {
+        AppleSpeechEngine::SfSpeechRecognizer
+    };
     let helper = resolve_helper_binary_path()?;
     let mut arguments = vec![
         OsString::from("--transcribe-file"),
         audio_path.as_os_str().to_os_string(),
+        OsString::from("--engine"),
+        OsString::from(engine.id()),
     ];
     append_configured_locale(&mut arguments);
     let output =
@@ -521,11 +850,17 @@ pub fn transcribe_file(audio_path: &Path) -> Result<(String, String, f64)> {
         ));
     }
 
-    Ok((payload.text, payload.language, payload.confidence))
+    Ok(MacosSpeechTranscript {
+        text: payload.text,
+        language: payload.language,
+        confidence: payload.confidence,
+        engine: payload.engine,
+        segments: payload.segments,
+    })
 }
 
 #[cfg(not(all(target_os = "macos", target_arch = "aarch64")))]
-pub fn transcribe_file(_audio_path: &Path) -> Result<(String, String, f64)> {
+pub fn transcribe_file(_audio_path: &Path) -> Result<MacosSpeechTranscript> {
     Err(typed_error(
         "helper_missing",
         "macOS Apple Speech native engine is unavailable in this build.",
@@ -533,12 +868,22 @@ pub fn transcribe_file(_audio_path: &Path) -> Result<(String, String, f64)> {
     ))
 }
 
+/// Starts a live dictation session against one of the two engines.
+///
+/// The SFSpeechRecognizer stream reports one growing best guess as `partial`
+/// events and one closing `final`. The SpeechAnalyzer stream additionally
+/// reports `live` events -- volatile and finalized spans -- which are folded
+/// into `StreamingPartial`s on the third channel; both streams end with the
+/// same closing `final`, so a caller that only wants the finished text needs
+/// no new parsing.
 #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
 pub async fn start_live_dictation_session(
     sample_rate: u32,
+    engine: AppleSpeechEngine,
 ) -> Result<(
     LiveSpeechAudioSink,
     mpsc::UnboundedReceiver<LiveSpeechEvent>,
+    mpsc::UnboundedReceiver<StreamingPartial>,
     oneshot::Receiver<Result<LiveSpeechResult, String>>,
 )> {
     ensure_speech_authorized(false)?;
@@ -547,7 +892,9 @@ pub async fn start_live_dictation_session(
     command
         .arg("--live")
         .arg("--sample-rate")
-        .arg(sample_rate.to_string());
+        .arg(sample_rate.to_string())
+        .arg("--engine")
+        .arg(engine.id());
     if let Some(locale) = configured_locale() {
         command.arg("--locale").arg(locale);
     }
@@ -587,6 +934,7 @@ pub async fn start_live_dictation_session(
 
     let (audio_tx, mut audio_rx) = mpsc::unbounded_channel::<Vec<f32>>();
     let (event_tx, event_rx) = mpsc::unbounded_channel::<LiveSpeechEvent>();
+    let (partial_tx, partial_rx) = mpsc::unbounded_channel::<StreamingPartial>();
     let (final_tx, final_rx) = oneshot::channel::<Result<LiveSpeechResult, String>>();
 
     tokio::spawn(async move {
@@ -616,6 +964,7 @@ pub async fn start_live_dictation_session(
         let mut final_tx = Some(final_tx);
         let mut terminal_message: Option<String> = None;
         let mut final_sent = false;
+        let mut accumulator = SpeechAnalyzerPartialAccumulator::new();
 
         while let Ok(Some(line)) = lines.next_line().await {
             if line.trim().is_empty() {
@@ -624,6 +973,13 @@ pub async fn start_live_dictation_session(
             if let Some(error) = parse_helper_error_line(&line) {
                 terminal_message = Some(serialize_helper_error(&error));
                 break;
+            }
+            // SpeechAnalyzer volatile/finalized spans. A finalized span is not
+            // the end of the session -- SpeechAnalyzer finalizes many of them
+            // -- so these never close the final channel.
+            if let Some(event) = parse_speech_analyzer_live_line(&line) {
+                let _ = partial_tx.send(accumulator.apply(&event));
+                continue;
             }
 
             match serde_json::from_str::<LiveSpeechEvent>(&line) {
@@ -713,15 +1069,22 @@ pub async fn start_live_dictation_session(
         }
     });
 
-    Ok((LiveSpeechAudioSink { sender: audio_tx }, event_rx, final_rx))
+    Ok((
+        LiveSpeechAudioSink { sender: audio_tx },
+        event_rx,
+        partial_rx,
+        final_rx,
+    ))
 }
 
 #[cfg(not(all(target_os = "macos", target_arch = "aarch64")))]
 pub async fn start_live_dictation_session(
     _sample_rate: u32,
+    _engine: AppleSpeechEngine,
 ) -> Result<(
     LiveSpeechAudioSink,
     mpsc::UnboundedReceiver<LiveSpeechEvent>,
+    mpsc::UnboundedReceiver<StreamingPartial>,
     oneshot::Receiver<Result<LiveSpeechResult, String>>,
 )> {
     Err(typed_error(
@@ -733,6 +1096,14 @@ pub async fn start_live_dictation_session(
 
 #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
 pub fn ensure_speech_authorized(prompt_if_needed: bool) -> Result<()> {
+    authorized_probe(prompt_if_needed).map(|_| ())
+}
+
+/// The authorization gate, returning the probe it already had to run so
+/// callers do not spawn the helper twice to learn which engine will serve
+/// them.
+#[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+fn authorized_probe(prompt_if_needed: bool) -> Result<HelperProbePayload> {
     if prompt_if_needed && !is_packaged_app_context() {
         return Err(typed_error(
             "authorization_not_determined",
@@ -782,6 +1153,13 @@ pub fn ensure_speech_authorized(prompt_if_needed: bool) -> Result<()> {
         }
     }
 
+    // The three checks below are SFSpeechRecognizer's. A locale it cannot
+    // serve on-device is still transcribable when SpeechAnalyzer supports it
+    // and its assets are installed, so they are skipped in that case rather
+    // than refusing a route that works.
+    if payload.speech_analyzer_usable() {
+        return Ok(payload);
+    }
     if !payload.locale_supported {
         return Err(typed_error_with_details(
             "unsupported_locale",
@@ -806,7 +1184,7 @@ pub fn ensure_speech_authorized(prompt_if_needed: bool) -> Result<()> {
             BTreeMap::from([("locale".to_string(), payload.locale)]),
         ));
     }
-    Ok(())
+    Ok(payload)
 }
 
 #[cfg(not(all(target_os = "macos", target_arch = "aarch64")))]
@@ -1255,12 +1633,275 @@ fn is_executable_file(path: &Path) -> bool {
 #[cfg(test)]
 mod tests {
     use super::{
-        map_authorization_status_payload, parse_helper_error_line, parse_single_payload,
-        readiness_from_probe, serialize_helper_error, typed_error, AppleSpeechReadinessStatus,
-        HelperErrorPayload, HelperProbePayload, SpeechAuthorizationStatus, HELPER_PROTOCOL_VERSION,
+        map_authorization_status_payload, meetings_supported, parse_helper_error_line,
+        parse_single_payload, parse_speech_analyzer_live_line, readiness_from_probe,
+        selected_engine, serialize_helper_error, supports_meetings, typed_error, AppleSpeechEngine,
+        AppleSpeechReadiness, AppleSpeechReadinessStatus, HelperErrorPayload, HelperProbePayload,
+        HelperTranscriptPayload, SpeechAnalyzerLiveEvent, SpeechAnalyzerPartialAccumulator,
+        SpeechAuthorizationStatus, StreamingPartial, StreamingPartialSink, HELPER_PROTOCOL_VERSION,
     };
     #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
     use super::{resolve_helper_binary_path_for_executable, HELPER_TARGET_NAME};
+
+    /// Every JSON literal below was captured verbatim from the compiled
+    /// helper on this Mac (macOS 27.0, build 26A5406e, SDK 26.2) rather than
+    /// hand-written, so the Rust contract is checked against what the helper
+    /// actually emits.
+    const HELPER_PROBE_CAPTURE: &[u8] = br#"{"authorization":"not_determined","authorization_code":0,"engine":"speech_analyzer","locale":"en_US","locale_supported":true,"on_device_available":true,"operating_system_version":"27.0.0","protocol_version":1,"recognizer_available":true,"speech_analyzer_asset_status":"installed_not_allocated","speech_analyzer_assets_installed":true,"speech_analyzer_available":true,"speech_analyzer_installed_locales":["en_AU","en_CA","en_GB","en_IE","en_IN","en_NZ","en_SG","en_US","en_ZA"],"speech_analyzer_locale_supported":true,"speech_analyzer_locales":["bn_IN","de_AT","de_CH","de_DE","en_AU","en_CA","en_GB","en_IE","en_IN","en_NZ","en_SG","en_US","en_ZA","es_CL","es_ES","es_MX","es_US","fr_BE","fr_CA","fr_CH","fr_FR","gu_IN","hi_IN","it_CH","it_IT","ja_JP","kn_IN","ko_KR","ks_IN","mai_IN","ml_IN","mr_IN","mul_IN","ne_IN","or_IN","pa_IN","pt_BR","pt_PT","ta_IN","te_IN","ur_IN","yue_CN","zh_CN","zh_HK","zh_TW"],"type":"probe"}"#;
+    const HELPER_TRANSCRIPT_CAPTURE: &[u8] = br#"{"confidence":0.9627857142857145,"engine":"speech_analyzer","is_final":true,"language":"en_US","protocol_version":1,"segments":[{"confidence":0.9627857142857145,"end_seconds":5.3226875,"start_seconds":0,"text":"This is a Nautilus local quality gate sample with enough spoken words for verification."}],"text":"This is a Nautilus local quality gate sample with enough spoken words for verification.","type":"transcript"}"#;
+
+    fn analyzer_readiness(
+        speech_analyzer_available: bool,
+        speech_analyzer_locale_supported: bool,
+        speech_analyzer_assets_installed: bool,
+        ready: bool,
+    ) -> AppleSpeechReadiness {
+        AppleSpeechReadiness {
+            status: if ready {
+                AppleSpeechReadinessStatus::Ready
+            } else {
+                AppleSpeechReadinessStatus::AuthorizationNotDetermined
+            },
+            ready,
+            platform_supported: true,
+            helper_present: true,
+            authorization: if ready {
+                "authorized"
+            } else {
+                "not_determined"
+            }
+            .to_string(),
+            locale: Some("en_US".to_string()),
+            locale_supported: true,
+            on_device_available: true,
+            recognizer_available: true,
+            message: String::new(),
+            setup_action: None,
+            speech_analyzer_available,
+            speech_analyzer_locale_supported,
+            speech_analyzer_assets_installed,
+            speech_analyzer_asset_status: String::new(),
+            speech_analyzer_locales: Vec::new(),
+            speech_analyzer_installed_locales: Vec::new(),
+            engine: AppleSpeechEngine::SfSpeechRecognizer,
+            operating_system_version: None,
+        }
+    }
+
+    #[test]
+    fn probe_contract_carries_the_speech_analyzer_asset_and_locale_fields() {
+        let probe: HelperProbePayload = parse_single_payload(HELPER_PROBE_CAPTURE, "probe")
+            .expect("the real helper probe should match the Rust contract");
+        assert!(probe.speech_analyzer_available);
+        assert!(probe.speech_analyzer_locale_supported);
+        assert!(probe.speech_analyzer_assets_installed);
+        // macOS reports `.supported` for a locale whose model is on disk until
+        // the process allocates it, so the helper reports that case explicitly
+        // instead of calling it a missing download.
+        assert_eq!(
+            probe.speech_analyzer_asset_status,
+            "installed_not_allocated"
+        );
+        assert!(probe.speech_analyzer_locales.contains(&"ja_JP".to_string()));
+        assert!(probe
+            .speech_analyzer_installed_locales
+            .contains(&"en_US".to_string()));
+        assert!(probe.speech_analyzer_usable());
+
+        // That capture has Speech Recognition permission still undecided, so
+        // the route is not ready even though SpeechAnalyzer itself is usable.
+        let readiness = readiness_from_probe(&probe);
+        assert_eq!(
+            readiness.status,
+            AppleSpeechReadinessStatus::AuthorizationNotDetermined
+        );
+        assert_eq!(readiness.engine, AppleSpeechEngine::SpeechAnalyzer);
+        assert!(!supports_meetings(&readiness));
+        assert_eq!(
+            readiness.speech_analyzer_locales.len(),
+            probe.speech_analyzer_locales.len()
+        );
+    }
+
+    #[test]
+    fn an_authorized_speech_analyzer_probe_is_ready_and_meeting_capable() {
+        let authorized = String::from_utf8(HELPER_PROBE_CAPTURE.to_vec())
+            .expect("probe capture is UTF-8")
+            .replace(
+                "\"authorization\":\"not_determined\",\"authorization_code\":0",
+                "\"authorization\":\"authorized\",\"authorization_code\":3",
+            );
+        let probe: HelperProbePayload = parse_single_payload(authorized.as_bytes(), "probe")
+            .expect("authorized probe should parse");
+        let readiness = readiness_from_probe(&probe);
+        assert_eq!(readiness.status, AppleSpeechReadinessStatus::Ready);
+        assert!(readiness.message.contains("SpeechAnalyzer"));
+        assert!(readiness.message.contains("nothing to download"));
+        assert_eq!(readiness.engine, AppleSpeechEngine::SpeechAnalyzer);
+        assert!(supports_meetings(&readiness));
+    }
+
+    #[test]
+    fn engine_selection_needs_the_api_the_locale_and_the_installed_assets() {
+        for (available, locale_supported, assets_installed, expected) in [
+            (true, true, true, AppleSpeechEngine::SpeechAnalyzer),
+            (false, true, true, AppleSpeechEngine::SfSpeechRecognizer),
+            (true, false, true, AppleSpeechEngine::SfSpeechRecognizer),
+            (true, true, false, AppleSpeechEngine::SfSpeechRecognizer),
+            (false, false, false, AppleSpeechEngine::SfSpeechRecognizer),
+        ] {
+            let readiness = analyzer_readiness(available, locale_supported, assets_installed, true);
+            assert_eq!(selected_engine(&readiness), expected);
+        }
+    }
+
+    #[test]
+    fn meetings_need_a_ready_route_running_speech_analyzer() {
+        assert!(supports_meetings(&analyzer_readiness(
+            true, true, true, true
+        )));
+        // Not ready: permission still undecided.
+        assert!(!supports_meetings(&analyzer_readiness(
+            true, true, true, false
+        )));
+        // Ready, but on the SFSpeechRecognizer path, which returns no segment
+        // timestamps and so stays dictation-only.
+        assert!(!supports_meetings(&analyzer_readiness(
+            false, false, false, true
+        )));
+        // Nothing has probed in this test process, so the cached flag the
+        // meeting-route policy reads is still its honest default.
+        assert!(!meetings_supported());
+    }
+
+    #[test]
+    fn transcript_contract_carries_speech_analyzer_segments() {
+        let payload: HelperTranscriptPayload =
+            parse_single_payload(HELPER_TRANSCRIPT_CAPTURE, "transcript")
+                .expect("the real helper transcript should match the Rust contract");
+        assert!(payload.is_final);
+        assert_eq!(payload.engine.as_deref(), Some("speech_analyzer"));
+        assert_eq!(payload.segments.len(), 1);
+        let segment = &payload.segments[0];
+        assert_eq!(segment.start_seconds, 0.0);
+        assert!((segment.end_seconds - 5.3226875).abs() < 1e-9);
+        assert!(segment.confidence > 0.9);
+        assert_eq!(segment.text, payload.text);
+    }
+
+    #[test]
+    fn an_sf_speech_recognizer_transcript_still_parses_without_segments() {
+        let json = br#"{"confidence":0.5,"is_final":true,"language":"en_US","protocol_version":1,"text":"hello there","type":"transcript"}"#;
+        let payload: HelperTranscriptPayload = parse_single_payload(json, "transcript")
+            .expect("a transcript without the new fields must still parse");
+        assert!(payload.engine.is_none());
+        assert!(payload.segments.is_empty());
+    }
+
+    #[test]
+    fn speech_analyzer_live_events_fold_into_streaming_partials() {
+        let lines = [
+            r#"{"confidence":0,"end_seconds":4,"kind":"volatile","language":"en_US","protocol_version":1,"start_seconds":0,"text":"Plain song is a free and open source dictation app for the Mac.","type":"live"}"#,
+            r#"{"confidence":0.9405384615384614,"end_seconds":3.36,"kind":"finalized","language":"en_US","protocol_version":1,"start_seconds":0,"text":"Plain song is a free and open source dictation app for the Mac.","type":"live"}"#,
+            r#"{"confidence":0,"end_seconds":4,"kind":"volatile","language":"en_US","protocol_version":1,"start_seconds":3.36,"text":" It","type":"live"}"#,
+            r#"{"confidence":0.9533999999999998,"end_seconds":10.14,"kind":"finalized","language":"en_US","protocol_version":1,"start_seconds":3.36,"text":" It listens when you press a hot, turns your words into text on your own machine, and types them into whatever app you are using.","type":"live"}"#,
+        ];
+        let events: Vec<SpeechAnalyzerLiveEvent> = lines
+            .iter()
+            .map(|line| {
+                parse_speech_analyzer_live_line(line).expect("captured live line should parse")
+            })
+            .collect();
+
+        let mut accumulator = SpeechAnalyzerPartialAccumulator::new();
+        let partials: Vec<StreamingPartial> = events
+            .iter()
+            .map(|event| accumulator.apply(event))
+            .collect();
+
+        // A volatile span is the current guess and nothing is stable yet.
+        assert_eq!(partials[0].stable_prefix, "");
+        assert_eq!(
+            partials[0].volatile_suffix,
+            "Plain song is a free and open source dictation app for the Mac."
+        );
+        // Finalizing that span moves it into the stable prefix and clears the
+        // guess, so nothing is shown twice.
+        assert_eq!(
+            partials[1].stable_prefix,
+            "Plain song is a free and open source dictation app for the Mac."
+        );
+        assert_eq!(partials[1].volatile_suffix, "");
+        // The next volatile span is appended to the display but not to the
+        // stable text.
+        assert_eq!(
+            partials[2].stable_prefix,
+            "Plain song is a free and open source dictation app for the Mac."
+        );
+        assert_eq!(partials[2].volatile_suffix, "It");
+        assert_eq!(
+            partials[2].combined_text(),
+            "Plain song is a free and open source dictation app for the Mac. It"
+        );
+        // Two finalized spans join with exactly one space.
+        assert_eq!(
+            partials[3].stable_prefix,
+            "Plain song is a free and open source dictation app for the Mac. It listens when you press a hot, turns your words into text on your own machine, and types them into whatever app you are using."
+        );
+        assert_eq!(partials[3].volatile_suffix, "");
+        assert_eq!(accumulator.finalized_text(), partials[3].stable_prefix);
+    }
+
+    #[test]
+    fn the_live_parser_ignores_every_other_helper_line() {
+        // The closing `final` line keeps the SFSpeechRecognizer shape, so the
+        // existing consumer still terminates on it rather than on a finalized
+        // span.
+        assert!(parse_speech_analyzer_live_line(r#"{"confidence":0.9341819823709108,"event":"final","is_final":true,"language":"en_US","protocol_version":1,"text":"Plain song is a free and open source dictation app for the Mac. It listens when you press a hot, turns your words into text on your own machine, and types them into whatever app you are using. Nothing you say ever leaves your computer. You can dictate an email in your male client, a message in Slack, a commit message in your terminal, or a note in your editor, and plain song will adapt its formatting to where you are typing. It also captures meetings without a bot joining the call, giving you transcripts, summaries, and action items you can search later. The goal is simple. Voice input everywhere, with no account, no subscription, and no cloud in the middle. This recording exists to benchmark transcription latency against realistic continuous speech instead of a synthetic tone.","type":"final"}"#).is_none());
+        assert!(parse_speech_analyzer_live_line(
+            r#"{"protocol_version":1,"type":"error","code":"cancelled","message":"stop","retryable":false,"details":{}}"#
+        )
+        .is_none());
+        assert!(parse_speech_analyzer_live_line(
+            r#"{"protocol_version":2,"type":"live","kind":"volatile","text":"x","language":"en_US"}"#
+        )
+        .is_none());
+        assert!(parse_speech_analyzer_live_line(
+            r#"{"protocol_version":1,"type":"live","kind":"speculative","text":"x","language":"en_US"}"#
+        )
+        .is_none());
+        assert!(parse_speech_analyzer_live_line("").is_none());
+    }
+
+    /// The seam lane C1's streaming dictation plugs into.
+    #[test]
+    fn a_streaming_partial_sink_receives_every_partial() {
+        #[derive(Default)]
+        struct RecordingSink {
+            partials: Vec<StreamingPartial>,
+        }
+
+        impl StreamingPartialSink for RecordingSink {
+            fn accept_partial(&mut self, partial: StreamingPartial) {
+                self.partials.push(partial);
+            }
+        }
+
+        let mut accumulator = SpeechAnalyzerPartialAccumulator::new();
+        let mut sink = RecordingSink::default();
+        for line in [
+            r#"{"confidence":0,"end_seconds":4,"kind":"volatile","language":"en_US","protocol_version":1,"start_seconds":0,"text":"Hello","type":"live"}"#,
+            r#"{"confidence":0.9,"end_seconds":4,"kind":"finalized","language":"en_US","protocol_version":1,"start_seconds":0,"text":"Hello there.","type":"live"}"#,
+        ] {
+            let event = parse_speech_analyzer_live_line(line).expect("live line");
+            sink.accept_partial(accumulator.apply(&event));
+        }
+
+        assert_eq!(sink.partials.len(), 2);
+        assert_eq!(sink.partials[0].volatile_suffix, "Hello");
+        assert_eq!(sink.partials[1].stable_prefix, "Hello there.");
+        assert_eq!(sink.partials[1].volatile_suffix, "");
+    }
 
     #[test]
     fn helper_authorization_payload_maps_known_statuses() {
@@ -1274,6 +1915,11 @@ mod tests {
             on_device_available: true,
             recognizer_available: true,
             speech_analyzer_available: false,
+            speech_analyzer_locale_supported: false,
+            speech_analyzer_assets_installed: false,
+            speech_analyzer_asset_status: String::new(),
+            speech_analyzer_locales: Vec::new(),
+            speech_analyzer_installed_locales: Vec::new(),
             operating_system_version: None,
         };
         assert_eq!(
@@ -1319,6 +1965,11 @@ mod tests {
             on_device_available,
             recognizer_available,
             speech_analyzer_available: false,
+            speech_analyzer_locale_supported: false,
+            speech_analyzer_assets_installed: false,
+            speech_analyzer_asset_status: String::new(),
+            speech_analyzer_locales: Vec::new(),
+            speech_analyzer_installed_locales: Vec::new(),
             operating_system_version: None,
         };
 

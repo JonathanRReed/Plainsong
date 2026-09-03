@@ -1011,9 +1011,14 @@ impl AsrManager {
         audio_data: &[u8],
         selected_model: Option<&str>,
     ) -> Result<TranscriptionResult> {
-        if provider_type == AsrProviderType::MacosAppleSpeech {
+        // Apple Speech reaches meetings only through SpeechAnalyzer, which is
+        // the only one of its two engines that returns the per-segment
+        // timestamps the meeting transcript is assembled from.
+        if provider_type == AsrProviderType::MacosAppleSpeech
+            && !crate::asr::platform::macos_speech::meetings_supported()
+        {
             return Err(anyhow::anyhow!(
-                "Apple Speech is dictation-only and cannot be routed through meeting transcription. Choose a meeting-capable provider."
+                "Apple Speech serves meetings only through SpeechAnalyzer, which needs macOS 26 or later with the language installed. Choose a meeting-capable provider."
             ));
         }
         let mlx_enabled = *self.meeting_mlx_enabled.read().await;
@@ -2324,6 +2329,12 @@ mod tests {
             message: "synthetic single-probe readiness".to_string(),
             setup_action: None,
             speech_analyzer_available: false,
+            speech_analyzer_locale_supported: false,
+            speech_analyzer_assets_installed: false,
+            speech_analyzer_asset_status: String::new(),
+            speech_analyzer_locales: Vec::new(),
+            speech_analyzer_installed_locales: Vec::new(),
+            engine: crate::asr::platform::macos_speech::AppleSpeechEngine::SfSpeechRecognizer,
             operating_system_version: None,
         };
         let runtime = runtime_diagnostics_for_provider(
