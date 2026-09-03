@@ -81,6 +81,9 @@ const EXTENDED_COMMANDS = new Set<string>([
   // multi-hour source needs more than the default minute.
   "import_audio_file",
   "import_dictation_dictionary_csv",
+  // Asks macOS to download a whole speech language pack. The size is Apple's,
+  // not this app's, so it gets the same headroom as a model download.
+  "install_apple_speech_language",
   "install_update",
   "migrate_to_encrypted_storage",
   "refresh_asr_runtime_probes",

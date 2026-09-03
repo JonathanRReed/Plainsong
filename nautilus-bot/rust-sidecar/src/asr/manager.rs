@@ -2417,8 +2417,15 @@ mod tests {
         .expect("cached provider inventory should refresh");
     }
 
+    /// Apple Speech reaches meeting transcription only through SpeechAnalyzer,
+    /// the one of its two engines that returns per-segment timestamps.
+    ///
+    /// Which branch runs depends on the machine the suite is on, so both are
+    /// asserted: a Mac without a meeting-capable route must be refused before
+    /// any audio is decoded, and one with it must not be refused by *that*
+    /// gate. Neither branch ever transcribes: the bytes are not audio.
     #[tokio::test]
-    async fn apple_speech_is_rejected_by_meeting_route_before_inference() {
+    async fn apple_speech_reaches_meeting_transcription_only_through_speech_analyzer() {
         let manager = AsrManager::new();
         let error = manager
             .transcribe_bytes_for_meeting(
@@ -2427,8 +2434,14 @@ mod tests {
                 Some("macos_apple_speech"),
             )
             .await
-            .expect_err("Apple Speech must never run for meetings");
-        assert!(error.to_string().contains("dictation-only"));
+            .expect_err("bytes that are not audio must never transcribe");
+
+        if crate::asr::platform::macos_speech::meetings_supported() {
+            assert!(!error.to_string().contains("serves meetings only"));
+        } else {
+            assert!(error.to_string().contains("SpeechAnalyzer"));
+            assert!(error.to_string().contains("macOS 26"));
+        }
     }
 
     #[tokio::test]

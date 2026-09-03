@@ -10,6 +10,7 @@ import {
   getAsrProviderInventory,
   listDownloadedModels,
 } from "@/lib/backend/asr";
+import { installAppleSpeechLanguage } from "@/lib/backend/settings";
 import {
   deleteBundledCleanupModel,
   downloadBundledCleanupModel,
@@ -485,6 +486,30 @@ export function ModelsScreen({
 
       if (action === "connect_api_key") {
         onOpenKeySettings();
+        return;
+      }
+      if (action === "install_language") {
+        // macOS owns the download and its size; this only asks for it and
+        // then re-reads what the machine now has.
+        setBusyRouteId(route.routeId);
+        setActionError(null);
+        try {
+          const result = await installAppleSpeechLanguage();
+          if (result.notes.length > 0) {
+            setActionError(result.notes.join(" "));
+          }
+          await Promise.all([refresh(), refreshProductReadiness()]);
+        } catch (error) {
+          setActionError(
+            error instanceof Error
+              ? error.message
+              : `Could not install the language for ${route.label}.`,
+          );
+        } finally {
+          if (mountedRef.current) {
+            setBusyRouteId(null);
+          }
+        }
         return;
       }
       if (action !== "download") {

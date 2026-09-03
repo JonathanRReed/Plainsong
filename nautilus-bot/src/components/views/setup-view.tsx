@@ -33,6 +33,7 @@ import {
   isDownloadableProvider,
   isMeetingGradeProvider,
   providerActionLabel,
+  appleSpeechServesMeetings,
   providerCapabilityLabel,
   providerHostingLabel,
   providerRecommendation,
@@ -682,7 +683,12 @@ export function SetupView() {
                             <p className="font-medium">{provider.name}</p>
                             {providerBadge(provider)}
                             <Badge variant="secondary">
-                              {providerCapabilityLabel(provider.providerType)}
+                              {providerCapabilityLabel(
+                                provider.providerType,
+                                appleSpeechServesMeetings(
+                                  provider.platformReadiness,
+                                ),
+                              )}
                             </Badge>
                             <Badge variant="outline">
                               {providerHostingLabel(provider.providerType)}

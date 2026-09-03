@@ -1,5 +1,6 @@
 import { normalizeDownloadStatus } from "@/lib/download-status";
 import {
+  appleSpeechServesMeetings,
   describeAsrModel,
   getAsrModelCapability,
   isDownloadableProvider,
@@ -10,6 +11,7 @@ import {
 } from "@/lib/asr-capabilities";
 import type { AsrModelCapability } from "@/lib/asr-capabilities";
 import type {
+  AppleSpeechReadiness,
   AsrProviderInfo,
   AsrProviderInventory,
   AsrProviderType,
@@ -26,6 +28,10 @@ type AsrRouteReadiness =
   | "unavailable";
 type AsrRouteAction =
   | "download"
+  // Asks macOS for one SpeechAnalyzer language. Distinct from "download",
+  // which fetches a model this repo pins and hashes: this one is Apple's
+  // asset, on Apple's terms, and Plainsong never stores a copy.
+  | "install_language"
   | "connect_api_key"
   | "request_permission"
   | "open_system_setup"
@@ -98,6 +104,12 @@ const MEETING_PROVIDER_ORDER_BY_POLICY: Record<
     "parakeet",
     "whisper",
     "distil_whisper",
+    // Apple Speech reaches this lane only on a Mac running SpeechAnalyzer with
+    // the language installed (see `routeLaneCompatibility`). It ranks after
+    // the three routes above -- they are what the meeting lane has been
+    // measured on -- but ahead of every cloud route, because it needs no
+    // account and never leaves the machine.
+    "macos_apple_speech",
     "openai_cloud",
     "elevenlabs_scribe",
     "groq",
@@ -111,6 +123,7 @@ const MEETING_PROVIDER_ORDER_BY_POLICY: Record<
     "parakeet",
     "whisper",
     "distil_whisper",
+    "macos_apple_speech",
   ],
 };
 
@@ -139,23 +152,47 @@ function routeHosting(providerType: AsrProviderType): AsrRouteHosting {
   return providerHostingPreference(providerType) === "cloud" ? "cloud" : "local";
 }
 
+/**
+ * Which engine the Apple Speech route runs, and why, in one sentence.
+ *
+ * Says what will happen rather than what exists: "SpeechAnalyzer API
+ * available" told a reader nothing about whether their next dictation would
+ * use it.
+ */
+export function describeAppleSpeechEngine(
+  readiness: AppleSpeechReadiness,
+): string {
+  const version = readiness.operatingSystemVersion
+    ? ` (macOS ${readiness.operatingSystemVersion})`
+    : "";
+  const locale = readiness.locale ?? "this language";
+
+  if (!readiness.speechAnalyzerAvailable) {
+    return `Runs SFSpeechRecognizer${version}. SpeechAnalyzer needs macOS 26 or later.`;
+  }
+  if (readiness.engine === "speech_analyzer") {
+    return `Runs SpeechAnalyzer${version} with the ${locale} language installed. Nothing to download.`;
+  }
+  if (!readiness.speechAnalyzerLocaleSupported) {
+    return `Runs SFSpeechRecognizer${version}. SpeechAnalyzer is available but does not cover ${locale}.`;
+  }
+  return `Runs SFSpeechRecognizer${version}. Install the ${locale} language to switch to SpeechAnalyzer.`;
+}
+
 /// Builds the human-readable readiness detail string for a route.
 ///
-/// For Apple Speech, this appends a note about the SpeechAnalyzer API
-/// (macOS 26+) when it is available, so the route catalog surfaces the
-/// newer streaming-capable framework to the UI.
+/// For Apple Speech this names the engine that will actually run and the
+/// language-asset state behind that choice, because which of the two engines
+/// runs decides whether the route has timestamps and whether meetings can use
+/// it at all.
 function buildReadinessDetail(provider: RouteSelectableProvider): string | null {
   const base = provider.platformReadiness?.message ?? null;
   if (
     provider.providerType === "macos_apple_speech" &&
-    provider.platformReadiness?.speechAnalyzerAvailable
+    provider.platformReadiness
   ) {
-    const analyzerNote = `SpeechAnalyzer API available${
-      provider.platformReadiness.operatingSystemVersion
-        ? ` (macOS ${provider.platformReadiness.operatingSystemVersion})`
-        : ""
-    }`;
-    return base ? `${base}. ${analyzerNote}` : analyzerNote;
+    const engineNote = describeAppleSpeechEngine(provider.platformReadiness);
+    return base ? `${base}. ${engineNote}` : engineNote;
   }
   return base;
 }
@@ -264,6 +301,17 @@ function routeAction(
       default:
         break;
     }
+
+    // Offered even on a ready route: the route works on SFSpeechRecognizer,
+    // and installing the language is what upgrades it to SpeechAnalyzer and
+    // opens the meeting lane.
+    if (
+      provider.platformReadiness?.speechAnalyzerAvailable &&
+      provider.platformReadiness.speechAnalyzerLocaleSupported &&
+      !provider.platformReadiness.speechAnalyzerAssetsInstalled
+    ) {
+      return { action: "install_language", actionLabel: "Install language" };
+    }
   }
 
   if (readiness === "needs_download") {
@@ -289,13 +337,14 @@ function routeAction(
 }
 
 function routeCapabilityBadge(
-  providerType: AsrProviderType,
+  provider: RouteSelectableProvider,
   modelId: string,
 ): "Best for dictation" | "Best for meetings" | "Shared" {
-  if (isSharedMeetingCompatible(providerType, modelId)) {
+  const lanes = routeLaneCompatibility(provider, modelId);
+  if (lanes.shared) {
     return "Shared";
   }
-  if (isMeetingEligibleModel(providerType, modelId)) {
+  if (lanes.meeting) {
     return "Best for meetings";
   }
   return "Best for dictation";
@@ -364,7 +413,9 @@ function routeSummary(
     return "Cloud route for meeting-grade transcription with a simple BYOK setup.";
   }
   if (providerType === "macos_apple_speech") {
-    return "On-device Apple Speech for direct dictation only; server fallback is disabled and meetings use a separate provider.";
+    return capabilityBadge === "Best for dictation"
+      ? "On-device Apple Speech for direct dictation only; server fallback is disabled and meetings use a separate provider."
+      : "On-device Apple Speech through SpeechAnalyzer: nothing to download, per-segment timestamps for meetings, and server fallback disabled.";
   }
   if (providerType === "windows_sdk_dictation") {
     return "Built into Windows and convenient for direct dictation, but not a meeting route.";
@@ -390,13 +441,20 @@ function routeSummary(
 }
 
 function routeLaneCompatibility(
-  providerType: AsrProviderType,
+  provider: RouteSelectableProvider,
   modelId: string,
 ): Record<AsrRouteLane, boolean> {
+  // Apple Speech is the one route whose meeting eligibility depends on the
+  // machine rather than the model id: only its SpeechAnalyzer engine returns
+  // the per-segment timestamps a meeting transcript is assembled from.
+  if (provider.providerType === "macos_apple_speech") {
+    const meeting = appleSpeechServesMeetings(provider.platformReadiness);
+    return { dictation: true, meeting, shared: meeting };
+  }
   return {
     dictation: true,
-    meeting: isMeetingEligibleModel(providerType, modelId),
-    shared: isSharedMeetingCompatible(providerType, modelId),
+    meeting: isMeetingEligibleModel(provider.providerType, modelId),
+    shared: isSharedMeetingCompatible(provider.providerType, modelId),
   };
 }
 
@@ -501,7 +559,7 @@ export function buildAsrRouteCatalog(
     provider.modelOptions.map((option) => {
       const hosting = routeHosting(provider.providerType);
       const readiness = routeReadiness(provider, hosting);
-      const capabilityBadge = routeCapabilityBadge(provider.providerType, option.id);
+      const capabilityBadge = routeCapabilityBadge(provider, option.id);
       const actionState = routeAction(provider, readiness, hosting);
 
       return {
@@ -515,7 +573,7 @@ export function buildAsrRouteCatalog(
         ),
         providerLabel: provider.name,
         providerDescription: provider.description,
-        laneCompatibility: routeLaneCompatibility(provider.providerType, option.id),
+        laneCompatibility: routeLaneCompatibility(provider, option.id),
         hosting,
         readiness,
         readinessDetail: buildReadinessDetail(provider),

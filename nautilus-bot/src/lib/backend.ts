@@ -15,6 +15,7 @@ import type {
   ActionItemsProvenance,
   SearchHit,
   MeetingTranscriptDetails,
+  AppleSpeechLanguageInstallResult,
 } from "@/types";
 import type { Settings } from "@/types/settings";
 import type { DictationBindingIssue } from "../../electron/dictation-bindings";
@@ -1265,6 +1266,23 @@ export async function requestDictationPermissions(): Promise<PermissionDiagnosti
 
 export async function requestAppleSpeechPermission(): Promise<PermissionDiagnostics> {
   return await invoke("request_apple_speech_permission");
+}
+
+/**
+ * Asks macOS to install one language's SpeechAnalyzer assets.
+ *
+ * The only download this route ever starts, and only when the reader asks:
+ * transcription refuses a missing language instead of fetching it. Progress
+ * arrives on the `apple-speech-language-install-progress` event.
+ */
+export async function installAppleSpeechLanguage(
+  locale?: string,
+): Promise<AppleSpeechLanguageInstallResult> {
+  const trimmed = locale?.trim();
+  return await invoke(
+    "install_apple_speech_language",
+    trimmed ? { locale: trimmed } : {},
+  );
 }
 
 export async function repairCursorInsertPermissions(): Promise<PermissionDiagnostics> {

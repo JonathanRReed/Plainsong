@@ -1179,6 +1179,57 @@ async fn request_apple_speech_permission_impl(
     Ok(collect_permission_diagnostics(state, notes).await)
 }
 
+/// What the Models screen gets back after asking macOS for a language.
+#[derive(Debug, Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct AppleSpeechLanguageInstallResult {
+    install: Option<crate::asr::platform::macos_speech::AppleSpeechAssetInstall>,
+    readiness: crate::asr::platform::macos_speech::AppleSpeechReadiness,
+    notes: Vec<String>,
+}
+
+/// Installs the SpeechAnalyzer assets for one language.
+///
+/// This is the only place in the app that starts an Apple language download,
+/// and it only runs when the reader asks for it. Progress is emitted as it
+/// arrives rather than buffered, because the download is the OS's and can take
+/// minutes.
+async fn install_apple_speech_language_impl(
+    state: &AppState,
+    handle: &crate::sidecar_handle::SidecarHandle,
+    locale: Option<&str>,
+) -> Result<AppleSpeechLanguageInstallResult, String> {
+    let mut notes = Vec::new();
+    let install =
+        match crate::asr::platform::macos_speech::install_language_assets(locale, |progress| {
+            handle.emit_event(
+                "apple-speech-language-install-progress",
+                serde_json::json!({
+                    "stage": progress.stage,
+                    "locale": progress.locale,
+                    "fraction": progress.fraction,
+                    "message": progress.message,
+                }),
+            );
+        })
+        .await
+        {
+            Ok(install) => Some(install),
+            Err(error) => {
+                notes.push(format!("Apple Speech language install failed: {}", error));
+                None
+            }
+        };
+
+    crate::asr::platform::macos_speech::invalidate_readiness_cache();
+    state.asr_manager.invalidate_provider_info_cache().await;
+    Ok(AppleSpeechLanguageInstallResult {
+        install,
+        readiness: crate::asr::platform::macos_speech::fresh_readiness(),
+        notes,
+    })
+}
+
 async fn repair_cursor_insert_permissions_impl(
     state: &AppState,
 ) -> Result<PermissionDiagnostics, String> {
@@ -18578,6 +18629,12 @@ fn preferred_meeting_provider_candidates(
                 && meeting_model_id.is_some_and(|model_id| {
                     meeting_model_is_supported(asr::AsrProviderType::Whisper, model_id)
                 })
+        } else if provider == asr::AsrProviderType::MacosAppleSpeech {
+            // Same rule as whisper.cpp, for the same reason: eligible is not
+            // the same as chosen. Inheriting it from the dictation or default
+            // slot would silently move an existing reader's meetings onto a
+            // different engine the first time they updated to macOS 26.
+            meeting_provider == Some(provider) && meeting_provider_is_supported(provider)
         } else {
             meeting_provider_is_supported(provider)
         };
@@ -32576,6 +32633,18 @@ pub async fn dispatch_command(
                 "readiness-invalidated",
                 serde_json::json!({ "reason": "dictation_permissions_requested" }),
             );
+            serde_json::to_value(result).map_err(|e| e.to_string())
+        }
+        "install_apple_speech_language" => {
+            let locale = params
+                .get("locale")
+                .and_then(serde_json::Value::as_str)
+                .map(str::trim)
+                .filter(|locale| !locale.is_empty())
+                .map(ToString::to_string);
+            let result =
+                install_apple_speech_language_impl(state.as_ref(), handle, locale.as_deref())
+                    .await?;
             serde_json::to_value(result).map_err(|e| e.to_string())
         }
         "request_apple_speech_permission" => {

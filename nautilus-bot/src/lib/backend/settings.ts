@@ -7,6 +7,7 @@ export {
   getSettings,
   getShortcutConflicts,
   hasProviderSecret,
+  installAppleSpeechLanguage,
   lockVault,
   migrateToEncryptedStorage,
   openInstalledPlainsongApp,

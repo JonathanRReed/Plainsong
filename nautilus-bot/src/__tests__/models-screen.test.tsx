@@ -13,6 +13,7 @@ const getBundledCleanupModelStatusMock = vi.fn();
 const downloadBundledCleanupModelMock = vi.fn();
 const deleteBundledCleanupModelMock = vi.fn();
 const getAppleLanguageModelAvailabilityMock = vi.fn();
+const installAppleSpeechLanguageMock = vi.fn();
 const readinessContext = vi.hoisted(() => ({
   refresh: vi.fn(async () => {}),
   productReadiness: {
@@ -48,9 +49,42 @@ vi.mock("@/lib/backend/ai", () => ({
     getAppleLanguageModelAvailabilityMock(refresh),
 }));
 
+vi.mock("@/lib/backend/settings", () => ({
+  installAppleSpeechLanguage: (locale?: string) =>
+    installAppleSpeechLanguageMock(locale),
+}));
+
 vi.mock("@/lib/electron", () => ({
   listen: vi.fn(async () => () => {}),
 }));
+
+/**
+ * An Apple Speech readiness that runs SpeechAnalyzer: macOS 26+, the language
+ * supported and its assets on disk. That is the only configuration in which
+ * the route returns per-segment timestamps, which is what the meeting lane is
+ * assembled from.
+ */
+const SPEECH_ANALYZER_READINESS = {
+  status: "ready",
+  ready: true,
+  platformSupported: true,
+  helperPresent: true,
+  authorization: "authorized",
+  locale: "en_US",
+  localeSupported: true,
+  onDeviceAvailable: true,
+  recognizerAvailable: true,
+  message: "Apple Speech is ready.",
+  setupAction: null,
+  speechAnalyzerAvailable: true,
+  speechAnalyzerLocaleSupported: true,
+  speechAnalyzerAssetsInstalled: true,
+  speechAnalyzerAssetStatus: "installed",
+  speechAnalyzerLocales: ["en_US", "fr_FR"],
+  speechAnalyzerInstalledLocales: ["en_US"],
+  engine: "speech_analyzer",
+  operatingSystemVersion: "27.0.0",
+};
 
 const BUNDLED_STATUS = {
   provider: "bundled_local",
@@ -261,6 +295,16 @@ describe("Models screen", () => {
     });
     deleteBundledCleanupModelMock.mockResolvedValue(BUNDLED_STATUS);
     getAppleLanguageModelAvailabilityMock.mockResolvedValue(APPLE_AVAILABILITY);
+    installAppleSpeechLanguageMock.mockResolvedValue({
+      install: {
+        locale: "en_US",
+        installed: true,
+        assetStatus: "installed",
+        engine: "speech_analyzer",
+      },
+      readiness: SPEECH_ANALYZER_READINESS,
+      notes: [],
+    });
   });
 
   it("never offers a dictation-only provider for meeting notes", async () => {
@@ -626,6 +670,104 @@ describe("Models screen", () => {
     );
     // whisper.cpp reaches this lane only through a multilingual model.
     expect(names.some((name) => name.includes("large-v3-turbo"))).toBe(true);
+  });
+
+  /** Apple Speech is not a promoted route, so its row lives in the drawer. */
+  function appleSpeechDrawerRow(): HTMLElement {
+    fireEvent.click(screen.getByRole("button", { name: /Show \d+ more models/ }));
+    const drawer = screen.getByRole("region", { name: "More models" });
+    const label = within(drawer).getByText("Apple Speech · on-device dictation");
+    return label.closest("div.rounded-md") as HTMLElement;
+  }
+
+  it("offers Apple Speech for meetings once SpeechAnalyzer is the engine that runs", async () => {
+    getAsrProviderInventoryMock.mockResolvedValue(
+      inventoryFixture({
+        macos_apple_speech: {
+          platformReadiness: SPEECH_ANALYZER_READINESS,
+        } as Partial<AsrProviderInventory>,
+      }),
+    );
+
+    render(<Harness />);
+    await screen.findByRole("region", { name: "Speech for dictation" });
+    const row = appleSpeechDrawerRow();
+
+    expect(
+      within(row).getByRole("button", { name: "Use for meetings" }),
+    ).toBeEnabled();
+    expect(within(row).queryByText(/Dictation only/)).toBeNull();
+  });
+
+  it("still keeps Apple Speech out of meetings when it runs SFSpeechRecognizer", async () => {
+    getAsrProviderInventoryMock.mockResolvedValue(
+      inventoryFixture({
+        macos_apple_speech: {
+          platformReadiness: {
+            ...SPEECH_ANALYZER_READINESS,
+            speechAnalyzerAvailable: false,
+            speechAnalyzerLocaleSupported: false,
+            speechAnalyzerAssetsInstalled: false,
+            speechAnalyzerAssetStatus: "unavailable",
+            engine: "sf_speech_recognizer",
+            operatingSystemVersion: "15.5.0",
+          },
+        } as Partial<AsrProviderInventory>,
+      }),
+    );
+
+    render(<Harness />);
+    const meetings = await screen.findByRole("region", {
+      name: "Speech for meetings",
+    });
+    const names = within(meetings)
+      .getAllByRole("radio")
+      .map((option) => option.querySelector("span > span")?.textContent ?? "");
+    expect(names.some((name) => name.includes("Apple Speech"))).toBe(false);
+
+    const row = appleSpeechDrawerRow();
+    expect(
+      within(row).queryByRole("button", { name: "Use for meetings" }),
+    ).toBeNull();
+    expect(within(row).getByText(/Dictation only/)).toBeInTheDocument();
+  });
+
+  it("offers the language install when SpeechAnalyzer is there but its assets are not", async () => {
+    getAsrProviderInventoryMock.mockResolvedValue(
+      inventoryFixture({
+        macos_apple_speech: {
+          platformReadiness: {
+            ...SPEECH_ANALYZER_READINESS,
+            speechAnalyzerAssetsInstalled: false,
+            speechAnalyzerAssetStatus: "supported",
+            speechAnalyzerInstalledLocales: [],
+            engine: "sf_speech_recognizer",
+          },
+        } as Partial<AsrProviderInventory>,
+      }),
+    );
+
+    render(<Harness />);
+    await screen.findByRole("region", { name: "Speech for dictation" });
+    // Point the dictation lane at Apple Speech so its header is the one that
+    // answers for the route.
+    fireEvent.click(
+      within(appleSpeechDrawerRow()).getByRole("button", {
+        name: "Use for dictation",
+      }),
+    );
+
+    const dictation = await screen.findByRole("region", {
+      name: "Speech for dictation",
+    });
+    const installButton = await within(dictation).findByRole("button", {
+      name: "Install language",
+    });
+    fireEvent.click(installButton);
+
+    await waitFor(() =>
+      expect(installAppleSpeechLanguageMock).toHaveBeenCalledTimes(1),
+    );
   });
 
   it("keeps an engine whose permission was denied visible but unpickable", async () => {

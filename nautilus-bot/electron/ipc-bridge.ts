@@ -196,6 +196,7 @@ const ALLOWED_RENDERER_COMMANDS = new Set<string>([
   "get_waveform_data",
   "has_provider_secret",
   "import_dictation_dictionary_csv",
+  "install_apple_speech_language",
   "install_cli_tool",
   "install_update",
   "is_diarization_model_available",

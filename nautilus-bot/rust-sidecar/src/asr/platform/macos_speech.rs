@@ -177,6 +177,45 @@ pub fn meetings_supported() -> bool {
     SPEECH_ANALYZER_MEETINGS_SUPPORTED.load(Ordering::Relaxed)
 }
 
+/// Progress from an in-flight language-asset install.
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct AppleSpeechAssetProgress {
+    pub stage: String,
+    pub locale: String,
+    pub fraction: f64,
+    pub message: String,
+}
+
+/// The result of a language-asset install.
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct AppleSpeechAssetInstall {
+    pub locale: String,
+    pub installed: bool,
+    pub asset_status: String,
+    pub engine: AppleSpeechEngine,
+}
+
+/// A locale identifier the helper will accept as a command-line argument.
+///
+/// The value reaches here from the renderer, and it is passed to a process as
+/// an argument, so it is matched against the shape of a BCP-47/ICU identifier
+/// rather than merely escaped: anything with a dash-dash prefix, a path
+/// separator, or whitespace is refused outright instead of being handed to the
+/// helper's argument parser.
+pub fn is_valid_locale_argument(locale: &str) -> bool {
+    !locale.is_empty()
+        && locale.len() <= 32
+        && locale.chars().all(|character| {
+            character.is_ascii_alphanumeric() || character == '_' || character == '-'
+        })
+        && locale
+            .chars()
+            .next()
+            .is_some_and(|c| c.is_ascii_alphanumeric())
+}
+
 /// One timed span of a SpeechAnalyzer transcript.
 #[derive(Debug, Clone, Deserialize, PartialEq)]
 pub struct MacosSpeechSegment {
@@ -261,6 +300,43 @@ impl HelperProbePayload {
             && self.speech_analyzer_locale_supported
             && self.speech_analyzer_assets_installed
     }
+}
+
+#[cfg(any(test, all(target_os = "macos", target_arch = "aarch64")))]
+#[derive(Debug, Clone, Deserialize)]
+struct HelperAssetProgressPayload {
+    protocol_version: u32,
+    #[serde(rename = "type")]
+    kind: String,
+    stage: String,
+    locale: String,
+    fraction: f64,
+    message: String,
+}
+
+#[cfg(any(test, all(target_os = "macos", target_arch = "aarch64")))]
+#[derive(Debug, Clone, Deserialize)]
+struct HelperAssetInstallPayload {
+    locale: String,
+    installed: bool,
+    asset_status: String,
+    engine: AppleSpeechEngine,
+}
+
+/// Parses one helper line as asset-install progress, or `None` for anything
+/// else (the closing `asset_install` payload, a typed error, a blank line).
+#[cfg(any(test, all(target_os = "macos", target_arch = "aarch64")))]
+fn parse_asset_progress_line(line: &str) -> Option<AppleSpeechAssetProgress> {
+    let payload = serde_json::from_str::<HelperAssetProgressPayload>(line).ok()?;
+    if payload.protocol_version != HELPER_PROTOCOL_VERSION || payload.kind != "progress" {
+        return None;
+    }
+    Some(AppleSpeechAssetProgress {
+        stage: payload.stage,
+        locale: payload.locale,
+        fraction: payload.fraction.clamp(0.0, 1.0),
+        message: payload.message,
+    })
 }
 
 #[cfg(any(test, all(target_os = "macos", target_arch = "aarch64")))]
@@ -1094,6 +1170,141 @@ pub async fn start_live_dictation_session(
     ))
 }
 
+/// Asks macOS to download and install the SpeechAnalyzer assets for one
+/// locale, reporting progress as it goes.
+///
+/// This is the only path that downloads anything. Transcription never does:
+/// it refuses with `assets_not_installed` and leaves the choice to the reader,
+/// because a language pack is the OS's download, on the reader's disk, at a
+/// size this app does not control.
+#[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+pub async fn install_language_assets<F>(
+    locale: Option<&str>,
+    mut on_progress: F,
+) -> Result<AppleSpeechAssetInstall>
+where
+    F: FnMut(AppleSpeechAssetProgress),
+{
+    let helper = resolve_helper_binary_path()?;
+    let mut command = TokioCommand::new(&helper);
+    command.arg("--install-assets");
+    let requested_locale = locale
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(ToString::to_string)
+        .or_else(configured_locale);
+    if let Some(locale) = requested_locale {
+        if !is_valid_locale_argument(&locale) {
+            return Err(typed_error_with_details(
+                "malformed_request",
+                "That is not a valid language identifier.",
+                false,
+                BTreeMap::from([("locale".to_string(), locale)]),
+            ));
+        }
+        command.arg("--locale").arg(locale);
+    }
+
+    let mut child = command
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .with_context(|| {
+            format!(
+                "Failed to start the macOS Speech helper at '{}' to install language assets",
+                helper.display()
+            )
+        })?;
+    let stdout = child.stdout.take().ok_or_else(|| {
+        typed_error(
+            "helper_missing",
+            "macOS Speech helper stdout is unavailable.",
+            false,
+        )
+    })?;
+    let stderr = child.stderr.take().ok_or_else(|| {
+        typed_error(
+            "helper_missing",
+            "macOS Speech helper stderr is unavailable.",
+            false,
+        )
+    })?;
+    let stderr_task = tokio::spawn(async move {
+        let mut reader = BufReader::new(stderr);
+        let mut text = String::new();
+        let _ = reader.read_to_string(&mut text).await;
+        text
+    });
+
+    let mut lines = BufReader::new(stdout).lines();
+    let mut install: Option<AppleSpeechAssetInstall> = None;
+    let mut helper_error: Option<anyhow::Error> = None;
+    while let Ok(Some(line)) = lines.next_line().await {
+        if line.trim().is_empty() {
+            continue;
+        }
+        if let Some(error) = parse_helper_error_line(&line) {
+            helper_error = Some(anyhow::anyhow!(serialize_helper_error(&error)));
+            break;
+        }
+        if let Some(progress) = parse_asset_progress_line(&line) {
+            on_progress(progress);
+            continue;
+        }
+        if let Ok(payload) = serde_json::from_str::<HelperAssetInstallPayload>(&line) {
+            install = Some(AppleSpeechAssetInstall {
+                locale: payload.locale,
+                installed: payload.installed,
+                asset_status: payload.asset_status,
+                engine: payload.engine,
+            });
+        }
+    }
+
+    let status = child.wait().await.ok();
+    let stderr_text = stderr_task.await.unwrap_or_default();
+    invalidate_readiness_cache();
+
+    if let Some(error) = helper_error {
+        return Err(error);
+    }
+    install.ok_or_else(|| {
+        let mut details = BTreeMap::from([(
+            "exit_code".to_string(),
+            status
+                .and_then(|status| status.code())
+                .map(|code| code.to_string())
+                .unwrap_or_else(|| "signal".to_string()),
+        )]);
+        let stderr_text = stderr_text.trim();
+        if !stderr_text.is_empty() {
+            details.insert("stderr".to_string(), stderr_text.to_string());
+        }
+        typed_error_with_details(
+            "asset_install_failed",
+            "The macOS language install ended without a result.",
+            true,
+            details,
+        )
+    })
+}
+
+#[cfg(not(all(target_os = "macos", target_arch = "aarch64")))]
+pub async fn install_language_assets<F>(
+    _locale: Option<&str>,
+    _on_progress: F,
+) -> Result<AppleSpeechAssetInstall>
+where
+    F: FnMut(AppleSpeechAssetProgress),
+{
+    Err(typed_error(
+        "helper_missing",
+        "Installing Apple Speech languages requires macOS on Apple Silicon.",
+        false,
+    ))
+}
+
 #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
 pub fn ensure_speech_authorized(prompt_if_needed: bool) -> Result<()> {
     authorized_probe(prompt_if_needed).map(|_| ())
@@ -1686,6 +1897,46 @@ mod tests {
             engine: AppleSpeechEngine::SfSpeechRecognizer,
             operating_system_version: None,
         }
+    }
+
+    #[test]
+    fn locale_arguments_are_validated_before_reaching_the_helper() {
+        for valid in ["en_US", "fr-FR", "zh_Hant_TW", "yue_CN", "en"] {
+            assert!(super::is_valid_locale_argument(valid), "{valid}");
+        }
+        // The value arrives from the renderer and becomes a process argument,
+        // so anything that could be read as another flag or a path is refused
+        // rather than escaped.
+        for invalid in [
+            "",
+            "--engine",
+            "-locale",
+            "en US",
+            "../etc/passwd",
+            "en_US;rm -rf /",
+            "en_US\n--engine",
+            "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        ] {
+            assert!(!super::is_valid_locale_argument(invalid), "{invalid:?}");
+        }
+    }
+
+    #[test]
+    fn asset_install_progress_lines_parse_and_other_lines_do_not() {
+        // Captured verbatim from `--install-assets --locale en_US`.
+        let progress = super::parse_asset_progress_line(
+            r#"{"fraction":0,"locale":"en_US","message":"Checking which language assets macOS already has.","protocol_version":1,"stage":"checking","type":"progress"}"#,
+        )
+        .expect("captured progress line should parse");
+        assert_eq!(progress.stage, "checking");
+        assert_eq!(progress.locale, "en_US");
+        assert_eq!(progress.fraction, 0.0);
+
+        assert!(super::parse_asset_progress_line(
+            r#"{"asset_status":"installed","engine":"speech_analyzer","installed":true,"locale":"en_US","protocol_version":1,"type":"asset_install"}"#
+        )
+        .is_none());
+        assert!(super::parse_asset_progress_line("").is_none());
     }
 
     #[test]
