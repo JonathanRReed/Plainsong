@@ -924,6 +924,22 @@ impl Database {
         details: Option<serde_json::Value>,
         severity: &str,
     ) -> Result<()> {
+        Self::log_audit_event_on(&self.conn, event, details, severity)
+    }
+
+    /// The audit write itself, against any connection.
+    ///
+    /// Split out so a change and the record of that change can be written in
+    /// one transaction. Two writes under two separate acquisitions of the
+    /// database lock leave a window in which a reader sees the change with no
+    /// audit record -- and, if the second write fails, leave that disagreement
+    /// permanently.
+    fn log_audit_event_on(
+        conn: &rusqlite::Connection,
+        event: &str,
+        details: Option<serde_json::Value>,
+        severity: &str,
+    ) -> Result<()> {
         let id = uuid::Uuid::new_v4().to_string();
         let timestamp = Utc::now();
         let details_json = details
@@ -934,7 +950,7 @@ impl Database {
             .transpose()?
             .unwrap_or_else(|| "{}".to_string());
 
-        self.conn.execute(
+        conn.execute(
             "INSERT INTO audit_log (id, timestamp, event, details, severity) VALUES (?1, ?2, ?3, ?4, ?5)",
             params![id, timestamp.to_rfc3339(), event, details_json, severity],
         )?;
@@ -6128,6 +6144,16 @@ impl Database {
     /// labels -- `deepgram`, `gemini_transcribe`, or
     /// `plainsong:<embedding model id>`. It is written in the same transaction
     /// as the segments so the record and the labels cannot disagree.
+    /// Store diarized segments, the speaker aliases they imply, and the name of
+    /// the diarizer that produced them.
+    ///
+    /// `audit_details`, when present, is written as a
+    /// `meeting_diarization_applied` entry *inside the same transaction*. The
+    /// `diarizer` column and that entry record the same fact -- which diarizer
+    /// produced the labels now stored -- and they used to be two writes under
+    /// two separate acquisitions of the database lock. Between them the column
+    /// read as changed with no audit record, and a failure of the second write
+    /// left that disagreement permanently. Both now land or neither does.
     pub fn apply_diarization_enrichment(
         &mut self,
         recording_id: &str,
@@ -6135,6 +6161,7 @@ impl Database {
         segments: &[TranscriptSegment],
         aliases: &[SpeakerAliasUpsert],
         diarizer: Option<&str>,
+        audit_details: Option<serde_json::Value>,
     ) -> Result<bool> {
         let segments_json = serde_json::to_string(segments)?;
         let full_text = segments
@@ -6172,6 +6199,9 @@ impl Database {
                 alias.sample_count,
                 true,
             )?;
+        }
+        if let Some(details) = audit_details {
+            Self::log_audit_event_on(&tx, "meeting_diarization_applied", Some(details), "info")?;
         }
         tx.commit()?;
         Ok(true)
@@ -8855,7 +8885,7 @@ mod tests {
             confidence: 0.95,
         }];
         assert!(!db
-            .apply_diarization_enrichment("edited", edit_revision, &stale_segments, &[], None)
+            .apply_diarization_enrichment("edited", edit_revision, &stale_segments, &[], None, None)
             .unwrap());
         let edited = db.get_transcript("edited").unwrap().unwrap();
         assert_eq!(edited.full_text, "User correction");
@@ -8869,7 +8899,14 @@ mod tests {
         db.delete_transcript_segments("deleted", &["s1".to_string()])
             .unwrap();
         assert!(!db
-            .apply_diarization_enrichment("deleted", delete_revision, &stale_segments, &[], None)
+            .apply_diarization_enrichment(
+                "deleted",
+                delete_revision,
+                &stale_segments,
+                &[],
+                None,
+                None
+            )
             .unwrap());
         let deleted = db.get_transcript("deleted").unwrap().unwrap();
         assert!(deleted.segments.is_empty());
@@ -8935,6 +8972,7 @@ mod tests {
                 &enriched,
                 &aliases,
                 Some("plainsong:ecapa_tdnn_speaker"),
+                Some(serde_json::json!({ "recording_id": "r1" })),
             )
             .expect_err("alias failure must roll back the full enrichment transaction");
         assert!(error.to_string().contains("injected alias failure"));
@@ -8948,6 +8986,72 @@ mod tests {
             .unwrap()
             .is_empty());
         assert!(db.get_speaker_aliases("r1").unwrap().is_empty());
+    }
+
+    /// The `diarizer` column and the `meeting_diarization_applied` entry record
+    /// the same fact, so neither may exist without the other.
+    ///
+    /// They used to be two writes under two separate acquisitions of the
+    /// database lock: a reader between them saw the column changed with nothing
+    /// saying why, and a failure of the second write made that permanent.
+    #[test]
+    fn the_diarizer_column_and_its_audit_entry_are_one_write() {
+        let mut db = in_memory_db();
+        db.create_recording(&sample_recording("r1", "inbox"))
+            .unwrap();
+        db.save_completed_transcript(&sample_transcript("r1"))
+            .unwrap();
+        let (_, revision) = db.get_transcript_with_revision("r1").unwrap().unwrap();
+        let diarized = vec![TranscriptSegment {
+            id: "enriched-0".to_string(),
+            start_time: 0.0,
+            end_time: 2.5,
+            text: "Diarized first".to_string(),
+            speaker_id: Some("speaker_0".to_string()),
+            confidence: 0.95,
+        }];
+
+        // A stale revision: the enrichment does not apply, so nothing may be
+        // recorded about a diarizer that did not land.
+        assert!(!db
+            .apply_diarization_enrichment(
+                "r1",
+                revision + 99,
+                &diarized,
+                &[],
+                Some("plainsong:campplus_speaker"),
+                Some(serde_json::json!({ "recording_id": "r1" })),
+            )
+            .unwrap());
+        assert!(db
+            .get_all_audit_log()
+            .unwrap()
+            .iter()
+            .all(|entry| entry.event != "meeting_diarization_applied"));
+        assert_eq!(db.get_transcript_diarizer("r1").unwrap(), None);
+
+        // The real write: column and entry together.
+        assert!(db
+            .apply_diarization_enrichment(
+                "r1",
+                revision,
+                &diarized,
+                &[],
+                Some("deepgram"),
+                Some(serde_json::json!({ "recording_id": "r1", "diarizer": "deepgram" })),
+            )
+            .unwrap());
+        assert_eq!(
+            db.get_transcript_diarizer("r1").unwrap().as_deref(),
+            Some("deepgram")
+        );
+        let entries = db.get_all_audit_log().unwrap();
+        let applied = entries
+            .iter()
+            .filter(|entry| entry.event == "meeting_diarization_applied")
+            .collect::<Vec<_>>();
+        assert_eq!(applied.len(), 1);
+        assert_eq!(applied[0].details["diarizer"], "deepgram");
     }
 
     #[test]
@@ -9191,7 +9295,7 @@ mod tests {
         let (mut diarized, revision) = db.get_transcript_with_revision("r1").unwrap().unwrap();
         diarized.segments[0].speaker_id = Some("speaker_9".to_string());
         assert!(db
-            .apply_diarization_enrichment("r1", revision, &diarized.segments, &[], None)
+            .apply_diarization_enrichment("r1", revision, &diarized.segments, &[], None, None)
             .unwrap());
         assert!(!db.has_embeddings("r1"));
         let recording = db.get_recording("r1").unwrap().unwrap();

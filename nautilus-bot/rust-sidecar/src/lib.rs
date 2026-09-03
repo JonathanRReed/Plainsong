@@ -31105,12 +31105,23 @@ async fn run_meeting_transcription_pipeline(
                         engine.merge_with_transcript(&result, &mut enriched_segments);
                         let update_result = {
                             let mut db = state_clone.db.lock().await;
+                            // The audit entry goes in with the enrichment, not
+                            // after it: the `diarizer` column and the entry
+                            // record the same fact, and writing them under two
+                            // separate lock acquisitions left a window where
+                            // the column had changed and nothing said why.
                             db.apply_diarization_enrichment(
                                 &recording_id_clone,
                                 0,
                                 &enriched_segments,
                                 &[],
                                 diarizer_record.as_deref(),
+                                Some(serde_json::json!({
+                                    "recording_id": &recording_id_clone,
+                                    "diarizer": diarizer_record.as_deref(),
+                                    "speaker_count": result.speakers.len(),
+                                    "speaker_segment_count": result.segments.len(),
+                                })),
                             )
                         };
                         match update_result {
@@ -31126,23 +31137,6 @@ async fn run_meeting_transcription_pipeline(
                                     diarization_fallback_notice = resolved_local_model
                                         .as_ref()
                                         .and_then(|resolved| resolved.fallback_notice.clone());
-                                }
-                                let mut db = state_clone.db.lock().await;
-                                if let Err(error) = db.log_audit_event(
-                                    "meeting_diarization_applied",
-                                    Some(serde_json::json!({
-                                        "recording_id": &recording_id_clone,
-                                        "diarizer": diarizer_record.as_deref(),
-                                        "speaker_count": result.speakers.len(),
-                                        "speaker_segment_count": result.segments.len(),
-                                    })),
-                                    "info",
-                                ) {
-                                    tracing::warn!(
-                                        "Failed to log the diarizer used for {}: {}",
-                                        recording_id_clone,
-                                        error
-                                    );
                                 }
                             }
                             Ok(false) => tracing::warn!(
@@ -33242,12 +33236,22 @@ pub async fn dispatch_command(
 
             let applied = {
                 let mut db = state.db.lock().await;
+                // The explicit "identify speakers" action writes the same
+                // `diarizer` column as the automatic pass, so it now leaves the
+                // same audit record -- previously the column could change here
+                // with nothing in the log saying it had.
                 db.apply_diarization_enrichment(
                     &recording_id,
                     transcript_revision,
                     &transcript.segments,
                     &alias_updates,
                     Some(&format!("plainsong:{diarization_model_id}")),
+                    Some(serde_json::json!({
+                        "recording_id": &recording_id,
+                        "diarizer": format!("plainsong:{diarization_model_id}"),
+                        "speaker_count": diarization.speakers.len(),
+                        "speaker_segment_count": diarization.segments.len(),
+                    })),
                 )
                 .map_err(|e| e.to_string())?
             };
