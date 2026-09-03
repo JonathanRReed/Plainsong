@@ -1218,8 +1218,13 @@ fn normalize_transcription_model_id(provider: &str, model_id: &str) -> String {
             "" | "qwen3-asr-0.6b" => "qwen3-asr-0.6b".to_string(),
             value => value.to_string(),
         },
+        // `route_spec_for`, not `spec_for`: the latter also resolves the
+        // Nemotron streaming GGUF that the benchmark loads to prove the runtime
+        // path and that `model_options()` deliberately never offers. Normalizing
+        // through it would let a saved settings file pin the route to a model
+        // the picker does not list and the app cannot download.
         #[cfg(feature = "asr-transcribe-cpp")]
-        "transcribe_cpp" => crate::asr::transcribe_cpp::spec_for(model_id)
+        "transcribe_cpp" => crate::asr::transcribe_cpp::route_spec_for(model_id)
             .model_id
             .to_string(),
         _ => "base.en".to_string(),
@@ -2366,6 +2371,42 @@ mod tests {
             // exactly what any other unrunnable provider name gets.
             assert_eq!(settings.meeting_provider, "parakeet");
             assert_eq!(settings.meeting_model_id, "parakeet-tdt-0.6b-v3");
+        }
+    }
+
+    /// The Nemotron streaming GGUF is loadable (the benchmark proves the
+    /// runtime path with it) but is not a route: `model_options()` never offers
+    /// it, so normalization must not persist it either.
+    #[cfg(feature = "asr-transcribe-cpp")]
+    #[test]
+    fn a_settings_file_cannot_pin_the_route_to_a_model_the_picker_never_offers() {
+        let mut settings = TranscriptionSettings {
+            default_provider: "transcribe_cpp".to_string(),
+            dictation_provider: "transcribe_cpp".to_string(),
+            meeting_provider: "transcribe_cpp".to_string(),
+            selected_model_id: "nemotron-3.5-asr-streaming-0.6b-q8_0".to_string(),
+            dictation_model_id: "nemotron-3.5-asr-streaming-0.6b-q8_0".to_string(),
+            meeting_model_id: "nemotron-3.5-asr-streaming-0.6b-q8_0".to_string(),
+            ..Default::default()
+        };
+        normalize_loaded_transcription_settings(&mut settings);
+
+        for model_id in [
+            &settings.selected_model_id,
+            &settings.dictation_model_id,
+            &settings.meeting_model_id,
+        ] {
+            assert_eq!(
+                model_id, "parakeet-tdt-0.6b-v3-q8_0",
+                "the streaming GGUF must not survive normalization"
+            );
+            assert!(
+                crate::asr::AsrProviderType::TranscribeCpp
+                    .model_options()
+                    .iter()
+                    .any(|option| &option.id == model_id),
+                "normalization must land on a model the picker offers"
+            );
         }
     }
 
