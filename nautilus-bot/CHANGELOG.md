@@ -13,6 +13,20 @@ changed underneath `0.9.0-beta.2`. See `LAUNCH.md` for which qualification
 evidence is stale and must be recaptured before this becomes a candidate.
 
 ### Added
+- The dictation live preview can be drawn by a real streaming recognizer
+  instead of by re-transcribing. Until now the popup's live text was a batch
+  re-decode of everything you had said so far, run again every few hundred
+  milliseconds, so the words landed a whole decode behind you. With the new
+  live preview engine installed — a 716 MB download on the Models screen,
+  experimental, off unless you fetch it — the recognizer keeps what it has
+  already heard, and the popup shows the words it has settled on apart from
+  the tail it may still change. **What Plainsong types is unchanged**: the
+  inserted text is still the finished transcription from your dictation
+  engine, made after you stop. Without the download, or in a language the
+  engine's own model file does not declare, the previous preview runs exactly
+  as before. Settings gains "What draws the live preview" (whichever is
+  available / streaming / re-transcribe) under the existing Live preview
+  control.
 - Dictation history is searchable, and a saved dictation can be run through
   the recognizer again. The search field over Recent dictations matches both
   what was delivered and (where it was kept) what the recognizer heard,

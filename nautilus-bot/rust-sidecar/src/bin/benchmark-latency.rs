@@ -23,9 +23,17 @@
 //! `DICTATION_STOP_CAPTURE_TAIL_MS` wait, no real insertion, no LLM pass.
 
 use plainsong_lib::asr::{
-    AsrProviderFactory, AsrProviderType, PcmChunker, StreamingPartialTracker, StreamingResampler,
-    TranscriptionOptions, VocabularyHint, DEFAULT_STREAMING_CHUNK_MS, STREAMING_CHUNK_MS_CHOICES,
-    STREAMING_SAMPLE_RATE_HZ,
+    AsrProviderFactory, AsrProviderType, TranscriptionOptions, VocabularyHint,
+    DEFAULT_STREAMING_CHUNK_MS, STREAMING_CHUNK_MS_CHOICES,
+};
+// Only the `--stream` harness uses these, and that harness only exists when a
+// streaming engine is compiled in. `--stream-chunk-ms` is still parsed and
+// validated in every build, so the two names above stay ungated: a default
+// build must reject an invalid chunk size the same way, and then say plainly
+// that it has no streaming engine.
+#[cfg(feature = "asr-transcribe-cpp")]
+use plainsong_lib::asr::{
+    PcmChunker, StreamingPartialTracker, StreamingResampler, STREAMING_SAMPLE_RATE_HZ,
 };
 use plainsong_lib::dictation_pipeline::{apply_dictation_pipeline, DictationPipelineInput};
 use plainsong_lib::text::format::DictationAppCategory;
@@ -817,10 +825,12 @@ fn build_pipeline_report(input: PipelineReportInput<'_>) -> serde_json::Value {
 /// chunk size: the harness imitates a capture callback, and the session's own
 /// `PcmChunker` regroups the slices into whole chunks — which is exactly what
 /// the dictation task does, so the seam under test is the real one.
+#[cfg(feature = "asr-transcribe-cpp")]
 const STREAM_SLICE_MS: u64 = 100;
 
 /// A word the reference decode aligned, and the wall-clock moment the first
 /// partial containing it arrived.
+#[cfg(feature = "asr-transcribe-cpp")]
 #[derive(Debug, Clone)]
 struct WordArrival {
     word: String,
@@ -831,6 +841,7 @@ struct WordArrival {
     partial_at_ms: Option<f64>,
 }
 
+#[cfg(feature = "asr-transcribe-cpp")]
 impl WordArrival {
     fn latency_ms(&self) -> Option<f64> {
         self.partial_at_ms
@@ -839,6 +850,7 @@ impl WordArrival {
 }
 
 /// Lowercase alphanumeric tokens, so "Plainsong," and "plainsong" match.
+#[cfg(feature = "asr-transcribe-cpp")]
 fn stream_tokens(text: &str) -> Vec<String> {
     text.split_whitespace()
         .map(|word| {
@@ -851,6 +863,7 @@ fn stream_tokens(text: &str) -> Vec<String> {
         .collect()
 }
 
+#[cfg(feature = "asr-transcribe-cpp")]
 fn stream_percentile(sorted: &[f64], percentile: f64) -> f64 {
     if sorted.is_empty() {
         return 0.0;
@@ -860,6 +873,7 @@ fn stream_percentile(sorted: &[f64], percentile: f64) -> f64 {
 }
 
 /// Process CPU seconds (user + system) burned so far by this process.
+#[cfg(feature = "asr-transcribe-cpp")]
 fn process_cpu_seconds() -> f64 {
     let mut usage: libc::rusage = unsafe { std::mem::zeroed() };
     // SAFETY: `usage` is a valid, zeroed `rusage` and RUSAGE_SELF is a
@@ -872,6 +886,7 @@ fn process_cpu_seconds() -> f64 {
 }
 
 /// Read a WAV as 16 kHz mono f32, the rate every streaming session takes.
+#[cfg(feature = "asr-transcribe-cpp")]
 fn load_wav_16k_mono(path: &Path) -> Result<Vec<f32>, String> {
     let mut reader = hound::WavReader::open(path)
         .map_err(|error| format!("Could not open {}: {error}", path.display()))?;
