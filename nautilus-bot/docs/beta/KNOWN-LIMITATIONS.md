@@ -125,8 +125,10 @@ using sensitive content.
   here that return speakers, and each numbers them per request — "speaker 0" in
   one request is not promised to be the same person as "speaker 0" in the next.
   Plainsong sends the whole recording in one request where the provider allows
-  it (Deepgram up to four hours, Gemini up to thirty minutes, which is Google's
-  own cap for a diarized request). Past that, or when the single request fails,
+  it (Deepgram up to two hours, Gemini up to thirty minutes). The Gemini
+  figure is Google's own cap for a diarized request; the Deepgram one is
+  Plainsong's, because Deepgram publishes no duration limit -- only a 2 GB
+  request size, which two hours of a meeting recording stays well inside. Past that, or when the single request fails,
   the meeting is transcribed in ninety-second chunks and Plainsong's own
   diarizer labels the speakers instead. The meeting header always names which
   one ran; it is never inferred from the transcription provider.

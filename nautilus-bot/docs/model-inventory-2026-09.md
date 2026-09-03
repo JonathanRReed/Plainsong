@@ -259,9 +259,15 @@ chunks, and a provider's speaker numbering is scoped to one request — "speaker
 only used when the whole recording went out in **one** request. To make that
 the normal case rather than a curiosity, a single-source meeting now goes to a
 diarizing provider whole, within that provider's own documented ceiling:
-Deepgram up to four hours (streamed off disk, so a two-hour meeting is not
-buffered in memory), Gemini up to thirty minutes (Google's cap for a request
-that asks for diarization or word timestamps). Past the ceiling, or when the
+Deepgram up to two hours, Gemini up to thirty minutes. Both recordings are
+streamed off disk rather than buffered in memory. The Gemini figure is
+Google's own cap for a request that asks for diarization or word timestamps.
+The Deepgram figure is Plainsong's, not Deepgram's: Deepgram documents no
+duration cap, only a 2 GB request size and a ten-minute processing ceiling
+(HTTP 504). Two hours of the app's meeting WAV (mono 16-bit PCM at the capture
+rate) is 230 MB at 16 kHz and 691 MB at 48 kHz, inside Plainsong's own 1 GiB
+request cap and well inside Deepgram's 2 GB; processing it costs about
+12 seconds at the 607.7x real time published for Nova-3. Past the ceiling, or when the
 single request fails, the meeting falls back to 90-second chunks with
 Plainsong's own diarizer, and both the audit log and the meeting header say
 which one ran.

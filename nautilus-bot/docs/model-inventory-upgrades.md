@@ -330,7 +330,7 @@ Full research, with prices, licences, endpoints and sources:
    the 2026-09-02 pass did not.
 5. **Provider diarization past the single-request ceiling.** A provider
    numbers speakers per request, so its labels are only used when the whole
-   meeting went out in one — Deepgram to four hours, Gemini to thirty minutes.
+   meeting went out in one — Deepgram to two hours, Gemini to thirty minutes.
    A longer meeting falls back to Plainsong's own diarizer. Closing that gap
    means matching speakers across requests (a voiceprint carried between
    chunks), which is a real piece of work and not a config change.

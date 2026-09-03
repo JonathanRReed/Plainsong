@@ -12481,6 +12481,57 @@ mod tests {
         ));
     }
 
+    /// The whole-file ceilings must be reachable at the format the app records
+    /// in, or they describe a request that never happens.
+    ///
+    /// The Deepgram ceiling used to be four hours, described as Deepgram's own.
+    /// Deepgram documents no duration cap; four hours of a 48 kHz meeting is
+    /// 1.38 GB, so the byte cap bound first and the stated figure was
+    /// unreachable on any normally-captured meeting.
+    #[test]
+    fn the_whole_file_ceilings_are_reachable_at_the_rate_meetings_are_recorded() {
+        // Mono 16-bit PCM: one second is 2 bytes per sample.
+        const BYTES_PER_SECOND_48K: u64 = 48_000 * 2;
+        const BYTES_PER_SECOND_16K: u64 = 16_000 * 2;
+
+        for provider in [
+            asr::AsrProviderType::Deepgram,
+            asr::AsrProviderType::GeminiTranscribe,
+        ] {
+            let limits =
+                whole_file_meeting_limits(provider).expect("a diarizing provider has limits");
+            for bytes_per_second in [BYTES_PER_SECOND_16K, BYTES_PER_SECOND_48K] {
+                let at_the_ceiling = (limits.max_seconds as u64) * bytes_per_second;
+                assert!(
+                    at_the_ceiling <= limits.max_bytes,
+                    "{provider:?}: a recording at the {}s ceiling is {} bytes, past the {} byte \
+                     cap, so the duration ceiling can never be the limit that applies",
+                    limits.max_seconds,
+                    at_the_ceiling,
+                    limits.max_bytes
+                );
+                // ...and it really is accepted, not merely arithmetically small
+                // enough.
+                assert!(should_request_whole_file_meeting(
+                    provider,
+                    true,
+                    true,
+                    limits.max_seconds,
+                    at_the_ceiling
+                ));
+            }
+        }
+
+        // The specific numbers, so a change to either has to be deliberate.
+        let deepgram = whole_file_meeting_limits(asr::AsrProviderType::Deepgram).expect("limits");
+        assert_eq!(deepgram.max_seconds, 2.0 * 60.0 * 60.0);
+        assert_eq!(deepgram.max_bytes, 1024 * 1024 * 1024);
+        // Two hours at 48 kHz is 691.2 MB: inside Plainsong's 1 GiB request cap
+        // and well inside Deepgram's documented 2 GB.
+        assert!(2 * 3600 * BYTES_PER_SECOND_48K < deepgram.max_bytes);
+        assert!(deepgram.max_bytes < 2 * 1000 * 1000 * 1000);
+    }
+
     /// Speaker separation off must stop the request, not just the labels.
     ///
     /// `resolve_meeting_diarizer` already refused to use provider turns with
@@ -19425,9 +19476,13 @@ fn provider_speaker_turns_survive_chunking(successful_chunks: usize) -> bool {
 /// The ceiling under which a provider will take a whole recording in one
 /// request, so its speaker numbering covers the entire meeting.
 ///
-/// Both numbers are the provider's own documented limits, pulled in on
-/// 2026-09-02 (see `docs/model-inventory-2026-09.md`), reduced where a
-/// documented limit is far above anything Plainsong should send in one go.
+/// Each provider's own documented limits, pulled in on 2026-09-02 (see
+/// `docs/model-inventory-2026-09.md`), reduced where a documented limit is far
+/// above anything Plainsong should send in one go -- or, where a provider
+/// documents no limit of that shape at all, replaced by a Plainsong ceiling
+/// with the arithmetic behind it written down. Which is which is stated per
+/// provider below, because a self-imposed number described as the provider's
+/// is a claim about someone else's API that nobody can check.
 #[derive(Debug, Clone, Copy, PartialEq)]
 struct WholeFileMeetingLimits {
     max_seconds: f64,
@@ -19436,12 +19491,29 @@ struct WholeFileMeetingLimits {
 
 fn whole_file_meeting_limits(provider: asr::AsrProviderType) -> Option<WholeFileMeetingLimits> {
     match provider {
-        // Deepgram documents a 2 GB upload cap and a ten-minute *processing*
-        // ceiling; at the 607x real time Artificial Analysis measures for
-        // Nova-3, processing is never the binding constraint. 1 GiB is the
-        // self-imposed one: past that the upload itself is the risk.
+        // Deepgram documents no duration cap at all. What it does document is
+        // a 2 GB request size and a ten-minute *processing* ceiling that
+        // answers 504. Both numbers are Deepgram's; the two below are
+        // Plainsong's, and here is the arithmetic behind them.
+        //
+        // A meeting is mono 16-bit PCM at the capture device's own rate, so
+        // one second is 32 kB at 16 kHz and 96 kB at 48 kHz.
+        //
+        // - 1 GiB is well inside Deepgram's 2 GB, and is the point past which
+        //   the upload itself is the risk rather than the transcription.
+        // - Two hours is 230 MB at 16 kHz and 691 MB at 48 kHz, so it stays
+        //   inside that byte cap at every rate a capture device offers.
+        //   Processing it costs about 12 seconds at the 607.7x real time
+        //   Artificial Analysis publishes for Nova-3, nowhere near the
+        //   ten-minute ceiling, and 691 MB fits the client's own fifteen-minute
+        //   whole-file timeout at about 6 Mbit/s of upload.
+        //
+        // The previous ceiling here was four hours, described as Deepgram's.
+        // It was neither: Deepgram documents no such limit, and four hours at
+        // 48 kHz is 1.38 GB, so the byte cap bound first and the stated figure
+        // was never reachable on a normally-captured meeting anyway.
         asr::AsrProviderType::Deepgram => Some(WholeFileMeetingLimits {
-            max_seconds: 4.0 * 60.0 * 60.0,
+            max_seconds: 2.0 * 60.0 * 60.0,
             max_bytes: 1024 * 1024 * 1024,
         }),
         // Gemini's own cap: one hour per request, dropping to thirty minutes

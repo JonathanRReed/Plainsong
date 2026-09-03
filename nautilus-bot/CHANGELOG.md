@@ -378,6 +378,13 @@ evidence is stale and must be recaptured before this becomes a candidate.
   files that still carry it load cleanly and are rewritten without it.
 
 ### Fixed
+- The whole-meeting Deepgram limit says what it is. Plainsong claimed a
+  "Deepgram four-hour ceiling"; Deepgram documents no duration limit at all,
+  only a 2 GB request size and a ten-minute processing timeout. Four hours of
+  a meeting recorded at 48 kHz is 1.38 GB, past Plainsong's own 1 GiB request
+  cap, so the stated figure was unreachable anyway. The ceiling is now two
+  hours, described as Plainsong's own, with the arithmetic behind it in the
+  code and the docs.
 - Two speakers in a Gemini meeting are no longer merged into one. The
   provider's speaker labels were converted with arithmetic that mapped both
   "speaker 0" and "speaker 1" onto Plainsong's first speaker, so any response
