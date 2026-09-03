@@ -113,21 +113,30 @@ pub enum SegmentationMode {
     /// hopping by `hop_seconds`. Falls back to `FixedGrid` when the VAD model
     /// is not downloaded or will not load.
     ///
-    /// **Measured, and deliberately not shipped.** On a 5-minute two-speaker
-    /// fixture with 0.8 s gaps it cuts frame error from 15.5% to 5.5% and is
-    /// faster; on the same fixture with 3-second turns it produces *no
-    /// speakers at all*. The cause is not in this module: `smooth_segments`
-    /// drops any merged run shorter than `EmbeddingClusterer`'s 5-second
-    /// `min_segment_duration`, and VAD-aligned runs are bounded by the speech
-    /// region while fixed-grid runs are not. Until that minimum is fixed,
-    /// `DEFAULT_SEGMENTATION` stays `FixedGrid` and this variant is
-    /// constructed only by `eval_segmentation_modes`. Full numbers:
-    /// `artifacts/qa/diarization-segmentation-2026-09-02.md`.
+    /// **Measured, and still not shipped.** Lane C8 found it cut frame error
+    /// from 15.5% to 5.5% on a 5-minute two-speaker fixture with 0.8 s gaps
+    /// and produced *no speakers at all* on the same fixture with 3-second
+    /// turns, because `smooth_segments` deleted every run: VAD-aligned runs
+    /// are bounded by their speech region, and the region was under the
+    /// then-5-second floor.
+    ///
+    /// That floor is now 3.0 s (`embedder::MIN_TURN_SECONDS`), and
+    /// re-measuring the whole 24-fixture sweep puts VAD alignment ahead:
+    /// better on 21 of 48 runs, identical on 22, worse on 5 — four of which are
+    /// 2-second-turn fixtures whose speech regions cannot clear any useful
+    /// floor. Runs that find no speakers at all fell from 16 of 48 to 4.
+    /// Adopting it is still a separate decision with its own receipt, because
+    /// it changes where windows are cut and so what the calibrated voiceprint
+    /// thresholds describe; until someone makes it, `DEFAULT_SEGMENTATION`
+    /// stays `FixedGrid` and this variant is constructed only by the eval
+    /// harness. Numbers:
+    /// `artifacts/qa/diarization-segmentation-2026-09-02.md` and
+    /// `artifacts/qa/diarization-turn-floor-2026-09-03.md`.
     #[cfg_attr(
         not(test),
         expect(
             dead_code,
-            reason = "measured alternative segmentation, kept so the receipt's numbers stay reproducible; blocked on EmbeddingClusterer::min_segment_duration, see artifacts/qa/diarization-segmentation-2026-09-02.md"
+            reason = "measured alternative segmentation, kept so the receipts' numbers stay reproducible; adoption is its own decision because it moves the embedding windows, see artifacts/qa/diarization-turn-floor-2026-09-03.md"
         )
     )]
     VadAligned { hop_seconds: f64 },
@@ -137,9 +146,11 @@ pub enum SegmentationMode {
 ///
 /// Set from the measurement in
 /// `artifacts/qa/diarization-segmentation-2026-09-02.md`, not from
-/// preference: the adoption rule for this lane was that VAD alignment had to
+/// preference: the adoption rule for that lane was that VAD alignment had to
 /// improve frame error *without* moving the calibrated voiceprint thresholds
-/// by more than 0.02.
+/// by more than 0.02. It failed the first half then because of the turn floor;
+/// with the floor corrected it passes, and the second half has not been
+/// re-checked. See `artifacts/qa/diarization-turn-floor-2026-09-03.md`.
 pub const DEFAULT_SEGMENTATION: SegmentationMode = SegmentationMode::FixedGrid;
 
 /// Speaker diarization engine
@@ -1579,6 +1590,239 @@ mod eval_tests {
                 &result,
             );
         }
+    }
+
+    /// Frame error against `EmbeddingClusterer`'s turn floor, swept in one
+    /// process on one fixture.
+    ///
+    /// The expensive half of diarization — windowing, embedding, clustering —
+    /// does not depend on the floor at all, so it runs **once** and every
+    /// floor is scored by re-running only `smooth_segments` over the same
+    /// labels. That is what makes a ten-point curve on 24 fixtures affordable,
+    /// and it also means the points differ by exactly one variable.
+    ///
+    /// Prints, per fixture:
+    /// - one `DIAR-LABELS` line: the raw window/label list, so a hermetic
+    ///   regression test can pin the frame error without an ONNX runtime;
+    /// - one `DIAR-EVAL` line per floor per policy, for
+    ///   `scripts/score-diarization-eval.mjs`.
+    ///
+    /// ```text
+    /// PLAINSONG_DIAR_EVAL_AUDIO=<wav> PLAINSONG_DIAR_EVAL_MODEL=<id> \
+    ///   node scripts/cargo-sidecar.mjs test --locked --lib \
+    ///   diarization::eval_tests::eval_turn_floor_sweep -- --ignored --nocapture
+    /// ```
+    #[cfg(feature = "diarization")]
+    #[tokio::test]
+    #[ignore = "evaluation harness: downloads models and runs real inference"]
+    async fn eval_turn_floor_sweep() {
+        let audio = eval_audio_path();
+        let model_id = std::env::var("PLAINSONG_DIAR_EVAL_MODEL")
+            .unwrap_or_else(|_| "ecapa_tdnn_speaker".to_string());
+        let segmentation = match std::env::var("PLAINSONG_DIAR_EVAL_SEGMENTATION")
+            .unwrap_or_else(|_| "fixed".to_string())
+            .as_str()
+        {
+            "fixed" => SegmentationMode::FixedGrid,
+            "vad1.0" => SegmentationMode::VadAligned { hop_seconds: 1.0 },
+            "vad0.5" => SegmentationMode::VadAligned { hop_seconds: 0.5 },
+            other => panic!("unknown PLAINSONG_DIAR_EVAL_SEGMENTATION {other:?}"),
+        };
+        let floors: Vec<f64> = std::env::var("PLAINSONG_DIAR_EVAL_FLOORS")
+            .unwrap_or_else(|_| "0.5,1.0,1.5,2.0,2.5,3.0,3.5,4.0,4.5,5.0".to_string())
+            .split(',')
+            .map(|value| value.trim().parse::<f64>().expect("floor must be a number"))
+            .collect();
+
+        let manager = crate::download::DownloadManager::new().expect("download manager");
+        manager
+            .download_diarization_model_by_id(&model_id, |_: crate::download::DownloadProgress| {})
+            .await
+            .expect("embedding model");
+        if matches!(segmentation, SegmentationMode::VadAligned { .. }) {
+            manager
+                .download_silero_vad_model(|_: crate::download::DownloadProgress| {})
+                .await
+                .expect("Silero VAD model");
+        }
+
+        let duration = get_audio_duration(&audio).await.expect("fixture duration");
+        let engine = DiarizationEngine::with_model(&model_id).with_segmentation(segmentation);
+        let segments = engine.segments_for(&audio, duration);
+        assert!(
+            !segments.is_empty(),
+            "fixture produced no embedding windows"
+        );
+
+        let started = std::time::Instant::now();
+        let extractor =
+            embedder::SpeakerEmbeddingExtractor::with_model(&model_id).expect("extractor");
+        let embeddings = extractor
+            .extract_embeddings(&audio, &segments)
+            .await
+            .expect("embeddings");
+        let windows: Vec<(f64, f64)> = embeddings
+            .iter()
+            .map(|(start, end, _)| (*start, *end))
+            .collect();
+        let labels = EmbeddingClusterer::new().cluster(&embeddings);
+        let shared = started.elapsed();
+
+        println!(
+            "DIAR-LABELS {}",
+            serde_json::json!({
+                "audio": audio.to_string_lossy(),
+                "model": model_id,
+                "durationSeconds": duration,
+                "windows": windows
+                    .iter()
+                    .zip(labels.iter())
+                    .map(|((start, end), label)| serde_json::json!([start, end, label]))
+                    .collect::<Vec<_>>(),
+            })
+        );
+
+        for floor in floors {
+            let clusterer = EmbeddingClusterer::new().with_min_segment_duration(floor);
+            let discarded = clusterer.smooth_segments(&windows, &labels);
+            report_turns(
+                &format!("{model_id}/discard/floor-{floor:.1}"),
+                &audio,
+                duration,
+                shared,
+                &discarded,
+            );
+
+            let absorbed = absorb_short_runs(&windows, &labels, &embeddings, floor);
+            report_turns(
+                &format!("{model_id}/absorb/floor-{floor:.1}"),
+                &audio,
+                duration,
+                shared,
+                &absorbed,
+            );
+        }
+    }
+
+    /// The candidate alternative to discarding: a merged run shorter than
+    /// `floor` is relabelled to whichever *neighbouring* run its mean
+    /// embedding is closer to by cosine, then adjacent same-label runs are
+    /// merged again. Nothing is dropped, so coverage is total.
+    ///
+    /// Lives in the harness rather than in `embedder` until the numbers say it
+    /// is worth shipping.
+    #[cfg(feature = "diarization")]
+    fn absorb_short_runs(
+        windows: &[(f64, f64)],
+        labels: &[usize],
+        embeddings: &[(f64, f64, Array1<f32>)],
+        floor: f64,
+    ) -> Vec<(f64, f64, usize)> {
+        // Merge consecutive same-label windows into runs, remembering which
+        // windows each run covers so a run's centroid can be recomputed.
+        let mut runs: Vec<(f64, f64, usize, std::ops::Range<usize>)> = Vec::new();
+        let mut i = 0;
+        while i < windows.len() {
+            let (start, _) = windows[i];
+            let label = labels[i];
+            let mut j = i + 1;
+            let mut end = windows[i].1;
+            while j < windows.len() && labels[j] == label {
+                end = windows[j].1;
+                j += 1;
+            }
+            runs.push((start, end, label, i..j));
+            i = j;
+        }
+
+        let centroid = |range: &std::ops::Range<usize>| -> Array1<f32> {
+            let mut sum = vec![0.0f32; embeddings[range.start].2.len()];
+            for index in range.clone() {
+                for (k, value) in embeddings[index].2.iter().enumerate() {
+                    sum[k] += *value;
+                }
+            }
+            let norm = sum.iter().map(|x| x * x).sum::<f32>().sqrt();
+            if norm > 1e-6 {
+                for value in &mut sum {
+                    *value /= norm;
+                }
+            }
+            Array1::from(sum)
+        };
+
+        // Both operands are L2-normalized above, so this is 1 - dot.
+        let distance = |a: &Array1<f32>, b: &Array1<f32>| -> f32 {
+            (1.0 - a.iter().zip(b.iter()).map(|(x, y)| x * y).sum::<f32>()).max(0.0)
+        };
+
+        let centroids: Vec<Array1<f32>> = runs.iter().map(|run| centroid(&run.3)).collect();
+        let mut relabelled: Vec<usize> = runs.iter().map(|run| run.2).collect();
+        for index in 0..runs.len() {
+            if runs[index].1 - runs[index].0 >= floor {
+                continue;
+            }
+            let previous = index
+                .checked_sub(1)
+                .map(|p| (relabelled[p], distance(&centroids[index], &centroids[p])));
+            let next = runs.get(index + 1).map(|_| {
+                (
+                    relabelled[index + 1],
+                    distance(&centroids[index], &centroids[index + 1]),
+                )
+            });
+            let winner = match (previous, next) {
+                (Some(a), Some(b)) => Some(if a.1 <= b.1 { a.0 } else { b.0 }),
+                (Some(a), None) => Some(a.0),
+                (None, Some(b)) => Some(b.0),
+                (None, None) => None,
+            };
+            if let Some(label) = winner {
+                relabelled[index] = label;
+            }
+        }
+
+        let mut turns: Vec<(f64, f64, usize)> = Vec::new();
+        for (index, run) in runs.iter().enumerate() {
+            let label = relabelled[index];
+            match turns.last_mut() {
+                Some(last) if last.2 == label => last.1 = run.1,
+                _ => turns.push((run.0, run.1, label)),
+            }
+        }
+        turns
+    }
+
+    #[cfg(feature = "diarization")]
+    fn report_turns(
+        backend: &str,
+        audio: &std::path::Path,
+        duration: f64,
+        elapsed: std::time::Duration,
+        turns: &[(f64, f64, usize)],
+    ) {
+        let mut speakers: Vec<usize> = turns.iter().map(|turn| turn.2).collect();
+        speakers.sort_unstable();
+        speakers.dedup();
+        let line = serde_json::json!({
+            "backend": backend,
+            "audio": audio.to_string_lossy(),
+            "durationSeconds": duration,
+            // The shared embed+cluster pass, repeated on every row: the floor
+            // does not change it, so this is not a per-row timing.
+            "wallSeconds": elapsed.as_secs_f64(),
+            "peakRssBytes": peak_rss_bytes(),
+            "speakerCount": speakers.len(),
+            "turns": turns
+                .iter()
+                .map(|(start, end, label)| serde_json::json!({
+                    "start": start,
+                    "end": end,
+                    "speaker": format!("S{}", label + 1),
+                }))
+                .collect::<Vec<_>>(),
+        });
+        println!("DIAR-EVAL {line}");
     }
 
     fn report(

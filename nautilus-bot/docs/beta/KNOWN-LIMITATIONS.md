@@ -175,16 +175,21 @@ using sensitive content.
   no overlap handling, so simultaneous speech and rapid turn-taking are where
   it loses. It is the only option for a locally transcribed meeting: no local
   speech model returns speaker labels.
-- The same diarizer cannot report a speaker turn shorter than five seconds. It
-  merges its two-second windows into turns and discards any turn under that
-  length as noise, so a quick exchange is either stretched to five seconds or
-  left without a speaker. Measured on a five-minute synthetic conversation with
-  three-second turns: 59% of frames get the wrong speaker and 121 of 300
-  seconds come back unattributed. Conversations with longer turns are much
-  better — the same measurement with five-second turns is 16% — but nothing in
-  the app tells you which kind of meeting you just recorded. The numbers, and
-  why a fix has to change the turn minimum rather than the windows, are in
-  `artifacts/qa/diarization-segmentation-2026-09-02.md`.
+- The same diarizer cannot report a speaker turn shorter than three seconds. It
+  merges its two-second windows into turns and drops any turn no two windows
+  agree on, because a single window's label is uncorroborated — without that
+  rule a two-person meeting comes back with sixteen speakers. So an
+  interjection shorter than about three seconds is left without a speaker
+  rather than given the wrong one. This floor was five seconds through beta.2,
+  which cost far more: on a five-minute synthetic conversation with
+  three-second turns, 59% of frames got the wrong speaker and 121 of 300
+  seconds came back unattributed. At three seconds the same fixture is 24% and
+  nothing is unattributed. Across 24 synthetic fixtures and both speaker
+  models, average frame error is 17% and the right number of speakers is found
+  in 45 of 48 runs. Two-second turns are still beyond it: expect 32% to 60%
+  frame error there, and nothing in the app tells you which kind of meeting you
+  just recorded. Numbers in
+  `artifacts/qa/diarization-turn-floor-2026-09-03.md`.
 - Never use the beta to record a confidential conversation without the consent
   required by your organization and location.
 - Plainsong does not post the consent notice into the meeting chat for you.

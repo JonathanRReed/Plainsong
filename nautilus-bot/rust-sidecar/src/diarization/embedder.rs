@@ -48,6 +48,30 @@ pub const MIN_SEGMENT_SECONDS: f64 = 1.0;
 /// Sample rate every diarization window is resampled to before features.
 pub const EMBEDDING_SAMPLE_RATE: usize = 16000;
 
+/// The shortest turn [`EmbeddingClusterer::smooth_segments`] will report, in
+/// seconds. A merged run below it is dropped, leaving that audio without a
+/// speaker rather than with a guessed one.
+///
+/// **Measured, not preferred.** This was 5.0 s, which is longer than most
+/// conversational turns and cost 58.7% frame error and 121 of 300 seconds
+/// unattributed on a three-second-turn fixture. Sweeping it from 0.5 s to
+/// 5.0 s over 24 fixtures and two embedders puts the optimum here: against
+/// 5.0 s, 3.0 s is better on 28 of the 48 runs, identical on 19 and worse on
+/// one, by 0.0007. Mean frame error 0.3807 → 0.1683, mean unattributed speech
+/// 85.6 s of 300 → 3.5 s, right speaker count 33/48 → 45/48.
+/// Receipt: `artifacts/qa/diarization-turn-floor-2026-09-03.md`.
+///
+/// Why the optimum is 3.0 and not 0, which is the part that matters if the
+/// windows ever move: on the shipped fixed grid a merged run spans
+/// `SEGMENT_SECONDS + k * hop` seconds for `k + 1` windows, so 3.0 s is
+/// exactly **two consecutive windows agreeing**. Below it the only runs
+/// admitted are single windows, and a single window's label is uncorroborated
+/// — on five-minute fixtures with two or three real speakers, clustering
+/// emits between 7 and 30 distinct labels, a mean of 13.4. The floor is a
+/// corroboration rule that happens to be written in seconds, and it is what
+/// keeps a two-person meeting from being reported as sixteen speakers.
+pub const MIN_TURN_SECONDS: f64 = SEGMENT_SECONDS + (SEGMENT_SECONDS - SEGMENT_OVERLAP_SECONDS);
+
 /// Speaker embedding extractor using ONNX
 #[cfg(feature = "diarization")]
 pub struct SpeakerEmbeddingExtractor {
@@ -585,7 +609,7 @@ fn finalize_embedding(array: ArrayViewD<'_, f32>) -> Result<Array1<f32>> {
 pub struct EmbeddingClusterer {
     /// Threshold for clustering (cosine similarity)
     threshold: f32,
-    /// Minimum segment duration (seconds)
+    /// The shortest turn to report. See [`MIN_TURN_SECONDS`].
     min_segment_duration: f64,
 }
 
@@ -594,7 +618,7 @@ impl EmbeddingClusterer {
         Self {
             // Cosine distance threshold. Lower is stricter and helps avoid speaker over-merging.
             threshold: 0.35,
-            min_segment_duration: 5.0,
+            min_segment_duration: MIN_TURN_SECONDS,
         }
     }
 
@@ -607,6 +631,17 @@ impl EmbeddingClusterer {
     )]
     pub fn with_threshold(mut self, threshold: f32) -> Self {
         self.threshold = threshold;
+        self
+    }
+
+    /// Override the shortest run [`Self::smooth_segments`] will emit.
+    ///
+    /// Test-only. The shipped value is measured, not preferred, and lives in
+    /// [`Self::new`]; this exists so the turn-floor sweep can plot frame error
+    /// against the floor in one process instead of recompiling per point.
+    #[cfg(test)]
+    pub(crate) fn with_min_segment_duration(mut self, seconds: f64) -> Self {
+        self.min_segment_duration = seconds;
         self
     }
 
@@ -747,7 +782,20 @@ impl EmbeddingClusterer {
         labels
     }
 
-    /// Refine segments using Viterbi-like smoothing
+    /// Merge consecutive same-label windows into turns, and drop any turn
+    /// shorter than [`MIN_TURN_SECONDS`].
+    ///
+    /// Dropping, rather than relabelling, is deliberate and it is what makes
+    /// the returned turns non-contiguous: audio under a dropped run comes back
+    /// with no speaker, and `merge_with_transcript` keeps that text anonymous.
+    /// Attaching a short run to the neighbour its embedding is closest to was
+    /// measured against this on 24 fixtures and lost. It helps only where the
+    /// floor is high enough to be deleting real turns — at a 5-second floor it
+    /// recovers a lot — and at the shipped floor it is worse on **44 of 48
+    /// runs**, because it never removes a spurious label, it only moves a
+    /// single-window one onto a neighbour and so launders noise into a named
+    /// speaker.
+    /// Receipt: `artifacts/qa/diarization-turn-floor-2026-09-03.md`.
     pub fn smooth_segments(
         &self,
         segments: &[(f64, f64)],
@@ -894,5 +942,357 @@ mod tests {
             !verified.contains(&fbank_frames_for_seconds(8.0)),
             "an 8-second window is outside what was calibrated"
         );
+    }
+
+    /// The floor is a corroboration rule written in seconds, so it has to stay
+    /// tied to the window geometry rather than being an independent number
+    /// somebody can nudge.
+    #[test]
+    fn the_turn_floor_is_the_span_of_two_consecutive_windows() {
+        assert_eq!(MIN_TURN_SECONDS, 3.0);
+        let two_windows = generate_segments(3.0, SEGMENT_SECONDS, SEGMENT_OVERLAP_SECONDS);
+        assert_eq!(two_windows, vec![(0.0, 2.0), (1.0, 3.0)]);
+        let (first_start, _) = two_windows[0];
+        let (_, last_end) = two_windows[two_windows.len() - 1];
+        assert_eq!(last_end - first_start, MIN_TURN_SECONDS);
+    }
+
+    /// Every shipped number in this file that came from a measurement names
+    /// the receipt, and the receipt has to still exist. Same rule as
+    /// `voiceprints.rs`, for the same reason: a constant with no citation is
+    /// indistinguishable from a guess.
+    #[test]
+    fn the_turn_floor_cites_a_receipt_that_exists() {
+        const SOURCE: &str = include_str!("embedder.rs");
+        const RECEIPT: &str = "artifacts/qa/diarization-turn-floor-2026-09-03.md";
+        assert!(
+            !include_str!("../../../artifacts/qa/diarization-turn-floor-2026-09-03.md").is_empty(),
+            "{RECEIPT} is empty"
+        );
+        let position = SOURCE
+            .find("pub const MIN_TURN_SECONDS: ")
+            .expect("MIN_TURN_SECONDS is not declared in this file");
+        let mut comment: Vec<&str> = SOURCE[..position]
+            .lines()
+            .rev()
+            .take_while(|line| line.trim_start().starts_with("///"))
+            .collect();
+        comment.reverse();
+        assert!(
+            comment.join("\n").contains(RECEIPT),
+            "MIN_TURN_SECONDS names no measurement receipt"
+        );
+    }
+
+    /// One window is a label nothing corroborates; two consecutive windows
+    /// agreeing is the shortest thing this pipeline is willing to call a turn.
+    #[test]
+    fn a_run_of_one_window_is_dropped_and_a_run_of_two_survives() {
+        let clusterer = EmbeddingClusterer::new();
+        let windows = generate_segments(6.0, SEGMENT_SECONDS, SEGMENT_OVERLAP_SECONDS);
+        assert_eq!(
+            windows,
+            vec![(0.0, 2.0), (1.0, 3.0), (2.0, 4.0), (3.0, 5.0), (4.0, 6.0)]
+        );
+
+        // Windows 0..=1 are speaker 0 (a 3.0 s run), window 2 is a lone
+        // speaker 1 (2.0 s), windows 3..=4 are speaker 0 again (3.0 s).
+        let turns = clusterer.smooth_segments(&windows, &[0, 0, 1, 0, 0]);
+        assert_eq!(turns, vec![(0.0, 3.0, 0), (3.0, 6.0, 0)]);
+
+        // The same shape one window longer on the interloper clears the floor
+        // and is reported.
+        let windows = generate_segments(7.0, SEGMENT_SECONDS, SEGMENT_OVERLAP_SECONDS);
+        let turns = clusterer.smooth_segments(&windows, &[0, 0, 1, 1, 0, 0]);
+        assert_eq!(turns, vec![(0.0, 3.0, 0), (2.0, 5.0, 1), (4.0, 7.0, 0)]);
+    }
+
+    /// A dropped run leaves a hole, and the hole is the point: the caller
+    /// renders that audio with no speaker instead of the wrong one.
+    #[test]
+    fn a_dropped_run_leaves_a_gap_rather_than_extending_its_neighbours() {
+        let clusterer = EmbeddingClusterer::new();
+        let turns = clusterer.smooth_segments(
+            &[
+                (0.0, 2.0),
+                (1.0, 3.0),
+                (2.0, 4.0),
+                (10.0, 12.0),
+                (11.0, 13.0),
+            ],
+            &[0, 0, 1, 2, 2],
+        );
+        assert_eq!(turns, vec![(0.0, 3.0, 0), (10.0, 13.0, 2)]);
+        // Nothing claims 3.0..10.0, and label 1 is not reported at all.
+        assert!(turns.iter().all(|(_, _, label)| *label != 1));
+    }
+
+    #[test]
+    fn a_recording_whose_every_window_disagrees_reports_no_turns() {
+        let clusterer = EmbeddingClusterer::new();
+        let windows = generate_segments(6.0, SEGMENT_SECONDS, SEGMENT_OVERLAP_SECONDS);
+        assert!(clusterer
+            .smooth_segments(&windows, &[0, 1, 2, 3, 4])
+            .is_empty());
+    }
+
+    /// The tail is where the fixed grid stops being regular: `generate_segments`
+    /// clips the last window to the end of the recording, so the last run can
+    /// be shorter than the geometry above implies.
+    #[test]
+    fn a_clipped_tail_run_is_judged_on_its_real_length() {
+        let clusterer = EmbeddingClusterer::new();
+        // A lone 1.2 s tail window is under the floor and goes.
+        assert_eq!(
+            clusterer.smooth_segments(&[(0.0, 2.0), (1.0, 3.0), (2.0, 3.2)], &[0, 0, 1]),
+            vec![(0.0, 3.0, 0)]
+        );
+        // Two windows are not automatically enough: a clipped tail makes the
+        // run 2.2 s, which is still under the floor.
+        assert_eq!(
+            clusterer.smooth_segments(
+                &[(0.0, 2.0), (1.0, 3.0), (2.0, 4.0), (3.0, 4.2)],
+                &[0, 0, 1, 1]
+            ),
+            vec![(0.0, 3.0, 0)]
+        );
+        // Three windows reaching the same tail span 3.2 s and are reported.
+        assert_eq!(
+            clusterer.smooth_segments(
+                &[(0.0, 2.0), (1.0, 3.0), (2.0, 4.0), (3.0, 5.0), (4.0, 5.2)],
+                &[0, 0, 1, 1, 1]
+            ),
+            vec![(0.0, 3.0, 0), (2.0, 5.2, 1)]
+        );
+    }
+
+    #[test]
+    fn an_empty_clustering_smooths_to_nothing() {
+        assert!(EmbeddingClusterer::new()
+            .smooth_segments(&[], &[])
+            .is_empty());
+    }
+
+    /// What the floor is worth end to end, without an ONNX runtime.
+    ///
+    /// `fixtures/turn-floor-three-second-turns.json` is one real ECAPA-TDNN
+    /// clustering of a five-minute two-speaker conversation with three-second
+    /// turns, frozen with the fixture's exact ground truth. Only the smoothing
+    /// step runs here, so this pins the decision under test and nothing else —
+    /// and it fails if the floor moves, in either direction.
+    #[test]
+    fn the_turn_floor_is_worth_a_third_of_the_frames_on_a_short_turn_fixture() {
+        let fixture = TurnFloorFixture::load();
+
+        let shipped = fixture.frame_errors(MIN_TURN_SECONDS);
+        let previous = fixture.frame_errors(5.0);
+        assert_eq!(fixture.frames(), 30_000);
+
+        // 23.93% against 58.73%. The second number is the one lane C8 measured
+        // through the whole pipeline in
+        // `artifacts/qa/diarization-segmentation-2026-09-02.md`, which is what
+        // makes this fixture a faithful stand-in for it.
+        assert_eq!(shipped.errors, 7_180);
+        assert_eq!(previous.errors, 17_620);
+
+        // Both floors find both speakers; the old one simply refused to place
+        // 121 of the 300 seconds — the exact figure C8 published.
+        assert_eq!(shipped.speakers, 2);
+        assert_eq!(previous.speakers, 2);
+        assert_eq!(shipped.unattributed_frames, 0);
+        assert_eq!(previous.unattributed_frames, 12_100);
+
+        // And dropping the floor further is not free: single-window labels
+        // come back as speakers, which is why the floor exists.
+        let no_floor = fixture.frame_errors(0.5);
+        assert_eq!(no_floor.speakers, 22);
+        assert!(
+            no_floor.errors > shipped.errors,
+            "removing the floor entirely scored {} errors against {}",
+            no_floor.errors,
+            shipped.errors
+        );
+    }
+
+    struct TurnFloorScore {
+        errors: usize,
+        speakers: usize,
+        unattributed_frames: usize,
+    }
+
+    /// A frozen clustering plus the ground truth it should be scored against.
+    struct TurnFloorFixture {
+        duration: f64,
+        windows: Vec<(f64, f64)>,
+        labels: Vec<usize>,
+        reference: Vec<(f64, f64, String)>,
+    }
+
+    impl TurnFloorFixture {
+        const FRAME_SECONDS: f64 = 0.01;
+
+        fn load() -> Self {
+            let raw: serde_json::Value =
+                serde_json::from_str(include_str!("fixtures/turn-floor-three-second-turns.json"))
+                    .expect("fixture parses");
+            let windows: Vec<(f64, f64)> = raw["windows"]
+                .as_array()
+                .expect("windows")
+                .iter()
+                .map(|entry| (entry[0].as_f64().unwrap(), entry[1].as_f64().unwrap()))
+                .collect();
+            let labels: Vec<usize> = raw["windows"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|entry| entry[2].as_u64().unwrap() as usize)
+                .collect();
+            let reference: Vec<(f64, f64, String)> = raw["reference"]
+                .as_array()
+                .expect("reference")
+                .iter()
+                .map(|entry| {
+                    (
+                        entry[0].as_f64().unwrap(),
+                        entry[1].as_f64().unwrap(),
+                        entry[2].as_str().unwrap().to_string(),
+                    )
+                })
+                .collect();
+            Self {
+                duration: raw["durationSeconds"].as_f64().expect("durationSeconds"),
+                windows,
+                labels,
+                reference,
+            }
+        }
+
+        fn frames(&self) -> usize {
+            (self.duration / Self::FRAME_SECONDS).round() as usize
+        }
+
+        /// Paint one label per 10 ms frame; `None` where nobody is speaking.
+        fn paint<T: Clone>(&self, turns: &[(f64, f64, T)]) -> Vec<Option<T>> {
+            let mut frames = vec![None; self.frames()];
+            for (start, end, label) in turns {
+                let from = ((start / Self::FRAME_SECONDS).round() as usize).min(frames.len());
+                let to = ((end / Self::FRAME_SECONDS).round() as usize).min(frames.len());
+                for frame in &mut frames[from..to] {
+                    if frame.is_none() {
+                        *frame = Some(label.clone());
+                    }
+                }
+            }
+            frames
+        }
+
+        /// Frame errors under the best one-to-one map from predicted labels to
+        /// reference speakers — the same accounting
+        /// `scripts/score-diarization-eval.mjs` reports as `frameErrorRate`.
+        fn frame_errors(&self, floor: f64) -> TurnFloorScore {
+            let turns = EmbeddingClusterer::new()
+                .with_min_segment_duration(floor)
+                .smooth_segments(&self.windows, &self.labels);
+
+            let reference = self.paint(&self.reference);
+            let predicted = self.paint(&turns);
+
+            let mut speakers: Vec<usize> = turns.iter().map(|(_, _, label)| *label).collect();
+            speakers.sort_unstable();
+            speakers.dedup();
+            let mut names: Vec<&str> = self
+                .reference
+                .iter()
+                .map(|(_, _, name)| name.as_str())
+                .collect();
+            names.sort_unstable();
+            names.dedup();
+
+            let unattributed_frames = reference
+                .iter()
+                .zip(predicted.iter())
+                .filter(|(expected, actual)| expected.is_some() && actual.is_none())
+                .count();
+
+            // `agree[p][r]`: frames a map from predicted p to reference r would
+            // score correct. `silent[p]`: frames p covers where the reference
+            // has nobody, which only agree when p is mapped to nobody. `base`:
+            // frames neither side attributes, correct under every map.
+            let mut agree = vec![vec![0usize; names.len()]; speakers.len()];
+            let mut silent = vec![0usize; speakers.len()];
+            let mut base = 0usize;
+            for (expected, actual) in reference.iter().zip(predicted.iter()) {
+                let Some(label) = actual else {
+                    if expected.is_none() {
+                        base += 1;
+                    }
+                    continue;
+                };
+                let p = speakers.iter().position(|s| s == label).unwrap();
+                match expected {
+                    None => silent[p] += 1,
+                    Some(name) => {
+                        agree[p][names.iter().position(|n| n == name).unwrap()] += 1;
+                    }
+                }
+            }
+
+            // Search over which predicted speaker (if any) each *reference*
+            // speaker is matched to. There are at most four of those and the
+            // matching is injective, so this stays small however many spurious
+            // clusters a low floor lets through.
+            let unmatched: usize = base + silent.iter().sum::<usize>();
+            let mut best_agreement = unmatched;
+            let mut taken = vec![false; speakers.len()];
+            Self::search(
+                &agree,
+                &silent,
+                0,
+                names.len(),
+                &mut taken,
+                unmatched,
+                &mut best_agreement,
+            );
+
+            TurnFloorScore {
+                errors: reference.len() - best_agreement,
+                speakers: speakers.len(),
+                unattributed_frames,
+            }
+        }
+
+        fn search(
+            agree: &[Vec<usize>],
+            silent: &[usize],
+            name: usize,
+            names: usize,
+            taken: &mut Vec<bool>,
+            agreement: usize,
+            best: &mut usize,
+        ) {
+            if name == names {
+                *best = (*best).max(agreement);
+                return;
+            }
+            // Leaving a reference speaker unmatched is allowed: a run can
+            // predict fewer speakers than the fixture has.
+            Self::search(agree, silent, name + 1, names, taken, agreement, best);
+            for p in 0..agree.len() {
+                if taken[p] {
+                    continue;
+                }
+                taken[p] = true;
+                Self::search(
+                    agree,
+                    silent,
+                    name + 1,
+                    names,
+                    taken,
+                    agreement + agree[p][name] - silent[p],
+                    best,
+                );
+                taken[p] = false;
+            }
+        }
     }
 }
