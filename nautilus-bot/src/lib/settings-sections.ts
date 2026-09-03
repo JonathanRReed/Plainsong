@@ -15,6 +15,7 @@ const DEFAULT_MEETINGS_SETTINGS: MeetingsSettings = {
   callDetectionEnabled: true,
   autoStopWhenCallAppQuits: true,
   autoStopAfterSilenceMinutes: 15,
+  preferProviderDiarization: true,
 };
 
 const DEFAULT_NOTIFICATIONS_SETTINGS: NotificationsSettings = {
@@ -39,6 +40,9 @@ export function resolveMeetingsSettings(
       typeof minutes === "number" && Number.isFinite(minutes)
         ? Math.min(Math.max(0, Math.round(minutes)), MEETING_AUTO_STOP_SILENCE_MINUTES_MAX)
         : DEFAULT_MEETINGS_SETTINGS.autoStopAfterSilenceMinutes,
+    preferProviderDiarization:
+      meetings?.preferProviderDiarization ??
+      DEFAULT_MEETINGS_SETTINGS.preferProviderDiarization,
   };
 }
 

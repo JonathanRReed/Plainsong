@@ -122,6 +122,13 @@ export interface MeetingTranscriptDetails {
   sourceMode: "me_them" | "speaker_labels" | "single_source" | "unknown" | string;
   hasSourceAwareSpeakers: boolean;
   hasSpeakerLabels: boolean;
+  /**
+   * Which diarizer produced the speaker labels, recorded when they were
+   * written: an ASR provider's settings value (`deepgram`), or
+   * `plainsong:<embedding model id>`. Absent when no diarizer has run, which
+   * is not the same as one having run and found a single speaker.
+   */
+  diarizer?: string | null;
 }
 
 export interface Project {

@@ -48,6 +48,10 @@ export function describeCloudDictationVocabularyNote(
       return "Your dictionary terms and snippet triggers are sent with the audio to help recognition. ElevenLabs bills 20% more for a request that carries them.";
     case "cohere_transcribe":
       return "Cohere does not accept vocabulary hints, so your dictionary is applied only after transcription, on this Mac.";
+    case "deepgram":
+      return "Your dictionary terms and snippet triggers are sent with the audio as keyterms to help recognition. Every request also opts out of Deepgram's model improvement programme.";
+    case "gemini_transcribe":
+      return "Your dictionary terms and snippet triggers are sent with the audio to help recognition. Google's paid tier does not train on them; its free tier does.";
     default:
       return null;
   }

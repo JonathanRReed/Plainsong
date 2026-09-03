@@ -628,6 +628,12 @@ pub struct MeetingTranscriptDetails {
     pub source_mode: String,
     pub has_source_aware_speakers: bool,
     pub has_speaker_labels: bool,
+    /// Which diarizer produced the speaker labels, as recorded when they were
+    /// written: an ASR provider's settings value (`deepgram`), or
+    /// `plainsong:<embedding model id>`. `None` means no diarizer has run on
+    /// this transcript, which is not the same as one having run and found a
+    /// single speaker.
+    pub diarizer: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

@@ -163,6 +163,7 @@ impl ElevenLabsScribeProvider {
             optimization_applied: false,
             fallback_reason: None,
             vocabulary_hint_terms_applied,
+            speaker_turns: Vec::new(),
         })
     }
 

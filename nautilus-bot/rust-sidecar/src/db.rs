@@ -1727,6 +1727,12 @@ impl Database {
         self.ensure_table_column("transcripts", "requested_provider", "TEXT")?;
         self.ensure_table_column("transcripts", "actual_provider", "TEXT")?;
         self.ensure_table_column("transcripts", "revision", "INTEGER NOT NULL DEFAULT 0")?;
+        // Which diarizer produced the speaker labels on this transcript, so the
+        // meeting header can name it instead of inferring it from the ASR
+        // provider (which would be wrong every time a provider-diarization
+        // attempt fell back to the local pipeline). NULL means no diarizer has
+        // run, which is not the same as "Plainsong ran and found one speaker".
+        self.ensure_table_column("transcripts", "diarizer", "TEXT")?;
         self.migrate_transcripts_drop_fallback_columns()?;
 
         self.conn.execute(
@@ -6118,12 +6124,17 @@ impl Database {
         Ok(())
     }
 
+    /// `diarizer` is the stable identifier of whatever produced these speaker
+    /// labels -- `deepgram`, `gemini_transcribe`, or
+    /// `plainsong:<embedding model id>`. It is written in the same transaction
+    /// as the segments so the record and the labels cannot disagree.
     pub fn apply_diarization_enrichment(
         &mut self,
         recording_id: &str,
         expected_revision: i64,
         segments: &[TranscriptSegment],
         aliases: &[SpeakerAliasUpsert],
+        diarizer: Option<&str>,
     ) -> Result<bool> {
         let segments_json = serde_json::to_string(segments)?;
         let full_text = segments
@@ -6135,9 +6146,15 @@ impl Database {
         let tx = self.conn.transaction()?;
         let updated = tx.execute(
             "UPDATE transcripts
-             SET segments = ?1, full_text = ?2, revision = revision + 1
+             SET segments = ?1, full_text = ?2, revision = revision + 1, diarizer = ?5
              WHERE recording_id = ?3 AND revision = ?4",
-            params![segments_json, full_text, recording_id, expected_revision],
+            params![
+                segments_json,
+                full_text,
+                recording_id,
+                expected_revision,
+                diarizer
+            ],
         )?;
         if updated == 0 {
             return Ok(false);
@@ -6158,6 +6175,23 @@ impl Database {
         }
         tx.commit()?;
         Ok(true)
+    }
+
+    /// The diarizer recorded against this recording's transcript, if any has
+    /// run. Read separately from `get_transcript` so the transcript model
+    /// itself does not grow a field forty-odd construction sites would have to
+    /// spell out.
+    pub fn get_transcript_diarizer(&self, recording_id: &str) -> Result<Option<String>> {
+        let mut statement = self
+            .conn
+            .prepare("SELECT diarizer FROM transcripts WHERE recording_id = ?1")?;
+        let mut rows = statement.query(params![recording_id])?;
+        match rows.next()? {
+            Some(row) => Ok(row
+                .get::<_, Option<String>>(0)?
+                .filter(|value| !value.trim().is_empty())),
+            None => Ok(None),
+        }
     }
 
     fn upsert_speaker_alias_transaction(
@@ -8821,7 +8855,7 @@ mod tests {
             confidence: 0.95,
         }];
         assert!(!db
-            .apply_diarization_enrichment("edited", edit_revision, &stale_segments, &[])
+            .apply_diarization_enrichment("edited", edit_revision, &stale_segments, &[], None)
             .unwrap());
         let edited = db.get_transcript("edited").unwrap().unwrap();
         assert_eq!(edited.full_text, "User correction");
@@ -8835,7 +8869,7 @@ mod tests {
         db.delete_transcript_segments("deleted", &["s1".to_string()])
             .unwrap();
         assert!(!db
-            .apply_diarization_enrichment("deleted", delete_revision, &stale_segments, &[])
+            .apply_diarization_enrichment("deleted", delete_revision, &stale_segments, &[], None)
             .unwrap());
         let deleted = db.get_transcript("deleted").unwrap().unwrap();
         assert!(deleted.segments.is_empty());
@@ -8895,7 +8929,13 @@ mod tests {
         ];
 
         let error = db
-            .apply_diarization_enrichment("r1", revision, &enriched, &aliases)
+            .apply_diarization_enrichment(
+                "r1",
+                revision,
+                &enriched,
+                &aliases,
+                Some("plainsong:ecapa_tdnn_speaker"),
+            )
             .expect_err("alias failure must roll back the full enrichment transaction");
         assert!(error.to_string().contains("injected alias failure"));
 
@@ -9151,7 +9191,7 @@ mod tests {
         let (mut diarized, revision) = db.get_transcript_with_revision("r1").unwrap().unwrap();
         diarized.segments[0].speaker_id = Some("speaker_9".to_string());
         assert!(db
-            .apply_diarization_enrichment("r1", revision, &diarized.segments, &[])
+            .apply_diarization_enrichment("r1", revision, &diarized.segments, &[], None)
             .unwrap());
         assert!(!db.has_embeddings("r1"));
         let recording = db.get_recording("r1").unwrap().unwrap();

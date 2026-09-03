@@ -38,6 +38,10 @@ export const ALLOWED_EXTERNAL_HOSTS: readonly string[] = [
   "console.groq.com",
   "developers.openai.com",
   "elevenlabs.io",
+  // Deepgram Nova → rust-sidecar/src/asr/deepgram.rs
+  "developers.deepgram.com",
+  // Gemini Transcribe → rust-sidecar/src/asr/gemini_transcribe.rs
+  "ai.google.dev",
   // macOS Apple Speech / Windows SDK dictation provider docs
   "developer.apple.com",
   "learn.microsoft.com",

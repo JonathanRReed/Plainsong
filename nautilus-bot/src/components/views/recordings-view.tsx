@@ -27,6 +27,10 @@ import {
   isKnownAsrProvider,
   providerHostingPreference,
 } from "@/lib/asr-capabilities";
+import {
+  describeMeetingDiarizer,
+  describeMeetingDiarizerDetail,
+} from "@/lib/meeting-diarizer";
 import { cn } from "@/lib/utils";
 import { RecordingWaveform, WaveformVisualizer } from "@/components/waveform-visualizer";
 import { AiAnalysisPanel } from "@/components/ai-analysis-panel";
@@ -422,6 +426,8 @@ const CLOUD_PROVIDER_DISPLAY_NAMES: Record<string, string> = {
   openai_cloud: "OpenAI",
   groq: "Groq",
   cohere_transcribe: "Cohere",
+  deepgram: "Deepgram Nova",
+  gemini_transcribe: "Gemini Transcribe",
 };
 
 /**
@@ -3625,6 +3631,19 @@ export function RecordingsView() {
       resolveRecordingCaptureMode(activeMeeting, null, liveMeetingSystemAudio),
     [activeMeeting, liveMeetingSystemAudio]
   );
+  // Which diarizer produced the speaker badges, from what was recorded when
+  // they were written -- never inferred from the ASR provider, because a
+  // provider-diarization attempt that fell back to the local pipeline would
+  // then be credited to the provider.
+  const selectedMeetingDiarizer = useMemo(
+    () => describeMeetingDiarizer(selectedTranscriptDetails),
+    [selectedTranscriptDetails]
+  );
+  const selectedMeetingDiarizerDetail = useMemo(
+    () => describeMeetingDiarizerDetail(selectedTranscriptDetails),
+    [selectedTranscriptDetails]
+  );
+
   const selectedMeetingCaptureMode = useMemo(
     () =>
       resolveRecordingCaptureMode(
@@ -4388,6 +4407,11 @@ export function RecordingsView() {
                 {formatDuration(selectedRecording?.duration ?? 0)}
               </span>
               <span>{selectedMeetingCaptureMode}</span>
+              {selectedMeetingDiarizer ? (
+                <span title={selectedMeetingDiarizerDetail ?? undefined}>
+                  {selectedMeetingDiarizer}
+                </span>
+              ) : null}
               {/* The meeting can be renamed; the file it came from cannot, so
                   the provenance is stated separately from the title. */}
               {selectedRecording?.importedSourceName ? (

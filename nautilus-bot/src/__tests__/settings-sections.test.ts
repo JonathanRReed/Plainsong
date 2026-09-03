@@ -11,6 +11,7 @@ describe("resolveMeetingsSettings", () => {
       callDetectionEnabled: true,
       autoStopWhenCallAppQuits: true,
       autoStopAfterSilenceMinutes: 15,
+      preferProviderDiarization: true,
     });
     expect(resolveMeetingsSettings({})).toEqual(resolveMeetingsSettings(undefined));
   });
@@ -22,18 +23,23 @@ describe("resolveMeetingsSettings", () => {
           callDetectionEnabled: false,
           autoStopWhenCallAppQuits: false,
           autoStopAfterSilenceMinutes: 0,
+          preferProviderDiarization: false,
         },
       }),
     ).toEqual({
       callDetectionEnabled: false,
       autoStopWhenCallAppQuits: false,
       autoStopAfterSilenceMinutes: 0,
+      preferProviderDiarization: false,
     });
     const partial = resolveMeetingsSettings({
       meetings: { autoStopAfterSilenceMinutes: 9_999 } as never,
     });
     expect(partial.autoStopAfterSilenceMinutes).toBe(MEETING_AUTO_STOP_SILENCE_MINUTES_MAX);
     expect(partial.callDetectionEnabled).toBe(true);
+    // A settings file written before provider diarization existed is not a
+    // user who opted out of it.
+    expect(partial.preferProviderDiarization).toBe(true);
     expect(
       resolveMeetingsSettings({
         meetings: { autoStopAfterSilenceMinutes: -4 } as never,

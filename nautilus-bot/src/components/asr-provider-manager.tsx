@@ -733,6 +733,8 @@ export function AsrProviderManager({ className }: AsrProviderManagerProps) {
       case "openai_cloud":
       case "elevenlabs_scribe":
       case "cohere_transcribe":
+      case "deepgram":
+      case "gemini_transcribe":
         return <CloudLightning className="h-5 w-5" />;
       default:
         return <Cpu className="h-5 w-5" />;
@@ -833,6 +835,10 @@ export function AsrProviderManager({ className }: AsrProviderManagerProps) {
         return "Add an OpenAI API key in Settings → API Keys";
       case "cohere_transcribe":
         return "Add a Cohere API key in Settings → API Keys";
+      case "deepgram":
+        return "Add a Deepgram API key in Settings → API Keys";
+      case "gemini_transcribe":
+        return "Add a Google Gemini API key in Settings → API Keys";
       default:
         return "Use the Download button to fetch the model (no Python needed)";
     }

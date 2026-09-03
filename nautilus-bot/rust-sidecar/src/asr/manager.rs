@@ -746,6 +746,7 @@ impl AsrManager {
             optimization_applied: true,
             fallback_reason: None,
             vocabulary_hint_terms_applied: 0,
+            speaker_turns: Vec::new(),
         })
     }
 
@@ -1024,6 +1025,38 @@ impl AsrManager {
             selected_model,
             Some(mlx_enabled),
             &TranscriptionOptions::default(),
+        )
+        .await
+    }
+
+    /// Transcribe a whole recording from disk for the meeting route slot.
+    ///
+    /// Used only where a provider can take an entire meeting in one request:
+    /// a provider's speaker numbering is scoped to one request, so this is the
+    /// only shape in which its diarization covers the whole recording. Asks
+    /// for speaker labels, which is the reason the path exists.
+    pub async fn transcribe_path_for_meeting(
+        &self,
+        provider_type: AsrProviderType,
+        audio_path: &Path,
+        selected_model: Option<&str>,
+    ) -> Result<TranscriptionResult> {
+        if provider_type == AsrProviderType::MacosAppleSpeech {
+            return Err(anyhow::anyhow!(
+                "Apple Speech is dictation-only and cannot be routed through meeting transcription. Choose a meeting-capable provider."
+            ));
+        }
+        let mlx_enabled = *self.meeting_mlx_enabled.read().await;
+        self.transcribe_inner(
+            provider_type,
+            Some(audio_path),
+            None,
+            selected_model,
+            Some(mlx_enabled),
+            &TranscriptionOptions {
+                request_speaker_labels: true,
+                ..TranscriptionOptions::default()
+            },
         )
         .await
     }
@@ -1764,6 +1797,74 @@ fn runtime_diagnostics_for_provider(
                         None
                     } else {
                         Some("Get API key from https://dashboard.cohere.com/api-keys and set in Settings -> API Keys.".to_string())
+                    },
+                },
+            }
+        }
+        AsrProviderType::Deepgram => {
+            let has_key = has_provider_secret_or_env("deepgram", "DEEPGRAM_API_KEY");
+            RuntimeDiagnosticsInternal {
+                runtime_status: if has_key {
+                    RuntimeStatus::Ready
+                } else {
+                    RuntimeStatus::MissingModel
+                },
+                runtime_message: Some(if has_key {
+                    "Deepgram Nova cloud API ready. Returns speaker labels and word timestamps; \
+                     every request opts out of Deepgram's model improvement programme."
+                        .to_string()
+                } else {
+                    "Set DEEPGRAM_API_KEY to enable Deepgram Nova cloud.".to_string()
+                }),
+                runtime_details: RuntimeDetails {
+                    model_path: None,
+                    python_path: None,
+                    missing_files: if has_key {
+                        Vec::new()
+                    } else {
+                        vec!["DEEPGRAM_API_KEY".to_string()]
+                    },
+                    setup_action: if has_key {
+                        None
+                    } else {
+                        Some(
+                            "Get an API key from https://console.deepgram.com and set it in Settings -> API Keys."
+                                .to_string(),
+                        )
+                    },
+                },
+            }
+        }
+        AsrProviderType::GeminiTranscribe => {
+            let has_key = has_provider_secret_or_env("gemini", "GEMINI_API_KEY");
+            RuntimeDiagnosticsInternal {
+                runtime_status: if has_key {
+                    RuntimeStatus::Ready
+                } else {
+                    RuntimeStatus::MissingModel
+                },
+                runtime_message: Some(if has_key {
+                    "Gemini 3.5 Transcribe cloud API ready. Google's paid tier does not train on \
+                     your prompts; the free tier does."
+                        .to_string()
+                } else {
+                    "Set GEMINI_API_KEY to enable Gemini 3.5 Transcribe cloud.".to_string()
+                }),
+                runtime_details: RuntimeDetails {
+                    model_path: None,
+                    python_path: None,
+                    missing_files: if has_key {
+                        Vec::new()
+                    } else {
+                        vec!["GEMINI_API_KEY".to_string()]
+                    },
+                    setup_action: if has_key {
+                        None
+                    } else {
+                        Some(
+                            "Get an API key from https://aistudio.google.com/apikey and set it in Settings -> API Keys."
+                                .to_string(),
+                        )
                     },
                 },
             }

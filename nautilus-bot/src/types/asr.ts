@@ -127,7 +127,9 @@ export type AsrProviderType =
   | "openai_cloud"
   | "groq"
   | "cohere_transcribe"
-  | "qwen3_asr";
+  | "qwen3_asr"
+  | "deepgram"
+  | "gemini_transcribe";
 
 // LLM Types
 export interface LlmAnalysisResult {

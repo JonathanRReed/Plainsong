@@ -1,6 +1,8 @@
 pub mod cohere;
+pub mod deepgram;
 pub mod distil_whisper;
 pub mod elevenlabs_scribe;
+pub mod gemini_transcribe;
 pub mod groq;
 pub mod macos_apple_speech_provider;
 pub mod manager;
@@ -82,7 +84,7 @@ pub struct ModelOption {
     pub label: String,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct TranscriptSegment {
     pub start_time: f64,
@@ -91,11 +93,43 @@ pub struct TranscriptSegment {
     pub confidence: f64,
 }
 
+/// One speaker turn exactly as a *provider* reported it, on that request's own
+/// timeline.
+///
+/// These are deliberately kept beside the transcript rather than merged into
+/// `segments` by the provider. The meeting lane feeds them through the same
+/// `DiarizationEngine::merge_with_transcript` the local diarizer uses, so the
+/// two diarizers cannot drift into producing differently-shaped transcripts —
+/// swapping the diarizer is swapping which turns go into one merge, and
+/// nothing else.
+///
+/// `speaker_id` is already in Plainsong's own `S1`/`S2` form, not the
+/// provider's numbering, because that is what the rename/alias flow and the
+/// transcript viewer read.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SpeakerTurn {
+    pub start_time: f64,
+    pub end_time: f64,
+    pub speaker_id: String,
+    pub confidence: f64,
+}
+
+/// Provider speaker numbering is per request and starts at zero; Plainsong's
+/// own diarizer emits `S1`, `S2`, … and the whole UI is built on that shape.
+pub(crate) fn provider_speaker_id(index: u32) -> String {
+    format!("S{}", index.saturating_add(1))
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct TranscriptionResult {
     pub text: String,
     pub segments: Vec<TranscriptSegment>,
+    /// Speaker turns the provider itself reported, empty for every provider
+    /// that does not diarize (which is all of them except Deepgram and Gemini).
+    #[serde(default)]
+    pub speaker_turns: Vec<SpeakerTurn>,
     pub language: String,
     pub confidence: f64,
     pub processing_time_ms: u64,
@@ -209,6 +243,16 @@ pub struct TranscriptionOptions {
     /// the caller translates the transcript afterwards. See
     /// `resolve_dictation_translation_route` in `lib.rs`.
     pub translate_to_english: bool,
+    /// Ask the provider for speaker labels on this request.
+    ///
+    /// Only the meeting lane sets it, and only providers that actually
+    /// diarize read it. It is a request option rather than a provider
+    /// setting because the same provider is used for both lanes and the
+    /// answer differs: Gemini's API refuses `custom_vocabulary` on a request
+    /// that asks for diarization or word timestamps (confirmed by Google on
+    /// 2026-09-01), so dictation gets the dictionary and meetings get the
+    /// speakers, and neither lane can silently take the other's shape.
+    pub request_speaker_labels: bool,
 }
 
 #[async_trait]
@@ -275,6 +319,8 @@ pub enum AsrProviderType {
     Groq,
     CohereTranscribe,
     Qwen3Asr,
+    Deepgram,
+    GeminiTranscribe,
 }
 
 impl AsrProviderType {
@@ -292,6 +338,8 @@ impl AsrProviderType {
             AsrProviderType::Groq,
             AsrProviderType::CohereTranscribe,
             AsrProviderType::Qwen3Asr,
+            AsrProviderType::Deepgram,
+            AsrProviderType::GeminiTranscribe,
         ]
     }
 
@@ -309,6 +357,8 @@ impl AsrProviderType {
             AsrProviderType::Groq => "Groq Whisper (Cloud)",
             AsrProviderType::CohereTranscribe => "Cohere Transcribe",
             AsrProviderType::Qwen3Asr => "Qwen3-ASR (Local)",
+            AsrProviderType::Deepgram => "Deepgram Nova",
+            AsrProviderType::GeminiTranscribe => "Google Gemini Transcribe",
         }
     }
 
@@ -333,6 +383,18 @@ impl AsrProviderType {
             AsrProviderType::Groq => "whisper-large-v3-turbo",
             AsrProviderType::CohereTranscribe => "cohere-transcribe-03-2026",
             AsrProviderType::Qwen3Asr => "qwen3-asr-0.6b",
+            // Verified live against
+            // https://developers.deepgram.com/docs/pre-recorded-audio on
+            // 2026-09-02: nova-3 is Deepgram's current general model for the
+            // batch /v1/listen endpoint, and the only family that accepts
+            // keyterm prompting.
+            AsrProviderType::Deepgram => "nova-3",
+            // Verified live against
+            // https://ai.google.dev/gemini-api/docs/transcribe on 2026-09-02.
+            // gemini-3.5-transcribe-live is deliberately excluded: it is the
+            // websocket model, it cannot diarize, and this provider posts to
+            // the batch interactions endpoint.
+            AsrProviderType::GeminiTranscribe => "gemini-3.5-transcribe",
         }
     }
 
@@ -343,6 +405,8 @@ impl AsrProviderType {
             AsrProviderType::OpenAiCloud => Some("openai"),
             AsrProviderType::Groq => Some("groq"),
             AsrProviderType::CohereTranscribe => Some("cohere"),
+            AsrProviderType::Deepgram => Some("deepgram"),
+            AsrProviderType::GeminiTranscribe => Some("gemini"),
             AsrProviderType::Whisper
             | AsrProviderType::Parakeet
             | AsrProviderType::WhisperCandle
@@ -484,6 +548,20 @@ impl AsrProviderType {
                 id: "qwen3-asr-0.6b".to_string(),
                 label: "Qwen3-ASR 0.6B int4 (multilingual, fast)".to_string(),
             }],
+            AsrProviderType::Deepgram => vec![
+                ModelOption {
+                    id: "nova-3".to_string(),
+                    label: "Nova-3 (recommended, $0.0043/min)".to_string(),
+                },
+                ModelOption {
+                    id: "nova-3-medical".to_string(),
+                    label: "Nova-3 Medical (clinical vocabulary)".to_string(),
+                },
+            ],
+            AsrProviderType::GeminiTranscribe => vec![ModelOption {
+                id: "gemini-3.5-transcribe".to_string(),
+                label: "Gemini 3.5 Transcribe ($0.005/min)".to_string(),
+            }],
         }
     }
 }
@@ -530,6 +608,12 @@ impl AsrProviderFactory {
             AsrProviderType::Qwen3Asr => {
                 Box::new(qwen3_asr::Qwen3AsrProvider::new(selected_model_id))
             }
+            AsrProviderType::Deepgram => {
+                Box::new(deepgram::DeepgramProvider::new(selected_model_id))
+            }
+            AsrProviderType::GeminiTranscribe => Box::new(
+                gemini_transcribe::GeminiTranscribeProvider::new(selected_model_id),
+            ),
         }
     }
 }

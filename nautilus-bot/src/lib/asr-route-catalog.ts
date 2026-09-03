@@ -83,6 +83,8 @@ const DICTATION_PROVIDER_ORDER: AsrProviderType[] = [
   "openai_cloud",
   "elevenlabs_scribe",
   "groq",
+  "deepgram",
+  "gemini_transcribe",
   "cohere_transcribe",
 ];
 
@@ -98,12 +100,19 @@ const MEETING_PROVIDER_ORDER_BY_POLICY: Record<
     "parakeet",
     "whisper",
     "distil_whisper",
+    "deepgram",
+    "gemini_transcribe",
     "openai_cloud",
     "elevenlabs_scribe",
     "groq",
     "cohere_transcribe",
   ],
+  // Deepgram and Gemini lead the cloud order for meetings because they are the
+  // only two routes that return speaker labels with the transcript; every
+  // other cloud route still pays for a local diarization pass afterwards.
   best_available: [
+    "deepgram",
+    "gemini_transcribe",
     "openai_cloud",
     "elevenlabs_scribe",
     "groq",
@@ -362,6 +371,14 @@ function routeSummary(
   }
   if (providerType === "cohere_transcribe") {
     return "Cloud route for meeting-grade transcription with a simple BYOK setup.";
+  }
+  if (providerType === "deepgram") {
+    return modelId === "nova-3-medical"
+      ? "Deepgram's clinical-vocabulary build, with the same speaker labels and word timestamps as Nova-3."
+      : "Fastest cloud route here, and the cheapest with speaker labels: meetings keep Deepgram's own speakers instead of running a second pass on this Mac.";
+  }
+  if (providerType === "gemini_transcribe") {
+    return "Lowest published word error rate of the cloud routes, with speaker labels and word timestamps. Its API refuses your dictionary on the same request, so meetings get speakers and dictation gets the dictionary.";
   }
   if (providerType === "macos_apple_speech") {
     return "On-device Apple Speech for direct dictation only; server fallback is disabled and meetings use a separate provider.";

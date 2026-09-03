@@ -51,6 +51,9 @@ pub struct DiarizationResult {
 pub enum DiarizationMethod {
     Embedding,
     Model,
+    /// The speaker turns came back with the transcript from a cloud ASR
+    /// provider that diarizes; no local embedding model ran.
+    Provider,
 }
 
 /// Speaker diarization engine
@@ -306,15 +309,26 @@ impl DiarizationEngine {
     }
 
     fn create_speaker(&self, id: &str, index: usize) -> Speaker {
-        let colors = [
-            "#3B82F6", "#10B981", "#F59E0B", "#EF4444", "#8B5CF6", "#EC4899",
-        ];
-        Speaker {
-            id: id.to_string(),
-            name: Some(format!("Speaker {}", index + 1)),
-            color: colors[index % colors.len()].to_string(),
-            sample_count: 0,
-        }
+        speaker_for_index(id, index)
+    }
+}
+
+/// The default record for the Nth distinct speaker found in a recording.
+///
+/// Shared rather than duplicated so a transcript whose speakers came from a
+/// cloud provider and one whose speakers came from Plainsong's own embedding
+/// pipeline are named and coloured identically -- the reader should not be
+/// able to tell which diarizer ran from the way the badges look, only from the
+/// line that says so.
+pub fn speaker_for_index(id: &str, index: usize) -> Speaker {
+    const COLORS: [&str; 6] = [
+        "#3B82F6", "#10B981", "#F59E0B", "#EF4444", "#8B5CF6", "#EC4899",
+    ];
+    Speaker {
+        id: id.to_string(),
+        name: Some(format!("Speaker {}", index + 1)),
+        color: COLORS[index % COLORS.len()].to_string(),
+        sample_count: 0,
     }
 }
 
@@ -322,11 +336,6 @@ impl Default for DiarizationEngine {
     fn default() -> Self {
         Self::new()
     }
-}
-
-/// Run diarization with strict real-model requirement.
-pub async fn run_diarization(audio_path: &Path) -> Result<DiarizationResult> {
-    run_diarization_with_model(audio_path, "ecapa_tdnn_speaker").await
 }
 
 /// Run diarization with a specific speaker embedding model.
@@ -368,7 +377,8 @@ mod tests {
             return;
         }
 
-        let result = run_diarization(&PathBuf::from("test.wav")).await;
+        let result =
+            run_diarization_with_model(&PathBuf::from("test.wav"), "ecapa_tdnn_speaker").await;
         assert!(result.is_err());
         let message = result.err().map(|e| e.to_string()).unwrap_or_default();
         assert!(message.contains("Real diarization model is not available"));

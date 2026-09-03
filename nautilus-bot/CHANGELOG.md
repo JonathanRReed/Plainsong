@@ -13,6 +13,27 @@ changed underneath `0.9.0-beta.2`. See `LAUNCH.md` for which qualification
 evidence is stale and must be recaptured before this becomes a candidate.
 
 ### Added
+- Two cloud speech-to-text providers that return speaker labels, both
+  bring-your-own-key and opt-in like the rest. **Deepgram Nova-3**
+  ($0.0043/min, the fastest route Plainsong offers) sends your personal
+  dictionary as keyterms, returns word timestamps and turn-level speakers, and
+  opts every request out of Deepgram's model improvement programme.
+  **Google Gemini 3.5 Transcribe** ($0.005/min, the lowest published word
+  error rate here) returns speakers and word timestamps for meetings and takes
+  your dictionary for dictation — its API refuses both on one request, so the
+  picker and the audit log say which one a request actually carried. Gemini
+  uploads audio to Google's Files API and Plainsong deletes it again after
+  each transcription. Google's paid tier does not train on your prompts; its
+  free tier does, and the route says so.
+- Meetings keep the speakers a cloud provider already found. When a meeting is
+  transcribed by a provider that returns speaker labels, Plainsong uses those
+  instead of separating the voices again on this Mac — the audio has already
+  been sent at that point. The meeting header names which diarizer produced the
+  badges ("Speakers by Deepgram" or "Speakers by Plainsong"), renaming works
+  the same either way, and a new setting, "Keep the speakers a cloud provider
+  sends back", turns it off. Because a provider numbers speakers per request,
+  its labels are only used when the whole recording went out in one request;
+  otherwise Plainsong's own diarizer runs and the header says so.
 - Dictation history is searchable, and a saved dictation can be run through
   the recognizer again. The search field over Recent dictations matches both
   what was delivered and (where it was kept) what the recognizer heard,
@@ -357,6 +378,13 @@ evidence is stale and must be recaptured before this becomes a candidate.
   files that still carry it load cleanly and are rewritten without it.
 
 ### Fixed
+- Settings -> API keys now offers the transcription services, not only the
+  language-model ones. Every cloud speech route's setup text said "Add a key
+  in Settings -> API Keys" and the picker there had no entry for ElevenLabs,
+  Groq or Cohere, so there was no way to add one: the packaged app strips API
+  keys out of the sidecar's environment, which left the keychain as the only
+  route and the keychain unreachable. Deepgram joins them; Google Gemini was
+  already listed.
 - THIRD-PARTY-NOTICES.txt now has a MODEL WEIGHTS section naming every model
   Plainsong can download — repository, pinned revision, files and license —
   including the terms that differ from the code's: Parakeet's CC-BY-4.0

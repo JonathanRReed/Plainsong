@@ -28,6 +28,8 @@ const ASR_PROVIDER_TYPE_FLAGS = {
   groq: true,
   cohere_transcribe: true,
   qwen3_asr: true,
+  deepgram: true,
+  gemini_transcribe: true,
 } satisfies Record<AsrProviderType, true>;
 
 export const ASR_PROVIDER_TYPES = Object.keys(
@@ -61,7 +63,28 @@ const MEETING_GRADE_PROVIDER_SET = new Set<AsrProviderType>([
   "elevenlabs_scribe",
   "cohere_transcribe",
   "qwen3_asr",
+  "deepgram",
+  "gemini_transcribe",
 ]);
+
+/**
+ * Providers whose transcription response carries speaker labels, so a meeting
+ * transcribed by them does not need Plainsong's own diarizer run over the same
+ * audio afterwards. Mirrors which `AsrProvider` implementations populate
+ * `TranscriptionResult::speaker_turns` in the sidecar.
+ *
+ * None of the four cloud providers that shipped before September 2026
+ * (OpenAI, Groq, ElevenLabs, Cohere) returns speaker labels at all, which is
+ * why this set is not simply "the cloud providers".
+ */
+const PROVIDER_DIARIZATION_SET = new Set<AsrProviderType>([
+  "deepgram",
+  "gemini_transcribe",
+]);
+
+export function providerReturnsSpeakerLabels(providerType: AsrProviderType) {
+  return PROVIDER_DIARIZATION_SET.has(providerType);
+}
 
 // whisper.cpp is deliberately absent: its meeting support is per model (see
 // `WHISPER_MEETING_MODEL_IDS` below), so the provider is neither dictation-only
@@ -96,6 +119,8 @@ const CLOUD_PROVIDER_SET = new Set<AsrProviderType>([
   "openai_cloud",
   "elevenlabs_scribe",
   "cohere_transcribe",
+  "deepgram",
+  "gemini_transcribe",
 ]);
 
 export function isDownloadableProvider(providerType: AsrProviderType) {
@@ -149,6 +174,14 @@ export function isMeetingEligibleModel(providerType: AsrProviderType, modelId: s
     case "elevenlabs_scribe":
     case "cohere_transcribe":
       return true;
+    case "deepgram":
+      // Both Nova-3 builds return word timestamps and turn-level utterances.
+      return normalizedModelId.startsWith("nova-3");
+    case "gemini_transcribe":
+      // Only the batch model returns word timestamps; the -live model is
+      // websocket-only and cannot diarize (see the sidecar's
+      // sanitize_gemini_asr_model_id).
+      return normalizedModelId === "gemini-3.5-transcribe";
     case "openai_cloud":
       // Only whisper-1 requests verbose_json from the transcriptions
       // endpoint (openai_cloud.rs's uses_verbose_json()), which is what
