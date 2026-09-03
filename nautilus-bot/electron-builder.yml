@@ -56,9 +56,22 @@ directories:
 # `en.lproj`, and naming both makes the intent survive an Electron upgrade that
 # renames the file.
 #
-# This does NOT touch ICU (`icudtl.dat` stays whole), so `toLocaleDateString`,
-# `Intl` and every other locale-aware format keep following the user's own
-# system locale. Language data and UI translations are different files.
+# `icudtl.dat` stays whole, so every locale's date, time, number and collation
+# data is still on disk. What the deletion DOES change is which locale ICU
+# defaults to: Chromium seeds it from the resource bundle it managed to load, so
+# with only `en.lproj` present the default inside the packaged app is `en-US`
+# whatever the Mac is set to. Measured 2026-09-02 with this repo's own Electron
+# 43.4.0, both `.lproj` sweeps applied, system language set through
+# NSUserDefaults: a German Mac went from `4.3.2026, 09:30:00` to
+# `3/4/2026, 9:30:00 AM`, French and Japanese likewise.
+#
+# So the renderer never relies on that default. `electron/app-locale.ts` reads
+# `app.getPreferredSystemLanguages()` — macOS' own AppleLanguages, which the
+# deletion cannot touch — passes it to every renderer through
+# `webPreferences.additionalArguments`, and `src/lib/format-locale.ts` supplies
+# it to every `Intl` call. Dates, times and sort order follow the user's own
+# language again; `src/__tests__/renderer-locale-bridge.test.ts` fails the build
+# if any file under `src/` formats without it.
 electronLanguages:
   - en
   - en-US

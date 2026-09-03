@@ -124,6 +124,99 @@ The four heaviest things in the baseline archive were `lucide-react`
 1.68 MB `dist` beside them. The 16 packages that remain are electron-updater
 and its dependency closure, which the main process genuinely loads.
 
+## Correction: the locale trim DOES move the default formatting locale
+
+The three commits that landed the locale trim, and the entry in
+`docs/beta/KNOWN-LIMITATIONS.md` that went with them, said `icudtl.dat` is
+untouched and therefore `toLocaleDateString`, `Intl` and every other
+locale-aware format keep following the user's own system locale. **The first
+half is true and the second does not follow.** ICU's data is whole, but
+Chromium seeds ICU's DEFAULT LOCALE from whichever resource-bundle locale it
+managed to load, and with only `en.lproj` present that resolution lands on
+`en-US` whatever the Mac is set to.
+
+Measured 2026-09-02 with this repo's own Electron 43.4.0
+(`node_modules/electron/dist/Electron.app`, cloned, no Plainsong code
+involved), removing the `.lproj` directories from **both** places
+`removeUnusedLanguagesIfNeeded` sweeps on macOS — `Contents/Resources` and
+`Electron Framework.framework/Versions/A/Resources` — and setting the system
+language through `NSUserDefaults` (`-AppleLanguages`). A hidden window
+reported `new Date(Date.UTC(2026, 2, 4, 15, 30)).toLocaleString()`:
+
+| system language | with all 220 `.lproj` | with only `en.lproj` |
+|---|---|---|
+| de-DE | `4.3.2026, 09:30:00` | `3/4/2026, 9:30:00 AM` |
+| fr-FR | `04/03/2026 09:30:00` | `3/4/2026, 9:30:00 AM` |
+| ja-JP | `2026/3/4 9:30:00` | `3/4/2026, 9:30:00 AM` |
+| en-US (this Mac) | `3/4/2026, 9:30:00 AM` | `3/4/2026, 9:30:00 AM` |
+
+`navigator.language` and `Intl.DateTimeFormat().resolvedOptions().locale` both
+read `en-US` in every trimmed run. `(1234567.89).toLocaleString()` went from
+`1.234.567,89` to `1,234,567.89` on the German run.
+
+Two things that made this easy to get wrong, both worth writing down:
+
+- **`--lang=de` is not a stand-in for a German Mac.** It is Chromium's UI
+  language switch and it is itself gated on the pak: with all locales present
+  `--lang=de` produced German formatting, and with only `en.lproj` it produced
+  none. Reading only that pair suggests the paks are what carry formatting,
+  which overstates the finding; reading only `-AppleLanguages` with the
+  framework swept but `Contents/Resources` left alone suggests nothing broke at
+  all, which understates it. Both sweeps and a real system-language preference
+  are needed to see the actual behaviour.
+- **Icelandic looks broken either way and is not.** `is-IS` resolves to `en-US`
+  with all 220 locales present too — Chromium simply has no Icelandic UI
+  translation. It is not evidence about the trim.
+
+**The fix keeps the 46 MB.** `icudtl.dat` is whole, so an EXPLICIT locale still
+formats correctly: `toLocaleString("de-DE")` returned `4.3.2026, 09:30:00` in
+every trimmed run above. So the renderer stopped relying on the default.
+`app.getPreferredSystemLanguages()` reads macOS' own `AppleLanguages` and is
+independent of which paks shipped — it returned `["de-DE"]` in the trimmed runs
+where `app.getLocale()` returned `"en-US"`. `electron/app-locale.ts` resolves
+it once, `webPreferences.additionalArguments` carries it into every renderer
+(main window and both overlays), the sandboxed preload reads it out of
+`process.argv` synchronously, and `src/lib/format-locale.ts` passes it to every
+`Intl` call. 31 call sites moved.
+
+**The fix was verified end to end in a trimmed bundle**, with the compiled
+`dist-electron/app-locale.js` and `dist-electron/preload.js` — not a
+reimplementation — driving a sandboxed `BrowserWindow` inside the same
+`.lproj`-stripped Electron, at the same 2026-03-04 15:30 UTC instant:
+
+| system language | ICU default | bare `toLocaleString()` | through the bridge |
+|---|---|---|---|
+| de-DE | en-US | `3/4/2026, 9:30:00 AM` | `4.3.2026, 09:30:00` |
+| ja-JP | en-US | `3/4/2026, 9:30:00 AM` | `2026/3/4 9:30:00` |
+| en-DE | en-US | `3/4/2026, 9:30:00 AM` | `04/03/2026, 09:30:00` |
+
+The preload delivered `de-DE`, `ja-JP` and `en-DE` respectively while the
+window's own ICU default stayed `en-US` in all three — which is the whole
+mechanism, observed rather than argued.
+
+`app.getSystemLocale()` was rejected for this: it splices the region onto the
+resource-bundle language, so the same trimmed run reported `"en-DE"` for a
+German Mac. A language-and-region tag like `en-DE` — which is how macOS encodes
+"English, Region: Germany" — comes through `getPreferredSystemLanguages()`
+intact and formats as `04/03/2026, 09:30:00`, so the region half is not lost.
+
+## What the tests actually check
+
+`src/__tests__/macos-packaging-config.test.ts` holds 21 tests after this
+review pass. Nine were added by this lane's work (three by the review):
+the two locale pins, the `extraResources` `.lproj` guard, three DMG-format
+tests, and three that read the main process's imports. **Two of them recompute
+the allow-list** — `keeps out of app.asar every npm package the packaged app
+cannot load` rebuilds electron-updater's dependency closure from
+`node_modules`, and `names electron-updater as the only npm package the main
+process loads` re-reads the imports out of `electron/`. The rest are pins and
+fixtures, not recomputations; an earlier summary of this work said fifteen
+tests recomputed the allow-list, which was three counts conflated into one.
+
+`src/__tests__/renderer-locale-bridge.test.ts` adds 19 more for the locale
+bridge, including a scan that fails the build if any file under `src/` calls a
+bare `toLocale*()` or any `localeCompare()`.
+
 ## What was checked and deliberately not changed
 
 - **Fonts.** Eight `.woff2` files in `src/assets/fonts`, and `src/index.css`
