@@ -131,7 +131,11 @@ import {
   RENDERER_READY_LOG_MESSAGE,
   shouldForwardRendererConsoleMessage,
 } from "./renderer-readiness";
-import { createDictationOverlayWindow, createRecordingOverlayWindow } from "./windows";
+import {
+  createDictationOverlayWindow,
+  createRecordingOverlayWindow,
+  rendererAdditionalArguments,
+} from "./windows";
 import {
   cloudLocationConfirmationDetail,
   parseCloudLocationRequest,
@@ -2704,6 +2708,7 @@ function createMainWindow(): BrowserWindow {
       contextIsolation: true,
       nodeIntegration: false,
       sandbox: true,
+      additionalArguments: [...rendererAdditionalArguments()],
     },
   });
   configureWindowSecurity(win);

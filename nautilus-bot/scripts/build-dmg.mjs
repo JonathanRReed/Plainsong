@@ -74,6 +74,8 @@ function detectSigningIdentity() {
   }
 }
 
+const DMG_FORMAT = "ULFO";
+
 warnNotForRelease();
 
 if (!existsSync(appPath)) {
@@ -102,7 +104,13 @@ try {
       stagingDir,
       "-ov",
       "-format",
-      "UDZO",
+      // Kept identical to `dmg.format` in electron-builder.yml on purpose. This
+      // script builds the ad-hoc, NOT-FOR-RELEASE image, and an ad-hoc image
+      // that compresses differently from the real one is a rehearsal of the
+      // wrong thing: someone checks a mount or a download size here and reads
+      // it as evidence about the artifact users get. `src/__tests__/
+      // macos-packaging-config.test.ts` fails if the two drift apart.
+      DMG_FORMAT,
       "-fs",
       "APFS",
       dmgPath,

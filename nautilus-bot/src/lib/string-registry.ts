@@ -47,7 +47,13 @@ export function assertUniqueStrings(
 }
 
 function normalizeRegistryString(value: string): string {
-  return value.trim().toLocaleLowerCase();
+  // Pinned to "en-US" on purpose, and NOT left to the ambient locale. These
+  // strings are identity keys for built-in registries, so the same input has to
+  // normalize the same way on every Mac — under a Turkish locale a bare
+  // toLocaleLowerCase() maps "I" to "\u0131" and two entries that collide
+  // everywhere else stop colliding here. Also see src/lib/format-locale.ts:
+  // text the USER reads follows the user's locale; keys never do.
+  return value.trim().toLocaleLowerCase("en-US");
 }
 
 export function assertUniqueNormalizedStrings(

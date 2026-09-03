@@ -23,6 +23,7 @@ import {
   historyPipelineStageLabel,
   historyPromptSourceLabel,
 } from "@/lib/dictation-history-labels";
+import { formatDateTime } from "@/lib/format-locale";
 
 function formatStartupLatency(startupLatencyMs: number | null | undefined) {
   if (startupLatencyMs == null) {
@@ -641,7 +642,7 @@ export function DictationHistoryDialog({
               Duration: <span className="time-spec">{durationLabel}</span> ·
               Created:{" "}
               {recording
-                ? new Date(recording.createdAt).toLocaleString()
+                ? formatDateTime(recording.createdAt)
                 : "N/A"}
               {historyDetails?.reprocessedFromId && (
                 <>
@@ -649,9 +650,7 @@ export function DictationHistoryDialog({
                   · Re-processed from{" "}
                   <span className="time-spec">
                     {historyDetails.reprocessedFromCreatedAt
-                      ? new Date(
-                          historyDetails.reprocessedFromCreatedAt,
-                        ).toLocaleString()
+                      ? formatDateTime(historyDetails.reprocessedFromCreatedAt)
                       : "a dictation that has since been deleted"}
                   </span>
                 </>

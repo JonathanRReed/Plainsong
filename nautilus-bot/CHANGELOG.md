@@ -249,6 +249,33 @@ evidence is stale and must be recaptured before this becomes a candidate.
   the answer.
 
 ### Changed
+- **The installed application is 86 MB smaller** — 384 MB down to 297 MB on an
+  unsigned `electron:pack` build — without removing anything the app can do.
+  Two things were shipping that nothing could reach. Chromium's user-interface
+  translations for 54 languages (46 MB) went out with a product written only in
+  English, so the file picker and text-field context menu could appear in
+  Polish inside a window whose every label was English; only the English locale
+  ships now. And `app.asar` carried a second copy of every package the renderer
+  imports — React, Radix, Base UI, 19 MB of Lucide icons — even though Vite
+  compiles all of it into `dist/` before packaging; the archive is now 4.1 MB
+  instead of 44.9 MB. Starting the app takes the same time it did; idle memory
+  could not be measured honestly on the machine this was done on, so no claim
+  is made about it either way. Receipt, with the per-directory before/after and
+  the load caveats the timings carry:
+  `artifacts/qa/shell-size-receipt-2026-09-02.md`.
+- **Dates, times and sort order follow your Mac's language again, on purpose
+  rather than by accident.** Dropping those 54 translations also moved the
+  browser engine's default formatting locale to US English — a German Mac would
+  have started seeing `3/4/2026, 9:30:00 AM` where it used to see
+  `4.3.2026, 09:30:00`, in meeting timestamps, the Dashboard's day grouping and
+  exported meeting text alike. Plainsong now reads your Mac's Language & Region
+  setting directly and formats with it everywhere, which also fixes sort order:
+  a Swedish list puts ö after z again. Nothing about this is optional or
+  configurable, and a build fails if any screen formats without it.
+- The download's disk image is compressed with lzfse instead of zlib: 3 MB
+  smaller and quicker to mount and drag out of, since lzfse decompresses
+  faster than zlib as well as packing tighter. Every Mac Plainsong supports
+  has been able to mount this format since macOS 10.11.
 - Searching dictation history no longer writes an audit-log row. It is a read
   that changes nothing, and the search field re-runs on a debounce and again
   whenever the recordings list changes, so a minute of typing buried the rows

@@ -40,6 +40,7 @@ import {
   TriangleAlert,
   Users,
 } from "lucide-react";
+import { formatDate, formatDateTime, formatTime } from "@/lib/format-locale";
 
 /** m:ss for a transcript offset, so a hit reads like a place in the meeting. */
 function formatHitTimestamp(seconds: number): string {
@@ -138,7 +139,7 @@ export function DashboardView() {
             ? "Mic-only meetings are ready. Dictation needs one more pass"
             : "Finish setup to unlock the full solo workflow";
   const timelineGroups = useMemo(() => recordings.reduce<Record<string, typeof recordings>>((acc, recording) => {
-    const key = new Date(recording.createdAt).toLocaleDateString();
+    const key = formatDate(recording.createdAt);
     if (!acc[key]) {
       acc[key] = [];
     }
@@ -543,7 +544,7 @@ export function DashboardView() {
                             <p className="font-medium truncate">{person.name}</p>
                             <p className="text-sm text-muted-foreground">
                               {person.recordingCount} meetings · last seen{" "}
-                              {new Date(person.lastSeenAt).toLocaleDateString()}
+                              {formatDate(person.lastSeenAt)}
                             </p>
                           </div>
                           <Button
@@ -581,7 +582,7 @@ export function DashboardView() {
                             <p className="font-medium truncate">{company.name}</p>
                             <p className="text-sm text-muted-foreground">
                               {company.recordingCount} meetings · last seen{" "}
-                              {new Date(company.lastSeenAt).toLocaleDateString()}
+                              {formatDate(company.lastSeenAt)}
                             </p>
                           </div>
                           <Button
@@ -785,7 +786,7 @@ export function DashboardView() {
                       <div className="min-w-0 flex-1">
                         <p className="font-medium truncate">{recording.title}</p>
                         <p className="text-xs text-muted-foreground">
-                          {new Date(recording.createdAt).toLocaleString()}
+                          {formatDateTime(recording.createdAt)}
                         </p>
                       </div>
                       <Badge variant="secondary" className="time-spec shrink-0">
@@ -826,7 +827,7 @@ export function DashboardView() {
                             {project.description || "No description"}
                           </p>
                           <p className="mt-2 text-xs text-muted-foreground">
-                            Created {new Date(project.createdAt).toLocaleDateString()}
+                            Created {formatDate(project.createdAt)}
                           </p>
                         </CardContent>
                       </Card>
@@ -853,7 +854,7 @@ export function DashboardView() {
                           <div key={recording.id} className="flex items-center justify-between rounded-md border px-3 py-2 text-sm">
                             <span className="truncate font-medium">{recording.title}</span>
                             <span className="time-spec shrink-0 text-xs text-muted-foreground">
-                              {new Date(recording.createdAt).toLocaleTimeString()}
+                              {formatTime(recording.createdAt)}
                             </span>
                           </div>
                         ))}

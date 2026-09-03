@@ -9,6 +9,7 @@ import {
 import { meetingAttendeesFromCalendar } from "@/lib/attendees";
 import { numberBriefCitations } from "@/lib/meeting-brief-citations";
 import type { CalendarEventSummary } from "@/lib/calendar-events";
+import { formatDate } from "@/lib/format-locale";
 
 interface PreMeetingBriefPanelProps {
   event: CalendarEventSummary;
@@ -193,7 +194,7 @@ export function PreMeetingBriefPanel({
               <div className="flex flex-wrap items-baseline justify-between gap-2">
                 <p className="text-sm font-medium">{meeting.title}</p>
                 <span className="time-spec text-sm text-muted-foreground">
-                  {new Date(meeting.createdAt).toLocaleDateString()}
+                  {formatDate(meeting.createdAt)}
                 </span>
               </div>
               <p className="mt-0.5 text-sm text-muted-foreground">

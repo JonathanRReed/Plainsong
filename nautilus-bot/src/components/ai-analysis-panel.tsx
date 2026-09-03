@@ -35,6 +35,7 @@ import {
   Loader2,
   AlertCircle
 } from "lucide-react";
+import { formatTime } from "@/lib/format-locale";
 
 interface AiAnalysisPanelProps {
   recordingId: string;
@@ -622,7 +623,7 @@ export function AiAnalysisPanel({
                           </Button>
                         ) : null}
                         <p className="font-mono text-[11px] text-muted-foreground tabular-nums">
-                          {new Date(message.createdAt).toLocaleTimeString()}
+                          {formatTime(message.createdAt)}
                         </p>
                       </div>
                     </div>

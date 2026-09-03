@@ -16,6 +16,7 @@ import {
   meetingAttendeesFromCalendar,
   type MeetingAttendee,
 } from "@/lib/attendees";
+import { compareStrings } from "@/lib/format-locale";
 
 export type CalendarAuthorization =
   | "not_determined"
@@ -212,7 +213,7 @@ export function selectNextCalendarEvent(
     if (candidateStart !== bestStart) {
       return candidateStart < bestStart ? candidate : best;
     }
-    return candidate.title.localeCompare(best.title) < 0 ? candidate : best;
+    return compareStrings(candidate.title, best.title) < 0 ? candidate : best;
   });
 }
 

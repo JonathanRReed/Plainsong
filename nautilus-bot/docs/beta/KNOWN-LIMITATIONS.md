@@ -23,6 +23,21 @@ using sensitive content.
 - Native Me + Them system-audio capture requires macOS 14.7 or later. Older
   supported macOS versions require an already configured virtual loopback
   device such as BlackHole, or should use microphone-only Meetings.
+- Plainsong's interface is English only, and so is everything the window
+  frame around it says. Menus that come from Chromium rather than from
+  Plainsong — the right-click menu in a text field, the file picker, the
+  spell-check submenu — now appear in English too, even on a Mac set to
+  another language; the translations for 54 other languages were 46 MB of a
+  product none of them had been translated into.
+- Dates, times and sort order still follow your Mac, but by a different route
+  than before. Dropping those translations also moved the browser engine's own
+  default formatting locale to US English, so Plainsong now reads your Mac's
+  Language & Region setting itself and formats every date, time and list order
+  with it — including the region half, so English with Region set to Germany
+  gets 04/03/2026 and a 24-hour clock. What Plainsong does not read is the
+  per-setting customization underneath that pane: if you have overridden the
+  date format, first day of week or number separators by hand, Plainsong uses
+  your region's defaults rather than your overrides.
 
 ## Dictation
 

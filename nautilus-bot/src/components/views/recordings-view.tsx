@@ -192,6 +192,7 @@ import {
 import type { AnalysisTemplate } from "@/types";
 import type { AsrProviderType, LlmCitation, SearchHit } from "@/types";
 import { MEETING_CAPTURE_MODE_IMPORTED } from "@/types";
+import { formatDate, formatDateTime } from "@/lib/format-locale";
 
 const MEETING_ASK_TEMPLATES: AnalysisTemplate[] = [
   {
@@ -485,7 +486,7 @@ function buildMeetingShareMarkdown(args: {
   const serviceLabel = storedVideoServiceLabel(args.recording.videoService);
   const sections = [
     `# ${args.recording.title}`,
-    `- Date: ${new Date(args.recording.createdAt).toLocaleString()}`,
+    `- Date: ${formatDateTime(args.recording.createdAt)}`,
     ...(serviceLabel ? [`- Service: ${serviceLabel}`] : []),
     `- Capture mode: ${args.captureMode}`,
     `- Template: ${args.templateLabel}`,
@@ -3554,7 +3555,7 @@ export function RecordingsView() {
         // a formatted date, which is all this used to look at.
         const haystack = [
           meeting.title,
-          new Date(meeting.createdAt).toLocaleString(),
+          formatDateTime(meeting.createdAt),
           meeting.meetingNotes ?? "",
           meeting.summary ?? "",
           ...(meeting.actionItems ?? []),
@@ -4381,7 +4382,7 @@ export function RecordingsView() {
             <div className="mt-3 flex flex-wrap items-center gap-x-4 gap-y-1.5 text-sm text-muted-foreground">
               <span className="time-spec">
                 {selectedRecording
-                  ? new Date(selectedRecording.createdAt).toLocaleString()
+                  ? formatDateTime(selectedRecording.createdAt)
                   : "Date unknown"}
               </span>
               <span className="time-spec">
@@ -4826,9 +4827,7 @@ export function RecordingsView() {
                                       <p className="mt-1 font-mono text-xs text-muted-foreground">
                                         {selectedRecording.summaryProvenance.actualProvider} ·{" "}
                                         {selectedRecording.summaryProvenance.actualModel} · finished{" "}
-                                        {new Date(
-                                          selectedRecording.summaryProvenance.completedAt
-                                        ).toLocaleString()}
+                                        {formatDateTime(selectedRecording.summaryProvenance.completedAt)}
                                       </p>
                                     ) : null}
                                     {!summaryProvenance.grounded ||
@@ -4880,9 +4879,7 @@ export function RecordingsView() {
                                       <p className="mt-1 font-mono text-xs text-muted-foreground">
                                         {selectedRecording.actionItemsProvenance.actualProvider} ·{" "}
                                         {selectedRecording.actionItemsProvenance.actualModel} · finished{" "}
-                                        {new Date(
-                                          selectedRecording.actionItemsProvenance.completedAt
-                                        ).toLocaleString()}
+                                        {formatDateTime(selectedRecording.actionItemsProvenance.completedAt)}
                                       </p>
                                     ) : null}
                                     <div className="mt-1.5 space-y-3">
@@ -5132,7 +5129,7 @@ export function RecordingsView() {
                                 {enhancedMeetingNotesDraft ? (
                                   <p className="mt-2 text-sm text-muted-foreground">
                                     Generated{" "}
-                                    {new Date(enhancedMeetingNotesDraft.generatedAt).toLocaleString()}.
+                                    {formatDateTime(enhancedMeetingNotesDraft.generatedAt)}.
                                   </p>
                                 ) : null}
                               </div>
@@ -5295,7 +5292,7 @@ export function RecordingsView() {
                                         <p className="text-sm font-medium">{person.name}</p>
                                         <p className="time-spec mt-1 text-sm text-muted-foreground">
                                           {person.recordingCount} meetings · last seen{" "}
-                                          {new Date(person.lastSeenAt).toLocaleDateString()}
+                                          {formatDate(person.lastSeenAt)}
                                         </p>
                                         {person.recentMeetings[0] ? (
                                           <p className="mt-2 text-sm text-muted-foreground">
@@ -5309,7 +5306,7 @@ export function RecordingsView() {
                                         <p className="text-sm font-medium">{company.name}</p>
                                         <p className="time-spec mt-1 text-sm text-muted-foreground">
                                           {company.recordingCount} meetings · last seen{" "}
-                                          {new Date(company.lastSeenAt).toLocaleDateString()}
+                                          {formatDate(company.lastSeenAt)}
                                         </p>
                                         {company.recentMeetings[0] ? (
                                           <p className="mt-2 text-sm text-muted-foreground">
@@ -5750,7 +5747,7 @@ export function RecordingsView() {
                             <span className="text-muted-foreground">Recorded:</span>{" "}
                             <span className="time-spec font-medium">
                               {selectedRecording?.createdAt
-                                ? new Date(selectedRecording.createdAt).toLocaleString()
+                                ? formatDateTime(selectedRecording.createdAt)
                                 : "Unknown"}
                             </span>
                           </p>
@@ -6841,7 +6838,7 @@ export function RecordingsView() {
                         <div className="min-w-0">
                           <h3 className="truncate font-medium">{recording.title}</h3>
                           <div className="mt-1.5 flex flex-wrap items-center gap-x-2.5 gap-y-1 font-mono text-xs text-muted-foreground">
-                            <span className="time-spec">{new Date(recording.createdAt).toLocaleString()}</span>
+                            <span className="time-spec">{formatDateTime(recording.createdAt)}</span>
                             <span aria-hidden="true" className="text-muted-foreground/40">·</span>
                             {recording.status === "processing" ? (
                               <span className="inline-flex items-center gap-1">
