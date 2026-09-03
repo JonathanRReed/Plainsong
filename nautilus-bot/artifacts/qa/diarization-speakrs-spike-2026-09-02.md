@@ -120,6 +120,15 @@ records every optional dependency of `ndarray-linalg` regardless of target.
 both read the lock, so this footprint is paid even though nothing ships.
 `Cargo.lock` is `--locked`-clean for both feature sets.
 
+The audit cost turned out to be nil, which is worth recording because it was
+the specific thing to fear: `cargo audit --no-fetch` reports **0
+vulnerabilities** on the expanded lock and exactly the same two warnings as the
+lock at the merge base `060c27aa` (`paste 1.0.15` unmaintained,
+RUSTSEC-2024-0436; `chacha20 0.10.0` yanked). The 55 new packages add no
+advisory. The third-party notices are unaffected because
+`generate-third-party-notices.mjs` runs `cargo metadata` with the shipped
+feature set, which does not include `diarization-speakrs`.
+
 ## 2. What was implemented
 
 - `rust-sidecar/src/diarization/speakrs_backend.rs` — the backend, behind
@@ -246,8 +255,8 @@ Reasons, in order of weight:
    real meeting audio — which Plainsong deliberately has none of.
 3. **The cost is real and known.** 10–14× slower and 2.1× the memory on the CPU
    path, ~60 MB of extra model downloads across ten files, +55 crates in the
-   lock, and an unresolved CC-BY-4.0 / undeclared-license question on the
-   weights.
+   lock (no new advisories, but a much larger surface to keep current), and an
+   unresolved CC-BY-4.0 / undeclared-license question on the weights.
 4. **The upside is real too.** Overlap handling, near-zero unattributed audio,
    and the whole pyannote pipeline for roughly 400 lines of glue. The CoreML
    path is where the speed claim lives and it is the version worth re-measuring.
