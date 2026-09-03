@@ -156,6 +156,56 @@ function requireArchitecture(filePath, label, expectedArchitecture) {
   return architectures;
 }
 
+/**
+ * Read `codesign -dv` for one file without deciding anything about it.
+ *
+ * @returns {{ status: number, output: string }}
+ */
+function readSignatureProbe(filePath, label) {
+  const result = spawnSync("/usr/bin/codesign", ["-dv", filePath], {
+    encoding: "utf8",
+  });
+  if (result.error) {
+    fail(`could not inspect ${label} signature: ${result.error.message}`);
+  }
+  return {
+    status: result.status ?? 1,
+    output: `${result.stdout}\n${result.stderr}`,
+  };
+}
+
+/**
+ * Did somebody actually run `codesign` on this binary?
+ *
+ * Every assertion below about entitlements is an assertion about a signature,
+ * and there are three states a Mach-O in this bundle can be in:
+ *
+ *   - `codesign -dv` exits non-zero ("code object is not signed at all"):
+ *     nothing has signed it.
+ *   - `flags=0x20002(adhoc,linker-signed)`: the *linker* stamped an ad-hoc
+ *     signature while cargo built it. No codesign invocation happened, so
+ *     there is no entitlement blob to read — `plainsong-sidecar` and
+ *     `plainsong-cli` are both in this state until electron-builder signs them.
+ *   - anything else — a deliberate `flags=0x2(adhoc)` from a build script, or
+ *     a Developer ID signature: someone chose these entitlements, so what this
+ *     gate reads back is a real claim about what will ship.
+ *
+ * Only the third state carries information. Asserting on the first two is
+ * asserting on a signature that does not exist yet, which is what made
+ * `bun run electron:pack` unrunnable on a machine with no signing identity:
+ * the pack signs nothing, so the CLI's "empty entitlement set" check failed on
+ * "has no readable entitlement property list" rather than on anything true
+ * about the build.
+ *
+ * @param {{ status: number, output: string }} probe
+ */
+export function hasDeliberateSignature(probe) {
+  if (probe.status !== 0) return false;
+  const flags = /\bflags=(\S+)/.exec(probe.output)?.[1] ?? "";
+  if (flags.includes("linker-signed")) return false;
+  return true;
+}
+
 function readEntitlements(filePath, label) {
   const result = spawnSync(
     "/usr/bin/codesign",
@@ -356,7 +406,32 @@ function verifySpeechHelperContract(appPath) {
   }
 }
 
-function verifyAppBundle(appPath, expectedArchitecture) {
+/**
+ * Decide whether this run may assert on `filePath`'s entitlements.
+ *
+ * In the default (strict) mode every binary must carry a deliberate signature,
+ * and one that does not is a failure rather than a skip — that is the mode
+ * `bun run gate:packaged:macos:native` uses against the signed `release/`
+ * bundle, so an unsigned helper in a shipping build still stops the gate.
+ *
+ * `allowUnsigned` relaxes that to a per-binary skip. It is for bundles that
+ * are not signed yet: the `afterPack` hook (which electron-builder runs before
+ * signing, always) and `bun run electron:pack`, whose `--dir` output is never
+ * signed at all.
+ */
+function entitlementChecksApply(filePath, label, allowUnsigned, skipped) {
+  if (hasDeliberateSignature(readSignatureProbe(filePath, label))) return true;
+  if (!allowUnsigned) {
+    fail(
+      `${label} is not signed at ${filePath}; a signed build must sign every ` +
+        "native helper (pass --allow-unsigned to verify an unsigned --dir pack)",
+    );
+  }
+  skipped.push(label);
+  return false;
+}
+
+function verifyAppBundle(appPath, expectedArchitecture, { allowUnsigned = false } = {}) {
   if (process.platform !== "darwin") {
     fail("Mach-O package verification requires macOS");
   }
@@ -383,10 +458,46 @@ function verifyAppBundle(appPath, expectedArchitecture) {
     );
   }
 
-  requireEmptyEntitlements(paths.shortcutHelper, "shortcut helper");
-  requireEmptyEntitlements(paths.cli, "plainsong CLI");
-  requireEmptyLanguageModelHelperEntitlements(paths.languageModelHelper);
-  requireCalendarHelperEntitlements(paths.calendarHelper);
+  // Every check below this line reads a signature. The ones above it — the
+  // file exists, is executable, and is arm64-only — read the Mach-O itself and
+  // hold whether or not anything has signed the bundle, so they run in both
+  // modes.
+  const unsignedSkips = [];
+  if (
+    entitlementChecksApply(
+      paths.shortcutHelper,
+      "shortcut helper",
+      allowUnsigned,
+      unsignedSkips,
+    )
+  ) {
+    requireEmptyEntitlements(paths.shortcutHelper, "shortcut helper");
+  }
+  if (entitlementChecksApply(paths.cli, "plainsong CLI", allowUnsigned, unsignedSkips)) {
+    requireEmptyEntitlements(paths.cli, "plainsong CLI");
+  }
+  if (
+    entitlementChecksApply(
+      paths.languageModelHelper,
+      "Apple Foundation Models helper",
+      allowUnsigned,
+      unsignedSkips,
+    )
+  ) {
+    requireEmptyLanguageModelHelperEntitlements(paths.languageModelHelper);
+  }
+  if (
+    entitlementChecksApply(
+      paths.calendarHelper,
+      "calendar helper",
+      allowUnsigned,
+      unsignedSkips,
+    )
+  ) {
+    requireCalendarHelperEntitlements(paths.calendarHelper);
+  }
+  // The helper's embedded `__TEXT,__info_plist` is compiled into the binary,
+  // not attached by codesign, so it is readable before signing too.
   requireCalendarHelperEmbeddedUsageDescriptions(paths.calendarHelper);
   requirePackagedSystemAudioUsageDescription(appPath);
   requirePackagedCalendarUsageDescriptions(appPath);
@@ -395,11 +506,29 @@ function verifyAppBundle(appPath, expectedArchitecture) {
     pass: true,
     appPath,
     expectedArchitecture,
+    allowUnsigned,
+    unsignedSkips,
     paths,
     architectures,
   };
 }
 
+/**
+ * electron-builder `afterPack` hook.
+ *
+ * This runs BEFORE code signing on every path — app-builder-lib emits
+ * `afterPack`, then flips the fuses, then signs (`platformPackager.js`
+ * `doPack` → `emitAfterPack` → `doAddElectronFuses` → `doSignAfterPack`) — so
+ * the bundle it is handed is never signed, not even during `release:mac`.
+ * `allowUnsigned` therefore is not a weakening of the release path: it is the
+ * only honest description of what is on disk at this point. The signed bundle
+ * is checked strictly afterwards by `bun run gate:packaged:macos:native`.
+ *
+ * The helpers a build script signs itself (Speech, calendar, shortcut, Apple
+ * Foundation Models) are still fully asserted here, because those signatures
+ * do exist by now. What is skipped is the Rust binaries, which cargo leaves
+ * linker-signed until electron-builder gets to them.
+ */
 export default function verifyPackagedNativeHelpers(context) {
   if (context.electronPlatformName !== "darwin") return;
 
@@ -407,7 +536,9 @@ export default function verifyPackagedNativeHelpers(context) {
     context.appOutDir,
     `${context.packager.appInfo.productFilename}.app`,
   );
-  verifyAppBundle(appPath, normalizeArchitecture(process.arch));
+  verifyAppBundle(appPath, normalizeArchitecture(process.arch), {
+    allowUnsigned: true,
+  });
 }
 
 if (process.argv[1] && path.resolve(process.argv[1]) === scriptPath) {
@@ -420,11 +551,17 @@ if (process.argv[1] && path.resolve(process.argv[1]) === scriptPath) {
   const expectedArchitecture = normalizeArchitecture(
     valueFor(args, "--arch", "arm64"),
   );
+  // Default off: the gate script points at `release/mac-arm64/Plainsong.app`,
+  // which after a real build is signed, and an unsigned binary there is a
+  // release defect and not something to shrug at. Pass the flag to verify the
+  // unsigned bundle `bun run electron:pack` leaves in the same place.
+  const allowUnsigned = args.includes("--allow-unsigned");
 
   try {
     const result = verifyAppBundle(
       path.resolve(repoRoot, appValue),
       expectedArchitecture,
+      { allowUnsigned },
     );
     console.log(JSON.stringify(result, null, 2));
   } catch (error) {

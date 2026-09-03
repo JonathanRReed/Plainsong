@@ -1045,6 +1045,15 @@ evidence is stale and must be recaptured before this becomes a candidate.
   layout. The `0.9.0-beta.2` DMG shipped unnotarized because this script was
   used instead of `bun run release:mac`; the warning now prints before and
   after every local build.
+- `bun run electron:pack` runs again. The packaged-native-helper gate is an
+  `afterPack` hook, and electron-builder emits `afterPack` before it signs
+  anything, so the gate was asserting entitlements on binaries that cargo had
+  only linker-signed — `plainsong-cli` failed on "no readable entitlement
+  property list" and took the whole pack down with it. Signature assertions
+  are now skipped per binary when nothing has deliberately signed it, and the
+  standalone `bun run gate:packaged:macos:native` stays strict against the
+  signed `release/` bundle, where an unsigned helper is now a named failure
+  rather than a confusing one.
 
 ## [0.9.0-beta.2] - 2026-08-23 (integration candidate)
 
