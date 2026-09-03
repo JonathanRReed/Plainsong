@@ -12,6 +12,98 @@
 
 use super::*;
 
+/// Compose the done-phase message for a finished dictation session.
+///
+/// A session that degraded (an LLM pass that failed or timed out, a command
+/// with no text to work on) still reports as done, but the warning describes
+/// the *formatting* pass while the outcome describes where the text actually
+/// went. Leading with the warning alone used to hide the outcome entirely —
+/// so a clipboard-only fallback, or a delivery that failed outright, read as
+/// an ordinary success. Say what happened to the text first, then why it is
+/// not quite what was asked for.
+/// What the delivery step observed, reduced to the terminal `outcome` string
+/// the overlay, the audit log and the renderer key on.
+pub(crate) struct DictationDeliveryFacts<'a> {
+    pub(crate) pasted: bool,
+    pub(crate) copied: bool,
+    /// The target was observed to take the text (direct Accessibility write),
+    /// as opposed to a Cmd+V that was merely dispatched.
+    pub(crate) confirmed: bool,
+    pub(crate) undo_performed: bool,
+    /// The secure-field policy refused delivery: nothing inserted, nothing
+    /// on the clipboard. Distinct from `error` so the renderer can say why.
+    pub(crate) secure_field_refused: bool,
+    pub(crate) has_paste_error: bool,
+    /// The outcome already set before delivery ran (an undo-only session,
+    /// or nothing at all), kept when delivery reported nothing.
+    pub(crate) previous: &'a str,
+}
+
+pub(crate) fn resolve_dictation_delivery_outcome(facts: DictationDeliveryFacts<'_>) -> String {
+    if facts.pasted {
+        if facts.undo_performed {
+            "replaced".to_string()
+        } else if facts.confirmed {
+            "pasted".to_string()
+        } else {
+            // Dispatched via Cmd+V with no read-back. Claiming a confirmed
+            // insert here is what let the app tell users it had typed text
+            // into an app that never took it.
+            "paste_dispatched".to_string()
+        }
+    } else if facts.copied {
+        if facts.undo_performed {
+            "copied_replacement".to_string()
+        } else {
+            "copied".to_string()
+        }
+    } else if facts.secure_field_refused {
+        dictation_secure_field::SECURE_FIELD_REASON_CODE.to_string()
+    } else if facts.has_paste_error {
+        "error".to_string()
+    } else {
+        facts.previous.to_string()
+    }
+}
+
+pub(crate) fn dictation_done_message(
+    outcome: &str,
+    final_text_is_empty: bool,
+    warnings: &[String],
+) -> String {
+    let outcome_message = match outcome {
+        "pasted" | "replaced" => "Inserted into the target app.",
+        // Refused on purpose: the focused control is a password or other
+        // secure input. Says so, says nothing was copied either, and says
+        // where the words are.
+        dictation_secure_field::SECURE_FIELD_REASON_CODE => {
+            "Not inserted: the field in front is a password or secure input. Plainsong did not insert or copy the words; they are saved in your dictation history."
+        }
+        // The paste keystroke was sent but nothing reported back that the app
+        // took it, so this says what actually happened and leaves the user a
+        // next step. The text stays on the clipboard for exactly this case.
+        "paste_dispatched" => {
+            "Sent to the target app. If nothing appeared, press Cmd+V to paste it."
+        }
+        "copied" | "copied_replacement" => "Copied to the clipboard and ready to paste.",
+        "previewed" => "Ready in Plainsong.",
+        "undone" => "Undo applied.",
+        "error" => "Could not deliver the text. It is saved in your dictation history.",
+        _ if final_text_is_empty => "No speech detected.",
+        _ => "Result ready.",
+    };
+
+    if warnings.is_empty() {
+        outcome_message.to_string()
+    } else {
+        format!("{} {}", outcome_message, warnings.join(" "))
+    }
+}
+
+pub(crate) fn should_deliver_dictation_text(delivery_mode: models::DictationDeliveryMode) -> bool {
+    delivery_mode == models::DictationDeliveryMode::System
+}
+
 /// Resolve the on-disk path to the Silero VAD ONNX model, but only when
 /// `vad_backend` actually calls for it -- when the energy-threshold backend
 /// is selected, skip touching the filesystem/download-manager entirely and
