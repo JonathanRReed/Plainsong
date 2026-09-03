@@ -1024,7 +1024,7 @@ impl AsrManager {
             Some(audio_data),
             selected_model,
             Some(mlx_enabled),
-            &TranscriptionOptions::default(),
+            &meeting_transcription_options(),
         )
         .await
     }
@@ -1033,8 +1033,13 @@ impl AsrManager {
     ///
     /// Used only where a provider can take an entire meeting in one request:
     /// a provider's speaker numbering is scoped to one request, so this is the
-    /// only shape in which its diarization covers the whole recording. Asks
-    /// for speaker labels, which is the reason the path exists.
+    /// only shape in which its diarization covers the whole recording.
+    ///
+    /// A path-mode transcription reaches the provider through
+    /// `AsrProvider::transcribe`, which takes no options, so the two providers
+    /// with a whole-file meeting route ask for speaker labels inside their own
+    /// `transcribe`. The options below only apply if the engine/provider
+    /// fallback chain ever serves this request through a bytes-mode call.
     pub async fn transcribe_path_for_meeting(
         &self,
         provider_type: AsrProviderType,
@@ -1904,6 +1909,26 @@ fn runtime_diagnostics_for_provider(
     }
 }
 
+/// The per-request options every meeting transcription uses.
+///
+/// The meeting lane always asks for speaker labels, even for a ninety-second
+/// chunk whose labels it will then throw away. Gemini only returns word
+/// timestamps on a request that also asks for diarization or timestamps, and a
+/// meeting without timestamps has no timeline to seek, no diarization to merge
+/// and no playhead to follow -- so asking is what buys the timings. Whether
+/// the labels that come back are *usable* is decided afterwards by
+/// `provider_speaker_turns_survive_chunking`, because a provider numbers its
+/// speakers per request.
+///
+/// No vocabulary hint: the personal dictionary is a dictation feature, and
+/// Gemini's API refuses it on the same request as timestamps anyway.
+fn meeting_transcription_options() -> TranscriptionOptions {
+    TranscriptionOptions {
+        request_speaker_labels: true,
+        ..TranscriptionOptions::default()
+    }
+}
+
 /// Diagnostics for native-inference providers (no Python, no external runtime).
 fn runtime_native_model(
     provider_available: bool,
@@ -2196,12 +2221,29 @@ fn sanitize_whisper_model_id(model_id: &str) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::{
-        migrate_legacy_local_artifacts, parakeet_model_dir_and_missing_files,
-        runtime_diagnostics_for_provider, AsrManager, AsrProviderType,
+        meeting_transcription_options, migrate_legacy_local_artifacts,
+        parakeet_model_dir_and_missing_files, runtime_diagnostics_for_provider, AsrManager,
+        AsrProviderType,
     };
     use crate::asr::AsrProviderFactory;
     use crate::settings::PlatformOptimizationSettings;
     use std::path::PathBuf;
+
+    #[test]
+    fn every_meeting_request_asks_for_speaker_labels_because_that_is_what_buys_timestamps() {
+        // Gemini returns word timestamps only on a request that also asks for
+        // diarization or timestamps. A meeting chunk that stopped asking would
+        // come back as one untimed block, and the transcript would lose its
+        // timeline, its playhead and any chance of a diarization merge -- a
+        // regression that would look like "speakers stopped working" rather
+        // than "timestamps stopped arriving".
+        let options = meeting_transcription_options();
+        assert!(options.request_speaker_labels);
+        // And never the personal dictionary: it is a dictation feature, and
+        // Gemini's API refuses it alongside timestamps.
+        assert!(options.vocabulary_hint.is_none());
+        assert!(!options.translate_to_english);
+    }
 
     #[test]
     fn no_provider_is_gated_out_of_transcription_in_this_build() {
