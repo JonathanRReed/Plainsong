@@ -13,6 +13,24 @@ changed underneath `0.9.0-beta.2`. See `LAUNCH.md` for which qualification
 evidence is stale and must be recaptured before this becomes a candidate.
 
 ### Added
+- Plainsong can remember a speaker's voice, on this Mac only, so the same
+  person is recognized in later meetings. Off by default (Settings › General ›
+  Meetings › Remembered voices). With it on, naming a speaker offers to
+  remember that voice, and a later meeting shows a chip in the speaker header
+  — "Looks like Dana, 91%" — with Confirm and Not them; confirming applies the
+  name through the usual rename path and folds that meeting into the stored
+  average. What is kept is a numeric voice signature, not audio: it cannot be
+  played back, it is excluded from exports and from the `plainsong` command
+  and its MCP server, it never leaves the machine, and it is included in a
+  local backup like the rest of the database. Settings lists every remembered
+  voice with per-voice delete and Delete all, both audit-logged. An optional
+  second switch applies a name without asking when the match clears a stricter
+  threshold; the transcript marks such a name "auto" until it is confirmed,
+  and a name you typed is never overwritten. Matching never crosses
+  speaker-separation models, and refuses when two remembered voices are too
+  close to tell apart. Thresholds are per model and calibrated against
+  synthetic fixtures at a zero-false-accept operating point —
+  `artifacts/qa/voiceprint-calibration-2026-09-02.md`.
 - Dictation history is searchable, and a saved dictation can be run through
   the recognizer again. The search field over Recent dictations matches both
   what was delivered and (where it was kept) what the recognizer heard,
