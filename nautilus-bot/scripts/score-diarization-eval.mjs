@@ -14,8 +14,9 @@
  *
  * - `frameErrorRate`: fraction of 10 ms frames whose predicted speaker
  *   disagrees with the reference, after mapping predicted speaker ids to
- *   reference speakers by the optimal one-to-one assignment (brute force over
- *   permutations; these fixtures have two speakers). This is DER-*style* —
+ *   reference speakers by the optimal one-to-one assignment (Hungarian; a run
+ *   with a low turn floor can predict dozens of speakers, which is more than
+ *   an enumeration of permutations survives). This is DER-*style* —
  *   the same confusion + miss + false-alarm accounting a DER tool does with a
  *   0 ms collar — but it is computed on a two-speaker fixture with no
  *   overlapped speech, so it is NOT comparable to a published VoxConverse DER.
@@ -71,46 +72,125 @@ function frameLabels(turns, durationSeconds) {
   return frames;
 }
 
-function permutations(items) {
-  if (items.length <= 1) {
-    return [items];
+/**
+ * Minimum-cost assignment of `rows` to `columns` (Hungarian / Kuhn-Munkres
+ * with potentials, the e-maxx formulation). `cost` is rectangular with
+ * `rows <= columns`. Returns, per row, the column it was assigned.
+ *
+ * O(rows^2 * columns), against the factorial of a brute-force search over
+ * every speaker permutation. The result is the same mapping — this is the
+ * classic assignment problem, and enumeration was only ever a slow way to
+ * solve it — but the search space stopped being enumerable the moment a run
+ * predicted more than about eight speakers, which is exactly what a low turn
+ * floor does. Scoring one 13-speaker prediction exhausted Node's heap.
+ */
+function minCostAssignment(cost) {
+  const n = cost.length;
+  const m = cost[0].length;
+  const u = new Array(n + 1).fill(0);
+  const v = new Array(m + 1).fill(0);
+  const p = new Array(m + 1).fill(0);
+  const way = new Array(m + 1).fill(0);
+
+  for (let i = 1; i <= n; i += 1) {
+    p[0] = i;
+    let j0 = 0;
+    const minv = new Array(m + 1).fill(Infinity);
+    const used = new Array(m + 1).fill(false);
+    do {
+      used[j0] = true;
+      const i0 = p[j0];
+      let delta = Infinity;
+      let j1 = 0;
+      for (let j = 1; j <= m; j += 1) {
+        if (used[j]) continue;
+        const current = cost[i0 - 1][j - 1] - u[i0] - v[j];
+        if (current < minv[j]) {
+          minv[j] = current;
+          way[j] = j0;
+        }
+        if (minv[j] < delta) {
+          delta = minv[j];
+          j1 = j;
+        }
+      }
+      for (let j = 0; j <= m; j += 1) {
+        if (used[j]) {
+          u[p[j]] += delta;
+          v[j] -= delta;
+        } else {
+          minv[j] -= delta;
+        }
+      }
+      j0 = j1;
+    } while (p[j0] !== 0);
+    do {
+      const j1 = way[j0];
+      p[j0] = p[j1];
+      j0 = j1;
+    } while (j0 !== 0);
   }
-  const out = [];
-  for (let i = 0; i < items.length; i += 1) {
-    const rest = [...items.slice(0, i), ...items.slice(i + 1)];
-    for (const tail of permutations(rest)) {
-      out.push([items[i], ...tail]);
-    }
+
+  const assignment = new Array(n).fill(-1);
+  for (let j = 1; j <= m; j += 1) {
+    if (p[j] > 0) assignment[p[j] - 1] = j - 1;
   }
-  return out;
+  return assignment;
 }
 
 function bestMapping(referenceFrames, predictedFrames, referenceSpeakers, predictedSpeakers) {
-  // Pad the shorter list so every predicted speaker gets some reference (or
-  // an explicit "no match", which scores every one of its frames as an error).
-  const width = Math.max(referenceSpeakers.length, predictedSpeakers.length);
-  const paddedReference = [...referenceSpeakers];
-  while (paddedReference.length < width) {
-    paddedReference.push(null);
+  if (predictedSpeakers.length === 0) {
+    const errors = referenceFrames.filter((label) => label !== null).length;
+    return { errors, mapping: new Map() };
   }
 
-  let best = null;
-  for (const order of permutations(paddedReference)) {
-    const mapping = new Map();
-    predictedSpeakers.forEach((speaker, index) => mapping.set(speaker, order[index] ?? null));
-    let errors = 0;
-    for (let i = 0; i < referenceFrames.length; i += 1) {
-      const expected = referenceFrames[i];
-      const actual = predictedFrames[i] === null ? null : mapping.get(predictedFrames[i]);
-      if (expected !== actual) {
-        errors += 1;
-      }
+  const referenceIndex = new Map(referenceSpeakers.map((speaker, i) => [speaker, i]));
+  const predictedIndex = new Map(predictedSpeakers.map((speaker, i) => [speaker, i]));
+
+  // agree[p][r]: frames a mapping p→r would score correct.
+  // silent[p]:   frames p covers where the reference has nobody, which agree
+  //              only when p is mapped to "no reference speaker".
+  // base:        frames neither side attributes; they agree under every
+  //              mapping, so they sit outside the optimisation.
+  const agree = predictedSpeakers.map(() => new Array(referenceSpeakers.length).fill(0));
+  const silent = new Array(predictedSpeakers.length).fill(0);
+  let base = 0;
+  for (let i = 0; i < referenceFrames.length; i += 1) {
+    const expected = referenceFrames[i];
+    const predicted = predictedFrames[i];
+    if (predicted === null) {
+      if (expected === null) base += 1;
+      continue;
     }
-    if (best === null || errors < best.errors) {
-      best = { errors, mapping };
+    const p = predictedIndex.get(predicted);
+    if (expected === null) {
+      silent[p] += 1;
+    } else {
+      agree[p][referenceIndex.get(expected)] += 1;
     }
   }
-  return best;
+
+  // One column per reference speaker, then one "unmatched" column per
+  // predicted speaker so a surplus predicted speaker can always be left
+  // unmapped — the padding the permutation search did with nulls.
+  const columns = referenceSpeakers.length + predictedSpeakers.length;
+  const cost = predictedSpeakers.map((_, p) =>
+    new Array(columns)
+      .fill(0)
+      .map((_unused, j) => -(j < referenceSpeakers.length ? agree[p][j] : silent[p])),
+  );
+  const assignment = minCostAssignment(cost);
+
+  const mapping = new Map();
+  let agreed = base;
+  predictedSpeakers.forEach((speaker, p) => {
+    const column = assignment[p];
+    const matched = column >= 0 && column < referenceSpeakers.length;
+    mapping.set(speaker, matched ? referenceSpeakers[column] : null);
+    agreed += matched ? agree[p][column] : silent[p];
+  });
+
+  return { errors: referenceFrames.length - agreed, mapping };
 }
 
 function boundaries(turns) {

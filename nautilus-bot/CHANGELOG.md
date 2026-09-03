@@ -13,12 +13,13 @@ changed underneath `0.9.0-beta.2`. See `LAUNCH.md` for which qualification
 evidence is stale and must be recaptured before this becomes a candidate.
 
 ### Documented
-- Plainsong's own speaker separation cannot report a turn shorter than five
-  seconds: it discards any turn under that length as noise. On a five-minute
-  synthetic conversation with three-second turns that costs 59% of frames and
-  leaves 121 of 300 seconds unattributed. Nothing changed in the app; this is a
-  measurement of what it already did, now written into KNOWN-LIMITATIONS with
-  the evidence in `artifacts/qa/diarization-segmentation-2026-09-02.md`.
+- Plainsong's own speaker separation could not report a turn shorter than five
+  seconds: it discarded any turn under that length as noise. On a five-minute
+  synthetic conversation with three-second turns that cost 59% of frames and
+  left 121 of 300 seconds unattributed. First measured in
+  `artifacts/qa/diarization-segmentation-2026-09-02.md`; the floor has since
+  been corrected, see Fixed below, and KNOWN-LIMITATIONS describes what is
+  true now rather than this.
 
 ### Added
 - A second, fully offline route for Cohere Transcribe: the same 03-2026 model
@@ -504,6 +505,19 @@ evidence is stale and must be recaptured before this becomes a candidate.
   files that still carry it load cleanly and are rewritten without it.
 
 ### Fixed
+- Speaker separation can now report a turn as short as three seconds, where it
+  used to need five. The old floor deleted most of an ordinary conversation:
+  on a five-minute recording with three-second turns it got 59% of frames wrong
+  and left 121 of 300 seconds with no speaker; the same recording is now 24%
+  wrong with nothing unattributed. Averaged over 24 synthetic fixtures (turn
+  lengths from 2 to 8 seconds, two and three speakers, with and without pauses)
+  and both speaker models, frame error falls from 38% to 17%, unattributed
+  speech from 86 seconds in 300 to 3.5, and the right number of speakers is
+  found in 45 of 48 runs instead of 33. The floor is not removed, because a
+  turn no two windows agree on is noise — without it a two-person meeting comes
+  back with sixteen speakers. Turns shorter than three seconds are still left
+  without a speaker rather than given the wrong one. Evidence:
+  `artifacts/qa/diarization-turn-floor-2026-09-03.md`.
 - Quitting Plainsong no longer schedules a sidecar it is about to throw away.
   When the whole process group is signalled — a macOS logout or restart, or a
   QA harness stopping the app — the sidecar can die before Electron's own quit
