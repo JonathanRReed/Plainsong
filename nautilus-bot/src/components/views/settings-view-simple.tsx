@@ -17,7 +17,7 @@ import {
   type AiLaneKey,
 } from "@/components/models/ai-lanes";
 import { SavedPromptManagerDialog } from "@/components/prompts/saved-prompt-manager-dialog";
-import { resolveSavedPrompts } from "@/lib/saved-prompts";
+import { resolveSavedPrompts, type SavedPrompt } from "@/lib/saved-prompts";
 import { listen } from "@/lib/electron";
 import { Button } from "@/components/ui/button";
 import { Switch } from "@/components/ui/switch";
@@ -519,6 +519,9 @@ export function SettingsView() {
   const { productReadiness } = useProductReadinessStatus();
   const [activeTab, setActiveTab] = useState<TabId>("general");
   const [savedPromptsOpen, setSavedPromptsOpen] = useState(false);
+  const [savedPromptsSaveError, setSavedPromptsSaveError] = useState<
+    string | null
+  >(null);
   const [draftSettings, setDraftSettings] = useState<Settings | null>(null);
   const [persistedSettings, setPersistedSettings] = useState<Settings | null>(
     null,
@@ -1525,6 +1528,62 @@ export function SettingsView() {
       queueSettingsSave(next, options?.debounceMs ?? SETTINGS_SAVE_DEBOUNCE_MS);
     },
     [flushPendingSettingsSave, queueSettingsSave],
+  );
+
+  /**
+   * Write the saved-prompt library and report whether it landed.
+   *
+   * Everything else on this view goes through `updateSettings`, which hands
+   * the write to the debounced scheduler and returns immediately -- it has no
+   * way to say a save failed, because by design nothing is waiting. That is
+   * right for a switch, whose failure the view's own error banner covers.
+   *
+   * It is wrong for this dialog. It takes `onPersist`'s answer as the truth
+   * about the write, and a `return true` written before any I/O told it a
+   * save had succeeded when the settings file was read-only or the disk was
+   * full: the row closed, the list looked saved, and it was not. So this
+   * mirrors the picker's own path in `use-saved-prompts.ts`: optimistic
+   * state, an awaited write, and the failure shown inside the dialog the
+   * reader is looking at.
+   *
+   * Anything already queued is flushed first, so this write cannot land
+   * underneath an older one still waiting out its debounce.
+   */
+  const persistSavedPrompts = useCallback(
+    async (next: readonly SavedPrompt[]): Promise<boolean> => {
+      const current = latestSettingsRef.current;
+      if (!current) return false;
+      const updated: Settings = {
+        ...current,
+        ai: { ...(current.ai ?? {}), savedPrompts: [...next] },
+      };
+
+      setSavedPromptsSaveError(null);
+      latestSettingsRef.current = updated;
+      setDraftSettings(updated);
+      setError(null);
+
+      try {
+        await flushPendingSettingsSave(true);
+        await saveSettings(updated);
+        if (mountedRef.current) {
+          setPersistedSettings(updated);
+          applySecurityStatusFromSettings(updated);
+        }
+        return true;
+      } catch (e) {
+        const message =
+          e instanceof Error
+            ? e.message
+            : "Plainsong could not save your prompts.";
+        if (mountedRef.current) {
+          setSavedPromptsSaveError(message);
+          setError(message);
+        }
+        return false;
+      }
+    },
+    [applySecurityStatusFromSettings, flushPendingSettingsSave],
   );
 
   // Change one field of the newest settings, for writes the user did not ask
@@ -5654,16 +5713,8 @@ export function SettingsView() {
                       open={savedPromptsOpen}
                       onOpenChange={setSavedPromptsOpen}
                       prompts={resolveSavedPrompts(settings.ai?.savedPrompts)}
-                      onPersist={(next) => {
-                        updateSettings(
-                          {
-                            ...settings,
-                            ai: { ...(settings.ai ?? {}), savedPrompts: [...next] },
-                          },
-                          { immediate: true },
-                        );
-                        return true;
-                      }}
+                      onPersist={persistSavedPrompts}
+                      saveError={savedPromptsSaveError}
                     />
 
                     <div className="flex items-center justify-between">
