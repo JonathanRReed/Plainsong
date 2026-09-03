@@ -13,6 +13,19 @@ changed underneath `0.9.0-beta.2`. See `LAUNCH.md` for which qualification
 evidence is stale and must be recaptured before this becomes a candidate.
 
 ### Added
+- Settings → Privacy & Security → Diagnostics can write a support bundle. It
+  is a zip you can open and read: app and macOS versions, this Mac's chip and
+  memory, your settings reduced to switches and short names, which macOS
+  permissions Plainsong has, which model files are on disk and whether each
+  still passes its integrity check, the tail of the local audit log, and the
+  last few hundred log lines from this session. "Show what is included" lists
+  every file and every redaction rule before anything is written, and the
+  button opens a save dialog — Plainsong writes where you choose and uploads
+  nothing. Audio, transcripts, dictated text, meeting notes, prompts,
+  dictionary entries, snippets, credentials and file paths are never in it,
+  and if a redaction rule fails to remove a home path or an email address the
+  app refuses to write the file at all. Previously only a source checkout
+  could produce one.
 - Dictation history is searchable, and a saved dictation can be run through
   the recognizer again. The search field over Recent dictations matches both
   what was delivered and (where it was kept) what the recognizer heard,

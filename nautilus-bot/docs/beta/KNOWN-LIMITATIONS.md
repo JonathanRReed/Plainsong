@@ -147,9 +147,15 @@ using sensitive content.
 
 ## Diagnostics and remote providers
 
-- The installed beta does not yet expose support-bundle creation in its UI.
-  Use the report template and the private invitation channel. Do not send raw
-  logs, recordings, transcripts, dictated text, credentials, or Keychain data.
+- Support bundles are now made from Settings -> Privacy & Security ->
+  Diagnostics, with the file list and the redaction rules shown before the zip
+  is written. Attach the bundle to the report template and send both through
+  the private invitation channel. Still do not send raw logs, recordings,
+  transcripts, dictated text, credentials, or Keychain data separately -- the
+  bundle deliberately holds none of those.
+- The bundle's log section is the tail of what the app logged *this run*, kept
+  in memory. Quit and relaunch and it starts empty, so make the bundle in the
+  same session as the problem.
 - Cloud speech and analysis providers are optional, use credentials you supply,
   and send the relevant audio or text directly to that provider. Local
   processing remains the default.

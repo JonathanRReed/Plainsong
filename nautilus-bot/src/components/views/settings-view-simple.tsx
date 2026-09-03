@@ -166,6 +166,7 @@ import {
 } from "lucide-react";
 import { UpdateStatusWidget, BetaChannelToggle } from "@/components/update";
 import { useToast } from "@/components/toast";
+import { SupportBundlePanel } from "@/components/settings/support-bundle-panel";
 import { useProductReadinessStatus } from "@/features/readiness/product-readiness-context";
 import type { ReadinessAssessment } from "@/features/readiness/product-readiness";
 
@@ -4608,6 +4609,8 @@ export function SettingsView() {
                           includeHotkeyBehavior: false,
                           includePermissions: true,
                         })}
+
+                        <SupportBundlePanel />
 
                         <div className="space-y-2">
                           <p className="section-heading">Vault</p>

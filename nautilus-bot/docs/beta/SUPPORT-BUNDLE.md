@@ -6,11 +6,33 @@ counts. It deliberately excludes content.
 
 ## Installed-app testers
 
-The first limited beta does not expose the support-bundle generator inside the
-installed app. Do not install Bun, clone the repository, or send raw logs just
-to file a report. Complete [ISSUE-TEMPLATE.md](ISSUE-TEMPLATE.md) without a
-bundle. If additional diagnostics are necessary, the beta owner will arrange a
-maintainer-assisted session.
+Settings -> Privacy & Security -> Diagnostics -> **Create support bundle...**
+
+"Show what is included" lists the files, the redaction rules, and what the
+bundle never carries, before anything is written. The button then opens a save
+dialog; Plainsong writes a zip where you choose and nowhere else. Nothing is
+uploaded, and no path is ever named by the app's window -- the sidecar only
+ever sees the file you picked.
+
+The zip holds a `README.txt`, a `manifest.json`, and one file per section:
+
+| File | What it holds |
+| --- | --- |
+| `summary.json` | app version, macOS version, chip, core count, memory |
+| `settings-redacted.json` | your settings, reduced to switches, numbers, and short names |
+| `readiness.json` | which macOS permissions Plainsong currently has |
+| `models.json` | which model files are on disk, their sizes, and their integrity-receipt status |
+| `audit-log-tail.json` | recent audit events, with details redacted |
+| `logs-redacted.txt` | the tail of this session's app and sidecar logs |
+| `build-identity.json` | app, Electron, Chrome, and Node versions, and whether the build is packaged |
+
+The log section is in-memory and per-session: relaunching the app empties it,
+so make the bundle in the session where the problem happened. Plainsong does
+not embed a signed release receipt in the app bundle, so `build-identity.json`
+reports the versions the running process knows rather than a signed receipt.
+
+If any redaction rule fails to remove a home path or an email address, the app
+refuses to write the file at all and says so. Read the zip before you send it.
 
 ## Source-checkout testers
 
