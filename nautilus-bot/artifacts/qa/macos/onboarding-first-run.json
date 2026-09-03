@@ -1,0 +1,116 @@
+{
+  "capturedAt": "2026-09-03T16:21:34.927Z",
+  "app": "/Users/jonathanreed/Downloads/Plainsong/.claude/worktrees/agent-aa7e7ffa13c0d5783/nautilus-bot/release/mac-arm64/Plainsong.app",
+  "profileRoot": "/var/folders/ph/7cfrg6mn3bj120hdsfs79d140000gn/T/plainsong-onboarding-first-run-36OKme",
+  "runs": [
+    {
+      "label": "fresh",
+      "observation": {
+        "wizardVisible": true,
+        "heading": "Dictation model",
+        "rubric": "ONBOARDING",
+        "permissionRows": [],
+        "splashVisible": false,
+        "workspaceVisible": true,
+        "legacyFlag": null
+      },
+      "onboardingLog": [
+        "[onboarding] show: Setup has not been completed on this install: No dictation model is ready on this Mac.\", source: plainsong://bundle/assets/App-lISuKDSL.js (2)"
+      ]
+    },
+    {
+      "label": "legacy-flag",
+      "observation": {
+        "wizardVisible": true,
+        "heading": "Dictation model",
+        "rubric": "ONBOARDING",
+        "permissionRows": [],
+        "splashVisible": false,
+        "workspaceVisible": true,
+        "legacyFlag": "true"
+      },
+      "onboardingLog": [
+        "[onboarding] show: Setup has not been completed on this install: No dictation model is ready on this Mac.\", source: plainsong://bundle/assets/App-lISuKDSL.js (2)"
+      ]
+    },
+    {
+      "label": "stale-record",
+      "observation": {
+        "wizardVisible": true,
+        "heading": "Dictation model",
+        "rubric": "ONBOARDING",
+        "permissionRows": [],
+        "splashVisible": false,
+        "workspaceVisible": true,
+        "legacyFlag": "true"
+      },
+      "onboardingLog": [
+        "[onboarding] show: Setup was completed before, but dictation cannot run now: No dictation model is ready on this Mac.\", source: plainsong://bundle/assets/App-lISuKDSL.js (2)"
+      ]
+    },
+    {
+      "label": "defer",
+      "observation": {
+        "wizardVisible": true,
+        "heading": "Dictation model",
+        "rubric": "ONBOARDING",
+        "permissionRows": [],
+        "splashVisible": false,
+        "workspaceVisible": true,
+        "legacyFlag": "true"
+      },
+      "onboardingLog": [
+        "[onboarding] show: Setup was completed before, but dictation cannot run now: No dictation model is ready on this Mac.\", source: plainsong://bundle/assets/App-lISuKDSL.js (2)",
+        "[onboarding] skip: Setup is incomplete, but the reader already deferred everything that is missing.\", source: plainsong://bundle/assets/App-lISuKDSL.js (2)"
+      ]
+    }
+  ],
+  "settingsAfterDefer": {
+    "completedAt": "2026-06-19T10:04:00Z",
+    "completedVersion": "0.9.0-beta.1",
+    "meetingsCompletedAt": null,
+    "grantedAtCompletion": {
+      "microphone": true,
+      "accessibility": true,
+      "postEvent": null,
+      "speechRecognition": null,
+      "systemAudio": null
+    },
+    "deferredAt": "2026-09-03T16:21:30.912311+00:00",
+    "deferredUnmet": [
+      "dictation_model"
+    ]
+  },
+  "checks": [
+    {
+      "name": "fresh data directory shows the first-run wizard",
+      "ok": true,
+      "detail": "Dictation model"
+    },
+    {
+      "name": "the retired localStorage flag is present for this launch",
+      "ok": true,
+      "detail": "nautilus_onboarding_complete=true"
+    },
+    {
+      "name": "a stale renderer flag no longer skips setup on a Mac that cannot dictate",
+      "ok": true,
+      "detail": "[onboarding] show: Setup has not been completed on this install: No dictation model is ready on this Mac.\", source: plainsong://bundle/assets/App-lISuKDSL.js (2)"
+    },
+    {
+      "name": "a completed record does not override a Mac that cannot dictate now",
+      "ok": true,
+      "detail": "[onboarding] show: Setup was completed before, but dictation cannot run now: No dictation model is ready on this Mac.\", source: plainsong://bundle/assets/App-lISuKDSL.js (2)"
+    },
+    {
+      "name": "Skip setup for now records a durable deferral in settings.json",
+      "ok": true,
+      "detail": "deferredAt=2026-09-03T16:21:30.912311+00:00"
+    },
+    {
+      "name": "the deferral names what was unmet",
+      "ok": true,
+      "detail": "[\"dictation_model\"]"
+    }
+  ]
+}
