@@ -52,6 +52,16 @@ pub const PARAKEET_GGUF_MODEL_ID: &str = "parakeet-tdt-0.6b-v3-q8_0";
 /// streaming feature.
 pub const NEMOTRON_STREAMING_GGUF_MODEL_ID: &str = "nemotron-3.5-asr-streaming-0.6b-q8_0";
 
+/// Mistral's offline audio-LLM, the open-weights accuracy leader on the
+/// Artificial Analysis non-streaming board. Measured here on 2026-09-03 and
+/// **not** offered as a route: see
+/// `artifacts/qa/model-selection-2026-09-03.md`.
+pub const VOXTRAL_MINI_3B_GGUF_MODEL_ID: &str = "voxtral-mini-3b-2507-q4_k_m";
+
+/// Mistral's streaming sibling. Also measured, also not a route, for the same
+/// reason plus one more: it emits no timestamps at all.
+pub const VOXTRAL_REALTIME_4B_GGUF_MODEL_ID: &str = "voxtral-mini-4b-realtime-2602-q4_k_m";
+
 /// Env override for the compute backend, so one binary can measure Metal and
 /// CPU without a rebuild. Spike-only: nothing in the app sets it, and the
 /// default (`Auto`) is what a user would get.
@@ -112,6 +122,16 @@ const PARAKEET_V3_LANGUAGES: &[&str] = &[
     "pl", "pt", "ro", "sk", "sl", "es", "sv", "ru", "uk",
 ];
 
+/// The 8 languages Mistral lists on the `Voxtral-Mini-3B-2507` model card.
+const VOXTRAL_2507_LANGUAGES: &[&str] = &["en", "fr", "de", "es", "it", "pt", "nl", "hi"];
+
+/// The 13 languages Mistral lists on the `Voxtral-Mini-4B-Realtime-2602` card.
+/// The streaming processor is auto-detect only — there is no language hint to
+/// send — so this is a coverage claim, not a selector.
+const VOXTRAL_REALTIME_LANGUAGES: &[&str] = &[
+    "en", "fr", "es", "de", "ru", "zh", "ja", "it", "pt", "nl", "ar", "hi", "ko",
+];
+
 pub(crate) const MODEL_SPECS: &[TranscribeCppModelSpec] = &[
     TranscribeCppModelSpec {
         model_id: PARAKEET_GGUF_MODEL_ID,
@@ -147,6 +167,39 @@ pub(crate) const MODEL_SPECS: &[TranscribeCppModelSpec] = &[
         // The model card lists 32 language-locales; only English is exercised
         // here, so no language list is claimed.
         languages: &["en"],
+        offered_as_route: false,
+    },
+    TranscribeCppModelSpec {
+        model_id: VOXTRAL_MINI_3B_GGUF_MODEL_ID,
+        label: "Voxtral Mini 3B 2507 GGUF Q4_K_M (measured, not a route)",
+        display_name: "Voxtral Mini 3B (2507, GGUF Q4_K_M)",
+        file_name: "Voxtral-Mini-3B-2507-Q4_K_M.gguf",
+        hf_repo: "handy-computer/Voxtral-Mini-3B-2507-gguf",
+        hf_revision: "5690205813042c07cbaa86d2a9dcc585fcd31304",
+        sha256: "3a6717aa8f8989108d260cbd237584289eec43cc987e10133c33643515936205",
+        size_bytes: 2_984_721_056,
+        // Mistral ships Voxtral under Apache-2.0 and the GGUF repo's card
+        // metadata repeats it; verified 2026-09-03. Q4_K_M is the smallest and
+        // fastest tier upstream publishes, and its LibriSpeech WER (1.94%) is
+        // within noise of BF16 (1.88%) — so this is Voxtral at its best case
+        // for latency, which is the comparison that had to be made.
+        license: "Apache-2.0",
+        upstream_url: "https://huggingface.co/handy-computer/Voxtral-Mini-3B-2507-gguf",
+        languages: VOXTRAL_2507_LANGUAGES,
+        offered_as_route: false,
+    },
+    TranscribeCppModelSpec {
+        model_id: VOXTRAL_REALTIME_4B_GGUF_MODEL_ID,
+        label: "Voxtral Mini 4B Realtime 2602 GGUF Q4_K_M (measured, not a route)",
+        display_name: "Voxtral Mini 4B Realtime (2602, GGUF Q4_K_M)",
+        file_name: "Voxtral-Mini-4B-Realtime-2602-Q4_K_M.gguf",
+        hf_repo: "handy-computer/Voxtral-Mini-4B-Realtime-2602-gguf",
+        hf_revision: "b3e1c979e3775cbd0a49a65878a0ec7f06789ed7",
+        sha256: "39dc1f65539373a406edea7490505822d77c12edff521744678717eef4da4723",
+        size_bytes: 2_830_493_984,
+        license: "Apache-2.0",
+        upstream_url: "https://huggingface.co/handy-computer/Voxtral-Mini-4B-Realtime-2602-gguf",
+        languages: VOXTRAL_REALTIME_LANGUAGES,
         offered_as_route: false,
     },
 ];
@@ -459,6 +512,31 @@ struct CachedRuntime {
     _model: Model,
     session: Session,
     load_ms: u64,
+    /// The finest timestamp granularity this family can produce, read from the
+    /// loaded model. Asking for more than this is a hard error upstream, not a
+    /// silent downgrade — see `timestamp_request_for`.
+    max_timestamp_kind: TimestampKind,
+}
+
+/// What to ask a loaded model for, given the finest granularity it advertises.
+///
+/// The dictation and meeting contracts want `Segment` rows. Families differ:
+/// Parakeet advertises `Token`, Voxtral advertises `None`. `transcribe_run`
+/// rejects a request finer than `max_timestamp_kind` with
+/// `TRANSCRIBE_ERR_UNSUPPORTED_TIMESTAMPS` rather than clamping it, so asking
+/// every family for `Segment` makes a timestamp-free family fail to decode at
+/// all instead of returning the text it does have. Clamp here, explicitly,
+/// rather than passing `Auto` — `Auto` would let a token-capable family return
+/// per-token rows this provider would then throw away.
+pub(crate) fn timestamp_request_for(max_timestamp_kind: TimestampKind) -> TimestampKind {
+    match max_timestamp_kind {
+        TimestampKind::Segment | TimestampKind::Word | TimestampKind::Token => {
+            TimestampKind::Segment
+        }
+        // `Auto` is not a capability a model reports; treat anything else as
+        // "no timed rows available".
+        TimestampKind::None | TimestampKind::Auto => TimestampKind::None,
+    }
 }
 
 fn runtime_cache() -> &'static Mutex<Option<CachedRuntime>> {
@@ -731,17 +809,20 @@ fn run_native(
             .session()
             .map_err(|error| anyhow::anyhow!(describe_transcribe_error(&model_label, &error)))?;
         let load_ms = started.elapsed().as_millis() as u64;
+        let max_timestamp_kind = model.capabilities().max_timestamp_kind;
         tracing::info!(
-            "transcribe.cpp loaded {} on {} in {} ms",
+            "transcribe.cpp loaded {} on {} in {} ms (max timestamps: {:?})",
             model_path.display(),
             backend.label(),
-            load_ms
+            load_ms,
+            max_timestamp_kind
         );
         *cache = Some(CachedRuntime {
             key,
             _model: model,
             session,
             load_ms,
+            max_timestamp_kind,
         });
     }
 
@@ -751,9 +832,9 @@ fn run_native(
 
     let options = RunOptions {
         // Segment granularity is what the dictation and meeting contracts
-        // consume; asking for `Auto` would let a family return token rows we
-        // then throw away.
-        timestamps: TimestampKind::Segment,
+        // consume, clamped to what this family can actually produce: a request
+        // finer than the model's `max_timestamp_kind` is rejected outright.
+        timestamps: timestamp_request_for(runtime.max_timestamp_kind),
         ..RunOptions::default()
     };
 
@@ -1656,6 +1737,106 @@ pub fn streaming_reference_words(model_path: &Path, pcm: &[f32]) -> Result<Vec<(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The bug this guards: the provider used to ask every family for
+    /// `Segment` timestamps. Voxtral advertises `max_timestamp_kind == None`,
+    /// and `transcribe_run` rejects an over-fine request rather than clamping
+    /// it, so a Voxtral decode failed outright with
+    /// `TRANSCRIBE_ERR_UNSUPPORTED_TIMESTAMPS` instead of returning its text.
+    #[test]
+    fn the_timestamp_request_is_clamped_to_what_the_family_can_produce() {
+        // Parakeet and Nemotron advertise Token; the meeting contract wants
+        // Segment, and asking for less than the maximum is always allowed.
+        assert_eq!(
+            timestamp_request_for(TimestampKind::Token),
+            TimestampKind::Segment
+        );
+        assert_eq!(
+            timestamp_request_for(TimestampKind::Word),
+            TimestampKind::Segment
+        );
+        assert_eq!(
+            timestamp_request_for(TimestampKind::Segment),
+            TimestampKind::Segment
+        );
+        // Voxtral (both families), Cohere, Canary, Moonshine: text only.
+        assert_eq!(
+            timestamp_request_for(TimestampKind::None),
+            TimestampKind::None
+        );
+        // `Auto` is a request, never a reported capability. Treat it as the
+        // conservative answer rather than assuming timed rows exist.
+        assert_eq!(
+            timestamp_request_for(TimestampKind::Auto),
+            TimestampKind::None
+        );
+    }
+
+    /// Every spec the provider can load is uniquely named, pins a full
+    /// SHA-256, and pins a 40-character commit rather than a branch. The
+    /// download path hashes what it fetches, so a wrong hash is caught at
+    /// install time — but a `main` revision would silently change what gets
+    /// hashed.
+    #[test]
+    fn every_model_spec_pins_an_immutable_revision_and_a_full_digest() {
+        let mut seen: Vec<&str> = Vec::new();
+        for spec in MODEL_SPECS {
+            assert!(
+                !seen.contains(&spec.model_id),
+                "duplicate model id {}",
+                spec.model_id
+            );
+            seen.push(spec.model_id);
+            assert_eq!(
+                spec.hf_revision.len(),
+                40,
+                "{} must pin a commit, not a branch",
+                spec.model_id
+            );
+            assert_eq!(spec.sha256.len(), 64, "{} needs a sha256", spec.model_id);
+            assert!(
+                spec.sha256.chars().all(|c| c.is_ascii_hexdigit()),
+                "{} sha256 is not hex",
+                spec.model_id
+            );
+            assert!(spec.size_bytes > 0, "{} needs a size", spec.model_id);
+            assert!(
+                !spec.languages.is_empty(),
+                "{} claims no languages",
+                spec.model_id
+            );
+        }
+    }
+
+    /// Measured on 2026-09-03 and deliberately left out of the picker: both
+    /// Voxtral tiers lost the dictation comparison by roughly an order of
+    /// magnitude and emit no timestamps at all, so neither can serve meetings
+    /// either. `artifacts/qa/model-selection-2026-09-03.md` has the numbers.
+    #[test]
+    fn the_measured_voxtral_tiers_are_not_offered_as_routes() {
+        for model_id in [
+            VOXTRAL_MINI_3B_GGUF_MODEL_ID,
+            VOXTRAL_REALTIME_4B_GGUF_MODEL_ID,
+        ] {
+            assert!(
+                !spec_for(model_id).offered_as_route,
+                "{model_id} must stay out of the route catalog"
+            );
+            assert!(
+                !route_model_options()
+                    .iter()
+                    .any(|option| option.id == model_id),
+                "{model_id} must not be offered in the picker"
+            );
+            // Nameable from the benchmark, which is the whole point of
+            // carrying the spec at all.
+            assert!(benchmark_model_options()
+                .iter()
+                .any(|option| option.id == model_id));
+            // A saved settings file naming one must fall back to a real route.
+            assert!(route_spec_for(model_id).offered_as_route);
+        }
+    }
 
     #[test]
     fn the_streaming_language_gate_uses_the_list_the_pinned_file_declares() {
