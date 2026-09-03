@@ -212,6 +212,16 @@ export interface TranscriptionSettings {
   dictationRouteOverrideEnabled?: boolean;
   dictationKeepWarm?: "off" | "on";
   dictationLivePreviewEnabled?: boolean;
+  /**
+   * Which engine draws the live preview. `auto` uses the streaming engine
+   * when it is installed and covers the language, and falls back to the
+   * re-decode preview otherwise; `redecode` pins the fallback; `streaming`
+   * asks for the streaming engine and still falls back rather than showing
+   * nothing. Mirrors `dictation_live_preview_engine` in
+   * rust-sidecar/src/settings.rs. None of the three changes the inserted
+   * text.
+   */
+  dictationLivePreviewEngine?: "auto" | "redecode" | "streaming";
   dictationAiFormatting: boolean;
   /**
    * Translate-to-English for the built-in modes (a saved custom mode carries

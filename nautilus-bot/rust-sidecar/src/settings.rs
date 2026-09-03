@@ -206,6 +206,17 @@ pub struct TranscriptionSettings {
     pub dictation_keep_warm: String,
     /// Dictation: show live partial text in popup/inline surfaces.
     pub dictation_live_preview_enabled: bool,
+    /// Dictation: which engine draws that live preview.
+    ///
+    /// `auto` (the default) uses the streaming engine when it is compiled in,
+    /// downloaded, integrity-verified and covers the selected language, and
+    /// falls back to the re-decode preview otherwise. `redecode` pins the
+    /// original behaviour -- re-transcribing a growing copy of the audio with
+    /// the dictation engine every few hundred milliseconds. `streaming` asks
+    /// for the streaming engine and still falls back rather than showing
+    /// nothing. None of the three changes the inserted text, which is always
+    /// the batch decode of the dictation engine.
+    pub dictation_live_preview_engine: String,
     /// Dictation: Smart Format, LLM polishes text before insert
     pub dictation_ai_formatting: bool,
     /// Dictation: translate whatever was spoken into English before the text
@@ -426,6 +437,7 @@ impl Default for TranscriptionSettings {
             dictation_route_override_enabled: true,
             dictation_keep_warm: "on".to_string(),
             dictation_live_preview_enabled: true,
+            dictation_live_preview_engine: "auto".to_string(),
             dictation_ai_formatting: false,
             dictation_translate_to_english: false,
             dictation_mode_preset: "voice".to_string(),
@@ -1344,6 +1356,20 @@ fn normalize_dictation_keep_warm(value: &str) -> String {
     }
 }
 
+/// Normalize the live-preview engine choice to the three the app implements.
+///
+/// Anything else -- a value from a newer build, a typo hand-edited into the
+/// settings file -- lands on `auto`, which picks the best engine that is
+/// actually present. It can never land on a value that would leave the preview
+/// dark.
+fn normalize_dictation_live_preview_engine(value: &str) -> String {
+    match value.trim() {
+        "redecode" => "redecode".to_string(),
+        "streaming" => "streaming".to_string(),
+        _ => "auto".to_string(),
+    }
+}
+
 /// Normalize an insertion mode to the two behaviors that actually differ.
 ///
 /// `paste` and `inline` were extra names for what `auto` already did (all
@@ -1649,6 +1675,8 @@ fn normalize_loaded_transcription_settings(transcription: &mut TranscriptionSett
 
     transcription.dictation_keep_warm =
         normalize_dictation_keep_warm(&transcription.dictation_keep_warm);
+    transcription.dictation_live_preview_engine =
+        normalize_dictation_live_preview_engine(&transcription.dictation_live_preview_engine);
     transcription.dictation_active_languages = normalize_dictation_active_languages(
         &transcription.dictation_provider,
         &transcription.dictation_model_id,
@@ -2627,6 +2655,51 @@ mod tests {
     use crate::text::format::DictationAppCategory;
     use std::fs;
     use std::time::{SystemTime, UNIX_EPOCH};
+
+    /// A settings file written before the live-preview engine setting existed
+    /// still loads, keeps every choice it recorded, and comes back on `auto` --
+    /// which is the behaviour that file already had.
+    #[test]
+    fn a_settings_file_without_a_live_preview_engine_loads_on_auto() {
+        let raw = serde_json::json!({
+            "defaultProvider": "parakeet",
+            "selectedModelId": "parakeet-tdt-0.6b-v3",
+            "dictationLivePreviewEnabled": false,
+            "dictationKeepWarm": "off",
+        });
+        let mut transcription: TranscriptionSettings =
+            serde_json::from_value(raw).expect("an older transcription blob still loads");
+        normalize_loaded_transcription_settings(&mut transcription);
+        assert_eq!(transcription.dictation_live_preview_engine, "auto");
+        assert!(!transcription.dictation_live_preview_enabled);
+        assert_eq!(transcription.dictation_keep_warm, "off");
+    }
+
+    /// The three values the app implements survive; anything else lands on
+    /// `auto`, which picks whatever engine is actually present. There is no
+    /// value that can leave the preview dark by accident.
+    #[test]
+    fn only_the_three_live_preview_engines_survive_a_load() {
+        for (written, expected) in [
+            ("auto", "auto"),
+            ("redecode", "redecode"),
+            ("streaming", "streaming"),
+            ("  streaming  ", "streaming"),
+            ("", "auto"),
+            ("nemotron", "auto"),
+            ("STREAMING", "auto"),
+        ] {
+            let mut transcription = TranscriptionSettings {
+                dictation_live_preview_engine: written.to_string(),
+                ..TranscriptionSettings::default()
+            };
+            normalize_loaded_transcription_settings(&mut transcription);
+            assert_eq!(
+                transcription.dictation_live_preview_engine, expected,
+                "'{written}' should load as '{expected}'"
+            );
+        }
+    }
 
     #[test]
     fn settings_written_before_the_python_providers_were_deleted_land_on_whisper() {
