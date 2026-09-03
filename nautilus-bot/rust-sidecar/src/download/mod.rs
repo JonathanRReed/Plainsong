@@ -2180,6 +2180,40 @@ mod tests {
             .all(|character| character.is_ascii_hexdigit()));
     }
 
+    /// The feature gate has to cover the download path, not only the picker: a
+    /// default build that listed no speakrs entry but still fetched the bundle
+    /// when asked by id would ship a route to weights whose license is
+    /// unresolved. The id is written out rather than referenced, because
+    /// `SPEAKRS_MODEL_ID` does not exist in this build -- which is the point.
+    #[cfg(not(feature = "diarization-speakrs"))]
+    #[tokio::test]
+    async fn a_default_build_refuses_to_download_the_speakrs_bundle() {
+        let models_dir = std::env::temp_dir()
+            .join("plainsong-speakrs-gate")
+            .join(uuid::Uuid::new_v4().to_string());
+        let manager = DownloadManager {
+            client: build_download_client().expect("client"),
+            models_dir: models_dir.clone(),
+        };
+
+        let error = manager
+            .download_diarization_model_by_id("speakrs_community1", |_| {})
+            .await
+            .expect_err("a build without the backend must not fetch its weights");
+        assert!(
+            error.to_string().contains("Unknown diarization model"),
+            "got {error}"
+        );
+
+        // Nor is the bundle reachable as a "trusted" artifact by that id.
+        assert!(!is_diarization_model_artifact_trusted(
+            "speakrs_community1",
+            &models_dir.join("diarization").join("speakrs")
+        ));
+
+        std::fs::remove_dir_all(&models_dir).ok();
+    }
+
     #[cfg(feature = "diarization-speakrs")]
     #[test]
     fn speakrs_bundle_is_pinned_by_revision_hash_and_size() {

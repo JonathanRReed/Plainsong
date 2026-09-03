@@ -1591,13 +1591,26 @@ fn list_diarization_models() -> Vec<DiarizationModelOption> {
     models.push(DiarizationModelOption {
         id: download::SPEAKRS_MODEL_ID,
         label: diarization::model_label(download::SPEAKRS_MODEL_ID),
-        description:
-            "Full pyannote pipeline with overlap handling, via speakrs. Slower than the embedding models and unmeasured on your audio (~60 MB, ten files)",
+        description: SPEAKRS_PICKER_DESCRIPTION,
         installed: diarization::is_model_available(download::SPEAKRS_MODEL_ID),
     });
 
     models
 }
+
+/// What the picker says about the experimental speakrs entry, shown in the
+/// option itself and therefore before anything is downloaded.
+///
+/// The licensing sentence is here rather than only in a Rust doc comment and a
+/// QA receipt: the person who needs to know that these weights are mirrored
+/// without a declared license is the one deciding whether to fetch them.
+#[cfg(feature = "diarization-speakrs")]
+const SPEAKRS_PICKER_DESCRIPTION: &str = concat!(
+    "Full pyannote pipeline with overlap handling, via speakrs. Slower than ",
+    "the embedding models and unmeasured on your audio (~60 MB, ten files). ",
+    "Model weights mirrored without a declared license; upstream terms are ",
+    "CC-BY-4.0 and gated. Not offered in shipped builds until resolved."
+);
 
 #[allow(non_snake_case)]
 fn is_diarization_model_available(modelId: Option<String>) -> bool {
@@ -34055,6 +34068,27 @@ mod diarization_model_picker_tests {
         }
         // It costs a ten-file download; say so where the user chooses.
         assert!(speakrs.description.contains("ten files"));
+    }
+
+    /// The licensing state has to be in the copy the user reads before pressing
+    /// Download, not only in a doc comment and a QA receipt.
+    #[cfg(feature = "diarization-speakrs")]
+    #[test]
+    fn speakrs_option_states_the_licensing_gap_before_download() {
+        let models = list_diarization_models();
+        let speakrs = models
+            .iter()
+            .find(|model| model.id == download::SPEAKRS_MODEL_ID)
+            .expect("speakrs option present when the backend is compiled in");
+
+        assert!(speakrs
+            .description
+            .contains("mirrored without a declared license"));
+        assert!(speakrs.description.contains("CC-BY-4.0"));
+        assert!(speakrs.description.contains("gated"));
+        assert!(speakrs
+            .description
+            .contains("Not offered in shipped builds until resolved"));
     }
 
     /// Availability is per model: asking about speakrs must not be answered by
