@@ -1118,7 +1118,11 @@ export function DictationPopup() {
   };
 
   const handleToggleReadAloud = async () => {
-    const text = (finalText ?? preview ?? "").trim();
+    // The finished result only. The button is already gated on `finalText`,
+    // but falling back to `preview` here meant any future caller could make
+    // Plainsong read a half-heard live partial aloud as though it were the
+    // transcription.
+    const text = (finalText ?? "").trim();
     if (!text) {
       return;
     }

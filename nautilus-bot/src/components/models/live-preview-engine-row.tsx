@@ -18,6 +18,34 @@ const WHAT_IT_DOES =
 const WHAT_IT_DOES_NOT_DO =
   "It never changes what Plainsong types for you. The inserted text is always the finished transcription from your dictation engine, made after you stop.";
 
+/**
+ * Why a file that is on disk is still not being loaded.
+ *
+ * The row used to say "did not match its pinned checksum" for every
+ * not-ready-with-bytes case, which is a specific and alarming accusation. An
+ * interrupted download leaves a short file behind and is the ordinary cause;
+ * saying the bytes are wrong sends the user looking for a problem that is not
+ * there. Sizes are the only evidence the status carries, so that is all this
+ * claims: short of the pinned size means incomplete, and anything else means
+ * Plainsong could not verify it — which covers a real mismatch and a missing
+ * integrity receipt alike, without asserting which.
+ */
+type LivePreviewFileProblem = "incomplete" | "unverified";
+
+function livePreviewFileProblem(
+  status: Pick<
+    LivePreviewEngineStatus,
+    "ready" | "bytesOnDisk" | "downloadBytes"
+  >,
+): LivePreviewFileProblem | null {
+  if (status.ready || status.bytesOnDisk <= 0) {
+    return null;
+  }
+  return status.downloadBytes > 0 && status.bytesOnDisk < status.downloadBytes
+    ? "incomplete"
+    : "unverified";
+}
+
 interface LivePreviewEngineRowProps {
   status: LivePreviewEngineStatus | null;
   busy: boolean;
@@ -50,7 +78,7 @@ export function LivePreviewEngineRow({
     return null;
   }
 
-  const partial = !status.ready && status.bytesOnDisk > 0;
+  const fileProblem = livePreviewFileProblem(status);
   const languageCount = status.languages.length;
 
   return (
@@ -100,10 +128,11 @@ export function LivePreviewEngineRow({
         </div>
       </div>
 
-      {partial && !busy ? (
+      {fileProblem && !busy ? (
         <p className="mt-2 text-sm leading-6 text-rust">
-          The file on disk did not match its pinned checksum, so it will not be
-          loaded. Downloading again replaces it.
+          {fileProblem === "incomplete"
+            ? `Only ${formatModelSize(bytesToMib(status.bytesOnDisk))} of the ${formatModelSize(bytesToMib(status.downloadBytes))} file is on disk, so the download did not finish and it will not be loaded. Downloading again starts it over.`
+            : "Plainsong could not verify the file on disk against its pinned checksum, so it will not be loaded. Downloading again replaces it."}
         </p>
       ) : null}
 

@@ -389,6 +389,10 @@ evidence is stale and must be recaptured before this becomes a candidate.
   ~1 GB engine beside the first. The task is now aborted, and only one preview
   engine may be resident at a time — a dictation that cannot get the slot goes
   without a streaming preview instead.
+- The Models screen no longer accuses an interrupted download of failing its
+  checksum. Any live-preview engine file that was on disk and not ready got
+  "did not match its pinned checksum"; a short file now says the download did
+  not finish, and a whole one says Plainsong could not verify it.
 - The diarization model chosen in Settings is now the one the automatic
   post-meeting speaker pass uses. It previously always ran ECAPA-TDNN no
   matter what the picker said; only the explicit "identify speakers" action

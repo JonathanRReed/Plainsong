@@ -808,6 +808,62 @@ describe("Models screen", () => {
     ).toBeInTheDocument();
   });
 
+  it("says a short file is an unfinished download, not a bad checksum", async () => {
+    getLivePreviewEngineStatusMock.mockResolvedValue({
+      ...LIVE_PREVIEW_STATUS,
+      ready: false,
+      // An interrupted download: some of the bytes landed, none of them are
+      // wrong. Accusing the file of failing its checksum sends the user
+      // hunting for a problem that is not there.
+      bytesOnDisk: 120_000_000,
+    });
+    render(<Harness />);
+
+    const row = (await screen.findByRole("region", {
+      name: "Live preview engine",
+    })) as HTMLElement;
+    expect(
+      within(row).getByText(/the download did not finish/i),
+    ).toBeInTheDocument();
+    expect(
+      within(row).queryByText(/checksum/i),
+    ).not.toBeInTheDocument();
+  });
+
+  it("says a whole-but-unusable file could not be verified", async () => {
+    getLivePreviewEngineStatusMock.mockResolvedValue({
+      ...LIVE_PREVIEW_STATUS,
+      ready: false,
+      // Every byte is there and it still will not load: a real mismatch, or a
+      // missing integrity receipt. The copy says what Plainsong knows --- it
+      // could not verify it --- rather than asserting which.
+      bytesOnDisk: LIVE_PREVIEW_STATUS.downloadBytes,
+    });
+    render(<Harness />);
+
+    const row = (await screen.findByRole("region", {
+      name: "Live preview engine",
+    })) as HTMLElement;
+    expect(
+      within(row).getByText(/could not verify the file on disk against its pinned checksum/i),
+    ).toBeInTheDocument();
+    expect(
+      within(row).queryByText(/the download did not finish/i),
+    ).not.toBeInTheDocument();
+  });
+
+  it("says nothing about the file when there is none on disk", async () => {
+    render(<Harness />);
+
+    const row = (await screen.findByRole("region", {
+      name: "Live preview engine",
+    })) as HTMLElement;
+    expect(within(row).queryByText(/checksum/i)).not.toBeInTheDocument();
+    expect(
+      within(row).queryByText(/the download did not finish/i),
+    ).not.toBeInTheDocument();
+  });
+
   it("shows nothing at all when this build has no streaming engine", async () => {
     getLivePreviewEngineStatusMock.mockResolvedValue({
       ...LIVE_PREVIEW_STATUS,
