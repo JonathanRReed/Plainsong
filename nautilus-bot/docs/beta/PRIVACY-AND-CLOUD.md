@@ -182,7 +182,7 @@ next-best remembered voice — if two stored voices both look like this speaker,
 Plainsong says nothing rather than guessing. A signature is tied to the
 speaker-separation model that made it and is never compared across models. The
 thresholds were calibrated on synthetic speech (see
-`artifacts/qa/voiceprint-calibration-2026-09-02.md`), so treat them as an
+`artifacts/qa/voiceprint-recalibration-2026-09-03.md`), so treat them as an
 upper bound; `docs/beta/KNOWN-LIMITATIONS.md` says what that does not cover.
 
 ## The meeting consent notice

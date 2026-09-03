@@ -34,7 +34,7 @@ use std::path::PathBuf;
 // wrong — and it is not a harmless number. CAM++ separates speakers cleanly
 // at 2-second windows and not at all at 8-second ones, so changing these
 // invalidates every threshold in `voiceprints.rs` until they are re-measured.
-// Receipt: `artifacts/qa/voiceprint-calibration-2026-09-02.md`.
+// Receipt: `artifacts/qa/voiceprint-recalibration-2026-09-03.md`.
 
 /// Length of one embedding window, in seconds.
 pub const SEGMENT_SECONDS: f64 = 2.0;
@@ -859,8 +859,9 @@ mod tests {
     use super::*;
 
     /// The two numbers the voiceprint thresholds were measured at. A change
-    /// here invalidates `artifacts/qa/voiceprint-calibration-2026-09-02.md`,
-    /// so it should fail a test rather than pass quietly.
+    /// here invalidates
+    /// `artifacts/qa/voiceprint-recalibration-2026-09-03.md`, so it should
+    /// fail a test rather than pass quietly.
     #[test]
     fn the_shipped_segmentation_is_two_second_windows_on_a_one_second_hop() {
         assert_eq!(SEGMENT_SECONDS, 2.0);

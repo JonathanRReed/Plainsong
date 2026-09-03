@@ -293,11 +293,18 @@ Two consequences:
 - **Stored CAM++ voiceprints keep working.** A profile enrolled by a pre-fix
   build is 0.97–0.99 similar to what a post-fix build computes for the same
   audio, far above the 0.57 accept threshold. No migration is needed.
+  **Confirmed** over all 36 fixtures rather than three, and against stored-style
+  profile centroids rather than single utterances, in
+  `artifacts/qa/voiceprint-recalibration-2026-09-03.md` §3: worst case 0.8930
+  against the 0.57 threshold, and no cross-speaker false accept.
 - **The CAM++ thresholds in `voiceprint-calibration-2026-09-02.md` were
   calibrated against the corrupted embeddings** (accept 0.57, auto_apply 0.62).
   The shift is small and in the safe direction on these three fixtures, but the
   calibration should be re-run on the fixed embeddings before those numbers are
   treated as measured. That harness lives in lane C6 and was not re-run here.
+  **Done in lane C7b** (`voiceprint-recalibration-2026-09-03.md`): all four
+  embedders re-derived on the fixed path, no threshold moved, and the three
+  models without the affected graph blocks produced bit-identical embeddings.
 
 Not proven here:
 
@@ -329,4 +336,8 @@ Two follow-ups, neither blocking:
    `ort_parity_dump` at `level3`. If 1.29's kernel fix is in, delete the
    `Disable` special case and take the 5% back. The regression guard will catch
    it either way.
-2. **Re-run lane C6's CAM++ threshold calibration** on the fixed embeddings.
+2. ~~**Re-run lane C6's CAM++ threshold calibration** on the fixed
+   embeddings.~~ Done: `artifacts/qa/voiceprint-recalibration-2026-09-03.md`.
+   CAM++ keeps `accept` 0.57 / `auto_apply` 0.62, and its two-speaker frame
+   error is still 2.2%, still the best of the four — now measured on correct
+   embeddings.
