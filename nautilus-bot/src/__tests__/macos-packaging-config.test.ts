@@ -216,6 +216,32 @@ describe("electron-builder macOS packaging", () => {
     expect(dmg).toContain("sign: true");
     expect(dmg).toContain("writeUpdateInfo: false");
   });
+
+  it("compresses the DMG with a format every supported Mac can mount", () => {
+    // LZMA is 26% smaller than electron-builder's zlib default on this
+    // payload. macOS has mounted ULMO since 10.15; the pairing with
+    // minimumSystemVersion is the part worth pinning, because raising the
+    // compression above what the support floor can open would produce a
+    // download that fails at the Finder rather than at the build.
+    const config = builderConfig();
+    const dmg = config.slice(config.indexOf("\ndmg:"), config.indexOf("\npublish:"));
+
+    expect(dmg).toMatch(/^ {2}format: (ULMO|ULFO|UDZO|UDBZ)$/m);
+    const format = /^ {2}format: (\w+)$/m.exec(dmg)![1];
+    const floor = /minimumSystemVersion: "(\d+)\.(\d+)"/.exec(config)!;
+    const [major, minor] = [Number(floor[1]), Number(floor[2])];
+    const introducedIn: Record<string, [number, number]> = {
+      UDZO: [10, 1],
+      UDBZ: [10, 4],
+      ULFO: [10, 11],
+      ULMO: [10, 15],
+    };
+    const [needMajor, needMinor] = introducedIn[format];
+    expect(
+      major > needMajor || (major === needMajor && minor >= needMinor),
+      `dmg.format ${format} needs macOS ${needMajor}.${needMinor}, floor is ${major}.${minor}`,
+    ).toBe(true);
+  });
 });
 
 describe("what the packaged bundle is allowed to contain", () => {

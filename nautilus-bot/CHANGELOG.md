@@ -262,6 +262,10 @@ evidence is stale and must be recaptured before this becomes a candidate.
   archive is now 4.1 MB instead of 44.9 MB. Receipt, with the per-directory
   before/after and the idle memory and cold-start measurements:
   `artifacts/qa/shell-size-receipt-2026-09-02.md`.
+- The download's disk image is compressed with lzfse instead of zlib: 3 MB
+  smaller and quicker to mount and drag out of, since lzfse decompresses
+  faster than zlib as well as packing tighter. Every Mac Plainsong supports
+  has been able to mount this format since macOS 10.11.
 - Searching dictation history no longer writes an audit-log row. It is a read
   that changes nothing, and the search field re-runs on a debounce and again
   whenever the recordings list changes, so a minute of typing buried the rows

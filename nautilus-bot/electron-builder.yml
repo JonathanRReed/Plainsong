@@ -217,6 +217,39 @@ nsis:
   artifactName: ${productName}-Setup-${version}.${ext}
 
 dmg:
+  # lzfse rather than electron-builder's default zlib. Measured with hdiutil on
+  # this build's own 297 MB Plainsong.app, one source folder, four formats:
+  #
+  #   UDZO (the default, zlib-level=9)  132,494,542 bytes
+  #   ULFO (lzfse-level=9)              129,218,471 bytes   -2.5%
+  #   UDBZ (bzip2-level=9)              121,123,816 bytes   -8.6%
+  #   ULMO (lzma-level=9)                97,964,404 bytes  -26.1%
+  #
+  # ULMO is by far the smallest and is NOT usable: electron-builder 26.15.3's
+  # own configuration schema accepts only UDBZ, UDCO, UDRO, UDRW, UDZO and
+  # ULFO, and rejects the config outright before packaging starts. (Found by
+  # running the pack, not by reading the docs.) Revisit if a later
+  # electron-builder adds it — the format itself works, mounts on macOS 10.15+,
+  # and would take the download to 93 MB.
+  #
+  # Of the three that are allowed, ULFO is the only one that is better than the
+  # default on both axes: lzfse decodes faster than zlib as well as packing
+  # smaller, so the disk image is smaller to download AND quicker to mount and
+  # drag out of. UDBZ saves 8 MB more but bzip2 decompresses several times
+  # slower than zlib, which would be paid in the one visible moment of the
+  # install — the copy to /Applications — to save about four seconds of
+  # download on a 20 Mbit line. That is a trade, not a win, so it was not taken.
+  #
+  # lzfse has been mountable since macOS 10.11 and this bundle's floor is 13.0.
+  # The measured ULFO image was attached read-only and its Plainsong.app read
+  # back whole before it was detached.
+  #
+  # `bun run electron:pack` was re-run after this line was added, so the
+  # configuration is known to validate. What has NOT been exercised is
+  # electron-builder's dmg target end-to-end: that path signs and notarizes and
+  # this machine has no credentials. The first `release:mac` after this change
+  # must confirm a DMG was produced and mounts before anything is distributed.
+  format: ULFO
   # The DMG is the primary download. electron-builder notarizes the .app before
   # creating this artifact, so sign the disk image here; the release workflow
   # then submits the signed DMG separately and staples its own notary ticket.
