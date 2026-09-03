@@ -1014,6 +1014,13 @@ evidence is stale and must be recaptured before this becomes a candidate.
   download existed to fix a problem no route has.
 
 ### Security
+- The build dependency graph is clean again. `@xmldom/xmldom` is pinned to
+  0.8.15 and `fast-uri` to 3.1.7, clearing one moderate XML-injection advisory
+  and four high-severity `fast-uri` advisories (host confusion, two SSRF paths,
+  percent-encoded scheme normalization). Both are build-time packages —
+  electron-builder's plist writer and Ajv's URI resolver — and neither is in
+  the shipped `app.asar`, but `bun run gate:release:dependencies` fails on any
+  advisory and a release does not go out over a failing security gate.
 - The window title a call was detected through no longer leaves the sidecar.
   It was broadcast to every app window on `meeting-call-detected`, and for
   Google Meet that title is the meeting's own name; only whether a window
