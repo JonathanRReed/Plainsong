@@ -1130,6 +1130,7 @@ export function RecordingsView() {
   const [speakerVoices, setSpeakerVoices] = useState<
     Record<string, SpeakerVoiceState>
   >({});
+  const [speakerNameOptions, setSpeakerNameOptions] = useState<string[]>([]);
   const [templateEditorOpen, setTemplateEditorOpen] = useState(false);
   // null while creating a new template; the template being edited otherwise.
   const [templateEditorTarget, setTemplateEditorTarget] =
@@ -1776,9 +1777,13 @@ export function RecordingsView() {
         }
       }
       setSpeakerVoices(next);
+      // Attendees first, then remembered voices — the sidecar has already
+      // ranked them, so this side does not re-decide the order.
+      setSpeakerNameOptions(result.enabled ? result.nameOptions : []);
     } catch (error) {
       console.warn("Failed to load remembered-voice suggestions:", error);
       setSpeakerVoices({});
+      setSpeakerNameOptions([]);
     }
   }, []);
 
@@ -1787,6 +1792,7 @@ export function RecordingsView() {
   useEffect(() => {
     if (!selectedRecording) {
       setSpeakerVoices({});
+      setSpeakerNameOptions([]);
       return;
     }
     void refreshSpeakerVoices(selectedRecording.id);
@@ -6022,6 +6028,7 @@ export function RecordingsView() {
                       rememberVoicesEnabled={rememberVoicesEnabled}
                       onConfirmSpeakerVoice={handleConfirmSpeakerVoice}
                       onRejectSpeakerVoice={handleRejectSpeakerVoice}
+                      speakerNameOptions={speakerNameOptions}
                       onEditSegment={async (segmentIds, newText) => {
                         if (!selectedRecording || segmentIds.length === 0) return;
                         try {

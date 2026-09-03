@@ -1,4 +1,4 @@
-import { Fragment, useCallback, useEffect, useRef, useState, useMemo, memo } from "react";
+import { Fragment, useCallback, useEffect, useId, useRef, useState, useMemo, memo } from "react";
 import { cn } from "@/lib/utils";
 import { formatTimeWithMs } from "@/lib/format-time";
 import { rangeIndexAtTime, SEEK_STEP_SECONDS } from "@/lib/playback";
@@ -104,6 +104,12 @@ export interface TranscriptViewerProps {
   /** "Not them": stop suggesting this voice for this speaker. */
   onRejectSpeakerVoice?: (speakerId: string, profileId: string) => Promise<void> | void;
   /**
+   * Names the rename editor suggests, in the order the sidecar ranked them:
+   * this meeting's known attendees first, then the voices already remembered.
+   * Only a hint — the field stays free text.
+   */
+  speakerNameOptions?: string[];
+  /**
    * Save an edited speaker turn. Receives every segment id in the turn so the
    * caller can replace the first and remove the rest as one atomic mutation.
    */
@@ -140,6 +146,8 @@ interface SpeakerBadgeProps {
   canRememberVoice?: boolean;
   /** True while a remembered name was applied without being asked. */
   isAutoNamed?: boolean;
+  /** Names to suggest while typing, already in the order to offer them. */
+  nameOptions?: string[];
 }
 
 /** How long the reader's own scroll holds off the playhead's auto-scroll. */
@@ -171,10 +179,11 @@ function defaultSpeakerLabel(speakerId: string | null | undefined) {
   return normalized;
 }
 
-const SpeakerBadge = memo(function SpeakerBadge({ speakerId, speakerName, isEditing, isActive, isFirstMention, onRename, canRememberVoice, isAutoNamed }: SpeakerBadgeProps) {
+const SpeakerBadge = memo(function SpeakerBadge({ speakerId, speakerName, isEditing, isActive, isFirstMention, onRename, canRememberVoice, isAutoNamed, nameOptions }: SpeakerBadgeProps) {
   const [isEditMode, setIsEditMode] = useState(false);
   const [isSaving, setIsSaving] = useState(false);
   const [editValue, setEditValue] = useState(speakerName || defaultSpeakerLabel(speakerId));
+  const nameListId = useId();
   // Checked by default only when voiceprints are on; turning the feature off
   // has to leave the rename flow exactly as it was before it existed.
   const [rememberVoice, setRememberVoice] = useState(Boolean(canRememberVoice));
@@ -215,6 +224,7 @@ const SpeakerBadge = memo(function SpeakerBadge({ speakerId, speakerName, isEdit
             onChange={(e: React.ChangeEvent<HTMLInputElement>) => setEditValue(e.target.value)}
             className="h-6 w-24 text-xs"
             aria-label="Speaker name"
+            list={nameOptions && nameOptions.length > 0 ? nameListId : undefined}
             autoFocus
             disabled={isSaving}
             onKeyDown={(e) => {
@@ -233,6 +243,13 @@ const SpeakerBadge = memo(function SpeakerBadge({ speakerId, speakerName, isEdit
             <Check className="h-3 w-3" />
           </Button>
         </div>
+        {nameOptions && nameOptions.length > 0 && (
+          <datalist id={nameListId} data-testid="speaker-name-options">
+            {nameOptions.map((name) => (
+              <option key={name} value={name} />
+            ))}
+          </datalist>
+        )}
         {canRememberVoice && (
           <label className="flex items-start gap-2 text-sm text-muted-foreground">
             <Switch
@@ -420,6 +437,7 @@ export const TranscriptViewer = memo(function TranscriptViewer({
   rememberVoicesEnabled,
   onConfirmSpeakerVoice,
   onRejectSpeakerVoice,
+  speakerNameOptions,
   onEditSegment,
   onDeleteSegments,
   deleteRecoveryNote,
@@ -946,6 +964,7 @@ export const TranscriptViewer = memo(function TranscriptViewer({
                       onRename={renameSpeakerForGroup}
                       canRememberVoice={Boolean(rememberVoicesEnabled && speakerId)}
                       isAutoNamed={voiceState?.matchState === "auto"}
+                      nameOptions={speakerNameOptions}
                     />
                   </div>
 

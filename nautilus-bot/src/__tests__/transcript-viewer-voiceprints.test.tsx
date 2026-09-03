@@ -190,6 +190,47 @@ describe("TranscriptViewer rename-and-remember", () => {
     expect(onRenameSpeaker).toHaveBeenCalledWith("S1", "Dana", true);
   });
 
+  // Item 5 of the lane brief as far as this build can honour it: attendees
+  // first, then remembered voices. Nothing records meeting attendees yet, so
+  // today the list is the remembered names — but the ordering comes from the
+  // sidecar and this side does not re-sort it.
+  it("offers the ranked name list while renaming, without constraining the field", () => {
+    render(
+      <TranscriptViewer
+        segments={TWO_SPEAKER_SEGMENTS}
+        rememberVoicesEnabled
+        speakerNameOptions={["Dana", "Devon", "Ravi"]}
+        onRenameSpeaker={vi.fn(async () => {})}
+      />,
+    );
+
+    fireEvent.click(screen.getByRole("button", { name: "Rename Speakers" }));
+    fireEvent.click(screen.getAllByRole("button", { name: "Edit speaker name" })[0]);
+
+    const list = screen.getByTestId("speaker-name-options");
+    expect(
+      Array.from(list.querySelectorAll("option")).map((option) => option.value),
+    ).toEqual(["Dana", "Devon", "Ravi"]);
+    // The field itself stays free text: the list is a hint, not a constraint.
+    expect(screen.getByLabelText("Speaker name")).toHaveAttribute("list", list.id);
+  });
+
+  it("offers no name list when there is nothing to offer", () => {
+    render(
+      <TranscriptViewer
+        segments={TWO_SPEAKER_SEGMENTS}
+        rememberVoicesEnabled
+        onRenameSpeaker={vi.fn(async () => {})}
+      />,
+    );
+
+    fireEvent.click(screen.getByRole("button", { name: "Rename Speakers" }));
+    fireEvent.click(screen.getAllByRole("button", { name: "Edit speaker name" })[0]);
+
+    expect(screen.queryByTestId("speaker-name-options")).not.toBeInTheDocument();
+    expect(screen.getByLabelText("Speaker name")).not.toHaveAttribute("list");
+  });
+
   it("renames without remembering when the offer is switched off", async () => {
     const onRenameSpeaker = vi.fn(async () => {});
     render(
