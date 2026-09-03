@@ -189,6 +189,36 @@ UI/IPC, integrity verification, and `list_downloaded_models`. The
 diarization engine now accepts a model ID via `with_model()` and
 `run_diarization_with_model()`.
 
+### CAM++ speaker embeddings — ONNX Runtime 1.28 defect (2026-09-02)
+
+`campplus_speaker` is the only shipped embedding model whose graph contains
+`Pad` and `AveragePool` nodes: 52 of each, the CAM segment pooling
+(`kernel=[100]`, `stride=[100]`, `ceil_mode=1`) preceded by a `Pad` that pads by
+zero on every axis. The ONNX Runtime 1.28 that `ort` 2.0.0-rc.13 links absorbs
+those no-op pads into the pools at graph optimization Level 1 and above and sets
+`count_include_pad=1`, which changes how the final partial pooling window is
+divided. The result was wrong at every input length where `ceil(T/2)` is not a
+multiple of 100 — including the 198-frame window `generate_segments(duration,
+2.0, 1.0)` produces.
+
+Python `onnxruntime` 1.19.2 never creates the flag, and 1.29.0 handles it
+correctly; 1.28 is the one release where both halves line up.
+
+Fixed by building **only** the CAM++ session with
+`GraphOptimizationLevel::Disable`
+(`diarization::embedding_window::graph_optimization_level_for`), which restores
+exact agreement at every length tested for +5% per inference on that model.
+`optimization.disable_specified_optimizers` was tried first and does not work.
+A per-model input-length cap (`verified_frame_window`, 220 frames for CAM++)
+splits and averages longer inputs so a future change to the segmentation cannot
+walk past what was measured.
+
+**Revisit when `ort` upgrades past ONNX Runtime 1.28**: re-run
+`diarization::ort_parity::ort_parity_dump` at `level3`, and if the kernel fix
+has landed, delete the `Disable` special case.
+`ort_parity::campplus_matches_the_agreeing_runtime` guards the regression either
+way. Full measurement: `artifacts/qa/campplus-divergence-2026-09-02.md`.
+
 ### ReCasePunct / ML punctuation (item 9)
 ReCasePunct 1 Flash (`MihaiPopa-1/ReCasePunct-1-Flash`) has no ONNX
 export — only Safetensors with a custom ALBERT architecture. An

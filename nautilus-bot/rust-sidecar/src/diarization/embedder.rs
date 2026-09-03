@@ -87,6 +87,7 @@ impl SpeakerEmbeddingExtractor {
         }
         let audio_path = audio_path.to_path_buf();
         let model_path = self.model_path.clone();
+        let model_id = self.model_id.clone();
         let segments = segments.to_vec();
         let sample_rate = self.sample_rate;
 
@@ -94,7 +95,7 @@ impl SpeakerEmbeddingExtractor {
             // WAV loading, channel conversion, and resampling are CPU/blocking work.
             let samples = crate::audio::utils::load_audio_file(&audio_path)
                 .context("Failed to load audio for diarization")?;
-            let mut session = load_embedding_session(&model_path)?;
+            let mut session = load_embedding_session(&model_path, &model_id)?;
             let mut embeddings = Vec::new();
 
             for (start_sec, end_sec) in segments {
@@ -110,7 +111,7 @@ impl SpeakerEmbeddingExtractor {
                     continue;
                 }
 
-                match run_embedding_inference(&mut session, segment_samples) {
+                match run_embedding_inference(&mut session, segment_samples, &model_id) {
                     Ok(embedding) => {
                         // Log embedding stats for debugging
                         let norm: f32 = embedding.iter().map(|x| x * x).sum::<f32>().sqrt();
@@ -140,7 +141,7 @@ impl SpeakerEmbeddingExtractor {
 }
 
 #[cfg(feature = "diarization")]
-fn load_embedding_session(model_path: &Path) -> Result<Session> {
+pub(super) fn load_embedding_session(model_path: &Path, artifact_id: &str) -> Result<Session> {
     if !model_path.exists() {
         return Err(anyhow!(
             "Diarization model file not found: {}",
@@ -150,10 +151,20 @@ fn load_embedding_session(model_path: &Path) -> Result<Session> {
 
     tracing::debug!("Loading diarization model from: {}", model_path.display());
 
-    let session = crate::ort_utils::build_session_with(model_path, |builder| {
+    // Per-model graph optimization level. CAM++ is built without it because the
+    // ONNX Runtime 1.28 that `ort` 2.0.0-rc.13 links rewrites its 52 no-op
+    // `Pad` + `AveragePool(ceil_mode=1)` pairs into pools with
+    // `count_include_pad=1` and then counts the ceil-mode padding, which
+    // corrupts the embedding at every input length whose pooled length is not a
+    // multiple of 100 -- including the 198-frame window this app feeds.
+    // Measured in artifacts/qa/campplus-divergence-2026-09-02.md.
+    let level = super::embedding_window::graph_optimization_level_for(artifact_id);
+    let session = crate::ort_utils::build_session_with(model_path, move |builder| {
         builder
             .with_intra_threads(1)
-            .map_err(|error| anyhow!("Failed to configure ONNX intra-op threads: {}", error))
+            .map_err(|error| anyhow!("Failed to configure ONNX intra-op threads: {}", error))?
+            .with_optimization_level(level)
+            .map_err(|error| anyhow!("Failed to set ONNX graph optimization level: {}", error))
     })?;
 
     // Log model input/output info
@@ -183,7 +194,11 @@ fn load_embedding_session(model_path: &Path) -> Result<Session> {
 }
 
 #[cfg(feature = "diarization")]
-fn run_embedding_inference(session: &mut Session, samples: &[f32]) -> Result<Array1<f32>> {
+pub(super) fn run_embedding_inference(
+    session: &mut Session,
+    samples: &[f32],
+    artifact_id: &str,
+) -> Result<Array1<f32>> {
     let input = session
         .inputs()
         .first()
@@ -202,22 +217,72 @@ fn run_embedding_inference(session: &mut Session, samples: &[f32]) -> Result<Arr
         // Compute FBank features
         let fbank_features = compute_fbank_features(samples, 16000, 80)?;
 
-        // Shape: [1, num_frames, 80]
         let num_frames = fbank_features.len() / 80;
-        let input_shape = vec![1, num_frames, 80];
+        if num_frames == 0 {
+            return Err(anyhow!("FBank front end produced no frames"));
+        }
 
-        tracing::debug!("Feeding FBank features: {} frames", num_frames);
+        // Never feed a model more frames in one shot than were verified for it.
+        // CAM++ is wrong under this ONNX Runtime at lengths whose pooled length
+        // is not a multiple of 100, and the error grows with the size of the
+        // partial pooling window, so a long input is split into near-equal
+        // windows and the per-window embeddings averaged -- the same thing the
+        // clusterer does across segments. Today nothing reaches this branch
+        // (`generate_segments(duration, 2.0, 1.0)` caps a window at 198
+        // frames); it exists so a future change to the segmentation cannot
+        // silently walk past what was measured.
+        let window = super::embedding_window::verified_frame_window(artifact_id)
+            .unwrap_or(usize::MAX)
+            .max(1);
+        let plan = super::embedding_window::split_into_windows(num_frames, window);
+        if plan.len() > 1 {
+            tracing::warn!(
+                "Diarization model '{}' was handed {} frames but is only verified to {}; \
+                 splitting into {} windows and averaging.",
+                artifact_id,
+                num_frames,
+                window,
+                plan.len()
+            );
+        }
 
-        let input_array = ndarray::Array::from_shape_vec(IxDyn(&input_shape), fbank_features)
-            .context("Failed to shape FBank input tensor")?;
+        let mut pooled: Option<Array1<f32>> = None;
+        for (start, len) in &plan {
+            let slice = fbank_features[start * 80..(start + len) * 80].to_vec();
+            let input_array = ndarray::Array::from_shape_vec(IxDyn(&[1, *len, 80]), slice)
+                .context("Failed to shape FBank input tensor")?;
+            let input_tensor = Tensor::from_array(input_array)
+                .context("Failed to create ONNX input tensor for FBank")?;
+            let outputs = session
+                .run(ort::inputs![input_tensor])
+                .context("ONNX diarization model inference failed")?;
+            let embedding = extract_embedding_from_outputs(&outputs)?;
+            pooled = Some(match pooled {
+                None => embedding,
+                Some(mut acc) => {
+                    if acc.len() != embedding.len() {
+                        return Err(anyhow!(
+                            "Diarization model returned embeddings of different lengths \
+                             ({} then {}) across split windows",
+                            acc.len(),
+                            embedding.len()
+                        ));
+                    }
+                    acc += &embedding;
+                    acc
+                }
+            });
+        }
 
-        let input_tensor = Tensor::from_array(input_array)
-            .context("Failed to create ONNX input tensor for FBank")?;
-        let outputs = session
-            .run(ort::inputs![input_tensor])
-            .context("ONNX diarization model inference failed")?;
-
-        extract_embedding_from_outputs(&outputs)
+        let summed = pooled.ok_or_else(|| anyhow!("Diarization produced no embedding windows"))?;
+        // Each window's embedding is already L2-normalized by
+        // `finalize_embedding`; re-normalize the sum so the mean of the windows
+        // is a unit vector again.
+        let norm = summed.iter().map(|x| x * x).sum::<f32>().sqrt();
+        if norm <= 1e-6 {
+            return Err(anyhow!("Diarization embedding norm is too close to zero"));
+        }
+        Ok(summed.mapv(|value| value / norm))
     } else {
         // Fallback for raw waveform models
         let input_shape = infer_input_shape(input.dtype(), samples.len())?;
