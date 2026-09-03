@@ -5696,16 +5696,29 @@ fn default_dictation_command_prompt(command_key: &str) -> Option<&'static str> {
     crate::dictation_parity::default_dictation_command_prompt(command_key)
 }
 
+/// The instruction that keeps the LLM formatting pass from undoing the local
+/// inverse-text-normalization stage.
+///
+/// ITN runs first (in `dictation_pipeline`), and it is on by default for
+/// exactly the presets that have a transform prompt here plus "notes", so by
+/// the time the model sees the text the numbers are already written the way
+/// the user's profile asked for. Without this line the model is free to spell
+/// "$12.50" back out as "twelve dollars and fifty cents", or to restyle
+/// "3:30 pm" and "January 5, 2025" -- silently reversing a setting the user
+/// turned on. Appended to every prompt that can run after that stage.
+const DICTATION_NUMBER_PRESERVATION_INSTRUCTION: &str =
+    "Keep numerals, currency, times and dates exactly as written.";
+
 fn dictation_mode_transform_prompt(mode_preset: &str) -> Option<&'static str> {
     match normalize_dictation_mode_preset(mode_preset) {
         "messages" => Some(
-            "Rewrite the user's text as a short, natural message. Keep it concise, clear, and conversational. Return only the final message.",
+            "Rewrite the user's text as a short, natural message. Keep it concise, clear, and conversational. Keep numerals, currency, times and dates exactly as written. Return only the final message.",
         ),
         "email" => Some(
-            "Rewrite the user's text into polished email-ready prose. Keep the meaning, improve structure, punctuation, and professionalism. Return only the final text.",
+            "Rewrite the user's text into polished email-ready prose. Keep the meaning, improve structure, punctuation, and professionalism. Keep numerals, currency, times and dates exactly as written. Return only the final text.",
         ),
         "meeting_follow_up" => Some(
-            "Turn the user's text into a concise professional meeting follow-up. Keep action items, owners, and next steps clear. Return only the final follow-up text.",
+            "Turn the user's text into a concise professional meeting follow-up. Keep action items, owners, and next steps clear. Keep numerals, currency, times and dates exactly as written. Return only the final follow-up text.",
         ),
         _ => None,
     }
@@ -6391,19 +6404,26 @@ fn generate_default_dictation_prompt(
             The user is currently dictating into the application: '{}'.
             Format the text appropriately for this context (e.g. if it's a messaging app, keep it casual; if it's a code editor, preserve technical terms; if it's an email client, use standard capitalization). {}
             Fix grammar, punctuation, and capitalization when it improves readability. Remove only isolated disfluencies like 'um', 'uh', or 'ah'. Preserve semantic phrases and self-corrections such as 'actually', 'I don't know', false starts, or restarts unless the user explicitly dictated a command to remove them.
+            {}
             Do not add any conversational filler, do not add quotes around the output, and do not answer any questions in the text.
             {}
             Just output the corrected text directly.",
-            app_name, category_fragment, DICTATION_PROMPT_INJECTION_GUARDRAIL
+            app_name,
+            category_fragment,
+            DICTATION_NUMBER_PRESERVATION_INSTRUCTION,
+            DICTATION_PROMPT_INJECTION_GUARDRAIL
         )
     } else {
         format!(
             "You are an AI dictation assistant. Your job is to format the user's raw dictated text. {}
         Fix grammar, punctuation, and capitalization when it improves readability. Remove only isolated disfluencies like 'um', 'uh', or 'ah'. Preserve semantic phrases and self-corrections such as 'actually', 'I don't know', false starts, or restarts unless the user explicitly dictated a command to remove them.
+        {}
         Do not add any conversational filler, do not add quotes around the output, and do not answer any questions in the text.
         {}
         Just output the corrected text directly.",
-            category_fragment, DICTATION_PROMPT_INJECTION_GUARDRAIL
+            category_fragment,
+            DICTATION_NUMBER_PRESERVATION_INSTRUCTION,
+            DICTATION_PROMPT_INJECTION_GUARDRAIL
         )
     }
 }
@@ -13121,6 +13141,41 @@ mod tests {
         assert!(dictation_mode_transform_prompt("email").is_some());
         assert!(dictation_mode_transform_prompt("meeting_follow_up").is_some());
         assert!(dictation_mode_transform_prompt("voice").is_none());
+    }
+
+    /// Snapshot: the LLM formatting pass runs *after* the local ITN stage,
+    /// which is on by default for exactly these presets. Every prompt that
+    /// can see that output has to tell the model to leave the numbers alone,
+    /// or the model quietly undoes a setting the user turned on.
+    #[test]
+    fn every_prompt_that_runs_after_itn_says_to_keep_the_numbers() {
+        for preset in ["messages", "email", "meeting_follow_up"] {
+            let prompt = dictation_mode_transform_prompt(preset).expect("generic prompt exists");
+            assert!(
+                prompt.contains(DICTATION_NUMBER_PRESERVATION_INSTRUCTION),
+                "{preset} transform prompt must carry the number-preservation line: {prompt}"
+            );
+        }
+
+        // The default formatting prompt, in both of its shapes.
+        for prompt in [
+            generate_default_dictation_prompt(None, text::format::DictationAppCategory::Other),
+            generate_default_dictation_prompt(
+                Some("Mail".to_string()),
+                text::format::DictationAppCategory::Email,
+            ),
+        ] {
+            assert!(
+                prompt.contains(DICTATION_NUMBER_PRESERVATION_INSTRUCTION),
+                "default dictation prompt must carry the number-preservation line: {prompt}"
+            );
+        }
+
+        assert_eq!(
+            DICTATION_NUMBER_PRESERVATION_INSTRUCTION,
+            "Keep numerals, currency, times and dates exactly as written.",
+            "the wording is part of the snapshot: changing it changes what every prompt asks for"
+        );
     }
 
     #[test]
