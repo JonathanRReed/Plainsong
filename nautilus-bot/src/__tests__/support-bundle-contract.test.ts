@@ -7,6 +7,7 @@ import {
   DIAGNOSTIC_LOG_BUFFER_MAX_LINES,
   DIAGNOSTIC_LOG_LINE_MAX_CHARS,
 } from "../../electron/diagnostic-log-buffer";
+import { dispatcher } from "./sidecar-source";
 
 const repoRoot = process.cwd();
 const read = (relative: string) =>
@@ -15,7 +16,7 @@ const read = (relative: string) =>
 describe("support bundle IPC contract", () => {
   const bridge = read("electron/ipc-bridge.ts");
   const main = read("electron/main.ts");
-  const sidecar = read("rust-sidecar/src/lib.rs");
+  const sidecar = dispatcher();
   const gate = read("scripts/verify-ipc-contract.mjs");
 
   it("admits only the two renderer-facing commands", () => {
