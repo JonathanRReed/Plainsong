@@ -207,6 +207,12 @@ impl VocabularyHint {
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct TranscriptionOptions {
     pub vocabulary_hint: Option<VocabularyHint>,
+    /// Ask the recognizer itself to emit English for non-English speech.
+    /// Only whisper.cpp with a multilingual model honours it (the `.en`
+    /// builds cannot translate); every other provider ignores the flag and
+    /// the caller translates the transcript afterwards. See
+    /// `resolve_dictation_translation_route` in `lib.rs`.
+    pub translate_to_english: bool,
 }
 
 #[async_trait]

@@ -17,6 +17,7 @@ import {
   DICTATION_MODE_DEFINITION_BY_ID,
 } from "@/lib/dictation-profiles";
 import {
+  describeHistoryLanguage,
   historyModeLabel,
   historyPipelineStageLabel,
   historyPromptSourceLabel,
@@ -241,6 +242,12 @@ export function DictationHistoryDialog({
                       <p className="rubric-muted">Prompt strategy</p>
                       <p className="mt-1 text-sm font-medium">
                         {historyPromptSourceLabel(historyDetails.promptSource)}
+                      </p>
+                    </div>
+                    <div className="rounded-md border bg-muted/30 px-3 py-2">
+                      <p className="rubric-muted">Language</p>
+                      <p className="mt-1 text-sm font-medium">
+                        {describeHistoryLanguage(historyDetails)}
                       </p>
                     </div>
                   </div>

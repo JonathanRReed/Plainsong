@@ -849,6 +849,7 @@ fn main() {
         };
         let options = TranscriptionOptions {
             vocabulary_hint: args.vocabulary_hint.clone(),
+            translate_to_english: false,
         };
         let warmup_started = Instant::now();
         let warmup_result = provider
