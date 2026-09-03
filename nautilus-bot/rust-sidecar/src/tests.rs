@@ -27,6 +27,9 @@ const SIDECAR_SOURCE: &str = concat!(
     include_str!("asr_routing.rs"),
     include_str!("dictation_live_preview.rs"),
     include_str!("meeting_transcribe.rs"),
+    include_str!("dictation_commands.rs"),
+    include_str!("export_paths.rs"),
+    include_str!("model_cache.rs"),
 );
 
 /// The source of one top-level item, from its declaration to the next one.
