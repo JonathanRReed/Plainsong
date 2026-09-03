@@ -1,7 +1,11 @@
 # A signed Plainsong you can install and use on this Mac — build receipt
 
 **Date:** 2026-09-03
-**Machine:** Apple M4 Pro (14 cores), 24 GB, macOS 27.0 (build 26A5406e), Xcode 26.2
+**Machine:** Apple M4 Pro (14 cores), 24 GB, macOS 27.0 (build 26A5406e).
+Command Line Tools only — no full Xcode — with the macOS 26.2 SDK. That SDK is
+new enough that `build.rs` compiles the Speech helper's SpeechAnalyzer section
+rather than passing `-D NO_SPEECH_ANALYZER`, which is why the packaged helper
+reports `engine: speech_analyzer`.
 **Branch:** `worktree-agent-a7989c7610bb925cf`, merged to `parity-waves` @ `39a987a1`
 **Commit under test:** `59605fb1` (`fix(release): let the packaged-helper gate run on an unsigned bundle`)
 **Version:** `0.9.0-beta.3` (`CFBundleVersion` 900303)
