@@ -30,7 +30,15 @@ describe("sidecar cargo feature set", () => {
   it("keeps the opt-in features out of Cargo.toml's default set", () => {
     const cargoToml = readRepoFile("rust-sidecar/Cargo.toml");
     const defaultLine = cargoToml.match(/^default = \[(.*)\]$/m)?.[1] ?? "";
-    for (const feature of [...MACOS_SIDECAR_CARGO_FEATURES, "ort-coreml"]) {
+    // `diarization-speakrs` is listed here for the same reason as
+    // `ort-coreml`: it exists, it must stay out of `default`, and it must stay
+    // out of the shipped set until a measurement justifies the cost. See
+    // artifacts/qa/diarization-speakrs-spike-2026-09-02.md.
+    for (const feature of [
+      ...MACOS_SIDECAR_CARGO_FEATURES,
+      "ort-coreml",
+      "diarization-speakrs",
+    ]) {
       expect(cargoToml).toMatch(new RegExp(`^${feature} = \\[`, "m"));
       expect(defaultLine).not.toContain(feature);
     }

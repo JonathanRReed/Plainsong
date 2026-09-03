@@ -55,6 +55,13 @@ using sensitive content.
 - Me + Them source labels distinguish microphone-side speech from captured
   system audio. They are not a promise of perfect person-by-person speaker
   identification.
+- Speaker identification ("who said what") has no published accuracy number.
+  It groups voices by embedding similarity; it cannot represent two people
+  talking at once, and audio it cannot attribute is left without a speaker
+  rather than guessed. A measured comparison against a full pyannote pipeline
+  is in `artifacts/qa/diarization-speakrs-spike-2026-09-02.md`; that
+  alternative backend is a build-time experiment and is not in any build you
+  can install.
 - Never use the beta to record a confidential conversation without the consent
   required by your organization and location.
 - Plainsong does not post the consent notice into the meeting chat for you.
