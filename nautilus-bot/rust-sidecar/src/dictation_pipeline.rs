@@ -93,14 +93,24 @@ pub fn apply_dictation_pipeline(input: DictationPipelineInput<'_>) -> DictationP
     // the user typed once and must come out exactly as written -- running ITN
     // first is what guarantees the stage can never reach inside one.
     //
+    // Gated on `command_applied.is_none()` exactly like the snippet and
+    // smart-formatting stages below: when a command ran, the text here is the
+    // *previous insert* with an edit applied to it, not something the user
+    // just dictated. That text already passed through this stage when it was
+    // inserted, so running it again would let "replace two with three" rewrite
+    // words elsewhere in the line that the user never touched.
+    //
     // The dictionary stage necessarily runs earlier (a phrase-swap command
     // matches against an already-corrected previous insert, see
     // `pipeline_applies_dictionary_before_scratch_that_replacement`), so the
     // same guarantee for dictionary output is bought explicitly: every
     // enabled entry's replacement text is handed to the stage as a protected
-    // phrase and is never rewritten.
-    if input.numbers_as_digits && !text.trim().is_empty() {
-        let protected_phrases = dictionary_replacement_phrases(input.dictionary_entries);
+    // phrase and is never rewritten. Enabled snippet triggers are protected
+    // for a different reason -- ITN runs before `apply_snippets`, so rewriting
+    // a number inside a trigger ("two factor auth" -> "2 factor auth") would
+    // stop the snippet firing at all.
+    if input.numbers_as_digits && command_applied.is_none() && !text.trim().is_empty() {
+        let protected_phrases = itn_protected_phrases(input.dictionary_entries, input.snippets);
         let normalized_numbers =
             crate::text::itn::inverse_text_normalize_protecting(text.as_str(), &protected_phrases);
         if normalized_numbers != text {
@@ -322,17 +332,34 @@ pub fn vocabulary_candidates_from_entries(
         .collect()
 }
 
-/// The replacement text of every enabled dictionary entry, handed to the ITN
-/// stage as a protected phrase. Scope is deliberately ignored: over-
-/// protecting a phrase only ever leaves the user's own words alone, while
-/// under-protecting one would let the stage rewrite a correction the user
-/// asked for.
-fn dictionary_replacement_phrases(entries: &[DictationDictionaryEntry]) -> Vec<String> {
+/// The phrases the ITN stage must not rewrite: the replacement text of every
+/// enabled dictionary entry, and the trigger of every enabled snippet.
+///
+/// A dictionary replacement is a correction the user asked for, and the
+/// dictionary stage necessarily runs first, so its output has to be fenced
+/// off. A snippet trigger has not been substituted yet -- ITN runs before
+/// `apply_snippets` -- so a trigger with a spoken number in it ("two factor
+/// auth") would be rewritten out of existence and the snippet would never
+/// fire.
+///
+/// Scope is deliberately ignored for both: over-protecting a phrase only ever
+/// leaves the user's own words alone, while under-protecting one loses a
+/// correction or an expansion.
+fn itn_protected_phrases(
+    entries: &[DictationDictionaryEntry],
+    snippets: &[DictationSnippet],
+) -> Vec<String> {
     entries
         .iter()
         .filter(|entry| entry.enabled)
         .map(|entry| entry.replacement.trim().to_string())
-        .filter(|replacement| !replacement.is_empty())
+        .chain(
+            snippets
+                .iter()
+                .filter(|snippet| snippet.enabled)
+                .map(|snippet| snippet.trigger.trim().to_string()),
+        )
+        .filter(|phrase| !phrase.is_empty())
         .collect()
 }
 
@@ -567,9 +594,12 @@ mod tests {
     }
 
     /// Command handling comes first, so the operands of a phrase swap are
-    /// still the words the user said and still match the previous insert.
+    /// still the words the user said and still match the previous insert --
+    /// and the result, which is the previous insert with one edit applied, is
+    /// then left alone. Running ITN over it would let a command rewrite text
+    /// the user never dictated in this utterance.
     #[test]
-    fn pipeline_resolves_a_phrase_swap_before_normalizing_numbers() {
+    fn pipeline_does_not_normalize_numbers_in_the_output_of_a_phrase_swap() {
         let result = apply_dictation_pipeline(DictationPipelineInput {
             text: "replace two with three",
             dictionary_entries: &[],
@@ -586,8 +616,77 @@ mod tests {
             result.command_applied.as_deref(),
             Some("backtrack_replace_phrase")
         );
-        assert_eq!(result.text, "we need 3 servers");
-        assert_eq!(result.pipeline_stage_keys, vec!["backtrack", "itn"]);
+        assert_eq!(result.text, "we need three servers");
+        assert_eq!(result.pipeline_stage_keys, vec!["backtrack"]);
+    }
+
+    /// The same gate as snippets and smart formatting: a command's output is
+    /// already-inserted text, and the words around the edit must survive it.
+    #[test]
+    fn pipeline_leaves_the_rest_of_a_previous_insert_alone_after_a_command() {
+        let result = apply_dictation_pipeline(DictationPipelineInput {
+            text: "replace servers with nodes",
+            dictionary_entries: &[],
+            snippets: &[],
+            app_target: None,
+            mode_preset: "voice",
+            smart_formatting_enabled: false,
+            numbers_as_digits: true,
+            recent_inserted_text: Some("we need twenty five servers"),
+            destination_category: DictationAppCategory::Other,
+        });
+
+        assert_eq!(result.text, "we need twenty five nodes");
+        assert_eq!(result.pipeline_stage_keys, vec!["backtrack"]);
+    }
+
+    /// ITN runs before `apply_snippets`, so a trigger with a spoken number in
+    /// it has to survive the stage or the snippet never fires.
+    #[test]
+    fn pipeline_never_rewrites_a_snippet_trigger() {
+        let result = apply_dictation_pipeline(DictationPipelineInput {
+            text: "turn on two factor auth for twenty five people",
+            dictionary_entries: &[],
+            snippets: &[snippet(
+                "two factor auth",
+                "two-factor authentication (TOTP)",
+            )],
+            app_target: None,
+            mode_preset: "voice",
+            smart_formatting_enabled: false,
+            numbers_as_digits: true,
+            recent_inserted_text: None,
+            destination_category: DictationAppCategory::Other,
+        });
+
+        assert_eq!(
+            result.text,
+            "turn on two-factor authentication (TOTP) for 25 people"
+        );
+        assert_eq!(result.snippet_applied_count, 1);
+        assert_eq!(result.pipeline_stage_keys, vec!["itn", "snippets"]);
+    }
+
+    /// A disabled snippet is not protected: it will never expand, so its
+    /// trigger is just words the user said.
+    #[test]
+    fn pipeline_does_not_protect_a_disabled_snippet_trigger() {
+        let mut disabled = snippet("two factor auth", "two-factor authentication");
+        disabled.enabled = false;
+        let result = apply_dictation_pipeline(DictationPipelineInput {
+            text: "turn on two factor auth",
+            dictionary_entries: &[],
+            snippets: &[disabled],
+            app_target: None,
+            mode_preset: "voice",
+            smart_formatting_enabled: false,
+            numbers_as_digits: true,
+            recent_inserted_text: None,
+            destination_category: DictationAppCategory::Other,
+        });
+
+        assert_eq!(result.text, "turn on 2 factor auth");
+        assert_eq!(result.snippet_applied_count, 0);
     }
 
     /// The undo command produces no text, so the stage has nothing to do and
