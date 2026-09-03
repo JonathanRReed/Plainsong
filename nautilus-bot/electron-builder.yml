@@ -83,6 +83,31 @@ files:
   - dist-electron/**
   - "!dist-electron/preload.js.map"
   - node_modules/**
+  # Everything the renderer imports — React, React DOM, Radix, Base UI, cmdk,
+  # 19 MB of Lucide icons — is compiled into dist/ by Vite before packaging.
+  # electron-builder then copied the *source* of all of it into app.asar as
+  # well, because it packs the whole production dependency tree: 39 of the
+  # asar's 43 MB was a second copy of code that no packaged code path can
+  # reach. `dist/index.html` is loaded over the renderer's own scheme and
+  # requires nothing from node_modules; the main process (electron/main.ts and
+  # its neighbours) imports exactly one real package, electron-updater.
+  #
+  # So the rule is inverted: exclude every top-level entry under node_modules
+  # that is not electron-updater or one of its transitive dependencies. Written
+  # this way a new renderer dependency is excluded the day it is added, instead
+  # of the day someone remembers to come back here. The cost is that a new
+  # *main-process* dependency must be added to this list or the packaged app
+  # will not start — which is why
+  # src/__tests__/macos-packaging-config.test.ts recomputes the closure from
+  # node_modules and the imports in electron/, and fails when this line and the
+  # code disagree in either direction. `bun run gate:cold-start` on the packed
+  # app is the second net: it launches the real bundle and waits for the
+  # renderer.
+  #
+  # Nested node_modules under a kept package are unaffected (the pattern only
+  # matches the first path segment), so electron-updater keeps any hoist-broken
+  # copies of its own dependencies.
+  - "!node_modules/!(argparse|builder-util-runtime|debug|electron-updater|fs-extra|graceful-fs|js-yaml|jsonfile|lazy-val|lodash.escaperegexp|lodash.isequal|ms|sax|semver|tiny-typed-emitter|universalify)/**"
 
 extraResources:
   # Keep the project's MIT license and generated dependency attributions beside

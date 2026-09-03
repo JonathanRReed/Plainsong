@@ -1,5 +1,5 @@
 import { spawnSync } from "node:child_process";
-import { mkdtempSync, readFileSync } from "node:fs";
+import { mkdtempSync, readdirSync, readFileSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { describe, expect, it } from "vitest";
@@ -35,6 +35,99 @@ function electronLanguages(): string[] {
     null,
   );
   return [...block![1].matchAll(/^\s+- (\S+)$/gm)].map(([, value]) => value);
+}
+
+/**
+ * The packages `files:` still allows into app.asar, read out of the
+ * "everything except these" exclusion pattern.
+ */
+function asarNodeModuleAllowList(): Set<string> {
+  const config = builderConfig();
+  const pattern = /"!node_modules\/!\(([^)]+)\)\/\*\*"/.exec(config);
+  expect(
+    pattern,
+    "electron-builder.yml no longer excludes renderer-only packages from app.asar",
+  ).not.toBe(null);
+  return new Set(pattern![1].split("|"));
+}
+
+function manifestOf(packageName: string): PackageManifest | null {
+  try {
+    return JSON.parse(
+      readFileSync(
+        path.join(repoRoot, "node_modules", packageName, "package.json"),
+        "utf8",
+      ),
+    ) as PackageManifest;
+  } catch {
+    return null;
+  }
+}
+
+/** Every package reachable from `roots` through `dependencies`, roots included. */
+function dependencyClosure(roots: string[]): Set<string> {
+  const seen = new Set<string>();
+  const pending = [...roots];
+  while (pending.length > 0) {
+    const name = pending.pop()!;
+    if (seen.has(name)) continue;
+    const manifest = manifestOf(name);
+    expect(manifest, `${name} is not installed`).not.toBe(null);
+    seen.add(name);
+    pending.push(...Object.keys(manifest!.dependencies ?? {}));
+  }
+  return seen;
+}
+
+/**
+ * The npm packages the main process imports, read from `electron/`. Electron's
+ * own module and Node's built-ins are not npm packages and are not listed.
+ */
+function mainProcessPackages(): string[] {
+  const electronDirectory = path.join(repoRoot, "electron");
+  const found = new Set<string>();
+  for (const entry of readdirSync(electronDirectory, { withFileTypes: true })) {
+    if (!entry.isFile() || !entry.name.endsWith(".ts")) continue;
+    const source = readFileSync(path.join(electronDirectory, entry.name), "utf8");
+    // Only real module specifiers: an `import`/`export ... from` clause that
+    // ends a statement, or a `require(...)` call. Prose in a comment that
+    // happens to contain the word "from" is not one.
+    const specifiers = [
+      ...source.matchAll(/^\s*(?:import|export)\b[^;]*?\bfrom\s*["']([^"']+)["']/gm),
+      ...source.matchAll(/^\s*import\s*["']([^"']+)["']/gm),
+      ...source.matchAll(/\brequire\(\s*["']([^"']+)["']\s*\)/g),
+    ].map(([, specifier]) => specifier);
+    for (const specifier of specifiers) {
+      if (specifier.startsWith(".")) continue;
+      if (specifier === "electron" || specifier.startsWith("electron/")) continue;
+      if (specifier.startsWith("node:")) continue;
+      // Node's built-ins are importable without the `node:` prefix too.
+      if (
+        [
+          "child_process",
+          "crypto",
+          "events",
+          "fs",
+          "fs/promises",
+          "http",
+          "https",
+          "net",
+          "os",
+          "path",
+          "readline",
+          "stream",
+          "timers",
+          "url",
+          "util",
+          "zlib",
+        ].includes(specifier)
+      ) {
+        continue;
+      }
+      found.add(specifier.split("/").slice(0, specifier.startsWith("@") ? 2 : 1).join("/"));
+    }
+  }
+  return [...found].sort();
 }
 
 describe("encodeBundleBuildVersion", () => {
@@ -148,6 +241,36 @@ describe("what the packaged bundle is allowed to contain", () => {
       ),
     );
     expect(localizationRuntimes).toEqual([]);
+  });
+
+  it("keeps out of app.asar every npm package the packaged app cannot load", () => {
+    // Everything the renderer imports is compiled into dist/ by Vite, so the
+    // second copy under node_modules/ was 39 MB of React, Radix, Base UI and
+    // Lucide that no packaged code path ever required. The exclusion is
+    // written as "everything except this list", so the list has to be exactly
+    // the runtime closure — too small and the app breaks, too large and the
+    // dead weight comes back.
+    const kept = asarNodeModuleAllowList();
+    const required = dependencyClosure(mainProcessPackages());
+    expect([...kept].sort()).toEqual([...required].sort());
+  });
+
+  it("names electron-updater as the only npm package the main process loads", () => {
+    // The premise of the line above, read from the main-process source rather
+    // than assumed: a new `import` of a real package in electron/ fails here
+    // until it is added to the allow-list it now depends on.
+    expect(mainProcessPackages()).toEqual(["electron-updater"]);
+  });
+
+  it("still drops the renderer's own packages, not just their leaves", () => {
+    // A guard against an allow-list that has quietly grown to cover
+    // everything: the packages Vite bundles must not be in app.asar.
+    const kept = asarNodeModuleAllowList();
+    for (const name of ["react", "react-dom", "lucide-react", "@base-ui/react"]) {
+      expect(kept.has(name), `${name} should not be packed into app.asar`).toBe(
+        false,
+      );
+    }
   });
 });
 

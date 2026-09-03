@@ -249,6 +249,19 @@ evidence is stale and must be recaptured before this becomes a candidate.
   the answer.
 
 ### Changed
+- **The installed application is 86 MB smaller** — 384 MB down to 297 MB on an
+  unsigned `electron:pack` build — without removing anything the app can do.
+  Two things were shipping that nothing could reach. Chromium's user-interface
+  translations for 54 languages (46 MB) went out with a product written only in
+  English, so the file picker and text-field context menu could appear in
+  Polish inside a window whose every label was English; only the English locale
+  ships now, and date and number formatting is unaffected because that comes
+  from ICU, which is untouched. And `app.asar` carried a second copy of every
+  package the renderer imports — React, Radix, Base UI, 19 MB of Lucide icons —
+  even though Vite compiles all of it into `dist/` before packaging; the
+  archive is now 4.1 MB instead of 44.9 MB. Receipt, with the per-directory
+  before/after and the idle memory and cold-start measurements:
+  `artifacts/qa/shell-size-receipt-2026-09-02.md`.
 - Searching dictation history no longer writes an audit-log row. It is a read
   that changes nothing, and the search field re-runs on a debounce and again
   whenever the recordings list changes, so a minute of typing buried the rows
