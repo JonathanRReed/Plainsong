@@ -410,6 +410,14 @@ pub(crate) fn is_diarization_model_artifact_trusted(model_id: &str, path: &Path)
         .is_some_and(|model| is_model_artifact_trusted(path, Some(model.sha256)))
 }
 
+/// Test seam: the digest `is_diarization_model_artifact_trusted` demands for
+/// `model_id`, so a readiness test can write the receipt the download path
+/// would have written for that model.
+#[cfg(test)]
+pub(crate) fn diarization_model_expected_sha256(model_id: &str) -> Option<&'static str> {
+    diarization_model_info(model_id).map(|model| model.sha256)
+}
+
 /// Test seam: write the receipt the download path writes once a file's hash
 /// matched its pin, so a provider test can prove readiness follows the
 /// receipt rather than the bytes. Test builds use a fixed MAC key.

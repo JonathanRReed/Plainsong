@@ -1554,55 +1554,32 @@ struct DiarizationModelOption {
     installed: bool,
 }
 
-fn diarization_model_path(model_id: &str) -> Option<std::path::PathBuf> {
-    let models_dir = crate::paths::data_dir()
-        .unwrap_or_else(|| std::path::PathBuf::from("."))
-        .join("Plainsong")
-        .join("models")
-        .join("diarization");
-    match model_id {
-        "ecapa_tdnn_speaker" => Some(models_dir.join("ecapa_tdnn_speaker.onnx")),
-        "resnet34_speaker" => Some(models_dir.join("resnet34_speaker.onnx")),
-        "campplus_speaker" => Some(models_dir.join("campplus_speaker.onnx")),
-        "eres2netv2_speaker" => Some(models_dir.join("eres2netv2_speaker.onnx")),
-        _ => None,
-    }
-}
-
 fn list_diarization_models() -> Vec<DiarizationModelOption> {
     #[allow(unused_mut)]
     let mut models = vec![
         DiarizationModelOption {
             id: "ecapa_tdnn_speaker",
-            label: "ECAPA-TDNN 512",
+            label: diarization::model_label("ecapa_tdnn_speaker"),
             description: "Fast and accurate, recommended for most use cases (~25 MB)",
-            installed: diarization_model_path("ecapa_tdnn_speaker")
-                .map(|p| download::is_diarization_model_artifact_trusted("ecapa_tdnn_speaker", &p))
-                .unwrap_or(false),
+            installed: diarization::is_model_available("ecapa_tdnn_speaker"),
         },
         DiarizationModelOption {
             id: "resnet34_speaker",
-            label: "ResNet34",
+            label: diarization::model_label("resnet34_speaker"),
             description: "Balanced performance, good accuracy with moderate speed (~30 MB)",
-            installed: diarization_model_path("resnet34_speaker")
-                .map(|p| download::is_diarization_model_artifact_trusted("resnet34_speaker", &p))
-                .unwrap_or(false),
+            installed: diarization::is_model_available("resnet34_speaker"),
         },
         DiarizationModelOption {
             id: "campplus_speaker",
-            label: "CAM++",
+            label: diarization::model_label("campplus_speaker"),
             description: "Highest accuracy, best for challenging audio conditions (~35 MB)",
-            installed: diarization_model_path("campplus_speaker")
-                .map(|p| download::is_diarization_model_artifact_trusted("campplus_speaker", &p))
-                .unwrap_or(false),
+            installed: diarization::is_model_available("campplus_speaker"),
         },
         DiarizationModelOption {
             id: "eres2netv2_speaker",
-            label: "ERes2NetV2 (int8)",
+            label: diarization::model_label("eres2netv2_speaker"),
             description: "Modern int8-quantized embedder, 192-dim, compact (~28 MB)",
-            installed: diarization_model_path("eres2netv2_speaker")
-                .map(|p| download::is_diarization_model_artifact_trusted("eres2netv2_speaker", &p))
-                .unwrap_or(false),
+            installed: diarization::is_model_available("eres2netv2_speaker"),
         },
     ];
 
@@ -1613,36 +1590,29 @@ fn list_diarization_models() -> Vec<DiarizationModelOption> {
     #[cfg(feature = "diarization-speakrs")]
     models.push(DiarizationModelOption {
         id: download::SPEAKRS_MODEL_ID,
-        label: "pyannote community-1 (experimental)",
+        label: diarization::model_label(download::SPEAKRS_MODEL_ID),
         description:
             "Full pyannote pipeline with overlap handling, via speakrs. Slower than the embedding models and unmeasured on your audio (~60 MB, ten files)",
-        installed: is_speakrs_bundle_installed(),
+        installed: diarization::is_model_available(download::SPEAKRS_MODEL_ID),
     });
 
     models
 }
 
-#[cfg(feature = "diarization-speakrs")]
-fn is_speakrs_bundle_installed() -> bool {
-    let bundle_dir = crate::paths::data_dir()
-        .unwrap_or_else(|| std::path::PathBuf::from("."))
-        .join("Plainsong")
-        .join("models")
-        .join("diarization")
-        .join(download::SPEAKRS_BUNDLE_DIR);
-    download::is_speakrs_bundle_trusted(&bundle_dir)
-}
-
 #[allow(non_snake_case)]
 fn is_diarization_model_available(modelId: Option<String>) -> bool {
-    let id = modelId.as_deref().unwrap_or("ecapa_tdnn_speaker");
-    #[cfg(feature = "diarization-speakrs")]
-    if id == download::SPEAKRS_MODEL_ID {
-        return is_speakrs_bundle_installed();
+    let id = modelId
+        .as_deref()
+        .unwrap_or(diarization::DEFAULT_EMBEDDING_MODEL_ID);
+    // An id this build does not offer is not "available": a run would silently
+    // load ECAPA-TDNN for it, but telling the UI "yes, you have that model"
+    // about a model that does not exist is a different claim. Ids that *are*
+    // offered delegate, so the picker's badge, this probe and the gate on the
+    // automatic pass give one answer instead of three.
+    if !list_diarization_models().iter().any(|model| model.id == id) {
+        return false;
     }
-    diarization_model_path(id)
-        .map(|p| download::is_diarization_model_artifact_trusted(id, &p))
-        .unwrap_or(false)
+    diarization::is_model_available(id)
 }
 
 async fn smoke_test_cursor_insert_impl(
@@ -29811,6 +29781,7 @@ async fn run_meeting_transcription_pipeline(
             // The post-processing guard keeps retention and reset from removing
             // this recording while best-effort enrichment is still reading it.
             let mut diarization_updated = false;
+            let mut diarization_fallback_notice: Option<String> = None;
             if transcript_persisted {
                 // The automatic pass runs the model the user picked, not
                 // always the default one: the picker previously only affected
@@ -29830,13 +29801,15 @@ async fn run_meeting_transcription_pipeline(
                             .unwrap_or_else(|| "ecapa_tdnn_speaker".to_string()),
                     )
                 };
-                if enable_diarization
+                let resolved_diarization_model = if enable_diarization
                     && !transcript_has_source_aware_speakers(&transcript.segments)
-                    && diarization::is_model_available(&diarization_model_id)
                 {
-                    match diarization::run_diarization_with_model(&path, &diarization_model_id)
-                        .await
-                    {
+                    diarization::resolve_model_for_run(&diarization_model_id)
+                } else {
+                    None
+                };
+                if let Some(resolved) = resolved_diarization_model {
+                    match diarization::run_diarization_with_model(&path, &resolved.model_id).await {
                         Ok(result) => {
                             let engine = diarization::DiarizationEngine::new();
                             let mut enriched_segments = transcript.segments.clone();
@@ -29854,6 +29827,11 @@ async fn run_meeting_transcription_pipeline(
                                 Ok(true) => {
                                     transcript.segments = enriched_segments;
                                     diarization_updated = true;
+                                    // Only once labels are actually stored: a
+                                    // notice about which model produced them
+                                    // is a lie if none were produced.
+                                    diarization_fallback_notice =
+                                        resolved.fallback_notice.clone();
                                 }
                                 Ok(false) => tracing::warn!(
                                     "Skipped diarization enrichment for {} because the transcript changed while diarization was running",
@@ -29907,6 +29885,26 @@ async fn run_meeting_transcription_pipeline(
                                 "updatedAt": chrono::Utc::now().to_rfc3339(),
                             }),
                         );
+                        // The completed event has already gone out (completion
+                        // is durable before diarization starts), so a model
+                        // substitution rides the same "a finished meeting can
+                        // still carry a note" path the degraded transcript uses.
+                        if let Some(notice) = diarization_fallback_notice.as_deref() {
+                            tracing::warn!(
+                                "Diarization for {} fell back to the default model: {}",
+                                recording_id_clone,
+                                notice
+                            );
+                            handle_clone.emit_event(
+                                "recording-status-changed",
+                                serde_json::json!({
+                                    "recordingId": &recording_id_clone,
+                                    "status": "completed",
+                                    "message": notice,
+                                    "updatedAt": chrono::Utc::now().to_rfc3339(),
+                                }),
+                            );
+                        }
                     }
 
                     if let Some(reason) = degraded_reason.as_deref() {
@@ -31876,12 +31874,25 @@ pub async fn dispatch_command(
                 .diarization_model_id
                 .clone()
                 .unwrap_or_else(|| "ecapa_tdnn_speaker".to_string());
-            let diarization =
-                diarization::run_diarization_with_model(&resolved.primary, &diarization_model_id)
-                    .await
-                    .map_err(|e| e.to_string())?;
+            // Same rule as the automatic pass: run the model the user picked,
+            // or say plainly that the default ran instead. Without this the
+            // explicit action either failed outright or -- once the fallback
+            // existed -- would have swapped models behind the user's back.
+            let resolved_model = diarization::resolve_model_for_run(&diarization_model_id)
+                .ok_or_else(|| {
+                    format!(
+                        "{} is not downloaded, and neither is the default speaker model. Download one under Settings, Speaker separation model.",
+                        diarization::model_label(&diarization_model_id)
+                    )
+                })?;
+            let diarization = diarization::run_diarization_with_model(
+                &resolved.primary,
+                &resolved_model.model_id,
+            )
+            .await
+            .map_err(|e| e.to_string())?;
 
-            let engine = diarization::DiarizationEngine::with_model(&diarization_model_id);
+            let engine = diarization::DiarizationEngine::with_model(&resolved_model.model_id);
             engine.merge_with_transcript(&diarization, &mut transcript.segments);
             let inferred_aliases = infer_speaker_aliases_from_segments(&transcript.segments);
             let alias_updates = diarization
@@ -31933,6 +31944,22 @@ pub async fn dispatch_command(
                     "updatedAt": chrono::Utc::now().to_rfc3339(),
                 }),
             );
+            if let Some(notice) = resolved_model.fallback_notice.as_deref() {
+                tracing::warn!(
+                    "Diarization for {} fell back to the default model: {}",
+                    recording_id,
+                    notice
+                );
+                handle.emit_event(
+                    "recording-status-changed",
+                    serde_json::json!({
+                        "recordingId": &recording_id,
+                        "status": "completed",
+                        "message": notice,
+                        "updatedAt": chrono::Utc::now().to_rfc3339(),
+                    }),
+                );
+            }
             serde_json::to_value(diarization).map_err(|e| e.to_string())
         }
         "download_diarization_model" => {
@@ -34041,7 +34068,9 @@ mod diarization_model_picker_tests {
         #[cfg(feature = "diarization-speakrs")]
         assert_eq!(
             is_diarization_model_available(Some(download::SPEAKRS_MODEL_ID.to_string())),
-            is_speakrs_bundle_installed()
+            download::is_speakrs_bundle_trusted(
+                &diarization::diarization_models_dir().join(download::SPEAKRS_BUNDLE_DIR)
+            )
         );
     }
 }

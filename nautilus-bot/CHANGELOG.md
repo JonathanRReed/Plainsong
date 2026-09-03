@@ -350,6 +350,14 @@ evidence is stale and must be recaptured before this becomes a candidate.
   post-meeting speaker pass uses. It previously always ran ECAPA-TDNN no
   matter what the picker said; only the explicit "identify speakers" action
   honoured the setting.
+- Choosing a speaker model you have not downloaded no longer costs you speaker
+  labels. "Is this model ready" was answered by checking ECAPA-TDNN whatever
+  model was asked about, so picking CAM++ (or ResNet34, or ERes2NetV2) without
+  downloading it passed the check and then failed inside the run, silently, on
+  every meeting. Readiness now checks the model you picked; if it is missing,
+  the meeting is diarized with the downloaded default and says so — "Speaker
+  labels used ECAPA-TDNN 512 because CAM++ is not downloaded." With nothing
+  downloaded at all, no speaker labels are claimed.
 - THIRD-PARTY-NOTICES.txt now has a MODEL WEIGHTS section naming every model
   Plainsong can download — repository, pinned revision, files and license —
   including the terms that differ from the code's: Parakeet's CC-BY-4.0
