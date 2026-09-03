@@ -85,10 +85,23 @@ function dependencyClosure(roots: string[]): Set<string> {
  */
 function mainProcessPackages(): string[] {
   const electronDirectory = path.join(repoRoot, "electron");
+  const sources: string[] = [];
+  const directories = [electronDirectory];
+  // Recursive: `electron/` is flat today, and a subdirectory added later must
+  // not silently drop out of a check the packaged bundle depends on.
+  while (directories.length > 0) {
+    const directory = directories.pop()!;
+    for (const entry of readdirSync(directory, { withFileTypes: true })) {
+      const entryPath = path.join(directory, entry.name);
+      if (entry.isDirectory()) directories.push(entryPath);
+      else if (entry.isFile() && entry.name.endsWith(".ts")) sources.push(entryPath);
+    }
+  }
+  expect(sources.length, "no main-process sources found").toBeGreaterThan(0);
+
   const found = new Set<string>();
-  for (const entry of readdirSync(electronDirectory, { withFileTypes: true })) {
-    if (!entry.isFile() || !entry.name.endsWith(".ts")) continue;
-    const source = readFileSync(path.join(electronDirectory, entry.name), "utf8");
+  for (const sourcePath of sources) {
+    const source = readFileSync(sourcePath, "utf8");
     // Only real module specifiers: an `import`/`export ... from` clause that
     // ends a statement, or a `require(...)` call. Prose in a comment that
     // happens to contain the word "from" is not one.
