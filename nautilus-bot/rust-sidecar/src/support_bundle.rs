@@ -92,6 +92,10 @@ const CONTENT_MARKERS: &[&str] = &[
 /// never disagree.
 pub const INCLUDED_SECTIONS: &[(&str, &str)] = &[
     (
+        "README.txt",
+        "This list and these rules in prose, so the bundle explains itself to whoever opens it.",
+    ),
+    (
         "summary.json",
         "Plainsong's version, macOS version, and this Mac's chip, core count, and memory.",
     ),
@@ -743,9 +747,9 @@ mod tests {
                 "{section} is described but not written"
             );
         }
-        // README.txt is the one extra file: it is the manifest in prose.
-        assert!(names.contains(&"README.txt"));
-        assert_eq!(names.len(), INCLUDED_SECTIONS.len() + 1);
+        // Exactly the described set, no more: the count the Settings screen
+        // shows is the count the zip holds.
+        assert_eq!(names.len(), INCLUDED_SECTIONS.len());
     }
 
     #[test]

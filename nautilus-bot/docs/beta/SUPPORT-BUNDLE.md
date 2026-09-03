@@ -14,10 +14,13 @@ dialog; Plainsong writes a zip where you choose and nowhere else. Nothing is
 uploaded, and no path is ever named by the app's window -- the sidecar only
 ever sees the file you picked.
 
-The zip holds a `README.txt`, a `manifest.json`, and one file per section:
+Every file the zip holds is listed in the app before it is written, and again
+in the zip's own `README.txt`:
 
 | File | What it holds |
 | --- | --- |
+| `README.txt` | this list and the redaction rules, in prose |
+| `manifest.json` | the same list as JSON, plus the time the bundle was made |
 | `summary.json` | app version, macOS version, chip, core count, memory |
 | `settings-redacted.json` | your settings, reduced to switches, numbers, and short names |
 | `readiness.json` | which macOS permissions Plainsong currently has |
