@@ -88,7 +88,10 @@ pub(crate) const SPEAKRS_MODEL_ID: &str = "speakrs_community1";
 /// Sub-directory of `models/diarization/` holding the speakrs bundle.
 /// speakrs resolves every file of the bundle by name inside one directory
 /// (`ModelBundle::from_dir`), so the layout is fixed by the crate.
-#[cfg(feature = "diarization-speakrs")]
+///
+/// Not feature-gated, unlike the file list: a build that can no longer download
+/// the bundle still has to find, size and delete a copy an earlier build left
+/// on disk.
 pub(crate) const SPEAKRS_BUNDLE_DIR: &str = "speakrs";
 
 #[cfg(feature = "diarization-speakrs")]
@@ -1603,6 +1606,88 @@ impl DownloadManager {
             }
         }
 
+        // Check diarization models. Without this branch the four speaker
+        // embedders and any speakrs bundle on disk were invisible in the models
+        // list and missing from the storage total, so a user could neither see
+        // them nor delete them -- the app downloaded files it then refused to
+        // account for. Named with the picker's own labels so a row can be
+        // matched to the entry that fetched it.
+        let diarization_dir = self.models_dir.join("diarization");
+        if diarization_dir.exists() {
+            let mut entries = tokio::fs::read_dir(&diarization_dir).await?;
+            while let Some(entry) = entries.next_entry().await? {
+                let path = entry.path();
+                if is_internal_model_metadata_file(&path) {
+                    continue;
+                }
+                let metadata = entry.metadata().await?;
+                if metadata.is_file() {
+                    let file_name = entry.file_name().to_string_lossy().to_string();
+                    let model_id = file_name.strip_suffix(".onnx").unwrap_or(&file_name);
+                    models.push(DownloadedModel {
+                        name: format!(
+                            "Speaker embedding {}",
+                            crate::diarization::model_label(model_id)
+                        ),
+                        provider: "diarization".to_string(),
+                        path,
+                        size_bytes: metadata.len(),
+                        downloaded_at: metadata.modified()?,
+                    });
+                    continue;
+                }
+                if !metadata.is_dir() {
+                    continue;
+                }
+
+                // A bundle is one model in several files (speakrs needs ten),
+                // so it is summed into a single deletable entry the way the
+                // Qwen3-ASR and cleanup bundles are.
+                let dir_name = path
+                    .file_name()
+                    .map(|name| name.to_string_lossy().to_string())
+                    .unwrap_or_default();
+                let mut total_size = 0u64;
+                let mut files = 0usize;
+                let mut modified: Option<std::time::SystemTime> = None;
+                let mut bundle_entries = tokio::fs::read_dir(&path).await?;
+                while let Some(bundle_entry) = bundle_entries.next_entry().await? {
+                    let bundle_path = bundle_entry.path();
+                    if is_internal_model_metadata_file(&bundle_path) {
+                        continue;
+                    }
+                    if let Ok(metadata) = bundle_entry.metadata().await {
+                        if !metadata.is_file() {
+                            continue;
+                        }
+                        total_size += metadata.len();
+                        files += 1;
+                        if let Ok(entry_modified) = metadata.modified() {
+                            modified = Some(match modified {
+                                Some(existing) if existing >= entry_modified => existing,
+                                _ => entry_modified,
+                            });
+                        }
+                    }
+                }
+                if files == 0 {
+                    continue;
+                }
+                let name = if dir_name == SPEAKRS_BUNDLE_DIR {
+                    "Speaker diarization pyannote community-1 (speakrs)".to_string()
+                } else {
+                    format!("Speaker diarization {dir_name}")
+                };
+                models.push(DownloadedModel {
+                    name,
+                    provider: "diarization".to_string(),
+                    path,
+                    size_bytes: total_size,
+                    downloaded_at: modified.unwrap_or_else(std::time::SystemTime::now),
+                });
+            }
+        }
+
         // The macOS MLX sidecar's stub asset listing has been removed along
         // with the retired engine (see `PlatformEngine::MacosMlxSidecar` and
         // `mlx_sidecar::probe`). Any leftover `models/mlx/manifest.json` from
@@ -1796,6 +1881,22 @@ impl DownloadManager {
                 "Refusing to delete file outside models directory: {:?}",
                 path
             ));
+        }
+        if canonical == models_canonical {
+            return Err(anyhow::anyhow!(
+                "Refusing to delete the models directory itself: {:?}",
+                path
+            ));
+        }
+
+        // Several listed models are bundles: a directory of files with their
+        // receipts beside them (speakrs, Qwen3-ASR, the cleanup model). The
+        // listing hands back the directory as the deletable path, so deleting
+        // one has to remove the directory rather than fail on `remove_file`.
+        if canonical.is_dir() {
+            tokio::fs::remove_dir_all(&canonical).await?;
+            tracing::info!("Deleted model bundle at {:?}", canonical);
+            return Ok(());
         }
 
         tokio::fs::remove_file(&canonical).await?;
@@ -2709,6 +2810,153 @@ mod tests {
             4_000 + 900 + 80 + 20,
             "every pinned file counts toward the footprint; the receipt does not"
         );
+
+        std::fs::remove_dir_all(&models_dir).ok();
+    }
+
+    /// The four speaker embedders and any speakrs bundle were downloaded into
+    /// `models/diarization` and then never listed, so the Models screen could
+    /// not show them and `delete_model` had no path to hand back.
+    #[tokio::test]
+    async fn downloaded_model_listing_includes_diarization_models_and_bundles() {
+        let models_dir = std::env::temp_dir()
+            .join("plainsong-download-diarization-listing")
+            .join(uuid::Uuid::new_v4().to_string());
+        let diarization_dir = models_dir.join("diarization");
+        let bundle_dir = diarization_dir.join(SPEAKRS_BUNDLE_DIR);
+        std::fs::create_dir_all(&bundle_dir).expect("create bundle dir");
+
+        std::fs::write(
+            diarization_dir.join("ecapa_tdnn_speaker.onnx"),
+            vec![0u8; 2_000],
+        )
+        .expect("ecapa");
+        std::fs::write(
+            diarization_dir.join("campplus_speaker.onnx"),
+            vec![0u8; 3_000],
+        )
+        .expect("campplus");
+        std::fs::write(
+            model_integrity_receipt_path(&diarization_dir.join("campplus_speaker.onnx")),
+            b"receipt",
+        )
+        .expect("receipt is metadata, not model footprint");
+        std::fs::write(bundle_dir.join("segmentation-3.0.onnx"), vec![0u8; 500]).expect("seg");
+        std::fs::write(bundle_dir.join("plda_lda.npy"), vec![0u8; 120]).expect("plda");
+        std::fs::write(
+            model_integrity_receipt_path(&bundle_dir.join("plda_lda.npy")),
+            b"receipt",
+        )
+        .expect("bundle receipt");
+
+        let manager = DownloadManager {
+            client: build_download_client().expect("client"),
+            models_dir: models_dir.clone(),
+        };
+        let listed = manager
+            .list_downloaded_models()
+            .await
+            .expect("listing should succeed");
+
+        let diarization: Vec<&DownloadedModel> = listed
+            .iter()
+            .filter(|model| model.provider == "diarization")
+            .collect();
+        assert_eq!(
+            diarization.len(),
+            3,
+            "two embedders and one bundle: {diarization:?}"
+        );
+
+        let ecapa = diarization
+            .iter()
+            .find(|model| model.path == diarization_dir.join("ecapa_tdnn_speaker.onnx"))
+            .expect("ECAPA listed");
+        // The picker's own label, so a row can be matched to the entry that
+        // downloaded it.
+        assert_eq!(ecapa.name, "Speaker embedding ECAPA-TDNN 512");
+        assert_eq!(ecapa.size_bytes, 2_000);
+
+        let campplus = diarization
+            .iter()
+            .find(|model| model.path == diarization_dir.join("campplus_speaker.onnx"))
+            .expect("CAM++ listed");
+        assert_eq!(campplus.name, "Speaker embedding CAM++");
+        assert_eq!(campplus.size_bytes, 3_000);
+
+        let bundle = diarization
+            .iter()
+            .find(|model| model.path == bundle_dir)
+            .expect("speakrs bundle listed as one entry");
+        assert!(bundle.name.contains("community-1"), "{}", bundle.name);
+        assert_eq!(
+            bundle.size_bytes,
+            500 + 120,
+            "the bundle's files are the footprint; the receipts are not"
+        );
+        assert!(
+            listed
+                .iter()
+                .all(|model| !is_internal_model_metadata_file(&model.path)),
+            "receipts must not be listed as models"
+        );
+
+        std::fs::remove_dir_all(&models_dir).ok();
+    }
+
+    /// A bundle is listed by its directory, so deleting one has to remove the
+    /// directory. `remove_file` returned an error on every bundle entry, which
+    /// is why the speakrs bundle (and the Qwen3-ASR and cleanup bundles beside
+    /// it) could be seen but not deleted.
+    #[tokio::test]
+    async fn deleting_a_model_bundle_removes_the_whole_directory() {
+        let models_dir = std::env::temp_dir()
+            .join("plainsong-download-delete-bundle")
+            .join(uuid::Uuid::new_v4().to_string());
+        let bundle_dir = models_dir.join("diarization").join(SPEAKRS_BUNDLE_DIR);
+        std::fs::create_dir_all(&bundle_dir).expect("create bundle dir");
+        let payload = bundle_dir.join("segmentation-3.0.onnx");
+        std::fs::write(&payload, b"weights").expect("write payload");
+        std::fs::write(model_integrity_receipt_path(&payload), b"receipt").expect("write receipt");
+
+        let manager = DownloadManager {
+            client: build_download_client().expect("client"),
+            models_dir: models_dir.clone(),
+        };
+        manager
+            .delete_model(&bundle_dir)
+            .await
+            .expect("a bundle directory is deletable");
+
+        assert!(!bundle_dir.exists(), "the bundle and its receipts are gone");
+        assert!(
+            models_dir.join("diarization").exists(),
+            "only the bundle is removed, not its parent"
+        );
+
+        std::fs::remove_dir_all(&models_dir).ok();
+    }
+
+    #[tokio::test]
+    async fn deleting_the_models_directory_itself_is_refused() {
+        let models_dir = std::env::temp_dir()
+            .join("plainsong-download-delete-root")
+            .join(uuid::Uuid::new_v4().to_string());
+        std::fs::create_dir_all(models_dir.join("diarization")).expect("create models dir");
+
+        let manager = DownloadManager {
+            client: build_download_client().expect("client"),
+            models_dir: models_dir.clone(),
+        };
+        let error = manager
+            .delete_model(&models_dir)
+            .await
+            .expect_err("the managed root is not a model");
+        assert!(
+            error.to_string().contains("models directory itself"),
+            "got {error}"
+        );
+        assert!(models_dir.exists());
 
         std::fs::remove_dir_all(&models_dir).ok();
     }

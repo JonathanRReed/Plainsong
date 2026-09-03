@@ -371,6 +371,13 @@ evidence is stale and must be recaptured before this becomes a candidate.
   attribution and S1-mini's naming clause. The section is generated from a
   manifest and covered by the release license gate, and it records honestly
   the one artifact whose upstream declares no license.
+- Speaker models now appear in the list of downloaded models, and can be
+  deleted. The four speaker embedders and any experimental pyannote bundle were
+  downloaded into the models directory and then never enumerated, so they were
+  invisible in the Models screen and there was no path to delete them. Deleting
+  a multi-file model (a speaker bundle, Qwen3-ASR, the built-in cleanup model)
+  now removes the whole directory instead of failing; the managed models
+  directory itself is refused.
 - The built-in cleanup model's 473 MiB now appears in the sidecar's list of
   downloaded models, where it was missing entirely. The Models screen's
   "Speech models on this Mac" total still counts only speech models, since
