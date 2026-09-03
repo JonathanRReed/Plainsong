@@ -13,6 +13,9 @@ const getBundledCleanupModelStatusMock = vi.fn();
 const downloadBundledCleanupModelMock = vi.fn();
 const deleteBundledCleanupModelMock = vi.fn();
 const getAppleLanguageModelAvailabilityMock = vi.fn();
+const getLivePreviewEngineStatusMock = vi.fn();
+const downloadLivePreviewEngineModelMock = vi.fn();
+const deleteLivePreviewEngineModelMock = vi.fn();
 const readinessContext = vi.hoisted(() => ({
   refresh: vi.fn(async () => {}),
   productReadiness: {
@@ -46,7 +49,26 @@ vi.mock("@/lib/backend/ai", () => ({
   deleteBundledCleanupModel: () => deleteBundledCleanupModelMock(),
   getAppleLanguageModelAvailability: (refresh: boolean) =>
     getAppleLanguageModelAvailabilityMock(refresh),
+  getLivePreviewEngineStatus: () => getLivePreviewEngineStatusMock(),
+  downloadLivePreviewEngineModel: () => downloadLivePreviewEngineModelMock(),
+  deleteLivePreviewEngineModel: () => deleteLivePreviewEngineModelMock(),
 }));
+
+/** A build with the streaming engine compiled in, weights not yet fetched. */
+const LIVE_PREVIEW_STATUS = {
+  supported: true,
+  ready: false,
+  modelId: "nemotron-3.5-asr-streaming-0.6b-q8_0",
+  displayName: "Nemotron 3.5 ASR Streaming 0.6B (GGUF Q8_0)",
+  engineName: "Nemotron 3.5 ASR Streaming via transcribe.cpp",
+  license: "OpenMDW-1.1",
+  upstreamUrl: "https://example.invalid/nemotron",
+  downloadBytes: 751_094_240,
+  bytesOnDisk: 0,
+  languages: ["en", "es", "fr"],
+  chunkMs: 560,
+  path: "/models/transcribe_cpp/nemotron-3.5-asr-streaming-0.6b-Q8_0.gguf",
+};
 
 vi.mock("@/lib/electron", () => ({
   listen: vi.fn(async () => () => {}),
@@ -261,6 +283,13 @@ describe("Models screen", () => {
     });
     deleteBundledCleanupModelMock.mockResolvedValue(BUNDLED_STATUS);
     getAppleLanguageModelAvailabilityMock.mockResolvedValue(APPLE_AVAILABILITY);
+    getLivePreviewEngineStatusMock.mockResolvedValue(LIVE_PREVIEW_STATUS);
+    downloadLivePreviewEngineModelMock.mockResolvedValue({
+      ...LIVE_PREVIEW_STATUS,
+      ready: true,
+      bytesOnDisk: 751_094_240,
+    });
+    deleteLivePreviewEngineModelMock.mockResolvedValue(LIVE_PREVIEW_STATUS);
   });
 
   it("never offers a dictation-only provider for meeting notes", async () => {
@@ -739,5 +768,65 @@ describe("Models screen", () => {
         /639 MiB, 25 European languages listed upstream; English verified in Plainsong/,
       ),
     ).toBeInTheDocument();
+  });
+  it("offers the live preview engine as a download that changes no transcription", async () => {
+    render(<Harness />);
+
+    const row = (await screen.findByRole("region", {
+      name: "Live preview engine",
+    })) as HTMLElement;
+    expect(
+      within(row).getByText(/never changes what Plainsong types for you/i),
+    ).toBeInTheDocument();
+    expect(within(row).getByText("716 MiB to download")).toBeInTheDocument();
+    // Not downloaded: the row says what happens without it, rather than
+    // implying the preview is off.
+    expect(
+      within(row).getByText(/Plainsong re-transcribes what you have said so far/i),
+    ).toBeInTheDocument();
+
+    fireEvent.click(within(row).getByRole("button", { name: "Download" }));
+    await waitFor(() => {
+      expect(downloadLivePreviewEngineModelMock).toHaveBeenCalledTimes(1);
+    });
+    expect(
+      await within(row).findByRole("button", { name: "Delete" }),
+    ).toBeInTheDocument();
+  });
+
+  it("says which languages the engine's own file declares", async () => {
+    render(<Harness />);
+
+    const row = (await screen.findByRole("region", {
+      name: "Live preview engine",
+    })) as HTMLElement;
+    expect(
+      within(row).getByText(/declares 3 languages \(en, es, fr\)/),
+    ).toBeInTheDocument();
+    expect(
+      within(row).getByText(/a dictation language outside that list keeps the older preview/i),
+    ).toBeInTheDocument();
+  });
+
+  it("shows nothing at all when this build has no streaming engine", async () => {
+    getLivePreviewEngineStatusMock.mockResolvedValue({
+      ...LIVE_PREVIEW_STATUS,
+      supported: false,
+      ready: false,
+      modelId: null,
+      displayName: null,
+      engineName: null,
+      license: null,
+      downloadBytes: 0,
+      languages: [],
+      chunkMs: null,
+      path: null,
+    });
+    render(<Harness />);
+
+    await screen.findByRole("region", { name: "Speech for dictation" });
+    expect(
+      screen.queryByRole("region", { name: "Live preview engine" }),
+    ).not.toBeInTheDocument();
   });
 });

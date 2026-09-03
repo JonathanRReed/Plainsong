@@ -12,11 +12,15 @@ import {
 } from "@/lib/backend/asr";
 import {
   deleteBundledCleanupModel,
+  deleteLivePreviewEngineModel,
   downloadBundledCleanupModel,
+  downloadLivePreviewEngineModel,
   getAppleLanguageModelAvailability,
   getBundledCleanupModelStatus,
+  getLivePreviewEngineStatus,
   type AppleLanguageModelAvailability,
   type BundledCleanupModelStatus,
+  type LivePreviewEngineStatus,
 } from "@/lib/backend/ai";
 import { listen } from "@/lib/electron";
 import type { AsrProviderInventory } from "@/types";
@@ -43,6 +47,7 @@ import {
   withSpeechLaneRoute,
   type SpeechLane,
 } from "@/components/models/model-selection";
+import { LivePreviewEngineRow } from "@/components/models/live-preview-engine-row";
 import { MoreModelsDrawer } from "@/components/models/more-models-drawer";
 import { PresetPicker } from "@/components/models/preset-picker";
 import { SpeechLaneRow } from "@/components/models/speech-lane-row";
@@ -112,6 +117,13 @@ export function ModelsScreen({
   const [bundledBusy, setBundledBusy] = useState(false);
   const [bundledProgress, setBundledProgress] = useState<number | null>(null);
   const [bundledError, setBundledError] = useState<string | null>(null);
+  const [livePreviewStatus, setLivePreviewStatus] =
+    useState<LivePreviewEngineStatus | null>(null);
+  const [livePreviewBusy, setLivePreviewBusy] = useState(false);
+  const [livePreviewProgress, setLivePreviewProgress] = useState<number | null>(
+    null,
+  );
+  const [livePreviewError, setLivePreviewError] = useState<string | null>(null);
   const [appleAvailability, setAppleAvailability] =
     useState<AppleLanguageModelAvailability | null>(null);
   const [appleChecking, setAppleChecking] = useState(false);
@@ -229,6 +241,73 @@ export function ModelsScreen({
       unlisten?.();
     };
   }, []);
+
+  const refreshLivePreviewStatus = useCallback(async () => {
+    try {
+      const status = await getLivePreviewEngineStatus();
+      if (mountedRef.current) {
+        setLivePreviewStatus(status);
+      }
+    } catch {
+      // A sidecar that cannot answer leaves the row hidden rather than
+      // claiming an engine state it does not know.
+      if (mountedRef.current) {
+        setLivePreviewStatus(null);
+      }
+    }
+  }, []);
+
+  useEffect(() => {
+    void refreshLivePreviewStatus();
+  }, [refreshLivePreviewStatus]);
+
+  const handleLivePreviewDownload = useCallback(async () => {
+    setLivePreviewBusy(true);
+    setLivePreviewProgress(null);
+    setLivePreviewError(null);
+    try {
+      const status = await downloadLivePreviewEngineModel();
+      if (mountedRef.current) {
+        setLivePreviewStatus(status);
+      }
+    } catch (error) {
+      if (mountedRef.current) {
+        setLivePreviewError(
+          error instanceof Error
+            ? error.message
+            : "The download did not finish.",
+        );
+      }
+      void refreshLivePreviewStatus();
+    } finally {
+      if (mountedRef.current) {
+        setLivePreviewBusy(false);
+        setLivePreviewProgress(null);
+      }
+    }
+  }, [refreshLivePreviewStatus]);
+
+  const handleLivePreviewDelete = useCallback(async () => {
+    setLivePreviewBusy(true);
+    setLivePreviewError(null);
+    try {
+      const status = await deleteLivePreviewEngineModel();
+      if (mountedRef.current) {
+        setLivePreviewStatus(status);
+      }
+    } catch (error) {
+      if (mountedRef.current) {
+        setLivePreviewError(
+          error instanceof Error ? error.message : "Could not delete it.",
+        );
+      }
+      void refreshLivePreviewStatus();
+    } finally {
+      if (mountedRef.current) {
+        setLivePreviewBusy(false);
+      }
+    }
+  }, [refreshLivePreviewStatus]);
 
   const handleBundledDownload = useCallback(async () => {
     setBundledBusy(true);
@@ -594,6 +673,16 @@ export function ModelsScreen({
                 actionBusy={busyRouteId === activeDictationRoute?.routeId}
                 readinessOverride={dictationReadinessOverride}
                 explainPauseBehavior
+              />
+              {/* Under the dictation lane on purpose: it is not a route the
+                  lane can select, it is an add-on to that lane's popup. */}
+              <LivePreviewEngineRow
+                status={livePreviewStatus}
+                busy={livePreviewBusy}
+                progressPercent={livePreviewProgress}
+                error={livePreviewError}
+                onDownload={() => void handleLivePreviewDownload()}
+                onDelete={() => void handleLivePreviewDelete()}
               />
             </div>
           )}
