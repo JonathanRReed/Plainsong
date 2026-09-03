@@ -378,6 +378,16 @@ evidence is stale and must be recaptured before this becomes a candidate.
   files that still carry it load cleanly and are rewritten without it.
 
 ### Fixed
+- Deepgram and Gemini Transcribe are treated as the cloud routes they are.
+  The sidecar's one privacy classification -- the list that decides whether
+  audio leaves this Mac -- still named only the four cloud providers that
+  shipped before them, so both new routes counted as local: they ran without
+  the remote-processing gate (which also means without its cancellation), the
+  "remote processing is off" refusal did nothing for them, a dictation
+  preference set to local-only would still upload to Deepgram, and a meeting
+  set to prefer local routes admitted them. Both are now classified as remote
+  everywhere, and the classification is pinned against the picker's own list
+  in both directions so a future provider cannot be added on one side alone.
 - Settings -> API keys now offers the transcription services, not only the
   language-model ones. Every cloud speech route's setup text said "Add a key
   in Settings -> API Keys" and the picker there had no entry for ElevenLabs,
