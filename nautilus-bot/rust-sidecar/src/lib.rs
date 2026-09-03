@@ -1,3 +1,38 @@
+//! Plainsong sidecar library.
+//!
+//! The sidecar is a newline-delimited JSON-RPC process: `src/bin/sidecar.rs`
+//! reads a request off stdin and calls `dispatch_command`, which routes it to a
+//! handler. Everything the renderer can reach goes through that one door, so
+//! the door is the seam a future Tauri command layer would call directly
+//! (`docs/tauri-migration-plan.md`).
+//!
+//! ## Module map
+//!
+//! This file used to hold ~38k lines of handler bodies. The split below is
+//! move-only: nothing was renamed, and `lib.rs` re-exports each module so every
+//! existing call site and test path still resolves through the crate root.
+//!
+//! | module | what lives there |
+//! | --- | --- |
+//! | `dispatch` | `dispatch_command` and its match over every JSON-RPC method |
+//! | `analysis` | meeting analysis passes, grounded summary/action items, relationship memory |
+//! | `dictation_text` | dictation transcript sanitising, mode/prompt resolution, snippet and command text |
+//! | `text_insert` | the macOS accessibility, clipboard and keystroke path that puts text at the cursor |
+//! | `asr_routing` | provider/model selection and fallback for the meeting and dictation lanes |
+//! | `streaming_partials` | live-preview partial decoding, VAD-aligned chunk cuts, streaming events |
+//! | `recording_vault` | recording-audio encryption, vault key migration, runtime playback staging |
+//! | `retention` | dictation and meeting retention policies, meeting auto-naming |
+//! | `model_cache` | on-disk model artifact validation and cache repair |
+//! | `audio_import_runtime` | `import_audio_file` and its `afconvert` staging |
+//! | `meeting_pipeline` | the post-stop meeting transcription pipeline |
+//!
+//! What stays here: the crate docs, the module declarations, `AppState` and the
+//! other shared types, the sidecar lifecycle entry points (`build_app_state`,
+//! `start_dictation_for_sidecar`, `stop_dictation_for_sidecar`,
+//! `start_recording_for_sidecar`, `stop_recording_for_sidecar`, settings and
+//! permission handling), and the re-exports that keep the seam invisible to
+//! callers.
+
 pub mod admission;
 mod approved_locations;
 pub mod asr;
