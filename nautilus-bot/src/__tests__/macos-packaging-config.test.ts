@@ -51,6 +51,30 @@ function asarNodeModuleAllowList(): Set<string> {
   return new Set(pattern![1].split("|"));
 }
 
+/**
+ * The `dmg.format` values app-builder-lib's own configuration schema accepts.
+ * Anything else is rejected before packaging starts — which is how ULMO, the
+ * smallest format by a wide margin, turned out to be unusable.
+ */
+function dmgFormatsAppBuilderAccepts(): string[] {
+  const schema = JSON.parse(
+    readFileSync(
+      path.join(repoRoot, "node_modules/app-builder-lib/scheme.json"),
+      "utf8",
+    ),
+  ) as {
+    definitions?: {
+      DmgOptions?: { properties?: { format?: { enum?: string[] } } };
+    };
+  };
+  const formats = schema.definitions?.DmgOptions?.properties?.format?.enum;
+  expect(
+    formats,
+    "app-builder-lib/scheme.json no longer describes dmg.format",
+  ).toBeTruthy();
+  return formats!;
+}
+
 function manifestOf(packageName: string): PackageManifest | null {
   try {
     return JSON.parse(
@@ -283,30 +307,61 @@ describe("electron-builder macOS packaging", () => {
     expect(dmg).toContain("writeUpdateInfo: false");
   });
 
-  it("compresses the DMG with a format every supported Mac can mount", () => {
-    // LZMA is 26% smaller than electron-builder's zlib default on this
-    // payload. macOS has mounted ULMO since 10.15; the pairing with
-    // minimumSystemVersion is the part worth pinning, because raising the
-    // compression above what the support floor can open would produce a
-    // download that fails at the Finder rather than at the build.
+  it("compresses the DMG with a format electron-builder will accept", () => {
+    // ULMO (lzma) is 26% smaller than the zlib default on this payload and is
+    // NOT usable: app-builder-lib's own config schema does not list it and
+    // rejects the whole configuration before packaging starts. The enum is read
+    // from that schema rather than copied, so an electron-builder upgrade that
+    // adds or drops a format is answered here instead of at build time.
     const config = builderConfig();
     const dmg = config.slice(config.indexOf("\ndmg:"), config.indexOf("\npublish:"));
 
-    expect(dmg).toMatch(/^ {2}format: (ULMO|ULFO|UDZO|UDBZ)$/m);
+    const format = /^ {2}format: (\w+)$/m.exec(dmg)?.[1];
+    expect(format, "electron-builder.yml no longer pins dmg.format").toBeTruthy();
+    expect(
+      dmgFormatsAppBuilderAccepts(),
+      `dmg.format ${format} is not in app-builder-lib's schema`,
+    ).toContain(format);
+  });
+
+  it("keeps the DMG format inside what the supported macOS floor can mount", () => {
+    // Raising the compression above what the support floor can open produces a
+    // download that fails in the tester's Finder rather than at the build.
+    const config = builderConfig();
+    const dmg = config.slice(config.indexOf("\ndmg:"), config.indexOf("\npublish:"));
     const format = /^ {2}format: (\w+)$/m.exec(dmg)![1];
     const floor = /minimumSystemVersion: "(\d+)\.(\d+)"/.exec(config)!;
     const [major, minor] = [Number(floor[1]), Number(floor[2])];
     const introducedIn: Record<string, [number, number]> = {
+      UDRW: [10, 0],
+      UDRO: [10, 0],
+      UDCO: [10, 0],
       UDZO: [10, 1],
       UDBZ: [10, 4],
       ULFO: [10, 11],
-      ULMO: [10, 15],
     };
-    const [needMajor, needMinor] = introducedIn[format];
+    const introduced = introducedIn[format];
+    expect(introduced, `no macOS floor recorded for dmg.format ${format}`).toBeTruthy();
+    const [needMajor, needMinor] = introduced;
     expect(
       major > needMajor || (major === needMajor && minor >= needMinor),
       `dmg.format ${format} needs macOS ${needMajor}.${needMinor}, floor is ${major}.${minor}`,
     ).toBe(true);
+  });
+
+  it("builds the ad-hoc disk image with the same format as the release one", () => {
+    // scripts/build-dmg.mjs is the NOT-FOR-RELEASE path. If it compresses
+    // differently, a mount or a download size checked there is evidence about
+    // an artifact nobody receives.
+    const config = builderConfig();
+    const dmg = config.slice(config.indexOf("\ndmg:"), config.indexOf("\npublish:"));
+    const format = /^ {2}format: (\w+)$/m.exec(dmg)![1];
+    const script = readFileSync(path.join(repoRoot, "scripts/build-dmg.mjs"), "utf8");
+
+    expect(script).toContain(`const DMG_FORMAT = "${format}";`);
+    expect(script, "hdiutil should read the constant, not a literal").not.toMatch(
+      /"-format",\s*\n\s*"/,
+    );
   });
 });
 
@@ -317,6 +372,35 @@ describe("what the packaged bundle is allowed to contain", () => {
     // pinned rather than merely non-empty: adding a language here is a claim
     // that something in the product is written in it.
     expect(electronLanguages()).toEqual(["en", "en-US"]);
+  });
+
+  it("puts nothing of its own where the locale sweep would delete it", () => {
+    // `removeUnusedLanguagesIfNeeded` does not only walk the framework: on
+    // macOS it also walks Contents/Resources, which is exactly where
+    // `extraResources` lands — and it deletes every `.lproj` entry whose name
+    // is not a wanted language, recursively, with no report. Nothing there ends
+    // in `.lproj` today. The day something does, it disappears from the bundle
+    // silently, and this is the only place that would notice.
+    const config = builderConfig();
+    const extra = config.slice(
+      config.indexOf("\nextraResources:"),
+      config.indexOf("\nmac:"),
+    );
+    expect(extra, "extraResources block not found").not.toBe("");
+
+    // What lands directly under Contents/Resources: an explicit `to:`, and the
+    // `from:` of any entry that has none (electron-builder copies the basename).
+    const destinations = [
+      ...extra.matchAll(/^\s+-?\s*(?:to|from):\s*(\S+)\s*$/gm),
+    ].map(([, value]) =>
+      value.replace(/^["']|["']$/g, "").replace(/\/+$/, "").split("/").pop()!,
+    );
+    expect(destinations).toContain("LICENSE");
+    expect(destinations).toContain("sidecar");
+    expect(
+      destinations.filter((value) => /\.lproj\/?$/.test(value)),
+      "electron-builder deletes .lproj entries under Contents/Resources",
+    ).toEqual([]);
   });
 
   it("has nothing in the renderer that would need another Chromium locale", () => {

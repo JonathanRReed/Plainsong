@@ -236,7 +236,10 @@ dmg:
   # ULFO, and rejects the config outright before packaging starts. (Found by
   # running the pack, not by reading the docs.) Revisit if a later
   # electron-builder adds it — the format itself works, mounts on macOS 10.15+,
-  # and would take the download to 93 MB.
+  # and would take the download to 93 MB. `compresses the DMG with a format
+  # electron-builder will accept` reads that list straight out of
+  # `node_modules/app-builder-lib/scheme.json`, so an upgrade that adds ULMO
+  # surfaces here rather than in a build log.
   #
   # Of the three that are allowed, ULFO is the only one that is better than the
   # default on both axes: lzfse decodes faster than zlib as well as packing
