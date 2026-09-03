@@ -35,35 +35,24 @@ pub struct SpeakerEmbeddingExtractor {
 
 #[cfg(feature = "diarization")]
 impl SpeakerEmbeddingExtractor {
-    /// Create a new embedding extractor with default model
-    pub fn new() -> Result<Self> {
-        Self::with_model("ecapa_tdnn_speaker")
-    }
-
     /// Create an embedding extractor with a specific model
+    ///
+    /// The id is normalised through [`super::embedding_model_artifact_id`], so
+    /// the file this opens and the pin its integrity is checked against are
+    /// always the same model. They were not: an id outside the known four
+    /// loaded ECAPA's file but verified it against an unknown id's pin, which
+    /// no lookup could satisfy, so the extractor refused a model it had in
+    /// fact found.
     pub fn with_model(model_id: &str) -> Result<Self> {
-        let models_dir = crate::paths::data_dir()
-            .unwrap_or_else(|| PathBuf::from("."))
-            .join("Plainsong")
-            .join("models")
-            .join("diarization");
-
-        let filename = match model_id {
-            "ecapa_tdnn_speaker" => "ecapa_tdnn_speaker.onnx",
-            "resnet34_speaker" => "resnet34_speaker.onnx",
-            "campplus_speaker" => "campplus_speaker.onnx",
-            "eres2netv2_speaker" => "eres2netv2_speaker.onnx",
-            _ => "ecapa_tdnn_speaker.onnx", // Default fallback
-        };
-
-        let model_path = models_dir.join(filename);
+        let artifact_id = super::embedding_model_artifact_id(model_id);
+        let model_path = super::diarization_models_dir().join(format!("{artifact_id}.onnx"));
 
         tracing::info!("Diarization model path: {:?}", model_path);
         tracing::info!("Model exists: {}", model_path.exists());
 
         Ok(Self {
             model_path,
-            model_id: model_id.to_string(),
+            model_id: artifact_id.to_string(),
             sample_rate: 16000,
         })
     }
@@ -474,40 +463,6 @@ fn finalize_embedding(array: ArrayViewD<'_, f32>) -> Result<Array1<f32>> {
 
     let normalized: Vec<f32> = embedding.into_iter().map(|v| v / norm).collect();
     Ok(Array1::from(normalized))
-}
-
-#[cfg(not(feature = "diarization"))]
-pub struct SpeakerEmbeddingExtractor;
-
-#[cfg(not(feature = "diarization"))]
-impl SpeakerEmbeddingExtractor {
-    #[expect(
-        dead_code,
-        reason = "only called from the feature-gated availability probe in diarization/mod.rs; the stub keeps the feature-on API shape"
-    )]
-    pub fn new() -> Result<Self> {
-        Ok(Self)
-    }
-
-    pub fn with_model(_model_id: &str) -> Result<Self> {
-        Ok(Self)
-    }
-
-    #[expect(
-        dead_code,
-        reason = "only called from the feature-gated availability probe in diarization/mod.rs; the stub keeps the feature-on API shape"
-    )]
-    pub fn is_model_available(&self) -> bool {
-        false
-    }
-
-    pub async fn extract_embeddings(
-        &self,
-        _audio_path: &Path,
-        _segments: &[(f64, f64)],
-    ) -> Result<Vec<(f64, f64, Array1<f32>)>> {
-        Ok(Vec::new())
-    }
 }
 
 /// Cluster embeddings to identify unique speakers

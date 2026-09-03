@@ -20,6 +20,10 @@ const SIDECAR_MODEL_SOURCES = [
   "rust-sidecar/src/asr/parakeet.rs",
   "rust-sidecar/src/asr/moonshine.rs",
   "rust-sidecar/src/asr/qwen3_asr.rs",
+  // The optional transcribe.cpp runtime pins its GGUFs here. It is compiled
+  // out of the default feature set, but the notices cover what the app can
+  // download, not what today's cargo flags happen to build.
+  "rust-sidecar/src/asr/transcribe_cpp.rs",
   "rust-sidecar/src/download/mod.rs",
 ];
 
@@ -117,6 +121,36 @@ describe("the model-weights manifest behind the notices' MODEL WEIGHTS section",
       unaccounted,
       "every model revision the sidecar downloads from needs an entry in scripts/model-weights-manifest.mjs",
     ).toEqual([]);
+  });
+
+  it("carries the speakrs bundle's ten files and its undeclared license", () => {
+    // The bundle is fetched at runtime by the experimental diarization backend.
+    // No shipped build enables that feature, but the pin is in the sidecar
+    // source, so the notices have to account for it -- and honestly: the mirror
+    // declares no license of its own.
+    const entry = MODEL_WEIGHTS.find((candidate) =>
+      candidate.pinnedIn.includes("SPEAKRS_BUNDLE"),
+    );
+    expect(entry, "the speakrs bundle needs a manifest entry").toBeDefined();
+    expect(entry!.license).toMatch(/^not declared/);
+    expect(entry!.pendingLicenseReview).toBe(true);
+    // CC-BY-4.0 is upstream's, not the mirror's; the entry must not present it
+    // as the terms these files arrive under.
+    expect(entry!.license).toContain("CC-BY-4.0");
+
+    const source = sidecarSource("rust-sidecar/src/download/mod.rs");
+    const bundle = source.slice(
+      source.indexOf("pub(crate) const SPEAKRS_BUNDLE"),
+      source.indexOf("/// All-or-nothing readiness"),
+    );
+    const pinnedFiles = [...bundle.matchAll(/file_name: "([^"]+)"/g)].map(
+      (match) => match[1],
+    );
+    expect(pinnedFiles).toHaveLength(10);
+    expect([...entry!.files].sort()).toEqual([...pinnedFiles].sort());
+    for (const file of pinnedFiles) {
+      expect(bundle).toContain(`${entry!.revision}/${file}`);
+    }
   });
 
   it("names the terms that are not the same as the code's", () => {
