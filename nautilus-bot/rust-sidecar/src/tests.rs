@@ -14,7 +14,49 @@ use std::path::PathBuf;
 /// must keep reading all of that code, or the split silently narrows it to
 /// whatever is left in `lib.rs`. Guards that bound a region by the item that
 /// follows it still name the single file that region lives in.
-const SIDECAR_SOURCE: &str = concat!(include_str!("lib.rs"), include_str!("dispatch.rs"));
+const SIDECAR_SOURCE: &str = concat!(
+    include_str!("lib.rs"),
+    include_str!("dispatch.rs"),
+    include_str!("text_insert.rs"),
+);
+
+/// The source of one top-level item, from its declaration to the next one.
+///
+/// The guards that bound themselves to a single handler used to anchor on a
+/// line beginning `fn name(`. Items the split moved into modules had to be
+/// widened to `pub(crate)` so `lib.rs` can re-export them, so both ends of the
+/// region now allow a visibility in front of the keyword. Without this the end
+/// anchor stops matching and a guard silently reads to the end of the file.
+fn top_level_item<'a>(source: &'a str, declaration: &str) -> &'a str {
+    const VISIBILITIES: [&str; 3] = ["", "pub(crate) ", "pub "];
+    const KINDS: [&str; 8] = [
+        "fn ",
+        "async fn ",
+        "struct ",
+        "enum ",
+        "impl ",
+        "const ",
+        "static ",
+        "type ",
+    ];
+
+    let start = VISIBILITIES
+        .iter()
+        .find_map(|visibility| source.find(&format!("\n{visibility}{declaration}")))
+        .unwrap_or_else(|| panic!("{declaration} must exist"));
+    let body = &source[start + 1..];
+    let end = KINDS
+        .iter()
+        .flat_map(|kind| {
+            VISIBILITIES
+                .iter()
+                .map(move |visibility| format!("\n{visibility}{kind}"))
+        })
+        .filter_map(|marker| body.find(&marker))
+        .min()
+        .unwrap_or(body.len());
+    &body[..end]
+}
 
 fn meeting_options_from_json(value: serde_json::Value) -> models::RecordingOptions {
     serde_json::from_value(value).expect("deserialize meeting options")
@@ -3734,15 +3776,7 @@ fn paste_success_reports_clipboard_state_after_the_restore() {
     // previous clipboard back, so the dictated text is NOT waiting there
     // and no arm may hard-code the flag. The non-macOS branch cannot run
     // on this platform, hence the source check.
-    const SOURCE: &str = include_str!("lib.rs");
-    let body = SOURCE
-        .split_once("\nfn paste_text_systemwide(")
-        .expect("paste_text_systemwide must exist")
-        .1;
-    let body = body
-        .split_once("\nfn ")
-        .map(|parts| parts.0)
-        .unwrap_or(body);
+    let body = top_level_item(include_str!("text_insert.rs"), "fn paste_text_systemwide(");
     let normalized = body.split_whitespace().collect::<Vec<_>>().join(" ");
     assert!(
         !normalized.contains("pasted: true, copied: true,"),
@@ -4000,11 +4034,7 @@ fn paste_text_systemwide_takes_no_borrow_of_app_state() {
     // Taking `&AppState` is what forced insertion to run inline: the borrow
     // could not cross into `spawn_blocking`. Keep the narrowed parameter so
     // the blocking dispatch above stays possible.
-    const SOURCE: &str = include_str!("lib.rs");
-    let signature = SOURCE
-        .split_once("\nfn paste_text_systemwide(")
-        .expect("paste_text_systemwide must exist")
-        .1
+    let signature = top_level_item(include_str!("text_insert.rs"), "fn paste_text_systemwide(")
         .split_once(')')
         .expect("signature must close")
         .0;
@@ -4040,13 +4070,10 @@ fn the_native_paste_probes_the_focused_field_right_before_it_stages_the_clipboar
     // Focus can move between an earlier probe and the paste. The macOS
     // dispatcher must bring the target forward, probe, and only then
     // touch the clipboard and send Cmd+V.
-    const SOURCE: &str = include_str!("lib.rs");
-    let start = SOURCE
-        .find("\nfn dispatch_paste_from_clipboard(")
-        .expect("the macOS paste dispatcher must exist");
-    let body = &SOURCE[start..];
-    let end = body[1..].find("\nfn ").map(|i| i + 1).unwrap_or(body.len());
-    let body = &body[..end];
+    let body = top_level_item(
+        include_str!("text_insert.rs"),
+        "fn dispatch_paste_from_clipboard(",
+    );
     let reactivate = body
         .find("reactivate_target_application(")
         .expect("the dispatcher must bring the target forward first");
