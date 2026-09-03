@@ -27,6 +27,7 @@ pub(crate) fn asr_provider_to_settings_value(provider: asr::AsrProviderType) -> 
         asr::AsrProviderType::CohereLocal => "cohere_local",
         asr::AsrProviderType::Qwen3Asr => "qwen3_asr",
         asr::AsrProviderType::Deepgram => "deepgram",
+        asr::AsrProviderType::MistralVoxtral => "mistral_voxtral",
         asr::AsrProviderType::GeminiTranscribe => "gemini_transcribe",
         #[cfg(feature = "asr-transcribe-cpp")]
         asr::AsrProviderType::TranscribeCpp => "transcribe_cpp",
@@ -49,6 +50,7 @@ pub(crate) fn asr_provider_from_settings_value(value: &str) -> Option<asr::AsrPr
         "cohere_local" => Some(asr::AsrProviderType::CohereLocal),
         "qwen3_asr" => Some(asr::AsrProviderType::Qwen3Asr),
         "deepgram" => Some(asr::AsrProviderType::Deepgram),
+        "mistral_voxtral" => Some(asr::AsrProviderType::MistralVoxtral),
         "gemini_transcribe" => Some(asr::AsrProviderType::GeminiTranscribe),
         #[cfg(feature = "asr-transcribe-cpp")]
         "transcribe_cpp" => Some(asr::AsrProviderType::TranscribeCpp),
@@ -226,6 +228,7 @@ pub(crate) fn meeting_provider_is_supported_with(
             | asr::AsrProviderType::Qwen3Asr
             | asr::AsrProviderType::Deepgram
             | asr::AsrProviderType::GeminiTranscribe
+            | asr::AsrProviderType::MistralVoxtral
             // whisper.cpp is meeting-capable per model, not per provider:
             // see `WHISPER_MEETING_MODEL_IDS`. It never enters the meeting
             // lane on its own (`preferred_meeting_provider_candidates`), only
@@ -315,7 +318,7 @@ pub(crate) fn ensure_meeting_route_supported(
         ""
     };
     Err(format!(
-        "Meetings require a meeting-grade ASR route. '{}' with model '{}' is dictation-only or unsupported for meetings. Choose {}Parakeet, whisper.cpp small/medium/large-v3/large-v3-turbo, Distil Whisper, Qwen3-ASR, ElevenLabs, OpenAI, Groq, or Cohere in Settings -> ASR / Providers.",
+        "Meetings require a meeting-grade ASR route. '{}' with model '{}' is dictation-only or unsupported for meetings. Choose {}Parakeet, whisper.cpp small/medium/large-v3/large-v3-turbo, Distil Whisper, Qwen3-ASR, ElevenLabs, OpenAI, Groq, Cohere, Deepgram, Gemini Transcribe, or Mistral Voxtral in Settings -> ASR / Providers.",
         provider.display_name(),
         model_id,
         apple_speech_choice

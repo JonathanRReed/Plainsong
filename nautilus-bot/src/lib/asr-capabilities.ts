@@ -36,6 +36,7 @@ const ASR_PROVIDER_TYPE_FLAGS = {
   qwen3_asr: true,
   deepgram: true,
   gemini_transcribe: true,
+  mistral_voxtral: true,
   transcribe_cpp: true,
 } satisfies Record<AsrProviderType, true>;
 
@@ -74,6 +75,7 @@ const MEETING_GRADE_PROVIDER_SET = new Set<AsrProviderType>([
   "qwen3_asr",
   "deepgram",
   "gemini_transcribe",
+  "mistral_voxtral",
   "transcribe_cpp",
 ]);
 
@@ -90,6 +92,7 @@ const MEETING_GRADE_PROVIDER_SET = new Set<AsrProviderType>([
 const PROVIDER_DIARIZATION_SET = new Set<AsrProviderType>([
   "deepgram",
   "gemini_transcribe",
+  "mistral_voxtral",
 ]);
 
 export function providerReturnsSpeakerLabels(providerType: AsrProviderType) {
@@ -151,6 +154,7 @@ const CLOUD_PROVIDER_SET = new Set<AsrProviderType>([
   "cohere_transcribe",
   "deepgram",
   "gemini_transcribe",
+  "mistral_voxtral",
 ]);
 
 export function isDownloadableProvider(providerType: AsrProviderType) {
@@ -212,6 +216,12 @@ export function isMeetingEligibleModel(providerType: AsrProviderType, modelId: s
       // websocket-only and cannot diarize (see the sidecar's
       // sanitize_gemini_asr_model_id).
       return normalizedModelId === "gemini-3.5-transcribe";
+    case "mistral_voxtral":
+      // Only the batch snapshot returns segment timestamps and speaker
+      // labels; `voxtral-mini-realtime-2602` is a websocket route that cannot
+      // diarize, and `voxtral-mini-2507` is the deprecated predecessor (see
+      // the sidecar's sanitize_mistral_model_id).
+      return normalizedModelId === "voxtral-mini-2602";
     case "openai_cloud":
       // Only whisper-1 requests verbose_json from the transcriptions
       // endpoint (openai_cloud.rs's uses_verbose_json()), which is what
@@ -790,6 +800,17 @@ const COHERE_LOCAL_LANGUAGE_CODES: readonly string[] = [
   "ar", "de", "el", "en", "es", "fr", "it", "ja", "ko", "nl", "pl", "pt", "vi", "zh",
 ];
 
+/**
+ * The 13 languages Mistral lists for Voxtral Mini Transcribe 2, taken from the
+ * `mistralai/Voxtral-Mini-4B-Realtime-2602` model card's own `language`
+ * metadata (fetched 2026-09-03), which is the same set the announcement names.
+ * Unlike Deepgram's `multi` and Gemini's "85+", Mistral publishes the actual
+ * set, so the picker can show it.
+ */
+const VOXTRAL_TRANSCRIBE_LANGUAGE_CODES: readonly string[] = [
+  "en", "fr", "es", "de", "ru", "zh", "ja", "it", "pt", "nl", "ar", "hi", "ko",
+];
+
 /** Language codes per route, where Plainsong can name the set. */
 const LANGUAGE_CODES_BY_ROUTE = new Map<string, readonly string[]>([
   ["whisper:tiny", WHISPER_LANGUAGE_CODES],
@@ -824,6 +845,8 @@ const CLOUD_LANGUAGE_CODES_BY_ROUTE = new Map<string, readonly string[]>([
   ["openai_cloud:whisper-1", WHISPER_LANGUAGE_CODES],
   ["groq:whisper-large-v3", WHISPER_LARGE_V3_LANGUAGE_CODES],
   ["groq:whisper-large-v3-turbo", WHISPER_LARGE_V3_LANGUAGE_CODES],
+  // Mistral publishes the set rather than a count, so this one can be named.
+  ["mistral_voxtral:voxtral-mini-2602", VOXTRAL_TRANSCRIBE_LANGUAGE_CODES],
 ]);
 
 /**

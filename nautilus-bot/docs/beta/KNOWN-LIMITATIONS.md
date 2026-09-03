@@ -160,14 +160,19 @@ using sensitive content.
   meeting has no microphone and system-audio sides, so speaker separation is
   whatever diarization can infer from one mixed track.
 - Speaker labels from a cloud provider only cover a whole meeting when the
-  whole meeting fit in one request. Deepgram and Gemini are the only providers
+  whole meeting fit in one request. Deepgram, Gemini and Mistral Voxtral are
+  the only providers
   here that return speakers, and each numbers them per request — "speaker 0" in
   one request is not promised to be the same person as "speaker 0" in the next.
   Plainsong sends the whole recording in one request where the provider allows
-  it (Deepgram up to two hours, Gemini up to thirty minutes). The Gemini
+  it (Deepgram up to two hours, Mistral up to two hours, Gemini up to thirty
+  minutes). The Gemini
   figure is Google's own cap for a diarized request; the Deepgram one is
   Plainsong's, because Deepgram publishes no duration limit -- only a 2 GB
-  request size, which two hours of a meeting recording stays well inside. Past that, or when the single request fails,
+  request size, which two hours of a meeting recording stays well inside. The
+  Mistral one is Plainsong's too: Mistral allows three hours per request but
+  only 1 GB per file, and three hours of a 48 kHz meeting is 1.04 GB, so a
+  three-hour ceiling would never be the limit that applied. Past that, or when the single request fails,
   the meeting is transcribed in ninety-second chunks and Plainsong's own
   diarizer labels the speakers instead. The meeting header always names which
   one ran; it is never inferred from the transcription provider.

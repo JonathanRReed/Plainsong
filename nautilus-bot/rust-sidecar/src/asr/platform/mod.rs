@@ -127,6 +127,7 @@ impl AsrProviderType {
                 | AsrProviderType::CohereTranscribe
                 | AsrProviderType::Deepgram
                 | AsrProviderType::GeminiTranscribe
+                | AsrProviderType::MistralVoxtral
         )
     }
 

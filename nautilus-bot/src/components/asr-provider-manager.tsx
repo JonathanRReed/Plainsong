@@ -747,6 +747,7 @@ export function AsrProviderManager({ className }: AsrProviderManagerProps) {
       case "cohere_transcribe":
       case "deepgram":
       case "gemini_transcribe":
+      case "mistral_voxtral":
         return <CloudLightning className="h-5 w-5" />;
       default:
         return <Cpu className="h-5 w-5" />;
@@ -857,6 +858,8 @@ export function AsrProviderManager({ className }: AsrProviderManagerProps) {
         return "Add a Deepgram API key in Settings → API Keys";
       case "gemini_transcribe":
         return "Add a Google Gemini API key in Settings → API Keys";
+      case "mistral_voxtral":
+        return "Add a Mistral API key in Settings → API Keys";
       default:
         return "Use the Download button to fetch the model (no Python needed)";
     }

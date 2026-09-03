@@ -137,6 +137,7 @@ const CLOUD_PROVIDER_LABELS: Record<string, string> = {
   elevenlabs_scribe: "ElevenLabs",
   cohere_transcribe: "Cohere",
   deepgram: "Deepgram",
+  mistral_voxtral: "Mistral Voxtral",
   gemini_transcribe: "Gemini",
 };
 

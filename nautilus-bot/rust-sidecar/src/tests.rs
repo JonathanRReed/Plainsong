@@ -2901,6 +2901,7 @@ fn the_whole_file_ceilings_are_reachable_at_the_rate_meetings_are_recorded() {
     for provider in [
         asr::AsrProviderType::Deepgram,
         asr::AsrProviderType::GeminiTranscribe,
+        asr::AsrProviderType::MistralVoxtral,
     ] {
         let limits = whole_file_meeting_limits(provider).expect("a diarizing provider has limits");
         for bytes_per_second in [BYTES_PER_SECOND_16K, BYTES_PER_SECOND_48K] {
@@ -2933,6 +2934,16 @@ fn the_whole_file_ceilings_are_reachable_at_the_rate_meetings_are_recorded() {
     // and well inside Deepgram's documented 2 GB.
     assert!(2 * 3600 * BYTES_PER_SECOND_48K < deepgram.max_bytes);
     assert!(deepgram.max_bytes < 2 * 1000 * 1000 * 1000);
+
+    // Mistral publishes a 1 GB file cap and a three-hour request cap. Both are
+    // real, but they disagree at 48 kHz: three hours is 1.04 GB, so a stated
+    // three-hour ceiling would never be the limit that applied. Plainsong's
+    // ceiling is two hours, which is reachable at every capture rate -- the
+    // loop above is what enforces that, and these are the numbers it enforces.
+    let mistral = whole_file_meeting_limits(asr::AsrProviderType::MistralVoxtral).expect("limits");
+    assert_eq!(mistral.max_seconds, 2.0 * 60.0 * 60.0);
+    assert_eq!(mistral.max_bytes, 1_000_000_000);
+    assert!(3 * 3600 * BYTES_PER_SECOND_48K > mistral.max_bytes);
 }
 
 /// Speaker separation off must stop the request, not just the labels.

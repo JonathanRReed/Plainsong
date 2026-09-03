@@ -437,6 +437,7 @@ const CLOUD_PROVIDER_DISPLAY_NAMES: Record<string, string> = {
   groq: "Groq",
   cohere_transcribe: "Cohere",
   deepgram: "Deepgram Nova",
+  mistral_voxtral: "Mistral Voxtral",
   gemini_transcribe: "Gemini Transcribe",
 };
 
