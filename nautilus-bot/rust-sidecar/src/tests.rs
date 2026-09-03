@@ -18,6 +18,7 @@ const SIDECAR_SOURCE: &str = concat!(
     include_str!("lib.rs"),
     include_str!("dispatch.rs"),
     include_str!("text_insert.rs"),
+    include_str!("analysis.rs"),
 );
 
 /// The source of one top-level item, from its declaration to the next one.
@@ -3870,7 +3871,7 @@ fn meeting_analysis_phases_use_the_contract_names() {
 
 #[test]
 fn meeting_analysis_status_payload_matches_the_event_contract() {
-    const SOURCE: &str = include_str!("lib.rs");
+    const SOURCE: &str = include_str!("analysis.rs");
     let start = SOURCE
         .find("fn emit_meeting_analysis_status(")
         .expect("the status emitter must exist");
@@ -3897,15 +3898,10 @@ fn the_analysis_pass_always_titles_the_meeting() {
     // side effect of a *successful* summary. The case that most needed a
     // title -- analysis failing on a default install -- was the one case
     // that never got one, leaving a placeholder name forever.
-    const SOURCE: &str = include_str!("lib.rs");
-    let start = SOURCE
-        .find("async fn run_meeting_analysis_pass(")
-        .expect("the shared analysis pass must exist");
-    let body = &SOURCE[start..];
-    let body = body
-        .split_once("\nasync fn ")
-        .map(|parts| parts.0)
-        .unwrap_or(body);
+    let body = top_level_item(
+        include_str!("analysis.rs"),
+        "async fn run_meeting_analysis_pass(",
+    );
 
     let title_call = body
         .find("auto_name_meeting_recording(")
@@ -3923,7 +3919,7 @@ fn the_analysis_pass_always_titles_the_meeting() {
 
 #[test]
 fn a_failed_analysis_pass_is_persisted_and_announced() {
-    const SOURCE: &str = include_str!("lib.rs");
+    const SOURCE: &str = include_str!("analysis.rs");
     let start = SOURCE
         .find("async fn record_meeting_analysis_outcome(")
         .expect("the outcome recorder must exist");
