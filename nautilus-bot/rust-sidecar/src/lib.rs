@@ -3411,6 +3411,21 @@ fn preserve_privileged_privacy_settings(
     incoming.vault_salt = current.vault_salt.clone();
 }
 
+/// The first-run record is the sidecar's, not the renderer's. Every settings
+/// write from the renderer is a read-modify-write of the whole document, so a
+/// `Settings` value built from a stale or hand-made literal -- or a forged
+/// one -- must never be allowed to overwrite it in `save_settings_for_sidecar`.
+///
+/// Mirrors `preserve_privileged_privacy_settings` in shape, and for the same
+/// reason: factored out of the save path so the guard is directly
+/// unit-testable without standing up a full `AppState`.
+fn preserve_sidecar_onboarding_record(
+    current: &settings::OnboardingSettings,
+    incoming: &mut settings::OnboardingSettings,
+) {
+    *incoming = current.clone();
+}
+
 /// Read the macOS grants Plainsong can see right now, for the first-run record.
 ///
 /// Preflight reads only — the same ones `get_permission_diagnostics` serves —
@@ -3515,9 +3530,11 @@ async fn save_settings_for_sidecar(
     preserve_privileged_privacy_settings(&privileged_privacy, &mut settings.privacy);
     // The first-run record is the sidecar's, not the renderer's. Every settings
     // write from the renderer is a read-modify-write of the whole document, so
-    // one built from a stale or hand-made `Settings` literal would silently
-    // erase the record and put the install back where this bug started.
-    settings.onboarding = previous_onboarding;
+    // one built from a stale or hand-made `Settings` literal -- or a forged
+    // one -- would silently erase the record and put the install back where
+    // this bug started. See `preserve_sidecar_onboarding_record` and
+    // `save_settings_never_overwrites_the_onboarding_record` in tests.rs.
+    preserve_sidecar_onboarding_record(&previous_onboarding, &mut settings.onboarding);
     // Keeps the legacy `toggleDictation` key and the binding table telling the
     // same story whichever one the writer edited; see the function's doc for
     // which side wins when.

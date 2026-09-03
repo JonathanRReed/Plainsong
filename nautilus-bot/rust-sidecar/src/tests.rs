@@ -583,6 +583,54 @@ fn export_root_renderer_settings_cannot_replace_privileged_identity() {
     assert_eq!(incoming.vault_salt.as_deref(), Some("sidecar-owned-salt"));
 }
 
+/// The reported bug: the first-run wizard never appearing. Its fix is a
+/// durable, sidecar-owned onboarding record instead of a renderer localStorage
+/// flag -- and that record is only as tamper-proof as this one guard, at
+/// `save_settings_for_sidecar`'s call to `preserve_sidecar_onboarding_record`.
+/// This proves a settings value carrying a forged `onboarding` payload comes
+/// out of the save path with the previous, sidecar-owned record instead.
+#[test]
+fn save_settings_never_overwrites_the_onboarding_record() {
+    // What the sidecar actually has on disk.
+    let current = settings::OnboardingSettings {
+        completed_at: Some("2026-06-19T10:04:00Z".to_string()),
+        completed_version: Some("0.9.0-beta.1".to_string()),
+        granted_at_completion: settings::OnboardingGrants {
+            microphone: Some(true),
+            accessibility: Some(true),
+            ..settings::OnboardingGrants::default()
+        },
+        ..settings::OnboardingSettings::default()
+    };
+
+    // A settings value carrying a forged onboarding payload -- exactly what a
+    // stale or hand-made renderer write could send: setup claimed complete
+    // just now, on a version that never shipped, with a deferral that never
+    // happened either.
+    let mut incoming = settings::Settings {
+        onboarding: settings::OnboardingSettings {
+            completed_at: Some("2099-01-01T00:00:00Z".to_string()),
+            completed_version: Some("forged-version".to_string()),
+            deferred_at: Some("2099-01-01T00:00:00Z".to_string()),
+            deferred_unmet: vec!["microphone_permission".to_string()],
+            ..settings::OnboardingSettings::default()
+        },
+        ..settings::Settings::default()
+    };
+
+    // The exact call `save_settings_for_sidecar` makes on every renderer
+    // write.
+    preserve_sidecar_onboarding_record(&current, &mut incoming.onboarding);
+
+    assert_eq!(incoming.onboarding, current);
+    assert_ne!(
+        incoming.onboarding.completed_version.as_deref(),
+        Some("forged-version"),
+        "the renderer's forged record must not survive the save path"
+    );
+    assert!(incoming.onboarding.deferred_at.is_none());
+}
+
 #[test]
 fn export_root_renderer_settings_hide_raw_path_and_vault_salt() {
     let mut persisted = settings::Settings::default();

@@ -57,8 +57,12 @@ function clearLegacyOnboardingFlags(): void {
  * Mac during the packaged capture -- which would have flashed a first-run
  * wizard at someone who was already set up, for the two seconds it took
  * settings to arrive.
+ *
+ * Exported so a test can assert this stays longer than the `get_settings`
+ * timeout rather than the two drifting apart silently. See
+ * `src/__tests__/use-onboarding-gate.test.ts`.
  */
-const READINESS_PATIENCE_MS = 20_000;
+export const READINESS_PATIENCE_MS = 20_000;
 
 /**
  * The launch-time first-run decision, wired to live readiness.
