@@ -218,20 +218,40 @@ deleted. If a future route ships without punctuation, the decision is
 to add the post-step for that route only, at the ASR-manager boundary,
 with a test on the dispatch decision.
 
-### Apple SpeechAnalyzer detection (item 10)
-Added `speech_analyzer_available` and `operating_system_version` fields
-to the Apple Speech probe protocol. The Swift helper uses
-`if #available(macOS 26, *)` for runtime detection. Updated Rust probe
-parsing, TypeScript types, and verify script.
+### Apple SpeechAnalyzer (item 10)
 
-**Status: Detection + UI surfacing.** Full SpeechAnalyzer migration
-requires rewriting the Swift helper to use `SpeechAnalyzer` +
-`SpeechTranscriber` instead of `SFSpeechRecognizer`. The
-`speech_analyzer_available` flag is now consumed in the UI:
-- The ASR provider manager shows a "SpeechAnalyzer API detected" note
-  with the OS version when the newer framework is available.
-- The route catalog appends "SpeechAnalyzer API available" to the
-  readiness detail string, so the route picker surfaces it to users.
+**Status: implemented and measured (2026-09-02).** The helper runs
+`SpeechAnalyzer` + `SpeechTranscriber` where the OS has them, behind
+`if #available(macOS 26, *)` so the same binary still builds and runs
+against the macOS 13.0 deployment target with the `SFSpeechRecognizer`
+paths untouched.
+
+- `--transcribe-file --engine auto|speech_analyzer|sf_speech_recognizer`
+  picks the engine; the transcript payload carries `engine` and per-segment
+  `segments` with `start_seconds`/`end_seconds`, which is what makes the
+  route usable for meetings at all.
+- `--live --engine speech_analyzer` streams `type: "live"` events with
+  `kind: "volatile" | "finalized"`. It is opt-in: the default `--live`
+  protocol is unchanged, because the analyzer's event shape is different
+  and the existing consumer was written against the old one.
+- `--install-assets` is the only path that downloads anything; transcription
+  refuses with `assets_not_installed` rather than fetching a language pack
+  the reader did not ask for.
+- The probe reports locale support, asset state, the supported and installed
+  locale lists from `SpeechTranscriber.supportedLocales`, and the resolved
+  engine. Additive fields only, so the helper protocol version stays 1.
+
+Two macOS behaviours that are not in the documentation and that the protocol
+had to account for: `AssetInventory.status(forModules:)` reports `.installed`
+only for a locale allocated to the calling process, so a language already on
+disk reads back as `.supported` until `AssetInventory.reserve` runs; and that
+reservation does not survive the process. The probe therefore treats either
+signal as "on disk" and reports the raw state as `installed_not_allocated`,
+and every analysis path reserves the locale for itself first.
+
+Measurements, the reference disagreements, the memory the OS daemons actually
+use, and what still needs a user-present run are in
+`artifacts/qa/speechanalyzer-receipt-2026-09-02.md`.
 
 ## Not implemented
 
