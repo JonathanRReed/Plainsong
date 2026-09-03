@@ -167,6 +167,42 @@ forbidMatch(
   /requiresOnDeviceRecognition\s*=\s*[^t\s]/,
   "helper must not conditionally allow Apple server fallback",
 );
+
+// SpeechAnalyzer (macOS 26+) additions. The helper still has to build and run
+// with a 13.0 deployment target, so every use has to sit behind an
+// `#available` guard, and the analyzer path has to be as strict about staying
+// on-device as the SFSpeechRecognizer path: no download it was not asked for,
+// and a refusal rather than a fallback when the locale's assets are missing.
+requireMatch(
+  source,
+  /if #available\(macOS 26, \*\)/,
+  "SpeechAnalyzer use must be guarded by #available(macOS 26, *)",
+);
+requireMatch(
+  source,
+  /SpeechTranscriber\.supportedLocales/,
+  "helper probe must report the SpeechAnalyzer locale list from the framework",
+);
+requireMatch(
+  source,
+  /AssetInventory\.status\(/,
+  "helper probe must check SpeechAnalyzer asset state through AssetInventory",
+);
+requireMatch(
+  source,
+  /attributeOptions: \[\.audioTimeRange/,
+  "SpeechAnalyzer transcription must request audio time ranges for segment timestamps",
+);
+requireMatch(
+  source,
+  /guard facts\.assetsInstalled else \{[\s\S]{0,400}code: \.assetsNotInstalled/,
+  "SpeechAnalyzer must refuse when the locale's assets are not installed",
+);
+requireMatch(
+  source,
+  /engine: engine \?\? \.sfSpeechRecognizer/,
+  "--live must keep the SFSpeechRecognizer event protocol unless SpeechAnalyzer is named outright",
+);
 forbidMatch(
   sidecarEnv,
   /PLAINSONG_MACOS_SPEECH_HELPER_PATH/,
@@ -194,6 +230,8 @@ requireMatch(
 );
 
 for (const code of [
+  "assets_not_installed",
+  "asset_install_failed",
   "authorization_denied",
   "authorization_restricted",
   "authorization_not_determined",
@@ -353,9 +391,27 @@ if (!sourceOnly) {
     typeof probe.locale_supported !== "boolean" ||
     typeof probe.on_device_available !== "boolean" ||
     typeof probe.speech_analyzer_available !== "boolean" ||
+    typeof probe.speech_analyzer_locale_supported !== "boolean" ||
+    typeof probe.speech_analyzer_assets_installed !== "boolean" ||
+    typeof probe.speech_analyzer_asset_status !== "string" ||
+    !Array.isArray(probe.speech_analyzer_locales) ||
+    !Array.isArray(probe.speech_analyzer_installed_locales) ||
+    typeof probe.engine !== "string" ||
     typeof probe.operating_system_version !== "string"
   ) {
     fail(`helper --probe does not match the Rust contract: ${JSON.stringify(probe)}`);
+  }
+  if (!["speech_analyzer", "sf_speech_recognizer"].includes(probe.engine)) {
+    fail(`helper --probe reported an unknown engine: ${probe.engine}`);
+  }
+  if (probe.engine === "speech_analyzer" && !probe.speech_analyzer_available) {
+    fail("helper --probe resolved SpeechAnalyzer while reporting it unavailable");
+  }
+  if (
+    probe.speech_analyzer_locales.some((locale) => typeof locale !== "string") ||
+    probe.speech_analyzer_installed_locales.some((locale) => typeof locale !== "string")
+  ) {
+    fail("helper --probe locale lists must contain strings only");
   }
 
   const malformed = run(helperPath, ["--not-a-command"], { allowFailure: true });
@@ -363,6 +419,17 @@ if (!sourceOnly) {
   const malformedPayload = parseLastJsonLine(malformed.stdout, "malformed helper request");
   if (malformedPayload.type !== "error" || malformedPayload.code !== "malformed_request") {
     fail(`malformed request did not return its typed error: ${JSON.stringify(malformedPayload)}`);
+  }
+
+  const badEngine = run(
+    helperPath,
+    ["--transcribe-file", "/nonexistent.wav", "--engine", "not-an-engine"],
+    { allowFailure: true },
+  );
+  if (badEngine.status === 0) fail("an unknown --engine must exit non-zero");
+  const badEnginePayload = parseLastJsonLine(badEngine.stdout, "unknown --engine request");
+  if (badEnginePayload.type !== "error" || badEnginePayload.code !== "malformed_request") {
+    fail(`unknown --engine did not return its typed error: ${JSON.stringify(badEnginePayload)}`);
   }
 
   const signature = run("/usr/bin/codesign", ["-d", "--entitlements", ":-", helperPath], {
@@ -403,5 +470,6 @@ console.log(
     architecture: "arm64",
     strictOnDevice: true,
     probe,
+    engine: probe ? probe.engine : null,
   }),
 );
