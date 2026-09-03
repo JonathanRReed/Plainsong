@@ -282,6 +282,17 @@ private func runBlocking<T: Sendable>(_ operation: @escaping @Sendable () async 
   return value
 }
 
+// `@available(macOS 26, *)` is a *runtime* guard: the symbols behind it still
+// have to resolve at compile time, so an SDK older than macOS 26 cannot build
+// this section at all -- it fails with "cannot find 'SpeechAnalyzer' in scope"
+// long before any deployment-target check runs. `build.rs` probes
+// `xcrun --sdk macosx --show-sdk-version` and passes `-D NO_SPEECH_ANALYZER`
+// when the SDK predates 26, which compiles the SFSpeechRecognizer-only helper.
+// That variant reports `speech_analyzer_available: false` and refuses every
+// SpeechAnalyzer request with the same typed error macOS 13-15 returns at
+// runtime under the modern SDK, so the app behaves identically either way.
+#if !NO_SPEECH_ANALYZER
+
 @available(macOS 26, *)
 private func analyzerTranscriber(
   locale: Locale,
@@ -355,6 +366,21 @@ private func analyzerFactsForProbe(locale: Locale) -> AnalyzerFacts {
   return runBlocking { await collectAnalyzerFacts(locale: locale) }
 }
 
+#else
+
+/// SDK-too-old variant of the probe's analyzer facts.
+///
+/// Every field stays at its "nothing is available" default, which is what a
+/// macOS 13-15 machine reports under the modern SDK too. `capabilityProbe`
+/// therefore emits `speech_analyzer_available: false` and `resolveEngine` can
+/// never choose the analyzer for `auto`.
+private func analyzerFactsForProbe(locale: Locale) -> AnalyzerFacts {
+  _ = locale
+  return AnalyzerFacts()
+}
+
+#endif
+
 private func resolveEngine(request: EngineRequest, facts: AnalyzerFacts) -> HelperEngine {
   switch request {
   case .sfSpeechRecognizer:
@@ -370,6 +396,8 @@ private func resolveEngine(request: EngineRequest, facts: AnalyzerFacts) -> Help
       && facts.assetsInstalled ? .speechAnalyzer : .sfSpeechRecognizer
   }
 }
+
+#if !NO_SPEECH_ANALYZER
 
 @available(macOS 26, *)
 private func analyzerSegment(from result: SpeechTranscriber.Result) -> AnalyzerSegment {
@@ -390,6 +418,8 @@ private func analyzerSegment(from result: SpeechTranscriber.Result) -> AnalyzerS
     confidence: confidenceCount > 0 ? confidenceTotal / confidenceCount : 0.0
   )
 }
+
+#endif
 
 private func joinedAnalyzerText(_ segments: [AnalyzerSegment]) -> String {
   var text = ""
@@ -421,6 +451,8 @@ private func analyzerErrorDetails(_ error: Error) -> [String: String] {
     "description": nsError.localizedDescription,
   ]
 }
+
+#if !NO_SPEECH_ANALYZER
 
 /// Makes sure the locale is allocated to this process before analysis.
 ///
@@ -908,6 +940,8 @@ private func analyzerInstallAssets(locale: Locale) async -> Result<AnalyzerFacts
   return .success(await collectAnalyzerFacts(locale: resolved))
 }
 
+#endif
+
 private func capabilityProbe(
   authorizationStatus: SFSpeechRecognizerAuthorizationStatus,
   localeIdentifier: String?
@@ -1192,22 +1226,35 @@ private func runFileRecognition(
     )
   }
 
-  if #available(macOS 26, *) {
-    let locale = requestedLocale(localeIdentifier)
-    let engine = resolveEngine(
-      request: engineRequest,
-      facts: runBlocking { await collectAnalyzerFacts(locale: locale) }
-    )
-    if engine == .speechAnalyzer {
-      runAnalyzerFileRecognition(url: inputURL, locale: locale)
+  #if !NO_SPEECH_ANALYZER
+    if #available(macOS 26, *) {
+      let locale = requestedLocale(localeIdentifier)
+      let engine = resolveEngine(
+        request: engineRequest,
+        facts: runBlocking { await collectAnalyzerFacts(locale: locale) }
+      )
+      if engine == .speechAnalyzer {
+        runAnalyzerFileRecognition(url: inputURL, locale: locale)
+      }
+    } else if engineRequest == .speechAnalyzer {
+      fail(
+        .onDeviceUnavailable,
+        "SpeechAnalyzer requires macOS 26 or later.",
+        details: ["engine": EngineRequest.speechAnalyzer.rawValue]
+      )
     }
-  } else if engineRequest == .speechAnalyzer {
-    fail(
-      .onDeviceUnavailable,
-      "SpeechAnalyzer requires macOS 26 or later.",
-      details: ["engine": EngineRequest.speechAnalyzer.rawValue]
-    )
-  }
+  #else
+    // Built against an SDK older than macOS 26: the analyzer symbols are not
+    // in this binary at all. `auto` falls through to SFSpeechRecognizer below,
+    // and an explicit request gets the same typed refusal an old OS gets.
+    if engineRequest == .speechAnalyzer {
+      fail(
+        .onDeviceUnavailable,
+        "SpeechAnalyzer requires macOS 26 or later.",
+        details: ["engine": EngineRequest.speechAnalyzer.rawValue]
+      )
+    }
+  #endif
 
   let context = recognitionContext(localeIdentifier: localeIdentifier)
   let request = SFSpeechURLRecognitionRequest(url: inputURL)
@@ -1293,6 +1340,8 @@ private func runFileRecognition(
   }
 }
 
+#if !NO_SPEECH_ANALYZER
+
 /// Runs the SpeechAnalyzer batch path and exits; only returns to the caller
 /// when the caller is expected to keep going (it never is).
 @available(macOS 26, *)
@@ -1362,6 +1411,8 @@ private func runAnalyzerAssetInstall(locale: Locale) -> Never {
   }
 }
 
+#endif
+
 private func runLiveRecognition(
   sampleRate: Double,
   localeIdentifier: String?,
@@ -1373,17 +1424,25 @@ private func runLiveRecognition(
   // explicitly and the existing consumer keeps the protocol it was written
   // against.
   if engineRequest == .speechAnalyzer {
-    guard #available(macOS 26, *) else {
+    #if !NO_SPEECH_ANALYZER
+      guard #available(macOS 26, *) else {
+        fail(
+          .onDeviceUnavailable,
+          "SpeechAnalyzer requires macOS 26 or later.",
+          details: ["engine": EngineRequest.speechAnalyzer.rawValue]
+        )
+      }
+      runAnalyzerLiveRecognition(
+        sampleRate: sampleRate,
+        locale: requestedLocale(localeIdentifier)
+      )
+    #else
       fail(
         .onDeviceUnavailable,
         "SpeechAnalyzer requires macOS 26 or later.",
         details: ["engine": EngineRequest.speechAnalyzer.rawValue]
       )
-    }
-    runAnalyzerLiveRecognition(
-      sampleRate: sampleRate,
-      locale: requestedLocale(localeIdentifier)
-    )
+    #endif
   }
 
   let context = recognitionContext(localeIdentifier: localeIdentifier)
@@ -1513,6 +1572,8 @@ private func runLiveRecognition(
   }
 }
 
+#if !NO_SPEECH_ANALYZER
+
 /// Runs the SpeechAnalyzer live path and exits. Volatile and finalized events
 /// were already streamed as they arrived; this emits the closing `final` line
 /// in the same shape the SFSpeechRecognizer live path uses, so a consumer that
@@ -1545,6 +1606,8 @@ private func runAnalyzerLiveRecognition(sampleRate: Double, locale: Locale) -> N
     exit(0)
   }
 }
+
+#endif
 
 private enum HelperCommand {
   case probe(locale: String?)
@@ -1773,14 +1836,23 @@ case .requestAuthorization(let locale):
     )
   }
 case .installAssets(let locale):
-  guard #available(macOS 26, *) else {
+  #if !NO_SPEECH_ANALYZER
+    guard #available(macOS 26, *) else {
+      fail(
+        .onDeviceUnavailable,
+        "Installing Apple Speech language assets requires macOS 26 or later.",
+        details: ["operation": "install_assets"]
+      )
+    }
+    runAnalyzerAssetInstall(locale: requestedLocale(locale))
+  #else
+    _ = locale
     fail(
       .onDeviceUnavailable,
       "Installing Apple Speech language assets requires macOS 26 or later.",
       details: ["operation": "install_assets"]
     )
-  }
-  runAnalyzerAssetInstall(locale: requestedLocale(locale))
+  #endif
 case .transcribeFile(let path, let locale, let engine):
   runFileRecognition(inputPath: path, localeIdentifier: locale, engineRequest: engine)
 case .live(let sampleRate, let locale, let engine):

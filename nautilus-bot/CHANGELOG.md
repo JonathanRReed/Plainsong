@@ -374,6 +374,12 @@ evidence is stale and must be recaptured before this becomes a candidate.
   files that still carry it load cleanly and are rewritten without it.
 
 ### Fixed
+- Plainsong builds again on a Mac whose Xcode predates macOS 26. The Apple
+  Speech helper referenced the SpeechAnalyzer API unconditionally, so an
+  older SDK failed to compile it and the whole app stopped building. The
+  build now checks the SDK and, when it is too old, compiles the helper
+  without that section: the app then runs the older recognizer and says so,
+  exactly as it does on macOS 13-15.
 - The diarization model chosen in Settings is now the one the automatic
   post-meeting speaker pass uses. It previously always ran ECAPA-TDNN no
   matter what the picker said; only the explicit "identify speakers" action

@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 import { spawnSync } from "node:child_process";
 import fs from "node:fs";
+import os from "node:os";
 import path from "node:path";
 
 const repoRoot = path.resolve(import.meta.dirname, "..");
@@ -178,6 +179,24 @@ requireMatch(
   /if #available\(macOS 26, \*\)/,
   "SpeechAnalyzer use must be guarded by #available(macOS 26, *)",
 );
+// `#available` is a runtime guard only: the symbols still have to resolve at
+// compile time, so an SDK older than macOS 26 needs the section compiled out
+// entirely or the whole app stops building.
+requireMatch(
+  source,
+  /#if !NO_SPEECH_ANALYZER/,
+  "SpeechAnalyzer sources must be compilable out with -D NO_SPEECH_ANALYZER for older SDKs",
+);
+requireMatch(
+  buildScript,
+  /"--sdk",\s*"macosx",\s*"--show-sdk-version"/,
+  "build.rs must probe the macOS SDK version before compiling the SpeechAnalyzer section",
+);
+requireMatch(
+  buildScript,
+  /"-D",\s*"NO_SPEECH_ANALYZER"/,
+  "build.rs must pass -D NO_SPEECH_ANALYZER when the SDK predates the SpeechAnalyzer API",
+);
 requireMatch(
   source,
   /SpeechTranscriber\.supportedLocales/,
@@ -343,7 +362,82 @@ if (!helperPath && !sourceOnly) {
   );
 }
 
+/**
+ * Compile the helper the way a machine with a pre-macOS-26 SDK would, and
+ * check the binary that comes out.
+ *
+ * This is the only proof that the older-SDK path is real: on this Mac the SDK
+ * is new, so the normal build never exercises it, and the failure it guards
+ * against (`cannot find 'SpeechAnalyzer' in scope`) stops the whole app from
+ * building on someone else's machine. The fallback binary must also be honest
+ * about what it can do -- `speech_analyzer_available: false` -- rather than
+ * claiming a capability whose symbols it does not contain.
+ *
+ * @returns {{ compiled: true, engine: string, speechAnalyzerAvailable: boolean }}
+ */
+function verifyOlderSdkFallbackBuild() {
+  const scratch = fs.mkdtempSync(path.join(os.tmpdir(), "plainsong-speech-helper-"));
+  const fallbackPath = path.join(scratch, "macos-speech-helper-no-speech-analyzer");
+  try {
+    run("/usr/bin/xcrun", [
+      "swiftc",
+      "-target",
+      "arm64-apple-macosx13.0",
+      "-D",
+      "NO_SPEECH_ANALYZER",
+      sourcePath,
+      "-framework",
+      "Speech",
+      "-framework",
+      "Foundation",
+      "-framework",
+      "AVFoundation",
+      "-o",
+      fallbackPath,
+    ]);
+    const fallbackProbe = parseLastJsonLine(
+      run(fallbackPath, ["--probe"]).stdout,
+      "older-SDK helper --probe",
+    );
+    if (fallbackProbe.speech_analyzer_available !== false) {
+      fail(
+        `the older-SDK helper must report speech_analyzer_available: false, got ${JSON.stringify(
+          fallbackProbe.speech_analyzer_available,
+        )}`,
+      );
+    }
+    if (fallbackProbe.engine !== "sf_speech_recognizer") {
+      fail(`the older-SDK helper must resolve SFSpeechRecognizer, got ${fallbackProbe.engine}`);
+    }
+    const analyzerRequest = run(fallbackPath, ["--live", "--sample-rate", "16000", "--engine", "speech_analyzer"], {
+      allowFailure: true,
+    });
+    if (analyzerRequest.status === 0) {
+      fail("the older-SDK helper must refuse an explicit SpeechAnalyzer request");
+    }
+    const analyzerPayload = parseLastJsonLine(
+      analyzerRequest.stdout,
+      "older-SDK helper SpeechAnalyzer request",
+    );
+    if (analyzerPayload.type !== "error" || analyzerPayload.code !== "on_device_unavailable") {
+      fail(
+        `the older-SDK helper must refuse SpeechAnalyzer with a typed error: ${JSON.stringify(
+          analyzerPayload,
+        )}`,
+      );
+    }
+    return {
+      compiled: true,
+      engine: fallbackProbe.engine,
+      speechAnalyzerAvailable: fallbackProbe.speech_analyzer_available,
+    };
+  } finally {
+    fs.rmSync(scratch, { force: true, recursive: true });
+  }
+}
+
 let probe = null;
+let olderSdkFallback = null;
 if (!sourceOnly) {
   if (process.platform !== "darwin") {
     fail("Mach-O helper auditing requires macOS; pass --source-only on other platforms");
@@ -445,6 +539,8 @@ if (!sourceOnly) {
     fail(`--live --engine auto did not return its typed error: ${JSON.stringify(liveAutoPayload)}`);
   }
 
+  olderSdkFallback = verifyOlderSdkFallbackBuild();
+
   const signature = run("/usr/bin/codesign", ["-d", "--entitlements", ":-", helperPath], {
     allowFailure: true,
   });
@@ -484,5 +580,6 @@ console.log(
     strictOnDevice: true,
     probe,
     engine: probe ? probe.engine : null,
+    olderSdkFallback,
   }),
 );
