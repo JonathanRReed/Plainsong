@@ -13,6 +13,17 @@ changed underneath `0.9.0-beta.2`. See `LAUNCH.md` for which qualification
 evidence is stale and must be recaptured before this becomes a candidate.
 
 ### Added
+- A second, fully offline route for Cohere Transcribe: the same 03-2026 model
+  Plainsong already calls over Cohere's API, downloaded as int4 ONNX (2.0 GiB)
+  and run on this machine with no key and no upload. Experimental and never a
+  default. It is more accurate than the shipped Parakeet default on the repo's
+  own long fixture and roughly four times slower for a short utterance (1.0 s
+  against 0.27 s for 5.3 s of speech on an M4 Pro under load), it has no Metal
+  path, it cannot detect a language so it transcribes as English until you
+  choose one of its 14, and its segment times are estimated from sentence
+  lengths rather than measured — which is why it is offered for dictation and
+  not for meetings. Evidence:
+  `artifacts/qa/cohere-local-receipt-2026-09-02.md`.
 - Plainsong can remember a speaker's voice, on this Mac only, so the same
   person is recognized in later meetings. Off by default (Settings › General ›
   Meetings › Remembered voices). With it on, naming a speaker offers to

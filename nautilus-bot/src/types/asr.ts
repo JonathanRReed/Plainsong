@@ -177,6 +177,10 @@ export type AsrProviderType =
   | "openai_cloud"
   | "groq"
   | "cohere_transcribe"
+  // The same Cohere Transcribe weights as `cohere_transcribe`, run locally on
+  // ONNX Runtime. Experimental, never a default: no language detection, and
+  // its segment times are estimated rather than measured.
+  | "cohere_local"
   | "qwen3_asr"
   | "deepgram"
   | "gemini_transcribe"

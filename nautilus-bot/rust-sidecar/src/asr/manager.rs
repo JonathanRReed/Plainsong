@@ -368,7 +368,10 @@ impl AsrManager {
             | AsrProviderType::Moonshine
             // Both Parakeet routes are native ONNX and hold cached sessions.
             | AsrProviderType::Parakeet
-            | AsrProviderType::Qwen3Asr => true,
+            | AsrProviderType::Qwen3Asr
+            // Two cached ONNX sessions and 2 GiB of mapped weights: the most
+            // expensive route in the app to reload, so the most worth cooling.
+            | AsrProviderType::CohereLocal => true,
             _ => false,
         }
     }
@@ -404,6 +407,13 @@ impl AsrManager {
             }
             AsrProviderType::Qwen3Asr => {
                 super::qwen3_asr::clear_cached_runtime(&self.models_dir.join("qwen3_asr"));
+            }
+            AsrProviderType::CohereLocal => {
+                super::cohere_local::clear_cached_runtime(
+                    &self
+                        .models_dir
+                        .join(super::cohere_local::COHERE_LOCAL_MODEL_DIR),
+                );
             }
             #[cfg(feature = "asr-transcribe-cpp")]
             AsrProviderType::TranscribeCpp => {
@@ -1972,6 +1982,36 @@ fn runtime_diagnostics_for_provider(
                     setup_action: "Re-download Qwen3-ASR ONNX assets in Settings -> ASR Models.",
                 },
                 "Qwen3-ASR native ONNX inference ready.",
+                last_error,
+            )
+        }
+        AsrProviderType::CohereLocal => {
+            use super::cohere_local;
+            let model_dir = models_root.join(cohere_local::COHERE_LOCAL_MODEL_DIR);
+            let mut missing_files = cohere_local::missing_or_invalid_files(model_dir.as_path());
+            let model_ready = missing_files.is_empty();
+            // Bytes that look right are not enough: 2 GiB of weights this app
+            // never reads is exactly the artifact worth swapping, so readiness
+            // follows the integrity receipts like every other local route.
+            let trusted = cohere_local::artifacts_trusted(model_dir.as_path());
+            if model_ready && !trusted {
+                missing_files.push(
+                    "integrity receipts for the pinned Cohere Transcribe files (not verified)"
+                        .to_string(),
+                );
+            }
+            let model_ready = model_ready && trusted;
+            runtime_native_model(
+                provider_available,
+                model_dir,
+                model_ready,
+                &missing_files,
+                MissingModelCopy {
+                    message:
+                        "Cohere Transcribe (local) files are missing or have not passed Plainsong integrity verification.",
+                    setup_action: "Download Cohere Transcribe (local) in Settings -> ASR Models.",
+                },
+                "Cohere Transcribe (local) ONNX inference ready, on CPU.",
                 last_error,
             )
         }
