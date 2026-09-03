@@ -228,7 +228,14 @@ describe("buildCalendarCapturePrefill", () => {
   it("carries the event title and its detected service", () => {
     expect(
       buildCalendarCapturePrefill(event({ title: "Design review", videoService: "zoom" })),
-    ).toEqual({ eventId: "event-1", title: "Design review", videoService: "zoom" });
+    ).toEqual({
+      eventId: "event-1",
+      title: "Design review",
+      videoService: "zoom",
+      // An event fixture with no `attendees` is a protocol-1 payload, which
+      // is an empty invitee list, not a missing one.
+      attendees: [],
+    });
   });
 
   it("collapses whitespace so a pasted title stays one line", () => {

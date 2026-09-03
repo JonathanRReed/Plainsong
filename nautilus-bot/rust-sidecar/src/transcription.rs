@@ -266,6 +266,7 @@ mod tests {
             consent_notice_message: None,
             consent_notice_updated_at: None,
             analysis_failure: None,
+            attendees: Vec::new(),
             pause_spans: Vec::new(),
             video_service: None,
         }

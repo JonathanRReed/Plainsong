@@ -392,6 +392,10 @@ impl AsrManager {
             AsrProviderType::Qwen3Asr => {
                 super::qwen3_asr::clear_cached_runtime(&self.models_dir.join("qwen3_asr"));
             }
+            #[cfg(feature = "asr-transcribe-cpp")]
+            AsrProviderType::TranscribeCpp => {
+                super::transcribe_cpp::clear_cached_runtime();
+            }
             _ => {}
         }
     }
@@ -1802,6 +1806,43 @@ fn runtime_diagnostics_for_provider(
                     setup_action: "Re-download Qwen3-ASR ONNX assets in Settings -> ASR Models.",
                 },
                 "Qwen3-ASR native ONNX inference ready.",
+                last_error,
+            )
+        }
+        #[cfg(feature = "asr-transcribe-cpp")]
+        AsrProviderType::TranscribeCpp => {
+            use super::transcribe_cpp;
+            let spec = transcribe_cpp::spec_for(selected_model_id);
+            let model_dir = models_root.join(transcribe_cpp::TRANSCRIBE_CPP_MODEL_DIR);
+            let model_path = model_dir.join(spec.file_name);
+            let present = std::fs::metadata(&model_path)
+                .map(|metadata| metadata.is_file() && metadata.len() > 0)
+                .unwrap_or(false);
+            // Bytes that look right are not enough, same rule as every other
+            // local route: readiness follows the integrity receipt.
+            let trusted =
+                crate::download::is_model_artifact_trusted(&model_path, Some(spec.sha256));
+            let mut missing_files = Vec::new();
+            if !present {
+                missing_files.push(spec.file_name.to_string());
+            } else if !trusted {
+                missing_files.push(format!(
+                    "integrity receipt for {} (not verified)",
+                    spec.file_name
+                ));
+            }
+            runtime_native_model(
+                provider_available,
+                model_dir,
+                present && trusted,
+                &missing_files,
+                MissingModelCopy {
+                    message:
+                        "The transcribe.cpp GGUF is missing or has not passed Plainsong integrity verification.",
+                    setup_action:
+                        "Re-download the transcribe.cpp model in Settings -> ASR Models.",
+                },
+                "transcribe.cpp GGUF inference ready (experimental).",
                 last_error,
             )
         }

@@ -256,10 +256,52 @@ use, and what still needs a user-present run are in
 ## Not implemented
 
 ### Parakeet via whisper.cpp Metal (item 1)
-**Viable but not implemented.** Pre-converted ggml model available at
-`ggml-org/parakeet-GGUF`. Metal acceleration confirmed. Requires custom
-FFI bindings to `parakeet.h` and a `whisper-rs-sys` fork. Estimated
-1-2 week effort. Documented as a strategic future direction.
+**Superseded by a measured spike; still not shipped.** The original plan --
+custom FFI bindings to `parakeet.h` plus a `whisper-rs-sys` fork, 1-2 weeks --
+is no longer the cheapest route. transcribe.cpp
+(https://github.com/handy-computer/transcribe.cpp, MIT) ships a maintained
+Rust binding that loads Parakeet TDT 0.6B v3 from a single GGUF onto Metal, and
+lane C2 built and measured it on 2026-09-02 behind the off-by-default Cargo
+feature `asr-transcribe-cpp`. Receipt:
+`artifacts/qa/transcribe-cpp-spike-2026-09-02.md`.
+
+What the spike settled:
+
+- **It links.** The feared blocker -- whisper-rs vendors its own ggml, so a
+  second vendored ggml should collide at link time -- did not happen.
+  transcribe.cpp compiles its tree with hidden visibility, so on Mach-O its
+  ggml symbols are `private external` and whisper-rs's stay `external`. No
+  fork, no `--no-default-features`, no linker flags. whisper.cpp still runs on
+  Metal in the same binary, and a unit test now calls into both native
+  libraries from one process so a future upstream bump fails in CI instead.
+- **Metal works and is faster on long-form audio.** On the 44 s fixture,
+  transcribe.cpp on Metal beat both its own strict-CPU path (2.0-5.3x) and the
+  shipped ORT CPU int8 route (1.3-3.8x) in all three rounds. Best observed
+  p50: 561 ms vs 1335 ms for ORT. On the 5.3 s fixture, two of three rounds
+  favour Metal (96 ms vs 196 ms best) and one does not; that comparison is not
+  settled.
+- **Transcripts match.** 0.00% WER against the shipped route on the 5.3 s
+  fixture and 0.74% on the 44 s one (one word, which transcribe.cpp got right).
+  Metal and CPU outputs are byte-identical.
+- **It is cheaper in memory and binary size.** Peak RSS 859-915 MiB vs
+  1188-2144 MiB for the ORT route; the sidecar grows 1 394 224 B (+3.5%).
+- **The streaming families load.** Nemotron 3.5 ASR Streaming 0.6B loaded in
+  522 ms and batch-decoded both fixtures through the same provider code.
+
+**Decision: adopt as optional (the feature stays, and stays off); plan to
+replace, not to add.** Shipping it as a second user-facing route would mean a
+second ggml runtime plus a second 740 MB copy of weights users already have,
+for a route the catalog would never recommend. The real decision belongs to the
+streaming work: transcribe.cpp is the only runtime here with cache-aware
+streaming models, and item 6 below is blocked on the same gap. If Plainsong
+commits to streaming ASR, this should replace the ORT Parakeet route outright.
+
+Open before any default moves: a quiet-machine re-measurement (every number
+above was taken at load averages of 56-135 on 14 cores, and repeats of the same
+configuration varied by up to 6x), the pre-1.0 ABI churn of a 0.2.x upstream,
+the "one in-flight compute per model" limit against Plainsong's
+dictation-during-a-meeting case, the absence of any CoreML/ANE path, and a
+migration story for users who already downloaded the ONNX export.
 
 ### Moonshine v2 streaming models (item 6)
 **Blocked on this runtime; to be revisited.** Moonshine v2 streaming
@@ -274,3 +316,10 @@ ggml-based runtime. That is a different runtime from anything this
 sidecar links today, so it does not unblock the ONNX path; the Wave C
 runtime evaluation will revisit Moonshine v2 through that route. There
 is still no ONNX export.
+
+Update (2026-09-02): lane C2's spike (item 1 above) linked transcribe.cpp into
+the sidecar behind an off-by-default feature and measured it, so "a different
+runtime from anything this sidecar links today" is now one build flag away
+rather than an unknown. Moonshine v2 is still not implemented, and there is
+still no ONNX export; it now waits on the same adopt/replace decision as
+item 1 rather than on an export appearing.

@@ -1901,6 +1901,66 @@ describe("SettingsView performance behavior", () => {
     });
   });
 
+  // ── Saved prompts ─────────────────────────────────────────────────────
+  /**
+   * The dialog takes `onPersist`'s answer as the truth about the write. This
+   * view used to hand back `true` before any I/O, so a read-only settings
+   * file looked exactly like a successful save.
+   */
+  it("shows a failed saved-prompt write inside the dialog instead of claiming it saved", async () => {
+    const backend = await import("@/lib/backend");
+    render(
+      <ToastProvider>
+        <SettingsView />
+      </ToastProvider>,
+    );
+
+    await screen.findByText("How Plainsong listens, writes, and what it keeps.");
+    fireEvent.click(screen.getByText("AI & Keys"));
+    fireEvent.click(await screen.findByRole("button", { name: "Manage prompts" }));
+    const dialog = await screen.findByRole("dialog");
+
+    vi.mocked(backend.saveSettings).mockRejectedValueOnce(
+      new Error("Settings file is read-only"),
+    );
+
+    fireEvent.click(
+      within(dialog).getByRole("button", { name: "Hide Decisions made" }),
+    );
+
+    expect(
+      await within(dialog).findByText("Settings file is read-only"),
+    ).toBeTruthy();
+  });
+
+  it("reports a saved-prompt write that landed", async () => {
+    const backend = await import("@/lib/backend");
+    render(
+      <ToastProvider>
+        <SettingsView />
+      </ToastProvider>,
+    );
+
+    await screen.findByText("How Plainsong listens, writes, and what it keeps.");
+    fireEvent.click(screen.getByText("AI & Keys"));
+    fireEvent.click(await screen.findByRole("button", { name: "Manage prompts" }));
+    const dialog = await screen.findByRole("dialog");
+
+    fireEvent.click(
+      within(dialog).getByRole("button", { name: "Hide Decisions made" }),
+    );
+
+    await waitFor(() => {
+      const written = vi
+        .mocked(backend.saveSettings)
+        .mock.calls.find(([next]) =>
+          (next?.ai?.savedPrompts ?? []).some((prompt) => prompt.hidden === true),
+        );
+      expect(written).toBeDefined();
+    });
+    expect(screen.queryByText(/read-only/)).toBeNull();
+  });
+
   // ── Translate to English (roadmap item B7a) ────────────────────────────
   it("refuses translate-to-English on an English-only whisper model and says why", async () => {
     render(

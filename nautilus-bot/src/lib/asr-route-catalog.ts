@@ -86,6 +86,7 @@ const DICTATION_PROVIDER_ORDER: AsrProviderType[] = [
   "distil_whisper",
   "whisper_candle",
   "qwen3_asr",
+  "transcribe_cpp",
   "openai_cloud",
   "elevenlabs_scribe",
   "groq",
@@ -355,6 +356,9 @@ function isExperimentalRoute(providerType: AsrProviderType, modelId: string) {
   return (
     providerType === "whisper_candle" ||
     providerType === "qwen3_asr" ||
+    // The transcribe.cpp spike: a second inference runtime behind an off-by-
+    // default Cargo feature. Offered when a build has it, never recommended.
+    providerType === "transcribe_cpp" ||
     normalized.includes("experimental") ||
     normalized === "parakeet-tdt-ctc-110m"
   );
@@ -429,6 +433,9 @@ function routeSummary(
     return isWhisperMeetingModel(modelId)
       ? "100 languages, runs on the GPU, slower than Parakeet. Local route for meetings in languages Parakeet v3 and Distil-Whisper cannot hear."
       : "Flexible Whisper family for local power users who want finer model control.";
+  }
+  if (providerType === "transcribe_cpp") {
+    return "Experimental second engine for the Parakeet weights, run on Metal through transcribe.cpp instead of the CPU ONNX runtime; a separate download from the Parakeet route.";
   }
   if (providerType === "qwen3_asr") {
     return "Experimental local route with the widest language list here, including Chinese, Japanese and Korean; slower than real time on the CPU.";

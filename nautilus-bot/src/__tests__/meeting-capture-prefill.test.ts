@@ -11,8 +11,14 @@ describe("meetingCapturePrefillFromCalendarEvent", () => {
         eventId: "event-1",
         title: "Design review",
         videoService: "zoom",
+        attendees: [{ name: "Alice Brown", email: "alice@example.com", isOrganizer: true }],
       }),
-    ).toEqual({ title: "Design review", videoService: "zoom", detectedCallId: null });
+    ).toEqual({
+      title: "Design review",
+      videoService: "zoom",
+      detectedCallId: null,
+      attendees: [{ name: "Alice Brown", email: "alice@example.com", isOrganizer: true }],
+    });
   });
 
   it("keeps a null service null", () => {
@@ -21,6 +27,7 @@ describe("meetingCapturePrefillFromCalendarEvent", () => {
         eventId: "event-2",
         title: "Standup",
         videoService: null,
+        attendees: [],
       }).videoService,
     ).toBeNull();
   });
@@ -34,7 +41,12 @@ describe("meetingCapturePrefillFromDetectedCall", () => {
         title: "Zoom call, 14:05",
         videoService: "zoom",
       }),
-    ).toEqual({ title: "Zoom call, 14:05", videoService: "zoom", detectedCallId: 7 });
+    ).toEqual({
+      title: "Zoom call, 14:05",
+      videoService: "zoom",
+      detectedCallId: 7,
+      attendees: [],
+    });
   });
 
   it("carries a call whose app has no service key with the call id intact", () => {
@@ -44,6 +56,11 @@ describe("meetingCapturePrefillFromDetectedCall", () => {
         title: "FaceTime call, 09:30",
         videoService: null,
       }),
-    ).toEqual({ title: "FaceTime call, 09:30", videoService: null, detectedCallId: 3 });
+    ).toEqual({
+      title: "FaceTime call, 09:30",
+      videoService: null,
+      detectedCallId: 3,
+      attendees: [],
+    });
   });
 });

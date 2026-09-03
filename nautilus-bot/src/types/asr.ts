@@ -177,7 +177,13 @@ export type AsrProviderType =
   | "openai_cloud"
   | "groq"
   | "cohere_transcribe"
-  | "qwen3_asr";
+  | "qwen3_asr"
+  // The transcribe.cpp spike route. The sidecar only reports it when it was
+  // built with `--features asr-transcribe-cpp` (off by default and absent from
+  // the release feature list), so no shipped build ever sends it -- but the
+  // renderer has to be able to render it honestly when a developer build does,
+  // instead of dropping an unknown provider out of the picker.
+  | "transcribe_cpp";
 
 // LLM Types
 export interface LlmAnalysisResult {

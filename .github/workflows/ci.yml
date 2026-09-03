@@ -127,6 +127,16 @@ jobs:
       - name: Rust tests
         run: node scripts/cargo-sidecar.mjs test --locked --lib --bins
 
+      # The steps above only ever build the shipped configuration, which turns
+      # every optional dependency on -- so a module that reaches for one
+      # without gating it compiles there and nowhere else. `src/diarization/`
+      # used `ndarray` unconditionally while `ndarray` is only pulled in by
+      # `asr-parakeet`, `asr-canary` and `diarization`. A compile check per
+      # narrower combination is what keeps the feature flags honest; it runs no
+      # binary and cannot change what the shipped build does.
+      - name: Rust feature combinations
+        run: node scripts/gate-rust-features.mjs
+
   verify-package:
     name: Package and verify (macOS)
     needs: [verify-build, verify-rust]

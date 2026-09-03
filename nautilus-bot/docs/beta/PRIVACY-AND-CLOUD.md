@@ -137,8 +137,56 @@ your behalf, and it does not type into or press keys in another app to do so.
 Sending the notice is your action. Plainsong records only whether the consent
 sheet was shown for that meeting.
 
+## The calendar, and who was in a meeting
+
+Calendar access is optional and never asked for at launch: the prompt follows
+the "Connect calendar" button and only that button. Plainsong reads the next
+few hours of events, never writes to a calendar, and sends nothing anywhere by
+reading one.
+
+What the calendar helper emits is deliberately narrow. Event titles and times
+leave it whole. Locations and notes do not: they are run through a link
+detector inside the helper and only http/https matches escape it, so a note
+reading "budget review with Dana at 40 Hill St" contributes a Zoom link and
+nothing else.
+
+Attendees are the exception, and they are the feature. When you start a
+meeting from a calendar cue, Plainsong stores the invitee list on that
+meeting: each person's display name, and their email address when the calendar
+had one. You can add or remove attendees by hand on any meeting. The list is
+stored in the local database beside the rest of the meeting.
+
+Two limits on where that list can go:
+
+- **Names, never addresses, reach an AI provider.** When a meeting has
+  attendees, its summary and chat prompts carry a single `Attendees: ...` line
+  of names, inside the same fenced, non-instruction data block the notes use.
+  Email addresses are dropped before the prompt is built and are never sent to
+  a local or cloud analysis provider. They exist to recognize the same person
+  across two meetings and to label a chip, and that is all.
+- **Nothing about a calendar leaves your Mac on its own.** The attendee names
+  travel only where the meeting's own transcript already travels: to the AI
+  provider you chose, at the moment you ask for a summary or an answer.
+
+Addresses are visible to you on hover in the meeting header, are written into
+a meeting export (Markdown, Word, plain text and JSON) beside the names, and
+are deleted with the meeting. An export is a file on your own disk, which is
+why it is the one place the whole list goes. The local `plainsong` CLI and its
+MCP server are not: `get_meeting` returns attendee NAMES only, framed as
+untrusted content like every other field somebody else wrote.
+
+The pre-meeting brief follows the same rule. "Prepare" on a calendar cue
+searches only meetings already on this Mac — ones sharing an attendee or a
+meeting name — and sends their summaries, decisions and open items, plus the
+upcoming meeting's name and the invitees' NAMES, to the analysis provider you
+chose. No addresses, no calendar beyond that one event, and nothing fetched
+from anywhere. With no analysis provider configured, nothing is sent at all
+and the panel shows the related meetings it found locally.
+
 ## Permissions
 
+- Calendar is optional and only used to offer to start capture for a meeting
+  you are about to join, and to record who was invited to it.
 - Microphone is required for Dictation and mic-side Meeting capture.
 - Accessibility is required to insert Dictation into other apps.
 - Speech Recognition is optional and only used by the Apple on-device

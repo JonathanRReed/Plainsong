@@ -140,6 +140,32 @@ export const MODEL_WEIGHTS = [
     pinnedIn: "rust-sidecar/src/asr/parakeet.rs (legacy artifact URLs)",
   },
   {
+    name: "Parakeet TDT 0.6B v3 (GGUF Q8_0)",
+    usedFor:
+      "Speech recognition through the optional transcribe.cpp Metal runtime, which is off by default and compiled out of the release build.",
+    repository:
+      "https://huggingface.co/handy-computer/parakeet-tdt-0.6b-v3-gguf",
+    revision: "85ac09ea12fc4b1112fa76810059364bc6adc9de",
+    license: "CC-BY-4.0",
+    note:
+      "Attribution is a condition of use, not a courtesy: this notice, shipped with the app, is how it is met. A GGUF conversion of NVIDIA's nvidia/parakeet-tdt-0.6b-v3; the GGUF repository's own card metadata declares cc-by-4.0, matching the source weights, verified 2026-09-02.",
+    files: ["parakeet-tdt-0.6b-v3-Q8_0.gguf"],
+    pinnedIn: "rust-sidecar/src/asr/transcribe_cpp.rs (MODEL_SPECS)",
+  },
+  {
+    name: "Nemotron 3.5 ASR Streaming 0.6B (GGUF Q8_0)",
+    usedFor:
+      "Proving the transcribe.cpp streaming runtime path from `benchmark-latency`. It is never offered as a transcription route.",
+    repository:
+      "https://huggingface.co/handy-computer/nemotron-3.5-asr-streaming-0.6b-gguf",
+    revision: "6d44e540bc31b0de1dbe174a3cea87f53a7f22fb",
+    license: "OpenMDW-1.1 (NVIDIA Open Model License terms)",
+    note:
+      "NVIDIA ships this model under OpenMDW-1.1 rather than the CC-BY-4.0 of the Parakeet weights beside it. It is downloadable only behind the optional transcribe.cpp runtime and is not selectable as a route, so nothing redistributes it.",
+    files: ["nemotron-3.5-asr-streaming-0.6b-Q8_0.gguf"],
+    pinnedIn: "rust-sidecar/src/asr/transcribe_cpp.rs (MODEL_SPECS)",
+  },
+  {
     name: "Moonshine (ONNX)",
     usedFor: "Low-latency English speech recognition, tiny and base.",
     repository: "https://huggingface.co/UsefulSensors/moonshine",
@@ -239,6 +265,31 @@ export const MODEL_WEIGHTS = [
       "The mirror this artifact is pinned to declares no license, so none is asserted here. Until that is resolved upstream or the model is replaced, this entry records the gap rather than an assumption.",
     files: ["diarize-embedding-eres2netv2-int8.onnx"],
     pinnedIn: "rust-sidecar/src/download/mod.rs (diarization_model_info)",
+  },
+  {
+    name: "pyannote community-1 bundle (speakrs export)",
+    usedFor:
+      "Speaker diarization through the experimental speakrs backend. Compiled only with the off-by-default `diarization-speakrs` Cargo feature, which no shipped build enables, so no released Plainsong offers or downloads this.",
+    repository: "https://huggingface.co/avencera/speakrs-models",
+    revision: "a785ebdbe6313868088c36c93d9efa71c470bd34",
+    license:
+      "not declared by the mirror; upstream pyannote community-1 is CC-BY-4.0 (gated)",
+    pendingLicenseReview: true,
+    note:
+      "The mirror's model card declares no license of its own and says users are responsible for the upstream terms. Upstream is pyannote/speaker-diarization-community-1 (CC-BY-4.0, gated on Hugging Face); its segmentation component pyannote/segmentation-3.0 is MIT and its embedder pyannote/wespeaker-voxceleb-resnet34-LM is CC-BY-4.0. Nothing is asserted about the mirrored copies until that is resolved or the artifacts are fetched from the gated upstream directly. See artifacts/qa/diarization-speakrs-spike-2026-09-02.md.",
+    files: [
+      "segmentation-3.0.onnx",
+      "wespeaker-voxceleb-resnet34.onnx",
+      "wespeaker-voxceleb-resnet34.onnx.data",
+      "wespeaker-voxceleb-resnet34.min_num_samples.txt",
+      "plda_lda.npy",
+      "plda_tr.npy",
+      "plda_mu.npy",
+      "plda_psi.npy",
+      "plda_mean1.npy",
+      "plda_mean2.npy",
+    ],
+    pinnedIn: "rust-sidecar/src/download/mod.rs (SPEAKRS_BUNDLE)",
   },
 ];
 

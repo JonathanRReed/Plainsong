@@ -1,5 +1,7 @@
 import type { AnalysisProvenance, ActionItemsProvenance } from "./asr";
 
+import type { MeetingAttendee } from "@/lib/attendees";
+
 /**
  * The capture mode written for a meeting that came from a file rather than a
  * microphone. Mirrors `IMPORTED_MEETING_CAPTURE_MODE` in
@@ -38,6 +40,12 @@ export interface Recording {
   consentNoticeSurface?: string | null;
   consentNoticeMessage?: string | null;
   consentNoticeUpdatedAt?: string | null;
+  /**
+   * Who was in the meeting, from the calendar event that started it or typed
+   * in afterwards. Optional because a sidecar that predates the column omits
+   * it, and every meeting recorded before it exists has none.
+   */
+  attendees?: MeetingAttendee[];
   /**
    * Meeting data-integrity facts. Optional because a sidecar that predates
    * them omits them entirely, and the renderer must degrade to making no claim

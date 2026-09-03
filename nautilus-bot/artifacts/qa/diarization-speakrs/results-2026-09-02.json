@@ -1,0 +1,1543 @@
+{
+  "generated": "2026-09-02",
+  "host": "Apple M4 Pro, macOS 27.0 (Darwin 27.0.0), rustc 1.93.0",
+  "note": "Wall time and realtime factor were measured on a heavily loaded shared machine (1-minute load average in each row's loadAverage field, on 14 cores). Treat every latency number as provisional and an upper bound; the accuracy numbers do not depend on load.",
+  "scorer": "scripts/score-diarization-eval.mjs (10 ms frames, optimal 1:1 speaker mapping, 0 ms collar)",
+  "harness": "rust-sidecar/src/diarization/mod.rs eval_tests::{eval_speakrs_backend,eval_embedding_backend}, run with --ignored",
+  "sets": [
+    {
+      "fixture": "two-speaker-44s",
+      "loadAverage": "60.99 / 67.76 / 73.89",
+      "scores": [
+        {
+          "backend": "speakrs-community1",
+          "durationSeconds": 44,
+          "frameErrorRate": 0.0566,
+          "speakerCount": {
+            "reference": 2,
+            "predicted": 2
+          },
+          "speakerMapping": {
+            "S1": "A",
+            "S2": "B"
+          },
+          "boundaries": {
+            "reference": 7,
+            "withinToleranceSeconds": 0.5,
+            "within": 4,
+            "meanAbsErrorSeconds": 0.352,
+            "maxAbsErrorSeconds": 0.822
+          },
+          "unattributedSeconds": 0.03,
+          "wallSeconds": 7.86,
+          "realtimeFactor": 5.6,
+          "peakRssMb": 251.1
+        },
+        {
+          "backend": "embedding-ecapa_tdnn",
+          "durationSeconds": 44,
+          "frameErrorRate": 0.0455,
+          "speakerCount": {
+            "reference": 2,
+            "predicted": 2
+          },
+          "speakerMapping": {
+            "S1": "A",
+            "S3": "B"
+          },
+          "boundaries": {
+            "reference": 7,
+            "withinToleranceSeconds": 0.5,
+            "within": 6,
+            "meanAbsErrorSeconds": 0.143,
+            "maxAbsErrorSeconds": 1
+          },
+          "unattributedSeconds": 1,
+          "wallSeconds": 0.56,
+          "realtimeFactor": 78.2,
+          "peakRssMb": 106.1
+        }
+      ],
+      "rawTurns": [
+        {
+          "audio": "/Users/jonathanreed/Downloads/Plainsong/.claude/worktrees/agent-ac5daa425b21e7a5b/nautilus-bot/artifacts/qa/diarization-speakrs/two-speaker-44s.wav",
+          "backend": "speakrs-community1",
+          "durationSeconds": 44,
+          "peakRssBytes": 263307264,
+          "speakerCount": 2,
+          "turns": [
+            {
+              "end": 5.177843750000001,
+              "speaker": "S1",
+              "start": 0.03096875
+            },
+            {
+              "end": 11.25284375,
+              "speaker": "S2",
+              "start": 5.177843750000001
+            },
+            {
+              "end": 17.96909375,
+              "speaker": "S1",
+              "start": 11.25284375
+            },
+            {
+              "end": 24.58409375,
+              "speaker": "S2",
+              "start": 17.96909375
+            },
+            {
+              "end": 30.051593750000002,
+              "speaker": "S1",
+              "start": 24.58409375
+            },
+            {
+              "end": 36.17721875,
+              "speaker": "S2",
+              "start": 30.051593750000002
+            },
+            {
+              "end": 42.049718750000004,
+              "speaker": "S1",
+              "start": 36.17721875
+            },
+            {
+              "end": 44,
+              "speaker": "S2",
+              "start": 42.049718750000004
+            }
+          ],
+          "wallSeconds": 7.862203083
+        },
+        {
+          "audio": "/Users/jonathanreed/Downloads/Plainsong/.claude/worktrees/agent-ac5daa425b21e7a5b/nautilus-bot/artifacts/qa/diarization-speakrs/two-speaker-44s.wav",
+          "backend": "embedding-ecapa_tdnn",
+          "durationSeconds": 44,
+          "peakRssBytes": 111214592,
+          "speakerCount": 2,
+          "turns": [
+            {
+              "end": 6,
+              "speaker": "S1",
+              "start": 0
+            },
+            {
+              "end": 12,
+              "speaker": "S3",
+              "start": 6
+            },
+            {
+              "end": 18,
+              "speaker": "S1",
+              "start": 11
+            },
+            {
+              "end": 24,
+              "speaker": "S3",
+              "start": 18
+            },
+            {
+              "end": 30,
+              "speaker": "S1",
+              "start": 24
+            },
+            {
+              "end": 36,
+              "speaker": "S3",
+              "start": 30
+            },
+            {
+              "end": 43,
+              "speaker": "S1",
+              "start": 36
+            }
+          ],
+          "wallSeconds": 0.562431042
+        }
+      ]
+    },
+    {
+      "fixture": "two-speaker-300s",
+      "loadAverage": "54.13 / 79.69 / 79.83 (speakrs), 62.08 / 69.16 / 74.73 (embedding)",
+      "scores": [
+        {
+          "backend": "speakrs-community1",
+          "durationSeconds": 300,
+          "frameErrorRate": 0.0708,
+          "speakerCount": {
+            "reference": 2,
+            "predicted": 2
+          },
+          "speakerMapping": {
+            "S1": "A",
+            "S2": "B"
+          },
+          "boundaries": {
+            "reference": 49,
+            "withinToleranceSeconds": 0.5,
+            "within": 32,
+            "meanAbsErrorSeconds": 0.433,
+            "maxAbsErrorSeconds": 1.84
+          },
+          "unattributedSeconds": 0.03,
+          "wallSeconds": 69.43,
+          "realtimeFactor": 4.3,
+          "peakRssMb": 262.3
+        },
+        {
+          "backend": "embedding-ecapa_tdnn",
+          "durationSeconds": 300,
+          "frameErrorRate": 0,
+          "speakerCount": {
+            "reference": 2,
+            "predicted": 2
+          },
+          "speakerMapping": {
+            "S1": "A",
+            "S3": "B"
+          },
+          "boundaries": {
+            "reference": 49,
+            "withinToleranceSeconds": 0.5,
+            "within": 49,
+            "meanAbsErrorSeconds": 0,
+            "maxAbsErrorSeconds": 0
+          },
+          "unattributedSeconds": 0,
+          "wallSeconds": 6.09,
+          "realtimeFactor": 49.3,
+          "peakRssMb": 121.6
+        }
+      ],
+      "rawTurns": [
+        {
+          "audio": "/Users/jonathanreed/Downloads/Plainsong/.claude/worktrees/agent-ac5daa425b21e7a5b/nautilus-bot/artifacts/qa/diarization-speakrs/two-speaker-300s.wav",
+          "backend": "speakrs-community1",
+          "durationSeconds": 300,
+          "peakRssBytes": 275021824,
+          "speakerCount": 2,
+          "turns": [
+            {
+              "end": 5.177843750000001,
+              "speaker": "S1",
+              "start": 0.03096875
+            },
+            {
+              "end": 11.25284375,
+              "speaker": "S2",
+              "start": 5.177843750000001
+            },
+            {
+              "end": 17.96909375,
+              "speaker": "S1",
+              "start": 11.25284375
+            },
+            {
+              "end": 24.58409375,
+              "speaker": "S2",
+              "start": 17.96909375
+            },
+            {
+              "end": 30.051593750000002,
+              "speaker": "S1",
+              "start": 24.58409375
+            },
+            {
+              "end": 36.17721875,
+              "speaker": "S2",
+              "start": 30.051593750000002
+            },
+            {
+              "end": 42.06659375,
+              "speaker": "S1",
+              "start": 36.17721875
+            },
+            {
+              "end": 46.977218750000006,
+              "speaker": "S2",
+              "start": 42.06659375
+            },
+            {
+              "end": 54.047843750000006,
+              "speaker": "S1",
+              "start": 46.977218750000006
+            },
+            {
+              "end": 60.76409375,
+              "speaker": "S2",
+              "start": 54.047843750000006
+            },
+            {
+              "end": 65.92784375000001,
+              "speaker": "S1",
+              "start": 60.76409375
+            },
+            {
+              "end": 72.93096875,
+              "speaker": "S2",
+              "start": 65.92784375000001
+            },
+            {
+              "end": 78.33096875000001,
+              "speaker": "S1",
+              "start": 72.93096875
+            },
+            {
+              "end": 85.84034375,
+              "speaker": "S2",
+              "start": 78.33096875000001
+            },
+            {
+              "end": 89.31659375000001,
+              "speaker": "S1",
+              "start": 85.84034375
+            },
+            {
+              "end": 95.96534375,
+              "speaker": "S2",
+              "start": 89.31659375000001
+            },
+            {
+              "end": 103.03596875000001,
+              "speaker": "S1",
+              "start": 95.96534375
+            },
+            {
+              "end": 108.36846875,
+              "speaker": "S2",
+              "start": 103.03596875000001
+            },
+            {
+              "end": 114.25784375,
+              "speaker": "S1",
+              "start": 108.36846875
+            },
+            {
+              "end": 120.33284375000001,
+              "speaker": "S2",
+              "start": 114.25784375
+            },
+            {
+              "end": 126.34034375,
+              "speaker": "S1",
+              "start": 120.33284375000001
+            },
+            {
+              "end": 132.85409375,
+              "speaker": "S2",
+              "start": 126.34034375
+            },
+            {
+              "end": 137.66346875000002,
+              "speaker": "S1",
+              "start": 132.85409375
+            },
+            {
+              "end": 144.46409375000002,
+              "speaker": "S2",
+              "start": 137.66346875000002
+            },
+            {
+              "end": 150.43784375,
+              "speaker": "S1",
+              "start": 144.46409375000002
+            },
+            {
+              "end": 157.47471875000002,
+              "speaker": "S2",
+              "start": 150.43784375
+            },
+            {
+              "end": 162.19971875000002,
+              "speaker": "S1",
+              "start": 157.47471875000002
+            },
+            {
+              "end": 168.32534375,
+              "speaker": "S2",
+              "start": 162.19971875000002
+            },
+            {
+              "end": 173.84346875,
+              "speaker": "S1",
+              "start": 168.32534375
+            },
+            {
+              "end": 179.96909375,
+              "speaker": "S2",
+              "start": 173.84346875
+            },
+            {
+              "end": 186.06096875,
+              "speaker": "S1",
+              "start": 179.96909375
+            },
+            {
+              "end": 191.91659375,
+              "speaker": "S2",
+              "start": 186.06096875
+            },
+            {
+              "end": 197.94096875000002,
+              "speaker": "S1",
+              "start": 191.91659375
+            },
+            {
+              "end": 203.34096875,
+              "speaker": "S2",
+              "start": 197.94096875000002
+            },
+            {
+              "end": 209.95596875,
+              "speaker": "S1",
+              "start": 203.34096875
+            },
+            {
+              "end": 215.49096875,
+              "speaker": "S2",
+              "start": 209.95596875
+            },
+            {
+              "end": 221.97096875000003,
+              "speaker": "S1",
+              "start": 215.49096875
+            },
+            {
+              "end": 228.07971875,
+              "speaker": "S2",
+              "start": 221.97096875000003
+            },
+            {
+              "end": 233.86784375000002,
+              "speaker": "S1",
+              "start": 228.07971875
+            },
+            {
+              "end": 239.82471875000002,
+              "speaker": "S2",
+              "start": 233.86784375000002
+            },
+            {
+              "end": 244.97159375,
+              "speaker": "S1",
+              "start": 239.82471875000002
+            },
+            {
+              "end": 250.99596875,
+              "speaker": "S2",
+              "start": 244.97159375
+            },
+            {
+              "end": 257.88096875,
+              "speaker": "S1",
+              "start": 250.99596875
+            },
+            {
+              "end": 263.88846875,
+              "speaker": "S2",
+              "start": 257.88096875
+            },
+            {
+              "end": 269.06909375000004,
+              "speaker": "S1",
+              "start": 263.88846875
+            },
+            {
+              "end": 275.17784375,
+              "speaker": "S2",
+              "start": 269.06909375000004
+            },
+            {
+              "end": 281.94471875,
+              "speaker": "S1",
+              "start": 275.17784375
+            },
+            {
+              "end": 288.47534375000004,
+              "speaker": "S2",
+              "start": 281.94471875
+            },
+            {
+              "end": 293.97659375,
+              "speaker": "S1",
+              "start": 288.47534375000004
+            },
+            {
+              "end": 300,
+              "speaker": "S2",
+              "start": 293.97659375
+            }
+          ],
+          "wallSeconds": 69.431634333
+        },
+        {
+          "audio": "/Users/jonathanreed/Downloads/Plainsong/.claude/worktrees/agent-ac5daa425b21e7a5b/nautilus-bot/artifacts/qa/diarization-speakrs/two-speaker-300s.wav",
+          "backend": "embedding-ecapa_tdnn",
+          "durationSeconds": 300,
+          "peakRssBytes": 127483904,
+          "speakerCount": 2,
+          "turns": [
+            {
+              "end": 6,
+              "speaker": "S1",
+              "start": 0
+            },
+            {
+              "end": 12,
+              "speaker": "S3",
+              "start": 6
+            },
+            {
+              "end": 18,
+              "speaker": "S1",
+              "start": 12
+            },
+            {
+              "end": 24,
+              "speaker": "S3",
+              "start": 18
+            },
+            {
+              "end": 30,
+              "speaker": "S1",
+              "start": 24
+            },
+            {
+              "end": 36,
+              "speaker": "S3",
+              "start": 30
+            },
+            {
+              "end": 42,
+              "speaker": "S1",
+              "start": 36
+            },
+            {
+              "end": 48,
+              "speaker": "S3",
+              "start": 42
+            },
+            {
+              "end": 54,
+              "speaker": "S1",
+              "start": 48
+            },
+            {
+              "end": 60,
+              "speaker": "S3",
+              "start": 54
+            },
+            {
+              "end": 66,
+              "speaker": "S1",
+              "start": 60
+            },
+            {
+              "end": 72,
+              "speaker": "S3",
+              "start": 66
+            },
+            {
+              "end": 78,
+              "speaker": "S1",
+              "start": 72
+            },
+            {
+              "end": 84,
+              "speaker": "S3",
+              "start": 78
+            },
+            {
+              "end": 90,
+              "speaker": "S1",
+              "start": 84
+            },
+            {
+              "end": 96,
+              "speaker": "S3",
+              "start": 90
+            },
+            {
+              "end": 102,
+              "speaker": "S1",
+              "start": 96
+            },
+            {
+              "end": 108,
+              "speaker": "S3",
+              "start": 102
+            },
+            {
+              "end": 114,
+              "speaker": "S1",
+              "start": 108
+            },
+            {
+              "end": 120,
+              "speaker": "S3",
+              "start": 114
+            },
+            {
+              "end": 126,
+              "speaker": "S1",
+              "start": 120
+            },
+            {
+              "end": 132,
+              "speaker": "S3",
+              "start": 126
+            },
+            {
+              "end": 138,
+              "speaker": "S1",
+              "start": 132
+            },
+            {
+              "end": 144,
+              "speaker": "S3",
+              "start": 138
+            },
+            {
+              "end": 150,
+              "speaker": "S1",
+              "start": 144
+            },
+            {
+              "end": 156,
+              "speaker": "S3",
+              "start": 150
+            },
+            {
+              "end": 162,
+              "speaker": "S1",
+              "start": 156
+            },
+            {
+              "end": 168,
+              "speaker": "S3",
+              "start": 162
+            },
+            {
+              "end": 174,
+              "speaker": "S1",
+              "start": 168
+            },
+            {
+              "end": 180,
+              "speaker": "S3",
+              "start": 174
+            },
+            {
+              "end": 186,
+              "speaker": "S1",
+              "start": 180
+            },
+            {
+              "end": 192,
+              "speaker": "S3",
+              "start": 186
+            },
+            {
+              "end": 198,
+              "speaker": "S1",
+              "start": 192
+            },
+            {
+              "end": 204,
+              "speaker": "S3",
+              "start": 198
+            },
+            {
+              "end": 210,
+              "speaker": "S1",
+              "start": 204
+            },
+            {
+              "end": 216,
+              "speaker": "S3",
+              "start": 210
+            },
+            {
+              "end": 222,
+              "speaker": "S1",
+              "start": 216
+            },
+            {
+              "end": 228,
+              "speaker": "S3",
+              "start": 222
+            },
+            {
+              "end": 234,
+              "speaker": "S1",
+              "start": 228
+            },
+            {
+              "end": 240,
+              "speaker": "S3",
+              "start": 234
+            },
+            {
+              "end": 246,
+              "speaker": "S1",
+              "start": 240
+            },
+            {
+              "end": 252,
+              "speaker": "S3",
+              "start": 246
+            },
+            {
+              "end": 258,
+              "speaker": "S1",
+              "start": 252
+            },
+            {
+              "end": 264,
+              "speaker": "S3",
+              "start": 258
+            },
+            {
+              "end": 270,
+              "speaker": "S1",
+              "start": 264
+            },
+            {
+              "end": 276,
+              "speaker": "S3",
+              "start": 270
+            },
+            {
+              "end": 282,
+              "speaker": "S1",
+              "start": 276
+            },
+            {
+              "end": 288,
+              "speaker": "S3",
+              "start": 282
+            },
+            {
+              "end": 294,
+              "speaker": "S1",
+              "start": 288
+            },
+            {
+              "end": 300,
+              "speaker": "S3",
+              "start": 294
+            }
+          ],
+          "wallSeconds": 6.087091959
+        }
+      ]
+    },
+    {
+      "fixture": "two-speaker-offgrid-44s",
+      "loadAverage": "74.73 / 83.82 / 79.87",
+      "scores": [
+        {
+          "backend": "speakrs-community1",
+          "durationSeconds": 44,
+          "frameErrorRate": 0.103,
+          "speakerCount": {
+            "reference": 2,
+            "predicted": 2
+          },
+          "speakerMapping": {
+            "S1": "A",
+            "S2": "B"
+          },
+          "boundaries": {
+            "reference": 8,
+            "withinToleranceSeconds": 0.5,
+            "within": 6,
+            "meanAbsErrorSeconds": 0.561,
+            "maxAbsErrorSeconds": 2.217
+          },
+          "unattributedSeconds": 0.03,
+          "wallSeconds": 6.78,
+          "realtimeFactor": 6.5,
+          "peakRssMb": 250
+        },
+        {
+          "backend": "embedding-ecapa_tdnn",
+          "durationSeconds": 44,
+          "frameErrorRate": 0.1136,
+          "speakerCount": {
+            "reference": 2,
+            "predicted": 2
+          },
+          "speakerMapping": {
+            "S1": "A",
+            "S2": "B"
+          },
+          "boundaries": {
+            "reference": 8,
+            "withinToleranceSeconds": 0.5,
+            "within": 8,
+            "meanAbsErrorSeconds": 0.275,
+            "maxAbsErrorSeconds": 0.5
+          },
+          "unattributedSeconds": 2,
+          "wallSeconds": 0.63,
+          "realtimeFactor": 70,
+          "peakRssMb": 105.8
+        }
+      ],
+      "rawTurns": [
+        {
+          "audio": "/Users/jonathanreed/Downloads/Plainsong/.claude/worktrees/agent-ac5daa425b21e7a5b/nautilus-bot/artifacts/qa/diarization-speakrs/two-speaker-offgrid-44s.wav",
+          "backend": "speakrs-community1",
+          "durationSeconds": 44,
+          "peakRssBytes": 262176768,
+          "speakerCount": 2,
+          "turns": [
+            {
+              "end": 5.177843750000001,
+              "speaker": "S1",
+              "start": 0.03096875
+            },
+            {
+              "end": 10.51034375,
+              "speaker": "S2",
+              "start": 5.177843750000001
+            },
+            {
+              "end": 15.67409375,
+              "speaker": "S1",
+              "start": 10.51034375
+            },
+            {
+              "end": 21.02346875,
+              "speaker": "S2",
+              "start": 15.67409375
+            },
+            {
+              "end": 26.47409375,
+              "speaker": "S1",
+              "start": 21.02346875
+            },
+            {
+              "end": 34.017218750000005,
+              "speaker": "S2",
+              "start": 26.47409375
+            },
+            {
+              "end": 37.071593750000005,
+              "speaker": "S1",
+              "start": 34.017218750000005
+            },
+            {
+              "end": 44,
+              "speaker": "S2",
+              "start": 37.071593750000005
+            }
+          ],
+          "wallSeconds": 6.779506791
+        },
+        {
+          "audio": "/Users/jonathanreed/Downloads/Plainsong/.claude/worktrees/agent-ac5daa425b21e7a5b/nautilus-bot/artifacts/qa/diarization-speakrs/two-speaker-offgrid-44s.wav",
+          "backend": "embedding-ecapa_tdnn",
+          "durationSeconds": 44,
+          "peakRssBytes": 110903296,
+          "speakerCount": 2,
+          "turns": [
+            {
+              "end": 6,
+              "speaker": "S1",
+              "start": 0
+            },
+            {
+              "end": 11,
+              "speaker": "S2",
+              "start": 5
+            },
+            {
+              "end": 16,
+              "speaker": "S1",
+              "start": 10
+            },
+            {
+              "end": 21,
+              "speaker": "S2",
+              "start": 16
+            },
+            {
+              "end": 27,
+              "speaker": "S1",
+              "start": 21
+            },
+            {
+              "end": 32,
+              "speaker": "S2",
+              "start": 26
+            },
+            {
+              "end": 38,
+              "speaker": "S1",
+              "start": 31
+            },
+            {
+              "end": 42,
+              "speaker": "S2",
+              "start": 37
+            }
+          ],
+          "wallSeconds": 0.628722208
+        }
+      ]
+    },
+    {
+      "fixture": "two-speaker-offgrid-300s",
+      "loadAverage": "72.00 / 68.58 / 73.46",
+      "scores": [
+        {
+          "backend": "speakrs-community1",
+          "durationSeconds": 300,
+          "frameErrorRate": 0.0749,
+          "speakerCount": {
+            "reference": 2,
+            "predicted": 2
+          },
+          "speakerMapping": {
+            "S1": "A",
+            "S2": "B"
+          },
+          "boundaries": {
+            "reference": 56,
+            "withinToleranceSeconds": 0.5,
+            "within": 39,
+            "meanAbsErrorSeconds": 0.39,
+            "maxAbsErrorSeconds": 2.206
+          },
+          "unattributedSeconds": 0.25,
+          "wallSeconds": 53.23,
+          "realtimeFactor": 5.6,
+          "peakRssMb": 252
+        },
+        {
+          "backend": "embedding-ecapa_tdnn",
+          "durationSeconds": 300,
+          "frameErrorRate": 0.108,
+          "speakerCount": {
+            "reference": 2,
+            "predicted": 2
+          },
+          "speakerMapping": {
+            "S1": "A",
+            "S2": "B"
+          },
+          "boundaries": {
+            "reference": 56,
+            "withinToleranceSeconds": 0.5,
+            "within": 55,
+            "meanAbsErrorSeconds": 0.257,
+            "maxAbsErrorSeconds": 0.6
+          },
+          "unattributedSeconds": 3,
+          "wallSeconds": 5.49,
+          "realtimeFactor": 54.7,
+          "peakRssMb": 120.5
+        }
+      ],
+      "rawTurns": [
+        {
+          "audio": "/Users/jonathanreed/Downloads/Plainsong/.claude/worktrees/agent-ac5daa425b21e7a5b/nautilus-bot/artifacts/qa/diarization-speakrs/two-speaker-offgrid-300s.wav",
+          "backend": "speakrs-community1",
+          "durationSeconds": 300,
+          "peakRssBytes": 264192000,
+          "speakerCount": 2,
+          "turns": [
+            {
+              "end": 5.177843750000001,
+              "speaker": "S1",
+              "start": 0.03096875
+            },
+            {
+              "end": 10.51034375,
+              "speaker": "S2",
+              "start": 5.177843750000001
+            },
+            {
+              "end": 15.67409375,
+              "speaker": "S1",
+              "start": 10.51034375
+            },
+            {
+              "end": 21.02346875,
+              "speaker": "S2",
+              "start": 15.67409375
+            },
+            {
+              "end": 26.47409375,
+              "speaker": "S1",
+              "start": 21.02346875
+            },
+            {
+              "end": 32.329718750000005,
+              "speaker": "S2",
+              "start": 26.47409375
+            },
+            {
+              "end": 37.62846875,
+              "speaker": "S1",
+              "start": 32.329718750000005
+            },
+            {
+              "end": 44.024093750000006,
+              "speaker": "S2",
+              "start": 37.62846875
+            },
+            {
+              "end": 47.736593750000004,
+              "speaker": "S1",
+              "start": 44.024093750000006
+            },
+            {
+              "end": 53.963468750000004,
+              "speaker": "S2",
+              "start": 47.736593750000004
+            },
+            {
+              "end": 58.24971875000001,
+              "speaker": "S1",
+              "start": 53.963468750000004
+            },
+            {
+              "end": 63.632843750000006,
+              "speaker": "S2",
+              "start": 58.24971875000001
+            },
+            {
+              "end": 68.79659375,
+              "speaker": "S1",
+              "start": 63.632843750000006
+            },
+            {
+              "end": 74.09534375,
+              "speaker": "S2",
+              "start": 68.94846875
+            },
+            {
+              "end": 78.97221875000001,
+              "speaker": "S1",
+              "start": 74.09534375
+            },
+            {
+              "end": 85.97534375000001,
+              "speaker": "S2",
+              "start": 78.97221875000001
+            },
+            {
+              "end": 89.97471875000001,
+              "speaker": "S1",
+              "start": 85.97534375000001
+            },
+            {
+              "end": 95.10471875,
+              "speaker": "S2",
+              "start": 89.97471875000001
+            },
+            {
+              "end": 100.97721875,
+              "speaker": "S1",
+              "start": 95.10471875
+            },
+            {
+              "end": 106.47846875,
+              "speaker": "S2",
+              "start": 100.97721875
+            },
+            {
+              "end": 106.91721875,
+              "speaker": "S1",
+              "start": 106.47846875
+            },
+            {
+              "end": 107.32221875,
+              "speaker": "S2",
+              "start": 106.91721875
+            },
+            {
+              "end": 111.55784375,
+              "speaker": "S1",
+              "start": 107.32221875
+            },
+            {
+              "end": 117.24471875,
+              "speaker": "S2",
+              "start": 111.55784375
+            },
+            {
+              "end": 121.78409375000001,
+              "speaker": "S1",
+              "start": 117.24471875
+            },
+            {
+              "end": 127.08284375000001,
+              "speaker": "S2",
+              "start": 121.78409375000001
+            },
+            {
+              "end": 132.97221875,
+              "speaker": "S1",
+              "start": 127.08284375000001
+            },
+            {
+              "end": 137.96721875,
+              "speaker": "S2",
+              "start": 132.97221875
+            },
+            {
+              "end": 143.14784375000002,
+              "speaker": "S1",
+              "start": 137.96721875
+            },
+            {
+              "end": 148.85159375,
+              "speaker": "S2",
+              "start": 143.14784375000002
+            },
+            {
+              "end": 153.96471875,
+              "speaker": "S1",
+              "start": 148.85159375
+            },
+            {
+              "end": 159.04409375,
+              "speaker": "S2",
+              "start": 153.96471875
+            },
+            {
+              "end": 164.39346875,
+              "speaker": "S1",
+              "start": 159.04409375
+            },
+            {
+              "end": 169.96221875,
+              "speaker": "S2",
+              "start": 164.39346875
+            },
+            {
+              "end": 175.96971875,
+              "speaker": "S1",
+              "start": 169.96221875
+            },
+            {
+              "end": 180.96471875,
+              "speaker": "S2",
+              "start": 175.96971875
+            },
+            {
+              "end": 184.96409375000002,
+              "speaker": "S1",
+              "start": 180.96471875
+            },
+            {
+              "end": 191.27534375000002,
+              "speaker": "S2",
+              "start": 184.96409375000002
+            },
+            {
+              "end": 195.89909375000002,
+              "speaker": "S1",
+              "start": 191.27534375000002
+            },
+            {
+              "end": 201.26534375,
+              "speaker": "S2",
+              "start": 195.96659375000002
+            },
+            {
+              "end": 206.64846875,
+              "speaker": "S1",
+              "start": 201.26534375
+            },
+            {
+              "end": 212.13284375,
+              "speaker": "S2",
+              "start": 206.64846875
+            },
+            {
+              "end": 217.39784375000002,
+              "speaker": "S1",
+              "start": 212.13284375
+            },
+            {
+              "end": 222.19034375,
+              "speaker": "S2",
+              "start": 217.39784375000002
+            },
+            {
+              "end": 227.84346875000003,
+              "speaker": "S1",
+              "start": 222.19034375
+            },
+            {
+              "end": 233.09159375000002,
+              "speaker": "S2",
+              "start": 227.84346875000003
+            },
+            {
+              "end": 237.96846875000003,
+              "speaker": "S1",
+              "start": 233.09159375000002
+            },
+            {
+              "end": 244.22909375,
+              "speaker": "S2",
+              "start": 237.96846875000003
+            },
+            {
+              "end": 250.00034375,
+              "speaker": "S1",
+              "start": 244.22909375
+            },
+            {
+              "end": 252.19409375,
+              "speaker": "S2",
+              "start": 250.00034375
+            },
+            {
+              "end": 258.96096875,
+              "speaker": "S1",
+              "start": 252.19409375
+            },
+            {
+              "end": 264.36096875000004,
+              "speaker": "S2",
+              "start": 258.96096875
+            },
+            {
+              "end": 269.96346875,
+              "speaker": "S1",
+              "start": 264.36096875000004
+            },
+            {
+              "end": 274.95846875,
+              "speaker": "S2",
+              "start": 269.96346875
+            },
+            {
+              "end": 280.84784375000004,
+              "speaker": "S1",
+              "start": 274.95846875
+            },
+            {
+              "end": 285.48846875000004,
+              "speaker": "S2",
+              "start": 280.84784375000004
+            },
+            {
+              "end": 291.34409375,
+              "speaker": "S1",
+              "start": 285.48846875000004
+            },
+            {
+              "end": 296.74409375000005,
+              "speaker": "S2",
+              "start": 291.34409375
+            },
+            {
+              "end": 300,
+              "speaker": "S1",
+              "start": 296.74409375000005
+            }
+          ],
+          "wallSeconds": 53.231739667
+        },
+        {
+          "audio": "/Users/jonathanreed/Downloads/Plainsong/.claude/worktrees/agent-ac5daa425b21e7a5b/nautilus-bot/artifacts/qa/diarization-speakrs/two-speaker-offgrid-300s.wav",
+          "backend": "embedding-ecapa_tdnn",
+          "durationSeconds": 300,
+          "peakRssBytes": 126386176,
+          "speakerCount": 2,
+          "turns": [
+            {
+              "end": 6,
+              "speaker": "S1",
+              "start": 0
+            },
+            {
+              "end": 11,
+              "speaker": "S2",
+              "start": 5
+            },
+            {
+              "end": 17,
+              "speaker": "S1",
+              "start": 10
+            },
+            {
+              "end": 21,
+              "speaker": "S2",
+              "start": 16
+            },
+            {
+              "end": 27,
+              "speaker": "S1",
+              "start": 20
+            },
+            {
+              "end": 32,
+              "speaker": "S2",
+              "start": 26
+            },
+            {
+              "end": 38,
+              "speaker": "S1",
+              "start": 31
+            },
+            {
+              "end": 42,
+              "speaker": "S2",
+              "start": 37
+            },
+            {
+              "end": 48,
+              "speaker": "S1",
+              "start": 41
+            },
+            {
+              "end": 53,
+              "speaker": "S2",
+              "start": 47
+            },
+            {
+              "end": 59,
+              "speaker": "S1",
+              "start": 52
+            },
+            {
+              "end": 64,
+              "speaker": "S2",
+              "start": 58
+            },
+            {
+              "end": 70,
+              "speaker": "S1",
+              "start": 63
+            },
+            {
+              "end": 74,
+              "speaker": "S2",
+              "start": 69
+            },
+            {
+              "end": 80,
+              "speaker": "S1",
+              "start": 73
+            },
+            {
+              "end": 85,
+              "speaker": "S2",
+              "start": 79
+            },
+            {
+              "end": 91,
+              "speaker": "S1",
+              "start": 84
+            },
+            {
+              "end": 95,
+              "speaker": "S2",
+              "start": 90
+            },
+            {
+              "end": 101,
+              "speaker": "S1",
+              "start": 94
+            },
+            {
+              "end": 106,
+              "speaker": "S2",
+              "start": 100
+            },
+            {
+              "end": 112,
+              "speaker": "S1",
+              "start": 105
+            },
+            {
+              "end": 116,
+              "speaker": "S2",
+              "start": 111
+            },
+            {
+              "end": 123,
+              "speaker": "S1",
+              "start": 116
+            },
+            {
+              "end": 127,
+              "speaker": "S2",
+              "start": 122
+            },
+            {
+              "end": 134,
+              "speaker": "S1",
+              "start": 127
+            },
+            {
+              "end": 138,
+              "speaker": "S2",
+              "start": 133
+            },
+            {
+              "end": 144,
+              "speaker": "S1",
+              "start": 137
+            },
+            {
+              "end": 149,
+              "speaker": "S2",
+              "start": 143
+            },
+            {
+              "end": 155,
+              "speaker": "S1",
+              "start": 148
+            },
+            {
+              "end": 159,
+              "speaker": "S2",
+              "start": 154
+            },
+            {
+              "end": 165,
+              "speaker": "S1",
+              "start": 158
+            },
+            {
+              "end": 170,
+              "speaker": "S2",
+              "start": 164
+            },
+            {
+              "end": 176,
+              "speaker": "S1",
+              "start": 169
+            },
+            {
+              "end": 180,
+              "speaker": "S2",
+              "start": 175
+            },
+            {
+              "end": 186,
+              "speaker": "S1",
+              "start": 179
+            },
+            {
+              "end": 191,
+              "speaker": "S2",
+              "start": 185
+            },
+            {
+              "end": 197,
+              "speaker": "S1",
+              "start": 190
+            },
+            {
+              "end": 202,
+              "speaker": "S2",
+              "start": 196
+            },
+            {
+              "end": 207,
+              "speaker": "S1",
+              "start": 201
+            },
+            {
+              "end": 212,
+              "speaker": "S2",
+              "start": 207
+            },
+            {
+              "end": 218,
+              "speaker": "S1",
+              "start": 211
+            },
+            {
+              "end": 223,
+              "speaker": "S2",
+              "start": 217
+            },
+            {
+              "end": 229,
+              "speaker": "S1",
+              "start": 222
+            },
+            {
+              "end": 233,
+              "speaker": "S2",
+              "start": 228
+            },
+            {
+              "end": 239,
+              "speaker": "S1",
+              "start": 232
+            },
+            {
+              "end": 244,
+              "speaker": "S2",
+              "start": 238
+            },
+            {
+              "end": 250,
+              "speaker": "S1",
+              "start": 243
+            },
+            {
+              "end": 255,
+              "speaker": "S2",
+              "start": 249
+            },
+            {
+              "end": 260,
+              "speaker": "S1",
+              "start": 254
+            },
+            {
+              "end": 265,
+              "speaker": "S2",
+              "start": 259
+            },
+            {
+              "end": 271,
+              "speaker": "S1",
+              "start": 264
+            },
+            {
+              "end": 276,
+              "speaker": "S2",
+              "start": 270
+            },
+            {
+              "end": 282,
+              "speaker": "S1",
+              "start": 275
+            },
+            {
+              "end": 286,
+              "speaker": "S2",
+              "start": 281
+            },
+            {
+              "end": 292,
+              "speaker": "S1",
+              "start": 285
+            },
+            {
+              "end": 297,
+              "speaker": "S2",
+              "start": 291
+            }
+          ],
+          "wallSeconds": 5.486316416
+        }
+      ]
+    }
+  ]
+}

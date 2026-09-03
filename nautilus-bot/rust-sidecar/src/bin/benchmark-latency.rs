@@ -67,6 +67,8 @@ Options:
                         [default: scripts/fixtures/real-speech-44s.wav]
   --provider <NAME>     whisper, parakeet, moonshine, whisper_candle,
                         distil_whisper, macos_apple_speech, or qwen3_asr
+                        (plus transcribe_cpp when the sidecar is built with
+                        --features asr-transcribe-cpp)
                         [default: whisper]
   --model <ID>          Model ID for the selected provider [default: provider default]
   --runs <1..100>       Timed transcription runs after one warm-up [default: 5]
@@ -82,6 +84,11 @@ Options:
                         [default: artifacts/qa/dictation-latency-e2e.json]
   --print-transcript    Also print each fixture's full final transcript to
                         stderr (the receipts only carry 160-char samples)
+  --ensure-model        Fetch the selected model first, through the same
+                        pinned-SHA-256 download path the app uses (a model
+                        already on disk is verified and receipted, not
+                        re-fetched). Off by default: a benchmark should not
+                        start a multi-gigabyte download by surprise.
   -h, --help            Print this help without loading a model
 
 Output:
@@ -103,6 +110,7 @@ struct BenchmarkArgs {
     report_path: PathBuf,
     report_path_e2e: PathBuf,
     print_transcript: bool,
+    ensure_model: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -138,6 +146,11 @@ fn provider_from_str(value: &str) -> Option<AsrProviderType> {
         "distil_whisper" => AsrProviderType::DistilWhisper,
         "macos_apple_speech" => AsrProviderType::MacosAppleSpeech,
         "qwen3_asr" => AsrProviderType::Qwen3Asr,
+        // Only resolvable when the spike feature is compiled in; a default
+        // build rejects the name instead of silently benchmarking something
+        // else.
+        #[cfg(feature = "asr-transcribe-cpp")]
+        "transcribe_cpp" => AsrProviderType::TranscribeCpp,
         _ => return None,
     })
 }
@@ -175,6 +188,7 @@ fn parse_args(args: &[String]) -> Result<ParseOutcome, String> {
     let mut report_path = None;
     let mut report_path_e2e = None;
     let mut print_transcript = false;
+    let mut ensure_model = false;
     let mut index = 0;
 
     while index < args.len() {
@@ -214,6 +228,9 @@ fn parse_args(args: &[String]) -> Result<ParseOutcome, String> {
             "--print-transcript" => {
                 print_transcript = true;
             }
+            "--ensure-model" => {
+                ensure_model = true;
+            }
             "--" => {}
             unknown => {
                 return Err(format!("Unknown option '{unknown}'"));
@@ -231,7 +248,16 @@ fn parse_args(args: &[String]) -> Result<ParseOutcome, String> {
     };
 
     let model = model.unwrap_or_else(|| provider_type.default_model_id().to_string());
-    let valid_models = provider_type.model_options();
+    #[allow(unused_mut)]
+    let mut valid_models = provider_type.model_options();
+    // The transcribe.cpp spike pins one model the route catalog deliberately
+    // does not offer (a streaming-capable family, loaded only to prove the
+    // runtime path). The benchmark has to be able to name it; the picker
+    // still must not.
+    #[cfg(feature = "asr-transcribe-cpp")]
+    if provider_type == AsrProviderType::TranscribeCpp {
+        valid_models = plainsong_lib::asr::transcribe_cpp::benchmark_model_options();
+    }
     if !valid_models.iter().any(|option| option.id == model) {
         let choices = valid_models
             .iter()
@@ -268,6 +294,7 @@ fn parse_args(args: &[String]) -> Result<ParseOutcome, String> {
             report_path_e2e.unwrap_or_else(|| DEFAULT_REPORT_PATH_E2E.to_string()),
         ),
         print_transcript,
+        ensure_model,
     }))
 }
 
@@ -571,6 +598,9 @@ async fn run_fixture_benchmark(
             app_target: None,
             mode_preset: "voice",
             smart_formatting_enabled: false,
+            // The "voice" preset ships with numbers as digits off, so the
+            // baseline measures what that preset actually runs.
+            numbers_as_digits: false,
             recent_inserted_text: None,
             destination_category: DictationAppCategory::Other,
         });
@@ -584,6 +614,9 @@ async fn run_fixture_benchmark(
             app_target: None,
             mode_preset: "voice",
             smart_formatting_enabled: true,
+            // Formatting on measures the full local text pipeline, inverse
+            // text normalization included.
+            numbers_as_digits: true,
             recent_inserted_text: None,
             destination_category: DictationAppCategory::Other,
         });
@@ -770,6 +803,23 @@ fn main() {
     let runtime = tokio::runtime::Runtime::new().expect("tokio runtime");
     runtime.block_on(async move {
         let provider = AsrProviderFactory::create_with_model(args.provider_type, Some(&args.model));
+
+        if args.ensure_model {
+            eprintln!(
+                "Ensuring {}/{} is downloaded and integrity-verified...",
+                args.provider_name, args.model
+            );
+            let progress: Box<dyn Fn(f32) + Send + Sync> = Box::new(|percent| {
+                eprintln!("  download {percent:.1}%");
+            });
+            if let Err(e) = provider.download_models(progress).await {
+                eprintln!(
+                    "Model download failed for {}/{}: {e}",
+                    args.provider_name, args.model
+                );
+                std::process::exit(1);
+            }
+        }
 
         eprintln!(
             "Benchmarking {}/{} -- primary {} + secondary {}, {} runs each...",
@@ -1093,6 +1143,73 @@ mod tests {
         assert!(
             !PathBuf::from(DEFAULT_WAV).is_absolute(),
             "default fixture paths must stay repo-relative, not canonicalized"
+        );
+    }
+
+    #[test]
+    fn ensure_model_is_off_unless_asked_for() {
+        // A benchmark run must never start a multi-gigabyte download because
+        // somebody forgot a flag.
+        let parse = |extra: &[&str]| {
+            let mut args = vec!["--wav", "Cargo.toml", "--secondary-wav", "Cargo.toml"];
+            args.extend_from_slice(extra);
+            match parse_args(&strings(&args)).expect("parse benchmark args") {
+                ParseOutcome::Run(args) => args.ensure_model,
+                ParseOutcome::Help => panic!("expected runnable benchmark args"),
+            }
+        };
+        assert!(!parse(&[]));
+        assert!(parse(&["--ensure-model"]));
+    }
+
+    #[cfg(feature = "asr-transcribe-cpp")]
+    #[test]
+    fn the_transcribe_cpp_spike_is_registered_with_the_benchmark() {
+        // Exit criterion 3 of the spike brief: the provider has to be
+        // reachable from `benchmark-latency`, or the receipt has no way to
+        // produce a number for it.
+        assert_eq!(
+            provider_from_str("transcribe_cpp"),
+            Some(AsrProviderType::TranscribeCpp)
+        );
+        let args = match parse_args(&strings(&[
+            "--wav",
+            "Cargo.toml",
+            "--secondary-wav",
+            "Cargo.toml",
+            "--provider",
+            "transcribe_cpp",
+        ]))
+        .expect("parse benchmark args")
+        {
+            ParseOutcome::Run(args) => args,
+            ParseOutcome::Help => panic!("expected runnable benchmark args"),
+        };
+        assert_eq!(
+            args.model,
+            plainsong_lib::asr::transcribe_cpp::PARAKEET_GGUF_MODEL_ID
+        );
+
+        // The streaming model is namable here (that is the runtime proof) even
+        // though the route catalog never offers it.
+        let streaming = match parse_args(&strings(&[
+            "--wav",
+            "Cargo.toml",
+            "--secondary-wav",
+            "Cargo.toml",
+            "--provider",
+            "transcribe_cpp",
+            "--model",
+            plainsong_lib::asr::transcribe_cpp::NEMOTRON_STREAMING_GGUF_MODEL_ID,
+        ]))
+        .expect("parse benchmark args")
+        {
+            ParseOutcome::Run(args) => args,
+            ParseOutcome::Help => panic!("expected runnable benchmark args"),
+        };
+        assert_eq!(
+            streaming.model,
+            plainsong_lib::asr::transcribe_cpp::NEMOTRON_STREAMING_GGUF_MODEL_ID
         );
     }
 
