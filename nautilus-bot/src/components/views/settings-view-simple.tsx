@@ -22,7 +22,11 @@ import { resolveSavedPrompts, type SavedPrompt } from "@/lib/saved-prompts";
 import { listen } from "@/lib/electron";
 import { Button } from "@/components/ui/button";
 import { Switch } from "@/components/ui/switch";
-import { SettingsSwitch } from "@/components/ui/settings-control";
+import {
+  SettingsInput,
+  SettingsSelect,
+  SettingsSwitch,
+} from "@/components/ui/settings-control";
 import { CalendarSettingsSection } from "@/components/meetings/calendar-settings-section";
 import { LocalToolsSection } from "@/components/local-tools-section";
 import { RememberedVoicesSection } from "@/components/remembered-voices-section";
@@ -301,47 +305,51 @@ async function withSettingsSectionTimeout<T>(
   }
 }
 
+// Each summary says what you would come to the tab to do, in the words the
+// tab itself uses. A tab whose summary names a subsystem ("engine
+// diagnostics") tells a new reader nothing about whether their question is
+// answered inside it.
 const SETTINGS_TABS = [
   {
     id: "models" as TabId,
     label: "Models",
-    summary: "Which engine hears you, and which AI tidies the text",
+    summary: "Choose the speech engine that hears you and the AI service that writes for you",
     icon: Layers,
   },
   {
     id: "asr" as TabId,
     label: "Transcription",
-    summary: "Microphones, dictation behavior, and engine diagnostics",
+    summary: "Microphones, languages, cleanup, and what to do when a capture fails",
     icon: Mic,
   },
   {
     id: "general" as TabId,
     label: "General",
-    summary: "Appearance, shortcuts, and window behavior",
+    summary: "Theme, windows, notifications, calendar, meeting behaviour, and shortcuts",
     icon: Monitor,
   },
   {
     id: "security" as TabId,
     label: "Privacy & Security",
-    summary: "Permissions, vault, and cloud access",
+    summary: "Whether anything leaves this Mac, what macOS lets Plainsong do, and the vault",
     icon: Shield,
   },
   {
     id: "storage" as TabId,
     label: "Storage",
-    summary: "Exports, retention, backups, and reset tools",
+    summary: "Where exports go, what gets deleted and when, backups, and starting over",
     icon: Database,
   },
   {
     id: "ai" as TabId,
     label: "AI & Keys",
-    summary: "AI services, API keys, and memory search",
+    summary: "Automatic summaries, saved prompts, API keys, and how search finds a meeting",
     icon: Key,
   },
   {
     id: "updates" as TabId,
     label: "Updates",
-    summary: "Version status and update channels",
+    summary: "Check for a new version and choose stable or beta releases",
     icon: RefreshCw,
   },
 ] as const;
@@ -2312,6 +2320,7 @@ export function SettingsView() {
           <span className="text-sm text-muted-foreground lg:w-24">{rowLabel}</span>
           <select
             aria-label={`${rowLabel} trigger type`}
+            aria-describedby="dictation-bindings-description"
             className="h-9 rounded-md border bg-background px-2 text-sm"
             value={triggerType}
             onChange={(event) =>
@@ -2353,6 +2362,7 @@ export function SettingsView() {
           />
           <select
             aria-label={`${rowLabel} action`}
+            aria-describedby="dictation-bindings-description"
             className="h-9 rounded-md border bg-background px-2 text-sm"
             value={bindingActionValue(binding.action)}
             onChange={(event) =>
@@ -2361,7 +2371,7 @@ export function SettingsView() {
               })
             }
           >
-            <option value="dictation">Dictation in the current profile</option>
+            <option value="dictation">Dictation in the selected profile</option>
             {DICTATION_MODE_CYCLE_ORDER.map((preset) => (
               <option key={preset} value={`dictation:${preset}`}>
                 Dictation · {dictationModeLabelFor(preset, dictationCustomModes)}
@@ -2378,6 +2388,7 @@ export function SettingsView() {
           {binding.action.kind === "dictation" && (
             <select
               aria-label={`${rowLabel} behavior`}
+              aria-describedby="dictation-bindings-description"
               className="h-9 rounded-md border bg-background px-2 text-sm"
               value={binding.action.behavior}
               onChange={(event) =>
@@ -2444,10 +2455,11 @@ export function SettingsView() {
       </div>
       <div className="mt-4 space-y-1">
         <p className="text-sm font-medium">Dictation bindings</p>
-        <p className="text-sm text-muted-foreground">
-          Each binding can start dictation in the current profile or a specific
-          one, move to the next profile, or cancel. Mouse buttons and Fn on its
-          own need the native shortcut helper
+        <p id="dictation-bindings-description" className="text-sm text-muted-foreground">
+          Each binding can start dictation in whichever profile is selected or
+          in a named one, move to the next profile, or cancel a dictation in
+          progress. Mouse buttons and Fn on its own need the native shortcut
+          helper
           {nativeShortcutAvailable ? " (running)" : " (not running)"}.
         </p>
       </div>
@@ -2585,11 +2597,15 @@ export function SettingsView() {
         {includeHotkeyBehavior && (
           <div className="space-y-2">
             <Label>How the dictation shortcut works</Label>
-            <p className="text-sm text-muted-foreground">
+            <p
+              id="dictation-shortcut-behavior-description"
+              className="text-sm text-muted-foreground"
+            >
               {dictationShortcutBehaviorHint}
             </p>
             <select
               aria-label="How the dictation shortcut works"
+              aria-describedby="dictation-shortcut-behavior-description"
               className="w-full rounded-md border bg-background px-3 py-2 text-sm"
               value={dictationShortcutBehavior}
               onChange={(event) => {
@@ -2645,7 +2661,7 @@ export function SettingsView() {
               label="Translate to English"
               description={
                 translateAvailability.enabled
-                  ? `Applies to the built-in profiles; a saved profile has its own switch. ${translateAvailability.description}`
+                  ? `Applies to the built-in profiles; a saved profile has its own switch for this. ${translateAvailability.description}`
                   : translateAvailability.description
               }
               checked={
@@ -2682,23 +2698,22 @@ export function SettingsView() {
               }
             />
 
-            <div className="space-y-2">
-              <Label>The word that starts a spoken command</Label>
-              <Input
-                value={
-                  settings.transcription.dictationCommandPrefix ?? "command"
-                }
-                onChange={(e: ChangeEvent<HTMLInputElement>) =>
-                  void updateSettings({
-                    ...settings,
-                    transcription: {
-                      ...settings.transcription,
-                      dictationCommandPrefix: e.target.value,
-                    },
-                  })
-                }
-              />
-            </div>
+            <SettingsInput
+              label="The word that starts a spoken command"
+              description="Say this word and Plainsong treats what follows as an instruction instead of typing it. Pick something you would not say by accident — the word itself is never inserted."
+              value={
+                settings.transcription.dictationCommandPrefix ?? "command"
+              }
+              onChange={(value) =>
+                void updateSettings({
+                  ...settings,
+                  transcription: {
+                    ...settings.transcription,
+                    dictationCommandPrefix: value,
+                  },
+                })
+              }
+            />
 
             <SettingsSwitch
               className="py-0"
@@ -2758,7 +2773,7 @@ export function SettingsView() {
             <div className="flex flex-col gap-4 lg:flex-row lg:items-center lg:justify-between">
               <p className="text-sm text-muted-foreground">
                 Word list, snippets, where text gets inserted, and your own
-                dictation modes live in Dictation.
+                dictation profiles live in Dictation.
               </p>
               <Button
                 variant="secondary"
@@ -2816,7 +2831,7 @@ export function SettingsView() {
                 <SettingsSwitch
                   className="py-0"
                   label="Name meetings for me"
-                  description="Give each meeting a title once its transcript is done."
+                  description="Sends each finished transcript to the AI service that writes your summaries and uses what comes back as the meeting's title. With it off, a meeting keeps the name you gave it or the time it started."
                   checked={
                     settings.transcription.meetingAutoNameEnabled ?? true
                   }
@@ -2830,26 +2845,25 @@ export function SettingsView() {
                     })
                   }
                 />
-                <div className="space-y-2">
-                  <Label>Model used for those titles</Label>
-                  <Input
-                    placeholder="Leave empty to use the summary model"
-                    value={settings.transcription.meetingAutoNameModel ?? ""}
-                    onBlur={handleSettingsTextBlur}
-                    onKeyDown={handleSettingsTextKeyDown}
-                    onChange={(e: ChangeEvent<HTMLInputElement>) =>
-                      void updateSettings({
-                        ...settings,
-                        transcription: {
-                          ...settings.transcription,
-                          meetingAutoNameModel: e.target.value.trim()
-                            ? e.target.value.trim()
-                            : null,
-                        },
-                      })
-                    }
-                  />
-                </div>
+                <SettingsInput
+                  label="AI model used for those titles"
+                  description="A title is a few words, so a smaller and cheaper model than your summary one is usually enough. Leave it empty and the summary model writes them."
+                  placeholder="Leave empty to use the summary model"
+                  value={settings.transcription.meetingAutoNameModel ?? ""}
+                  onBlur={handleSettingsTextBlur}
+                  onKeyDown={handleSettingsTextKeyDown}
+                  onChange={(value) =>
+                    void updateSettings({
+                      ...settings,
+                      transcription: {
+                        ...settings.transcription,
+                        meetingAutoNameModel: value.trim()
+                          ? value.trim()
+                          : null,
+                      },
+                    })
+                  }
+                />
               </>
             )}
 
@@ -3229,13 +3243,15 @@ export function SettingsView() {
           <>
             <div className="space-y-2 border-t pt-4">
               <p className="section-heading">API keys</p>
-              <p className="text-sm text-muted-foreground">
+              <p id="api-key-service-description" className="text-sm text-muted-foreground">
                 Keys are held in the macOS keychain. Pick a service to add,
-                replace, or remove its key.
+                replace, or remove its key. Picking one here does not make
+                Plainsong use it — that is chosen in Models.
               </p>
               <div className="flex items-center gap-2">
                 <select
                   aria-label="API key service"
+                  aria-describedby="api-key-service-description"
                   value={provider}
                   onChange={(e: ChangeEvent<HTMLSelectElement>) => {
                     // This only chooses which provider's credential is being
@@ -3420,7 +3436,11 @@ export function SettingsView() {
             </div>
 
             <div className="space-y-2 border-t pt-4">
-              <p className="section-heading">Is the cloud set up?</p>
+              <p className="section-heading">Cloud readiness</p>
+              <p className="text-sm text-muted-foreground">
+                Checks the two things a cloud summary needs — the permission
+                and a saved key — and names whichever is missing.
+              </p>
               <div className="flex flex-wrap gap-2">
                 <Button
                   variant="outline"
@@ -3520,39 +3540,43 @@ export function SettingsView() {
               </Button>
             </div>
 
-            <div className="space-y-2">
-              <Label htmlFor="memory-search-method">Method</Label>
-              <select
-                id="memory-search-method"
-                value={settings.transcription.memorySearchMode}
-                onChange={(e: ChangeEvent<HTMLSelectElement>) =>
-                  void updateSettings({
-                    ...settings,
-                    transcription: {
-                      ...settings.transcription,
-                      memorySearchMode: e.target.value as
-                        | "fts"
-                        | "ollama_embeddings",
-                    },
-                  })
-                }
-                className="w-full rounded-md border bg-background p-2"
-              >
-                <option value="fts">
-                  Match the words you type — built in, nothing to set up
-                </option>
-                <option value="ollama_embeddings">
-                  Match the meaning as well — needs Ollama on this Mac
-                </option>
-              </select>
-            </div>
+            <SettingsSelect
+              label="How search finds a meeting"
+              description="Word matching only finds a meeting that used the words you typed. Meaning matching also finds one that said the same thing differently, but it needs Ollama running on this Mac and an index that has to be built first."
+              value={settings.transcription.memorySearchMode}
+              onChange={(value) =>
+                void updateSettings({
+                  ...settings,
+                  transcription: {
+                    ...settings.transcription,
+                    memorySearchMode: value as "fts" | "ollama_embeddings",
+                  },
+                })
+              }
+            >
+              <option value="fts">
+                Match the words you type — built in, nothing to set up
+              </option>
+              <option value="ollama_embeddings">
+                Match the meaning as well — needs Ollama on this Mac
+              </option>
+            </SettingsSelect>
 
             {settings.transcription.memorySearchMode ===
               "ollama_embeddings" && (
               <>
                 <div className="space-y-2">
-                  <Label>Ollama model used for meaning matching</Label>
+                  <Label htmlFor="embedding-model">
+                    Ollama model used for meaning matching
+                  </Label>
+                  <p id="embedding-model-description" className="text-sm text-muted-foreground">
+                    The model that turns your transcripts into the numbers
+                    search compares. Changing it invalidates the index, so
+                    rebuild it below afterwards or search finds nothing.
+                  </p>
                   <Input
+                    id="embedding-model"
+                    aria-describedby="embedding-model-description"
                     value={settings.transcription.embeddingModel}
                     onChange={(e: ChangeEvent<HTMLInputElement>) =>
                       void updateSettings({
@@ -3754,12 +3778,17 @@ export function SettingsView() {
                         <div className="space-y-3 rounded-2xl border border-border bg-background p-4">
                           <div>
                             <p className="section-heading">Whole app</p>
-                            <p className="mt-1 text-sm text-muted-foreground">
-                              Used unless one of the overrides below is on.
+                            <p
+                              id="app-wide-microphone-description"
+                              className="mt-1 text-sm text-muted-foreground"
+                            >
+                              The microphone every capture uses unless one of
+                              the overrides beside it is switched on.
                             </p>
                           </div>
                           <select
                             aria-label="App-wide microphone"
+                            aria-describedby="app-wide-microphone-description"
                             className="w-full rounded-xl border border-border bg-background px-3 py-2 text-sm text-foreground"
                             value={appWideDeviceId}
                             onChange={(event) => {
@@ -3796,13 +3825,19 @@ export function SettingsView() {
                               <p className="section-heading">
                                 Dictation only
                               </p>
-                              <p className="mt-1 text-sm text-muted-foreground">
-                                Use a different microphone when you dictate
-                                with the shortcut.
+                              <p
+                                id="dictation-microphone-description"
+                                className="mt-1 text-sm text-muted-foreground"
+                              >
+                                Switch this on to dictate through a different
+                                microphone from the one meetings use — a
+                                headset mic for dictation, the room for
+                                meetings.
                               </p>
                             </div>
                             <Switch
                               aria-label="Use a different microphone for dictation"
+                              aria-describedby="dictation-microphone-description"
                               checked={
                                 settings.audio
                                   .dictationInputOverrideEnabled ?? false
@@ -3827,6 +3862,7 @@ export function SettingsView() {
                           </div>
                           <select
                             aria-label="Dictation microphone override"
+                            aria-describedby="dictation-microphone-description"
                             disabled={
                               !(
                                 settings.audio
@@ -3869,13 +3905,18 @@ export function SettingsView() {
                               <p className="section-heading">
                                 Meetings only
                               </p>
-                              <p className="mt-1 text-sm text-muted-foreground">
-                                Use a different microphone when you record a
-                                meeting.
+                              <p
+                                id="meeting-microphone-description"
+                                className="mt-1 text-sm text-muted-foreground"
+                              >
+                                Switch this on to record meetings through a
+                                different microphone from the one dictation
+                                uses.
                               </p>
                             </div>
                             <Switch
                               aria-label="Use a different microphone for meetings"
+                              aria-describedby="meeting-microphone-description"
                               checked={
                                 settings.audio
                                   .meetingInputOverrideEnabled ?? false
@@ -3900,6 +3941,7 @@ export function SettingsView() {
                           </div>
                           <select
                             aria-label="Meeting microphone override"
+                            aria-describedby="meeting-microphone-description"
                             disabled={
                               !(
                                 settings.audio
@@ -4066,14 +4108,21 @@ export function SettingsView() {
                     <div className="flex items-center justify-between">
                       <div className="space-y-0.5">
                         <Label id="separate-speakers-label">Separate speakers</Label>
-                        <p className="text-sm text-muted-foreground">
-                          Once a recording is transcribed, split the text up by
-                          who was talking.
+                        <p
+                          id="separate-speakers-description"
+                          className="text-sm text-muted-foreground"
+                        >
+                          Once a recording is transcribed, splits the text up
+                          by who was talking, so a transcript reads as a
+                          conversation rather than one block. It needs a 25 MB
+                          speaker separation model on this Mac, and it runs
+                          after the transcript, never during.
                         </p>
                       </div>
                       {diarizationAvailable ? (
                         <Switch
                           aria-labelledby="separate-speakers-label"
+                          aria-describedby="separate-speakers-description"
                           checked={settings.transcription.enableDiarization}
                           onCheckedChange={(checked) =>
                             void updateSettings({
@@ -4134,36 +4183,23 @@ export function SettingsView() {
                     {diarizationAvailable &&
                     settings.transcription.enableDiarization &&
                     diarizationModels.length > 0 ? (
-                      <div className="space-y-2">
-                        <Label htmlFor="diarization-model">
-                          Speaker separation model
-                        </Label>
-                        <select
-                          id="diarization-model"
-                          className="w-full rounded-md border bg-background px-3 py-2 text-sm"
-                          value={
-                            settings.transcription.diarizationModelId ??
-                            "ecapa_tdnn_speaker"
-                          }
-                          onChange={(e: ChangeEvent<HTMLSelectElement>) =>
-                            void updateSettings({
-                              ...settings,
-                              transcription: {
-                                ...settings.transcription,
-                                diarizationModelId: e.target.value,
-                              },
-                            })
-                          }
-                        >
-                          {diarizationModels.map((model) => (
-                            <option key={model.id} value={model.id}>
-                              {model.label}
-                              {model.installed ? "" : " (not downloaded)"} —{" "}
-                              {model.description}
-                            </option>
-                          ))}
-                        </select>
-                        {(() => {
+                      <SettingsSelect
+                        label="Speaker separation model"
+                        description="Which model decides that two stretches of a recording are the same voice. Every voice signature is tied to the model that made it, so changing this means remembered voices stop matching and the next meeting starts fresh."
+                        value={
+                          settings.transcription.diarizationModelId ??
+                          "ecapa_tdnn_speaker"
+                        }
+                        onChange={(value) =>
+                          void updateSettings({
+                            ...settings,
+                            transcription: {
+                              ...settings.transcription,
+                              diarizationModelId: value,
+                            },
+                          })
+                        }
+                        footnote={(() => {
                           const selectedModel = diarizationModels.find(
                             (m) =>
                               m.id ===
@@ -4172,21 +4208,38 @@ export function SettingsView() {
                           );
                           if (selectedModel && !selectedModel.installed) {
                             return (
-                              <p className="text-xs text-muted-foreground">
-                                The selected model is not downloaded. Click
-                                "Download Model" above to fetch it.
+                              <p className="text-sm text-rust">
+                                This one is not on this Mac yet, so speakers
+                                will not be separated until you press Download
+                                Model above.
                               </p>
                             );
                           }
                           return null;
                         })()}
-                      </div>
+                      >
+                        {diarizationModels.map((model) => (
+                          <option key={model.id} value={model.id}>
+                            {model.label}
+                            {model.installed ? "" : " (not downloaded)"} —{" "}
+                            {model.description}
+                          </option>
+                        ))}
+                      </SettingsSelect>
                     ) : null}
 
                     <div className="space-y-2">
                       <Label htmlFor="transcription-language">Transcription language</Label>
+                      <p id="transcription-language-description" className="text-sm text-muted-foreground">
+                        The language both dictation and meetings are
+                        transcribed as. Pick one and every recording is treated
+                        as that language, even when it is not; auto-detect lets
+                        the speech engine decide per recording, narrowed by the
+                        list below.
+                      </p>
                       <select
                         id="transcription-language"
+                        aria-describedby="transcription-language-description"
                         className="w-full rounded-md border bg-background px-3 py-2 text-sm"
                         value={settings.transcription.language ?? ""}
                         onChange={(e: ChangeEvent<HTMLSelectElement>) =>
@@ -4281,7 +4334,15 @@ export function SettingsView() {
                     </div>
 
                     <div className="space-y-5 border-t pt-4">
-                      <p className="section-heading">Advanced</p>
+                      <div className="space-y-1">
+                        <p className="section-heading">
+                          Advanced: what happens to the words
+                        </p>
+                        <p className="text-sm text-muted-foreground">
+                          Cleanup, spoken commands, meeting titles and the
+                          audio tuning behind them.
+                        </p>
+                      </div>
                       {renderSharedDictationControls({
                         includeMeetingAutoName: true,
                         includeAudioTuning: true,
@@ -4293,8 +4354,17 @@ export function SettingsView() {
                 {activeTab === "general" && (
                   <div className="space-y-5">
                     <div className="space-y-2">
-                      <Label>Theme</Label>
-                      <div className="flex gap-2">
+                      <Label id="theme-label">Theme</Label>
+                      <p className="text-sm text-muted-foreground">
+                        Light is the vellum page, dark is the candle-lit one.
+                        System follows your Mac&apos;s appearance setting and
+                        changes with it.
+                      </p>
+                      <div
+                        className="flex gap-2"
+                        role="group"
+                        aria-labelledby="theme-label"
+                      >
                         <Button
                           variant={
                             theme === "light" ? "default" : "outline"
@@ -4380,6 +4450,7 @@ export function SettingsView() {
                       <SettingsSwitch
                         className="py-0"
                         label="While dictating"
+                        description="Shows the level, the words as they arrive, and why an insert failed. With it off, a failed dictation is only reported by the notification below."
                         checked={settings.ui.showDictationPopup}
                         onCheckedChange={(checked) =>
                           void updateSettings({
@@ -4395,6 +4466,7 @@ export function SettingsView() {
                       <SettingsSwitch
                         className="py-0"
                         label="While recording a meeting"
+                        description="Shows that a meeting is being recorded, for how long, and gives you stop and pause without switching back to Plainsong."
                         checked={settings.ui.showRecordingPopup}
                         onCheckedChange={(checked) =>
                           void updateSettings({
@@ -4477,8 +4549,8 @@ export function SettingsView() {
 
                       <SettingsSwitch
                         className="py-0"
-                        label="Keep the speakers a cloud provider sends back"
-                        description="Deepgram and Gemini return speaker labels with the transcript. When one of them transcribes a meeting, Plainsong keeps its speakers instead of separating the voices again on this Mac. Turn this off to always use Plainsong's own diarizer. Local models return no speaker labels, so this changes nothing for a local meeting."
+                        label="Keep the speakers a cloud service sends back"
+                        description="Deepgram and Gemini return speaker labels with the transcript. When one of them transcribes a meeting, Plainsong keeps its speakers instead of separating the voices again on this Mac. Turn this off to always separate them here. No speech engine that runs on this Mac returns speaker labels, so this changes nothing while you transcribe here."
                         checked={meetingsSettings.preferProviderDiarization}
                         onCheckedChange={(checked) =>
                           void updateSettings({
@@ -4589,7 +4661,15 @@ export function SettingsView() {
                     />
 
                     <div className="pt-4 border-t space-y-5">
-                      <p className="section-heading">Advanced</p>
+                      <div className="space-y-1">
+                        <p className="section-heading">
+                          Advanced: keyboard shortcuts
+                        </p>
+                        <p className="text-sm text-muted-foreground">
+                          Every key and mouse button that reaches Plainsong
+                          from another app.
+                        </p>
+                      </div>
                       <div className="flex flex-col gap-3 lg:flex-row lg:items-center lg:justify-between">
                         <p className="text-sm text-muted-foreground">
                           Smart Format, prompts, and audio behavior are set in
@@ -4653,14 +4733,21 @@ export function SettingsView() {
                           <Cloud className="h-4 w-4" />
                           Use cloud AI for summaries and answers
                         </Label>
-                        <p className="text-sm text-muted-foreground">
-                          Required before summaries, Q&amp;A, and action items
-                          can use anything other than Ollama on this Mac. Speech
-                          engines have their own setting.
+                        <p
+                          id="remote-processing-description"
+                          className="text-sm text-muted-foreground"
+                        >
+                          Off means only Ollama on this Mac may write
+                          summaries, answers and action items, and every other
+                          service is refused. On means the transcript text goes
+                          to whichever service you picked in Models, which
+                          bills you for it. Speech engines are a separate
+                          choice and this does not affect them.
                         </p>
                       </div>
                       <Switch
                         aria-label="Use cloud AI for summaries and answers"
+                        aria-describedby="remote-processing-description"
                         checked={settings.privacy.remoteProcessingEnabled}
                         onCheckedChange={(checked) =>
                           void updateSettings({
@@ -4675,7 +4762,15 @@ export function SettingsView() {
                     </div>
 
                     <div className="pt-4 border-t space-y-5">
-                      <p className="section-heading">Advanced</p>
+                      <div className="space-y-1">
+                        <p className="section-heading">
+                          Advanced: permissions and diagnostics
+                        </p>
+                        <p className="text-sm text-muted-foreground">
+                          What macOS currently lets Plainsong do, a redacted
+                          log bundle, and the vault.
+                        </p>
+                      </div>
                         {renderSharedDictationControls({
                           includeCoreControls: false,
                           includeHotkeyBehavior: false,
@@ -4686,14 +4781,17 @@ export function SettingsView() {
 
                         <div className="space-y-2">
                           <p className="section-heading">Vault</p>
-                          <p className="text-sm text-muted-foreground">
+                          <p id="vault-password-description" className="text-sm text-muted-foreground">
                             The vault encrypts recordings already saved on this
                             Mac. Enter its password to unlock it, or to encrypt
-                            what is on disk now.
+                            what is on disk now. New recordings are written
+                            unencrypted either way, and there is no recovery if
+                            you lose the password.
                           </p>
                           <Label htmlFor="vault-password">Password</Label>
                           <Input
                             id="vault-password"
+                            aria-describedby="vault-password-description"
                             type="password"
                             placeholder="Vault password"
                             value={vaultPassword}
@@ -4765,7 +4863,7 @@ export function SettingsView() {
                                 }
                               }}
                             >
-                              Migrate to Encrypted Storage
+                              Encrypt what is on disk now
                             </Button>
                           </div>
                           {securityStatus ? (
@@ -4870,50 +4968,45 @@ export function SettingsView() {
 
                     <div className="h-px bg-border" />
 
-                    <div className="space-y-2">
-                      <Label htmlFor="dictation-retention">Auto-delete dictation recordings</Label>
-                      <select
-                        id="dictation-retention"
-                        className="w-full rounded-md border bg-background px-3 py-2 text-sm"
-                        value={
-                          settings.transcription.dictationRetentionPreset ??
-                          "never"
-                        }
-                        onChange={(e: ChangeEvent<HTMLSelectElement>) =>
-                          void updateSettings({
-                            ...settings,
-                            transcription: {
-                              ...settings.transcription,
-                              dictationRetentionPreset: e.target.value as "custom" | "immediate" | "24h" | "72h" | "never",
-                            },
-                          })
-                        }
-                      >
-                        <option value="immediate">Immediately</option>
-                        <option value="24h">After 24 hours</option>
-                        <option value="72h">After 72 hours</option>
-                        <option value="never">Never</option>
-                        <option value="custom">Custom</option>
-                      </select>
-                      {(settings.transcription.dictationRetentionPreset ??
-                        "never") === "custom" && (
-                        <div className="space-y-2">
-                          <Label>Custom retention hours</Label>
-                          <Input
+                    {/* The same setting also stands in Dictation, beside
+                        "Keep dictation audio". Both say so, because two
+                        identical controls a reader cannot connect is the thing
+                        that made this screen confusing. */}
+                    <SettingsSelect
+                      label="Auto-delete dictation recordings"
+                      description="Deletes the whole dictation once it is this old — the text in History and any audio kept for it. The same setting appears in Dictation; changing it in either place changes both."
+                      value={
+                        settings.transcription.dictationRetentionPreset ??
+                        "never"
+                      }
+                      onChange={(value) =>
+                        void updateSettings({
+                          ...settings,
+                          transcription: {
+                            ...settings.transcription,
+                            dictationRetentionPreset: value as "custom" | "immediate" | "24h" | "72h" | "never",
+                          },
+                        })
+                      }
+                      footnote={
+                        (settings.transcription.dictationRetentionPreset ??
+                          "never") === "custom" ? (
+                          <SettingsInput
+                            className="pt-2"
+                            label="Custom retention hours"
+                            description="How many hours a dictation survives before it is deleted. The clock starts when it was captured."
                             type="number"
                             min={1}
-                            value={
+                            value={String(
                               settings.transcription
-                                .dictationRetentionCustomHours ?? 24
-                            }
+                                .dictationRetentionCustomHours ?? 24,
+                            )}
                             onBlur={handleSettingsTextBlur}
                             onKeyDown={handleSettingsTextKeyDown}
-                            onChange={(
-                              e: ChangeEvent<HTMLInputElement>,
-                            ) => {
+                            onChange={(value) => {
                               const nextHours = Math.max(
                                 1,
-                                Number(e.target.value) || 1,
+                                Number(value) || 1,
                               );
                               void updateSettings({
                                 ...settings,
@@ -4924,80 +5017,74 @@ export function SettingsView() {
                               });
                             }}
                           />
-                        </div>
-                      )}
-                    </div>
+                        ) : null
+                      }
+                    >
+                      <option value="immediate">Immediately</option>
+                      <option value="24h">After 24 hours</option>
+                      <option value="72h">After 72 hours</option>
+                      <option value="never">Never</option>
+                      <option value="custom">Custom</option>
+                    </SettingsSelect>
 
-                    <div className="space-y-2">
-                      <Label htmlFor="meeting-audio-storage">Meeting audio</Label>
-                      <select
-                        id="meeting-audio-storage"
-                        className="w-full rounded-md border bg-background px-3 py-2 text-sm"
-                        value={
-                          settings.transcription.meetingAudioStorageMode ??
-                          "always"
-                        }
-                        onChange={(e: ChangeEvent<HTMLSelectElement>) =>
-                          void updateSettings({
-                            ...settings,
-                            transcription: {
-                              ...settings.transcription,
-                              meetingAudioStorageMode: e.target.value as "always" | "transcript_only",
-                            },
-                          })
-                        }
-                      >
-                        <option value="always">Keep it</option>
-                        <option value="transcript_only">
-                          Delete it once the transcript is ready
-                        </option>
-                      </select>
-                    </div>
+                    <SettingsSelect
+                      label="Meeting audio"
+                      description="Whether a meeting keeps its sound file after the transcript is written. The transcript and the notes stay either way; deleting the audio means that meeting can never be transcribed again with another speech engine."
+                      value={
+                        settings.transcription.meetingAudioStorageMode ??
+                        "always"
+                      }
+                      onChange={(value) =>
+                        void updateSettings({
+                          ...settings,
+                          transcription: {
+                            ...settings.transcription,
+                            meetingAudioStorageMode: value as "always" | "transcript_only",
+                          },
+                        })
+                      }
+                    >
+                      <option value="always">Keep it</option>
+                      <option value="transcript_only">
+                        Delete it once the transcript is ready
+                      </option>
+                    </SettingsSelect>
 
-                    <div className="space-y-2">
-                      <Label htmlFor="meeting-retention">Auto-delete meeting data</Label>
-                      <select
-                        id="meeting-retention"
-                        className="w-full rounded-md border bg-background px-3 py-2 text-sm"
-                        value={
-                          settings.transcription.meetingRetentionPreset ??
-                          "never"
-                        }
-                        onChange={(e: ChangeEvent<HTMLSelectElement>) =>
-                          void updateSettings({
-                            ...settings,
-                            transcription: {
-                              ...settings.transcription,
-                              meetingRetentionPreset: e.target.value as "custom" | "never" | "1m" | "2m" | "3m",
-                            },
-                          })
-                        }
-                      >
-                        <option value="1m">After 1 month</option>
-                        <option value="2m">After 2 months</option>
-                        <option value="3m">After 3 months</option>
-                        <option value="never">Never</option>
-                        <option value="custom">Custom</option>
-                      </select>
-                      {(settings.transcription.meetingRetentionPreset ??
-                        "never") === "custom" && (
-                        <div className="space-y-2">
-                          <Label>Custom retention months</Label>
-                          <Input
+                    <SettingsSelect
+                      label="Auto-delete meeting data"
+                      description="How old a meeting has to get before Plainsong cleans it up. What it removes at that point is the next setting."
+                      value={
+                        settings.transcription.meetingRetentionPreset ??
+                        "never"
+                      }
+                      onChange={(value) =>
+                        void updateSettings({
+                          ...settings,
+                          transcription: {
+                            ...settings.transcription,
+                            meetingRetentionPreset: value as "custom" | "never" | "1m" | "2m" | "3m",
+                          },
+                        })
+                      }
+                      footnote={
+                        (settings.transcription.meetingRetentionPreset ??
+                          "never") === "custom" ? (
+                          <SettingsInput
+                            className="pt-2"
+                            label="Custom retention months"
+                            description="How many months a meeting survives before the cleanup below runs on it."
                             type="number"
                             min={1}
-                            value={
+                            value={String(
                               settings.transcription
-                                .meetingRetentionCustomMonths ?? 1
-                            }
+                                .meetingRetentionCustomMonths ?? 1,
+                            )}
                             onBlur={handleSettingsTextBlur}
                             onKeyDown={handleSettingsTextKeyDown}
-                            onChange={(
-                              e: ChangeEvent<HTMLInputElement>,
-                            ) => {
+                            onChange={(value) => {
                               const nextMonths = Math.max(
                                 1,
-                                Number(e.target.value) || 1,
+                                Number(value) || 1,
                               );
                               void updateSettings({
                                 ...settings,
@@ -5008,35 +5095,38 @@ export function SettingsView() {
                               });
                             }}
                           />
-                        </div>
-                      )}
-                    </div>
+                        ) : null
+                      }
+                    >
+                      <option value="1m">After 1 month</option>
+                      <option value="2m">After 2 months</option>
+                      <option value="3m">After 3 months</option>
+                      <option value="never">Never</option>
+                      <option value="custom">Custom</option>
+                    </SettingsSelect>
 
-                    <div className="space-y-2">
-                      <Label htmlFor="meeting-retention-delete-mode">When a meeting is auto-deleted, remove</Label>
-                      <select
-                        id="meeting-retention-delete-mode"
-                        className="w-full rounded-md border bg-background px-3 py-2 text-sm"
-                        value={
-                          settings.transcription
-                            .meetingRetentionDeleteMode ?? "audio_only"
-                        }
-                        onChange={(e: ChangeEvent<HTMLSelectElement>) =>
-                          void updateSettings({
-                            ...settings,
-                            transcription: {
-                              ...settings.transcription,
-                              meetingRetentionDeleteMode: e.target.value as "audio_only" | "audio_and_transcript",
-                            },
-                          })
-                        }
-                      >
-                        <option value="audio_only">The audio only</option>
-                        <option value="audio_and_transcript">
-                          The audio and the transcript
-                        </option>
-                      </select>
-                    </div>
+                    <SettingsSelect
+                      label="When a meeting is auto-deleted, remove"
+                      description="The audio only leaves the transcript, the notes and the meeting in your library. The audio and the transcript takes the whole meeting; nothing about it survives."
+                      value={
+                        settings.transcription
+                          .meetingRetentionDeleteMode ?? "audio_only"
+                      }
+                      onChange={(value) =>
+                        void updateSettings({
+                          ...settings,
+                          transcription: {
+                            ...settings.transcription,
+                            meetingRetentionDeleteMode: value as "audio_only" | "audio_and_transcript",
+                          },
+                        })
+                      }
+                    >
+                      <option value="audio_only">The audio only</option>
+                      <option value="audio_and_transcript">
+                        The audio and the transcript
+                      </option>
+                    </SettingsSelect>
 
                     <div className="border-t pt-4 space-y-3">
                       <div className="space-y-1">
@@ -5208,6 +5298,11 @@ export function SettingsView() {
 
                         <div className="space-y-2">
                           <Label>Backup folder</Label>
+                          <p className="text-sm text-muted-foreground">
+                            Where a backup is written on this Mac. macOS has to
+                            hand Plainsong the folder through its own picker,
+                            so a typed path will not do.
+                          </p>
                           <div className="flex flex-wrap items-center gap-3 rounded-lg border bg-muted/20 p-3">
                             <div className="min-w-0 flex-1">
                               <p className="text-sm font-medium">
@@ -5266,78 +5361,68 @@ export function SettingsView() {
                         />
 
                         <div className="grid grid-cols-2 gap-4">
-                          <div className="space-y-2">
-                            <Label htmlFor="cloud-storage-service">Cloud storage service</Label>
-                            <select
-                              id="cloud-storage-service"
-                              value={backupConfig.cloudProvider ?? ""}
-                              onChange={(e: ChangeEvent<HTMLSelectElement>) =>
-                                setBackupConfig({
-                                  ...backupConfig,
-                                  cloudProvider: (e.target.value ||
-                                    null) as BackupConfig["cloudProvider"],
-                                  cloudLocationId: null,
-                                  cloudLocationLabel: null,
-                                  cloudLocationApproved: false,
-                                })
-                              }
-                              className="w-full p-2 border rounded-md bg-background"
-                            >
-                              <option value="">Choose one</option>
-                              <option value="one_drive">OneDrive</option>
-                              <option value="google_drive">
-                                Google Drive
-                              </option>
-                              <option value="proton_drive">
-                                Proton Drive
-                              </option>
-                              <option value="i_cloud">iCloud</option>
-                            </select>
-                          </div>
+                          <SettingsSelect
+                            label="Cloud storage service"
+                            description="Where an upload goes when you press one of the Sync buttons. Choosing one here uploads nothing on its own."
+                            value={backupConfig.cloudProvider ?? ""}
+                            onChange={(value) =>
+                              setBackupConfig({
+                                ...backupConfig,
+                                cloudProvider: (value ||
+                                  null) as BackupConfig["cloudProvider"],
+                                cloudLocationId: null,
+                                cloudLocationLabel: null,
+                                cloudLocationApproved: false,
+                              })
+                            }
+                          >
+                            <option value="">Choose one</option>
+                            <option value="one_drive">OneDrive</option>
+                            <option value="google_drive">
+                              Google Drive
+                            </option>
+                            <option value="proton_drive">
+                              Proton Drive
+                            </option>
+                            <option value="i_cloud">iCloud</option>
+                          </SettingsSelect>
 
-                          <div className="space-y-2">
-                            <Label>Cloud folder</Label>
-                            <Input
-                              value={backupConfig.cloudFolder}
-                              onChange={(
-                                e: ChangeEvent<HTMLInputElement>,
-                              ) =>
-                                setBackupConfig({
-                                  ...backupConfig,
-                                  cloudFolder: e.target.value,
-                                })
-                              }
-                              placeholder="PlainsongBackups"
-                            />
-                          </div>
+                          <SettingsInput
+                            label="Cloud folder"
+                            description="The folder name Plainsong creates or reuses inside that service. It is created on the first upload."
+                            value={backupConfig.cloudFolder}
+                            onChange={(value) =>
+                              setBackupConfig({
+                                ...backupConfig,
+                                cloudFolder: value,
+                              })
+                            }
+                            placeholder="PlainsongBackups"
+                          />
                         </div>
 
                         {backupConfig.cloudProvider === "i_cloud" ? (
                           <div className="space-y-2">
                             <Label>iCloud destination</Label>
                             <p className="text-sm text-muted-foreground">
-                              {backupConfig.cloudLocationLabel ??
-                                "Choose the iCloud folder in the native picker."}
+                              {backupConfig.cloudLocationLabel
+                                ? `Uploads go to ${backupConfig.cloudLocationLabel}.`
+                                : "Nothing can be uploaded until you pick the iCloud folder in the macOS picker below."}
                             </p>
                           </div>
                         ) : (
-                          <div className="space-y-2">
-                            <Label>rclone remote name</Label>
-                            <Input
-                              value={backupConfig.cloudRemoteName ?? ""}
-                              onChange={(
-                                e: ChangeEvent<HTMLInputElement>,
-                              ) =>
-                                setBackupConfig({
-                                  ...backupConfig,
-                                  cloudRemoteName: e.target.value.trim()
-                                    ? e.target.value
-                                    : null,
-                                })
-                              }
-                              placeholder="onedrive / gdrive / protondrive"
-                            />
-                          </div>
+                          <SettingsInput
+                            label="rclone remote name"
+                            description="The name you gave this service when you ran rclone config. Plainsong uploads through rclone, so a name that does not match one of your remotes fails the connection test."
+                            value={backupConfig.cloudRemoteName ?? ""}
+                            onChange={(value) =>
+                              setBackupConfig({
+                                ...backupConfig,
+                                cloudRemoteName: value.trim() ? value : null,
+                              })
+                            }
+                            placeholder="onedrive / gdrive / protondrive"
+                          />
                         )}
 
                         <div className="flex flex-wrap items-center gap-3">
@@ -5674,9 +5759,15 @@ export function SettingsView() {
                         {backupSetupReport && (
                           <div className="space-y-2 border-t pt-4">
                             <div className="flex items-center justify-between">
-                              <p className="section-heading">
-                                Cloud setup checks
-                              </p>
+                              <div>
+                                <p className="section-heading">
+                                  Cloud setup checks
+                                </p>
+                                <p className="text-sm text-muted-foreground">
+                                  What still stands between you and a working
+                                  upload.
+                                </p>
+                              </div>
                               <span
                                 className={`text-sm font-medium ${
                                   backupSetupReport.ready
@@ -5799,27 +5890,37 @@ export function SettingsView() {
                       saveError={savedPromptsSaveError}
                     />
 
-                    <div className="flex items-center justify-between">
-                      <div className="space-y-0.5">
-                        <Label>Use cloud AI for summaries and answers</Label>
-                        <p className="text-sm text-muted-foreground">
-                          Required before any service other than Ollama on this
-                          Mac can write them.
+                    {/* The switch itself lives on Privacy & Security, and
+                        only there. Two switches on the same settings key with
+                        two different descriptions is what made a reader ask
+                        which of them was the real one. */}
+                    <div className="flex flex-col gap-3 rounded-md border border-border/60 bg-muted/20 p-4 lg:flex-row lg:items-center lg:justify-between">
+                      <div className="max-w-2xl space-y-0.5">
+                        <p className="flex items-center gap-2 text-sm font-medium">
+                          <span
+                            aria-hidden="true"
+                            className={
+                              settings.privacy.remoteProcessingEnabled
+                                ? "neume neume-lit"
+                                : "neume neume-hollow"
+                            }
+                          />
+                          {settings.privacy.remoteProcessingEnabled
+                            ? "Cloud AI is allowed"
+                            : "Cloud AI is off"}
+                        </p>
+                        <p className="text-sm leading-6 text-muted-foreground">
+                          {settings.privacy.remoteProcessingEnabled
+                            ? "Any service you pick in Models may receive your transcripts. Turn it back off under Privacy & Security."
+                            : "Only Ollama on this Mac may write summaries and answers. Every other service is refused until you allow it under Privacy & Security."}
                         </p>
                       </div>
-                      <Switch
-                        aria-label="Use cloud AI for summaries and answers"
-                        checked={settings.privacy.remoteProcessingEnabled}
-                        onCheckedChange={(checked) =>
-                          void updateSettings({
-                            ...settings,
-                            privacy: {
-                              ...settings.privacy,
-                              remoteProcessingEnabled: checked,
-                            },
-                          })
-                        }
-                      />
+                      <Button
+                        variant="secondary"
+                        onClick={() => setActiveTab("security")}
+                      >
+                        Open Privacy &amp; Security
+                      </Button>
                     </div>
 
                     {/* Either lane on Ollama makes the local daemon's state
@@ -5852,7 +5953,15 @@ export function SettingsView() {
                     )}
 
                     <div className="pt-4 border-t space-y-5">
-                      <p className="section-heading">Advanced</p>
+                      <div className="space-y-1">
+                        <p className="section-heading">
+                          Advanced: keys and search
+                        </p>
+                        <p className="text-sm text-muted-foreground">
+                          Where your API keys are kept, and how search looks
+                          through past meetings.
+                        </p>
+                      </div>
                         <div className="flex flex-col gap-3 lg:flex-row lg:items-center lg:justify-between">
                           <p className="text-sm text-muted-foreground">
                             Smart Format, shortcut behavior, and capture

@@ -370,6 +370,41 @@ evidence is stale and must be recaptured before this becomes a candidate.
   the answer.
 
 ### Changed
+- **Every control in Settings now says what it does, in one sentence, and no
+  word means two things.** A first-time reader reported being "either kinda
+  confused or not being shown what something does or things having multiple
+  meanings". Thirty-one controls had a label and nothing under it — "While
+  dictating", "Method", "Meeting audio", every retention picker — or a
+  description that named a mechanism rather than a consequence. Each now
+  carries one plain sentence, wired to its control with `aria-describedby` so
+  a screen reader hears it and `src/__tests__/settings-view-simple.test.tsx`
+  can prove it is there: the description is a required prop on the settings
+  row primitives, so a control cannot ship without one. Seven overloaded words
+  were retired for a single settled term — a "custom mode" is a **profile**
+  everywhere now, an "analysis provider" or "cloud provider" is a **service**,
+  a "route" is a **speech engine**, "Local tools" is **command line and MCP
+  access**, and a bare "model" always carries its job ("speech model", "AI
+  model"). The map is committed in `src/lib/settings-vocabulary.ts` and
+  `src/__tests__/settings-vocabulary.test.ts` fails if a word is reused for a
+  second concept or a retired phrase comes back — including in the sidecar's
+  user-facing strings. The full control-by-control inventory, with the settings
+  key and what the code does with it, is
+  `docs/settings-inventory-2026-09-03.md`.
+- **The cloud-AI consent switch has one home.** Two switches wrote
+  `privacy.remoteProcessingEnabled`, one on Privacy & Security and one on AI &
+  Keys, each with a different description; a reader could not tell whether that
+  was one consent or two. The switch lives on Privacy & Security, where it now
+  says the whole consequence, and AI & Keys reports its state and sends you
+  there.
+- **The meetings ordering control moved to the meetings list it reorders.** It
+  was called "Meeting quality policy" and stood on the Transcription tab's
+  diagnostics card, two tabs from the meetings engine list, where it read like
+  a second engine picker. It is now "Which meeting engine to offer first",
+  directly above that list on Models, and says plainly that it only reorders.
+- Auto-delete for dictations now says what it actually removes — the dictation's
+  text in History as well as its audio, because
+  `enforce_dictation_retention_policy` deletes the whole recording row — and
+  says that the same control also stands in Dictation.
 - **The installed application is 86 MB smaller** — 384 MB down to 297 MB on an
   unsigned `electron:pack` build — without removing anything the app can do.
   Two things were shipping that nothing could reach. Chromium's user-interface
@@ -1061,6 +1096,18 @@ evidence is stale and must be recaptured before this becomes a candidate.
   not as having "gone silent," which previously read as a muting problem.
 
 ### Removed
+- The "Compatibility & Runtime Tuning" panel in Settings › Transcription ›
+  Downloads & Diagnostics: Mode (auto/manual), Fallback policy, "Allow MLX
+  acceleration routes", "Windows Foundry Local", and the manual engine
+  priority list. None of them could change anything on a shipped build.
+  `effective_provider_selection` discards `optimization` and `mlx_enabled`
+  outright (the MLX route was deleted), `fallback_policy` is normalized on load
+  and read by no decision, and `select_requested_engine` only ever returns a
+  Windows engine — behind `cfg(target_os = "windows")`, in a product whose own
+  KNOWN-LIMITATIONS puts Windows outside the beta. The settings keys still load
+  from existing files and no default changed; only the controls that could not
+  do anything were removed. `Repair local cache`, the benchmark, and the
+  per-engine diagnostics cards stay.
 - The never-reachable "post the consent notice into the meeting chat for
   you" automation for Zoom and Google Meet. Its keystroke senders sat behind
   a gate that was hard-wired to off because nothing could prove the meeting

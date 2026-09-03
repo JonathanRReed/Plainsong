@@ -971,7 +971,7 @@ pub fn available_backend() -> &'static str {
 /// so instead of pointing at a settings screen.
 #[cfg(not(feature = "local-llm"))]
 pub const BUILD_WITHOUT_LOCAL_LLM: &str =
-    "This build of Plainsong was compiled without the built-in cleanup model. Choose Ollama or a cloud provider for dictation cleanup.";
+    "This build of Plainsong was compiled without the built-in cleanup model. Choose Ollama or a cloud service for dictation cleanup.";
 
 /// Run one cleanup pass. Blocking; call from `spawn_blocking`.
 ///
@@ -1032,7 +1032,7 @@ pub fn supports_purpose(purpose: super::CompletionPurpose) -> bool {
     matches!(purpose, super::CompletionPurpose::Generic)
 }
 
-pub const MEETINGS_LANE_REFUSAL: &str = "S1-mini by Superwhisper only cleans up dictation; it cannot write meeting summaries, answers, or action items. Choose Ollama or a cloud provider for the meetings lane.";
+pub const MEETINGS_LANE_REFUSAL: &str = "S1-mini by Superwhisper only cleans up dictation; it cannot write meeting summaries, answers, or action items. Choose Ollama or a cloud service for the meetings lane.";
 
 #[async_trait::async_trait]
 impl super::transport::CompletionTransport for BundledLocalClient {

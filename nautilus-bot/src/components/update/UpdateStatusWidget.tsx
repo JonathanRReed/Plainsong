@@ -98,8 +98,8 @@ export function UpdateStatusWidget() {
         </div>
         <CardDescription>
           {status?.status === "updateAvailable" && status.info
-            ? `Version ${status.info.version} is available`
-            : "Check for the latest updates to get new features and bug fixes"}
+            ? `Version ${status.info.version} is available.`
+            : "Plainsong never checks on its own. Pressing the button below is the only time it contacts the release feed."}
         </CardDescription>
       </CardHeader>
       <CardContent className="space-y-4">
@@ -145,7 +145,7 @@ export function UpdateStatusWidget() {
             ) : (
               <RefreshCw className="mr-2 h-4 w-4" />
             )}
-            Check for Updates
+            Check for updates
           </Button>
 
           {status?.status === "updateAvailable" && installBlocked && (
@@ -166,7 +166,7 @@ export function UpdateStatusWidget() {
               ) : (
                 <Download className="mr-2 h-4 w-4" />
               )}
-              Install Update
+              Install update
             </Button>
           )}
         </div>

@@ -1868,7 +1868,7 @@ async fn resolve_ready_dictation_selection(
         enforce_remote_asr_provider_policy(provider_type, remote_processing_enabled)?;
         let resolved_hosting = provider_hosting_environment(provider_type, &model_id);
         let warning = format!(
-            "This dictation mode prefers {} routing. Using '{}' / '{}' instead of '{}' / '{}'.",
+            "This dictation profile prefers {} routing. Using '{}' / '{}' instead of '{}' / '{}'.",
             dictation_route_preference_to_settings_value(route_preference),
             provider_type.display_name(),
             model_id,
@@ -1885,7 +1885,7 @@ async fn resolve_ready_dictation_selection(
     }
 
     Err(format!(
-        "This dictation mode prefers {} routing, but no {} dictation route is ready. Open Settings -> Setup and prepare one.",
+        "This dictation profile prefers {} routing, but no {} dictation engine is ready. Open Settings -> Storage -> Setup and prepare one.",
         dictation_route_preference_to_settings_value(route_preference),
         dictation_route_preference_to_settings_value(route_preference)
     ))
@@ -2221,7 +2221,7 @@ where
 /// provider and the alternative.
 fn custom_transform_unsupported_error(provider: AnalysisProvider) -> String {
     format!(
-        "'{}' can only clean up dictation; it cannot run a custom transform prompt. Choose Ollama or a cloud provider for custom modes and dictation commands.",
+        "'{}' can only clean up dictation; it cannot run a custom transform prompt. Choose Ollama or a cloud service for saved profiles and dictation commands.",
         provider.as_settings_value()
     )
 }
@@ -2236,7 +2236,7 @@ fn enforce_meeting_lane_provider_policy(provider: AnalysisProvider) -> Result<()
         return Ok(());
     }
     Err(format!(
-        "'{}' only cleans up dictation and cannot write meeting summaries. Choose Ollama or a cloud provider for the meetings lane in Models.",
+        "'{}' only cleans up dictation and cannot write meeting summaries. Choose Ollama or a cloud service for the meetings lane in Models.",
         provider.as_settings_value()
     ))
 }

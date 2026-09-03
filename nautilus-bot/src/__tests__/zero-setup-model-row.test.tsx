@@ -64,7 +64,9 @@ describe("the built-in cleanup model row", () => {
     // The honest half: a user must not discover this when a custom mode
     // quietly stops using AI.
     expect(region.textContent).toContain("does not summarize");
-    expect(region.textContent).toContain("custom modes");
+    // "Saved profiles", not "custom modes": one word per concept, checked by
+    // src/__tests__/settings-vocabulary.test.ts.
+    expect(region.textContent).toContain("saved profiles");
     expect(region.textContent).toContain("English only");
   });
 

@@ -1,6 +1,5 @@
 import { describe, expect, it, vi, beforeEach } from "vitest";
-import { fireEvent, render, screen, waitFor } from "@testing-library/react";
-import userEvent from "@testing-library/user-event";
+import { fireEvent, render, screen } from "@testing-library/react";
 import { AsrProviderManager } from "@/components/asr-provider-manager";
 
 const invokeMock = vi.fn();
@@ -231,65 +230,51 @@ describe("Platform optimization settings", () => {
     });
   });
 
-  it("persists fallback policy changes", async () => {
-    const user = userEvent.setup();
+  /**
+   * The "Compatibility & Runtime Tuning" card is gone, and this is the test
+   * that keeps it gone.
+   *
+   * Every control in it was inert on a shipped build:
+   * `effective_provider_selection` in rust-sidecar/src/asr/manager.rs discards
+   * `optimization` and `mlx_enabled` outright, `fallback_policy` is normalized
+   * on load and read by no decision, and `select_requested_engine` only ever
+   * returns a Windows engine -- behind `cfg(target_os = "windows")`, on a
+   * product whose own KNOWN-LIMITATIONS puts Windows outside the beta. The
+   * settings keys still load; only the controls that could not do anything
+   * were removed. See docs/settings-inventory-2026-09-03.md.
+   */
+  it("offers no platform-tuning controls that cannot change anything", async () => {
     render(<AsrProviderManager />);
 
     fireEvent.click(await screen.findByRole("button", { name: "Show tools" }));
-    const fallbackTrigger = await screen.findByRole("combobox", { name: /fallback policy/i });
-    await user.click(fallbackTrigger);
-    const failFastOption = await screen.findByRole("option", { name: /fail fast/i });
-    await user.click(failFastOption);
+    // The repair tool is real and still there, so this is not asserting that
+    // the advanced panel failed to open.
+    expect(
+      await screen.findByRole("button", { name: "Repair local cache" }),
+    ).toBeInTheDocument();
 
-    await waitFor(() => {
-      expect(saveSettingsMock).toHaveBeenCalled();
-    });
-
-    const savedPayload =
-      saveSettingsMock.mock.calls[saveSettingsMock.mock.calls.length - 1]?.[0];
-    expect(savedPayload.transcription.platformOptimization.fallbackPolicy).toBe("fail_fast");
+    expect(screen.queryByText("Compatibility & Runtime Tuning")).toBeNull();
+    expect(screen.queryByRole("combobox", { name: /^mode$/i })).toBeNull();
+    expect(
+      screen.queryByRole("combobox", { name: /fallback policy/i }),
+    ).toBeNull();
+    expect(screen.queryByText("Allow MLX acceleration routes")).toBeNull();
+    expect(screen.queryByText("Windows Foundry Local")).toBeNull();
+    expect(screen.queryByRole("button", { name: "Add engine" })).toBeNull();
   });
 
-  it("persists ordered manual engine priority", async () => {
-    const user = userEvent.setup();
+  /**
+   * The meetings ordering control moved to the Models screen, next to the
+   * meetings list it reorders. `models-screen.test.tsx` asserts it persists
+   * there; this asserts the second copy is not left behind here.
+   */
+  it("no longer offers a second meetings-engine picker on the diagnostics card", async () => {
     render(<AsrProviderManager />);
 
-    fireEvent.click(await screen.findByRole("button", { name: "Show tools" }));
-    const modeTrigger = await screen.findByRole("combobox", { name: /^mode$/i });
-    await user.click(modeTrigger);
-    const manualOption = await screen.findByRole("option", { name: /manual/i });
-    await user.click(manualOption);
-
-    const addButton = await screen.findByRole("button", { name: "Add engine" });
-    await user.click(addButton);
-
-    await waitFor(() => {
-      expect(saveSettingsMock).toHaveBeenCalled();
-    });
-
-    const engineTrigger = await screen.findByRole("combobox", { name: /engine priority 1/i });
-    await user.click(engineTrigger);
-    const foundryOption = await screen.findByRole("option", { name: /windows foundry/i });
-    await user.click(foundryOption);
-
-    await waitFor(() => {
-      const savedPayload =
-        saveSettingsMock.mock.calls[saveSettingsMock.mock.calls.length - 1]?.[0];
-      expect(savedPayload.transcription.platformOptimization.manualEnginePriority).toEqual([
-        "windows_foundry_local",
-      ]);
-    });
-
-    await user.click(addButton);
-
-    await waitFor(() => {
-      const savedPayload =
-        saveSettingsMock.mock.calls[saveSettingsMock.mock.calls.length - 1]?.[0];
-      expect(savedPayload.transcription.platformOptimization.manualEnginePriority).toEqual([
-        "windows_foundry_local",
-        "provider_default",
-      ]);
-    });
+    await screen.findByText("Engine status");
+    expect(
+      screen.queryByRole("combobox", { name: /meeting quality policy/i }),
+    ).toBeNull();
   });
 
   it("keeps Apple Native setup here and out of advanced native toggles", async () => {
@@ -486,23 +471,6 @@ describe("Platform optimization settings", () => {
     expect(
       screen.queryByText("Required for Apple Speech transcription."),
     ).not.toBeInTheDocument();
-  });
-
-  it("persists meeting route policy changes", async () => {
-    render(<AsrProviderManager />);
-
-    const meetingPolicyTrigger = await screen.findByRole("combobox", { name: /meeting quality policy/i });
-    await userEvent.click(meetingPolicyTrigger);
-    const bestOption = await screen.findByRole("option", { name: /best available/i });
-    await userEvent.click(bestOption);
-
-    await waitFor(() => {
-      expect(saveSettingsMock).toHaveBeenCalled();
-    });
-
-    const savedPayload =
-      saveSettingsMock.mock.calls[saveSettingsMock.mock.calls.length - 1]?.[0];
-    expect(savedPayload.transcription.meetingRoutePolicy).toBe("best_available");
   });
 
   it("treats Accessibility as the insertion gate even when Automation is unavailable", async () => {

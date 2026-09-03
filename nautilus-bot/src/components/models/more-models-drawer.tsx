@@ -125,13 +125,13 @@ export function MoreModelsDrawer({
       {open ? (
         <div className="mt-4 space-y-5">
           {renderGroup(
-            "Other local builds",
-            "Downloaded to this Mac and run here.",
+            "Other engines that run on this Mac",
+            "Downloaded once and run here. Nothing is uploaded and nothing is billed.",
             local,
           )}
           {renderGroup(
-            "Cloud engines",
-            "Your audio is uploaded to the service, and you bring the API key. No download, so no size to report.",
+            "Engines that run in the cloud",
+            "Your audio is uploaded to the service and the service bills you for it, by the minute or by the hour. You bring the API key. Nothing to download, so there is no size to report.",
             cloud,
           )}
         </div>

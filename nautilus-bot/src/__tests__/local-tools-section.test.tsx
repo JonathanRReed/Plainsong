@@ -52,7 +52,7 @@ describe("LocalToolsSection", () => {
 
   it("states what the switch allows and reports it off", async () => {
     const onEnabledChange = renderSection(false);
-    expect(screen.getByText("Local tools")).toBeInTheDocument();
+    expect(screen.getByText("Command line and MCP access")).toBeInTheDocument();
     expect(
       screen.getByText(
         /Apps you run on this Mac, such as a terminal or an AI assistant, can read your meeting notes and transcripts\. Nothing leaves the machine unless that app sends it\./,
@@ -64,7 +64,7 @@ describe("LocalToolsSection", () => {
       screen.getByText(/a web page you open can\s+trigger one just as a script can/),
     ).toBeInTheDocument();
     expect(screen.getByText(/Recording from a link/)).toBeInTheDocument();
-    const toggle = screen.getByRole("switch", { name: "Allow local tools" });
+    const toggle = screen.getByRole("switch", { name: "Allow the plainsong command and MCP server" });
     expect(toggle).toHaveAttribute("aria-checked", "false");
     fireEvent.click(toggle);
     expect(onEnabledChange).toHaveBeenCalledWith(true);

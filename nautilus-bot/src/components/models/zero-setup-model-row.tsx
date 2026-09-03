@@ -14,14 +14,14 @@ import type {
  * resolves self-corrections, punctuates, and writes spoken numbers and dates
  * in written form. It does not summarize, answer, or follow a prompt. Saying
  * both halves here is the honest version of "no setup" -- the alternative is
- * a user discovering the second half when a custom mode quietly stops using
- * AI.
+ * a user discovering the second half when a saved dictation profile quietly
+ * stops using AI.
  */
 const BUNDLED_CLEANUP_WHAT_IT_DOES =
   "Removes filler words, fixes false starts, adds punctuation and capitalization, and writes spoken numbers, dates and email addresses in written form. English only.";
 
 const BUNDLED_CLEANUP_WHAT_IT_CANNOT_DO =
-  "It does not summarize, answer questions, or follow a custom prompt, so meeting notes, custom modes and dictation commands need Ollama or a cloud provider.";
+  "It does not summarize, answer questions, or follow a custom prompt, so meeting notes, saved profiles and dictation commands need Ollama or a cloud service.";
 
 /**
  * What the machine underneath actually delivers.
@@ -46,12 +46,12 @@ function describeBackend(status: BundledCleanupModelStatus): {
   }
   if (!status.backendPresent) {
     return {
-      text: "This build has no runtime for the built-in model, so cleanup here is skipped and your words are inserted unchanged. Choose Ollama or a cloud provider.",
+      text: "This build has no runtime for the built-in model, so cleanup here is skipped and your words are inserted unchanged. Choose Ollama or a cloud service.",
       slow: true,
     };
   }
   return {
-    text: "This Mac runs it on the CPU, not the GPU. A short dictation still finishes in about five seconds, but a 200-word one takes 11 to 13 — past the six-second limit, so long dictations arrive as spoken with a “took too long” warning. Ollama or a cloud provider is the better choice here.",
+    text: "This Mac runs it on the CPU, not the GPU. A short dictation still finishes in about five seconds, but a 200-word one takes 11 to 13 — past the six-second limit, so long dictations arrive as spoken with a “took too long” warning. Ollama or a cloud service is the better choice here.",
     slow: true,
   };
 }

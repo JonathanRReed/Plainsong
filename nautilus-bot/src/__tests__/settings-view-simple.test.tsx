@@ -499,7 +499,9 @@ describe("SettingsView performance behavior", () => {
     expect(
       screen.getByRole("combobox", { name: "API key service" }),
     ).toBeInTheDocument();
-    expect(screen.getByRole("combobox", { name: "Method" })).toBeInTheDocument();
+    expect(
+      screen.getByRole("combobox", { name: "How search finds a meeting" }),
+    ).toBeInTheDocument();
   });
 
   it("invalidates ASR runtime probes before refreshing permission diagnostics", async () => {
@@ -1109,7 +1111,7 @@ describe("SettingsView performance behavior", () => {
     expect(lastCall?.[0]?.ui?.alwaysOnTop).toBe(true);
   });
 
-  it("renders Local tools in General, off, with the sentence that says what it allows", async () => {
+  it("renders command line and MCP access in General, off, with the sentence that says what it allows", async () => {
     render(
       <ToastProvider>
         <SettingsView />
@@ -1117,13 +1119,13 @@ describe("SettingsView performance behavior", () => {
     );
 
     await screen.findByText("How Plainsong listens, writes, and what it keeps.");
-    expect(screen.getByText("Local tools")).toBeInTheDocument();
+    expect(screen.getByText("Command line and MCP access")).toBeInTheDocument();
     expect(
       screen.getByText(
         /Apps you run on this Mac, such as a terminal or an AI assistant, can read your meeting notes and transcripts\. Nothing leaves the machine unless that app sends it\./,
       ),
     ).toBeInTheDocument();
-    expect(screen.getByRole("switch", { name: "Allow local tools" })).toHaveAttribute(
+    expect(screen.getByRole("switch", { name: "Allow the plainsong command and MCP server" })).toHaveAttribute(
       "aria-checked",
       "false",
     );
@@ -1133,7 +1135,7 @@ describe("SettingsView performance behavior", () => {
     await screen.findByText(/Not installed\. Installing adds \/usr\/local\/bin\/plainsong/);
   });
 
-  it("persists the Local tools switch as automation.localToolsEnabled", async () => {
+  it("persists the command line and MCP switch as automation.localToolsEnabled", async () => {
     const backend = await import("@/lib/backend");
 
     render(
@@ -1145,7 +1147,7 @@ describe("SettingsView performance behavior", () => {
     await screen.findByText("How Plainsong listens, writes, and what it keeps.");
     vi.useFakeTimers();
 
-    fireEvent.click(screen.getByRole("switch", { name: "Allow local tools" }));
+    fireEvent.click(screen.getByRole("switch", { name: "Allow the plainsong command and MCP server" }));
 
     await act(async () => {
       await vi.advanceTimersByTimeAsync(400);
@@ -1983,5 +1985,145 @@ describe("SettingsView performance behavior", () => {
         /This model is English-only and cannot translate\./,
       ),
     ).toBeInTheDocument();
+  });
+});
+
+/**
+ * The lane U2 contract, asserted rather than promised.
+ *
+ * The complaint was "not being shown what something does". A label names a
+ * control; only the sentence under it says what happens to you. Wiring that
+ * sentence with `aria-describedby` makes it audible to a screen reader *and*
+ * checkable from here -- a control whose helper text someone deletes fails
+ * this test instead of shipping.
+ *
+ * Scope: switches and selects, which are the controls that change a stored
+ * setting. Read-only shortcut recorders and the API-key field are named by
+ * their own section's prose and are exempt. `AsrProviderManager` is mocked in
+ * this file, so the engine-status section is covered by
+ * `platform-optimization-settings.test.tsx` instead.
+ */
+describe("Settings copy clarity", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    electronEventListeners.clear();
+  });
+
+  const describedText = (element: Element): string => {
+    const ids = (element.getAttribute("aria-describedby") ?? "")
+      .split(/\s+/)
+      .filter(Boolean);
+    return ids
+      .map((id) => document.getElementById(id)?.textContent?.trim() ?? "")
+      .join(" ")
+      .trim();
+  };
+
+  const expectEveryControlExplained = (label: string) => {
+    const controls = [
+      ...screen.queryAllByRole("switch"),
+      ...screen.queryAllByRole("combobox"),
+    ];
+    expect(controls.length).toBeGreaterThan(0);
+    const unexplained = controls
+      .filter((control) => describedText(control).length === 0)
+      .map(
+        (control) =>
+          control.getAttribute("aria-label") ??
+          document.getElementById(
+            control.getAttribute("aria-labelledby") ?? "",
+          )?.textContent ??
+          control.outerHTML.slice(0, 120),
+      );
+    expect(
+      unexplained,
+      `${label}: every switch and select needs one sentence saying what it does`,
+    ).toEqual([]);
+  };
+
+  it("gives every switch and select on every tab a sentence of its own", async () => {
+    render(
+      <ToastProvider>
+        <SettingsView />
+      </ToastProvider>,
+    );
+
+    await screen.findByText("How Plainsong listens, writes, and what it keeps.");
+    expectEveryControlExplained("General");
+
+    fireEvent.click(screen.getByText("Transcription"));
+    await screen.findByText("Microphones");
+    expectEveryControlExplained("Transcription");
+
+    fireEvent.click(screen.getByText("Privacy & Security"));
+    await screen.findByText("macOS permissions");
+    expectEveryControlExplained("Privacy & Security");
+
+    fireEvent.click(screen.getByText("Storage"));
+    await screen.findByText("Backups");
+    expectEveryControlExplained("Storage");
+
+    fireEvent.click(screen.getByText("AI & Keys"));
+    await screen.findByText("API keys");
+    expectEveryControlExplained("AI & Keys");
+  });
+
+  /**
+   * Two switches wrote `privacy.remoteProcessingEnabled` -- one on Privacy &
+   * Security, one on AI & Keys -- with two different descriptions. A reader
+   * could not tell whether that was one consent or two. It has one home now,
+   * and AI & Keys reports its state and sends you there.
+   */
+  it("keeps the cloud-AI consent switch in exactly one place", async () => {
+    render(
+      <ToastProvider>
+        <SettingsView />
+      </ToastProvider>,
+    );
+
+    await screen.findByText("How Plainsong listens, writes, and what it keeps.");
+
+    fireEvent.click(screen.getByText("AI & Keys"));
+    await screen.findByText("API keys");
+    expect(
+      screen.queryByRole("switch", {
+        name: "Use cloud AI for summaries and answers",
+      }),
+    ).toBeNull();
+    expect(screen.getByText("Cloud AI is off")).toBeInTheDocument();
+    expect(
+      screen.getByRole("button", { name: /Open Privacy & Security/ }),
+    ).toBeInTheDocument();
+
+    fireEvent.click(screen.getByText("Privacy & Security"));
+    expect(
+      await screen.findByRole("switch", {
+        name: "Use cloud AI for summaries and answers",
+      }),
+    ).toBeInTheDocument();
+  });
+
+  /**
+   * The Storage copy has to name what auto-delete actually removes.
+   * `enforce_dictation_retention_policy` calls `delete_recording`, so the
+   * dictation's text goes with its audio -- and the same control also stands
+   * in Dictation, which the copy now says out loud.
+   */
+  it("says that dictation auto-delete takes the text, and that the control is shared", async () => {
+    render(
+      <ToastProvider>
+        <SettingsView />
+      </ToastProvider>,
+    );
+
+    await screen.findByText("How Plainsong listens, writes, and what it keeps.");
+    fireEvent.click(screen.getByText("Storage"));
+
+    const retention = await screen.findByRole("combobox", {
+      name: "Auto-delete dictation recordings",
+    });
+    const description = describedText(retention);
+    expect(description).toMatch(/the text in History/i);
+    expect(description).toMatch(/same setting appears in Dictation/i);
   });
 });

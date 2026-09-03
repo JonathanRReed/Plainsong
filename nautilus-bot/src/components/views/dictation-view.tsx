@@ -2568,7 +2568,7 @@ export function DictationView() {
         };
         await saveSettings(settings);
       } catch (error) {
-        console.warn("Failed to apply custom mode engine settings:", error);
+        console.warn("Failed to apply saved profile engine settings:", error);
         toast("Couldn't apply this mode's engine settings — check Settings.", "error");
       }
     })();
@@ -2641,7 +2641,7 @@ export function DictationView() {
       };
       await saveSettings(settings);
     } catch (error) {
-      console.warn("Failed to persist custom mode engine snapshot:", error);
+      console.warn("Failed to persist saved profile engine snapshot:", error);
       toast("Couldn't save this mode's engine settings — they may reset on restart.", "error");
     }
   };
@@ -5817,8 +5817,18 @@ export function DictationView() {
                     >
                       Auto-delete dictation recordings
                     </label>
+                    <p
+                      id="dictation-retention-description"
+                      className="text-sm text-muted-foreground"
+                    >
+                      Deletes the whole dictation once it is this old — the
+                      text in History and any audio kept for it. The same
+                      setting appears in Settings &rarr; Storage; changing it
+                      in either place changes both.
+                    </p>
                     <select
                       id="dictation-retention"
+                      aria-describedby="dictation-retention-description"
                       className="w-full rounded-md border bg-background p-2 text-sm"
                       value={dictationRetentionPreset}
                       onChange={(event) => {

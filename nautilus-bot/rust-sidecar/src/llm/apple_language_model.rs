@@ -426,7 +426,7 @@ pub fn supports_purpose(purpose: super::CompletionPurpose) -> bool {
     matches!(purpose, super::CompletionPurpose::Generic)
 }
 
-pub const MEETINGS_LANE_REFUSAL: &str = "The Apple on-device model only cleans up dictation; its 4,096-token window is too small for meeting summaries. Choose Ollama or a cloud provider for the meetings lane.";
+pub const MEETINGS_LANE_REFUSAL: &str = "The Apple on-device model only cleans up dictation; its 4,096-token window is too small for meeting summaries. Choose Ollama or a cloud service for the meetings lane.";
 
 #[async_trait::async_trait]
 impl super::transport::CompletionTransport for AppleLanguageModelClient {
