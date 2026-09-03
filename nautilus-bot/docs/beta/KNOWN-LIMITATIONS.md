@@ -168,6 +168,32 @@ using sensitive content.
   recorded anywhere. The saved file skips the gap and the transcript marks
   where it was. The transcript preview and both silence detectors stand
   still while paused, and the elapsed clock excludes paused time.
+- Remembered voices (Settings > General > Meetings) are off by default, and
+  what they can do is bounded in ways worth knowing before you turn them on.
+  The thresholds that decide whether two voices match were calibrated on
+  synthetic speech — six macOS `say` voices, six utterances each, no room, no
+  microphone, no crosstalk (the numbers are in
+  `artifacts/qa/voiceprint-calibration-2026-09-02.md`). Real meetings are
+  harder than that in every direction, so the measured accuracy is an upper
+  bound, not a promise about your Mac. Matching also assumes one voice per
+  speaker turn: where two people share a microphone, or talk over each other,
+  the signature Plainsong stores describes neither of them well. A voice
+  remembered under one speaker-separation model is never compared with
+  another, so changing the model in Settings > Transcription means later
+  meetings start over rather than matching against numbers from a different
+  system — the old voices are kept, not deleted, and become live again if you
+  change back. Nothing is matched from a calendar or an attendee list: a
+  suggestion always comes from the audio, and where a meeting has attendees
+  they only decide which of several suggestions is shown first, never which
+  voice matched. Suggestions for speakers you never named do not survive
+  quitting Plainsong: the signature behind them is only written once a speaker
+  has a name, so until then it is held in memory and goes when the app does.
+  Reopening such a meeting later shows the transcript exactly as it was, with
+  no chips, until you run speaker identification again. And a suggestion is an
+  offer —
+  Plainsong applies a name on its own only if you also turn on "Apply a
+  confident match without asking", and even then the transcript marks that
+  name "auto" until you confirm it, and a name you typed is never overwritten.
 - Notifications use macOS Notification Center. The first one Plainsong shows
   is what makes macOS ask whether to allow them; if you decline, none appear
   and the in-app surfaces carry the same information.

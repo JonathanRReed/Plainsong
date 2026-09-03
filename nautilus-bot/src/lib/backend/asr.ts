@@ -2,6 +2,8 @@ export {
   downloadAsrModels,
   downloadDiarizationModel,
   downloadSileroVadModel,
+  forgetAllRememberedVoices,
+  forgetRememberedVoice,
   getAsrProviderInventory,
   getAsrProviders,
   getSpeakers,
@@ -9,9 +11,17 @@ export {
   isSileroVadModelDownloaded,
   listDiarizationModels,
   listDownloadedModels,
+  listRememberedVoices,
   refreshAsrRuntimeProbes,
+  rejectSpeakerVoice,
+  rememberSpeakerVoice,
   renameSpeaker,
   repairLocalModelCache,
   runDiarization,
+  suggestSpeakerVoices,
 } from "../backend";
-export type { DiarizationModelOption, DownloadedModelFile } from "../backend";
+export type {
+  DiarizationModelOption,
+  DownloadedModelFile,
+  RememberedVoice,
+} from "../backend";

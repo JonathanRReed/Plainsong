@@ -128,6 +128,63 @@ stopped, transcript ready, notes ready or failed) or a one-line reason a
 dictation was not delivered. They never contain transcript text, notes, or
 dictated words.
 
+## Remembered voices (off by default)
+
+Plainsong can be told to remember a speaker's voice so the same person is
+recognized in later meetings. It is off until you turn it on in Settings >
+General > Meetings > Remembered voices, and while it is off **nothing about
+anyone's voice is stored** — speaker separation runs exactly as it does with
+the feature absent, and the database has no rows for it.
+
+**What is stored.** A *voice signature*: a list of a few hundred numbers that
+the speaker-separation model produces from the audio, averaged over the turns
+Plainsong has attributed to that person. It is not a recording and cannot be
+played back or turned into speech. A signature is only written for a speaker
+you name, or one Plainsong offers to name and you confirm — and, if you turn
+on "Apply a confident match without asking", for a speaker it names on its own,
+because a name on the transcript needs the numbers behind it to be confirmable
+later.
+
+**What is not stored.** The other speakers in the meeting. Offering a name
+needs their numbers too, so they are kept in memory while Plainsong is running
+and are never written down: no rows, no files, nothing to delete. Quitting
+forgets them. The visible cost is that reopening a meeting after a restart
+shows no suggestions for speakers nobody named, until speaker identification
+runs over it again.
+
+**Where it is stored.** In Plainsong's own database on this Mac
+(`plainsong.db`), alongside your transcripts. With the vault on it is
+encrypted with everything else. Two tables hold it — the remembered voices
+themselves, and up to 20 samples per voice that the stored average is computed
+from — plus one signature per *named* speaker on each meeting.
+
+**Where it is not.** It is excluded from every export. It is not readable by
+the `plainsong` command or its MCP server: the read-only interface those share
+has no method that returns it, and a test proves the name of a remembered
+voice reaches none of their output. It is never sent anywhere — voice matching
+is arithmetic on numbers already on this Mac, with no network of any kind, and
+is not affected by the remote-processing switch because nothing leaves.
+
+**Where it is included.** A local backup contains the whole database, so it
+contains the remembered voices too. Restoring a backup restores them.
+
+**How to delete it.** Settings > General > Meetings > Remembered voices lists
+every voice by name and offers "Forget" per voice and "Delete all". Deleting
+one removes its samples and unlinks it from every transcript; "Delete all"
+also clears the per-meeting signatures kept so a voice could be matched again.
+Speaker names already written into a transcript are yours and stay. Deleting a
+meeting removes that meeting's signatures but keeps the remembered voices, and
+Reset Everything removes all of it.
+
+**Accuracy, honestly.** Matching compares a stored signature with this
+meeting's, and requires both a high similarity and a clear gap over the
+next-best remembered voice — if two stored voices both look like this speaker,
+Plainsong says nothing rather than guessing. A signature is tied to the
+speaker-separation model that made it and is never compared across models. The
+thresholds were calibrated on synthetic speech (see
+`artifacts/qa/voiceprint-calibration-2026-09-02.md`), so treat them as an
+upper bound; `docs/beta/KNOWN-LIMITATIONS.md` says what that does not cover.
+
 ## The meeting consent notice
 
 Before a Meeting starts, Plainsong shows a short notice you can copy that

@@ -282,6 +282,16 @@ vi.mock("@/lib/backend", () => ({
   getMeetingTranscriptDetails: vi.fn(async () => ({})) as any,
   runDiarization: vi.fn() as any,
   renameSpeaker: vi.fn() as any,
+  suggestSpeakerVoices: vi.fn(async () => ({
+    enabled: false,
+    clusters: [],
+    nameOptions: [],
+  })) as any,
+  rememberSpeakerVoice: vi.fn(async () => ({
+    profileId: "p-dana",
+    displayName: "Dana",
+  })) as any,
+  rejectSpeakerVoice: vi.fn(async () => {}) as any,
   deleteRecording: vi.fn() as any,
   renameRecording: vi.fn() as any,
   retranscribeRecording: vi.fn() as any,
@@ -457,6 +467,16 @@ describe("RecordingsView", () => {
     });
     backend.getSpeakers.mockResolvedValue([]);
     backend.renameSpeaker.mockResolvedValue(undefined);
+    backend.suggestSpeakerVoices.mockResolvedValue({
+      enabled: false,
+      clusters: [],
+      nameOptions: [],
+    });
+    backend.rememberSpeakerVoice.mockResolvedValue({
+      profileId: "p-dana",
+      displayName: "Dana",
+    });
+    backend.rejectSpeakerVoice.mockResolvedValue(undefined);
     backend.editTranscriptSpeakerTurn.mockResolvedValue(undefined);
     backend.deleteRecording.mockResolvedValue(undefined);
     backend.searchTranscripts.mockResolvedValue([]);
@@ -3845,6 +3865,140 @@ describe("RecordingsView", () => {
         screen.queryByRole("button", { name: "Start capture" }),
       ).not.toBeInTheDocument();
       expect(screen.queryByText("Connect your calendar")).not.toBeInTheDocument();
+    });
+  });
+});
+
+describe("RecordingsView remembered voices", () => {
+  /**
+   * Renaming has to work on a meeting that was diarized before "Remember
+   * voices" was ever turned on. Such a meeting has no signature for any of its
+   * clusters, the sidecar refuses `rememberSpeakerVoice`, and taking the
+   * remember branch anyway made an ordinary rename impossible there.
+   */
+  it("falls back to a plain rename when the cluster has no voice signature", async () => {
+    backend.getSpeakers.mockResolvedValue([
+      { id: "speaker_0", name: "Speaker 1", color: "#000", sampleCount: 1 },
+    ]);
+    backend.suggestSpeakerVoices.mockResolvedValue({
+      enabled: true,
+      clusters: [],
+      nameOptions: [],
+    });
+
+    render(<RecordingsView />);
+    fireEvent.click(screen.getByText("Weekly sync"));
+    await screen.findByText("The record");
+    await waitFor(() => {
+      expect(transcriptViewerProps.current?.speakerVoices).toEqual({});
+    });
+
+    backend.renameSpeaker.mockClear();
+    backend.rememberSpeakerVoice.mockClear();
+
+    await act(async () => {
+      await transcriptViewerProps.current.onRenameSpeaker(
+        "speaker_0",
+        "Alice",
+        true,
+      );
+    });
+
+    expect(backend.rememberSpeakerVoice).not.toHaveBeenCalled();
+    expect(backend.renameSpeaker).toHaveBeenCalledWith("r1", "speaker_0", "Alice");
+    await waitFor(() => {
+      expect(transcriptViewerProps.current.speakerNames).toEqual({
+        speaker_0: "Alice",
+      });
+    });
+  });
+
+  it("remembers the voice when the cluster does have a signature", async () => {
+    backend.getSpeakers.mockResolvedValue([
+      { id: "speaker_0", name: "Speaker 1", color: "#000", sampleCount: 1 },
+    ]);
+    backend.suggestSpeakerVoices.mockResolvedValue({
+      enabled: true,
+      clusters: [
+        { speakerId: "speaker_0", appliedProfileId: null, matchState: null, suggestion: null },
+      ],
+      nameOptions: [],
+    });
+
+    render(<RecordingsView />);
+    fireEvent.click(screen.getByText("Weekly sync"));
+    await screen.findByText("The record");
+    await waitFor(() => {
+      expect(transcriptViewerProps.current?.speakerVoices).toHaveProperty("speaker_0");
+    });
+
+    // This suite does not reset call history between cases, and the fallback
+    // test above renames through the same mock.
+    backend.renameSpeaker.mockClear();
+    backend.rememberSpeakerVoice.mockClear();
+
+    await act(async () => {
+      await transcriptViewerProps.current.onRenameSpeaker(
+        "speaker_0",
+        "Dana",
+        true,
+      );
+    });
+
+    expect(backend.rememberSpeakerVoice).toHaveBeenCalledWith({
+      recordingId: "r1",
+      speakerId: "speaker_0",
+      name: "Dana",
+    });
+    expect(backend.renameSpeaker).not.toHaveBeenCalled();
+  });
+
+  /**
+   * "Delete all" in Settings used to leave the open transcript offering names
+   * for voices that no longer existed, because the suggestions were only
+   * re-asked when the selected meeting changed.
+   */
+  it("clears the chips on the open transcript when a remembered voice is forgotten", async () => {
+    backend.getSpeakers.mockResolvedValue([
+      { id: "speaker_0", name: "Speaker 1", color: "#000", sampleCount: 1 },
+    ]);
+    backend.suggestSpeakerVoices.mockResolvedValue({
+      enabled: true,
+      clusters: [
+        {
+          speakerId: "speaker_0",
+          appliedProfileId: null,
+          matchState: null,
+          suggestion: { profileId: "p-dana", displayName: "Dana", percent: 91 },
+        },
+      ],
+      nameOptions: ["Dana"],
+    });
+
+    render(<RecordingsView />);
+    fireEvent.click(screen.getByText("Weekly sync"));
+    await screen.findByText("The record");
+    await waitFor(() => {
+      expect(
+        transcriptViewerProps.current?.speakerVoices?.speaker_0?.suggestion,
+      ).toMatchObject({ displayName: "Dana" });
+    });
+
+    backend.suggestSpeakerVoices.mockResolvedValue({
+      enabled: true,
+      clusters: [],
+      nameOptions: [],
+    });
+
+    await act(async () => {
+      eventListeners.get("remembered-voices-changed")?.({
+        payload: { removed: 1 },
+      });
+    });
+
+    await waitFor(() => {
+      expect(transcriptViewerProps.current.speakerVoices).toEqual({});
+      expect(transcriptViewerProps.current.speakerNameOptions).toEqual([]);
     });
   });
 });

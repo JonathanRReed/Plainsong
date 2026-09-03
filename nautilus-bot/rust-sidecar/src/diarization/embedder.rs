@@ -25,6 +25,29 @@ use std::path::PathBuf;
 
 // Re-export Array1 for use in mod.rs
 
+// ── The segmentation everything downstream was measured at ───────────────
+//
+// Two callers must not drift: `diarize_real` produces the embeddings the
+// product compares, and the voiceprint calibration harness measures the same
+// object to pick the thresholds in `voiceprints.rs`. They were literals in
+// both places, which is exactly the kind of duplication that goes quietly
+// wrong — and it is not a harmless number. CAM++ separates speakers cleanly
+// at 2-second windows and not at all at 8-second ones, so changing these
+// invalidates every threshold in `voiceprints.rs` until they are re-measured.
+// Receipt: `artifacts/qa/voiceprint-calibration-2026-09-02.md`.
+
+/// Length of one embedding window, in seconds.
+pub const SEGMENT_SECONDS: f64 = 2.0;
+/// How much each window overlaps the previous one, in seconds — a 1-second
+/// hop at the 2-second window above.
+pub const SEGMENT_OVERLAP_SECONDS: f64 = 1.0;
+/// The shortest window worth embedding. The tail of a recording is clipped to
+/// what is left, and below this there is not enough voice to describe.
+pub const MIN_SEGMENT_SECONDS: f64 = 1.0;
+
+/// Sample rate every diarization window is resampled to before features.
+pub const EMBEDDING_SAMPLE_RATE: usize = 16000;
+
 /// Speaker embedding extractor using ONNX
 #[cfg(feature = "diarization")]
 pub struct SpeakerEmbeddingExtractor {
@@ -206,6 +229,32 @@ fn run_embedding_inference(session: &mut Session, samples: &[f32]) -> Result<Arr
         let num_frames = fbank_features.len() / 80;
         let input_shape = vec![1, num_frames, 80];
 
+        // The thresholds in `voiceprints.rs` were measured on tensors this
+        // shape, produced by the windows above. A window outside the verified
+        // range is a different object under the same name, and comparing it
+        // with a stored centroid would be arithmetic with no calibration
+        // behind it. A warning and a debug assertion rather than an error:
+        // this is a bug in a caller, and a meeting should not fail for it.
+        let verified = verified_fbank_frame_range();
+        if !verified.contains(&num_frames) {
+            tracing::warn!(
+                "Diarization window produced {} FBank frames, outside the verified {}-{} \
+                 (from {}-{}s windows). Voiceprint thresholds were not calibrated here.",
+                num_frames,
+                verified.start(),
+                verified.end(),
+                MIN_SEGMENT_SECONDS,
+                SEGMENT_SECONDS,
+            );
+        }
+        debug_assert!(
+            verified.contains(&num_frames),
+            "diarization window produced {num_frames} FBank frames, outside the verified \
+             {}-{}",
+            verified.start(),
+            verified.end(),
+        );
+
         tracing::debug!("Feeding FBank features: {} frames", num_frames);
 
         let input_array = ndarray::Array::from_shape_vec(IxDyn(&input_shape), fbank_features)
@@ -257,8 +306,8 @@ fn compute_fbank_features(
     num_mel_bins: usize,
 ) -> Result<Vec<f32>> {
     // Parameters for FBank extraction
-    let frame_size = 400; // 25ms at 16kHz
-    let frame_shift = 160; // 10ms at 16kHz
+    let frame_size = FBANK_FRAME_SIZE;
+    let frame_shift = FBANK_FRAME_SHIFT;
     let fft_size = 512;
 
     // Apply pre-emphasis
@@ -685,6 +734,38 @@ fn cosine_distance(a: &Array1<f32>, b: &Array1<f32>) -> f32 {
     (1.0 - similarity).max(0.0)
 }
 
+/// FBank analysis window, in samples: 25 ms at 16 kHz.
+#[cfg(feature = "diarization")]
+const FBANK_FRAME_SIZE: usize = 400;
+/// FBank hop, in samples: 10 ms at 16 kHz.
+#[cfg(feature = "diarization")]
+const FBANK_FRAME_SHIFT: usize = 160;
+
+/// How many FBank frames `compute_fbank_features` produces for `seconds` of
+/// audio at [`EMBEDDING_SAMPLE_RATE`].
+///
+/// Split out from the loop so the verified range below is derived from the
+/// segmentation constants rather than written down twice.
+#[cfg(feature = "diarization")]
+pub fn fbank_frames_for_seconds(seconds: f64) -> usize {
+    let samples = (seconds * EMBEDDING_SAMPLE_RATE as f64).round() as usize;
+    if samples < FBANK_FRAME_SIZE {
+        1
+    } else {
+        (samples - FBANK_FRAME_SIZE) / FBANK_FRAME_SHIFT + 1
+    }
+}
+
+/// The FBank frame counts the shipped segmentation can produce, inclusive.
+///
+/// Generic on purpose: every embedder in this build is fed the same windows,
+/// so the range is a property of the segmentation rather than of one model. A
+/// model-specific bound belongs beside the model.
+#[cfg(feature = "diarization")]
+pub fn verified_fbank_frame_range() -> std::ops::RangeInclusive<usize> {
+    fbank_frames_for_seconds(MIN_SEGMENT_SECONDS)..=fbank_frames_for_seconds(SEGMENT_SECONDS)
+}
+
 /// Generate overlapping segments for embedding extraction
 pub fn generate_segments(duration: f64, segment_duration: f64, overlap: f64) -> Vec<(f64, f64)> {
     let mut segments = Vec::new();
@@ -693,8 +774,7 @@ pub fn generate_segments(duration: f64, segment_duration: f64, overlap: f64) -> 
 
     while start < duration {
         let end = (start + segment_duration).min(duration);
-        if end - start >= 1.0 {
-            // Minimum 1 second
+        if end - start >= MIN_SEGMENT_SECONDS {
             segments.push((start, end));
         }
         start += step;
@@ -705,4 +785,46 @@ pub fn generate_segments(duration: f64, segment_duration: f64, overlap: f64) -> 
     }
 
     segments
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The two numbers the voiceprint thresholds were measured at. A change
+    /// here invalidates `artifacts/qa/voiceprint-calibration-2026-09-02.md`,
+    /// so it should fail a test rather than pass quietly.
+    #[test]
+    fn the_shipped_segmentation_is_two_second_windows_on_a_one_second_hop() {
+        assert_eq!(SEGMENT_SECONDS, 2.0);
+        assert_eq!(SEGMENT_OVERLAP_SECONDS, 1.0);
+        assert_eq!(MIN_SEGMENT_SECONDS, 1.0);
+        assert_eq!(EMBEDDING_SAMPLE_RATE, 16000);
+    }
+
+    #[test]
+    fn generate_segments_hops_by_the_shipped_step_and_drops_a_short_tail() {
+        let segments = generate_segments(5.5, SEGMENT_SECONDS, SEGMENT_OVERLAP_SECONDS);
+        assert_eq!(
+            segments,
+            vec![(0.0, 2.0), (1.0, 3.0), (2.0, 4.0), (3.0, 5.0), (4.0, 5.5)]
+        );
+        // 0.5 s of audio is below `MIN_SEGMENT_SECONDS`, so nothing is emitted.
+        assert!(generate_segments(0.5, SEGMENT_SECONDS, SEGMENT_OVERLAP_SECONDS).is_empty());
+    }
+
+    #[test]
+    fn the_verified_frame_range_matches_the_shipped_windows() {
+        // 1.0 s -> (16000 - 400) / 160 + 1 = 98 frames.
+        // 2.0 s -> (32000 - 400) / 160 + 1 = 198 frames.
+        assert_eq!(fbank_frames_for_seconds(MIN_SEGMENT_SECONDS), 98);
+        assert_eq!(fbank_frames_for_seconds(SEGMENT_SECONDS), 198);
+        let verified = verified_fbank_frame_range();
+        assert_eq!(verified, 98..=198);
+        assert!(verified.contains(&fbank_frames_for_seconds(1.5)));
+        assert!(
+            !verified.contains(&fbank_frames_for_seconds(8.0)),
+            "an 8-second window is outside what was calibrated"
+        );
+    }
 }

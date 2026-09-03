@@ -11,6 +11,8 @@ describe("resolveMeetingsSettings", () => {
       callDetectionEnabled: true,
       autoStopWhenCallAppQuits: true,
       autoStopAfterSilenceMinutes: 15,
+      rememberVoices: false,
+      autoApplyConfidentVoices: false,
     });
     expect(resolveMeetingsSettings({})).toEqual(resolveMeetingsSettings(undefined));
   });
@@ -22,12 +24,16 @@ describe("resolveMeetingsSettings", () => {
           callDetectionEnabled: false,
           autoStopWhenCallAppQuits: false,
           autoStopAfterSilenceMinutes: 0,
+          rememberVoices: true,
+          autoApplyConfidentVoices: true,
         },
       }),
     ).toEqual({
       callDetectionEnabled: false,
       autoStopWhenCallAppQuits: false,
       autoStopAfterSilenceMinutes: 0,
+      rememberVoices: true,
+      autoApplyConfidentVoices: true,
     });
     const partial = resolveMeetingsSettings({
       meetings: { autoStopAfterSilenceMinutes: 9_999 } as never,
@@ -44,6 +50,37 @@ describe("resolveMeetingsSettings", () => {
         meetings: { autoStopAfterSilenceMinutes: Number.NaN } as never,
       }).autoStopAfterSilenceMinutes,
     ).toBe(15);
+  });
+
+  // Voiceprints are opt-in, so a settings file written before they existed —
+  // every settings file on every machine today — must resolve to both off.
+  it("leaves voiceprints off for a settings file written before they existed", () => {
+    const resolved = resolveMeetingsSettings({
+      meetings: { callDetectionEnabled: true } as never,
+    });
+    expect(resolved.rememberVoices).toBe(false);
+    expect(resolved.autoApplyConfidentVoices).toBe(false);
+  });
+
+  // Mirrors `normalize_loaded_meetings_settings` in settings.rs: auto-apply
+  // refines remembering and cannot outlive it.
+  it("turns auto-apply off when remembering voices is off", () => {
+    expect(
+      resolveMeetingsSettings({
+        meetings: {
+          rememberVoices: false,
+          autoApplyConfidentVoices: true,
+        } as never,
+      }).autoApplyConfidentVoices,
+    ).toBe(false);
+    expect(
+      resolveMeetingsSettings({
+        meetings: {
+          rememberVoices: true,
+          autoApplyConfidentVoices: true,
+        } as never,
+      }).autoApplyConfidentVoices,
+    ).toBe(true);
   });
 });
 

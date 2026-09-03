@@ -13,6 +13,24 @@ changed underneath `0.9.0-beta.2`. See `LAUNCH.md` for which qualification
 evidence is stale and must be recaptured before this becomes a candidate.
 
 ### Added
+- Plainsong can remember a speaker's voice, on this Mac only, so the same
+  person is recognized in later meetings. Off by default (Settings › General ›
+  Meetings › Remembered voices). With it on, naming a speaker offers to
+  remember that voice, and a later meeting shows a chip in the speaker header
+  — "Looks like Dana, 91%" — with Confirm and Not them; confirming applies the
+  name through the usual rename path and folds that meeting into the stored
+  average. What is kept is a numeric voice signature, not audio: it cannot be
+  played back, it is excluded from exports and from the `plainsong` command
+  and its MCP server, it never leaves the machine, and it is included in a
+  local backup like the rest of the database. Settings lists every remembered
+  voice with per-voice delete and Delete all, both audit-logged. An optional
+  second switch applies a name without asking when the match clears a stricter
+  threshold; the transcript marks such a name "auto" until it is confirmed,
+  and a name you typed is never overwritten. Matching never crosses
+  speaker-separation models, and refuses when two remembered voices are too
+  close to tell apart. Thresholds are per model and calibrated against
+  synthetic fixtures at a zero-false-accept operating point —
+  `artifacts/qa/voiceprint-calibration-2026-09-02.md`.
 - Dictation history is searchable, and a saved dictation can be run through
   the recognizer again. The search field over Recent dictations matches both
   what was delivered and (where it was kept) what the recognizer heard,
@@ -384,6 +402,32 @@ evidence is stale and must be recaptured before this becomes a candidate.
   files that still carry it load cleanly and are rewritten without it.
 
 ### Fixed
+- Remembered voices now store what Settings says they store. A per-meeting
+  voice signature is written only for a speaker who is given a name — by you,
+  or by "Apply a confident match without asking" — instead of for every
+  speaker in the room. Other speakers' numbers are held in memory while
+  Plainsong is open and never written down, so an unnamed voice leaves nothing
+  behind; the visible cost, now documented, is that reopening a meeting after
+  a restart offers no suggestions for speakers nobody named until speaker
+  identification runs again.
+- Renaming a speaker works again on meetings recorded before "Remember voices"
+  was turned on. The rename editor offered to remember a voice Plainsong had
+  no signature for, defaulted that offer to on, and the save was then refused
+  outright — so an ordinary rename failed. The offer now appears only where
+  there is a signature, and asking to remember one that does not exist falls
+  back to a plain rename.
+- Typing a speaker's name over one Plainsong applied by itself now clears the
+  "auto" marker and unlinks the remembered voice it replaced, instead of
+  leaving the transcript claiming a name you just corrected came from a voice
+  match.
+- Dismissing a suggestion with "Not them" is remembered for speakers you have
+  not named. It previously did nothing at all for them, so the same wrong
+  suggestion came back on every visit.
+- "Delete all" under Remembered voices now clears the suggestion chips on the
+  meeting you have open, instead of leaving them offering names for voices
+  that no longer exist until you navigate away and back.
+- "Not them" is refused while "Remember voices" is off, like every other write
+  the feature makes. It wrote to the voiceprint columns with the switch off.
 - The diarization model chosen in Settings is now the one the automatic
   post-meeting speaker pass uses. It previously always ran ECAPA-TDNN no
   matter what the picker said; only the explicit "identify speakers" action

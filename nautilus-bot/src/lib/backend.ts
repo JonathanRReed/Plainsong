@@ -1367,6 +1367,79 @@ export interface DiarizationModelOption {
   installed: boolean;
 }
 
+/** A remembered voice, as Settings lists it. Never carries the signature itself. */
+export interface RememberedVoice {
+  id: string;
+  displayName: string;
+  embeddingModelId: string;
+  sampleCount: number;
+  createdAt: string;
+  updatedAt: string;
+}
+
+/** What one speaker cluster's header should offer. */
+export interface SpeakerVoiceCluster {
+  speakerId: string;
+  appliedProfileId: string | null;
+  /** "auto" while Plainsong applied the name unasked, "confirmed" once agreed. */
+  matchState: "auto" | "confirmed" | null;
+  suggestion: {
+    profileId: string;
+    displayName: string;
+    percent: number;
+    confident: boolean;
+  } | null;
+}
+
+export interface SpeakerVoiceSuggestions {
+  /** False when "Remember voices" is off; the UI shows nothing rather than an error. */
+  enabled: boolean;
+  clusters: SpeakerVoiceCluster[];
+  /** Names offered in Confirm, attendees first where a meeting has them. */
+  nameOptions: string[];
+}
+
+export async function suggestSpeakerVoices(
+  recordingId: string,
+): Promise<SpeakerVoiceSuggestions> {
+  return await invoke("suggest_speaker_voices", { recordingId });
+}
+
+/**
+ * Remember one cluster's voice under a name, and put that name on the speaker.
+ *
+ * Pass `profileId` to confirm an existing suggestion (the stored voice decides
+ * the name), or `name` to remember a new one from the rename flow.
+ */
+export async function rememberSpeakerVoice(args: {
+  recordingId: string;
+  speakerId: string;
+  profileId?: string;
+  name?: string;
+}): Promise<{ profileId: string; displayName: string }> {
+  return await invoke("remember_speaker_voice", args);
+}
+
+export async function rejectSpeakerVoice(
+  recordingId: string,
+  speakerId: string,
+  profileId: string,
+): Promise<void> {
+  await invoke("reject_speaker_voice", { recordingId, speakerId, profileId });
+}
+
+export async function listRememberedVoices(): Promise<RememberedVoice[]> {
+  return await invoke("list_remembered_voices");
+}
+
+export async function forgetRememberedVoice(profileId: string): Promise<boolean> {
+  return await invoke("forget_remembered_voice", { profileId });
+}
+
+export async function forgetAllRememberedVoices(): Promise<number> {
+  return await invoke("forget_all_remembered_voices");
+}
+
 export async function listDiarizationModels(): Promise<DiarizationModelOption[]> {
   return await invoke("list_diarization_models");
 }
