@@ -17,7 +17,7 @@ import type {
   MeetingTranscriptDetails,
   AppleSpeechLanguageInstallResult,
 } from "@/types";
-import type { Settings } from "@/types/settings";
+import type { OnboardingSettings, Settings } from "@/types/settings";
 import type { MeetingAttendee } from "@/lib/attendees";
 import type { DictationBindingIssue } from "../../electron/dictation-bindings";
 
@@ -1258,13 +1258,25 @@ export async function verifySystemAudioSetup(): Promise<SetupVerificationResult>
   return await invoke("verify_system_audio_setup");
 }
 
+/**
+ * The System Settings panes Plainsong can send someone straight to.
+ *
+ * Calendar is deliberately absent: it has its own gesture-gated command
+ * (`openCalendarPrivacySettings`), because this helper falls back to the
+ * Accessibility pane for a section it does not know, and sending someone
+ * looking for the Calendars switch to the Accessibility list is worse than
+ * offering no button at all.
+ */
+export type PermissionSettingsSection =
+  | "microphone"
+  | "speech"
+  | "accessibility"
+  | "automation"
+  | "system_audio"
+  | "notifications";
+
 export async function openPermissionSettings(
-  section:
-    | "microphone"
-    | "speech"
-    | "accessibility"
-    | "automation"
-    | "system_audio"
+  section: PermissionSettingsSection
 ): Promise<void> {
   await invoke("open_permission_settings", { section });
 }
@@ -1644,6 +1656,40 @@ export async function resetAppState(): Promise<ResetAppStateResult> {
 
 export async function saveSettings(settings: Settings): Promise<void> {
   await invoke("save_settings", { settings });
+}
+
+/** What happened to first-run setup. The sidecar supplies everything else. */
+export type OnboardingStateEvent =
+  /** The wizard finished. */
+  | "completed"
+  /** The meetings half of setup finished, without the rest of the wizard. */
+  | "meetings_completed"
+  /** The reader closed the wizard with setup still incomplete. */
+  | "deferred"
+  /**
+   * The retired renderer flag was adopted as a real record, after the
+   * gate satisfied itself the app actually works on this Mac.
+   */
+  | "migrated";
+
+/**
+ * Write this install's first-run record into settings.json.
+ *
+ * The renderer names the event and nothing else: the clock, the app version
+ * and the observed macOS grants are all read by the sidecar. A record the
+ * renderer could fill in would be worth exactly as much as the localStorage
+ * boolean it replaces. Returns the record as stored.
+ */
+export async function recordOnboardingState(request: {
+  event: OnboardingStateEvent;
+  meetingsCompleted?: boolean;
+  unmet?: string[];
+}): Promise<OnboardingSettings> {
+  return await invoke("record_onboarding_state", {
+    event: request.event,
+    meetingsCompleted: request.meetingsCompleted === true,
+    unmet: request.unmet ?? [],
+  });
 }
 
 export async function hasProviderSecret(provider: string): Promise<boolean> {

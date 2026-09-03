@@ -35,6 +35,60 @@ export interface Settings {
    * this section existed loads: absent, then defaulted.
    */
   ai?: AiSettings;
+  /**
+   * What this install recorded about first-run setup. Written only by the
+   * sidecar (`recordOnboardingState`); a renderer save never carries it back,
+   * and the sidecar preserves its own copy across every `save_settings`.
+   *
+   * Optional on the wire because a settings.json written before the section
+   * existed simply has no `onboarding` key — which is every settings.json
+   * written before the section existed.
+   */
+  onboarding?: OnboardingSettings;
+}
+
+/**
+ * The durable answer to "has this install been set up", replacing the
+ * `nautilus_onboarding_complete` boolean that used to live in the renderer's
+ * localStorage. Mirrors `OnboardingSettings` in rust-sidecar/src/settings.rs.
+ *
+ * It records what happened; it does not decide anything. Whether to show the
+ * first-run wizard is decided by `src/features/onboarding/onboarding-gate.ts`
+ * from what the app can actually do right now.
+ */
+export interface OnboardingSettings {
+  /** RFC 3339 UTC. Null/absent means this install never finished the wizard. */
+  completedAt?: string | null;
+  /**
+   * The Plainsong version that wrote `completedAt`, or
+   * `"legacy-local-storage"` for a record adopted from the retired
+   * renderer flag.
+   */
+  completedVersion?: string | null;
+  /** RFC 3339 UTC, set when the meetings half of setup was finished. */
+  meetingsCompletedAt?: string | null;
+  /** The macOS grants Plainsong could see when setup finished. */
+  grantedAtCompletion?: OnboardingGrants;
+  /** RFC 3339 UTC, set when the reader closed the wizard with setup unfinished. */
+  deferredAt?: string | null;
+  /**
+   * The requirement ids that were unmet at that moment
+   * (`OnboardingRequirementId`). The gate stays quiet while the unmet set is a
+   * subset of this one and speaks up again when something new breaks.
+   */
+  deferredUnmet?: string[];
+}
+
+/**
+ * One reading of the macOS grants, taken by the sidecar itself. Every field is
+ * a tri-state: absent/null is "not observed", which is not "denied".
+ */
+export interface OnboardingGrants {
+  microphone?: boolean | null;
+  accessibility?: boolean | null;
+  postEvent?: boolean | null;
+  speechRecognition?: boolean | null;
+  systemAudio?: boolean | null;
 }
 
 /**

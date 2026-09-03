@@ -52,6 +52,7 @@
     "qa:asr:preflight": "node scripts/provision-asr-assets.mjs --validate-only --allow-missing-secrets --required-providers whisper,parakeet_tdt_v3,distil_whisper --out artifacts/asr-preflight-macos.json",
     "qa:packaged:macos:smoke": "node scripts/capture-packaged-macos-smoke.mjs",
     "qa:packaged:macos:onboarding": "node scripts/capture-packaged-macos-onboarding-settings.mjs",
+    "qa:packaged:macos:onboarding-first-run": "node scripts/capture-packaged-macos-onboarding-first-run.mjs",
     "qa:packaged:macos:backup": "node scripts/capture-packaged-macos-backup-restore.mjs",
     "qa:packaged:macos:whisper": "node scripts/capture-packaged-macos-whisper-transcription.mjs",
     "qa:packaged:macos:ollama": "node scripts/capture-packaged-macos-ollama-analysis.mjs",

@@ -146,7 +146,11 @@ import {
   type DictationBindingTrigger,
 } from "../../../electron/dictation-bindings";
 import { findConflictingShortcuts } from "../../../electron/shortcut-registration";
-import { ONBOARDING_STORAGE_KEY, requestOnboarding } from "@/lib/onboarding";
+import {
+  MEETING_ONBOARDING_STORAGE_KEY,
+  ONBOARDING_STORAGE_KEY,
+  requestOnboarding,
+} from "@/lib/onboarding";
 import {
   consumePendingSettingsTab,
   OPEN_SETTINGS_TAB_EVENT,
@@ -792,7 +796,16 @@ export function SettingsView() {
     setError(null);
     try {
       const result = await resetAppState();
-      localStorage.removeItem(ONBOARDING_STORAGE_KEY);
+      // The reset already puts settings back to defaults, and the first-run
+      // record lives there now, so the install comes back genuinely unset up.
+      // The retired renderer flags are cleared too, in case this profile still
+      // carries a pair written before the record existed.
+      try {
+        localStorage.removeItem(ONBOARDING_STORAGE_KEY);
+        localStorage.removeItem(MEETING_ONBOARDING_STORAGE_KEY);
+      } catch {
+        // Nothing reads them any more.
+      }
       toast(
         `Reset complete. Removed ${result.deletedRecordings} recordings and deleted ${result.deletedAudioFiles} audio files.`,
         "success",
@@ -5134,7 +5147,10 @@ export function SettingsView() {
                         <p className="section-heading">Setup</p>
                         <p className="text-sm text-muted-foreground">
                           Walk through permissions, models, and meeting
-                          capture again.
+                          capture again. Plainsong also opens this on its own
+                          when dictation cannot run — a revoked permission, a
+                          deleted model — whether or not you have been through
+                          it before.
                         </p>
                       </div>
                       <div className="flex flex-wrap gap-2">
@@ -5148,7 +5164,7 @@ export function SettingsView() {
                           variant="outline"
                           onClick={() => requestOnboarding("full")}
                         >
-                          Rerun onboarding
+                          Show setup again
                         </Button>
                         <Button
                           variant="outline"

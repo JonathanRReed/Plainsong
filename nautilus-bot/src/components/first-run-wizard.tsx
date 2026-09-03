@@ -1,6 +1,8 @@
 import { useCallback, useEffect, useId, useMemo, useRef, useState, type KeyboardEvent, type ReactNode } from "react";
 import {
+  Bell,
   Brain,
+  CalendarDays,
   CheckCircle2,
   ChevronRight,
   Download,
@@ -10,6 +12,7 @@ import {
   Shield,
   ShieldCheck,
   Users,
+  Volume2,
   XCircle,
 } from "lucide-react";
 import {
@@ -22,12 +25,24 @@ import {
   getSettings,
   openInstalledPlainsongApp,
   openPermissionSettings,
+  recordOnboardingState,
   requestDictationPermissions,
   saveSettings,
   verifyMeetingSetup,
   type PermissionDiagnostics,
   type SetupVerificationResult,
 } from "@/lib/backend/settings";
+import {
+  getCalendarSnapshot,
+  openCalendarPrivacySettings,
+} from "@/lib/backend/calendar";
+import type { CalendarAuthorization } from "@/lib/calendar-events";
+import {
+  PERMISSION_GATES,
+  type PermissionGate,
+  type PermissionGateKey,
+  type PermissionGateObservations,
+} from "@/features/onboarding/permission-gates";
 import {
   getSystemAudioCapability,
   testSystemAudioCapture,
@@ -52,7 +67,7 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Progress } from "@/components/ui/progress";
 import type { AsrProviderInfo, AsrProviderType } from "@/types";
-import { MEETING_ONBOARDING_STORAGE_KEY, type OnboardingMode } from "@/lib/onboarding";
+import { type OnboardingMode } from "@/lib/onboarding";
 import { readAiNotesOptOut, writeAiNotesOptOut } from "@/lib/ai-notes-preference";
 import { getOllamaStatus } from "@/lib/backend/ai";
 import {
@@ -64,7 +79,16 @@ import { findConflictingShortcuts } from "../../electron/shortcut-registration";
 
 type Props = {
   mode?: OnboardingMode;
-  onComplete(result?: { markOnboardingComplete?: boolean; meetingsCompleted?: boolean }): void;
+  onComplete(result?: {
+    markOnboardingComplete?: boolean;
+    meetingsCompleted?: boolean;
+    /**
+     * The reader closed the wizard with setup unfinished. Recorded durably so
+     * "Skip setup for now" suppresses exactly what they declined, and nothing
+     * else -- see features/onboarding/onboarding-gate.ts.
+     */
+    deferred?: boolean;
+  }): void;
 };
 
 type Step =
@@ -133,68 +157,27 @@ const POWER_MODEL_OPTIONS: Array<{
   },
 ];
 
-type PermissionGate = {
-  key: string;
-  label: string;
-  purpose: string;
-  section: "microphone" | "speech" | "accessibility" | "automation";
-  settingsLabel: string;
-  // Optional gates are shown with a neutral (not red/urgent) indicator and
-  // don't imply setup is broken when ungranted -- the app's default route
-  // doesn't need them.
-  optional?: boolean;
-  ready(perms: PermissionDiagnostics | null): boolean | undefined;
-};
-
-// Sequential, purpose-labeled gates: microphone first, then the speech and
-// cursor-control grants. Each row states *why* the grant is needed so the
-// request reads as a purpose, not a demand.
-const PERMISSION_GATES: PermissionGate[] = [
-  {
-    key: "microphone",
-    label: "Microphone",
-    purpose: "So Plainsong can hear what you say out loud.",
-    section: "microphone",
-    settingsLabel: "Microphone",
-    ready: (perms) => perms?.microphonePermissionReady ?? perms?.microphoneReady,
-  },
-  {
-    key: "speech",
-    label: "Speech recognition",
-    purpose:
-      "Optional -- only needed when you explicitly choose Apple Speech for on-device dictation. macOS transcribes on this Mac; the permission records your consent to that, not permission to use a server. Plainsong never uses this route as a fallback.",
-    section: "speech",
-    settingsLabel: "Speech Recognition",
-    optional: true,
-    ready: (perms) => perms?.speechRecognitionReady,
-  },
-  {
-    key: "accessibility",
-    label: "Accessibility",
-    purpose: "So Plainsong can insert your spoken words into other apps.",
-    section: "accessibility",
-    settingsLabel: "Accessibility",
-    ready: (perms) => perms?.accessibilityReady,
-  },
-  {
-    key: "automation",
-    label: "Keyboard fallback",
-    purpose: "So Plainsong can type words in when direct insertion is unavailable.",
-    // The capability this row describes is actually tracked by postEventReady
-    // (CGPreflightPostEventAccess), which is granted from the same macOS
-    // Accessibility pane as the row above -- not a separate "Automation"
-    // pane, which governs unrelated inter-app scripting permissions.
-    section: "accessibility",
-    settingsLabel: "Accessibility",
-    ready: (perms) => perms?.postEventReady,
-  },
-];
+// The rows themselves live in features/onboarding/permission-gates.ts, with
+// the sentence each one owes the reader: what Plainsong does with the grant,
+// and what stops working without it.
+/**
+ * The two grants the "Use it everywhere" step is about: inserting at the
+ * cursor, and typing when insertion is refused. Same definitions, same
+ * sentences as the permissions step -- a reader who reads a row twice should
+ * read the same thing twice.
+ */
+const CURSOR_INSERTION_GATES = PERMISSION_GATES.filter(
+  (gate) => gate.key === "accessibility" || gate.key === "keyboard_fallback",
+);
 
 const PERMISSION_GATE_ICONS: Record<string, ReactNode> = {
   microphone: <Mic className="h-4 w-4" />,
-  speech: <Brain className="h-4 w-4" />,
   accessibility: <ShieldCheck className="h-4 w-4" />,
-  automation: <Shield className="h-4 w-4" />,
+  keyboard_fallback: <Shield className="h-4 w-4" />,
+  system_audio: <Volume2 className="h-4 w-4" />,
+  speech: <Brain className="h-4 w-4" />,
+  calendar: <CalendarDays className="h-4 w-4" />,
+  notifications: <Bell className="h-4 w-4" />,
 };
 
 const STEP_LABELS: Record<Step, string> = {
@@ -382,6 +365,12 @@ export function FirstRunWizard({ mode = "full", onComplete }: Props) {
   const [permissionRequestError, setPermissionRequestError] = useState<string | null>(null);
   const [permissionRequestStatus, setPermissionRequestStatus] = useState<string | null>(null);
   const [permissionRevocation, setPermissionRevocation] = useState<string | null>(null);
+  // The two grants that are not in PermissionDiagnostics. Both stay null until
+  // their probe answers, and null renders as "not checked", never as "denied".
+  const [permissionSystemAudio, setPermissionSystemAudio] =
+    useState<SystemAudioCapability | null>(null);
+  const [calendarAuthorization, setCalendarAuthorization] =
+    useState<CalendarAuthorization | null>(null);
   const [autoRequestPermissions, setAutoRequestPermissions] = useState(true);
   const permRowRefs = useRef<Record<string, HTMLDivElement | null>>({});
 
@@ -585,11 +574,26 @@ export function FirstRunWizard({ mode = "full", onComplete }: Props) {
     };
   }, []);
 
+  /**
+   * Re-read every grant the permissions step shows.
+   *
+   * All three probes are preflight reads: none of them can raise a macOS
+   * prompt, so this is safe to run on a timer or a focus change. A probe that
+   * throws leaves its row unknown rather than turning it into a denial.
+   */
   const refreshPerms = useCallback(async () => {
     setPermsLoading(true);
     try {
-      const result = await getPermissionDiagnostics();
+      const [result, systemAudio, calendar] = await Promise.all([
+        getPermissionDiagnostics(),
+        getSystemAudioCapability().catch(() => null),
+        getCalendarSnapshot()
+          .then((snapshot) => snapshot.authorization)
+          .catch(() => null),
+      ]);
       setPerms(result);
+      setPermissionSystemAudio(systemAudio);
+      setCalendarAuthorization(calendar);
       return result;
     } catch {
       return null;
@@ -598,15 +602,36 @@ export function FirstRunWizard({ mode = "full", onComplete }: Props) {
     }
   }, []);
 
+  const permissionStepVisible =
+    step === "permissions" || step === "try-dictation" || step === "use-everywhere";
+
   useEffect(() => {
-    if (
-      step === "permissions" ||
-      step === "try-dictation" ||
-      step === "use-everywhere"
-    ) {
+    if (permissionStepVisible) {
       void refreshPerms();
     }
-  }, [refreshPerms, step]);
+  }, [permissionStepVisible, refreshPerms]);
+
+  // Granting happens in System Settings, in another window. Without this the
+  // row the reader just switched on stays rust until they find the Re-check
+  // button -- which is exactly the moment someone concludes the app is broken.
+  useEffect(() => {
+    if (!permissionStepVisible) {
+      return;
+    }
+    const handleFocus = () => {
+      void refreshPerms();
+    };
+    window.addEventListener("focus", handleFocus);
+    return () => {
+      window.removeEventListener("focus", handleFocus);
+    };
+  }, [permissionStepVisible, refreshPerms]);
+
+  const permissionObservations: PermissionGateObservations = {
+    permissions: perms,
+    systemAudio: permissionSystemAudio,
+    calendarAuthorization,
+  };
 
   const focusPermissionCard = useCallback((gateKey: string) => {
     const card = permRowRefs.current[gateKey];
@@ -627,19 +652,24 @@ export function FirstRunWizard({ mode = "full", onComplete }: Props) {
       setPermissionRevocation(null);
       return true;
     }
+    // Only the two diagnostics-backed required rows can regress between one
+    // render and the next here; the optional grants never block Continue.
     const revoked = PERMISSION_GATES.find(
-      (gate) => !gate.optional && gate.ready(previous) === true && gate.ready(fresh) !== true
+      (gate) =>
+        !gate.optional &&
+        gate.ready({ ...permissionObservations, permissions: previous }) === true &&
+        gate.ready({ ...permissionObservations, permissions: fresh }) !== true,
     );
     if (!revoked) {
       setPermissionRevocation(null);
       return true;
     }
-    const message = `${revoked.label} access was turned off again. ${revoked.purpose} Re-grant it to continue.`;
+    const message = `${revoked.label} was turned off again. ${revoked.consequence} Re-grant it to continue.`;
     setPermissionRevocation(message);
     setPermissionRequestStatus(null);
     requestAnimationFrame(() => focusPermissionCard(revoked.key));
     return false;
-  }, [focusPermissionCard, perms, refreshPerms]);
+  }, [focusPermissionCard, permissionObservations, perms, refreshPerms]);
 
   const refreshMeetingSetup = useCallback(async () => {
     setMeetingSetupLoading(true);
@@ -739,18 +769,50 @@ export function FirstRunWizard({ mode = "full", onComplete }: Props) {
     }
   }, []);
 
+  /**
+   * Open the exact System Settings pane a row is about.
+   *
+   * Calendar takes its own route: `open_permission_settings` falls back to the
+   * Accessibility pane for a section it does not know, and dropping someone
+   * looking for the Calendars switch into the Accessibility list is worse than
+   * offering no button at all.
+   */
   const openPermissionSettingsFromWizard = useCallback(
-    async (section: "microphone" | "speech" | "accessibility" | "automation", label: string) => {
+    async (gate: PermissionGate) => {
       setPermissionRequestError(null);
       setPermissionRequestStatus(null);
       try {
-        await openPermissionSettings(section);
-        setPermissionRequestStatus(`Opened macOS ${label} settings.`);
+        if (gate.destination.kind === "calendar_pane") {
+          await openCalendarPrivacySettings();
+        } else {
+          await openPermissionSettings(gate.destination.section);
+        }
+        setPermissionRequestStatus(
+          `Opened macOS ${gate.settingsLabel} settings. Plainsong re-checks when you come back.`,
+        );
       } catch (error) {
         setPermissionRequestError(error instanceof Error ? error.message : String(error));
       }
     },
     []
+  );
+
+  const openGateSettingsByKey = useCallback(
+    async (key: PermissionGateKey) => {
+      const gate = PERMISSION_GATES.find((candidate) => candidate.key === key);
+      if (gate) {
+        await openPermissionSettingsFromWizard(gate);
+      }
+    },
+    [openPermissionSettingsFromWizard],
+  );
+  const openMicrophoneSettingsFromWizard = useCallback(
+    () => openGateSettingsByKey("microphone"),
+    [openGateSettingsByKey],
+  );
+  const openAccessibilitySettingsFromWizard = useCallback(
+    () => openGateSettingsByKey("accessibility"),
+    [openGateSettingsByKey],
   );
 
   const openInstalledAppFromWizard = useCallback(async () => {
@@ -1109,11 +1171,14 @@ export function FirstRunWizard({ mode = "full", onComplete }: Props) {
       settings.transcription.meetingRetentionCustomMonths = Math.max(1, meetingRetentionCustomMonths);
       settings.transcription.meetingRetentionDeleteMode = meetingRetentionDeleteMode;
       await saveSettings(settings);
-      try {
-        localStorage.setItem(MEETING_ONBOARDING_STORAGE_KEY, "true");
-      } catch {
-        // The saved settings are authoritative if browser storage is unavailable.
-      }
+      // Replaces the write-only `nautilus_meeting_onboarding_complete` flag,
+      // which lived in a localStorage nothing ever read back and which every
+      // development build shared with the packaged app.
+      await recordOnboardingState({ event: "meetings_completed" }).catch((error) => {
+        // The meeting settings above are what actually matter here; a lost
+        // stamp costs a repeat of this step, not a wrong configuration.
+        console.warn("[onboarding] could not record the meetings setup stamp:", error);
+      });
       return true;
     } catch (error) {
       setSaveError(error instanceof Error ? error.message : String(error));
@@ -1130,11 +1195,16 @@ export function FirstRunWizard({ mode = "full", onComplete }: Props) {
   ]);
 
   const completeWizard = useCallback(
-    (result?: { markOnboardingComplete?: boolean; meetingsCompleted?: boolean }) => {
+    (result?: {
+      markOnboardingComplete?: boolean;
+      meetingsCompleted?: boolean;
+      deferred?: boolean;
+    }) => {
       const markOnboardingComplete = result?.markOnboardingComplete ?? mode === "full";
       onComplete({
         markOnboardingComplete,
         meetingsCompleted: result?.meetingsCompleted ?? false,
+        deferred: result?.deferred ?? false,
       });
     },
     [mode, onComplete]
@@ -1306,7 +1376,7 @@ export function FirstRunWizard({ mode = "full", onComplete }: Props) {
             onRefreshPermissions={() => void refreshPerms()}
             onRequestPermissions={() => void requestPermissionsNow()}
             onOpenMicrophoneSettings={() =>
-              void openPermissionSettingsFromWizard("microphone", "Microphone")
+              void openMicrophoneSettingsFromWizard()
             }
             permissionRequestBusy={permissionRequestBusy}
             permissionRequestError={permissionRequestError}
@@ -1329,10 +1399,7 @@ export function FirstRunWizard({ mode = "full", onComplete }: Props) {
             permsLoading={permsLoading}
             onRefreshPermissions={() => void refreshPerms()}
             onOpenAccessibilitySettings={() =>
-              void openPermissionSettingsFromWizard(
-                "accessibility",
-                "Accessibility"
-              )
+              void openAccessibilitySettingsFromWizard()
             }
             displayShortcut={displayShortcut}
             onShortcutChange={setShortcutValue}
@@ -1365,13 +1432,14 @@ export function FirstRunWizard({ mode = "full", onComplete }: Props) {
         {step === "permissions" ? (
           <PermissionsStep
             perms={perms}
+            observations={permissionObservations}
             loading={permsLoading}
             onRefresh={() => void refreshPerms()}
             autoRequestPermissions={autoRequestPermissions}
             onAutoRequestPermissionsChange={setAutoRequestPermissions}
             onRequestNow={() => void requestPermissionsNow()}
-            onOpenPermissionSettings={(section, label) =>
-              void openPermissionSettingsFromWizard(section, label)
+            onOpenPermissionSettings={(gate) =>
+              void openPermissionSettingsFromWizard(gate)
             }
             onOpenInstalledApp={() => void openInstalledAppFromWizard()}
             requestBusy={permissionRequestBusy}
@@ -1492,7 +1560,15 @@ export function FirstRunWizard({ mode = "full", onComplete }: Props) {
                 <Button
                   variant="ghost"
                   onClick={() =>
-                  completeWizard({ markOnboardingComplete: true, meetingsCompleted: false })
+                    // Not a completion. Recorded as a deferral against exactly
+                    // what is unmet right now, so this stays quiet until
+                    // something else breaks -- and Settings > General > Setup
+                    // still reopens it on demand.
+                    completeWizard({
+                      markOnboardingComplete: false,
+                      meetingsCompleted: false,
+                      deferred: true,
+                    })
                   }
                   className="text-muted-foreground"
                   disabled={
@@ -1790,26 +1866,22 @@ function UseEverywhereStep({
       </p>
 
       <div className="space-y-3">
-        <PermRow
-          order={1}
-          label="Accessibility"
-          purpose="Lets Plainsong insert finished words at your cursor."
-          icon={<ShieldCheck className="h-4 w-4" />}
-          ready={perms?.accessibilityReady}
-          loading={permsLoading}
-          onFix={onOpenAccessibilitySettings}
-          registerRef={() => {}}
-        />
-        <PermRow
-          order={2}
-          label="Keyboard fallback"
-          purpose="Lets Plainsong type when direct insertion is unavailable."
-          icon={<Shield className="h-4 w-4" />}
-          ready={perms?.postEventReady}
-          loading={permsLoading}
-          onFix={onOpenAccessibilitySettings}
-          registerRef={() => {}}
-        />
+        {CURSOR_INSERTION_GATES.map((gate, index) => (
+          <PermRow
+            key={gate.key}
+            order={index + 1}
+            gate={gate}
+            icon={PERMISSION_GATE_ICONS[gate.key]}
+            ready={gate.ready({
+              permissions: perms,
+              systemAudio: null,
+              calendarAuthorization: null,
+            })}
+            loading={permsLoading}
+            onFix={onOpenAccessibilitySettings}
+            registerRef={() => {}}
+          />
+        ))}
       </div>
 
       <Button
@@ -2011,6 +2083,7 @@ function ReadyStep({
 
 function PermissionsStep({
   perms,
+  observations,
   loading,
   onRefresh,
   autoRequestPermissions,
@@ -2025,15 +2098,13 @@ function PermissionsStep({
   registerCardRef,
 }: {
   perms: PermissionDiagnostics | null;
+  observations: PermissionGateObservations;
   loading: boolean;
   onRefresh(): void;
   autoRequestPermissions: boolean;
   onAutoRequestPermissionsChange(next: boolean): void;
   onRequestNow(): void;
-  onOpenPermissionSettings(
-    section: "microphone" | "speech" | "accessibility" | "automation",
-    label: string
-  ): void;
+  onOpenPermissionSettings(gate: PermissionGate): void;
   onOpenInstalledApp(): void;
   requestBusy: boolean;
   requestError: string | null;
@@ -2044,10 +2115,11 @@ function PermissionsStep({
   return (
     <div className="space-y-4">
       <p className="text-sm text-muted-foreground">
-        Grant these in order. Microphone first so Plainsong can hear you, then the
-        cursor-control grant so it can insert your spoken words into other apps. Speech
-        recognition is optional -- it is only used when you explicitly select Apple's
-        on-device, dictation-only route.
+        The first three are what dictation runs on; the rest each unlock one
+        feature and are marked optional. Every row says what Plainsong does with
+        the grant and what still works without it. Each button goes straight to
+        that switch in System Settings, and Plainsong re-checks when you come
+        back here.
       </p>
 
       {revocationNotice ? (
@@ -2064,7 +2136,7 @@ function PermissionsStep({
           <p className="text-sm font-medium text-rust">
             You are running the DMG copy
           </p>
-          <p className="text-xs text-rust">
+          <p className="text-sm text-rust">
             macOS permissions granted to the installed app do not apply to the disk image copy. Move Plainsong into
             /Applications and reopen that installed app.
           </p>
@@ -2084,13 +2156,13 @@ function PermissionsStep({
           <li key={gate.key}>
             <PermRow
               order={index + 1}
-              label={gate.label}
-              purpose={gate.purpose}
+              gate={gate}
               icon={PERMISSION_GATE_ICONS[gate.key]}
-              ready={gate.ready(perms)}
-              optional={gate.optional}
-              loading={gate.key === "microphone" ? loading : loading || requestBusy}
-              onFix={() => onOpenPermissionSettings(gate.section, gate.settingsLabel)}
+              ready={gate.ready(observations)}
+              loading={
+                gate.key === "microphone" ? loading : loading || requestBusy
+              }
+              onFix={() => onOpenPermissionSettings(gate)}
               registerRef={(node) => registerCardRef(gate.key, node)}
             />
           </li>
@@ -2101,7 +2173,7 @@ function PermissionsStep({
         <label className="flex items-center justify-between gap-3">
           <div>
             <p className="text-sm font-medium">Auto-request permissions before dictation</p>
-            <p className="text-xs text-muted-foreground">
+            <p className="text-sm text-muted-foreground">
               Prompt for microphone access, plus Speech Recognition only when the selected dictation route needs it. Leave this off if you are not at the Mac to respond to system prompts.
             </p>
           </div>
@@ -2121,19 +2193,19 @@ function PermissionsStep({
           </Button>
         </div>
         {requestStatus ? (
-          <p className="text-xs text-muted-foreground" role="status" aria-live="polite">
+          <p className="text-sm text-muted-foreground" role="status" aria-live="polite">
             {requestStatus}
           </p>
         ) : null}
         {requestError ? (
-          <p className="text-xs text-destructive" role="alert">
+          <p className="text-sm text-destructive" role="alert">
             {requestError}
           </p>
         ) : null}
       </div>
 
       {perms?.notes?.map((note, index) => (
-        <p key={index} className="text-xs text-muted-foreground">
+        <p key={index} className="text-sm text-muted-foreground">
           {note}
         </p>
       ))}
@@ -2141,27 +2213,41 @@ function PermissionsStep({
   );
 }
 
+/**
+ * One macOS grant: what it is for, what breaks without it, whether it is on
+ * right now, and a way to go change it.
+ *
+ * Three states, not two. A grant Plainsong cannot read (Notifications) says
+ * "Plainsong cannot read this one" rather than a made-up "not granted", and an
+ * optional grant that is off is bronze, never rust -- it is a feature nobody
+ * turned on, not a fault.
+ */
 function PermRow({
   order,
-  label,
-  purpose,
+  gate,
   icon,
   ready,
-  optional,
   loading,
   onFix,
   registerRef,
 }: {
   order: number;
-  label: string;
-  purpose: string;
+  gate: PermissionGate;
   icon: ReactNode;
   ready: boolean | undefined;
-  optional?: boolean;
   loading: boolean;
   onFix(): void;
   registerRef(node: HTMLDivElement | null): void;
 }) {
+  const stateLabel = !gate.observable
+    ? "Plainsong cannot read this one"
+    : ready === true
+      ? "Granted"
+      : ready === false
+        ? gate.optional
+          ? "Not granted"
+          : "Still needed"
+        : "Not checked yet";
   return (
     <div
       ref={registerRef}
@@ -2173,36 +2259,59 @@ function PermRow({
           {order}
         </span>
         <span className="mt-0.5 shrink-0 text-muted-foreground">{icon}</span>
-        <div className="min-w-0">
+        <div className="min-w-0 space-y-1">
           <span className="text-sm font-medium">
-            {label}
-            {optional ? (
-              <span className="ml-1.5 rounded-full bg-muted px-1.5 py-0.5 text-[0.65rem] font-normal text-muted-foreground">
+            {gate.label}
+            {gate.optional ? (
+              <span className="ml-1.5 rounded-full bg-muted px-1.5 py-0.5 text-xs font-normal text-muted-foreground">
                 Optional
               </span>
             ) : null}
           </span>
-          <p className="text-xs text-muted-foreground">{purpose}</p>
+          <p className="text-sm text-muted-foreground">{gate.purpose}</p>
+          <p className="text-sm text-muted-foreground">{gate.consequence}</p>
         </div>
       </div>
-      <div className="flex shrink-0 items-center gap-2.5">
-        {loading ? (
-          <Loader2 className="h-4 w-4 animate-spin text-muted-foreground" />
-        ) : ready ? (
-          <span className="neume neume-lit" aria-hidden="true" />
-        ) : (
-          <>
-            <span className={optional ? "neume neume-hollow" : "neume neume-rust"} aria-hidden="true" />
-            <Button
-              variant="outline"
-              size="sm"
-              onClick={onFix}
-              className="h-7 text-xs"
-              aria-label={`Fix ${label}`}
-            >
-              Fix
-            </Button>
-          </>
+      <div className="flex shrink-0 flex-col items-end gap-1.5">
+        <span className="flex items-center gap-2">
+          {loading && gate.observable ? (
+            <Loader2 className="h-4 w-4 animate-spin text-muted-foreground" />
+          ) : (
+            <span
+              className={
+                ready === true
+                  ? "neume neume-lit"
+                  : !gate.observable || ready === undefined || gate.optional
+                    ? "neume neume-hollow"
+                    : "neume neume-rust"
+              }
+              aria-hidden="true"
+            />
+          )}
+          <span
+            className={
+              ready === true
+                ? "text-sm text-gold-text"
+                : gate.observable && ready === false && !gate.optional
+                  ? "text-sm text-rust"
+                  : "text-sm text-muted-foreground"
+            }
+          >
+            {stateLabel}
+          </span>
+        </span>
+        {ready === true ? null : (
+          <Button
+            variant="outline"
+            size="sm"
+            onClick={onFix}
+            className="h-7 text-xs"
+            // Two rows send the reader to the same Accessibility list, so the
+            // accessible name says which row's button this is.
+            aria-label={`Open macOS ${gate.settingsLabel} settings for ${gate.label}`}
+          >
+            Open System Settings
+          </Button>
         )}
       </div>
     </div>
