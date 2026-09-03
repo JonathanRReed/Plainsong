@@ -151,6 +151,28 @@ fn export_subtitles(
     Ok(subtitles::render(&cues, format))
 }
 
+/// One attendee as an export writes them: name, organizer mark, address.
+///
+/// An export is the reader's own file on their own disk, so unlike a prompt it
+/// carries the address the meeting header only shows on hover. The prompt path
+/// is `models::attendee_names_for_context`, which drops addresses; the two must
+/// stay separate, and this function is deliberately not reachable from it.
+fn attendee_export_line(attendee: &crate::models::MeetingAttendee) -> String {
+    let mut line = attendee.name.clone();
+    if attendee.is_organizer {
+        line.push_str(" (organizer)");
+    }
+    if let Some(email) = attendee
+        .email
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    {
+        line.push_str(&format!(" <{email}>"));
+    }
+    line
+}
+
 /// Export to Markdown format
 fn export_markdown(
     recording: &Recording,
@@ -180,6 +202,14 @@ fn export_markdown(
     }
 
     if recording.source_type == "meeting" {
+        if !recording.attendees.is_empty() {
+            output.push_str("## Attendees\n\n");
+            for attendee in &recording.attendees {
+                output.push_str(&format!("- {}\n", attendee_export_line(attendee)));
+            }
+            output.push('\n');
+        }
+
         if let Some(summary) = recording
             .summary
             .as_deref()
@@ -279,6 +309,10 @@ fn export_json(recording: &Recording, transcript: Option<&Transcript>) -> Result
             "action_items_structured": action_items::structured_action_items(
                 recording.action_items.as_deref().unwrap_or(&[]),
             ),
+            // Names AND addresses: an export is the reader's own file. The
+            // prompt path drops addresses (`attendee_names_for_context`); this
+            // one deliberately does not.
+            "attendees": recording.attendees,
             "meeting_notes": recording.meeting_notes,
             "meeting_template_id": recording.meeting_template_id,
             "meeting_capture_mode": recording.meeting_capture_mode,
@@ -324,6 +358,16 @@ fn export_text(recording: &Recording, transcript: Option<&Transcript>) -> Result
     ));
 
     if recording.source_type == "meeting" {
+        if !recording.attendees.is_empty() {
+            output.push_str("ATTENDEES\n");
+            output.push_str(&"=".repeat(50));
+            output.push_str("\n\n");
+            for attendee in &recording.attendees {
+                output.push_str(&format!("- {}\n", attendee_export_line(attendee)));
+            }
+            output.push('\n');
+        }
+
         if let Some(summary) = recording
             .summary
             .as_deref()
@@ -476,6 +520,7 @@ mod tests {
             ),
             meeting_template_id: None,
             meeting_capture_mode: Some("me_and_them".to_string()),
+            imported_source_name: None,
             notes_updated_at: Some(now),
             consent_prompt_shown: true,
             consent_notice_mode: Some("manual".to_string()),
@@ -483,9 +528,79 @@ mod tests {
             consent_notice_message: None,
             consent_notice_updated_at: Some(now),
             analysis_failure: None,
+            attendees: Vec::new(),
             pause_spans: Vec::new(),
             video_service: None,
         }
+    }
+
+    /// `docs/beta/PRIVACY-AND-CLOUD.md` promises the reader that the addresses
+    /// the meeting header only shows on hover are in their export. This is that
+    /// promise: names AND addresses in Markdown (which is also the .docx text),
+    /// plain text and JSON. The prompt path is the opposite rule and is pinned
+    /// separately by `context_names_never_carry_an_address` in `models.rs`.
+    #[test]
+    fn meeting_exports_carry_attendee_names_and_addresses() {
+        let mut recording = meeting_recording_with_recap();
+        recording.attendees = vec![
+            crate::models::MeetingAttendee {
+                name: "Dana Okafor".to_string(),
+                email: Some("dana@example.com".to_string()),
+                is_organizer: true,
+            },
+            crate::models::MeetingAttendee {
+                name: "Sam Ito".to_string(),
+                email: None,
+                is_organizer: false,
+            },
+        ];
+
+        let markdown = export_markdown(&recording, None, false).expect("markdown export");
+        assert!(
+            markdown.contains(
+                "## Attendees\n\n- Dana Okafor (organizer) <dana@example.com>\n- Sam Ito\n"
+            ),
+            "markdown export should list attendees with their addresses: {markdown}"
+        );
+        // The .docx is built from exactly this text, so it carries them too.
+        assert_eq!(
+            export_recording(
+                &recording,
+                None,
+                ExportFormat::Docx,
+                false,
+                &ExportContext::default()
+            )
+            .expect("docx export text"),
+            markdown
+        );
+
+        let text = export_text(&recording, None).expect("text export");
+        assert!(text.contains("- Dana Okafor (organizer) <dana@example.com>"));
+
+        let json: serde_json::Value =
+            serde_json::from_str(&export_json(&recording, None).expect("json export"))
+                .expect("json export parses");
+        assert_eq!(
+            json["recording"]["attendees"],
+            serde_json::json!([
+                { "name": "Dana Okafor", "email": "dana@example.com", "isOrganizer": true },
+                { "name": "Sam Ito", "email": null, "isOrganizer": false },
+            ])
+        );
+    }
+
+    /// A meeting with nobody recorded on it must not grow an empty heading.
+    #[test]
+    fn an_export_with_no_attendees_has_no_attendee_section() {
+        let recording = meeting_recording_with_recap();
+        assert!(recording.attendees.is_empty());
+        assert!(!export_markdown(&recording, None, false)
+            .expect("markdown export")
+            .contains("## Attendees"));
+        assert!(!export_text(&recording, None)
+            .expect("text export")
+            .contains("ATTENDEES"));
     }
 
     #[test]

@@ -103,6 +103,7 @@ mac:
     - Contents/Resources/sidecar/nautilus-macos-speech-helper-aarch64-apple-darwin
     - Contents/Resources/shortcut-helper/plainsong-native-shortcut-helper
     - Contents/Resources/calendar-helper/plainsong-native-calendar-helper
+    - Contents/Resources/language-model-helper/plainsong-native-language-model-helper
   icon: build-resources/icon.icns
   # Required TCC usage strings — without these macOS terminates the app the
   # moment it accesses the microphone / speech recognition.
@@ -137,6 +138,14 @@ mac:
       to: calendar-helper
       filter:
         - plainsong-native-calendar-helper
+    # Apple Foundation Models helper (built by `language-model-helper:build`).
+    # Its own resource directory for the same reason as the calendar helper:
+    # the packaged-helper gate names one path per entitlement policy, and this
+    # one's policy is "no entitlements at all".
+    - from: dist-native/
+      to: language-model-helper
+      filter:
+        - plainsong-native-language-model-helper
     - from: rust-sidecar/binaries/
       to: sidecar
       filter:

@@ -59,6 +59,37 @@ export const SESSION_INSERTION_MODE_LABELS: Record<
   none: "Save only",
 };
 
+/**
+ * Splits a history-search snippet into runs, marking the ones the sidecar
+ * wrapped in `[[`/`]]` (FTS5's `snippet()` and the LIKE fallback both emit
+ * that shape). Unbalanced markers are rendered as plain text rather than
+ * swallowed, so a transcript that literally says "[[" still reads.
+ */
+export function splitHistorySnippet(
+  snippet: string,
+): Array<{ text: string; matched: boolean }> {
+  const runs: Array<{ text: string; matched: boolean }> = [];
+  let rest = snippet;
+  while (rest.length > 0) {
+    const open = rest.indexOf("[[");
+    if (open === -1) {
+      runs.push({ text: rest, matched: false });
+      break;
+    }
+    const close = rest.indexOf("]]", open + 2);
+    if (close === -1) {
+      runs.push({ text: rest, matched: false });
+      break;
+    }
+    if (open > 0) {
+      runs.push({ text: rest.slice(0, open), matched: false });
+    }
+    runs.push({ text: rest.slice(open + 2, close), matched: true });
+    rest = rest.slice(close + 2);
+  }
+  return runs.filter((run) => run.text.length > 0);
+}
+
 function formatSnakeCaseLabel(value: string): string {
   return value
     .split("_")
@@ -90,6 +121,31 @@ export function historyModeLabel(
     return MODE_LABELS[details.modePreset as DictationModePreset] ?? details.modePreset;
   }
   return "Unavailable";
+}
+
+/**
+ * The "Language" tile of the history details: what the recognizer heard and,
+ * when translate-to-English was on, whether the delivered text is the
+ * translation. Mirrors `detected_language` / `translation_route` /
+ * `translation_applied` in the sidecar's `dictation_completed` audit record.
+ */
+export function describeHistoryLanguage(
+  details: Pick<
+    DictationHistoryDetails,
+    "detectedLanguage" | "translationRoute" | "translationApplied"
+  >,
+): string {
+  const detected = details.detectedLanguage?.trim() || null;
+  const heard = detected ? `Heard: ${detected}` : "Heard: unknown";
+  if (!details.translationRoute) {
+    return detected ? heard : "Unavailable";
+  }
+  if (details.translationApplied) {
+    return `${heard} · translated to English${
+      details.translationRoute === "whisper_native" ? " by whisper" : " by the AI provider"
+    }`;
+  }
+  return `${heard} · translation did not run, original words kept`;
 }
 
 export function historyPromptSourceLabel(
@@ -135,6 +191,10 @@ export function historyPipelineStageLabel(stageKey: string): string {
   switch (stageKey) {
     case "dictionary":
       return "Dictionary";
+    case "translate_to_english":
+      return "Translated to English";
+    case "translate_to_english_fallback":
+      return "Translation skipped";
     case "mode_transform":
       return "Mode transform";
     case "mode_transform_fallback":

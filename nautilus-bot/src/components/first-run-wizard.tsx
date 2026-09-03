@@ -2495,6 +2495,21 @@ function AiNotesStep({
         route you choose. Capture and the transcript never depend on it.
       </p>
 
+      {/*
+        Dictation cleanup is a different lane with a different answer, and
+        saying so here stops the most common misreading of this step: that
+        picking "Transcripts only" also turns dictation cleanup off. The
+        built-in model ships as the default for that lane and needs nothing
+        from this screen -- but it is a normalizer, so it is not one of the
+        three answers below.
+      */}
+      <p className="text-sm text-muted-foreground">
+        Dictation cleanup is separate. It uses a small built-in model that runs
+        on this Mac with nothing to install — it tidies punctuation, fillers and
+        spoken numbers, but it cannot write meeting notes. Change either lane
+        later in Models.
+      </p>
+
       <div
         className="space-y-2"
         role="radiogroup"
@@ -2684,6 +2699,8 @@ function MeetingSetupStep({
     <div className="space-y-4">
       <p className="text-sm text-muted-foreground">
         Meetings work best with a meeting-grade ASR route and, when available, both microphone and system audio capture.
+        Parakeet is the recommended local route; for a language it does not cover, whisper.cpp small, medium,
+        large-v3 or large-v3-turbo can run meetings too (100 languages, on the GPU, slower than Parakeet).
       </p>
 
       <div className="space-y-3">

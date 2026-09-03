@@ -5,6 +5,7 @@ import {
   isDownloadableProvider,
   isMeetingEligibleModel,
   isSharedMeetingCompatible,
+  isWhisperMeetingModel,
   providerHostingPreference,
 } from "@/lib/asr-capabilities";
 import type { AsrModelCapability } from "@/lib/asr-capabilities";
@@ -85,12 +86,17 @@ const DICTATION_PROVIDER_ORDER: AsrProviderType[] = [
   "cohere_transcribe",
 ];
 
+// Parakeet stays first in every policy. whisper.cpp (only its multilingual
+// small+ models reach this lane -- see `isWhisperMeetingModel`) sits after it
+// and before Distil: it is the local route for the ~100 languages Parakeet v3
+// lacks, at the cost of being slower than Parakeet on long audio.
 const MEETING_PROVIDER_ORDER_BY_POLICY: Record<
   MeetingRoutePolicy,
   AsrProviderType[]
 > = {
   prefer_local: [
     "parakeet",
+    "whisper",
     "distil_whisper",
     "openai_cloud",
     "elevenlabs_scribe",
@@ -103,6 +109,7 @@ const MEETING_PROVIDER_ORDER_BY_POLICY: Record<
     "groq",
     "cohere_transcribe",
     "parakeet",
+    "whisper",
     "distil_whisper",
   ],
 };
@@ -366,7 +373,11 @@ function routeSummary(
     return "Whisper Large v3 Turbo run via Candle instead of whisper.cpp — a fallback engine, not a different model from the whisper.cpp large-v3-turbo route.";
   }
   if (providerType === "whisper") {
-    return "Flexible Whisper family for local power users who want finer model control.";
+    // The meeting-grade ggml models carry the same tradeoff sentence in every
+    // picker: what they add over Parakeet, where they run, and what it costs.
+    return isWhisperMeetingModel(modelId)
+      ? "100 languages, runs on the GPU, slower than Parakeet. Local route for meetings in languages Parakeet v3 and Distil-Whisper cannot hear."
+      : "Flexible Whisper family for local power users who want finer model control.";
   }
   if (providerType === "qwen3_asr") {
     return "Experimental local route with the widest language list here, including Chinese, Japanese and Korean; slower than real time on the CPU.";

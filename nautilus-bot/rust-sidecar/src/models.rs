@@ -97,6 +97,14 @@ pub struct Recording {
     pub meeting_template_id: Option<String>,
     #[serde(default)]
     pub meeting_capture_mode: Option<String>,
+    /// The name of the file an imported meeting came from, without its
+    /// directory. `None` for every meeting Plainsong recorded itself.
+    ///
+    /// Stored so the detail view can still say where the audio came from
+    /// after the app restarts, and after the reader renames the meeting.
+    /// Only the file name is kept: the folder is the reader's business.
+    #[serde(default)]
+    pub imported_source_name: Option<String>,
     #[serde(default)]
     pub notes_updated_at: Option<DateTime<Utc>>,
     #[serde(default)]
@@ -118,6 +126,12 @@ pub struct Recording {
     /// say so and offer a retry.
     #[serde(default)]
     pub analysis_failure: Option<String>,
+    /// Who was in the meeting, captured from the calendar event that started
+    /// it (or typed by hand afterwards). Empty for every meeting that did
+    /// not start from a calendar cue, and for everything recorded before
+    /// this column existed.
+    #[serde(default)]
+    pub attendees: Vec<MeetingAttendee>,
     /// Every pause taken while this meeting was recording, in order. The
     /// saved audio does not contain the pauses; `at_seconds` on each span is
     /// where the gap sits in it. Serialized as `pauseSpans`; empty for a
@@ -129,6 +143,148 @@ pub struct Recording {
     /// one. Serialized as `videoService`; `None` for every other meeting.
     #[serde(default)]
     pub video_service: Option<String>,
+}
+
+/// One person in a meeting. Mirrors `MeetingAttendee` in
+/// `src/lib/attendees.ts` -- same shape, same caps, same identity rule.
+///
+/// `email` exists because it is the only reliable way to recognize the same
+/// person across two meetings: display names differ between accounts and an
+/// address does not. It is stored, shown on a chip's tooltip, and matched
+/// against -- and it is never put in a prompt. `attendee_names_for_context`
+/// is the only function that produces prompt-bound text from a list, and it
+/// drops the address.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(default, rename_all = "camelCase")]
+pub struct MeetingAttendee {
+    pub name: String,
+    pub email: Option<String>,
+    pub is_organizer: bool,
+}
+
+/// Mirrors `MAX_MEETING_ATTENDEES` in src/lib/attendees.ts. A meeting with
+/// more invitees than this is a mailing list, and the header chips would be
+/// unreadable long before the list was.
+pub const MAX_MEETING_ATTENDEES: usize = 40;
+const MAX_ATTENDEE_FIELD_LENGTH: usize = 256;
+
+/// True for a character that steers rendering rather than saying anything.
+///
+/// C0/C1 controls, the bidi marks and isolates (U+200E/U+200F, U+202A-U+202E,
+/// U+2066-U+2069) and the zero-width joiners and BOM. Whitespace collapsing
+/// does not touch any of them: `split_whitespace` sees U+202E as an ordinary
+/// character, so a name of "Dana\u{202E}kafo" survived the whole sanitizer.
+///
+/// They matter because an attendee name is not just a chip. It is rendered
+/// beside other text in the meeting header, written verbatim into an export,
+/// and -- through `attendee_names_for_context` -- placed inside a fenced block
+/// in a prompt. A right-to-left override there reverses everything drawn after
+/// it, which is how one line of a document is made to read as another. The
+/// name is calendar text somebody else wrote, so it is exactly the text that
+/// should not be able to do that.
+///
+/// Mirrors `isFormattingControl` in src/lib/attendees.ts.
+fn is_formatting_control(c: char) -> bool {
+    matches!(c,
+        '\u{0}'..='\u{1f}'
+            | '\u{7f}'..='\u{9f}'
+            | '\u{200b}'..='\u{200f}'
+            | '\u{202a}'..='\u{202e}'
+            | '\u{2066}'..='\u{2069}'
+            | '\u{feff}'
+    )
+}
+
+/// Strip the steering characters, then collapse runs of whitespace.
+///
+/// In that order: a control character is not whitespace, so collapsing first
+/// would leave "Dana\u{202e} Okafor" with the override still in it, and
+/// removing it afterwards would leave the double space behind.
+///
+/// Mirrors `normalizeAttendeeText` in src/lib/attendees.ts.
+fn collapse_whitespace(value: &str) -> String {
+    value
+        .chars()
+        .filter(|c| !is_formatting_control(*c))
+        .collect::<String>()
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+fn clip_attendee_field(value: &str) -> String {
+    let collapsed = collapse_whitespace(value);
+    if collapsed.chars().count() <= MAX_ATTENDEE_FIELD_LENGTH {
+        return collapsed;
+    }
+    collapsed
+        .chars()
+        .take(MAX_ATTENDEE_FIELD_LENGTH)
+        .collect::<String>()
+        .trim_end()
+        .to_string()
+}
+
+/// How two attendee entries are recognized as the same person.
+///
+/// Address first, because display names differ between accounts ("J. Reed"
+/// in one invite, "Jonathan Reed" in another) and an address does not. Name
+/// only when there is no address.
+pub fn attendee_identity_key(name: &str, email: Option<&str>) -> String {
+    match email.map(str::trim).filter(|value| !value.is_empty()) {
+        Some(address) => format!("email:{}", address.to_lowercase()),
+        None => format!("name:{}", collapse_whitespace(name).to_lowercase()),
+    }
+}
+
+/// Trim, de-duplicate and cap an attendee list, whatever produced it.
+///
+/// Run on every path that stores one -- the renderer's write command, and
+/// the read back out of SQLite -- so a duplicated invite or a hand-edited
+/// database row cannot put the same person on the header twice, and so a
+/// crafted payload cannot store 5000 of them.
+pub fn sanitize_meeting_attendees(attendees: Vec<MeetingAttendee>) -> Vec<MeetingAttendee> {
+    let mut seen = std::collections::HashSet::new();
+    let mut result = Vec::new();
+    for attendee in attendees {
+        let name = clip_attendee_field(&attendee.name);
+        if name.is_empty() {
+            continue;
+        }
+        let email = attendee
+            .email
+            .as_deref()
+            .map(clip_attendee_field)
+            .filter(|value| !value.is_empty());
+        let key = attendee_identity_key(&name, email.as_deref());
+        if !seen.insert(key) {
+            continue;
+        }
+        result.push(MeetingAttendee {
+            name,
+            email,
+            is_organizer: attendee.is_organizer,
+        });
+        if result.len() >= MAX_MEETING_ATTENDEES {
+            break;
+        }
+    }
+    result
+}
+
+/// The names, and only the names, for a grounded prompt's "Attendees:" line.
+///
+/// The single place an attendee list becomes prompt-bound text. Addresses are
+/// dropped here rather than at each call site so there is exactly one thing
+/// to audit: a summary lane pointed at a cloud provider must not carry the
+/// reader's contact book there, and a model does not answer better for
+/// knowing someone's employer domain.
+pub fn attendee_names_for_context(attendees: &[MeetingAttendee]) -> Vec<String> {
+    attendees
+        .iter()
+        .map(|attendee| collapse_whitespace(&attendee.name))
+        .filter(|name| !name.is_empty())
+        .collect()
 }
 
 /// The conferencing services a recording may be tagged with.
@@ -313,6 +469,22 @@ pub struct DictationStartOptions {
     /// user never meant to dictate at their cursor.
     #[serde(default)]
     pub hands_free_trigger: bool,
+    /// A mode chosen for this session only, by a per-mode dictation binding
+    /// (roadmap item B4). `None` means "whatever mode is selected in
+    /// Settings". The selected mode in Settings is never changed by this.
+    #[serde(default)]
+    pub mode_override: Option<DictationSessionModeOverride>,
+}
+
+/// The mode a single dictation session runs under when a binding named one.
+/// `preset` is a built-in preset id (`voice`, `messages`, ...) or `custom`
+/// with `custom_mode_id` naming the saved mode.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct DictationSessionModeOverride {
+    pub preset: String,
+    #[serde(default)]
+    pub custom_mode_id: Option<String>,
 }
 
 impl Default for DictationStartOptions {
@@ -342,6 +514,7 @@ impl Default for DictationStartOptions {
             preferred_input_device_id: None,
             delivery_mode: DictationDeliveryMode::System,
             hands_free_trigger: false,
+            mode_override: None,
         }
     }
 }
@@ -376,6 +549,55 @@ pub struct DictationHistoryDetails {
     pub transcription_latency_ms: Option<u64>,
     pub insert_latency_ms: Option<u64>,
     pub end_to_end_ms: Option<u64>,
+    /// BCP-47 primary tag the recognizer reported for the spoken audio
+    /// (`en` for an English-only model, which cannot detect anything else).
+    #[serde(default)]
+    pub detected_language: Option<String>,
+    /// How translate-to-English ran for this session: `whisper_native`
+    /// (the multilingual whisper.cpp translate task), `ai_lane` (a second
+    /// pass through the dictation AI provider), or absent when translation
+    /// was off.
+    #[serde(default)]
+    pub translation_route: Option<String>,
+    /// Whether the delivered text is the translated one. `false` with a
+    /// route set means the pass failed or timed out and the source-language
+    /// words were inserted instead.
+    #[serde(default)]
+    pub translation_applied: Option<bool>,
+    /// What the recognizer heard before the pipeline touched it, when the
+    /// dictation was saved with it (older rows only kept the delivered text).
+    #[serde(default)]
+    pub raw_transcript: Option<String>,
+    /// Whether the captured audio is still on disk, which is what "Process
+    /// again" needs. `None` for dictations saved without audio.
+    #[serde(default)]
+    pub audio_available: Option<bool>,
+    /// Set on an entry produced by "Process again": the dictation whose audio
+    /// it re-ran, and when that dictation was captured.
+    #[serde(default)]
+    pub reprocessed_from_id: Option<String>,
+    #[serde(default)]
+    pub reprocessed_from_created_at: Option<DateTime<Utc>>,
+}
+
+/// The result of running a saved dictation's audio through the pipeline
+/// again: the new history entry plus what produced it. Nothing is inserted.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DictationReprocessOutcome {
+    pub recording: Recording,
+    pub transcript: Transcript,
+    pub final_text: String,
+    pub raw_text: String,
+    pub mode_preset: String,
+    pub custom_mode_id: Option<String>,
+    pub custom_mode_name: Option<String>,
+    pub provider: String,
+    pub model_id: String,
+    pub used_ai: bool,
+    pub reprocessed_from_id: String,
+    pub reprocessed_from_created_at: DateTime<Utc>,
+    pub transcription_latency_ms: u64,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -428,6 +650,23 @@ pub struct SearchHit {
     pub text: String,
     pub start_time: f64,
     pub end_time: f64,
+    pub score: f64,
+}
+
+/// One ranked hit from dictation history search.
+///
+/// `snippet` is a short window of the matched text with each matched term
+/// wrapped in `[[` / `]]`, which the renderer turns into a highlight.
+/// `matched_field` says whether the delivered text or the raw transcript
+/// matched, so the row can say which of the two it is quoting.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DictationHistorySearchHit {
+    pub recording_id: String,
+    pub recording_title: String,
+    pub created_at: DateTime<Utc>,
+    pub snippet: String,
+    pub matched_field: String,
     pub score: f64,
 }
 
@@ -679,6 +918,117 @@ pub struct UpsertDictationCommandPresetRequest {
 
 fn default_true() -> bool {
     true
+}
+
+#[cfg(test)]
+mod attendee_tests {
+    use super::{
+        attendee_identity_key, attendee_names_for_context, sanitize_meeting_attendees,
+        MeetingAttendee, MAX_MEETING_ATTENDEES,
+    };
+
+    fn attendee(name: &str, email: Option<&str>) -> MeetingAttendee {
+        MeetingAttendee {
+            name: name.to_string(),
+            email: email.map(str::to_string),
+            is_organizer: false,
+        }
+    }
+
+    #[test]
+    fn identity_prefers_the_address_over_the_display_name() {
+        assert_eq!(
+            attendee_identity_key("J. Reed", Some("j@example.com")),
+            attendee_identity_key("Jonathan Reed", Some("J@Example.com")),
+            "the same address is the same person however the invite spelled the name"
+        );
+        assert_eq!(
+            attendee_identity_key("  Alice   Brown ", None),
+            attendee_identity_key("alice brown", None)
+        );
+        assert_ne!(
+            attendee_identity_key("Alex", Some("a@one.com")),
+            attendee_identity_key("Alex", Some("a@two.com"))
+        );
+    }
+
+    #[test]
+    fn sanitize_drops_nameless_and_duplicate_entries_and_caps_the_list() {
+        let sanitized = sanitize_meeting_attendees(vec![
+            attendee("   ", None),
+            attendee("  Alice   Brown ", None),
+            attendee("Alice Brown", None),
+            attendee("Bob", Some("bob@example.com")),
+            attendee("Robert", Some("BOB@example.com")),
+        ]);
+        assert_eq!(
+            sanitized
+                .iter()
+                .map(|entry| entry.name.as_str())
+                .collect::<Vec<_>>(),
+            vec!["Alice Brown", "Bob"]
+        );
+
+        let many: Vec<MeetingAttendee> = (0..(MAX_MEETING_ATTENDEES + 20))
+            .map(|index| attendee(&format!("Person {index}"), None))
+            .collect();
+        assert_eq!(
+            sanitize_meeting_attendees(many).len(),
+            MAX_MEETING_ATTENDEES
+        );
+    }
+
+    #[test]
+    fn sanitize_treats_a_blank_address_as_no_address() {
+        let sanitized = sanitize_meeting_attendees(vec![attendee("Alice", Some("   "))]);
+        assert_eq!(sanitized[0].email, None);
+    }
+
+    /// A display name comes off somebody else's calendar invite. A
+    /// right-to-left override in one reverses every glyph drawn after it, in
+    /// the header, in an export, and inside the fenced block of a prompt.
+    #[test]
+    fn sanitize_strips_bidi_overrides_and_control_characters() {
+        let sanitized = sanitize_meeting_attendees(vec![MeetingAttendee {
+            name: "Dana\u{202e}\u{2066} Okafor\u{7}".to_string(),
+            email: Some("dana\u{200b}@example.com".to_string()),
+            is_organizer: false,
+        }]);
+        assert_eq!(sanitized[0].name, "Dana Okafor");
+        assert_eq!(sanitized[0].email.as_deref(), Some("dana@example.com"));
+        assert!(!sanitized[0].name.chars().any(super::is_formatting_control));
+
+        // The prompt path is the one that matters most, and it reads the same
+        // normalizer, so an override cannot ride a name into a fenced block.
+        let names = attendee_names_for_context(&[MeetingAttendee {
+            name: "\u{202d}Sam\u{202c} Ito".to_string(),
+            email: None,
+            is_organizer: false,
+        }]);
+        assert_eq!(names, vec!["Sam Ito"]);
+
+        // And a name that is nothing but steering characters is not a name.
+        assert!(sanitize_meeting_attendees(vec![MeetingAttendee {
+            name: "\u{202e}\u{feff}".to_string(),
+            email: None,
+            is_organizer: false,
+        }])
+        .is_empty());
+    }
+
+    /// The one rule the whole feature rests on: names may reach a prompt,
+    /// addresses never do. A summary lane pointed at a cloud provider must
+    /// not carry the reader's contact book there.
+    #[test]
+    fn context_names_never_carry_an_address() {
+        let names = attendee_names_for_context(&[
+            attendee("Alice  Brown", Some("alice@acme-holdings.example")),
+            attendee("Bob", Some("bob@example.com")),
+            attendee("   ", None),
+        ]);
+        assert_eq!(names, vec!["Alice Brown", "Bob"]);
+        assert!(!names.join(" ").contains('@'));
+    }
 }
 
 #[cfg(test)]

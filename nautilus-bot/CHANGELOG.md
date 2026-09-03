@@ -13,6 +13,68 @@ changed underneath `0.9.0-beta.2`. See `LAUNCH.md` for which qualification
 evidence is stale and must be recaptured before this becomes a candidate.
 
 ### Added
+- Dictation history is searchable, and a saved dictation can be run through
+  the recognizer again. The search field over Recent dictations matches both
+  what was delivered and (where it was kept) what the recognizer heard,
+  marking the matched words in each result. "Process again" in a saved
+  dictation's dialog re-runs its kept audio through any style and saves the
+  result as a new history entry linked to the original — it never types or
+  pastes anything. Keeping the audio is a new off-by-default setting, "Keep
+  dictation audio for Process again"; without it, the dialog says so and
+  names the setting instead of offering a button it cannot honour. Kept audio
+  is deleted with its history entry, and with the vault on it is encrypted
+  into the vault like a meeting's audio rather than left in the clear.
+- "Import audio…" in the Meetings header transcribes an audio file you
+  already have. Plainsong decodes .wav, .mp3, .m4a, .aac, .mp4, .ogg and
+  .flac up to 2 GB and 4 hours with macOS' own converter, copies the
+  result into its recordings folder, and runs the same transcription,
+  diarization and analysis a stopped meeting runs, reporting the same
+  progress. The file you picked is only ever read — never moved, changed or
+  deleted. Imported meetings are labelled "Imported file" rather than
+  Me + Them, name the file they came from, and skip the consent step, which
+  has nothing to describe when nobody is being recorded. A file whose length
+  macOS will not report is refused rather than decoded, decoding gives up
+  rather than hanging on a source that stops answering, and a volume without
+  room for the decoded copy is told so before anything is written.
+- Multilingual meetings can use whisper.cpp. The `small`, `medium`,
+  `large-v3` and `large-v3-turbo` ggml models are now allowed in the meeting
+  lane, so a language outside Parakeet v3's 25 European languages has a local
+  meeting route that is not the experimental CPU-bound Qwen3 (100 languages,
+  runs on the GPU, slower than Parakeet). `tiny`, `base` and every `.en`
+  build stay dictation-only, Parakeet stays ranked first in every policy, and
+  whisper.cpp never enters the meeting lane on its own: a `base.en` default
+  still resolves meetings to Parakeet, and whisper runs a meeting only when
+  one of those four models is picked for the meeting lane.
+- A local pre-meeting brief. "Prepare" on a calendar cue reads meetings
+  already on this Mac that share an attendee or a normalized meeting name with
+  the one you are about to join, and writes a short brief — what was last
+  agreed, what is still open, what you owe anyone — citing the meetings it
+  came from. Related meetings are found and ranked locally; the only thing
+  that leaves the Mac is the prompt, down whichever AI lane you already chose
+  for meetings. With no analysis provider configured it shows the related
+  meetings and their open items instead of an error. Cached per event and
+  input, with a "Refresh".
+- Meetings started from a calendar cue now record who was invited. The macOS
+  calendar helper reports each attendee's name (and the address the calendar
+  had for them, when it had one); the meeting header shows them as chips with
+  the address on hover, and any meeting can have attendees added or removed by
+  hand. Renaming a speaker offers those names. When a meeting has attendees,
+  its summary and chat prompts carry one `Attendees: ...` line of NAMES only,
+  inside the same fenced non-instruction block the notes use — addresses are
+  never sent to an AI provider. Locations and notes are still stripped inside
+  the helper exactly as before. See `docs/beta/PRIVACY-AND-CLOUD.md`.
+- Saved prompts for the two chat boxes. Type "/" in a meeting's chat or in
+  "Ask your meetings" to pick a question you keep asking; "Save as prompt" on
+  a message you already sent turns it into one. Six starters ship (decisions,
+  open questions, what you committed to, risks and blockers, a follow-up
+  draft, a catch-up explanation); they can be edited, reordered and hidden,
+  but not deleted, because they would only come back. Manage them from
+  Settings → AI or the picker's own footer. They live in your settings file
+  on this Mac and choosing one only fills the box.
+- A meeting export now says who was there. Markdown, Word, plain text and
+  JSON carry the attendee list with names and addresses — an export is your
+  own file — while the local `plainsong` CLI and MCP server return attendee
+  names only. Prompts are unchanged: still names, never addresses.
 - Plainsong now notices a live call and offers to record it. Every few
   seconds the sidecar checks, locally, which apps are running; when Zoom,
   Microsoft Teams, Webex, FaceTime, Slack, Discord, or a browser window
@@ -96,6 +158,29 @@ evidence is stale and must be recaptured before this becomes a candidate.
   `plainsong://playback` route resolves per request (with HTTP Range support,
   so seeking does not wait on a full download). "Open audio file", which
   hands the recording to the system player, stays as the secondary action.
+- **More than one dictation shortcut.** Settings → Shortcuts now holds a list
+  of dictation bindings instead of a single hotkey. A binding can be a key
+  chord, an extra mouse button (3–5), or a modifier on its own (Fn, Cmd), and
+  it can start dictation in the current profile, start it in one named
+  profile for that session only, move to the next profile, or cancel. Each
+  binding chooses hold-to-talk or press-to-toggle, or follows the activation
+  setting. Mouse buttons and lone modifiers need the native shortcut helper
+  and say so in the row when it is not running; key bindings still fall back
+  to Electron's press-only registration, where hold degrades to toggle as
+  before. Existing settings migrate: the old `toggleDictation` key becomes
+  the first binding and is kept written for one release so a downgrade still
+  has a hotkey.
+- **Translate to English, per profile.** A dictation profile (and the
+  built-in profiles as a group) can now deliver English whatever language was
+  spoken. Multilingual whisper.cpp models translate inside their own decode
+  with nothing else running; every other recognizer transcribes in the spoken
+  language and the dictation AI provider translates before formatting and
+  insert, inside the same timeout the formatting pass gets. A translation
+  that fails or times out inserts the words as spoken and says so rather than
+  losing them. The switch is disabled with the reason when the model cannot
+  translate (`.en` whisper builds) or when no AI provider can answer. The
+  language the recognizer detected, the route, and whether the translation
+  actually landed are recorded in the dictation history details.
 - Onboarding now asks how meeting notes get written: local Ollama (with live
   detection), bring-your-own-key cloud AI, or transcripts only — instead of
   silently defaulting to an Ollama install that usually isn't there.
@@ -128,7 +213,36 @@ evidence is stale and must be recaptured before this becomes a candidate.
   own copy says so. Audio longer than 60 s is decoded in pause-aligned
   chunks, and a decode that would come back truncated is refused.
 
+- **Dictation cleanup now works out of the box.** Smart Format used to need
+  Ollama installed or a cloud key pasted, so on a fresh install it simply
+  never ran. A new "Built-in (no setup)" route downloads S1-mini by
+  Superwhisper once (473 MiB, verified against a checksum pinned in the app)
+  and then runs it inside Plainsong with no server, no account and no
+  network. It removes fillers, resolves false starts, punctuates, and writes
+  spoken numbers, dates and email addresses in written form — English only.
+  It is the default for the dictation lane on new installs; anyone who
+  already chose Ollama or a cloud provider keeps that choice. Models shows
+  its size and a Delete action.
+  It is deliberately not offered for meeting notes: it is a text normalizer,
+  not an assistant, and its own model card says it will not follow general
+  instructions. Custom modes and dictation commands fall back to
+  Plainsong's built-in text transforms while this route is selected, and
+  the picker says so.
+- **Apple's on-device model is selectable for dictation cleanup on macOS 26
+  and newer.** Nothing to download: it uses the model Apple Intelligence
+  already ships, through a small Plainsong helper with no network client and
+  no entitlements. Availability is probed at launch and the Models screen
+  says which of "this Mac can't", "Apple Intelligence is off" and "it is
+  still downloading" applies, rather than only "not available". Also
+  dictation-only — its 4,096-token window is shared between the prompt and
+  the answer.
+
 ### Changed
+- Searching dictation history no longer writes an audit-log row. It is a read
+  that changes nothing, and the search field re-runs on a debounce and again
+  whenever the recordings list changes, so a minute of typing buried the rows
+  that record an actual change. "Process again", deletion and retention still
+  write theirs.
 - **The macOS sidecar now ships Candle's Metal backend** (`candle-metal`),
   so the Distil-Whisper and Whisper large-v3-turbo providers run on the GPU
   instead of CPU F32. Measured on an M4 Pro with a combined
@@ -236,6 +350,61 @@ evidence is stale and must be recaptured before this becomes a candidate.
   post-meeting speaker pass uses. It previously always ran ECAPA-TDNN no
   matter what the picker said; only the explicit "identify speakers" action
   honoured the setting.
+- THIRD-PARTY-NOTICES.txt now has a MODEL WEIGHTS section naming every model
+  Plainsong can download — repository, pinned revision, files and license —
+  including the terms that differ from the code's: Parakeet's CC-BY-4.0
+  attribution and S1-mini's naming clause. The section is generated from a
+  manifest and covered by the release license gate, and it records honestly
+  the one artifact whose upstream declares no license.
+- The built-in cleanup model's 473 MiB now appears in the sidecar's list of
+  downloaded models, where it was missing entirely. The Models screen's
+  "Speech models on this Mac" total still counts only speech models, since
+  that is what it says.
+- "Keep the model warm: off" now actually releases the built-in cleanup
+  model. It used to skip only the warm-up — the first dictation loaded the
+  model anyway and it stayed in memory for the rest of the session — so the
+  switch saved nothing after your first capture. With it off, the model is
+  unloaded a minute after the last dictation, and switching the dictation
+  lane to Ollama or a cloud provider releases it immediately. The Models
+  screen states what it holds while loaded.
+- The Models screen now says which processor the built-in cleanup model runs
+  on, and Plainsong no longer starts a new install on that route where it
+  would be too slow. On a Mac that falls back to the CPU a 200-word dictation
+  takes 11 to 13 seconds against a six-second limit, so the row says so and
+  the dictation lane starts on Ollama instead; choosing the built-in model
+  there is still yours to make.
+- The Apple on-device model row says "Still downloading" while Apple
+  Intelligence is fetching its model, instead of "Not available" — a wait,
+  not a verdict about this Mac.
+- A dictation cleanup that runs past its time limit now stops within a
+  token instead of running to the end of its budget. The built-in model
+  (S1-mini by Superwhisper) is held behind one lock, so an abandoned cleanup
+  used to leave every later dictation of the session waiting on it with the
+  GPU still busy; the first slow cleanup no longer breaks the rest.
+- The built-in cleanup model can no longer put its own markup into your
+  document. A reasoning block or a stray chat-turn marker in the model's
+  output is removed, and a result that is nothing but reasoning falls back
+  to the text the local pipeline already produced.
+- Chat-turn markers in a transcript — reachable through a dictionary
+  replacement you wrote yourself — are rewritten as plain text before the
+  built-in model sees them, so a dictation cannot open a second turn and
+  address the model as its instructions.
+- A question that starts with a path can be asked again. Any leading "/"
+  opened the saved-prompt picker, and both chat boxes refuse to send while it
+  is open, so "/Users/me/notes.txt is failing to import" could not be sent at
+  all. The picker now closes as soon as nothing matches what you typed, and
+  its footer says Esc closes it.
+- A pre-meeting brief's citations are numbered references you can click,
+  each naming the meeting it came from, instead of the raw "L1"/"L4" evidence
+  IDs the model wrote.
+- A saved-prompt change that fails to write now says so in the Manage prompts
+  dialog. Settings reported every such change as saved without waiting to
+  find out.
+- Attendee names arriving from a calendar invite are stripped of bidi
+  overrides and control characters before they are shown, exported or put in
+  a prompt.
+- "Prepare" on a calendar cue no longer reads the whole meeting library to
+  look at the newest few hundred.
 - A meeting only stops itself for a call ending when it is the call whose
   offer was actually accepted. A recording started any other way, or started
   from an offer that was waved away, is no longer ended because some
@@ -359,6 +528,69 @@ evidence is stale and must be recaptured before this becomes a candidate.
   integrity check on a PSVAULT1 payload. It now streams PSVAULT1 frames into
   the temporary file and uses the whole-file decoder only for legacy
   payloads, which is also what keeps a long meeting out of memory.
+- Dictation bindings refuse the chords macOS owns (Cmd+Q, Cmd+W, Cmd+Tab,
+  Cmd+Space, Cmd+H, Cmd+M), and a modifier on its own can only be Fn — a lone
+  Cmd would have started dictation from an ordinary pause mid-chord. Both the
+  sidecar and the Settings screen say so in the same words.
+- A shortcut written with the macOS symbols kept its modifiers. The sidecar
+  was deleting them when it normalized a trigger, so a symbol chord read as
+  its bare key: it could fail validation as "ordinary typing", and two
+  different chords could look like the same trigger.
+- A binding whose activation behavior was missing or unrecognised is now read
+  as "follows the setting above" instead of being dropped, matching what the
+  sidecar already did — the two sides could otherwise register different
+  hotkeys from the same file. Only F1 through F24 count as a function key.
+- The first click of an extra mouse button on a binding's recorder now
+  registers. It was discarded because the click had not focused the field
+  yet, so binding a mouse button took two clicks.
+- The "next profile" notice reaches a dictation overlay that had to be
+  created to show it, instead of arriving before that window could listen.
+- The dictation HUD's "next profile" notice is rust and neutral instead of
+  gilded. Picking a profile is a mode selector, and gilding it competed with
+  the live recording moment gold is reserved for.
+- "Next profile" now walks the profiles in the order their tiles are shown,
+  so the ready-made Coding and Quiet profiles land where you see them rather
+  than behind whatever you built yourself.
+- A binding saved as hold-to-talk on a machine where the native shortcut
+  helper is not running no longer reads as "Follows the setting above". The
+  hold option is shown, disabled, with the reason, and the row says the
+  binding presses to start and presses again to stop until the helper is
+  available.
+- Editing a dictation binding while recording no longer strands the
+  recording. Each edit saves immediately, and the native shortcut helper takes
+  its whole binding table on launch, so the save killed and respawned it —
+  swallowing the key release of a hold in progress and leaving the session to
+  run until the 10-minute watchdog. A new table is now held back while a
+  session or a held key is in flight and applied the moment things go idle,
+  and a helper that is replaced anyway hands over the release it owes.
+- "Add binding" no longer creates a row that disappears. The new row was
+  saved immediately with no keys recorded, and the sidecar drops a binding
+  with no trigger, so it survived on screen only until the next reload. The
+  row is now held unsaved until the recorder captures a trigger, and written
+  the moment it does.
+- A dictation binding on the same keys as Open window (or either recovery
+  shortcut) now says so in Settings. Dictation bindings are registered first
+  and take the keys, so the other shortcut silently stopped working with only
+  a line in the console; the conflict check walked the four legacy shortcut
+  fields and could not see the binding table at all.
+- Two dictation bindings on the same trigger no longer fail the whole
+  settings save. The sidecar rejected the entire payload — losing every
+  unrelated edit saved with it — where the app's own Settings screen only
+  warned in the row. The later of two identical triggers is now dropped on
+  save, which is all that could ever have happened anyway, and the row says
+  so.
+- The wait in front of an insert is now capped once, not once per pass. A
+  dictation that both translates to English and then formats used to take a
+  full formatting timeout for each, so the real worst case before a word
+  appeared was twice the stated budget (12 s on the local split). Both passes
+  now share one budget; whatever the first spends is taken off the second.
+- Translate to English no longer runs a hidden AI pass on an English-only
+  whisper model. Turning the switch on under a multilingual model and then
+  switching to a `.en` build left the setting stored as on while the switch
+  showed off and disabled, so every English dictation paid for a second model
+  call before insertion. The stored flag (built-in profiles and each saved
+  profile) is now cleared on save, and the runtime route refuses the case
+  independently.
 - A mic failure mid-meeting in a "me and them" (microphone plus system
   audio) recording is now detected and noted on the meeting instead of being
   silently padded with silence and presented as a complete recording; a

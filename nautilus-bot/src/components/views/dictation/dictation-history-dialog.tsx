@@ -9,6 +9,7 @@ import { Volume2 } from "lucide-react";
 import type { Recording, Transcript } from "@/types";
 import type {
   DictationHistoryDetails,
+  DictationReprocessOutcome,
   DictationReprocessResult,
 } from "@/lib/backend/dictation";
 import type { DictationModePreset } from "@/features/dictation/runtime";
@@ -17,6 +18,7 @@ import {
   DICTATION_MODE_DEFINITION_BY_ID,
 } from "@/lib/dictation-profiles";
 import {
+  describeHistoryLanguage,
   historyModeLabel,
   historyPipelineStageLabel,
   historyPromptSourceLabel,
@@ -56,6 +58,15 @@ interface DictationHistoryDialogProps {
   reprocessError: string | null;
   onReprocess: () => void;
   onUseReprocessedResult: () => void;
+  /** "Process again": the kept audio through the recognizer, not the text. */
+  processAgainModeId: string;
+  onProcessAgainModeIdChange: (modeId: string) => void;
+  processAgainCustomModes: Array<{ id: string; name: string }>;
+  processAgainOutcome: DictationReprocessOutcome | null;
+  isProcessingAgain: boolean;
+  processAgainError: string | null;
+  onProcessAgain: () => void;
+  onOpenProcessAgainResult: () => void;
   correctionText: string;
   onCorrectionTextChange: (value: string) => void;
   onCorrectionBlur: () => void;
@@ -88,6 +99,14 @@ export function DictationHistoryDialog({
   reprocessError,
   onReprocess,
   onUseReprocessedResult,
+  processAgainModeId,
+  onProcessAgainModeIdChange,
+  processAgainCustomModes,
+  processAgainOutcome,
+  isProcessingAgain,
+  processAgainError,
+  onProcessAgain,
+  onOpenProcessAgainResult,
   correctionText,
   onCorrectionTextChange,
   onCorrectionBlur,
@@ -100,6 +119,14 @@ export function DictationHistoryDialog({
   onCopyTranscript,
   onDelete,
 }: DictationHistoryDialogProps) {
+  // `audioAvailable` is three-valued on purpose: true (the file is there),
+  // false (audio was kept and is now gone) and null (none was ever kept).
+  // Each gets its own sentence rather than one vague "unavailable".
+  const canProcessAgain = historyDetails?.audioAvailable === true;
+  const processAgainUnavailableReason =
+    historyDetails?.audioAvailable === false
+      ? "This dictation's kept audio is no longer on disk, so it cannot be processed again. Auto-delete removes kept audio along with the history entry."
+      : "This dictation was saved without its audio, so only the words above can be restyled. Turn on “Keep dictation audio for Process again” in Capture and insert to keep the audio of future dictations.";
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
       <DialogContent className="max-w-2xl max-h-[80vh] overflow-y-auto">
@@ -241,6 +268,12 @@ export function DictationHistoryDialog({
                       <p className="rubric-muted">Prompt strategy</p>
                       <p className="mt-1 text-sm font-medium">
                         {historyPromptSourceLabel(historyDetails.promptSource)}
+                      </p>
+                    </div>
+                    <div className="rounded-md border bg-muted/30 px-3 py-2">
+                      <p className="rubric-muted">Language</p>
+                      <p className="mt-1 text-sm font-medium">
+                        {describeHistoryLanguage(historyDetails)}
                       </p>
                     </div>
                   </div>
@@ -402,6 +435,116 @@ export function DictationHistoryDialog({
               )}
             </div>
 
+            <div className="space-y-3 border-t pt-4">
+              <div>
+                <h3 className="section-heading">Process again</h3>
+                <p className="text-sm text-muted-foreground">
+                  Runs this dictation&apos;s kept audio through the recognizer
+                  again and saves the result as a new history entry. Nothing is
+                  typed anywhere and this entry is left as it is.
+                </p>
+              </div>
+              {canProcessAgain ? (
+                <div className="flex flex-col gap-3 md:flex-row md:items-end md:justify-between">
+                  <div className="space-y-2">
+                    <label
+                      className="text-sm font-medium"
+                      htmlFor="dictation-process-again-mode"
+                    >
+                      Style for the new entry
+                    </label>
+                    <select
+                      id="dictation-process-again-mode"
+                      className="w-full min-w-[220px] rounded-md border bg-background p-2 text-sm"
+                      value={processAgainModeId}
+                      onChange={(event) =>
+                        onProcessAgainModeIdChange(event.target.value)
+                      }
+                    >
+                      {DICTATION_MODE_DEFINITIONS.filter(
+                        (mode) => mode.id !== "custom",
+                      ).map((mode) => (
+                        <option key={mode.id} value={mode.id}>
+                          {mode.label}
+                        </option>
+                      ))}
+                      {processAgainCustomModes.map((mode) => (
+                        <option key={mode.id} value={mode.id}>
+                          {mode.name} (saved profile)
+                        </option>
+                      ))}
+                    </select>
+                  </div>
+                  <Button
+                    variant="outline"
+                    onClick={onProcessAgain}
+                    disabled={isProcessingAgain}
+                  >
+                    {isProcessingAgain
+                      ? "Processing again..."
+                      : "Process again"}
+                  </Button>
+                </div>
+              ) : (
+                <p className="rounded-md border bg-muted/30 px-3 py-2 text-sm text-muted-foreground">
+                  {processAgainUnavailableReason}
+                </p>
+              )}
+              {processAgainError && (
+                <div className="rounded-md border border-rust/30 bg-rust/10 px-3 py-2 text-sm text-rust">
+                  {processAgainError}
+                </div>
+              )}
+              {processAgainOutcome && (
+                <div className="space-y-2 rounded-md border border-gold/30 bg-gold/5 px-3 py-3">
+                  <div className="flex flex-wrap items-start justify-between gap-2">
+                    <p className="text-sm font-medium">
+                      Saved as a new dictation
+                    </p>
+                    <div className="flex items-center gap-2">
+                      <Button
+                        variant="ghost"
+                        size="sm"
+                        onClick={() =>
+                          navigator.clipboard.writeText(
+                            processAgainOutcome.finalText,
+                          )
+                        }
+                      >
+                        Copy result
+                      </Button>
+                      <Button
+                        variant="ghost"
+                        size="sm"
+                        onClick={onOpenProcessAgainResult}
+                      >
+                        Open it
+                      </Button>
+                    </div>
+                  </div>
+                  <p className="whitespace-pre-wrap text-sm">
+                    {processAgainOutcome.finalText}
+                  </p>
+                  <p className="text-sm text-muted-foreground">
+                    {processAgainOutcome.customModeName ??
+                      modeLabelFor(
+                        processAgainOutcome.modePreset,
+                        processAgainOutcome.modePreset,
+                      )}{" "}
+                    · Engine: {processAgainOutcome.provider} ·{" "}
+                    {processAgainOutcome.modelId} ·{" "}
+                    {processAgainOutcome.usedAi ? "AI tuned" : "Rule based"} ·
+                    Transcribed in{" "}
+                    <span className="time-spec">
+                      {formatStartupLatency(
+                        processAgainOutcome.transcriptionLatencyMs,
+                      )}
+                    </span>
+                  </p>
+                </div>
+              )}
+            </div>
+
             <div className="grid gap-4 border-t pt-4 md:grid-cols-2">
               <div className="space-y-2">
                 <div className="flex flex-wrap items-start justify-between gap-2">
@@ -500,6 +643,19 @@ export function DictationHistoryDialog({
               {recording
                 ? new Date(recording.createdAt).toLocaleString()
                 : "N/A"}
+              {historyDetails?.reprocessedFromId && (
+                <>
+                  {" "}
+                  · Re-processed from{" "}
+                  <span className="time-spec">
+                    {historyDetails.reprocessedFromCreatedAt
+                      ? new Date(
+                          historyDetails.reprocessedFromCreatedAt,
+                        ).toLocaleString()
+                      : "a dictation that has since been deleted"}
+                  </span>
+                </>
+              )}
               {reprocessedResult && (
                 <>
                   {" "}

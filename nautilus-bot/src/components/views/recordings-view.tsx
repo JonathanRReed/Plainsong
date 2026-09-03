@@ -43,8 +43,10 @@ import {
   editTranscriptSpeakerTurn,
   getMeetingChatMessages,
   getRecording,
+  importAudioFile,
   openRecordingAudio,
   renameRecording,
+  updateRecordingAttendees,
   acknowledgeIncompleteTranscript,
   retranscribeRecording,
   retryMeetingAnalysis,
@@ -131,6 +133,8 @@ import {
 } from "@/lib/meeting-analysis-status";
 import { StatusBanner } from "@/components/ui/status-banner";
 import { CalendarMeetingCue } from "@/components/meetings/calendar-meeting-cue";
+import { MeetingAttendees } from "@/components/meetings/meeting-attendees";
+import { attendeeNameSuggestions, type MeetingAttendee } from "@/lib/attendees";
 import { DetectedCallCue } from "@/components/meetings/detected-call-cue";
 import { storedVideoServiceLabel } from "@/lib/calendar-events";
 import { buildDetectedCallCapturePrefill } from "@/lib/detected-call";
@@ -169,6 +173,7 @@ import {
   FileAudio,
   FileOutput,
   FileText,
+  FolderOpen,
   MessageSquare,
   Loader2,
   Mic2,
@@ -186,6 +191,7 @@ import {
 } from "lucide-react";
 import type { AnalysisTemplate } from "@/types";
 import type { AsrProviderType, LlmCitation, SearchHit } from "@/types";
+import { MEETING_CAPTURE_MODE_IMPORTED } from "@/types";
 
 const MEETING_ASK_TEMPLATES: AnalysisTemplate[] = [
   {
@@ -505,6 +511,13 @@ function resolveRecordingCaptureMode(
   details: MeetingTranscriptDetails | null,
   fallbackSystemAudio = false
 ): string {
+  // An imported file has no microphone side and no system side, so this is
+  // checked before the transcript's source mode: "Single track" would be
+  // technically true and completely uninformative.
+  if (recording?.meetingCaptureMode === MEETING_CAPTURE_MODE_IMPORTED) {
+    return "Imported file";
+  }
+
   const sourceMode = formatSourceMode(details);
   if (sourceMode !== "Unknown") {
     return sourceMode;
@@ -1243,6 +1256,10 @@ export function RecordingsView() {
   const [meetingStartFailure, setMeetingStartFailure] =
     useState<MeetingStartFailure | null>(null);
   const [isBulkReclassifying, setIsBulkReclassifying] = useState(false);
+  // "Import audio…": true from the click until the sidecar has decoded the
+  // file and saved it. Transcription runs after that and reports itself
+  // through the same processing states a stopped meeting uses.
+  const [isImportingAudio, setIsImportingAudio] = useState(false);
   const [isExportingMeeting, setIsExportingMeeting] = useState(false);
   const [isRefreshingTranscriptPanel, setIsRefreshingTranscriptPanel] =
     useState(false);
@@ -2470,6 +2487,16 @@ export function RecordingsView() {
           } catch (error) {
             console.error("Failed to apply the calendar meeting title:", error);
           }
+          // Same shape as the rename above: applied after the start, so a
+          // failure costs the attendee list and nothing else. The meeting is
+          // already recording by this point and must not be undone for it.
+          if (prefill.attendees.length > 0) {
+            try {
+              await updateRecordingAttendees(startedId, prefill.attendees);
+            } catch (error) {
+              console.error("Failed to store the calendar attendee list:", error);
+            }
+          }
         }
         void refetch();
       }
@@ -2522,6 +2549,39 @@ export function RecordingsView() {
       );
     } finally {
       setIsStopping(false);
+    }
+  };
+
+  /**
+   * Import an existing audio file as a meeting.
+   *
+   * There is no consent step: nobody is being recorded, the audio already
+   * exists, and asking the reader to confirm a notice they cannot send to a
+   * meeting that already happened would be theatre. The native picker itself
+   * is the user gesture Electron requires.
+   */
+  const handleImportAudioFile = async () => {
+    setIsImportingAudio(true);
+    try {
+      const imported = await importAudioFile();
+      if (!imported) {
+        // The picker was dismissed. Nothing happened, so say nothing.
+        return;
+      }
+      await refetch();
+      toast(
+        `Importing ${imported.sourceFileName}. Transcription is running now.`,
+        "success",
+      );
+    } catch (error) {
+      toast(
+        error instanceof Error
+          ? error.message
+          : "Plainsong could not import that audio file.",
+        "error",
+      );
+    } finally {
+      setIsImportingAudio(false);
     }
   };
 
@@ -3282,6 +3342,25 @@ export function RecordingsView() {
 
   // The title is edited where it is read, in the workspace header. It is the
   // same write the row's Rename dialog performs.
+  const handleAttendeesChange = async (next: MeetingAttendee[]) => {
+    if (!selectedRecording) {
+      return;
+    }
+    const recordingId = selectedRecording.id;
+    try {
+      // Render what the sidecar stored, not what was sent: it sanitizes the
+      // list (duplicates dropped, fields clipped) and the header must show
+      // the version that is actually on disk.
+      const stored = await updateRecordingAttendees(recordingId, next);
+      setSelectedRecording((current) =>
+        current?.id === recordingId ? { ...current, attendees: stored } : current,
+      );
+    } catch (error) {
+      console.error("Failed to update the attendee list:", error);
+      toast("Couldn't save that attendee change.", "error");
+    }
+  };
+
   const handleRenameMeetingTitle = async (nextTitle: string) => {
     if (!selectedRecording) {
       return;
@@ -4309,6 +4388,11 @@ export function RecordingsView() {
                 {formatDuration(selectedRecording?.duration ?? 0)}
               </span>
               <span>{selectedMeetingCaptureMode}</span>
+              {/* The meeting can be renamed; the file it came from cannot, so
+                  the provenance is stated separately from the title. */}
+              {selectedRecording?.importedSourceName ? (
+                <span>From {selectedRecording.importedSourceName}</span>
+              ) : null}
               <span className="inline-flex items-center gap-1.5">
                 <span
                   className={cn(
@@ -4333,6 +4417,11 @@ export function RecordingsView() {
                 {selectedMeetingConsent.message}
               </p>
             ) : null}
+            <MeetingAttendees
+              attendees={selectedRecording?.attendees ?? []}
+              onChange={(next) => void handleAttendeesChange(next)}
+              disabled={!selectedRecording}
+            />
           </div>
 
           {/* What the capture actually got. Rendered before anything derived
@@ -5844,6 +5933,9 @@ export function RecordingsView() {
                       segments={transcriptSegments}
                       pauseSpans={selectedRecording?.pauseSpans}
                       speakerNames={speakerNames}
+                      speakerNameSuggestions={attendeeNameSuggestions(
+                        selectedRecording?.attendees,
+                      )}
                       provenance={selectedTranscriptProvenance}
                       onSegmentClick={(segment) => {
                         playhead.set(segment.startTime);
@@ -6019,6 +6111,18 @@ export function RecordingsView() {
           </p>
         </div>
         <div className="flex gap-2">
+          {/* Secondary to the one primary CTA on this surface. Disabled while a
+              meeting is live: an import and a capture want the same
+              post-processing lease, and the sidecar would refuse the second. */}
+          <Button
+            variant="outline"
+            onClick={() => void handleImportAudioFile()}
+            disabled={isRecording || isImportingAudio}
+            title="Transcribe an audio file you already have"
+          >
+            <FolderOpen className="h-4 w-4 mr-2" />
+            {isImportingAudio ? "Importing…" : "Import audio…"}
+          </Button>
           {isRecording ? (
             <>
               <Button
@@ -6067,6 +6171,12 @@ export function RecordingsView() {
           onStartCapture={(prefill) =>
             openMeetingCapture(meetingCapturePrefillFromCalendarEvent(prefill))
           }
+          onOpenMeeting={(recordingId) => {
+            const cited = recordings.find((entry) => entry.id === recordingId);
+            if (cited) {
+              openMeetingWorkspace(cited);
+            }
+          }}
         />
         {/* Its sibling for a call that is happening right now, found by the
             sidecar's detector. Same shape, same hand-off, same rule about

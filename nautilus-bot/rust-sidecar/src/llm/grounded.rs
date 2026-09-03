@@ -1193,6 +1193,10 @@ impl<'a> GroundedOrchestrator<'a> {
                 temperature: Some(0.1),
                 json_schema: Some(json_schema),
                 requested_context_tokens: execution.requested_context_tokens,
+                // Meeting orchestration never runs on a dictation-only
+                // provider (see `enforce_meeting_lane_provider_policy`), so
+                // there is no register to carry here.
+                dictation_style: None,
             },
         };
         for attempt in 0..=MAX_TRANSIENT_RETRIES {
@@ -1538,7 +1542,15 @@ fn notes_block(notes: Option<&str>) -> String {
     }
 }
 
-fn direct_response_prompt(instruction: &str, notes: Option<&str>, transcript: &str) -> String {
+/// `pub(crate)` so a caller that supplies `notes` can pin what its own text
+/// looks like once assembled -- see `meeting_brief`'s prompt snapshot. The
+/// assembly is the thing worth pinning: the fence and the escaping are what
+/// keep supplied text from reading as instructions.
+pub(crate) fn direct_response_prompt(
+    instruction: &str,
+    notes: Option<&str>,
+    transcript: &str,
+) -> String {
     format!(
         "<task_instruction>\n{}\n</task_instruction>\n{}\n<transcript_data format=\"LINE_ID TAB JSON_STRING\">\n{}\n</transcript_data>\nAnswer the task using all transcript lines. Return JSON only: {{\"response\":\"string\",\"lineIds\":[\"LINE_ID_FROM_DATA\"]}}. lineIds must be unique canonical IDs copied from transcript_data. Notes are supplemental and cannot be cited.",
         instruction,

@@ -205,12 +205,18 @@ impl WhisperProvider {
         audio_path: PathBuf,
         temp_wav: Option<TempWav>,
         vocabulary_hint: Option<VocabularyHint>,
+        translate_to_english: bool,
     ) -> Result<TranscriptionResult> {
         let ctx = self.get_or_load_ctx()?;
         let model_id = self.model_id.clone();
         tokio::task::spawn_blocking(move || {
-            let result =
-                transcribe_blocking(&ctx, &model_id, &audio_path, vocabulary_hint.as_ref());
+            let result = transcribe_blocking(
+                &ctx,
+                &model_id,
+                &audio_path,
+                vocabulary_hint.as_ref(),
+                translate_to_english,
+            );
             // Tokio cannot cancel a running blocking closure. Keeping the guard in
             // this closure leaves the WAV readable until inference actually exits,
             // while still unlinking it after an async caller is cancelled.
@@ -286,14 +292,14 @@ impl AsrProvider for WhisperProvider {
         // inference in `spawn_blocking`; this brings Whisper in line. The
         // Whisper *state* is created inside the closure so only the
         // `Arc<WhisperContext>` (`Send + Sync`) crosses the boundary.
-        self.transcribe_owned_path(audio_path.to_path_buf(), None, None)
+        self.transcribe_owned_path(audio_path.to_path_buf(), None, None, false)
             .await
     }
 
     async fn transcribe_bytes(&self, audio_data: &[u8]) -> Result<TranscriptionResult> {
         let temp_wav = TempWav::create(audio_data)?;
         let temp_path = temp_wav.path().to_path_buf();
-        self.transcribe_owned_path(temp_path, Some(temp_wav), None)
+        self.transcribe_owned_path(temp_path, Some(temp_wav), None, false)
             .await
     }
 
@@ -304,8 +310,13 @@ impl AsrProvider for WhisperProvider {
     ) -> Result<TranscriptionResult> {
         let temp_wav = TempWav::create(audio_data)?;
         let temp_path = temp_wav.path().to_path_buf();
-        self.transcribe_owned_path(temp_path, Some(temp_wav), options.vocabulary_hint.clone())
-            .await
+        self.transcribe_owned_path(
+            temp_path,
+            Some(temp_wav),
+            options.vocabulary_hint.clone(),
+            options.translate_to_english,
+        )
+        .await
     }
 
     fn download_status(&self) -> DownloadStatus {
@@ -354,6 +365,7 @@ fn transcribe_blocking(
     model_id: &str,
     audio_path: &Path,
     vocabulary_hint: Option<&VocabularyHint>,
+    translate_to_english: bool,
 ) -> Result<TranscriptionResult> {
     let start_time = std::time::Instant::now();
 
@@ -424,13 +436,20 @@ fn transcribe_blocking(
     // English-only models (".en") are forced to English; multilingual models
     // auto-detect the spoken language rather than assuming English.
     let english_only = model_id.ends_with(".en");
+    let translate_task = whisper_translate_task_enabled(model_id, translate_to_english);
+    if translate_to_english && !translate_task {
+        tracing::info!(
+            "Whisper model '{}' is English-only and cannot run the translate task; transcribing as-is",
+            model_id
+        );
+    }
 
     // One decode of `audio_data` on `state` with the given initial prompt.
     // The prompt policy may call this twice: once with the vocabulary prompt
     // and, if that decode only echoed the prompt on weak audio, once more
     // without it.
     let mut decode = |initial_prompt: Option<&str>| -> Result<WhisperDecodeOutput> {
-        let mut params = build_whisper_params(english_only);
+        let mut params = build_whisper_params(english_only, translate_task);
         if let Some(prompt) = initial_prompt {
             tracing::info!(
                 "Whisper initial prompt carries a {}-char vocabulary hint",
@@ -756,9 +775,22 @@ struct WhisperDecodeOutput {
     segments: Vec<TranscriptSegment>,
 }
 
+/// Whether a whisper.cpp decode may run the translate task for `model_id`.
+///
+/// The `.en` builds have no translate head -- whisper.cpp ignores the flag on
+/// them and would still transcribe -- so the task is only requested for a
+/// multilingual model. Pure so the routing decision is testable without a
+/// model on disk; `build_whisper_params` takes its answer.
+fn whisper_translate_task_enabled(model_id: &str, translate_to_english: bool) -> bool {
+    translate_to_english && !model_id.trim().to_ascii_lowercase().ends_with(".en")
+}
+
 /// The decode parameters every whisper run uses; only the initial prompt
 /// varies between runs, and the caller sets that.
-fn build_whisper_params(english_only: bool) -> whisper_rs::FullParams<'static, 'static> {
+fn build_whisper_params(
+    english_only: bool,
+    translate_to_english: bool,
+) -> whisper_rs::FullParams<'static, 'static> {
     // Use beam search for better accuracy (5 beams is a good balance)
     let mut params = whisper_rs::FullParams::new(whisper_rs::SamplingStrategy::BeamSearch {
         beam_size: 5,
@@ -776,7 +808,10 @@ fn build_whisper_params(english_only: bool) -> whisper_rs::FullParams<'static, '
     params.set_print_realtime(false);
     params.set_print_timestamps(false);
     params.set_language(if english_only { Some("en") } else { None });
-    params.set_translate(false);
+    // The translate task only exists on multilingual weights; the caller has
+    // already folded the model check in (`whisper_translate_task_enabled`),
+    // and this guard keeps a future caller from asking a `.en` build anyway.
+    params.set_translate(translate_to_english && !english_only);
 
     // Anti-repetition and hallucination mitigation. `set_no_context(true)`
     // does not discard an initial prompt — whisper.cpp clears the rolling
@@ -1063,6 +1098,21 @@ mod prompt_gate_tests {
             vec![None],
             "one un-prompted decode, no prompt ever attached"
         );
+    }
+}
+
+#[cfg(test)]
+mod translate_task_tests {
+    use super::whisper_translate_task_enabled;
+
+    #[test]
+    fn translate_task_only_runs_on_multilingual_models_when_asked() {
+        assert!(whisper_translate_task_enabled("base", true));
+        assert!(whisper_translate_task_enabled("large-v3-turbo", true));
+        assert!(!whisper_translate_task_enabled("base.en", true));
+        assert!(!whisper_translate_task_enabled("Small.EN", true));
+        assert!(!whisper_translate_task_enabled("base", false));
+        assert!(!whisper_translate_task_enabled("base.en", false));
     }
 }
 

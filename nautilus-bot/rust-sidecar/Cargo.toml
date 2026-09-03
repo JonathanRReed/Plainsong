@@ -134,7 +134,16 @@ objc2-foundation = { version = "0.3.2", features = ["NSString"] }
 tokio = { version = "1", features = ["test-util"] }
 
 [features]
-default = ["asr-all", "sqlcipher", "whisper-gpu"]
+default = ["asr-all", "sqlcipher", "whisper-gpu", "local-llm"]
+
+# The bundled zero-setup dictation cleanup model (S1-mini by Superwhisper),
+# run in-process through Candle's quantized Qwen3 GGUF path. Adds no new
+# crate: candle-core/-nn/-transformers and tokenizers are already pulled in by
+# `asr-canary`/`asr-parakeet`, and `candle-metal` (shipped on macOS) routes it
+# through the GPU. In `default` because "works out of the box" is the point --
+# a build without it falls back to telling the user to pick Ollama or a cloud
+# provider, which is the pre-B6 behavior.
+local-llm = ["candle-core", "candle-nn", "candle-transformers", "tokenizers", "download-manager"]
 
 # ASR Provider Features
 asr-whisper = ["whisper-rs", "download-manager"]

@@ -3,8 +3,12 @@ export {
   analyzeRecordings,
   askMemory,
   cancelAnalysisRun,
+  deleteBundledCleanupModel,
+  downloadBundledCleanupModel,
   extractActionItems,
   extractActionItemsGrounded,
+  getAppleLanguageModelAvailability,
+  getBundledCleanupModelStatus,
   getOllamaStatus,
   getRelationshipMemory,
   listAnthropicModels,
@@ -17,6 +21,8 @@ export {
   summarizeRecordingGrounded,
 } from "../backend";
 export type {
+  AppleLanguageModelAvailability,
+  BundledCleanupModelStatus,
   CompanyMemoryProfile,
   MeetingChatMessage,
   PersonMemoryProfile,

@@ -27,6 +27,56 @@ export interface Settings {
    */
   automation?: AutomationSettings;
   theme: "light" | "dark" | "system";
+  /**
+   * Optional on this side only. The Rust struct always serializes it, so a
+   * live app always receives it; declaring it optional keeps every existing
+   * `Settings` literal (tests, the settings screen's merge path) compiling
+   * without a mechanical edit, and matches how a settings.json written before
+   * this section existed loads: absent, then defaulted.
+   */
+  ai?: AiSettings;
+}
+
+/**
+ * Which chat surface a saved prompt is offered on.
+ *
+ * `meeting` is the per-meeting chat (one transcript in context), `memory` is
+ * the dashboard's "ask your meetings" (many). They are genuinely different
+ * questions — "draft a follow-up message" makes no sense against a whole
+ * library — so the picker filters rather than showing everything everywhere.
+ */
+export type SavedPromptScope = "meeting" | "memory" | "both";
+
+/**
+ * A reusable question the reader keeps around ("Recipes", in Granola's
+ * words). Mirrors `SavedPrompt` in rust-sidecar/src/settings.rs -- same
+ * shape, same sanitization discipline (dropped if malformed, capped in count
+ * and length), exactly like `MeetingCustomTemplate`.
+ *
+ * A stored entry whose `id` is one of the built-ins in
+ * `src/lib/saved-prompts.ts` is an OVERRIDE of that built-in, not a separate
+ * prompt: it is how an edited or hidden starter prompt is persisted. The
+ * sidecar recomputes `builtIn` from the id on every load and save, so the
+ * flag can be neither spoofed onto a user prompt nor stripped off a built-in.
+ */
+export interface SavedPrompt {
+  id: string;
+  name: string;
+  prompt: string;
+  scope: SavedPromptScope;
+  /** Derived from the id by the sidecar; never trusted from the wire. */
+  builtIn?: boolean;
+  /**
+   * Built-in starters can be hidden but not deleted -- deleting one would
+   * only mean it came back on the next release with a different id history.
+   * A hidden prompt is kept in settings so the choice survives, and skipped
+   * by the picker.
+   */
+  hidden?: boolean;
+}
+
+export interface AiSettings {
+  savedPrompts?: SavedPrompt[];
 }
 
 /**
@@ -90,6 +140,12 @@ export interface DictationCustomMode {
   aiModelId?: string | null;
   activationAppMatcher?: string | null;
   activationDomainMatcher?: string | null;
+  /**
+   * Translate the spoken words into English for this profile. Mirrors
+   * `translate_to_english` in rust-sidecar/src/settings.rs; the built-in
+   * modes use `TranscriptionSettings.dictationTranslateToEnglish` instead.
+   */
+  translateToEnglish?: boolean;
 }
 
 /**
@@ -150,6 +206,13 @@ export interface TranscriptionSettings {
   dictationKeepWarm?: "off" | "on";
   dictationLivePreviewEnabled?: boolean;
   dictationAiFormatting: boolean;
+  /**
+   * Translate-to-English for the built-in modes (a saved custom mode carries
+   * its own `translateToEnglish`). Mirrors `dictation_translate_to_english`
+   * in rust-sidecar/src/settings.rs. How it runs depends on the model: see
+   * `resolveTranslateToEnglishAvailability` in src/lib/dictation-translation.ts.
+   */
+  dictationTranslateToEnglish?: boolean;
   dictationModePreset?:
     | "voice"
     | "messages"
@@ -181,6 +244,12 @@ export interface TranscriptionSettings {
   dictationProjectId: string;
   dictationRetentionPreset?: "immediate" | "24h" | "72h" | "never" | "custom";
   dictationRetentionCustomHours?: number;
+  /**
+   * Keep each dictation's captured audio so a history entry can be run through
+   * the recognizer again ("Process again"). Off by default; the audio is
+   * deleted with the entry. Mirrors `dictation_keep_audio` in settings.rs.
+   */
+  dictationKeepAudio?: boolean;
   meetingAudioStorageMode?: "always" | "transcript_only";
   meetingRetentionPreset?: "1m" | "2m" | "3m" | "custom" | "never";
   meetingRetentionCustomMonths?: number;
@@ -262,10 +331,43 @@ interface UpdateSettings {
   lastSeenVersion: string | null;
 }
 
+/**
+ * What physically fires a dictation binding. Mirrors `DictationBindingTrigger`
+ * in rust-sidecar/src/settings.rs. A `key` accelerator may be a lone modifier
+ * ("Fn", "Cmd"); that and every `mouse` trigger need the native macOS helper.
+ */
+export type DictationBindingTrigger =
+  | { kind: "key"; accelerator: string }
+  | { kind: "mouse"; button: 3 | 4 | 5; modifiers?: string[] };
+
+/**
+ * What a dictation binding does. `dictation` with `modeId: null` runs the
+ * selected mode; a built-in preset id or a saved custom mode id runs that
+ * mode for the one session. `behavior: "inherit"` follows the activation
+ * setting (toggle / hold / hands-free); `toggle` and `hold` pin it.
+ */
+export type DictationBindingAction =
+  | { kind: "dictation"; modeId: string | null; behavior: "toggle" | "hold" | "inherit" }
+  | { kind: "cycleMode" }
+  | { kind: "cancel" };
+
+export interface DictationBinding {
+  id: string;
+  trigger: DictationBindingTrigger;
+  action: DictationBindingAction;
+}
+
 interface KeyboardShortcuts {
+  /**
+   * The primary dictation binding's accelerator, kept in step with
+   * `dictationBindings` by the sidecar so an older build still has a hotkey.
+   * Read it for display; write `dictationBindings` to change it.
+   */
   toggleDictation: string;
   openWindow: string;
   // Recovery bindings for the last dictation result. Empty string = unbound.
   repasteLastDictation?: string;
   recopyLastDictation?: string;
+  /** The dictation binding table (roadmap item B4). Absent on older files. */
+  dictationBindings?: DictationBinding[];
 }

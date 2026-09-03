@@ -210,6 +210,10 @@ impl MeetingSource for ReadOnlyStore {
             template_id: recording.meeting_template_id.clone(),
             capture_mode: recording.meeting_capture_mode.clone(),
             analysis_failure: recording.analysis_failure.clone(),
+            // Names only: `attendee_names_for_context` is the one function that
+            // turns an attendee list into text for a consumer outside the app,
+            // and it drops the address.
+            attendee_names: crate::models::attendee_names_for_context(&recording.attendees),
         }))
     }
 
@@ -349,6 +353,7 @@ mod tests {
             meeting_notes: Some("Notes here".to_string()),
             meeting_template_id: None,
             meeting_capture_mode: None,
+            imported_source_name: None,
             notes_updated_at: None,
             consent_prompt_shown: false,
             consent_notice_mode: None,
@@ -356,6 +361,7 @@ mod tests {
             consent_notice_message: None,
             consent_notice_updated_at: None,
             analysis_failure: None,
+            attendees: Vec::new(),
             pause_spans: Vec::new(),
             video_service: None,
         }

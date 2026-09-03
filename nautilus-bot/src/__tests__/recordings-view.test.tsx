@@ -289,6 +289,7 @@ vi.mock("@/lib/backend", () => ({
   revalidateRecordingAudio: vi.fn(async () => ({})) as any,
   acknowledgeIncompleteTranscript: vi.fn(async () => ({})) as any,
   setRecordingSourceType: vi.fn() as any,
+  importAudioFile: vi.fn(async () => null) as any,
   isDiarizationModelAvailable: vi.fn(async () => false) as any,
   getMeetingChatMessages: vi.fn(async () => []) as any,
   updateMeetingChatMessages: vi.fn(async () => {}) as any,
@@ -3844,5 +3845,170 @@ describe("RecordingsView", () => {
       ).not.toBeInTheDocument();
       expect(screen.queryByText("Connect your calendar")).not.toBeInTheDocument();
     });
+  });
+});
+
+describe("RecordingsView audio import", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    recordingsLoading = false;
+    recordingsHaveLoaded = true;
+    recordingsError = null;
+    recordingState = {
+      isRecording: false,
+      recordingId: null,
+      formattedDuration: "00:00",
+      meetingPhase: "idle",
+      meetingMessage: null,
+    };
+    readinessContext.productReadiness = {
+      evidenceObservedAt: 1,
+      dictation: { domain: "dictation", state: "ready", cause: null },
+      meetings: { domain: "meetings", state: "ready", cause: null },
+      meetingsCapture: {
+        domain: "meetings_capture",
+        state: "ready",
+        cause: null,
+      },
+      fullCapture: { domain: "full_capture", state: "ready", cause: null },
+      overall: { domain: "overall", state: "ready", cause: null },
+    };
+    recordings = [
+      {
+        id: "r1",
+        title: "Weekly sync",
+        projectId: "default",
+        duration: 120,
+        createdAt: "2026-03-06T12:00:00Z",
+        updatedAt: "2026-03-06T12:00:00Z",
+        sourceType: "meeting",
+        audioPath: "/tmp/weekly-sync.wav",
+        meetingCaptureMode: "me_and_them",
+        status: "completed" as const,
+      } as Recording,
+    ];
+    backend.getRecording.mockResolvedValue({ ...recordings[0] });
+    backend.getTranscript.mockResolvedValue({
+      id: "t1",
+      recordingId: "r1",
+      segments: [],
+      fullText: "",
+      language: "en",
+      confidence: 0.9,
+      model: "parakeet",
+      createdAt: "2026-03-06T12:02:00Z",
+    });
+    backend.getMeetingTranscriptDetails.mockResolvedValue({});
+  });
+
+  it("offers Import audio beside New meeting and hands the picker's file to the sidecar", async () => {
+    backend.importAudioFile.mockResolvedValue({
+      recordingId: "r2",
+      title: "Q3 planning call",
+      sourceFileName: "Q3 planning call.m4a",
+      durationSeconds: 1800,
+    });
+
+    render(<RecordingsView />);
+    await screen.findByRole("heading", { name: "Meetings" });
+
+    const importButton = screen.getByRole("button", { name: /import audio/i });
+    // The one gold CTA on this surface stays "New meeting".
+    expect(screen.getByRole("button", { name: /new meeting/i })).toBeInTheDocument();
+    fireEvent.click(importButton);
+
+    await waitFor(() => {
+      expect(backend.importAudioFile).toHaveBeenCalledTimes(1);
+      // The renderer never names a path; the main process picks the file.
+      expect(backend.importAudioFile).toHaveBeenCalledWith();
+    });
+    await waitFor(() => {
+      expect(refetchRecordings).toHaveBeenCalled();
+      expect(toast).toHaveBeenCalledWith(
+        "Importing Q3 planning call.m4a. Transcription is running now.",
+        "success",
+      );
+    });
+    // No consent step: nobody is being recorded.
+    expect(
+      screen.queryByRole("button", { name: "Confirm meeting consent" }),
+    ).not.toBeInTheDocument();
+  });
+
+  it("says Importing while the file is being decoded, and nothing at all when the picker is dismissed", async () => {
+    const pending = deferred<any>();
+    backend.importAudioFile.mockReturnValue(pending.promise);
+
+    render(<RecordingsView />);
+    await screen.findByRole("heading", { name: "Meetings" });
+    fireEvent.click(screen.getByRole("button", { name: /import audio/i }));
+
+    const importing = await screen.findByRole("button", { name: /importing/i });
+    expect(importing).toBeDisabled();
+
+    // A dismissed picker resolves with nothing: no toast, no reload, no noise.
+    await act(async () => {
+      pending.resolve(null);
+    });
+    await waitFor(() => {
+      expect(
+        screen.getByRole("button", { name: /import audio/i }),
+      ).not.toBeDisabled();
+    });
+    expect(toast).not.toHaveBeenCalled();
+    expect(refetchRecordings).not.toHaveBeenCalled();
+  });
+
+  it("cannot start an import while a meeting is being recorded", async () => {
+    recordingState = {
+      isRecording: true,
+      recordingId: "r9",
+      formattedDuration: "00:42",
+      meetingPhase: "recording",
+      meetingMessage: null,
+    };
+
+    render(<RecordingsView />);
+    await screen.findByRole("heading", { name: "Meetings" });
+
+    expect(screen.getByRole("button", { name: /import audio/i })).toBeDisabled();
+  });
+
+  it("labels an imported meeting as a file, not as Me + Them, and says which file", async () => {
+    recordings = [
+      {
+        id: "imported-1",
+        title: "Q3 planning call",
+        projectId: "default",
+        duration: 1800,
+        createdAt: "2026-03-06T12:00:00Z",
+        updatedAt: "2026-03-06T12:00:00Z",
+        sourceType: "meeting",
+        audioPath: "/tmp/recording_1_abcdefgh.wav",
+        meetingCaptureMode: "imported",
+        importedSourceName: "Q3 planning call.m4a",
+        status: "completed" as const,
+      } as Recording,
+    ];
+    backend.getRecording.mockResolvedValue({ ...recordings[0] });
+    backend.getTranscript.mockResolvedValue({
+      id: "t2",
+      recordingId: "imported-1",
+      segments: [],
+      fullText: "",
+      language: "en",
+      confidence: 0.9,
+      model: "parakeet",
+      createdAt: "2026-03-06T12:02:00Z",
+    });
+
+    render(<RecordingsView />);
+    fireEvent.click(await screen.findByText("Q3 planning call"));
+    await screen.findByText("The record");
+
+    expect(await screen.findByText("Imported file")).toBeInTheDocument();
+    expect(screen.queryByText("Me + Them")).not.toBeInTheDocument();
+    // The meeting can be renamed; the file it came from is stated separately.
+    expect(screen.getByText("From Q3 planning call.m4a")).toBeInTheDocument();
   });
 });

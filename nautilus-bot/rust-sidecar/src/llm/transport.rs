@@ -78,6 +78,12 @@ fn body_snippet(body: &[u8]) -> String {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Provider {
+    /// The zero-setup bundled cleanup model (S1-mini by Superwhisper), run
+    /// in-process through Candle. Dictation lane only; see `bundled_local`.
+    BundledLocal,
+    /// Apple's on-device system model via the FoundationModels helper.
+    /// Dictation lane only; see `apple_language_model`.
+    AppleLanguageModel,
     Ollama,
     OpenAi,
     Anthropic,
@@ -89,6 +95,8 @@ pub enum Provider {
 impl Provider {
     pub fn from_settings_value(value: &str) -> Result<Self, String> {
         match value.trim().to_ascii_lowercase().as_str() {
+            "bundled_local" | "bundled-local" => Ok(Self::BundledLocal),
+            "apple_language_model" | "apple-language-model" => Ok(Self::AppleLanguageModel),
             "ollama" => Ok(Self::Ollama),
             "openai" => Ok(Self::OpenAi),
             "anthropic" => Ok(Self::Anthropic),
@@ -96,7 +104,7 @@ impl Provider {
             "deepseek" => Ok(Self::DeepSeek),
             "ollama-cloud" => Ok(Self::OllamaCloud),
             unknown => Err(format!(
-                "Unsupported analysis provider '{}'. Choose ollama, openai, anthropic, gemini, deepseek, or ollama-cloud.",
+                "Unsupported analysis provider '{}'. Choose bundled_local, apple_language_model, ollama, openai, anthropic, gemini, deepseek, or ollama-cloud.",
                 unknown
             )),
         }
@@ -104,6 +112,8 @@ impl Provider {
 
     pub fn as_settings_value(self) -> &'static str {
         match self {
+            Self::BundledLocal => super::bundled_local::PROVIDER_SETTINGS_VALUE,
+            Self::AppleLanguageModel => super::apple_language_model::PROVIDER_SETTINGS_VALUE,
             Self::Ollama => "ollama",
             Self::OpenAi => "openai",
             Self::Anthropic => "anthropic",
@@ -113,12 +123,41 @@ impl Provider {
         }
     }
 
+    /// Whether using this provider sends text off the machine.
+    ///
+    /// `BundledLocal` runs in this process and `AppleLanguageModel` runs in a
+    /// helper with no network client at all, so neither is remote. Widening
+    /// this one answer rather than the old `!= Ollama` test is the point: the
+    /// remote-processing gate, the secret lookup and every privacy disclosure
+    /// read it.
     pub fn is_remote(self) -> bool {
-        !matches!(self, Self::Ollama)
+        !matches!(
+            self,
+            Self::Ollama | Self::BundledLocal | Self::AppleLanguageModel
+        )
+    }
+
+    /// Whether this provider may serve a lane other than dictation cleanup.
+    ///
+    /// The two on-device providers cannot: S1-mini is a normalizer whose own
+    /// model card says it "will not follow general instructions", and Apple's
+    /// shared 4,096-token window cannot hold a meeting chunk plus its
+    /// summary. Both refuse at request time too; this is the check that keeps
+    /// them out of the meetings picker in the first place.
+    pub fn supports_meeting_analysis(self) -> bool {
+        !matches!(self, Self::BundledLocal | Self::AppleLanguageModel)
+    }
+
+    /// Runs entirely on this Mac with no server of any kind -- not even a
+    /// localhost one. Ollama is local but still an installed service the user
+    /// has to run and keep running; these two are not.
+    pub fn is_zero_setup_local(self) -> bool {
+        matches!(self, Self::BundledLocal | Self::AppleLanguageModel)
     }
 
     pub fn provider_secret_name(self) -> Option<&'static str> {
         match self {
+            Self::BundledLocal | Self::AppleLanguageModel => None,
             Self::OpenAi => Some("openai"),
             Self::Anthropic => Some("anthropic"),
             Self::Gemini => Some("gemini"),
@@ -130,6 +169,7 @@ impl Provider {
 
     pub fn environment_key_name(self) -> Option<&'static str> {
         match self {
+            Self::BundledLocal | Self::AppleLanguageModel => None,
             Self::OpenAi => Some("OPENAI_API_KEY"),
             Self::Anthropic => Some("ANTHROPIC_API_KEY"),
             Self::Gemini => Some("GEMINI_API_KEY"),
@@ -161,6 +201,8 @@ impl Provider {
     ///   successor (https://api-docs.deepseek.com/updates/).
     pub fn default_model(self) -> &'static str {
         match self {
+            Self::BundledLocal => super::bundled_local::MODEL_ID,
+            Self::AppleLanguageModel => super::apple_language_model::MODEL_ID,
             Self::Ollama => "qwen3.5:4b",
             Self::OpenAi => "gpt-5.6-luna",
             Self::Anthropic => "claude-opus-5",
@@ -173,6 +215,12 @@ impl Provider {
     pub fn model_budget(self, model: &str, purpose: CompletionPurpose) -> ModelBudget {
         let normalized = model.to_ascii_lowercase();
         let context_window_tokens = match self {
+            // Both on-device providers report a window far below what their
+            // weights advertise, because the honest number is the one they
+            // produce good output inside. Over-reporting packs a prompt the
+            // model then handles badly; under-reporting only wastes headroom.
+            Self::BundledLocal => super::bundled_local::CONTEXT_WINDOW_TOKENS,
+            Self::AppleLanguageModel => super::apple_language_model::CONTEXT_WINDOW_TOKENS,
             Self::Ollama => model_context_hint(&normalized).unwrap_or(4_096),
             Self::OllamaCloud => model_context_hint(&normalized).unwrap_or(32_768),
             Self::OpenAi => {
@@ -211,6 +259,19 @@ impl Provider {
             }
             Self::DeepSeek => 64_000,
         };
+
+        // The on-device pair only ever serves dictation cleanup, whose output
+        // is bounded by the transcript rather than by a summary budget.
+        // Reserving 3,072 tokens of a 4,096-token window for output would
+        // leave 512 tokens of input; reserving what the pass actually needs
+        // leaves room for the dictation.
+        if self.is_zero_setup_local() {
+            return ModelBudget {
+                context_window_tokens,
+                reserved_output_tokens: super::bundled_local::MAX_OUTPUT_TOKENS,
+                safety_margin_tokens: 256,
+            };
+        }
 
         let reserved_output_tokens = match purpose {
             CompletionPurpose::Title => 128,
@@ -330,6 +391,12 @@ pub struct RequestOptions {
     /// Provider-neutral context allocation hint. Only Ollama serializes this,
     /// after validating it as a positive `num_ctx`; cloud adapters ignore it.
     pub requested_context_tokens: Option<usize>,
+    /// Register/structure/context for the bundled cleanup model's control
+    /// line. Provider-neutral in the same way `requested_context_tokens` is:
+    /// only `bundled_local` reads it, because it is the only provider whose
+    /// input format has a slot for it. Everything else steers through the
+    /// system prompt, which that model has no room for.
+    pub dictation_style: Option<super::bundled_local::StyleControl>,
 }
 
 impl RequestOptions {
@@ -341,6 +408,7 @@ impl RequestOptions {
             temperature: Some(0.1),
             json_schema: None,
             requested_context_tokens: None,
+            dictation_style: None,
         }
     }
 }
@@ -502,6 +570,8 @@ pub trait CompletionTransport: Send + Sync {
 
 #[derive(Clone)]
 pub enum ProviderTransport {
+    BundledLocal(super::bundled_local::BundledLocalClient),
+    AppleLanguageModel(super::apple_language_model::AppleLanguageModelClient),
     Ollama(OllamaClient),
     OpenAi(OpenAIClient),
     Anthropic(AnthropicClient),
@@ -511,8 +581,19 @@ pub enum ProviderTransport {
 }
 
 impl ProviderTransport {
-    pub fn new(provider: Provider, api_key: Option<String>, ollama: &OllamaClient) -> Self {
+    pub fn new(
+        provider: Provider,
+        api_key: Option<String>,
+        ollama: &OllamaClient,
+        models_root: &std::path::Path,
+    ) -> Self {
         match provider {
+            Provider::BundledLocal => Self::BundledLocal(
+                super::bundled_local::BundledLocalClient::new(models_root.to_path_buf()),
+            ),
+            Provider::AppleLanguageModel => {
+                Self::AppleLanguageModel(super::apple_language_model::AppleLanguageModelClient)
+            }
             Provider::Ollama => Self::Ollama(ollama.clone()),
             Provider::OpenAi => Self::OpenAi(OpenAIClient::with_api_key(api_key)),
             Provider::Anthropic => Self::Anthropic(AnthropicClient::with_api_key(api_key)),
@@ -527,6 +608,8 @@ impl ProviderTransport {
 impl CompletionTransport for ProviderTransport {
     fn provider(&self) -> Provider {
         match self {
+            Self::BundledLocal(_) => Provider::BundledLocal,
+            Self::AppleLanguageModel(_) => Provider::AppleLanguageModel,
             Self::Ollama(_) => Provider::Ollama,
             Self::OpenAi(_) => Provider::OpenAi,
             Self::Anthropic(_) => Provider::Anthropic,
@@ -538,6 +621,8 @@ impl CompletionTransport for ProviderTransport {
 
     async fn complete(&self, request: &CompletionRequest) -> Result<CompletionResponse, LlmError> {
         match self {
+            Self::BundledLocal(client) => client.complete(request).await,
+            Self::AppleLanguageModel(client) => client.complete(request).await,
             Self::Ollama(client) => client.complete(request).await,
             Self::OpenAi(client) => client.complete(request).await,
             Self::Anthropic(client) => client.complete(request).await,
@@ -572,6 +657,10 @@ pub struct ProviderSelection {
     pub remote_processing_gate: Arc<crate::remote_processing::RemoteProcessingGate>,
     pub api_key: Option<String>,
     pub timeout: Duration,
+    /// Where downloaded models live. Only `bundled_local` reads it; carried
+    /// on the selection rather than looked up inside the provider so tests
+    /// can point it at a fixture directory.
+    pub models_root: std::path::PathBuf,
 }
 
 pub struct ProviderRuntime {
@@ -609,8 +698,12 @@ impl ProviderRuntime {
             ));
         }
 
-        let transport =
-            ProviderTransport::new(selection.provider, selection.api_key.clone(), ollama);
+        let transport = ProviderTransport::new(
+            selection.provider,
+            selection.api_key.clone(),
+            ollama,
+            &selection.models_root,
+        );
         Ok(Self {
             selection,
             transport,
@@ -899,6 +992,125 @@ mod tests {
         assert_eq!(budget.available_input_tokens(), 0);
     }
 
+    /// Every provider the settings file can name, so a new variant cannot be
+    /// added without deciding what it does at each of these five sites.
+    const EVERY_PROVIDER: [Provider; 8] = [
+        Provider::BundledLocal,
+        Provider::AppleLanguageModel,
+        Provider::Ollama,
+        Provider::OpenAi,
+        Provider::Anthropic,
+        Provider::Gemini,
+        Provider::DeepSeek,
+        Provider::OllamaCloud,
+    ];
+
+    #[test]
+    fn every_provider_round_trips_through_its_settings_value() {
+        for provider in EVERY_PROVIDER {
+            assert_eq!(
+                Provider::from_settings_value(provider.as_settings_value()).unwrap(),
+                provider,
+                "{provider:?} does not survive a settings write/read"
+            );
+        }
+        // The two snake_case ids also accept the hyphenated spelling a
+        // hand-edited settings file might carry.
+        assert_eq!(
+            Provider::from_settings_value("bundled-local").unwrap(),
+            Provider::BundledLocal
+        );
+        assert_eq!(
+            Provider::from_settings_value("apple-language-model").unwrap(),
+            Provider::AppleLanguageModel
+        );
+    }
+
+    #[test]
+    fn every_provider_builds_its_own_transport_variant() {
+        // The dispatch site: `ProviderTransport::new` is what every lane
+        // reaches through, so a provider that silently fell through to Ollama
+        // here would send dictation somewhere the settings never named.
+        let ollama = OllamaClient::new();
+        let models_root = std::path::Path::new("/tmp/plainsong-test-models");
+        for provider in EVERY_PROVIDER {
+            let transport =
+                ProviderTransport::new(provider, Some("key".to_string()), &ollama, models_root);
+            assert_eq!(
+                CompletionTransport::provider(&transport),
+                provider,
+                "{provider:?} built the wrong transport"
+            );
+        }
+    }
+
+    #[test]
+    fn the_on_device_providers_are_local_and_need_no_secret() {
+        for provider in [Provider::BundledLocal, Provider::AppleLanguageModel] {
+            assert!(!provider.is_remote(), "{provider:?} must not be remote");
+            assert!(provider.is_zero_setup_local(), "{provider:?}");
+            assert_eq!(provider.provider_secret_name(), None, "{provider:?}");
+            assert_eq!(provider.environment_key_name(), None, "{provider:?}");
+        }
+        // Ollama is local but is still an installed service, so it is not in
+        // the zero-setup set.
+        assert!(!Provider::Ollama.is_remote());
+        assert!(!Provider::Ollama.is_zero_setup_local());
+        for remote in [
+            Provider::OpenAi,
+            Provider::Anthropic,
+            Provider::Gemini,
+            Provider::DeepSeek,
+            Provider::OllamaCloud,
+        ] {
+            assert!(remote.is_remote(), "{remote:?}");
+            assert!(!remote.is_zero_setup_local(), "{remote:?}");
+        }
+    }
+
+    #[test]
+    fn only_the_on_device_providers_are_barred_from_meeting_analysis() {
+        for provider in EVERY_PROVIDER {
+            assert_eq!(
+                provider.supports_meeting_analysis(),
+                !provider.is_zero_setup_local(),
+                "{provider:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_zero_setup_provider_never_reserves_more_output_than_its_window() {
+        // The generic reservation for a Summary is 3,072 tokens, which would
+        // leave 512 tokens of input inside a 4,096-token window. These two
+        // only ever serve dictation cleanup, whose output is bounded by the
+        // transcript, so they get their own reservation.
+        for provider in [Provider::BundledLocal, Provider::AppleLanguageModel] {
+            for purpose in [
+                CompletionPurpose::Generic,
+                CompletionPurpose::Summary,
+                CompletionPurpose::Ask,
+            ] {
+                let budget = provider.model_budget(provider.default_model(), purpose);
+                assert_eq!(budget.context_window_tokens, 4_096, "{provider:?}");
+                assert!(
+                    budget.available_input_tokens() >= 2_000,
+                    "{provider:?} {purpose:?} left only {} input tokens",
+                    budget.available_input_tokens()
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn the_on_device_providers_name_the_one_model_they_serve() {
+        assert_eq!(Provider::BundledLocal.default_model(), "s1-mini");
+        assert_eq!(
+            Provider::AppleLanguageModel.default_model(),
+            "apple-on-device"
+        );
+    }
+
     #[test]
     fn unknown_analysis_providers_are_rejected_instead_of_routing_to_ollama() {
         assert_eq!(
@@ -920,6 +1132,7 @@ mod tests {
                 remote_processing_gate: Arc::clone(&gate),
                 api_key: Some("not-used".to_string()),
                 timeout: Duration::from_secs(1),
+                models_root: std::path::PathBuf::from("/tmp/plainsong-test-models"),
             },
             &OllamaClient::new(),
         )

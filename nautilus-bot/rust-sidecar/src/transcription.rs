@@ -258,6 +258,7 @@ mod tests {
             meeting_notes: None,
             meeting_template_id: None,
             meeting_capture_mode: None,
+            imported_source_name: None,
             notes_updated_at: None,
             consent_prompt_shown: false,
             consent_notice_mode: None,
@@ -265,6 +266,7 @@ mod tests {
             consent_notice_message: None,
             consent_notice_updated_at: None,
             analysis_failure: None,
+            attendees: Vec::new(),
             pause_spans: Vec::new(),
             video_service: None,
         }

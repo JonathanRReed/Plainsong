@@ -12,6 +12,7 @@
 
 import type { CalendarCapturePrefill, CalendarVideoService } from "@/lib/calendar-events";
 import type { DetectedCallCapturePrefill } from "@/lib/detected-call";
+import type { MeetingAttendee } from "@/lib/attendees";
 
 export interface MeetingCapturePrefill {
   /** Becomes the recording's title, so auto-naming leaves it alone. */
@@ -29,6 +30,12 @@ export interface MeetingCapturePrefill {
    * rust-sidecar/src/meeting_detect.rs.
    */
   detectedCallId: number | null;
+  /**
+   * Who was invited, when the offer came from a calendar event that named
+   * anyone. Empty for a detected call: the call detector sees an app and a
+   * window title, never a guest list.
+   */
+  attendees: MeetingAttendee[];
 }
 
 /** A calendar event's prefill. Its `eventId` stays in the renderer. */
@@ -39,6 +46,7 @@ export function meetingCapturePrefillFromCalendarEvent(
     title: prefill.title,
     videoService: prefill.videoService,
     detectedCallId: null,
+    attendees: prefill.attendees,
   };
 }
 
@@ -50,5 +58,6 @@ export function meetingCapturePrefillFromDetectedCall(
     title: prefill.title,
     videoService: prefill.videoService,
     detectedCallId: prefill.callId,
+    attendees: [],
   };
 }

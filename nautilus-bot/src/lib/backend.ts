@@ -17,6 +17,8 @@ import type {
   MeetingTranscriptDetails,
 } from "@/types";
 import type { Settings } from "@/types/settings";
+import type { MeetingAttendee } from "@/lib/attendees";
+import type { DictationBindingIssue } from "../../electron/dictation-bindings";
 
 export interface DictationStartOptions {
   saveToInbox: boolean;
@@ -57,6 +59,19 @@ export interface DictationHistoryDetails {
   transcriptionLatencyMs: number | null;
   insertLatencyMs: number | null;
   endToEndMs: number | null;
+  /** BCP-47 primary tag the recognizer reported for the spoken audio. */
+  detectedLanguage?: string | null;
+  /** `whisper_native` | `ai_lane` when translate-to-English ran; null when off. */
+  translationRoute?: string | null;
+  /** Whether the delivered text is the translated one. */
+  translationApplied?: boolean | null;
+  /** What the recognizer heard, when the dictation was saved with it. */
+  rawTranscript?: string | null;
+  /** Whether the kept audio is still on disk; null when none was kept. */
+  audioAvailable?: boolean | null;
+  /** Set on a "Process again" entry: the dictation whose audio it re-ran. */
+  reprocessedFromId?: string | null;
+  reprocessedFromCreatedAt?: string | null;
 }
 
 export interface DictationInsights {
@@ -176,6 +191,72 @@ export async function getDictationHistoryDetails(
 
 export async function getDictationInsights(): Promise<DictationInsights> {
   return await invoke("get_dictation_insights");
+}
+
+/**
+ * One ranked hit from dictation history search. `snippet` wraps each matched
+ * term in `[[`/`]]`; `matchedField` says whether the delivered text
+ * (`final`) or what the recognizer heard (`raw`) matched.
+ */
+export interface DictationHistorySearchHit {
+  recordingId: string;
+  recordingTitle: string;
+  createdAt: string;
+  snippet: string;
+  matchedField: "final" | "raw" | string;
+  score: number;
+}
+
+export async function searchDictationHistory(
+  query: string,
+  options: { limit?: number; offset?: number } = {}
+): Promise<DictationHistorySearchHit[]> {
+  return await invoke("search_dictation_history", {
+    query,
+    limit: options.limit ?? 25,
+    offset: options.offset ?? 0,
+  });
+}
+
+/** What "Process again" was asked to do; only `historyId` is required. */
+export interface DictationReprocessRequest {
+  historyId: string;
+  /** A built-in preset id or a custom mode id. Omit for the active mode. */
+  modeId?: string | null;
+  /** Override the dictation lane's engine for this run only. */
+  provider?: string | null;
+  modelId?: string | null;
+}
+
+/**
+ * The new history entry "Process again" saved, plus what produced it. The
+ * sidecar inserts nothing and touches no clipboard; the entry is the result.
+ */
+export interface DictationReprocessOutcome {
+  recording: Recording;
+  transcript: Transcript;
+  finalText: string;
+  rawText: string;
+  modePreset: string;
+  customModeId: string | null;
+  customModeName: string | null;
+  provider: string;
+  modelId: string;
+  usedAi: boolean;
+  reprocessedFromId: string;
+  reprocessedFromCreatedAt: string;
+  transcriptionLatencyMs: number;
+}
+
+export async function reprocessDictation(
+  request: DictationReprocessRequest
+): Promise<DictationReprocessOutcome> {
+  return await invoke("reprocess_dictation", {
+    historyId: request.historyId,
+    modeId: request.modeId ?? null,
+    provider: request.provider ?? null,
+    modelId: request.modelId ?? null,
+  });
 }
 
 interface CursorInsertSmokeTestResult {
@@ -452,8 +533,45 @@ export async function retranscribeRecording(recordingId: string): Promise<void> 
   await invoke("retranscribe_recording", { recordingId });
 }
 
+/**
+ * What the sidecar saved for an imported audio file. `null` means the user
+ * dismissed the native file picker without choosing anything.
+ */
+export interface ImportedAudioFile {
+  recordingId: string;
+  title: string;
+  sourceFileName: string;
+  durationSeconds: number;
+}
+
+/**
+ * Open the native "choose an audio file" dialog and import what the user
+ * picks as a meeting.
+ *
+ * The renderer never names a path: Electron's main process shows the picker
+ * and hands the chosen path straight to the sidecar. Resolves as soon as the
+ * file has been decoded and saved; transcription then runs in the background
+ * and reports through the same `recording-status-changed` events a stopped
+ * meeting uses.
+ */
+export async function importAudioFile(): Promise<ImportedAudioFile | null> {
+  return (await invoke("select_audio_file_to_import")) as ImportedAudioFile | null;
+}
+
 export async function renameRecording(recordingId: string, newTitle: string): Promise<void> {
   await invoke("rename_recording", { recordingId, newTitle });
+}
+
+/**
+ * Replace a meeting's attendee list. Returns what the sidecar actually
+ * stored, which is the sanitized list -- duplicates dropped, fields clipped
+ * -- so the caller renders what is on disk rather than what it sent.
+ */
+export async function updateRecordingAttendees(
+  recordingId: string,
+  attendees: MeetingAttendee[],
+): Promise<MeetingAttendee[]> {
+  return await invoke("update_recording_attendees", { recordingId, attendees });
 }
 
 export async function updateRecordingNotes(
@@ -1168,6 +1286,12 @@ export async function repairCursorInsertPermissions(): Promise<PermissionDiagnos
 
 export interface DictationShortcutCapabilityStatus {
   nativeShortcutAvailable: boolean;
+  /**
+   * Per-binding problems from Electron's last registration pass (see
+   * `validateDictationBindings` in electron/dictation-bindings.ts). Absent
+   * from older main processes.
+   */
+  bindingIssues?: DictationBindingIssue[];
 }
 
 /** Check whether the native hold-to-talk helper is available on this machine. */
@@ -1262,6 +1386,86 @@ export async function isSileroVadModelDownloaded(): Promise<boolean> {
 
 export async function downloadSileroVadModel(): Promise<void> {
   await invoke("download_silero_vad_model");
+}
+
+/**
+ * Readiness of the bundled zero-setup dictation cleanup model.
+ *
+ * `ready` is "every pinned file carries a trusted integrity receipt", not
+ * "the files are on disk" -- the sidecar refuses to load weights it cannot
+ * vouch for, so anything weaker here would show a green row for a model that
+ * will not run.
+ */
+export interface BundledCleanupModelStatus {
+  provider: string;
+  modelId: string;
+  /** License-required name: "S1-mini" by "Superwhisper". */
+  displayName: string;
+  vendor: string;
+  /** Total bytes the download will fetch. */
+  downloadBytes: number;
+  /** Bytes currently on disk, whether or not they verify. */
+  bytesOnDisk: number;
+  ready: boolean;
+  /** Pinned files that are missing or failed verification. */
+  missingFiles: string[];
+  path: string;
+  /**
+   * Which backend a cleanup would actually run on: "metal", "cpu", or
+   * "unavailable" in a build without the local runtime. Probed without
+   * loading the weights.
+   */
+  backend: string;
+  /**
+   * Whether that backend can finish a long dictation inside the pre-insert
+   * budget. False on CPU, where a 200-word dictation measured 11-13 s against
+   * a 6 s budget — "downloaded" and "usable here" are different questions.
+   */
+  backendMeetsBudget: boolean;
+  /**
+   * Whether there is a backend at all. False only in a build compiled without
+   * the local runtime, where "this build cannot run it" is a different
+   * sentence from "this Mac is slow".
+   */
+  backendPresent: boolean;
+  /** Roughly what the model holds in memory while it is loaded. */
+  residentBytes: number;
+}
+
+export async function getBundledCleanupModelStatus(): Promise<BundledCleanupModelStatus> {
+  return await invoke("get_bundled_cleanup_model_status");
+}
+
+export async function downloadBundledCleanupModel(): Promise<BundledCleanupModelStatus> {
+  return await invoke("download_bundled_cleanup_model");
+}
+
+export async function deleteBundledCleanupModel(): Promise<BundledCleanupModelStatus> {
+  return await invoke("delete_bundled_cleanup_model");
+}
+
+/**
+ * Whether Apple's on-device model can run here.
+ *
+ * Probed once at sidecar startup and cached, because the answer only changes
+ * when the user flips a System Settings switch or an OS model download
+ * finishes. Pass `refresh` after sending someone to System Settings.
+ */
+export interface AppleLanguageModelAvailability {
+  provider: string;
+  displayName: string;
+  available: boolean;
+  /** Machine-readable reason when unavailable. */
+  reason: string | null;
+  /** One sentence the user can act on when unavailable. */
+  detail: string | null;
+  operatingSystemVersion: string | null;
+}
+
+export async function getAppleLanguageModelAvailability(
+  refresh = false,
+): Promise<AppleLanguageModelAvailability> {
+  return await invoke("get_apple_language_model_availability", { refresh });
 }
 
 export async function getSpeakers(recordingId: string): Promise<Speaker[]> {

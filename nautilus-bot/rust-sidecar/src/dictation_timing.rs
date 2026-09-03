@@ -247,6 +247,52 @@ pub fn resolve_dictation_format_attempt(
     }
 }
 
+/// The single insertion-delay budget every pre-insert model pass of one
+/// dictation draws from.
+///
+/// One dictation can run two model passes back to back before a word appears:
+/// translate-to-English, then the mode transform or Smart Format pass. Each
+/// used to take a fresh `dictation_format_timeout(provider)`, so the worst
+/// case a user waited was twice the budget the constant claims -- 12 s on the
+/// local split -- while every comment and receipt around it described 6 s.
+///
+/// The clock starts when the *first* pass starts, not when this is
+/// constructed: provider resolution and prompt building deliberately run
+/// outside the budget (they are not the model call the budget is meant to
+/// time), and a dictation that runs no pre-insert pass at all must not have
+/// the clock running against it.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct DictationPreInsertBudget {
+    started_at: Option<std::time::Instant>,
+}
+
+impl DictationPreInsertBudget {
+    pub const fn new() -> Self {
+        Self { started_at: None }
+    }
+
+    /// How long the next pass may run. The first call starts the clock;
+    /// later calls return `budget` minus whatever the earlier passes already
+    /// spent, so two passes cannot cost 2x. `Duration::ZERO` (the budget is
+    /// already gone) makes `tokio::time::timeout` give up immediately, which
+    /// is the intended outcome: the local pipeline text is already good, and
+    /// the user has waited long enough.
+    ///
+    /// `now` is a parameter so the arithmetic is testable without sleeping.
+    /// A later pass with a *larger* budget than the first (the two lanes
+    /// resolve the same dictation AI provider today, so this does not happen
+    /// in practice) is capped at that larger budget measured from the same
+    /// start, never at their sum.
+    pub fn remaining(
+        &mut self,
+        budget: std::time::Duration,
+        now: std::time::Instant,
+    ) -> std::time::Duration {
+        let started_at = *self.started_at.get_or_insert(now);
+        budget.saturating_sub(now.saturating_duration_since(started_at))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -409,5 +455,75 @@ mod tests {
             assert!(!fallback.final_text.is_empty());
             assert_eq!(fallback.final_text, "non-empty local text");
         }
+    }
+}
+
+#[cfg(test)]
+mod pre_insert_budget_tests {
+    use super::DictationPreInsertBudget;
+    use std::time::{Duration, Instant};
+
+    const LOCAL: Duration = Duration::from_millis(6_000);
+
+    #[test]
+    fn the_first_pass_gets_the_whole_budget() {
+        let mut budget = DictationPreInsertBudget::new();
+        assert_eq!(budget.remaining(LOCAL, Instant::now()), LOCAL);
+    }
+
+    /// The regression: translate took a fresh 6 s and the format pass took
+    /// another, so the worst case in front of insertion was 12 s.
+    #[test]
+    fn two_passes_share_one_budget_and_cannot_sum_past_it() {
+        let start = Instant::now();
+        let mut budget = DictationPreInsertBudget::new();
+
+        let first = budget.remaining(LOCAL, start);
+        // The first pass ran to its own cap.
+        let after_first = start + first;
+        let second = budget.remaining(LOCAL, after_first);
+
+        assert_eq!(second, Duration::ZERO);
+        assert!(
+            first + second <= LOCAL,
+            "{first:?} + {second:?} must not exceed {LOCAL:?}"
+        );
+    }
+
+    #[test]
+    fn a_fast_first_pass_leaves_the_rest_for_the_second() {
+        let start = Instant::now();
+        let mut budget = DictationPreInsertBudget::new();
+
+        let first = budget.remaining(LOCAL, start);
+        let spent_by_first = Duration::from_millis(400);
+        let second = budget.remaining(LOCAL, start + spent_by_first);
+
+        assert_eq!(first, LOCAL);
+        assert_eq!(second, Duration::from_millis(5_600));
+        // What the user actually waits: the first pass's real cost plus the
+        // most the second may take. That total is the budget, not 2x it.
+        assert_eq!(spent_by_first + second, LOCAL);
+    }
+
+    #[test]
+    fn an_overrun_first_pass_leaves_zero_rather_than_a_negative_wrap() {
+        let start = Instant::now();
+        let mut budget = DictationPreInsertBudget::new();
+        budget.remaining(LOCAL, start);
+        assert_eq!(
+            budget.remaining(LOCAL, start + Duration::from_secs(30)),
+            Duration::ZERO
+        );
+    }
+
+    /// Provider resolution runs outside the budget on purpose, and a
+    /// dictation with no pre-insert pass must not have the clock running.
+    #[test]
+    fn the_clock_starts_at_the_first_pass_not_at_construction() {
+        let built = Instant::now();
+        let mut budget = DictationPreInsertBudget::new();
+        let first_pass_at = built + Duration::from_secs(5);
+        assert_eq!(budget.remaining(LOCAL, first_pass_at), LOCAL);
     }
 }
