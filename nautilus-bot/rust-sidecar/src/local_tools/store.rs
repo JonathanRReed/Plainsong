@@ -569,11 +569,21 @@ mod tests {
     /// meetings; a stored voice signature is biometric-shaped data about a
     /// person, and no read path here has any business returning it. The trait
     /// has no method for it, which is the real guarantee — this test is the
-    /// belt: it writes a remembered voice with an unmistakable name and proves
-    /// that name reaches none of the surfaces, including the export.
+    /// belt.
+    ///
+    /// Two canaries, because one alone would prove nothing. The transcript
+    /// cluster is named with `TRANSCRIPT_NAME_CANARY`, which these surfaces
+    /// *do* render (a name written into a transcript is the reader's own
+    /// content and is exported like the words are); asserting it appears is
+    /// what makes the second assertion mean something, since a surface that
+    /// rendered no speaker name at all would pass the exclusion check while
+    /// proving nothing. `SECRET_VOICE_NAME` is the remembered voice behind
+    /// that cluster, and it must appear nowhere — nor may the storage the
+    /// signature lives in.
     #[test]
     fn remembered_voices_never_reach_the_cli_mcp_or_export_surface() {
         const SECRET_VOICE_NAME: &str = "ZZVoiceprintCanary";
+        const TRANSCRIPT_NAME_CANARY: &str = "ZZSpeakerNameCanary";
         let dir = crate::test_fs::TempDir::new("local-tools-voiceprints");
         let path = dir.path().join("plainsong.db");
         {
@@ -597,10 +607,29 @@ mod tests {
                 "ecapa_tdnn_speaker",
             )
             .unwrap();
+            // The alias name these surfaces read, written through the path the
+            // app uses. Deliberately not the profile's name: the point is that
+            // the transcript's name travels and the remembered voice's does
+            // not, and one string could not tell those apart.
+            db.rename_speaker("m1", "speaker_0", TRANSCRIPT_NAME_CANARY)
+                .unwrap();
             db.set_cluster_voice_match("m1", "speaker_0", &profile_id, "confirmed")
+                .unwrap();
+            db.reject_cluster_voice_match("m1", "speaker_1", &profile_id)
                 .unwrap();
         }
         let store = ReadOnlyStore::open_at(&path, None).unwrap();
+
+        // The alias name really does travel through `get_transcript`, so the
+        // exclusion assertions below are testing an exclusion rather than an
+        // absence. (The three export formats offered here do not label
+        // speakers at all, which is why the check is made where it applies.)
+        let transcript_view = store.get_transcript("m1").unwrap().unwrap();
+        assert_eq!(
+            transcript_view.segments[0].speaker.as_deref(),
+            Some(TRANSCRIPT_NAME_CANARY),
+            "the surface reads speaker_aliases.name"
+        );
 
         let mut rendered = vec![
             serde_json::to_string(&store.list_meetings(&ListFilter::default()).unwrap()).unwrap(),
@@ -623,6 +652,12 @@ mod tests {
             );
         }
 
+        assert!(
+            rendered
+                .iter()
+                .any(|output| output.contains(TRANSCRIPT_NAME_CANARY)),
+            "the rendered surfaces below must include one that names a speaker"
+        );
         for output in rendered {
             assert!(
                 !output.contains(SECRET_VOICE_NAME),
@@ -631,6 +666,12 @@ mod tests {
             assert!(
                 !output.contains("voice_centroid") && !output.contains("speaker_profile"),
                 "voiceprint storage leaked into a local-tools surface: {output}"
+            );
+            assert!(
+                !output.contains("voice_profile_id")
+                    && !output.contains("voice_match_state")
+                    && !output.contains("voice_rejected_profiles"),
+                "a voiceprint column on the alias row leaked into a local-tools surface: {output}"
             );
         }
     }

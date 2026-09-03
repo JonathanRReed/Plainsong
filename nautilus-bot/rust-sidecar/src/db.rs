@@ -6309,7 +6309,20 @@ impl Database {
             );
         }
 
-        self.upsert_speaker_alias(recording_id, speaker_id, Some(new_name), None, 0)
+        self.upsert_speaker_alias(recording_id, speaker_id, Some(new_name), None, 0)?;
+        // A hand-typed name settles the question the voice link was asking.
+        // Leaving `voice_profile_id` and `voice_match_state` behind would keep
+        // the transcript saying "auto" over a name a human just chose, and
+        // would keep the cluster pointed at a remembered voice the rename was
+        // most likely correcting. `remember_speaker_voice` renames first and
+        // writes `confirmed` after, so the confirm path is unaffected.
+        self.conn.execute(
+            "UPDATE speaker_aliases
+             SET voice_profile_id = NULL, voice_match_state = NULL
+             WHERE recording_id = ?1 AND speaker_id = ?2",
+            params![recording_id, speaker_id],
+        )?;
+        Ok(())
     }
 
     pub fn get_speaker_aliases(&self, recording_id: &str) -> Result<HashMap<String, SpeakerAlias>> {
@@ -6375,45 +6388,53 @@ impl Database {
         Ok(())
     }
 
-    /// Store every cluster signature this meeting produced — but only when the
-    /// user turned remembering on.
+    /// Persist one cluster's voice signature, at the moment that cluster is
+    /// given a name — and only when the user turned remembering on.
+    ///
+    /// This is the *only* path that writes a signature, and it is deliberately
+    /// per-cluster. Settings and `docs/beta/PRIVACY-AND-CLOUD.md` both say a
+    /// signature is written for a speaker you name, or one Plainsong offers to
+    /// name and you confirm; storing one for every cluster a meeting happened
+    /// to contain would be a larger privacy surface than the one the reader
+    /// agreed to. Unnamed clusters' centroids stay in
+    /// [`crate::diarization::voiceprints::SessionClusterVoices`] instead, in
+    /// memory, for as long as the app is open.
     ///
     /// The switch is a parameter rather than a settings lookup so that
     /// "nothing is written while it is off" is a property a test can prove
     /// against a real database, without a settings file or a running app.
-    /// Returns how many signatures were written.
-    pub fn record_cluster_voice_signatures(
+    /// Returns whether a signature was written.
+    ///
+    /// Best effort: a signature that could not be stored costs a suggestion,
+    /// not the meeting, so an unusable vector is logged rather than raised.
+    pub fn record_named_cluster_voice_signature(
         &mut self,
         recording_id: &str,
+        speaker_id: &str,
+        centroid: &[f32],
         embedding_model_id: &str,
-        cluster_centroids: &HashMap<String, Vec<f32>>,
         remember_voices: bool,
-    ) -> Result<usize> {
+    ) -> Result<bool> {
         if !remember_voices {
-            return Ok(0);
+            return Ok(false);
         }
-        let mut written = 0;
-        for (speaker_id, centroid) in cluster_centroids {
-            match self.set_cluster_voice_signature(
-                recording_id,
-                speaker_id,
-                centroid,
-                embedding_model_id,
-            ) {
-                Ok(()) => written += 1,
-                Err(error) => {
-                    // Best effort: a signature that could not be stored costs
-                    // a suggestion, not the meeting. The transcript is saved.
-                    tracing::warn!(
-                        "Could not store the voice signature for speaker {} of {}: {}",
-                        speaker_id,
-                        recording_id,
-                        error
-                    );
-                }
+        match self.set_cluster_voice_signature(
+            recording_id,
+            speaker_id,
+            centroid,
+            embedding_model_id,
+        ) {
+            Ok(()) => Ok(true),
+            Err(error) => {
+                tracing::warn!(
+                    "Could not store the voice signature for speaker {} of {}: {}",
+                    speaker_id,
+                    recording_id,
+                    error
+                );
+                Ok(false)
             }
         }
-        Ok(written)
     }
 
     /// Every speaker cluster in one recording that carries a voice signature.
@@ -6512,15 +6533,23 @@ impl Database {
             rejected.push(profile_id.to_string());
         }
         let encoded = serde_json::to_string(&rejected)?;
+        // An upsert, not an update: a cluster nobody has named has no alias
+        // row, and since signatures are only written for named clusters that
+        // is the common case for "Not them". Dropping the rejection on the
+        // floor would bring the same wrong suggestion back on every visit.
         self.conn.execute(
-            "UPDATE speaker_aliases
-             SET voice_rejected_profiles = ?3,
-                 voice_profile_id = CASE WHEN voice_profile_id = ?4 THEN NULL
-                                         ELSE voice_profile_id END,
-                 voice_match_state = CASE WHEN voice_profile_id = ?4 THEN NULL
-                                          ELSE voice_match_state END,
-                 updated_at = ?5
-             WHERE recording_id = ?1 AND speaker_id = ?2",
+            "INSERT INTO speaker_aliases (
+                 recording_id, speaker_id, updated_at, voice_rejected_profiles
+             ) VALUES (?1, ?2, ?5, ?3)
+             ON CONFLICT(recording_id, speaker_id) DO UPDATE SET
+                 voice_rejected_profiles = excluded.voice_rejected_profiles,
+                 voice_profile_id = CASE
+                     WHEN speaker_aliases.voice_profile_id = ?4 THEN NULL
+                     ELSE speaker_aliases.voice_profile_id END,
+                 voice_match_state = CASE
+                     WHEN speaker_aliases.voice_profile_id = ?4 THEN NULL
+                     ELSE speaker_aliases.voice_match_state END,
+                 updated_at = excluded.updated_at",
             params![
                 recording_id,
                 speaker_id,
@@ -6530,6 +6559,51 @@ impl Database {
             ],
         )?;
         Ok(())
+    }
+
+    /// Every "Not them" this recording carries, keyed by speaker id.
+    ///
+    /// Read separately from [`Self::get_cluster_voice_signatures`] because a
+    /// rejection outlives the row that prompted it: an unnamed cluster has a
+    /// rejection but no signature, and its centroid is only in memory.
+    pub fn get_cluster_voice_rejections(
+        &self,
+        recording_id: &str,
+    ) -> Result<HashMap<String, Vec<String>>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT speaker_id, voice_rejected_profiles
+             FROM speaker_aliases
+             WHERE recording_id = ?1 AND voice_rejected_profiles IS NOT NULL",
+        )?;
+        let rows = stmt.query_map(params![recording_id], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, Option<String>>(1)?))
+        })?;
+        let mut rejections = HashMap::new();
+        for row in rows {
+            let (speaker_id, raw) = row?;
+            let parsed: Vec<String> = raw
+                .as_deref()
+                .and_then(|value| serde_json::from_str(value).ok())
+                .unwrap_or_default();
+            if !parsed.is_empty() {
+                rejections.insert(speaker_id, parsed);
+            }
+        }
+        Ok(rejections)
+    }
+
+    /// The alias name on each cluster of one recording, for callers that need
+    /// to tell a named cluster from an unnamed one.
+    pub fn get_cluster_alias_names(&self, recording_id: &str) -> Result<HashMap<String, String>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT speaker_id, name FROM speaker_aliases
+             WHERE recording_id = ?1 AND name IS NOT NULL AND TRIM(name) != ''",
+        )?;
+        let rows = stmt.query_map(params![recording_id], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+        })?;
+        rows.collect::<Result<HashMap<_, _>, _>>()
+            .map_err(|e| e.into())
     }
 
     /// Every remembered voice, newest name first.
@@ -11000,10 +11074,18 @@ mod tests {
         centroids.insert("S1".to_string(), unit(&[1.0, 0.0, 0.0]));
         centroids.insert("S2".to_string(), unit(&[0.0, 1.0, 0.0]));
 
-        let written = db
-            .record_cluster_voice_signatures("r1", "ecapa_tdnn_speaker", &centroids, false)
-            .unwrap();
-        assert_eq!(written, 0);
+        for (speaker_id, centroid) in &centroids {
+            let written = db
+                .record_named_cluster_voice_signature(
+                    "r1",
+                    speaker_id,
+                    centroid,
+                    "ecapa_tdnn_speaker",
+                    false,
+                )
+                .unwrap();
+            assert!(!written);
+        }
         assert!(db.get_cluster_voice_signatures("r1").unwrap().is_empty());
         assert!(db.list_speaker_profiles().unwrap().is_empty());
         let signature_rows: i64 = db
@@ -11016,12 +11098,43 @@ mod tests {
             .unwrap();
         assert_eq!(signature_rows, 0);
 
-        // And with it on, the same call writes both clusters.
-        let written = db
-            .record_cluster_voice_signatures("r1", "ecapa_tdnn_speaker", &centroids, true)
+        // And with it on, the same call writes the cluster it was given.
+        assert!(db
+            .record_named_cluster_voice_signature(
+                "r1",
+                "S1",
+                &centroids["S1"],
+                "ecapa_tdnn_speaker",
+                true,
+            )
+            .unwrap());
+        let stored = db.get_cluster_voice_signatures("r1").unwrap();
+        assert_eq!(
+            stored.len(),
+            1,
+            "one signature per named cluster, not one per cluster in the room"
+        );
+        assert_eq!(stored[0].speaker_id, "S1");
+    }
+
+    /// A vector that cannot be compared costs a suggestion, not the meeting:
+    /// the write is refused and reported as "nothing written", not as an error
+    /// that would fail an otherwise finished transcript.
+    #[test]
+    fn an_unusable_signature_is_declined_rather_than_raised() {
+        let mut db = in_memory_db();
+        db.create_recording(&sample_recording("r1", "inbox"))
             .unwrap();
-        assert_eq!(written, 2);
-        assert_eq!(db.get_cluster_voice_signatures("r1").unwrap().len(), 2);
+        assert!(!db
+            .record_named_cluster_voice_signature(
+                "r1",
+                "S1",
+                &[f32::NAN, 1.0],
+                "ecapa_tdnn_speaker",
+                true,
+            )
+            .unwrap());
+        assert!(db.get_cluster_voice_signatures("r1").unwrap().is_empty());
     }
 
     #[test]
@@ -11191,6 +11304,101 @@ mod tests {
         );
     }
 
+    /// A cluster nobody has named has no alias row at all, and since
+    /// signatures are only written for named clusters that is the ordinary
+    /// case for "Not them". The rejection has to create the row, or the same
+    /// wrong suggestion comes back on every visit.
+    #[test]
+    fn a_rejection_sticks_on_a_cluster_that_has_no_alias_row() {
+        let mut db = in_memory_db();
+        db.create_recording(&sample_recording("r1", "inbox"))
+            .unwrap();
+        assert!(db.get_speaker_aliases("r1").unwrap().is_empty());
+
+        db.reject_cluster_voice_match("r1", "S2", "p-dana").unwrap();
+
+        let rejections = db.get_cluster_voice_rejections("r1").unwrap();
+        assert_eq!(
+            rejections.get("S2").cloned(),
+            Some(vec!["p-dana".to_string()])
+        );
+        assert!(
+            db.get_cluster_voice_signatures("r1").unwrap().is_empty(),
+            "rejecting a suggestion must not invent a signature"
+        );
+        let named: Option<Option<String>> = db
+            .conn
+            .query_row(
+                "SELECT name FROM speaker_aliases WHERE recording_id = 'r1' AND speaker_id = 'S2'",
+                [],
+                |row| row.get(0),
+            )
+            .optional()
+            .unwrap();
+        assert_eq!(
+            named,
+            Some(None),
+            "the row exists and carries no name of its own"
+        );
+
+        // And a second rejection on the same unnamed cluster accumulates.
+        db.reject_cluster_voice_match("r1", "S2", "p-devon")
+            .unwrap();
+        assert_eq!(
+            db.get_cluster_voice_rejections("r1").unwrap().get("S2"),
+            Some(&vec!["p-dana".to_string(), "p-devon".to_string()])
+        );
+    }
+
+    /// Typing a name over a name Plainsong applied by itself has to settle the
+    /// question: the transcript stops saying "auto", and the cluster stops
+    /// pointing at the remembered voice the rename was most likely correcting.
+    #[test]
+    fn renaming_a_speaker_clears_the_auto_marker_and_the_voice_link() {
+        let mut db = in_memory_db();
+        db.create_recording(&sample_recording("r1", "inbox"))
+            .unwrap();
+        db.save_transcript(&sample_transcript("r1")).unwrap();
+        db.set_cluster_voice_signature("r1", "speaker_0", &unit(&[1.0, 0.0]), "ecapa_tdnn_speaker")
+            .unwrap();
+        db.set_cluster_voice_match("r1", "speaker_0", "p-dana", "auto")
+            .unwrap();
+
+        db.rename_speaker("r1", "speaker_0", "Ravi").unwrap();
+
+        let signature = &db.get_cluster_voice_signatures("r1").unwrap()[0];
+        assert_eq!(signature.name.as_deref(), Some("Ravi"));
+        assert_eq!(
+            signature.applied_profile_id, None,
+            "a hand-typed name unlinks the remembered voice it replaced"
+        );
+        assert_eq!(signature.match_state, None, "and stops saying \"auto\"");
+        assert!(
+            !signature.centroid.is_empty(),
+            "the meeting's own signature is untouched"
+        );
+    }
+
+    /// The confirm path renames first and marks the match afterwards, so
+    /// clearing the link on rename must not undo the confirmation.
+    #[test]
+    fn confirming_after_a_rename_still_leaves_the_match_confirmed() {
+        let mut db = in_memory_db();
+        db.create_recording(&sample_recording("r1", "inbox"))
+            .unwrap();
+        db.save_transcript(&sample_transcript("r1")).unwrap();
+        db.set_cluster_voice_signature("r1", "speaker_0", &unit(&[1.0, 0.0]), "ecapa_tdnn_speaker")
+            .unwrap();
+
+        db.rename_speaker("r1", "speaker_0", "Dana").unwrap();
+        db.set_cluster_voice_match("r1", "speaker_0", "p-dana", "confirmed")
+            .unwrap();
+
+        let signature = &db.get_cluster_voice_signatures("r1").unwrap()[0];
+        assert_eq!(signature.applied_profile_id.as_deref(), Some("p-dana"));
+        assert_eq!(signature.match_state.as_deref(), Some("confirmed"));
+    }
+
     #[test]
     fn forgetting_one_voice_removes_its_samples_and_detaches_its_clusters() {
         let mut db = in_memory_db();
@@ -11258,8 +11466,19 @@ mod tests {
             .unwrap();
         db.set_cluster_voice_match("r1", "S1", &dana, "confirmed")
             .unwrap();
+        // S2 was never named, so it has no alias row until the rejection
+        // creates one. Asserting it landed is the point: before the upsert
+        // this leg wrote nothing and the assertion below passed vacuously.
         db.reject_cluster_voice_match("r1", "S2", "p-other")
             .unwrap();
+        assert_eq!(
+            db.get_cluster_voice_rejections("r1")
+                .unwrap()
+                .get("S2")
+                .cloned(),
+            Some(vec!["p-other".to_string()]),
+            "a rejection on an unnamed cluster is stored"
+        );
 
         assert_eq!(db.forget_all_speaker_voices().unwrap(), 2);
         assert!(db.list_speaker_profiles().unwrap().is_empty());

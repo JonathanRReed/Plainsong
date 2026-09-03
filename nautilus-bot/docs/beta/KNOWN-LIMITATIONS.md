@@ -168,7 +168,14 @@ using sensitive content.
   meetings start over rather than matching against numbers from a different
   system — the old voices are kept, not deleted, and become live again if you
   change back. Nothing is matched from a calendar or an attendee list: a
-  suggestion always comes from the audio. And a suggestion is an offer —
+  suggestion always comes from the audio, and where a meeting has attendees
+  they only decide which of several suggestions is shown first, never which
+  voice matched. Suggestions for speakers you never named do not survive
+  quitting Plainsong: the signature behind them is only written once a speaker
+  has a name, so until then it is held in memory and goes when the app does.
+  Reopening such a meeting later shows the transcript exactly as it was, with
+  no chips, until you run speaker identification again. And a suggestion is an
+  offer —
   Plainsong applies a name on its own only if you also turn on "Apply a
   confident match without asking", and even then the transcript marks that
   name "auto" until you confirm it, and a name you typed is never overwritten.

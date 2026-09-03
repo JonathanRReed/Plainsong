@@ -484,6 +484,172 @@ pub fn confirm_name_options(attendees: &[String], remembered: &[String]) -> Vec<
     options
 }
 
+/// The refusal every voiceprint write returns while "Remember voices" is off.
+///
+/// One string, because the two write paths must not drift into telling the
+/// reader different things about the same switch.
+pub const VOICEPRINTS_OFF_MESSAGE: &str =
+    "Remembering voices is off. Turn on \"Remember voices\" in Settings > General > Meetings first.";
+
+/// Whether a write to the voiceprint columns may proceed.
+///
+/// A function rather than an `if` at each call site so that "every write path
+/// is gated" is a property one test can check, and so a new write path has
+/// something obvious to call. Applies to *every* write, not just the ones that
+/// store a signature: "Not them" writes to the same columns, and while the
+/// switch is off there are no chips to dismiss in the first place.
+pub fn voiceprint_write_allowed(remember_voices: bool) -> Result<(), &'static str> {
+    if remember_voices {
+        Ok(())
+    } else {
+        Err(VOICEPRINTS_OFF_MESSAGE)
+    }
+}
+
+/// One cluster's centroid, held in memory for as long as Plainsong runs.
+///
+/// See [`SessionClusterVoices`] for why these are not rows.
+#[derive(Debug, Clone, PartialEq)]
+pub struct SessionClusterVoice {
+    pub speaker_id: String,
+    pub embedding_model_id: String,
+    pub centroid: Vec<f32>,
+}
+
+/// How many recordings' worth of session centroids are kept at once.
+///
+/// A bound, not a tuning knob: this is a cache of numbers nobody asked to
+/// keep, so it must not grow with how long the app has been open. The oldest
+/// recording is dropped first, which costs a suggestion chip on a meeting
+/// nobody has looked at in a while and nothing else.
+pub const MAX_SESSION_RECORDINGS: usize = 32;
+
+/// Cluster centroids for meetings diarized since the app started, for
+/// clusters that have **not** earned a database row.
+///
+/// The promise in Settings and in `docs/beta/PRIVACY-AND-CLOUD.md` is that a
+/// voice signature is written for a speaker who gets a name — not for every
+/// voice that happened to be in the room. Suggesting a name still needs the
+/// numbers, though, so they live here: readable for as long as Plainsong is
+/// open, gone when it quits, and never on disk. The moment a cluster is named
+/// (confirmed, or applied unasked by the stricter auto-apply threshold) its
+/// signature is persisted and the database copy takes over.
+///
+/// The cost is honest and belongs in the docs: reopening a meeting after a
+/// restart shows no chips for speakers nobody named, because the only thing
+/// that could have produced them was deliberately not kept.
+#[derive(Debug, Default)]
+pub struct SessionClusterVoices {
+    /// Insertion order, oldest first, for eviction.
+    order: Vec<String>,
+    by_recording: std::collections::HashMap<String, Vec<SessionClusterVoice>>,
+}
+
+impl SessionClusterVoices {
+    /// Replace what is held for `recording_id`. Unusable vectors are dropped
+    /// rather than stored: they cannot be compared, so keeping them would only
+    /// make a later `None` look like a match that failed.
+    pub fn remember<'a, I>(&mut self, recording_id: &str, embedding_model_id: &str, centroids: I)
+    where
+        I: IntoIterator<Item = (&'a String, &'a Vec<f32>)>,
+    {
+        let mut kept: Vec<SessionClusterVoice> = centroids
+            .into_iter()
+            .filter(|(_, centroid)| is_usable_embedding(centroid))
+            .map(|(speaker_id, centroid)| SessionClusterVoice {
+                speaker_id: speaker_id.clone(),
+                embedding_model_id: embedding_model_id.to_string(),
+                centroid: centroid.clone(),
+            })
+            .collect();
+        kept.sort_by(|left, right| left.speaker_id.cmp(&right.speaker_id));
+
+        if kept.is_empty() {
+            self.forget(recording_id);
+            return;
+        }
+        if self
+            .by_recording
+            .insert(recording_id.to_string(), kept)
+            .is_none()
+        {
+            self.order.push(recording_id.to_string());
+        }
+        while self.order.len() > MAX_SESSION_RECORDINGS {
+            let oldest = self.order.remove(0);
+            self.by_recording.remove(&oldest);
+        }
+    }
+
+    /// What is held for one recording, ordered by speaker id.
+    pub fn for_recording(&self, recording_id: &str) -> &[SessionClusterVoice] {
+        self.by_recording
+            .get(recording_id)
+            .map(Vec::as_slice)
+            .unwrap_or(&[])
+    }
+
+    /// Drop everything held for one recording — it was deleted, or its
+    /// signatures are now on disk.
+    pub fn forget(&mut self, recording_id: &str) {
+        if self.by_recording.remove(recording_id).is_some() {
+            self.order.retain(|held| held != recording_id);
+        }
+    }
+
+    /// How many recordings are held. The eviction bound is the only thing
+    /// that reads it, and only from a test.
+    #[cfg(test)]
+    pub fn recordings_held(&self) -> usize {
+        self.by_recording.len()
+    }
+}
+
+/// Every cluster worth reasoning about for one recording: the persisted
+/// signatures, plus the session-only centroids for clusters the database has
+/// no signature row for.
+///
+/// A persisted row always wins. It carries the alias name, the applied
+/// profile and the "Not them" list; the session copy carries none of that, so
+/// preferring it would quietly forget a rejection.
+///
+/// `names` and `rejections` are keyed by speaker id and come from the alias
+/// table, which has rows for clusters that carry no signature — a rejection is
+/// written even for a cluster nobody named, so the same wrong suggestion does
+/// not come back.
+pub fn merge_session_signatures(
+    stored: Vec<ClusterVoiceSignature>,
+    session: &[SessionClusterVoice],
+    names: &std::collections::HashMap<String, String>,
+    rejections: &std::collections::HashMap<String, Vec<String>>,
+) -> Vec<ClusterVoiceSignature> {
+    let mut merged = stored;
+    for held in session {
+        if merged
+            .iter()
+            .any(|signature| signature.speaker_id == held.speaker_id)
+        {
+            continue;
+        }
+        merged.push(ClusterVoiceSignature {
+            speaker_id: held.speaker_id.clone(),
+            name: names.get(&held.speaker_id).cloned(),
+            centroid: held.centroid.clone(),
+            embedding_model_id: held.embedding_model_id.clone(),
+            // Nothing on disk links this cluster to a profile: a link is
+            // written at the same moment the signature is.
+            applied_profile_id: None,
+            match_state: None,
+            rejected_profile_ids: rejections
+                .get(&held.speaker_id)
+                .cloned()
+                .unwrap_or_default(),
+        });
+    }
+    merged.sort_by(|left, right| left.speaker_id.cmp(&right.speaker_id));
+    merged
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -858,5 +1024,193 @@ mod tests {
             &["devon".to_string(), "Ravi".to_string()],
         );
         assert_eq!(options, vec!["Dana", "Devon", "Ravi"]);
+    }
+
+    #[test]
+    fn every_voiceprint_write_is_refused_while_the_switch_is_off() {
+        assert_eq!(voiceprint_write_allowed(true), Ok(()));
+        let refusal = voiceprint_write_allowed(false).expect_err("the switch is off");
+        assert_eq!(refusal, VOICEPRINTS_OFF_MESSAGE);
+        // The refusal has to say what to do about it, not just that it failed.
+        assert!(refusal.contains("Remember voices"), "{refusal}");
+        assert!(
+            refusal.contains("Settings > General > Meetings"),
+            "{refusal}"
+        );
+    }
+
+    // ── Session-only centroids ───────────────────────────────────────────
+
+    fn centroids(pairs: &[(&str, Vec<f32>)]) -> std::collections::HashMap<String, Vec<f32>> {
+        pairs
+            .iter()
+            .map(|(id, centroid)| (id.to_string(), centroid.clone()))
+            .collect()
+    }
+
+    #[test]
+    fn session_centroids_are_held_per_recording_and_ordered_by_speaker() {
+        let mut held = SessionClusterVoices::default();
+        let map = centroids(&[("S2", vec![0.0, 1.0, 0.0]), ("S1", vec![1.0, 0.0, 0.0])]);
+        held.remember("r1", "ecapa_tdnn_speaker", map.iter());
+
+        let voices = held.for_recording("r1");
+        assert_eq!(voices.len(), 2);
+        assert_eq!(voices[0].speaker_id, "S1");
+        assert_eq!(voices[1].speaker_id, "S2");
+        assert_eq!(voices[0].embedding_model_id, "ecapa_tdnn_speaker");
+        assert!(
+            held.for_recording("r-other").is_empty(),
+            "one recording's voices never leak into another"
+        );
+    }
+
+    #[test]
+    fn session_centroids_drop_vectors_that_cannot_be_compared() {
+        let mut held = SessionClusterVoices::default();
+        let map = centroids(&[
+            ("S1", vec![1.0, 0.0]),
+            ("S2", vec![]),
+            ("S3", vec![0.0, 0.0]),
+            ("S4", vec![f32::NAN, 1.0]),
+        ]);
+        held.remember("r1", "ecapa_tdnn_speaker", map.iter());
+        let kept: Vec<&str> = held
+            .for_recording("r1")
+            .iter()
+            .map(|voice| voice.speaker_id.as_str())
+            .collect();
+        assert_eq!(kept, vec!["S1"]);
+    }
+
+    #[test]
+    fn session_centroids_are_bounded_and_forgettable() {
+        let mut held = SessionClusterVoices::default();
+        for index in 0..(MAX_SESSION_RECORDINGS + 3) {
+            held.remember(
+                &format!("r{index}"),
+                "ecapa_tdnn_speaker",
+                centroids(&[("S1", vec![1.0, 0.0])]).iter(),
+            );
+        }
+        assert_eq!(held.recordings_held(), MAX_SESSION_RECORDINGS);
+        assert!(
+            held.for_recording("r0").is_empty(),
+            "the oldest recording is evicted first"
+        );
+        let newest = format!("r{}", MAX_SESSION_RECORDINGS + 2);
+        assert_eq!(held.for_recording(&newest).len(), 1);
+
+        held.forget(&newest);
+        assert!(held.for_recording(&newest).is_empty());
+        assert_eq!(held.recordings_held(), MAX_SESSION_RECORDINGS - 1);
+    }
+
+    #[test]
+    fn re_diarizing_replaces_a_recordings_session_voices_without_growing_the_bound() {
+        let mut held = SessionClusterVoices::default();
+        held.remember(
+            "r1",
+            "ecapa_tdnn_speaker",
+            centroids(&[("S1", vec![1.0, 0.0]), ("S2", vec![0.0, 1.0])]).iter(),
+        );
+        held.remember(
+            "r1",
+            "campplus_speaker",
+            centroids(&[("S1", vec![0.0, 1.0])]).iter(),
+        );
+        assert_eq!(held.recordings_held(), 1);
+        let voices = held.for_recording("r1");
+        assert_eq!(voices.len(), 1, "the previous run is replaced, not merged");
+        assert_eq!(voices[0].embedding_model_id, "campplus_speaker");
+    }
+
+    #[test]
+    fn a_stored_signature_wins_over_the_session_copy_of_the_same_cluster() {
+        let stored = vec![ClusterVoiceSignature {
+            speaker_id: "S1".to_string(),
+            name: Some("Dana".to_string()),
+            centroid: vec![1.0, 0.0],
+            embedding_model_id: "ecapa_tdnn_speaker".to_string(),
+            applied_profile_id: Some("p1".to_string()),
+            match_state: Some(MATCH_STATE_CONFIRMED.to_string()),
+            rejected_profile_ids: vec!["p9".to_string()],
+        }];
+        let session = vec![
+            SessionClusterVoice {
+                speaker_id: "S1".to_string(),
+                embedding_model_id: "ecapa_tdnn_speaker".to_string(),
+                centroid: vec![0.0, 1.0],
+            },
+            SessionClusterVoice {
+                speaker_id: "S2".to_string(),
+                embedding_model_id: "ecapa_tdnn_speaker".to_string(),
+                centroid: vec![0.0, 1.0],
+            },
+        ];
+        let mut names = std::collections::HashMap::new();
+        names.insert("S2".to_string(), "Speaker 2".to_string());
+        let mut rejections = std::collections::HashMap::new();
+        rejections.insert("S2".to_string(), vec!["p3".to_string()]);
+
+        let merged = merge_session_signatures(stored, &session, &names, &rejections);
+        assert_eq!(merged.len(), 2);
+        assert_eq!(merged[0].speaker_id, "S1");
+        assert_eq!(
+            merged[0].centroid,
+            vec![1.0, 0.0],
+            "the persisted centroid is the one that counts"
+        );
+        assert_eq!(merged[0].applied_profile_id.as_deref(), Some("p1"));
+        assert_eq!(merged[1].speaker_id, "S2");
+        assert_eq!(merged[1].name.as_deref(), Some("Speaker 2"));
+        assert_eq!(merged[1].applied_profile_id, None);
+        assert_eq!(merged[1].match_state, None);
+        assert_eq!(
+            merged[1].rejected_profile_ids,
+            vec!["p3".to_string()],
+            "a rejection on an unnamed cluster still suppresses the suggestion"
+        );
+    }
+
+    /// The point of holding centroids in memory: a cluster nobody has named
+    /// can still be offered a name, which is the only reason not to persist it
+    /// would otherwise cost the feature anything.
+    #[test]
+    fn a_session_only_cluster_is_still_matched_and_still_respects_a_rejection() {
+        let profiles = vec![profile(
+            "p1",
+            "Dana",
+            "ecapa_tdnn_speaker",
+            vec![1.0, 0.0, 0.0],
+        )];
+        let session = vec![SessionClusterVoice {
+            speaker_id: "S1".to_string(),
+            embedding_model_id: "ecapa_tdnn_speaker".to_string(),
+            centroid: from_similarity(0.95),
+        }];
+        let empty_names = std::collections::HashMap::new();
+        let no_rejections = std::collections::HashMap::new();
+
+        let merged = merge_session_signatures(Vec::new(), &session, &empty_names, &no_rejections);
+        let offered = build_suggestions(&merged, &profiles, &[]);
+        assert_eq!(offered.len(), 1);
+        assert_eq!(
+            offered[0]
+                .suggestion
+                .as_ref()
+                .map(|matched| matched.display_name.as_str()),
+            Some("Dana")
+        );
+
+        let mut rejections = std::collections::HashMap::new();
+        rejections.insert("S1".to_string(), vec!["p1".to_string()]);
+        let merged = merge_session_signatures(Vec::new(), &session, &empty_names, &rejections);
+        let offered = build_suggestions(&merged, &profiles, &[]);
+        assert_eq!(offered.len(), 1);
+        assert!(
+            offered[0].suggestion.is_none(),
+            "\"Not them\" survives even though the cluster has no signature row"
+        );
     }
 }

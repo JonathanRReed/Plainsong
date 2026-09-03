@@ -101,14 +101,17 @@ export function RememberedVoicesSection({
           Plainsong&rsquo;s database on this Mac, encrypted with everything else
           when the vault is on. It is never exported, never readable by the
           plainsong command or its MCP server, and never sent anywhere. It is
-          included in a local backup, like the rest of the database.
+          included in a local backup, like the rest of the database. Speakers
+          you never name are not written down at all: their numbers stay in
+          memory while Plainsong is open, which is why a meeting reopened after
+          a restart offers no suggestions for them.
         </p>
       </div>
 
       <SettingsSwitch
         className="py-0"
         label="Remember voices"
-        description="Off by default. While it is off nothing about anyone's voice is stored, and speaker separation works exactly as it does now. Turning it on stores a signature only for speakers you name, or that Plainsong offers to name and you confirm."
+        description="Off by default. While it is off nothing about anyone's voice is stored, and speaker separation works exactly as it does now. Turning it on stores a signature only for speakers you name, or that Plainsong offers to name and you confirm — everyone else's stays in memory until you quit."
         checked={rememberVoices}
         onCheckedChange={onRememberVoicesChange}
       />

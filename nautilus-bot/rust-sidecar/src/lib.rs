@@ -144,6 +144,11 @@ pub struct AppState {
     /// `spawn_meeting_call_detection`, read by `get_meeting_call_status` and
     /// by the meeting capture monitor's call-ended auto-stop.
     meeting_call_detector: Arc<StdMutex<meeting_detect::CallDetector>>,
+    /// Voice signatures for clusters nobody has named, held only while the app
+    /// is running. The database gets a signature when a cluster is given a
+    /// name; everything else stays here so a chip can still be offered without
+    /// keeping a record of every voice in the room. Cleared by quitting.
+    session_cluster_voices: Arc<StdMutex<diarization::voiceprints::SessionClusterVoices>>,
 }
 
 struct MeetingAudioPostprocessingGuard {
@@ -9811,6 +9816,305 @@ fn resolve_speaker_name(
 ///
 /// Returns whether any speaker name changed, so the caller knows whether the
 /// transcript needs a refresh event.
+/// Every cluster worth reasoning about for one recording, and this meeting's
+/// attendee names.
+///
+/// One function, called by the automatic pass and by `suggest_speaker_voices`,
+/// so the two can never disagree about which clusters exist or how attendees
+/// rank them. Attendee names only reorder what is offered first; the matcher
+/// never sees them, because guessing a speaker from a guest list is not
+/// speaker identification.
+fn cluster_voice_context(
+    db: &db::Database,
+    session_voices: &StdMutex<diarization::voiceprints::SessionClusterVoices>,
+    recording_id: &str,
+) -> Result<
+    (
+        Vec<diarization::voiceprints::ClusterVoiceSignature>,
+        Vec<String>,
+    ),
+    String,
+> {
+    let stored = db
+        .get_cluster_voice_signatures(recording_id)
+        .map_err(|e| e.to_string())?;
+    let names = db
+        .get_cluster_alias_names(recording_id)
+        .map_err(|e| e.to_string())?;
+    let rejections = db
+        .get_cluster_voice_rejections(recording_id)
+        .map_err(|e| e.to_string())?;
+    let session: Vec<diarization::voiceprints::SessionClusterVoice> = {
+        let held = session_voices
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        held.for_recording(recording_id).to_vec()
+    };
+    let signatures =
+        diarization::voiceprints::merge_session_signatures(stored, &session, &names, &rejections);
+
+    // Names only, never addresses: an attendee list is a contact book, and
+    // ranking a suggestion does not need one. `attendee_names_for_context` is
+    // the single place that drop happens.
+    let attendees = db
+        .get_recording(recording_id)
+        .map_err(|e| e.to_string())?
+        .map(|recording| crate::models::attendee_names_for_context(&recording.attendees))
+        .unwrap_or_default();
+
+    Ok((signatures, attendees))
+}
+
+#[cfg(test)]
+mod cluster_voice_context_tests {
+    use super::*;
+    use crate::models::MeetingAttendee;
+
+    fn recording_with_attendees(id: &str, attendees: Vec<MeetingAttendee>) -> models::Recording {
+        models::Recording {
+            id: id.to_string(),
+            title: "Weekly sync".to_string(),
+            project_id: "inbox".to_string(),
+            duration: 120,
+            created_at: chrono::Utc::now(),
+            updated_at: chrono::Utc::now(),
+            source_type: "meeting".to_string(),
+            audio_path: format!("/tmp/{id}.wav"),
+            status: "completed".to_string(),
+            summary: None,
+            action_items: None,
+            summary_provenance: None,
+            action_items_provenance: None,
+            meeting_notes: None,
+            meeting_template_id: None,
+            meeting_capture_mode: None,
+            imported_source_name: None,
+            notes_updated_at: None,
+            consent_prompt_shown: false,
+            consent_notice_mode: None,
+            consent_notice_surface: None,
+            consent_notice_message: None,
+            consent_notice_updated_at: None,
+            analysis_failure: None,
+            attendees,
+            pause_spans: Vec::new(),
+            video_service: None,
+        }
+    }
+
+    fn attendee(name: &str, email: Option<&str>) -> MeetingAttendee {
+        MeetingAttendee {
+            name: name.to_string(),
+            email: email.map(str::to_string),
+            is_organizer: false,
+        }
+    }
+
+    /// `create_recording` does not write the attendee column — the calendar
+    /// path fills it in afterwards with `update_recording_attendees`, so the
+    /// test takes the same route the app does.
+    fn create_with_attendees(db: &mut db::Database, id: &str, attendees: Vec<MeetingAttendee>) {
+        db.create_recording(&recording_with_attendees(id, Vec::new()))
+            .unwrap();
+        if !attendees.is_empty() {
+            db.update_recording_attendees(id, attendees).unwrap();
+        }
+    }
+
+    fn open_db() -> (crate::test_fs::TempDir, db::Database) {
+        let dir = crate::test_fs::TempDir::new("cluster-voice-context");
+        let db = db::Database::open_at_path(&dir.path().join("plainsong.db"), None).unwrap();
+        (dir, db)
+    }
+
+    fn unit(values: &[f32]) -> Vec<f32> {
+        let norm = values.iter().map(|v| v * v).sum::<f32>().sqrt();
+        values.iter().map(|v| v / norm).collect()
+    }
+
+    /// The meeting's attendees reach the ranking, and their addresses do not.
+    #[test]
+    fn a_recordings_attendees_reach_the_context_as_names_only() {
+        let (_dir, mut db) = open_db();
+        create_with_attendees(
+            &mut db,
+            "r1",
+            vec![
+                attendee("Dana Okafor", Some("dana@example.com")),
+                attendee("  Ravi  Menon ", None),
+                attendee("   ", Some("blank@example.com")),
+            ],
+        );
+        let held = StdMutex::new(diarization::voiceprints::SessionClusterVoices::default());
+
+        let (signatures, attendees) = cluster_voice_context(&db, &held, "r1").unwrap();
+
+        assert!(signatures.is_empty(), "nothing has been diarized yet");
+        assert_eq!(attendees, vec!["Dana Okafor", "Ravi Menon"]);
+        assert!(
+            !attendees.iter().any(|name| name.contains('@')),
+            "an attendee list is a contact book; only names travel"
+        );
+    }
+
+    /// A meeting with no attendees at all still works, and ranks by similarity.
+    #[test]
+    fn a_meeting_without_attendees_has_an_empty_attendee_list() {
+        let (_dir, mut db) = open_db();
+        db.create_recording(&recording_with_attendees("r1", Vec::new()))
+            .unwrap();
+        let held = StdMutex::new(diarization::voiceprints::SessionClusterVoices::default());
+
+        let (_, attendees) = cluster_voice_context(&db, &held, "r1").unwrap();
+        assert!(attendees.is_empty());
+    }
+
+    /// Attendee overlap decides which suggestion is offered first. It must not
+    /// decide which profile a cluster matched: a name on an invite is not
+    /// evidence about a voice.
+    #[test]
+    fn attendees_reorder_the_offers_without_changing_any_match() {
+        let (_dir, mut db) = open_db();
+        create_with_attendees(
+            &mut db,
+            "r1",
+            vec![attendee("Ravi", Some("ravi@example.com"))],
+        );
+
+        // Two remembered voices, orthogonal so neither is a rival for the
+        // other's cluster.
+        let dana = db
+            .remember_speaker_voice(
+                "Dana",
+                "ecapa_tdnn_speaker",
+                &unit(&[1.0, 0.0, 0.0]),
+                None,
+                None,
+            )
+            .unwrap();
+        let ravi = db
+            .remember_speaker_voice(
+                "Ravi",
+                "ecapa_tdnn_speaker",
+                &unit(&[0.0, 1.0, 0.0]),
+                None,
+                None,
+            )
+            .unwrap();
+
+        // S1 is the stronger match (to Dana); S2 matches Ravi less strongly.
+        let held = StdMutex::new(diarization::voiceprints::SessionClusterVoices::default());
+        {
+            let mut centroids: std::collections::HashMap<String, Vec<f32>> =
+                std::collections::HashMap::new();
+            centroids.insert("S1".to_string(), unit(&[1.0, 0.02, 0.0]));
+            centroids.insert("S2".to_string(), unit(&[0.25, 1.0, 0.0]));
+            held.lock()
+                .unwrap()
+                .remember("r1", "ecapa_tdnn_speaker", centroids.iter());
+        }
+
+        let (signatures, attendees) = cluster_voice_context(&db, &held, "r1").unwrap();
+        assert_eq!(attendees, vec!["Ravi"]);
+        let profiles = db.list_speaker_profiles().unwrap();
+
+        let matched_by_cluster = |offers: &[diarization::voiceprints::ClusterSuggestion]| {
+            offers
+                .iter()
+                .map(|offer| {
+                    (
+                        offer.speaker_id.clone(),
+                        offer
+                            .suggestion
+                            .as_ref()
+                            .map(|matched| matched.profile_id.clone()),
+                    )
+                })
+                .collect::<std::collections::BTreeMap<_, _>>()
+        };
+
+        let with_attendee =
+            diarization::voiceprints::build_suggestions(&signatures, &profiles, &attendees);
+        let without_attendee =
+            diarization::voiceprints::build_suggestions(&signatures, &profiles, &[]);
+
+        assert_eq!(
+            matched_by_cluster(&with_attendee),
+            matched_by_cluster(&without_attendee),
+            "attendees must not change which profile any cluster matched"
+        );
+        assert_eq!(
+            with_attendee[0].speaker_id, "S2",
+            "the attendee's voice is offered first"
+        );
+        assert_eq!(
+            with_attendee[0]
+                .suggestion
+                .as_ref()
+                .map(|matched| matched.profile_id.as_str()),
+            Some(ravi.as_str())
+        );
+        assert_eq!(
+            without_attendee[0].speaker_id, "S1",
+            "without the attendee list it is similarity order"
+        );
+        assert_eq!(
+            without_attendee[0]
+                .suggestion
+                .as_ref()
+                .map(|matched| matched.profile_id.as_str()),
+            Some(dana.as_str())
+        );
+
+        // And Confirm offers the attendee's name ahead of the other voice.
+        let remembered: Vec<String> = profiles
+            .iter()
+            .map(|profile| profile.display_name.clone())
+            .collect();
+        assert_eq!(
+            diarization::voiceprints::confirm_name_options(&attendees, &remembered),
+            vec!["Ravi", "Dana"]
+        );
+    }
+
+    /// The session's centroids are visible to the context, and a persisted
+    /// signature for the same cluster takes precedence over them.
+    #[test]
+    fn session_centroids_fill_the_gaps_the_database_deliberately_leaves() {
+        let (_dir, mut db) = open_db();
+        db.create_recording(&recording_with_attendees("r1", Vec::new()))
+            .unwrap();
+        db.set_cluster_voice_signature("r1", "S1", &unit(&[1.0, 0.0]), "ecapa_tdnn_speaker")
+            .unwrap();
+        db.reject_cluster_voice_match("r1", "S2", "p-old").unwrap();
+
+        let held = StdMutex::new(diarization::voiceprints::SessionClusterVoices::default());
+        {
+            let mut centroids: std::collections::HashMap<String, Vec<f32>> =
+                std::collections::HashMap::new();
+            centroids.insert("S1".to_string(), unit(&[0.0, 1.0]));
+            centroids.insert("S2".to_string(), unit(&[0.0, 1.0]));
+            held.lock()
+                .unwrap()
+                .remember("r1", "ecapa_tdnn_speaker", centroids.iter());
+        }
+
+        let (signatures, _) = cluster_voice_context(&db, &held, "r1").unwrap();
+        assert_eq!(signatures.len(), 2);
+        assert_eq!(signatures[0].speaker_id, "S1");
+        assert!(
+            (signatures[0].centroid[0] - 1.0).abs() < 1e-6,
+            "the persisted signature wins over the session copy"
+        );
+        assert_eq!(signatures[1].speaker_id, "S2");
+        assert_eq!(
+            signatures[1].rejected_profile_ids,
+            vec!["p-old".to_string()],
+            "a rejection on an unnamed cluster is carried through"
+        );
+    }
+}
+
 async fn store_and_match_cluster_voices(
     state: &AppState,
     recording_id: &str,
@@ -9821,35 +10125,74 @@ async fn store_and_match_cluster_voices(
     if cluster_centroids.is_empty() {
         return Ok(false);
     }
+    // Nothing is written to the database here. A cluster earns a row when it
+    // earns a name; until then its centroid lives in memory only, which is
+    // what Settings and PRIVACY-AND-CLOUD.md promise.
+    {
+        let mut held = state
+            .session_cluster_voices
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        held.remember(recording_id, embedding_model_id, cluster_centroids.iter());
+    }
+
     let mut db = state.db.lock().await;
-    db.record_cluster_voice_signatures(recording_id, embedding_model_id, cluster_centroids, true)
-        .map_err(|e| e.to_string())?;
+    let (signatures, attendees) =
+        cluster_voice_context(&db, &state.session_cluster_voices, recording_id)?;
+
+    // A speaker who already carried a name of their own when diarization ran
+    // is the "a speaker you name" case, so their signature is kept.
+    for signature in &signatures {
+        let named = signature
+            .name
+            .as_deref()
+            .is_some_and(|name| !is_generic_speaker_name(name));
+        if named {
+            db.record_named_cluster_voice_signature(
+                recording_id,
+                &signature.speaker_id,
+                &signature.centroid,
+                &signature.embedding_model_id,
+                true,
+            )
+            .map_err(|e| e.to_string())?;
+        }
+    }
 
     if !auto_apply_enabled {
         return Ok(false);
     }
 
-    let signatures = db
-        .get_cluster_voice_signatures(recording_id)
-        .map_err(|e| e.to_string())?;
     let profiles = db.list_speaker_profiles().map_err(|e| e.to_string())?;
-    // Nothing records who was in a meeting in this build, so the attendee list
-    // is empty and ranking falls back to similarity order. See lane B-notes.
-    let attendees: Vec<String> = Vec::new();
-
     let mut applied = false;
     for cluster in diarization::voiceprints::build_suggestions(&signatures, &profiles, &attendees) {
         let Some(matched) = cluster.suggestion.as_ref() else {
             continue;
         };
-        let existing_is_specific = signatures
+        let Some(signature) = signatures
             .iter()
             .find(|signature| signature.speaker_id == cluster.speaker_id)
-            .and_then(|signature| signature.name.as_deref())
+        else {
+            continue;
+        };
+        let existing_is_specific = signature
+            .name
+            .as_deref()
             .is_some_and(|name| !is_generic_speaker_name(name));
         if !diarization::voiceprints::should_auto_apply(matched, true, existing_is_specific) {
             continue;
         }
+        // The name is going on the transcript, so the signature behind it is
+        // written too: confirming or rejecting it after a restart needs the
+        // numbers, and the cluster is no longer an unnamed one.
+        db.record_named_cluster_voice_signature(
+            recording_id,
+            &cluster.speaker_id,
+            &signature.centroid,
+            &signature.embedding_model_id,
+            true,
+        )
+        .map_err(|e| e.to_string())?;
         db.upsert_speaker_alias(
             recording_id,
             &cluster.speaker_id,
@@ -23562,6 +23905,9 @@ pub async fn build_app_state() -> Result<AppState, String> {
         sidecar_shutting_down: Arc::new(AtomicBool::new(false)),
         recent_dictation_results: Arc::new(StdMutex::new(Vec::new())),
         meeting_call_detector: Arc::new(StdMutex::new(meeting_detect::CallDetector::default())),
+        session_cluster_voices: Arc::new(StdMutex::new(
+            diarization::voiceprints::SessionClusterVoices::default(),
+        )),
     })
 }
 
@@ -30732,6 +31078,14 @@ pub async fn dispatch_command(
             let mut db = state.db.lock().await;
             db.delete_recording(&recording_id)
                 .map_err(|error| error.to_string())?;
+            // The rows are gone; the session's in-memory centroids for this
+            // meeting have to go with them, or a deleted meeting would still
+            // be describable in voice for as long as the app stayed open.
+            state
+                .session_cluster_voices
+                .lock()
+                .unwrap_or_else(|error| error.into_inner())
+                .forget(&recording_id);
             let _ = db.log_audit_event(
                 "recording_deleted",
                 Some(serde_json::json!({
@@ -32118,17 +32472,13 @@ pub async fn dispatch_command(
                     "nameOptions": [],
                 }));
             }
-            let (signatures, profiles) = {
+            let (signatures, attendees, profiles) = {
                 let db = state.db.lock().await;
-                (
-                    db.get_cluster_voice_signatures(&recording_id)
-                        .map_err(|e| e.to_string())?,
-                    db.list_speaker_profiles().map_err(|e| e.to_string())?,
-                )
+                let (signatures, attendees) =
+                    cluster_voice_context(&db, &state.session_cluster_voices, &recording_id)?;
+                let profiles = db.list_speaker_profiles().map_err(|e| e.to_string())?;
+                (signatures, attendees, profiles)
             };
-            // Nothing records who was in a meeting in this build; see lane
-            // B-notes. Ranking falls back to similarity order.
-            let attendees: Vec<String> = Vec::new();
             let clusters =
                 diarization::voiceprints::build_suggestions(&signatures, &profiles, &attendees);
             let remembered: Vec<String> = profiles
@@ -32184,23 +32534,30 @@ pub async fn dispatch_command(
                 .settings()
                 .meetings
                 .remember_voices;
-            if !remember_voices {
-                return Err(
-                    "Remembering voices is off. Turn on \"Remember voices\" in Settings > General > Meetings first."
-                        .to_string(),
-                );
-            }
+            diarization::voiceprints::voiceprint_write_allowed(remember_voices)
+                .map_err(str::to_string)?;
 
             let mut db = state.db.lock().await;
-            let signature = db
-                .get_cluster_voice_signatures(&recording_id)
-                .map_err(|e| e.to_string())?
+            // The session's in-memory centroids count here: this is the moment
+            // an unnamed cluster becomes a named one, and it is the moment its
+            // signature is written.
+            let (signatures, _attendees) =
+                cluster_voice_context(&db, &state.session_cluster_voices, &recording_id)?;
+            let signature = signatures
                 .into_iter()
                 .find(|signature| signature.speaker_id == speaker_id)
                 .ok_or_else(|| {
                     "Plainsong has no voice signature for this speaker. Run speaker identification again with \"Remember voices\" on."
                         .to_string()
                 })?;
+            db.record_named_cluster_voice_signature(
+                &recording_id,
+                &speaker_id,
+                &signature.centroid,
+                &signature.embedding_model_id,
+                true,
+            )
+            .map_err(|e| e.to_string())?;
 
             // A profile id decides the name, so a chip and the stored voice can
             // never drift apart; only the free-text path uses `name`.
@@ -32280,6 +32637,19 @@ pub async fn dispatch_command(
                 serde_json::from_value(params["speakerId"].clone()).map_err(|e| e.to_string())?;
             let profile_id: String =
                 serde_json::from_value(params["profileId"].clone()).map_err(|e| e.to_string())?;
+            // The same gate `remember_speaker_voice` has. "Not them" is still
+            // a write to the voiceprint columns, and the promise is that
+            // nothing about anyone's voice is stored while the switch is off —
+            // there is also nothing to dismiss, since the chips are gone.
+            let remember_voices = state
+                .settings_manager
+                .lock()
+                .await
+                .settings()
+                .meetings
+                .remember_voices;
+            diarization::voiceprints::voiceprint_write_allowed(remember_voices)
+                .map_err(str::to_string)?;
             let mut db = state.db.lock().await;
             db.reject_cluster_voice_match(&recording_id, &speaker_id, &profile_id)
                 .map_err(|e| e.to_string())?;
@@ -32321,6 +32691,14 @@ pub async fn dispatch_command(
                 "info",
             )
             .map_err(|e| e.to_string())?;
+            drop(db);
+            // An open transcript is showing chips for a voice that no longer
+            // exists; refreshing only on selection change left them there
+            // until the reader navigated away and back.
+            handle.emit_event(
+                "remembered-voices-changed",
+                serde_json::json!({ "removed": removed }),
+            );
             Ok(serde_json::json!(removed))
         }
         "forget_all_remembered_voices" => {
@@ -32332,6 +32710,11 @@ pub async fn dispatch_command(
                 "info",
             )
             .map_err(|e| e.to_string())?;
+            drop(db);
+            handle.emit_event(
+                "remembered-voices-changed",
+                serde_json::json!({ "removed": removed }),
+            );
             Ok(serde_json::json!(removed))
         }
         "list_diarization_models" => {

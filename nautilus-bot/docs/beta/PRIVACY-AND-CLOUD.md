@@ -140,13 +140,23 @@ the feature absent, and the database has no rows for it.
 the speaker-separation model produces from the audio, averaged over the turns
 Plainsong has attributed to that person. It is not a recording and cannot be
 played back or turned into speech. A signature is only written for a speaker
-you name, or one Plainsong offers to name and you confirm.
+you name, or one Plainsong offers to name and you confirm — and, if you turn
+on "Apply a confident match without asking", for a speaker it names on its own,
+because a name on the transcript needs the numbers behind it to be confirmable
+later.
+
+**What is not stored.** The other speakers in the meeting. Offering a name
+needs their numbers too, so they are kept in memory while Plainsong is running
+and are never written down: no rows, no files, nothing to delete. Quitting
+forgets them. The visible cost is that reopening a meeting after a restart
+shows no suggestions for speakers nobody named, until speaker identification
+runs over it again.
 
 **Where it is stored.** In Plainsong's own database on this Mac
 (`plainsong.db`), alongside your transcripts. With the vault on it is
 encrypted with everything else. Two tables hold it — the remembered voices
 themselves, and up to 20 samples per voice that the stored average is computed
-from — plus one signature per speaker on each meeting it was matched in.
+from — plus one signature per *named* speaker on each meeting.
 
 **Where it is not.** It is excluded from every export. It is not readable by
 the `plainsong` command or its MCP server: the read-only interface those share
