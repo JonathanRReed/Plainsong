@@ -7,7 +7,7 @@ Regenerate from nautilus-bot/ with:
 Application package: plainsong@0.9.0-beta.3
 Rust dependency packages: 532
 npm production dependency packages: 79
-Downloadable model artifacts: 16
+Downloadable model artifacts: 17
 
 The dependency indexes retain declared license identifiers and repository URLs
 even when no license file is available in the installed package or Cargo cache.
@@ -233,8 +233,8 @@ pinned in the source, and stored in the user's own models directory. The
 terms are the upstream project's, not Plainsong's, and are reproduced here
 because several differ from the license of the code that runs them.
 
-Model artifacts: 16
-Artifacts whose upstream declares no license: 1 (ERes2NetV2 speaker embedding (int8))
+Model artifacts: 17
+Artifacts whose upstream declares no license: 2 (ERes2NetV2 speaker embedding (int8), pyannote community-1 bundle (speakrs export))
 
 S1-mini by Superwhisper (GGUF)
   Used for: Built-in dictation cleanup (the zero-setup route).
@@ -367,6 +367,15 @@ ERes2NetV2 speaker embedding (int8)
   Files: diarize-embedding-eres2netv2-int8.onnx
   Pinned in: rust-sidecar/src/download/mod.rs (diarization_model_info)
   Note: The mirror this artifact is pinned to declares no license, so none is asserted here. Until that is resolved upstream or the model is replaced, this entry records the gap rather than an assumption.
+
+pyannote community-1 bundle (speakrs export)
+  Used for: Speaker diarization through the experimental speakrs backend. Compiled only with the off-by-default `diarization-speakrs` Cargo feature, which no shipped build enables, so no released Plainsong offers or downloads this.
+  License: not declared by the mirror; upstream pyannote community-1 is CC-BY-4.0 (gated)
+  Repository: https://huggingface.co/avencera/speakrs-models
+  Revision: a785ebdbe6313868088c36c93d9efa71c470bd34
+  Files: segmentation-3.0.onnx, wespeaker-voxceleb-resnet34.onnx, wespeaker-voxceleb-resnet34.onnx.data, wespeaker-voxceleb-resnet34.min_num_samples.txt, plda_lda.npy, plda_tr.npy, plda_mu.npy, plda_psi.npy, plda_mean1.npy, plda_mean2.npy
+  Pinned in: rust-sidecar/src/download/mod.rs (SPEAKRS_BUNDLE)
+  Note: The mirror's model card declares no license of its own and says users are responsible for the upstream terms. Upstream is pyannote/speaker-diarization-community-1 (CC-BY-4.0, gated on Hugging Face); its segmentation component pyannote/segmentation-3.0 is MIT and its embedder pyannote/wespeaker-voxceleb-resnet34-LM is CC-BY-4.0. Nothing is asserted about the mirrored copies until that is resolved or the artifacts are fetched from the gated upstream directly. See artifacts/qa/diarization-speakrs-spike-2026-09-02.md.
 
 ================================================================================
 RUST DEPENDENCY INDEX

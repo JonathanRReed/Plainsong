@@ -358,6 +358,13 @@ evidence is stale and must be recaptured before this becomes a candidate.
   the meeting is diarized with the downloaded default and says so — "Speaker
   labels used ECAPA-TDNN 512 because CAM++ is not downloaded." With nothing
   downloaded at all, no speaker labels are claimed.
+- The MODEL WEIGHTS section of THIRD-PARTY-NOTICES.txt now also accounts for
+  the pyannote community-1 bundle the experimental diarization backend fetches.
+  No shipped build enables that backend, but its pin lives in the sidecar
+  source, and the notices record what the mirror actually declares: nothing.
+  Upstream is CC-BY-4.0 and gated; that is stated as upstream's terms, not as
+  the mirror's, and the artifact is counted among those awaiting a human
+  answer.
 - THIRD-PARTY-NOTICES.txt now has a MODEL WEIGHTS section naming every model
   Plainsong can download — repository, pinned revision, files and license —
   including the terms that differ from the code's: Parakeet's CC-BY-4.0

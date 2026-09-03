@@ -240,6 +240,31 @@ export const MODEL_WEIGHTS = [
     files: ["diarize-embedding-eres2netv2-int8.onnx"],
     pinnedIn: "rust-sidecar/src/download/mod.rs (diarization_model_info)",
   },
+  {
+    name: "pyannote community-1 bundle (speakrs export)",
+    usedFor:
+      "Speaker diarization through the experimental speakrs backend. Compiled only with the off-by-default `diarization-speakrs` Cargo feature, which no shipped build enables, so no released Plainsong offers or downloads this.",
+    repository: "https://huggingface.co/avencera/speakrs-models",
+    revision: "a785ebdbe6313868088c36c93d9efa71c470bd34",
+    license:
+      "not declared by the mirror; upstream pyannote community-1 is CC-BY-4.0 (gated)",
+    pendingLicenseReview: true,
+    note:
+      "The mirror's model card declares no license of its own and says users are responsible for the upstream terms. Upstream is pyannote/speaker-diarization-community-1 (CC-BY-4.0, gated on Hugging Face); its segmentation component pyannote/segmentation-3.0 is MIT and its embedder pyannote/wespeaker-voxceleb-resnet34-LM is CC-BY-4.0. Nothing is asserted about the mirrored copies until that is resolved or the artifacts are fetched from the gated upstream directly. See artifacts/qa/diarization-speakrs-spike-2026-09-02.md.",
+    files: [
+      "segmentation-3.0.onnx",
+      "wespeaker-voxceleb-resnet34.onnx",
+      "wespeaker-voxceleb-resnet34.onnx.data",
+      "wespeaker-voxceleb-resnet34.min_num_samples.txt",
+      "plda_lda.npy",
+      "plda_tr.npy",
+      "plda_mu.npy",
+      "plda_psi.npy",
+      "plda_mean1.npy",
+      "plda_mean2.npy",
+    ],
+    pinnedIn: "rust-sidecar/src/download/mod.rs (SPEAKRS_BUNDLE)",
+  },
 ];
 
 /** The section body, rendered into THIRD-PARTY-NOTICES.txt. */
