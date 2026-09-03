@@ -1,5 +1,12 @@
 import type { AnalysisProvenance, ActionItemsProvenance } from "./asr";
 
+/**
+ * The capture mode written for a meeting that came from a file rather than a
+ * microphone. Mirrors `IMPORTED_MEETING_CAPTURE_MODE` in
+ * rust-sidecar/src/lib.rs.
+ */
+export const MEETING_CAPTURE_MODE_IMPORTED = "imported";
+
 export interface Recording {
   id: string;
   title: string;
@@ -18,7 +25,13 @@ export interface Recording {
   actionItemsProvenance?: ActionItemsProvenance | null;
   meetingNotes?: string | null;
   meetingTemplateId?: string | null;
-  meetingCaptureMode?: "mic_only" | "me_and_them" | null;
+  meetingCaptureMode?: "mic_only" | "me_and_them" | typeof MEETING_CAPTURE_MODE_IMPORTED | null;
+  /**
+   * The file name an imported meeting came from, without its folder. Absent
+   * for every meeting Plainsong recorded itself. Mirrors
+   * `imported_source_name` in rust-sidecar/src/models.rs.
+   */
+  importedSourceName?: string | null;
   notesUpdatedAt?: string | null;
   consentPromptShown?: boolean;
   consentNoticeMode?: string | null;

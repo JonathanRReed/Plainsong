@@ -46,6 +46,16 @@ using sensitive content.
 - The first local model download and preparation take longer than later
   Dictations and require additional disk space. Ready means the selected model
   is actually present, not merely selected in Settings.
+- "Process again" needs the dictation's audio, and Plainsong keeps that only
+  when "Keep dictation audio for Process again" is on, which it is not by
+  default. Turning it on affects later dictations, never ones already saved,
+  and the kept audio is deleted with its history entry — by auto-delete or by
+  hand. A history entry whose audio is gone says so and names the setting
+  rather than offering an action it cannot complete.
+- History search covers the dictations still in history. Anything auto-delete
+  has already removed cannot be found, and dictations saved before this
+  version were indexed on their delivered text only, so for them a search
+  cannot distinguish what was heard from what was delivered.
 
 ## Meetings
 
@@ -55,6 +65,24 @@ using sensitive content.
 - Me + Them source labels distinguish microphone-side speech from captured
   system audio. They are not a promise of perfect person-by-person speaker
   identification.
+- Local meeting routes: Parakeet TDT 0.6B v3 (25 European languages) is the
+  recommended route. For a language it does not cover, the multilingual
+  whisper.cpp models small, medium, large-v3 and large-v3-turbo can run
+  meetings (about 100 languages, on the GPU, slower than Parakeet on long
+  audio). whisper.cpp tiny, base and every `.en` build stay dictation-only, and
+  whisper.cpp is never chosen for meetings on its own: it runs a meeting only
+  when you pick one of those models for the meeting lane in Settings.
+- "Import audio…" accepts .wav, .mp3, .m4a, .aac, .mp4, .ogg and .flac up to
+  2 GB and 4 hours. It uses macOS' own audio converter, so it is macOS only in
+  this beta, and a file macOS cannot decode (a DRM-protected purchase, an
+  unusual codec, a .webm — macOS cannot read Matroska at all) is refused with
+  the converter's own reason. A file whose length macOS will not report is
+  refused rather than decoded, because the 4-hour limit cannot be checked
+  without it. The file you
+  pick is only read: Plainsong copies the decoded audio into its recordings
+  folder and never moves, changes or deletes your original. An imported
+  meeting has no microphone and system-audio sides, so speaker separation is
+  whatever diarization can infer from one mixed track.
 - Never use the beta to record a confidential conversation without the consent
   required by your organization and location.
 - Plainsong does not post the consent notice into the meeting chat for you.

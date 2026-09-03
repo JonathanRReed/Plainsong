@@ -62,6 +62,23 @@ pub struct TranscriptArtifactRecord {
     pub created_at: DateTime<Utc>,
 }
 
+/// The searchable text of one saved dictation, kept beside its transcript.
+///
+/// `final_text` is what the pipeline delivered; `raw_text` is what the
+/// recognizer heard before dictionary, snippets, commands and formatting ran.
+/// A "Process again" entry carries the id of the dictation whose kept audio
+/// it re-ran in `reprocessed_from_id`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DictationHistoryTextRecord {
+    pub recording_id: String,
+    pub final_text: String,
+    pub raw_text: String,
+    pub reprocessed_from_id: Option<String>,
+    pub mode_preset: Option<String>,
+    pub created_at: DateTime<Utc>,
+}
+
 /// Pre-aggregated counters for the Dictation insights panel, computed by
 /// SQLite rather than by walking every dictation and its transcript in Rust.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]

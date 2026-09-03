@@ -64,6 +64,13 @@ export interface DictationHistoryDetails {
   translationRoute?: string | null;
   /** Whether the delivered text is the translated one. */
   translationApplied?: boolean | null;
+  /** What the recognizer heard, when the dictation was saved with it. */
+  rawTranscript?: string | null;
+  /** Whether the kept audio is still on disk; null when none was kept. */
+  audioAvailable?: boolean | null;
+  /** Set on a "Process again" entry: the dictation whose audio it re-ran. */
+  reprocessedFromId?: string | null;
+  reprocessedFromCreatedAt?: string | null;
 }
 
 export interface DictationInsights {
@@ -183,6 +190,72 @@ export async function getDictationHistoryDetails(
 
 export async function getDictationInsights(): Promise<DictationInsights> {
   return await invoke("get_dictation_insights");
+}
+
+/**
+ * One ranked hit from dictation history search. `snippet` wraps each matched
+ * term in `[[`/`]]`; `matchedField` says whether the delivered text
+ * (`final`) or what the recognizer heard (`raw`) matched.
+ */
+export interface DictationHistorySearchHit {
+  recordingId: string;
+  recordingTitle: string;
+  createdAt: string;
+  snippet: string;
+  matchedField: "final" | "raw" | string;
+  score: number;
+}
+
+export async function searchDictationHistory(
+  query: string,
+  options: { limit?: number; offset?: number } = {}
+): Promise<DictationHistorySearchHit[]> {
+  return await invoke("search_dictation_history", {
+    query,
+    limit: options.limit ?? 25,
+    offset: options.offset ?? 0,
+  });
+}
+
+/** What "Process again" was asked to do; only `historyId` is required. */
+export interface DictationReprocessRequest {
+  historyId: string;
+  /** A built-in preset id or a custom mode id. Omit for the active mode. */
+  modeId?: string | null;
+  /** Override the dictation lane's engine for this run only. */
+  provider?: string | null;
+  modelId?: string | null;
+}
+
+/**
+ * The new history entry "Process again" saved, plus what produced it. The
+ * sidecar inserts nothing and touches no clipboard; the entry is the result.
+ */
+export interface DictationReprocessOutcome {
+  recording: Recording;
+  transcript: Transcript;
+  finalText: string;
+  rawText: string;
+  modePreset: string;
+  customModeId: string | null;
+  customModeName: string | null;
+  provider: string;
+  modelId: string;
+  usedAi: boolean;
+  reprocessedFromId: string;
+  reprocessedFromCreatedAt: string;
+  transcriptionLatencyMs: number;
+}
+
+export async function reprocessDictation(
+  request: DictationReprocessRequest
+): Promise<DictationReprocessOutcome> {
+  return await invoke("reprocess_dictation", {
+    historyId: request.historyId,
+    modeId: request.modeId ?? null,
+    provider: request.provider ?? null,
+    modelId: request.modelId ?? null,
+  });
 }
 
 interface CursorInsertSmokeTestResult {
@@ -457,6 +530,31 @@ export async function deleteRecording(recordingId: string): Promise<void> {
  * still on disk (recovery for interrupted or failed transcriptions). */
 export async function retranscribeRecording(recordingId: string): Promise<void> {
   await invoke("retranscribe_recording", { recordingId });
+}
+
+/**
+ * What the sidecar saved for an imported audio file. `null` means the user
+ * dismissed the native file picker without choosing anything.
+ */
+export interface ImportedAudioFile {
+  recordingId: string;
+  title: string;
+  sourceFileName: string;
+  durationSeconds: number;
+}
+
+/**
+ * Open the native "choose an audio file" dialog and import what the user
+ * picks as a meeting.
+ *
+ * The renderer never names a path: Electron's main process shows the picker
+ * and hands the chosen path straight to the sidecar. Resolves as soon as the
+ * file has been decoded and saved; transcription then runs in the background
+ * and reports through the same `recording-status-changed` events a stopped
+ * meeting uses.
+ */
+export async function importAudioFile(): Promise<ImportedAudioFile | null> {
+  return (await invoke("select_audio_file_to_import")) as ImportedAudioFile | null;
 }
 
 export async function renameRecording(recordingId: string, newTitle: string): Promise<void> {

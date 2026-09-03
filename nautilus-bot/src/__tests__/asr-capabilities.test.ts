@@ -34,7 +34,9 @@ describe("ASR capability mappings", () => {
   });
 
   it("keeps frontend provider eligibility aligned with backend meeting rules", () => {
-    expect(isDictationOnlyProvider("whisper")).toBe(true);
+    // whisper.cpp is per model (see the matrix below), so the provider as a
+    // whole is neither dictation-only nor meeting-grade.
+    expect(isDictationOnlyProvider("whisper")).toBe(false);
     expect(isDictationOnlyProvider("moonshine")).toBe(true);
     expect(isDictationOnlyProvider("whisper_candle")).toBe(true);
     expect(isMeetingEligibleProvider("distil_whisper")).toBe(true);
@@ -45,6 +47,18 @@ describe("ASR capability mappings", () => {
     expect(isSharedMeetingCompatible("parakeet", "parakeet-tdt-0.6b-v3")).toBe(true);
     expect(isSharedMeetingCompatible("whisper", "base.en")).toBe(false);
     expect(isSharedMeetingCompatible("whisper_candle", "whisper-large-v3-turbo")).toBe(false);
+  });
+
+  it("admits only the multilingual whisper.cpp models from small up to the meeting lane", () => {
+    // Mirrors WHISPER_MEETING_MODEL_IDS in rust-sidecar/src/lib.rs.
+    for (const modelId of ["small", "medium", "large-v3", "large-v3-turbo"]) {
+      expect(isSharedMeetingCompatible("whisper", modelId)).toBe(true);
+    }
+    for (const modelId of ["tiny", "tiny.en", "base", "base.en", "small.en", "medium.en"]) {
+      expect(isSharedMeetingCompatible("whisper", modelId)).toBe(false);
+    }
+    // No meeting-safe default: the provider default is base.en.
+    expect(isMeetingEligibleModel("whisper", "")).toBe(false);
   });
 
   it("keeps the short-form legacy Parakeet export out of the meeting lane", () => {

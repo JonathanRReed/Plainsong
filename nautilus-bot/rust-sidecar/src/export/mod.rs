@@ -476,6 +476,7 @@ mod tests {
             ),
             meeting_template_id: None,
             meeting_capture_mode: Some("me_and_them".to_string()),
+            imported_source_name: None,
             notes_updated_at: Some(now),
             consent_prompt_shown: true,
             consent_notice_mode: Some("manual".to_string()),

@@ -2,6 +2,7 @@ pub mod admission;
 mod approved_locations;
 pub mod asr;
 mod audio;
+mod audio_import;
 mod backup;
 mod crypto;
 mod db;
@@ -3095,7 +3096,44 @@ fn dictation_history_details_from_audit(
         translation_applied: details
             .get("translation_applied")
             .and_then(|value| value.as_bool()),
+        // Filled from the history text row and the recording, not the audit
+        // log: see `enrich_dictation_history_details`.
+        raw_transcript: None,
+        audio_available: None,
+        reprocessed_from_id: None,
+        reprocessed_from_created_at: None,
     }
+}
+
+/// Adds what the audit log never carries: the raw transcript, whether the
+/// captured audio is still on disk, and the "Process again" lineage.
+fn enrich_dictation_history_details(
+    mut details: models::DictationHistoryDetails,
+    history_text: Option<&crate::store::DictationHistoryTextRecord>,
+    recording: Option<&models::Recording>,
+    reprocessed_from: Option<&models::Recording>,
+) -> models::DictationHistoryDetails {
+    if let Some(text) = history_text {
+        // Older rows were backfilled with the delivered text on both sides;
+        // reporting that as "heard" would claim a raw transcript that was
+        // never kept.
+        if !text.raw_text.trim().is_empty() && text.raw_text != text.final_text {
+            details.raw_transcript = Some(text.raw_text.clone());
+        }
+        details.reprocessed_from_id = text.reprocessed_from_id.clone();
+        if details.mode_preset.is_none() {
+            details.mode_preset = text.mode_preset.clone();
+        }
+    }
+    if let Some(recording) = recording {
+        details.audio_available = if recording.audio_path.trim().is_empty() {
+            None
+        } else {
+            Some(Path::new(&recording.audio_path).is_file())
+        };
+    }
+    details.reprocessed_from_created_at = reprocessed_from.map(|source| source.created_at);
+    details
 }
 
 fn merge_dictation_history_details(
@@ -3151,6 +3189,10 @@ fn dictation_history_details_is_empty(details: &models::DictationHistoryDetails)
         && details.model_id.is_none()
         && details.route_preference.is_none()
         && details.resolved_hosting.is_none()
+        && details.raw_transcript.is_none()
+        && details.audio_available.is_none()
+        && details.reprocessed_from_id.is_none()
+        && details.reprocessed_from_created_at.is_none()
         && details.startup_latency_ms.is_none()
         && details.transcription_latency_ms.is_none()
         && details.insert_latency_ms.is_none()
@@ -3351,6 +3393,7 @@ async fn resolve_ready_meeting_selection(
                 default_provider,
                 dictation_provider,
                 meeting_provider,
+                Some(transcription.meeting_model_id.as_str()),
             );
             let repaired_candidate = select_ready_meeting_candidate(
                 &provider_infos,
@@ -3569,6 +3612,616 @@ async fn tracker_copy_to_clipboard(state: &AppState) -> bool {
     // Matches `dictation_copy_to_clipboard`'s default: without an explicit
     // opt-in, do not leave the dictated text sitting on the user's clipboard.
     tracker.copy_to_clipboard_at_start.unwrap_or(false)
+}
+
+/// What `reprocess_dictation` was asked to do. `mode_id` is a built-in
+/// preset ("voice", "messages", ...) or the id of a custom mode; `provider`
+/// and `model_id` override the dictation lane's route for this run only.
+#[derive(Debug, Clone)]
+struct DictationReprocessRequest {
+    history_id: String,
+    mode_id: Option<String>,
+    provider: Option<String>,
+    model_id: Option<String>,
+}
+
+/// Whether a saved dictation's audio can be run again, decided from facts the
+/// caller already has so the refusal can name the setting that would have
+/// kept it. Pure so the policy is testable without a database or a file.
+fn dictation_reprocess_audio_decision(
+    audio_path: &str,
+    audio_file_present: bool,
+    keep_audio_enabled: bool,
+    retention_preset: &str,
+) -> Result<(), String> {
+    if audio_path.trim().is_empty() {
+        return Err(if keep_audio_enabled {
+            "This dictation was saved before \"Keep dictation audio\" was turned on, so there is no audio to process again. Newer dictations keep theirs.".to_string()
+        } else {
+            "This dictation's audio was not kept. Turn on \"Keep dictation audio for Process again\" in Dictation settings; from then on each dictation keeps its audio until its history entry is deleted.".to_string()
+        });
+    }
+    if !audio_file_present {
+        let preset = normalize_dictation_retention_preset(retention_preset);
+        return Err(if preset == "never" {
+            "This dictation's audio file is no longer on disk, so it cannot be processed again."
+                .to_string()
+        } else {
+            format!(
+                "This dictation's audio file is gone. Dictation auto-delete is set to \"{}\", which removes kept audio with the entry; a longer setting keeps it for Process again.",
+                preset
+            )
+        });
+    }
+    Ok(())
+}
+
+/// Resolves a requested mode id to the base preset the pipeline runs and the
+/// custom mode (if any) whose prompt applies. Unknown ids fall back to the
+/// active mode, the same way live dictation resolves it.
+fn resolve_reprocess_mode<'a>(
+    settings: &'a settings::Settings,
+    mode_id: Option<&str>,
+) -> (&'static str, Option<&'a settings::DictationCustomMode>) {
+    if let Some(mode_id) = mode_id.map(str::trim).filter(|value| !value.is_empty()) {
+        if let Some(custom) = settings
+            .transcription
+            .dictation_custom_modes
+            .iter()
+            .find(|mode| mode.id == mode_id)
+        {
+            let base = custom
+                .base_mode_preset
+                .as_deref()
+                .map(normalize_dictation_base_mode_preset)
+                .unwrap_or("voice");
+            return (base, Some(custom));
+        }
+        // `normalize_dictation_mode_preset` answers "voice" for anything it
+        // does not know, which would turn a stale or mistyped mode id into a
+        // silent style change. Only an id that really is one of the built-in
+        // presets short-circuits; everything else falls through to the mode
+        // the reader is actually using.
+        let preset = normalize_dictation_mode_preset(mode_id);
+        if preset != "custom" && preset == mode_id {
+            return (preset, None);
+        }
+    }
+    (
+        resolved_dictation_mode_preset(settings),
+        active_dictation_custom_mode(settings),
+    )
+}
+
+/// Runs kept dictation audio through the recognizer and the chosen style
+/// again and saves the result as a new history entry linked to the original.
+/// Nothing is inserted, copied to the clipboard, or shown in the popup.
+async fn reprocess_dictation_impl(
+    state: &AppState,
+    handle: &crate::sidecar_handle::SidecarHandle,
+    request: DictationReprocessRequest,
+) -> Result<models::DictationReprocessOutcome, String> {
+    // Reads stored audio, so it is excluded against backup/restore/vault work
+    // exactly like meeting post-processing.
+    let _postprocessing_lease = state
+        .operation_coordinator
+        .try_acquire(operation_coordinator::OperationKind::PostProcess)?;
+    let settings_snapshot = state.settings_manager.lock().await.settings().clone();
+
+    let (source, dictionary_entries, snippets) = {
+        let db = state.db.lock().await;
+        let source = db
+            .get_recording(&request.history_id)
+            .map_err(|e| e.to_string())?
+            .ok_or_else(|| "That saved dictation no longer exists.".to_string())?;
+        if source.source_type != "dictation" {
+            return Err("Process again works on saved dictations only.".to_string());
+        }
+        let dictionary_entries = db
+            .list_dictation_dictionary_entries()
+            .map_err(|e| format!("Failed to read the dictation dictionary: {e}"))?;
+        let snippets = if settings_snapshot.transcription.dictation_snippets_enabled {
+            db.list_dictation_snippets()
+                .map_err(|e| format!("Failed to read dictation snippets: {e}"))?
+        } else {
+            Vec::new()
+        };
+        (source, dictionary_entries, snippets)
+    };
+
+    dictation_reprocess_audio_decision(
+        &source.audio_path,
+        Path::new(&source.audio_path).is_file(),
+        settings_snapshot.transcription.dictation_keep_audio,
+        &settings_snapshot.transcription.dictation_retention_preset,
+    )?;
+
+    // Same ownership path as meeting audio: approved-root check, decryption
+    // when the vault holds it, and the storage gate so a retention sweep or
+    // delete cannot pull the file out from under the read.
+    let audio_bytes = {
+        let _storage_guard = state.audio_storage_gate.lock().await;
+        let bundle = resolve_recording_audio_bundle_for_runtime(state, &source.id).await?;
+        std::fs::read(&bundle.primary).map_err(|error| {
+            format!(
+                "Could not read this dictation's kept audio ({}): {}",
+                bundle.primary.display(),
+                error
+            )
+        })?
+    };
+    let duration_seconds = compute_wav_duration_seconds_from_bytes(&audio_bytes)?;
+
+    let (provider_type, model_id) = match (&request.provider, &request.model_id) {
+        (Some(provider), model) => {
+            let provider_type = asr_provider_from_settings_value(provider)
+                .ok_or_else(|| format!("Unknown speech engine '{provider}'."))?;
+            let model_id = model
+                .clone()
+                .unwrap_or_else(|| provider_type.default_model_id().to_string());
+            (
+                provider_type,
+                normalize_asr_model_id(provider_type, &model_id),
+            )
+        }
+        (None, _) => resolve_transcription_provider_and_model(
+            &settings_snapshot.transcription,
+            TranscriptionScope::Dictation,
+        ),
+    };
+    enforce_remote_asr_provider_policy(
+        provider_type,
+        settings_snapshot.privacy.remote_processing_enabled,
+    )?;
+    ensure_asr_route_ready(state, provider_type, &model_id, "process again").await?;
+
+    let (base_preset, custom_mode) =
+        resolve_reprocess_mode(&settings_snapshot, request.mode_id.as_deref());
+    let base_preset = base_preset.to_string();
+    let custom_mode = custom_mode.cloned();
+
+    // The original destination app scopes the dictionary and the formatting
+    // style, exactly as it did the first time.
+    let original_details = {
+        let db = state.db.lock().await;
+        db.get_all_audit_log()
+            .map_err(|e| e.to_string())?
+            .into_iter()
+            .rev()
+            .find(|entry| {
+                entry.event == "dictation_completed"
+                    && entry.details.get("recording_id").and_then(|v| v.as_str())
+                        == Some(source.id.as_str())
+            })
+            .map(|entry| dictation_history_details_from_audit(&entry.details))
+            .unwrap_or_default()
+    };
+    let app_target = original_details
+        .app_target
+        .clone()
+        .or_else(|| original_details.context_app_name.clone());
+    let formatting_hint = resolve_dictation_formatting_hint(
+        app_target.as_deref(),
+        original_details.activation_matcher.as_deref(),
+        original_details.context_app_name.as_deref(),
+    );
+    let destination_category = settings::resolve_dictation_app_category_with_overrides_and_hint(
+        &settings_snapshot.transcription,
+        app_target.as_deref(),
+        None,
+        formatting_hint.as_deref(),
+    );
+    // Translate-to-English follows the mode this re-run selected, not the
+    // one that happens to be active now. Only the whisper-native route
+    // applies here: it is a decode flag, so it costs nothing extra. The AI
+    // lane is a second model pass the live path owns; "Process again" does
+    // not re-run it, so a non-whisper recognizer re-runs untranslated.
+    let translate_requested = match custom_mode.as_ref() {
+        Some(mode) => mode.translate_to_english,
+        None => {
+            settings_snapshot
+                .transcription
+                .dictation_translate_to_english
+        }
+    };
+    let translation_route =
+        resolve_dictation_translation_route(provider_type, &model_id, translate_requested);
+    let transcription_options = asr::TranscriptionOptions {
+        vocabulary_hint: crate::dictation_parity::build_vocabulary_hint(
+            &crate::dictation_pipeline::vocabulary_candidates_from_entries(
+                &dictionary_entries,
+                &snippets,
+            ),
+            app_target.as_deref(),
+            destination_category,
+        ),
+        translate_to_english: translation_route == DictationTranslationRoute::WhisperNative,
+    };
+
+    if let Ok(mut overlay) = state.dictation_overlay_state.lock() {
+        overlay.message = Some("Processing a saved dictation again…".to_string());
+    }
+    let transcription_started = std::time::Instant::now();
+    let transcription_result = state
+        .asr_manager
+        .transcribe_bytes_for_dictation_with_options(
+            provider_type,
+            &audio_bytes,
+            Some(model_id.as_str()),
+            &transcription_options,
+        )
+        .await
+        .map_err(|error| {
+            format!(
+                "Process again failed on {} / {}: {}",
+                provider_type.display_name(),
+                model_id,
+                error
+            )
+        })?;
+    let transcription_latency_ms = transcription_started.elapsed().as_millis() as u64;
+
+    let raw_text =
+        sanitize_dictation_output(&transcription_result.text, &transcription_result.text)
+            .trim()
+            .to_string();
+    if raw_text.is_empty() {
+        return Err(
+            "The recognizer heard nothing in this dictation's audio, so there is nothing to save."
+                .to_string(),
+        );
+    }
+
+    // Stage two: the same local pipeline the live path runs, then the mode's
+    // transform. Commands are deliberately not re-executed: a "delete that"
+    // said last week must not act on whatever is focused now.
+    let pipeline_result = crate::dictation_pipeline::apply_dictation_pipeline(
+        crate::dictation_pipeline::DictationPipelineInput {
+            text: raw_text.as_str(),
+            dictionary_entries: &dictionary_entries,
+            snippets: &snippets,
+            app_target: app_target.as_deref(),
+            mode_preset: base_preset.as_str(),
+            smart_formatting_enabled: true,
+            recent_inserted_text: None,
+            destination_category,
+        },
+    );
+    let mut final_text = pipeline_result.text.trim().to_string();
+    let mut used_ai = false;
+    let mut pipeline_stage_keys = pipeline_result.pipeline_stage_keys.clone();
+
+    let custom_prompt = custom_mode
+        .as_ref()
+        .and_then(|mode| mode.custom_prompt.as_deref())
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_string);
+    let llm_allowed = settings_snapshot.transcription.dictation_ai_formatting
+        || custom_mode
+            .as_ref()
+            .map(|mode| mode.profile == "power_rewrite")
+            .unwrap_or(false);
+    if !final_text.is_empty() {
+        match base_preset.as_str() {
+            "messages" | "email" | "meeting_follow_up" => {
+                // A custom mode built on this base supplies the prompt; any
+                // other custom mode must not hijack an explicit preset choice.
+                let prompt = custom_prompt.clone().unwrap_or_else(|| {
+                    dictation_mode_transform_prompt(&base_preset)
+                        .unwrap_or_default()
+                        .to_string()
+                });
+                if llm_allowed && !prompt.is_empty() {
+                    match run_custom_dictation_transform_with_selected_provider(
+                        state,
+                        final_text.as_str(),
+                        prompt.as_str(),
+                    )
+                    .await
+                    {
+                        Ok((output, _, _)) => {
+                            final_text = output.trim().to_string();
+                            used_ai = true;
+                            pipeline_stage_keys.push("mode_transform".to_string());
+                        }
+                        Err(error) => {
+                            tracing::warn!(
+                                "Process again: '{}' transform fell back to the local rewrite: {}",
+                                base_preset,
+                                error
+                            );
+                            final_text = match base_preset.as_str() {
+                                "messages" => rewrite_shorter_text(&final_text),
+                                _ => rewrite_professional_text(&final_text),
+                            };
+                            pipeline_stage_keys.push("mode_transform_fallback".to_string());
+                        }
+                    }
+                } else {
+                    final_text = match base_preset.as_str() {
+                        "messages" => rewrite_shorter_text(&final_text),
+                        _ => rewrite_professional_text(&final_text),
+                    };
+                    pipeline_stage_keys.push("mode_transform_fallback".to_string());
+                }
+            }
+            "notes" => {
+                let bulletized = bulletize_text(&final_text);
+                if bulletized != final_text {
+                    final_text = bulletized;
+                    pipeline_stage_keys.push("mode_transform".to_string());
+                }
+            }
+            _ => {
+                if let (true, Some(prompt)) = (llm_allowed, custom_prompt.as_deref()) {
+                    match run_custom_dictation_transform_with_selected_provider(
+                        state,
+                        final_text.as_str(),
+                        prompt,
+                    )
+                    .await
+                    {
+                        Ok((output, _, _)) => {
+                            final_text = output.trim().to_string();
+                            used_ai = true;
+                            pipeline_stage_keys.push("smart_formatting".to_string());
+                        }
+                        Err(error) => tracing::warn!(
+                            "Process again: custom-mode formatting kept the local output: {}",
+                            error
+                        ),
+                    }
+                }
+            }
+        }
+    }
+    final_text = sanitize_dictation_output(final_text.as_str(), raw_text.as_str())
+        .trim()
+        .to_string();
+    let stored_text = if final_text.is_empty() {
+        raw_text.clone()
+    } else {
+        final_text.clone()
+    };
+
+    // The new entry keeps its own copy of the audio, so deleting either entry
+    // (by hand or by the retention sweep) never strands the other.
+    let now = chrono::Utc::now();
+    let recording_id = uuid::Uuid::new_v4().to_string();
+    let kept_audio_path = if settings_snapshot.transcription.dictation_keep_audio {
+        Some(write_kept_dictation_audio(&recording_id, &audio_bytes)?)
+    } else {
+        None
+    };
+    let kept_audio_metadata = kept_audio_path
+        .as_deref()
+        .map(recording_audio::validate_plaintext_wav)
+        .and_then(|validation| match validation {
+            recording_audio::RecordingAudioValidation::Ready(metadata) => Some(metadata),
+            _ => None,
+        });
+
+    let transcript = models::Transcript {
+        id: uuid::Uuid::new_v4().to_string(),
+        recording_id: recording_id.clone(),
+        segments: if stored_text == raw_text {
+            transcription_result
+                .segments
+                .iter()
+                .cloned()
+                .map(|segment| models::TranscriptSegment {
+                    id: uuid::Uuid::new_v4().to_string(),
+                    start_time: segment.start_time,
+                    end_time: segment.end_time,
+                    text: segment.text,
+                    speaker_id: None,
+                    confidence: segment.confidence,
+                })
+                .collect()
+        } else {
+            vec![models::TranscriptSegment {
+                id: uuid::Uuid::new_v4().to_string(),
+                start_time: 0.0,
+                end_time: 0.0,
+                text: stored_text.clone(),
+                speaker_id: None,
+                confidence: transcription_result.confidence,
+            }]
+        },
+        full_text: stored_text.clone(),
+        language: transcription_result.language.clone(),
+        confidence: transcription_result.confidence,
+        model: transcription_result.model_name.clone(),
+        model_id: Some(transcription_result.model_id.clone()),
+        requested_provider: Some(asr_provider_to_settings_value(provider_type).to_string()),
+        actual_provider: Some(
+            asr_provider_to_settings_value(transcription_result.actual_provider).to_string(),
+        ),
+        created_at: now,
+    };
+    let mode_label = custom_mode
+        .as_ref()
+        .map(|mode| mode.name.clone())
+        .unwrap_or_else(|| {
+            dictation_mode_label(
+                &base_preset,
+                None,
+                &settings_snapshot.transcription.dictation_custom_modes,
+            )
+        });
+    let recording = models::Recording {
+        id: recording_id.clone(),
+        title: format!(
+            "Dictation (processed again, {}) - {}",
+            mode_label,
+            chrono::Local::now().format("%Y-%m-%d %H:%M")
+        ),
+        project_id: source.project_id.clone(),
+        duration: duration_seconds,
+        created_at: now,
+        updated_at: now,
+        source_type: "dictation".to_string(),
+        audio_path: kept_audio_path
+            .as_ref()
+            .map(|path| path.to_string_lossy().to_string())
+            .unwrap_or_default(),
+        status: "completed".to_string(),
+        summary: None,
+        action_items: None,
+        summary_provenance: None,
+        action_items_provenance: None,
+        meeting_notes: None,
+        meeting_template_id: None,
+        meeting_capture_mode: None,
+        imported_source_name: None,
+        notes_updated_at: None,
+        consent_prompt_shown: false,
+        consent_notice_mode: None,
+        consent_notice_surface: None,
+        consent_notice_message: None,
+        consent_notice_updated_at: None,
+        analysis_failure: None,
+        pause_spans: Vec::new(),
+        video_service: None,
+    };
+    let history_text = crate::store::DictationHistoryTextRecord {
+        recording_id: recording_id.clone(),
+        final_text: stored_text.clone(),
+        raw_text: raw_text.clone(),
+        reprocessed_from_id: Some(source.id.clone()),
+        mode_preset: Some(base_preset.clone()),
+        created_at: now,
+    };
+
+    {
+        let mut db = state.db.lock().await;
+        if let Err(error) = db.create_dictation_history_entry(
+            &recording,
+            &transcript,
+            &history_text,
+            kept_audio_metadata.as_ref(),
+        ) {
+            if let Some(path) = kept_audio_path.as_deref() {
+                let _ = std::fs::remove_file(path);
+            }
+            return Err(format!(
+                "Plainsong could not save the processed-again dictation: {error}"
+            ));
+        }
+        let _ = db.save_transcript_artifact(&TranscriptArtifactRecord {
+            id: uuid::Uuid::new_v4().to_string(),
+            recording_id: recording_id.clone(),
+            transcript_id: Some(transcript.id.clone()),
+            segment_count: transcript.segments.len() as i64,
+            model_id: Some(transcription_result.model_id.clone()),
+            requested_provider: Some(asr_provider_to_settings_value(provider_type).to_string()),
+            actual_provider: Some(
+                asr_provider_to_settings_value(transcription_result.actual_provider).to_string(),
+            ),
+            quality_score: Some(transcription_result.confidence),
+            startup_latency_ms: None,
+            transcription_latency_ms: Some(transcription_latency_ms as i64),
+            insert_latency_ms: None,
+            end_to_end_ms: Some(transcription_latency_ms as i64),
+            created_at: now,
+        });
+        // Mirrors `dictation_completed` closely enough that the history
+        // inspector reads the new entry through the same code path.
+        let _ = db.log_audit_event(
+            "dictation_completed",
+            Some(serde_json::json!({
+                "recording_id": &recording_id,
+                "reprocessed_from_id": &source.id,
+                "stop_reason": "process_again",
+                "dictation_mode_preset": custom_mode.as_ref().map(|_| "custom").unwrap_or(base_preset.as_str()),
+                "dictation_mode_label": mode_label,
+                "dictation_base_mode_preset": &base_preset,
+                "dictation_custom_mode_id": custom_mode.as_ref().map(|mode| mode.id.clone()),
+                "dictation_custom_mode_name": custom_mode.as_ref().map(|mode| mode.name.clone()),
+                "app_target": app_target,
+                "dictionary_applied_count": pipeline_result.dictionary_applied_count,
+                "snippet_applied_count": pipeline_result.snippet_applied_count,
+                "formatting_applied": used_ai || pipeline_result.formatting_applied,
+                "pipeline_stage_keys": pipeline_stage_keys,
+                "requested_provider": asr_provider_to_settings_value(provider_type),
+                "actual_provider": asr_provider_to_settings_value(transcription_result.actual_provider),
+                "model_id": &transcription_result.model_id,
+                "transcription_latency_ms": transcription_latency_ms,
+                "outcome": "saved",
+            })),
+            "info",
+        );
+        let _ = db.log_audit_event(
+            "dictation_reprocessed",
+            Some(serde_json::json!({
+                "recording_id": &recording_id,
+                "reprocessed_from_id": &source.id,
+                "mode_preset": &base_preset,
+                "custom_mode_id": custom_mode.as_ref().map(|mode| mode.id.clone()),
+                "provider": asr_provider_to_settings_value(transcription_result.actual_provider),
+                "model_id": &transcription_result.model_id,
+                "used_ai": used_ai,
+                "duration_seconds": duration_seconds,
+                "transcription_latency_ms": transcription_latency_ms,
+            })),
+            "info",
+        );
+    }
+    if let Ok(mut overlay) = state.dictation_overlay_state.lock() {
+        overlay.message = None;
+    }
+    handle.emit_event(
+        "dictation-history-changed",
+        serde_json::json!({
+            "recordingId": &recording_id,
+            "reprocessedFromId": &source.id,
+        }),
+    );
+
+    Ok(models::DictationReprocessOutcome {
+        recording,
+        transcript,
+        final_text: stored_text,
+        raw_text,
+        mode_preset: base_preset,
+        custom_mode_id: custom_mode.as_ref().map(|mode| mode.id.clone()),
+        custom_mode_name: custom_mode.as_ref().map(|mode| mode.name.clone()),
+        provider: asr_provider_to_settings_value(transcription_result.actual_provider).to_string(),
+        model_id: transcription_result.model_id.clone(),
+        used_ai,
+        reprocessed_from_id: source.id.clone(),
+        reprocessed_from_created_at: source.created_at,
+        transcription_latency_ms,
+    })
+}
+
+/// Writes a dictation's captured WAV into the recordings store under a name
+/// that cannot collide, and returns its path. The caller registers it as the
+/// entry's owned primary asset in the same transaction as the row.
+fn write_kept_dictation_audio(recording_id: &str, audio_bytes: &[u8]) -> Result<PathBuf, String> {
+    let recordings_dir = nautilus_data_root()?.join("recordings");
+    std::fs::create_dir_all(&recordings_dir).map_err(|error| {
+        format!(
+            "Failed to prepare the recordings folder '{}': {}",
+            recordings_dir.display(),
+            error
+        )
+    })?;
+    let timestamp = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|duration| duration.as_secs())
+        .unwrap_or(0);
+    let short_id: String = recording_id.chars().take(8).collect();
+    let path = recordings_dir.join(format!("dictation_{timestamp}_{short_id}.wav"));
+    std::fs::write(&path, audio_bytes).map_err(|error| {
+        format!(
+            "Failed to keep the dictation audio at '{}': {}",
+            path.display(),
+            error
+        )
+    })?;
+    Ok(path)
 }
 
 async fn reprocess_dictation_text_impl(
@@ -7682,6 +8335,73 @@ fn available_space_for_encryption(path: &Path) -> Option<u64> {
     crate::download::available_space_for_path(directory).ok()
 }
 
+/// Encrypt a just-finalized recording's audio bundle into the vault, when the
+/// vault is on. A no-op when it is off, or when the bundle is already covered.
+///
+/// Lifted out of the meeting stop path because two other routes land the same
+/// kind of owned audio asset and neither encrypted it: "Import audio..." wrote
+/// the converted WAV into the recordings folder and spawned the pipeline, and a
+/// kept dictation WAV went in with `protection 'plaintext'` and stayed that
+/// way. Both are read back by the same playback, export, retention and
+/// migration code as a stopped meeting's audio, so leaving them in the clear
+/// left plaintext audio under a vault the UI says is on, and held
+/// `get_security_status` at "not every recording is encrypted" forever.
+///
+/// A locked vault is an error rather than a silent skip: the file is already on
+/// disk by the time this runs, so saying nothing would be the quiet failure.
+async fn encrypt_finalized_recording_audio(
+    state: &AppState,
+    handle: Option<&crate::sidecar_handle::SidecarHandle>,
+    recording_id: &str,
+) -> Result<(), String> {
+    let vault_initialized = state
+        .settings_manager
+        .lock()
+        .await
+        .settings()
+        .privacy
+        .vault_initialized;
+    if !vault_initialized {
+        return Ok(());
+    }
+    let key = {
+        let vault_state = state.vault_state.lock().await;
+        if !vault_state.unlocked {
+            return Err(
+                "Vault locked before the finalized recording bundle could be encrypted".to_string(),
+            );
+        }
+        vault_state.recording_key.ok_or_else(|| {
+            "Vault key became unavailable before recording encryption was journaled".to_string()
+        })?
+    };
+    let operation = state
+        .db
+        .lock()
+        .await
+        .begin_recording_audio_encryption(recording_id)
+        .map_err(|error| error.to_string())?;
+    // No operation means there was nothing plaintext left to encrypt.
+    let Some(operation) = operation else {
+        return Ok(());
+    };
+    if let Err(error) = encrypt_recording_audio_operation(state, operation, &key, handle).await {
+        let mut db = state.db.lock().await;
+        let _ = db.update_recording_status(recording_id, "error");
+        let _ = db.log_audit_event(
+            "recording_audio_encryption_pending",
+            Some(serde_json::json!({
+                "recording_id": recording_id,
+                "error": &error,
+            })),
+            "warning",
+        );
+        drop(db);
+        return Err(error);
+    }
+    Ok(())
+}
+
 /// Encrypt a recording's audio bundle into the vault.
 ///
 /// Runs the file work on the blocking pool and takes the database lock only for
@@ -10170,6 +10890,7 @@ mod tests {
             meeting_notes: meeting_notes.map(str::to_string),
             meeting_template_id: None,
             meeting_capture_mode: Some("me_and_them".to_string()),
+            imported_source_name: None,
             notes_updated_at: None,
             consent_prompt_shown: false,
             consent_notice_mode: None,
@@ -11921,7 +12642,7 @@ mod tests {
         // delivery attempt, not after it returns.
         let body = owned_stop_dictation_body();
         let persistence = body
-            .find("create_recording_with_transcript")
+            .find("create_dictation_history_entry")
             .expect("dictation stop must persist the result transactionally");
         let delivery = body
             .find("paste_text_systemwide")
@@ -13045,6 +13766,161 @@ mod tests {
     }
 
     #[test]
+    fn reprocess_audio_decision_names_the_setting_that_would_have_kept_it() {
+        // Audio present: allowed regardless of the toggle's current value.
+        assert!(dictation_reprocess_audio_decision("/kept/a.wav", true, false, "never").is_ok());
+        assert!(dictation_reprocess_audio_decision("/kept/a.wav", true, true, "24h").is_ok());
+
+        // Never kept, toggle off: point at the toggle.
+        let off = dictation_reprocess_audio_decision("", false, false, "never").unwrap_err();
+        assert!(
+            off.contains("Keep dictation audio for Process again"),
+            "{off}"
+        );
+
+        // Never kept, toggle on now: say it predates the toggle.
+        let predates = dictation_reprocess_audio_decision("", false, true, "never").unwrap_err();
+        assert!(predates.contains("before"), "{predates}");
+
+        // Kept, then removed by auto-delete: name the retention preset.
+        let swept =
+            dictation_reprocess_audio_decision("/kept/a.wav", false, true, "24h").unwrap_err();
+        assert!(
+            swept.contains("auto-delete") && swept.contains("24h"),
+            "{swept}"
+        );
+
+        // Kept, gone for some other reason: no false claim about retention.
+        let gone =
+            dictation_reprocess_audio_decision("/kept/a.wav", false, true, "never").unwrap_err();
+        assert!(!gone.contains("auto-delete"), "{gone}");
+    }
+
+    #[test]
+    fn reprocess_mode_resolves_presets_custom_modes_and_falls_back_to_the_active_mode() {
+        let mut settings = settings::Settings::default();
+        settings.transcription.dictation_mode_preset = "notes".to_string();
+        settings.transcription.dictation_custom_modes = vec![settings::DictationCustomMode {
+            id: "mode-email".to_string(),
+            name: "Investor email".to_string(),
+            description: String::new(),
+            base_mode_preset: Some("email".to_string()),
+            custom_prompt: Some("Write it for an investor.".to_string()),
+            profile: "normal_speed".to_string(),
+            route_preference: None,
+            language_override: None,
+            live_preview_enabled: None,
+            insertion_mode: "auto".to_string(),
+            context_source: "none".to_string(),
+            save_to_inbox: true,
+            copy_to_clipboard: false,
+            command_mode_enabled: true,
+            dictation_provider: None,
+            dictation_model_id: None,
+            ai_provider: None,
+            ai_model_id: None,
+            activation_app_matcher: None,
+            activation_domain_matcher: None,
+            translate_to_english: false,
+        }];
+
+        let (preset, custom) = resolve_reprocess_mode(&settings, Some("messages"));
+        assert_eq!(preset, "messages");
+        assert!(custom.is_none());
+
+        let (preset, custom) = resolve_reprocess_mode(&settings, Some("mode-email"));
+        assert_eq!(preset, "email");
+        assert_eq!(custom.map(|mode| mode.id.as_str()), Some("mode-email"));
+
+        // Unknown id and no id both land on the active mode.
+        let (preset, custom) = resolve_reprocess_mode(&settings, Some("mode-missing"));
+        assert_eq!(preset, "notes");
+        assert!(custom.is_none());
+        let (preset, _) = resolve_reprocess_mode(&settings, None);
+        assert_eq!(preset, "notes");
+    }
+
+    #[test]
+    fn history_details_enrichment_reports_lineage_audio_and_a_real_raw_transcript() {
+        let now = chrono::Utc::now();
+        let source_created_at = now - chrono::Duration::minutes(30);
+        let source = models::Recording {
+            id: "source".to_string(),
+            title: "Dictation".to_string(),
+            project_id: "inbox".to_string(),
+            duration: 3,
+            created_at: source_created_at,
+            updated_at: source_created_at,
+            source_type: "dictation".to_string(),
+            audio_path: String::new(),
+            status: "completed".to_string(),
+            summary: None,
+            action_items: None,
+            summary_provenance: None,
+            action_items_provenance: None,
+            meeting_notes: None,
+            meeting_template_id: None,
+            meeting_capture_mode: None,
+            imported_source_name: None,
+            notes_updated_at: None,
+            consent_prompt_shown: false,
+            consent_notice_mode: None,
+            consent_notice_surface: None,
+            consent_notice_message: None,
+            consent_notice_updated_at: None,
+            analysis_failure: None,
+            pause_spans: Vec::new(),
+            video_service: None,
+        };
+        let entry = models::Recording {
+            id: "entry".to_string(),
+            audio_path: "/definitely/not/here.wav".to_string(),
+            ..source.clone()
+        };
+        let text = crate::store::DictationHistoryTextRecord {
+            recording_id: "entry".to_string(),
+            final_text: "Water the plants.".to_string(),
+            raw_text: "water the plants".to_string(),
+            reprocessed_from_id: Some("source".to_string()),
+            mode_preset: Some("voice".to_string()),
+            created_at: now,
+        };
+
+        let details = enrich_dictation_history_details(
+            models::DictationHistoryDetails::default(),
+            Some(&text),
+            Some(&entry),
+            Some(&source),
+        );
+        assert_eq!(details.raw_transcript.as_deref(), Some("water the plants"));
+        assert_eq!(details.audio_available, Some(false));
+        assert_eq!(details.reprocessed_from_id.as_deref(), Some("source"));
+        assert_eq!(details.reprocessed_from_created_at, Some(source_created_at));
+        assert_eq!(details.mode_preset.as_deref(), Some("voice"));
+        assert!(!dictation_history_details_is_empty(&details));
+
+        // A backfilled legacy row carries the delivered text on both sides;
+        // that is not a raw transcript and must not be shown as one.
+        let legacy = crate::store::DictationHistoryTextRecord {
+            raw_text: text.final_text.clone(),
+            reprocessed_from_id: None,
+            ..text.clone()
+        };
+        let details = enrich_dictation_history_details(
+            models::DictationHistoryDetails::default(),
+            Some(&legacy),
+            Some(&source),
+            None,
+        );
+        assert_eq!(details.raw_transcript, None);
+        assert_eq!(
+            details.audio_available, None,
+            "no audio path means no claim"
+        );
+        assert_eq!(details.reprocessed_from_id, None);
+    }
+
+    #[test]
     fn dictation_history_details_empty_check_detects_missing_data() {
         assert!(dictation_history_details_is_empty(
             &models::DictationHistoryDetails::default()
@@ -13590,6 +14466,129 @@ mod tests {
     }
 
     #[test]
+    fn whisper_multilingual_model_in_the_meeting_slot_stays_on_whisper() {
+        // A dedicated meeting slot naming large-v3-turbo is an explicit
+        // choice: the resolver keeps it instead of falling through to Parakeet.
+        let mut transcription = settings::TranscriptionSettings {
+            use_shared_asr_selection: false,
+            default_provider: "parakeet".to_string(),
+            selected_model_id: "parakeet-tdt-0.6b-v3".to_string(),
+            dictation_provider: "parakeet".to_string(),
+            dictation_model_id: "parakeet-tdt-0.6b-v3".to_string(),
+            meeting_provider: "whisper".to_string(),
+            meeting_model_id: "large-v3-turbo".to_string(),
+            ..Default::default()
+        };
+
+        normalize_contextual_asr_settings(&mut transcription);
+
+        assert_eq!(transcription.meeting_provider, "whisper");
+        assert_eq!(transcription.meeting_model_id, "large-v3-turbo");
+
+        let (meeting_provider, meeting_model_id) =
+            resolve_transcription_provider_and_model(&transcription, TranscriptionScope::Meeting);
+        assert_eq!(meeting_provider, asr::AsrProviderType::Whisper);
+        assert_eq!(meeting_model_id, "large-v3-turbo");
+        assert!(ensure_meeting_route_supported(meeting_provider, &meeting_model_id).is_ok());
+    }
+
+    #[test]
+    fn whisper_multilingual_model_keeps_shared_selection_for_both_lanes() {
+        let mut transcription = settings::TranscriptionSettings {
+            use_shared_asr_selection: true,
+            default_provider: "whisper".to_string(),
+            selected_model_id: "medium".to_string(),
+            dictation_provider: "whisper".to_string(),
+            dictation_model_id: "medium".to_string(),
+            meeting_provider: "whisper".to_string(),
+            meeting_model_id: "medium".to_string(),
+            ..Default::default()
+        };
+
+        normalize_contextual_asr_settings(&mut transcription);
+
+        assert!(transcription.use_shared_asr_selection);
+        assert_eq!(transcription.meeting_provider, "whisper");
+        assert_eq!(transcription.meeting_model_id, "medium");
+    }
+
+    #[test]
+    fn whisper_english_model_in_the_meeting_slot_falls_through_to_parakeet() {
+        // The meeting slot can be left on base.en by an old settings file.
+        // That is dictation-only, so meetings resolve to Parakeet -- never to
+        // a whisper model the user did not pick.
+        let mut transcription = settings::TranscriptionSettings {
+            use_shared_asr_selection: false,
+            default_provider: "whisper".to_string(),
+            selected_model_id: "base.en".to_string(),
+            dictation_provider: "whisper".to_string(),
+            dictation_model_id: "base.en".to_string(),
+            meeting_provider: "whisper".to_string(),
+            meeting_model_id: "base.en".to_string(),
+            ..Default::default()
+        };
+
+        normalize_contextual_asr_settings(&mut transcription);
+
+        assert_eq!(transcription.meeting_provider, "parakeet");
+        assert_eq!(transcription.meeting_model_id, "parakeet-tdt-0.6b-v3");
+    }
+
+    #[test]
+    fn whisper_is_never_an_automatic_meeting_candidate() {
+        // Inherited from the default or dictation slot, whisper must not
+        // enter the candidate list at all; Parakeet stays first.
+        let candidates = preferred_meeting_provider_candidates(
+            MeetingRoutePolicy::PreferLocal,
+            asr::AsrProviderType::Whisper,
+            asr::AsrProviderType::Whisper,
+            None,
+            Some("large-v3-turbo"),
+        );
+        assert!(!candidates.contains(&asr::AsrProviderType::Whisper));
+        assert_eq!(candidates.first(), Some(&asr::AsrProviderType::Parakeet));
+
+        // Named in the meeting slot with a meeting-grade model: first.
+        let explicit = preferred_meeting_provider_candidates(
+            MeetingRoutePolicy::PreferLocal,
+            asr::AsrProviderType::Parakeet,
+            asr::AsrProviderType::Parakeet,
+            Some(asr::AsrProviderType::Whisper),
+            Some("large-v3-turbo"),
+        );
+        assert_eq!(explicit.first(), Some(&asr::AsrProviderType::Whisper));
+
+        // Named in the meeting slot with an English-only model: skipped.
+        let english = preferred_meeting_provider_candidates(
+            MeetingRoutePolicy::PreferLocal,
+            asr::AsrProviderType::Parakeet,
+            asr::AsrProviderType::Parakeet,
+            Some(asr::AsrProviderType::Whisper),
+            Some("base.en"),
+        );
+        assert!(!english.contains(&asr::AsrProviderType::Whisper));
+    }
+
+    #[test]
+    fn whisper_meeting_lane_accepts_languages_parakeet_cannot() {
+        let whisper = settings::dictation_supported_languages("whisper", "large-v3-turbo")
+            .expect("multilingual whisper enumerates its languages");
+        let parakeet = settings::dictation_supported_languages("parakeet", "parakeet-tdt-0.6b-v3")
+            .expect("Parakeet v3 enumerates its languages");
+        for code in ["zh", "ja", "ko", "hi", "ar"] {
+            assert!(whisper.contains(&code), "whisper must list {code}");
+            assert!(
+                !parakeet.contains(&code),
+                "Parakeet v3 does not list {code}"
+            );
+        }
+        assert_eq!(
+            settings::dictation_supported_languages("whisper", "medium.en"),
+            Some(&["en"][..])
+        );
+    }
+
+    #[test]
     fn moonshine_is_dictation_only_for_meetings() {
         let mut transcription = settings::TranscriptionSettings {
             use_shared_asr_selection: true,
@@ -13612,9 +14611,43 @@ mod tests {
 
     #[test]
     fn meeting_route_support_matrix_matches_expected_provider_families() {
+        // whisper.cpp: multilingual `small` and up only. Never tiny/base,
+        // never a `.en` build.
         assert!(!meeting_route_is_shared_compatible(
             asr::AsrProviderType::Whisper,
             "base.en"
+        ));
+        assert!(!meeting_route_is_shared_compatible(
+            asr::AsrProviderType::Whisper,
+            "tiny"
+        ));
+        assert!(!meeting_route_is_shared_compatible(
+            asr::AsrProviderType::Whisper,
+            "base"
+        ));
+        assert!(!meeting_route_is_shared_compatible(
+            asr::AsrProviderType::Whisper,
+            "small.en"
+        ));
+        assert!(!meeting_route_is_shared_compatible(
+            asr::AsrProviderType::Whisper,
+            "medium.en"
+        ));
+        assert!(meeting_route_is_shared_compatible(
+            asr::AsrProviderType::Whisper,
+            "small"
+        ));
+        assert!(meeting_route_is_shared_compatible(
+            asr::AsrProviderType::Whisper,
+            "medium"
+        ));
+        assert!(meeting_route_is_shared_compatible(
+            asr::AsrProviderType::Whisper,
+            "large-v3"
+        ));
+        assert!(meeting_route_is_shared_compatible(
+            asr::AsrProviderType::Whisper,
+            "large-v3-turbo"
         ));
         assert!(!meeting_route_is_shared_compatible(
             asr::AsrProviderType::Moonshine,
@@ -14066,6 +15099,7 @@ mod tests {
             asr::AsrProviderType::OpenAiCloud,
             asr::AsrProviderType::CohereTranscribe,
             Some(asr::AsrProviderType::ElevenLabsScribe),
+            None,
         );
         assert!(candidates.iter().all(|provider| !provider.is_remote()));
 
@@ -14102,6 +15136,7 @@ mod tests {
             asr::AsrProviderType::Whisper,
             asr::AsrProviderType::Moonshine,
             Some(asr::AsrProviderType::CohereTranscribe),
+            None,
         );
         assert_eq!(
             explicit.first(),
@@ -14112,6 +15147,7 @@ mod tests {
             MeetingRoutePolicy::BestAvailable,
             asr::AsrProviderType::Whisper,
             asr::AsrProviderType::Moonshine,
+            None,
             None,
         );
         assert!(inferred.iter().all(|provider| !provider.is_remote()));
@@ -16976,6 +18012,20 @@ fn provider_is_dictation_only(provider: asr::AsrProviderType) -> bool {
     !meeting_provider_is_supported(provider)
 }
 
+/// Whether a stored meeting route can only ever serve dictation.
+///
+/// Provider-level for every engine but whisper.cpp, whose meeting support is
+/// per model: `base.en` in the meeting slot is dictation-only, `large-v3-turbo`
+/// is not. Deciding this at the route level is what lets the resolver keep
+/// falling through to Parakeet for the small English models without also
+/// throwing away an explicit multilingual selection.
+fn meeting_route_is_dictation_only(provider: asr::AsrProviderType, model_id: &str) -> bool {
+    match provider {
+        asr::AsrProviderType::Whisper => !meeting_model_is_supported(provider, model_id),
+        _ => provider_is_dictation_only(provider),
+    }
+}
+
 fn provider_supports_generic_live_preview(provider: asr::AsrProviderType) -> bool {
     !provider.is_remote() && provider != asr::AsrProviderType::MacosAppleSpeech
 }
@@ -16994,8 +18044,25 @@ fn meeting_provider_is_supported(provider: asr::AsrProviderType) -> bool {
             | asr::AsrProviderType::Groq
             | asr::AsrProviderType::CohereTranscribe
             | asr::AsrProviderType::Qwen3Asr
+            // whisper.cpp is meeting-capable per model, not per provider:
+            // see `WHISPER_MEETING_MODEL_IDS`. It never enters the meeting
+            // lane on its own (`preferred_meeting_provider_candidates`), only
+            // when the meeting slot names one of those models outright.
+            | asr::AsrProviderType::Whisper
     )
 }
+
+/// The whisper.cpp ggml models allowed in the meeting lane.
+///
+/// Multilingual weights from `small` up: they carry the ~100-language
+/// coverage Parakeet v3 (25 European languages) and Distil-Whisper (English)
+/// lack, and whisper.cpp returns per-segment timestamps for them, which is
+/// what `transcribe_recording_in_chunks` offsets and merges. `tiny` and
+/// `base` are left out on accuracy: this repo's own benchmark shows base.en
+/// mis-transcribing unfamiliar words, and the multilingual weights of the same
+/// size are worse still. Every `.en` build is left out because the meeting
+/// lane exists here for the languages English-only models cannot hear.
+const WHISPER_MEETING_MODEL_IDS: &[&str] = &["small", "medium", "large-v3", "large-v3-turbo"];
 
 fn meeting_model_is_supported(provider: asr::AsrProviderType, model_id: &str) -> bool {
     if !meeting_provider_is_supported(provider) {
@@ -17003,6 +18070,9 @@ fn meeting_model_is_supported(provider: asr::AsrProviderType, model_id: &str) ->
     }
 
     let candidate = normalize_asr_model_id(provider, model_id);
+    if provider == asr::AsrProviderType::Whisper {
+        return WHISPER_MEETING_MODEL_IDS.contains(&candidate.as_str());
+    }
     provider
         .model_options()
         .iter()
@@ -17010,7 +18080,12 @@ fn meeting_model_is_supported(provider: asr::AsrProviderType, model_id: &str) ->
 }
 
 fn default_meeting_model_id(provider: asr::AsrProviderType) -> &'static str {
-    provider.default_model_id()
+    match provider {
+        // The provider default (`base.en`) is dictation-only; the meeting slot
+        // needs a model that is actually allowed there.
+        asr::AsrProviderType::Whisper => "large-v3-turbo",
+        _ => provider.default_model_id(),
+    }
 }
 
 fn normalize_meeting_model_id(provider: asr::AsrProviderType, model_id: &str) -> String {
@@ -17035,7 +18110,7 @@ fn ensure_meeting_route_supported(
     }
 
     Err(format!(
-        "Meetings require a meeting-grade ASR route. '{}' with model '{}' is dictation-only or unsupported for meetings. Choose Distil Whisper, Parakeet, Qwen3-ASR, ElevenLabs, OpenAI, Groq, or Cohere in Settings -> ASR / Providers.",
+        "Meetings require a meeting-grade ASR route. '{}' with model '{}' is dictation-only or unsupported for meetings. Choose Parakeet, whisper.cpp small/medium/large-v3/large-v3-turbo, Distil Whisper, Qwen3-ASR, ElevenLabs, OpenAI, Groq, or Cohere in Settings -> ASR / Providers.",
         provider.display_name(),
         model_id
     ))
@@ -17046,6 +18121,7 @@ fn preferred_meeting_provider_candidates(
     default_provider: asr::AsrProviderType,
     dictation_provider: asr::AsrProviderType,
     meeting_provider: Option<asr::AsrProviderType>,
+    meeting_model_id: Option<&str>,
 ) -> Vec<asr::AsrProviderType> {
     let mut candidates = Vec::new();
     let explicit_candidates = [
@@ -17071,10 +18147,20 @@ fn preferred_meeting_provider_candidates(
                 !provider.is_remote() || meeting_provider == Some(provider)
             }
         };
-        if hosting_allowed
-            && meeting_provider_is_supported(provider)
-            && !candidates.contains(&provider)
-        {
+        // whisper.cpp is a meeting candidate only when the meeting slot itself
+        // names a meeting-grade ggml model. Inheriting it from the default or
+        // dictation slot would silently move every `base.en` install's
+        // meetings onto a 1.6 GB model nobody downloaded, when Parakeet is
+        // both ranked first and usually already on disk.
+        let supported = if provider == asr::AsrProviderType::Whisper {
+            meeting_provider == Some(provider)
+                && meeting_model_id.is_some_and(|model_id| {
+                    meeting_model_is_supported(asr::AsrProviderType::Whisper, model_id)
+                })
+        } else {
+            meeting_provider_is_supported(provider)
+        };
+        if hosting_allowed && supported && !candidates.contains(&provider) {
             candidates.push(provider);
         }
     }
@@ -17086,12 +18172,14 @@ fn preferred_meeting_provider(
     default_provider: asr::AsrProviderType,
     dictation_provider: asr::AsrProviderType,
     meeting_provider: Option<asr::AsrProviderType>,
+    meeting_model_id: Option<&str>,
 ) -> asr::AsrProviderType {
     if let Some(provider) = preferred_meeting_provider_candidates(
         policy,
         default_provider,
         dictation_provider,
         meeting_provider,
+        meeting_model_id,
     )
     .into_iter()
     .next()
@@ -17261,6 +18349,7 @@ fn normalize_contextual_asr_settings(transcription: &mut settings::Transcription
         default_provider,
         dictation_provider,
         requested_meeting_provider.or(Some(default_provider)),
+        Some(transcription.meeting_model_id.as_str()),
     );
     transcription.meeting_provider = asr_provider_to_settings_value(meeting_provider).to_string();
     transcription.meeting_model_id = normalize_meeting_model_id(
@@ -17322,19 +18411,21 @@ fn resolve_transcription_provider_and_model(
 
     let provider =
         asr_provider_from_settings_value(provider_value).unwrap_or(asr::AsrProviderType::Whisper);
-    let provider =
-        if matches!(scope, TranscriptionScope::Meeting) && provider_is_dictation_only(provider) {
-            preferred_meeting_provider(
-                meeting_policy,
-                asr_provider_from_settings_value(&transcription.default_provider)
-                    .unwrap_or(asr::AsrProviderType::Whisper),
-                asr_provider_from_settings_value(&transcription.dictation_provider)
-                    .unwrap_or(asr::AsrProviderType::Whisper),
-                asr_provider_from_settings_value(&transcription.meeting_provider),
-            )
-        } else {
-            provider
-        };
+    let provider = if matches!(scope, TranscriptionScope::Meeting)
+        && meeting_route_is_dictation_only(provider, model_value)
+    {
+        preferred_meeting_provider(
+            meeting_policy,
+            asr_provider_from_settings_value(&transcription.default_provider)
+                .unwrap_or(asr::AsrProviderType::Whisper),
+            asr_provider_from_settings_value(&transcription.dictation_provider)
+                .unwrap_or(asr::AsrProviderType::Whisper),
+            asr_provider_from_settings_value(&transcription.meeting_provider),
+            Some(transcription.meeting_model_id.as_str()),
+        )
+    } else {
+        provider
+    };
     let model_id = if matches!(scope, TranscriptionScope::Meeting) {
         normalize_meeting_model_id(provider, model_value)
     } else {
@@ -24145,6 +25236,38 @@ async fn stop_dictation_for_sidecar(
         ),
         created_at: now,
     };
+    // Opt-in: keep the captured WAV so this entry can be processed again.
+    // Written before the row so a failed write never leaves a row that claims
+    // audio it does not have; a failed row write removes the file again below.
+    let kept_audio_path = if settings_snapshot.transcription.dictation_keep_audio {
+        match write_kept_dictation_audio(&recording_id, &audio_bytes) {
+            Ok(path) => Some(path),
+            Err(error) => {
+                tracing::warn!("Dictation audio was not kept: {}", error);
+                warnings.push(format!(
+                    "The dictation audio could not be kept for Process again: {error}"
+                ));
+                None
+            }
+        }
+    } else {
+        None
+    };
+    let kept_audio_metadata = kept_audio_path
+        .as_deref()
+        .map(recording_audio::validate_plaintext_wav)
+        .and_then(|validation| match validation {
+            recording_audio::RecordingAudioValidation::Ready(metadata) => Some(metadata),
+            _ => None,
+        });
+    let history_text = crate::store::DictationHistoryTextRecord {
+        recording_id: recording_id.clone(),
+        final_text: stored_text.clone(),
+        raw_text: raw_transcribed_text.clone(),
+        reprocessed_from_id: None,
+        mode_preset: Some(effective_mode.clone()),
+        created_at: now,
+    };
     let recording = models::Recording {
         id: recording_id.clone(),
         title: format!(
@@ -24159,7 +25282,11 @@ async fn stop_dictation_for_sidecar(
         created_at: now,
         updated_at: now,
         source_type: "dictation".to_string(),
-        audio_path: String::new(),
+        audio_path: kept_audio_metadata
+            .as_ref()
+            .and(kept_audio_path.as_ref())
+            .map(|path| path.to_string_lossy().to_string())
+            .unwrap_or_default(),
         status: "completed".to_string(),
         summary: None,
         action_items: None,
@@ -24168,6 +25295,7 @@ async fn stop_dictation_for_sidecar(
         meeting_notes: None,
         meeting_template_id: None,
         meeting_capture_mode: None,
+        imported_source_name: None,
         notes_updated_at: None,
         consent_prompt_shown: false,
         consent_notice_mode: None,
@@ -24184,8 +25312,16 @@ async fn stop_dictation_for_sidecar(
     // failure or app termination during insertion cannot erase the words.
     {
         let mut db = state.db.lock().await;
-        if let Err(error) = db.create_recording_with_transcript(&recording, &transcript) {
+        if let Err(error) = db.create_dictation_history_entry(
+            &recording,
+            &transcript,
+            &history_text,
+            kept_audio_metadata.as_ref(),
+        ) {
             drop(db);
+            if let Some(path) = kept_audio_path.as_deref() {
+                let _ = std::fs::remove_file(path);
+            }
             record_recent_dictation_result(
                 state,
                 &final_text,
@@ -24207,6 +25343,26 @@ async fn stop_dictation_for_sidecar(
                 ),
             )
             .await);
+        }
+    }
+
+    // Kept dictation audio is an owned asset in the recordings store exactly
+    // like a meeting's track, and it went in as `protection 'plaintext'`. With
+    // the vault on it has to be encrypted here, or the words the reader chose
+    // to keep sit in the clear under a vault the UI says covers them.
+    //
+    // A failure is a warning, not a refusal: the transcript is already
+    // committed and the text still has to be delivered. The asset stays
+    // plaintext and `get_security_status` keeps reporting it as such, which is
+    // the truth, and the reader is told rather than left to find out.
+    if kept_audio_metadata.is_some() {
+        if let Err(error) =
+            encrypt_finalized_recording_audio(state, Some(handle), &recording_id).await
+        {
+            tracing::warn!("Kept dictation audio was not encrypted: {}", error);
+            warnings.push(format!(
+                "The kept dictation audio is not in the vault yet: {error}"
+            ));
         }
     }
 
@@ -25790,6 +26946,8 @@ async fn start_recording_for_sidecar(
                 "mic_only".to_string()
             }
         })),
+        // Recorded here, never imported.
+        imported_source_name: None,
         notes_updated_at: options
             .meeting_notes
             .as_ref()
@@ -26881,55 +28039,12 @@ async fn stop_recording_for_sidecar_inner(
         }
     }
 
-    let vault_initialized = state
-        .settings_manager
-        .lock()
-        .await
-        .settings()
-        .privacy
-        .vault_initialized;
-    if vault_initialized {
-        let key = {
-            let vault_state = state.vault_state.lock().await;
-            if !vault_state.unlocked {
-                return Err(
-                    "Vault locked before the finalized recording bundle could be encrypted"
-                        .to_string(),
-                );
-            }
-            vault_state.recording_key.ok_or_else(|| {
-                "Vault key became unavailable before recording encryption was journaled".to_string()
-            })?
-        };
-        let operation = state
-            .db
-            .lock()
-            .await
-            .begin_recording_audio_encryption(&recording_id)
-            .map_err(|error| error.to_string())?;
-        if let Some(operation) = operation {
-            if let Err(error) =
-                encrypt_recording_audio_operation(state.as_ref(), operation, &key, Some(handle))
-                    .await
-            {
-                let message = format!(
-                    "Recording was finalized, but vault encryption must be retried before transcription: {}",
-                    error
-                );
-                let mut db = state.db.lock().await;
-                let _ = db.update_recording_status(&recording_id, "error");
-                let _ = db.log_audit_event(
-                    "recording_audio_encryption_pending",
-                    Some(serde_json::json!({
-                        "recording_id": &recording_id,
-                        "error": &error,
-                    })),
-                    "warning",
-                );
-                drop(db);
-                return Err(message);
-            }
-        }
+    if let Err(error) =
+        encrypt_finalized_recording_audio(state.as_ref(), Some(handle), &recording_id).await
+    {
+        return Err(format!(
+            "Recording was finalized, but vault encryption must be retried before transcription: {error}"
+        ));
     }
 
     emit_meeting_lifecycle_phase(
@@ -26973,6 +28088,684 @@ async fn stop_recording_for_sidecar_inner(
     });
 
     Ok(())
+}
+
+/// Everything an "Import audio…" produces before the database sees it: the
+/// planned recording id and audio path, the title taken from the file, and the
+/// converted WAV's validated metadata.
+#[derive(Debug)]
+struct PreparedAudioImport {
+    plan: recording_audio::RecordingCapturePlan,
+    title: String,
+    source_file_name: String,
+    validated: recording_audio::ValidatedRecordingAudio,
+}
+
+/// Said when the import path is reached on a platform that has no `afconvert`.
+const IMPORT_UNSUPPORTED_PLATFORM: &str =
+    "Importing an audio file is not supported on this platform yet. It uses macOS' own audio decoder.";
+
+/// Ask macOS how long a file is without decoding it.
+///
+/// Plain `afinfo`, not `afinfo --brief`: the brief report has no
+/// `estimated duration:` line at all, so the previous invocation always parsed
+/// to `None`, the caller treated that as "unknown, carry on", and the four-hour
+/// guard never ran -- a nine-hour file was decoded in full before anything
+/// refused it. Both report shapes are parsed anyway, so a future macOS that
+/// changes which one carries the number still gets a length.
+///
+/// A length nobody can state is a refusal, not a pass. Refusing costs an
+/// unreadable file an error it was going to get from `afconvert` a moment
+/// later; passing costs an unbounded decode.
+fn probe_audio_duration_seconds(path: &Path) -> Result<f64, String> {
+    if !cfg!(target_os = "macos") {
+        return Err(IMPORT_UNSUPPORTED_PLATFORM.to_string());
+    }
+    let output = std::process::Command::new("/usr/bin/afinfo")
+        .arg(path)
+        .output()
+        .map_err(|error| format!("Plainsong could not run the macOS audio inspector: {error}"))?;
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    audio_import::parse_afinfo_duration_seconds(&stdout)
+        .or_else(|| audio_import::parse_afinfo_duration_seconds(&stderr))
+        .ok_or_else(|| audio_import::unreadable_duration_message(&stderr))
+}
+
+/// How often the conversion is checked for having finished. Short enough that
+/// a two-second file still returns promptly, long enough that an eight-hour
+/// budget is not a spin loop.
+const AFCONVERT_POLL_INTERVAL: std::time::Duration = std::time::Duration::from_millis(50);
+
+/// Run macOS' `afconvert` to decode `source` into `destination`, giving up
+/// after `timeout`.
+///
+/// The timeout is the point of this function. `afconvert` is spawned rather
+/// than run to completion with `Command::output()` because the caller holds
+/// the audio storage gate and the PostProcess lease for the whole call: a
+/// source on a network volume that stops answering used to block here forever,
+/// and retention, vault migration, backup and every other meeting's
+/// post-processing waited behind it until the sidecar was restarted. The IPC
+/// budget cancelling the caller did not help -- nothing killed the child.
+fn run_afconvert(
+    source: &Path,
+    destination: &Path,
+    timeout: std::time::Duration,
+) -> Result<(), String> {
+    if !cfg!(target_os = "macos") {
+        return Err(IMPORT_UNSUPPORTED_PLATFORM.to_string());
+    }
+    let mut child = std::process::Command::new("/usr/bin/afconvert")
+        .args(audio_import::afconvert_args(source, destination))
+        // stdout is discarded rather than piped: nothing reads it until the
+        // child exits, and an unread pipe that fills would hang the very wait
+        // this function exists to bound. afconvert says nothing there anyway --
+        // verified that its refusals ("Error: Couldn't open input file") go to
+        // stderr, which stays piped because that sentence is what the reader
+        // needs.
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .map_err(|error| format!("Plainsong could not run the macOS audio converter: {error}"))?;
+
+    let deadline = std::time::Instant::now() + timeout;
+    let status = loop {
+        match child.try_wait() {
+            Ok(Some(status)) => break status,
+            Ok(None) => {}
+            Err(error) => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return Err(format!(
+                    "Plainsong lost track of the macOS audio converter: {error}"
+                ));
+            }
+        }
+        if std::time::Instant::now() >= deadline {
+            // Kill first, then reap, so the caller's locks are released with no
+            // orphan still writing into the recordings folder behind them.
+            let _ = child.kill();
+            let _ = child.wait();
+            return Err(audio_import::conversion_timeout_message(timeout));
+        }
+        std::thread::sleep(AFCONVERT_POLL_INTERVAL);
+    };
+
+    let stderr = child
+        .stderr
+        .take()
+        .map(|mut pipe| {
+            use std::io::Read;
+            let mut buffer = String::new();
+            let _ = pipe.read_to_string(&mut buffer);
+            buffer
+        })
+        .unwrap_or_default();
+    if status.success() {
+        return Ok(());
+    }
+    // afconvert reports a codec it cannot read on stderr; the reader needs
+    // that sentence, not just an exit code.
+    let detail = stderr
+        .lines()
+        .map(str::trim)
+        .find(|line| !line.is_empty())
+        .unwrap_or("the converter gave no reason")
+        .to_string();
+    Err(format!("macOS could not decode that audio file: {detail}"))
+}
+
+/// Validate a chosen audio file and decode it into the recordings store.
+///
+/// Deliberately free of `AppState` and of the database so the whole
+/// file-to-recording step can be tested against a generated WAV in a temp
+/// directory without a recognizer, a model, or a running sidecar.
+fn prepare_audio_import(
+    source_path: &Path,
+    recordings_dir: &Path,
+) -> Result<PreparedAudioImport, String> {
+    audio_import::validate_import_extension(source_path)?;
+    let metadata = std::fs::symlink_metadata(source_path).map_err(|error| {
+        format!(
+            "Plainsong could not read '{}': {}",
+            source_path.display(),
+            error
+        )
+    })?;
+    if !metadata.file_type().is_file() {
+        return Err("Choose an audio file, not a folder or a link.".to_string());
+    }
+    audio_import::validate_import_size(metadata.len())?;
+    // Before anything is decoded: a length macOS will not state is a refusal,
+    // and the length it does state is what the 4-hour guard, the conversion
+    // timeout and the free-space estimate are all derived from.
+    let probed_seconds = probe_audio_duration_seconds(source_path)?;
+    audio_import::validate_import_duration(probed_seconds)?;
+
+    std::fs::create_dir_all(recordings_dir).map_err(|error| {
+        format!(
+            "Failed to prepare the recordings folder '{}': {}",
+            recordings_dir.display(),
+            error
+        )
+    })?;
+    // Refuse a conversion the volume cannot hold rather than filling the disk
+    // and failing halfway, which would also take down any meeting recording
+    // into the same folder.
+    if let Some(needed) = audio_import::import_space_shortfall(
+        probed_seconds,
+        crate::download::available_space_for_path(recordings_dir).ok(),
+    ) {
+        return Err(audio_import::insufficient_space_message(needed));
+    }
+    // One mic-shaped track: an imported file is a single source, so the plan
+    // has a primary path and no per-source companions.
+    let plan = recording_audio::RecordingCapturePlan::new(recordings_dir, true, false)
+        .map_err(|error| error.to_string())?;
+    // Armed until the converted WAV has been read back successfully, so a
+    // refused, timed-out or corrupt import leaves nothing behind in the store.
+    let converted = recording_audio::DurableTempFile::new(plan.primary_path.clone());
+    run_afconvert(
+        source_path,
+        &plan.primary_path,
+        audio_import::import_conversion_timeout(probed_seconds),
+    )?;
+    let validated = match recording_audio::validate_plaintext_wav(&plan.primary_path) {
+        recording_audio::RecordingAudioValidation::Ready(metadata) => metadata,
+        recording_audio::RecordingAudioValidation::Missing(reason)
+        | recording_audio::RecordingAudioValidation::Failed(reason) => {
+            return Err(format!(
+                "Plainsong could not read the converted audio: {reason}"
+            ));
+        }
+    };
+    // The authoritative duration check: afinfo above is an estimate, this is
+    // the file the pipeline will actually transcribe.
+    audio_import::validate_import_duration(validated.duration_seconds as f64)?;
+    let _ = converted.disarm();
+
+    Ok(PreparedAudioImport {
+        title: audio_import::import_title_from_file_name(source_path),
+        source_file_name: source_path
+            .file_name()
+            .map(|value| value.to_string_lossy().to_string())
+            .unwrap_or_default(),
+        plan,
+        validated,
+    })
+}
+
+/// Turn a prepared import into the meeting row the pipeline will pick up.
+///
+/// `consent_prompt_shown` stays false: nobody was in the room when Plainsong
+/// got this audio, so claiming a consent prompt was shown would be a lie. The
+/// capture mode is `imported`, which is what the Meetings view reads to show
+/// "Imported file" instead of Me + Them.
+fn imported_recording_row(
+    prepared: &PreparedAudioImport,
+    project_id: &str,
+    now: chrono::DateTime<chrono::Utc>,
+) -> models::Recording {
+    models::Recording {
+        id: prepared.plan.recording_id.clone(),
+        title: prepared.title.clone(),
+        project_id: project_id.to_string(),
+        duration: prepared.validated.duration_seconds,
+        created_at: now,
+        updated_at: now,
+        source_type: "meeting".to_string(),
+        audio_path: prepared.plan.primary_path.to_string_lossy().to_string(),
+        status: "processing".to_string(),
+        summary: None,
+        action_items: None,
+        summary_provenance: None,
+        action_items_provenance: None,
+        meeting_notes: None,
+        meeting_template_id: None,
+        meeting_capture_mode: Some(IMPORTED_MEETING_CAPTURE_MODE.to_string()),
+        imported_source_name: Some(prepared.source_file_name.clone())
+            .filter(|value| !value.trim().is_empty()),
+        notes_updated_at: None,
+        consent_prompt_shown: false,
+        consent_notice_mode: None,
+        consent_notice_surface: None,
+        consent_notice_message: None,
+        consent_notice_updated_at: None,
+        analysis_failure: None,
+        pause_spans: Vec::new(),
+        video_service: None,
+    }
+}
+
+/// The capture mode written for a meeting that came from a file rather than a
+/// microphone. Mirrored by `MEETING_CAPTURE_MODE_IMPORTED` in
+/// `src/types/index.ts`.
+const IMPORTED_MEETING_CAPTURE_MODE: &str = "imported";
+
+/// Persist a prepared import: the meeting row, its owned audio asset, and the
+/// audit entry that records where the audio came from.
+fn persist_audio_import(
+    db: &mut db::Database,
+    prepared: &PreparedAudioImport,
+    recording: &models::Recording,
+) -> Result<(), String> {
+    db.create_recording_with_audio_plan(recording, &prepared.plan)
+        .map_err(|error| error.to_string())?;
+    db.finalize_recording_audio(
+        &recording.id,
+        &[(
+            recording_audio::RecordingAudioRole::Primary,
+            prepared.validated.clone(),
+        )],
+        prepared.validated.duration_seconds,
+        "processing",
+        None,
+    )
+    .map_err(|error| error.to_string())?;
+    // The original file's name is recorded; its directory is not, so the audit
+    // log does not become a map of the reader's disk.
+    if let Err(error) = db.log_audit_event(
+        "meeting_audio_imported",
+        Some(serde_json::json!({
+            "recording_id": &recording.id,
+            "source_file_name": &prepared.source_file_name,
+            "duration_seconds": prepared.validated.duration_seconds,
+            "converted_bytes": prepared.validated.plaintext_bytes,
+        })),
+        "info",
+    ) {
+        tracing::warn!("Failed to log audio import audit event: {}", error);
+    }
+    Ok(())
+}
+
+/// `import_audio_file`: decode a file the user picked, save it as a meeting,
+/// and hand it to the same post-capture pipeline a stopped meeting uses.
+///
+/// The original file is only ever read.
+async fn import_audio_file_impl(
+    state: &Arc<AppState>,
+    handle: &crate::sidecar_handle::SidecarHandle,
+    source_path: PathBuf,
+) -> Result<serde_json::Value, String> {
+    // Same lease the stop path and `retranscribe_recording` take, so an import
+    // cannot start on top of a backup, a vault migration, or another meeting's
+    // post-processing.
+    let postprocessing_lease = state
+        .operation_coordinator
+        .try_acquire(operation_coordinator::OperationKind::PostProcess)?;
+
+    let project_id = {
+        let settings = state.settings_manager.lock().await;
+        settings
+            .settings()
+            .transcription
+            .dictation_project_id
+            .clone()
+    };
+    let recordings_dir = nautilus_data_root()?.join("recordings");
+
+    let prepared = {
+        // Decoding writes into the recordings store, so it holds the same gate
+        // a retention sweep and the vault migration take.
+        let _storage_guard = state.audio_storage_gate.lock().await;
+        let source_for_task = source_path.clone();
+        let dir_for_task = recordings_dir.clone();
+        // afconvert on a long file takes minutes; it must not sit on the async
+        // runtime while it runs.
+        tokio::task::spawn_blocking(move || prepare_audio_import(&source_for_task, &dir_for_task))
+            .await
+            .map_err(|error| format!("The audio import task failed: {error}"))??
+    };
+
+    let recording = imported_recording_row(&prepared, &project_id, chrono::Utc::now());
+    {
+        let mut db = state.db.lock().await;
+        if let Err(error) = persist_audio_import(&mut db, &prepared, &recording) {
+            drop(db);
+            let _ = std::fs::remove_file(&prepared.plan.primary_path);
+            return Err(format!(
+                "Plainsong could not save the imported meeting: {error}"
+            ));
+        }
+    }
+
+    let recording_id = recording.id.clone();
+
+    // Same order the stop path uses: the audio is encrypted into the vault
+    // before the pipeline is allowed to read it. An imported file lands in the
+    // recordings folder as the same kind of owned asset a meeting's audio does,
+    // so skipping this left plaintext audio under a vault the UI says is on.
+    if let Err(error) =
+        encrypt_finalized_recording_audio(state.as_ref(), Some(handle), &recording_id).await
+    {
+        let mut db = state.db.lock().await;
+        let _ = db.update_recording_status(&recording_id, "error");
+        drop(db);
+        let message = format!(
+            "The audio was imported, but vault encryption must be retried before it can be transcribed: {error}"
+        );
+        emit_meeting_lifecycle_phase(
+            state.as_ref(),
+            handle,
+            "error",
+            &recording_id,
+            Some(&message),
+        );
+        return Err(message);
+    }
+
+    // The same pair the stop path emits, in the same order. The import
+    // previously emitted only `recording-status-changed`, so the renderer's
+    // meeting state machine never left `idle` for an import: no processing
+    // phase was ever shown, and the pipeline's own terminal `ready` or `error`
+    // phase arrived for a meeting the machine had never heard of.
+    emit_meeting_lifecycle_phase(
+        state.as_ref(),
+        handle,
+        "processing",
+        &recording_id,
+        Some("Processing transcript"),
+    );
+    handle.emit_event(
+        "recording-status-changed",
+        serde_json::json!({
+            "recordingId": &recording_id,
+            "status": "processing",
+            "message": "Processing transcript",
+            "progress": 0.0,
+            "updatedAt": chrono::Utc::now().to_rfc3339(),
+        }),
+    );
+
+    let audio_postprocessing_guard = MeetingAudioPostprocessingGuard::coordinated(
+        Arc::clone(&state.active_meeting_audio_postprocessing),
+        &recording_id,
+        postprocessing_lease,
+    );
+    tokio::spawn(run_meeting_transcription_pipeline(
+        Arc::clone(state),
+        handle.clone(),
+        recording_id.clone(),
+        audio_postprocessing_guard,
+    ));
+
+    Ok(serde_json::json!({
+        "recordingId": recording_id,
+        "title": recording.title,
+        "sourceFileName": prepared.source_file_name,
+        "durationSeconds": prepared.validated.duration_seconds,
+    }))
+}
+
+/// The import path from a file on disk to a saved meeting row, with the
+/// recognizer deliberately left out: `prepare_audio_import` and
+/// `persist_audio_import` are the seam, and everything after them is the same
+/// pipeline a stopped meeting already runs.
+#[cfg(test)]
+#[cfg(target_os = "macos")]
+mod audio_import_tests {
+    use super::*;
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    /// A short stereo 44.1 kHz WAV, i.e. deliberately not the shape the
+    /// meeting pipeline wants, so the conversion has something to do.
+    fn write_stereo_fixture(path: &Path, seconds: u32) {
+        let spec = hound::WavSpec {
+            channels: 2,
+            sample_rate: 44_100,
+            bits_per_sample: 16,
+            sample_format: hound::SampleFormat::Int,
+        };
+        let mut writer = hound::WavWriter::create(path, spec).expect("create fixture wav");
+        for index in 0..(44_100 * seconds) {
+            let value = ((index as f32 * 0.05).sin() * 8_000.0) as i16;
+            writer.write_sample(value).expect("left");
+            writer.write_sample(-value).expect("right");
+        }
+        writer.finalize().expect("finalize fixture wav");
+    }
+
+    fn scratch_dir(label: &str) -> PathBuf {
+        let suffix = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("system time before epoch")
+            .as_nanos();
+        let dir = std::env::temp_dir().join(format!("nautilus-import-{label}-{suffix}"));
+        std::fs::create_dir_all(&dir).expect("create scratch dir");
+        dir
+    }
+
+    #[test]
+    fn importing_a_wav_converts_it_and_saves_one_meeting_row() {
+        let root = scratch_dir("ok");
+        let source = root.join("Q3 planning call.wav");
+        write_stereo_fixture(&source, 2);
+        let recordings_dir = root.join("recordings");
+
+        let prepared =
+            prepare_audio_import(&source, &recordings_dir).expect("a plain WAV must import");
+
+        // The original is only ever read.
+        assert!(source.is_file(), "the file the user picked must survive");
+        // The converted copy lives in the recordings store, at 16 kHz mono.
+        assert!(prepared.plan.primary_path.starts_with(&recordings_dir));
+        let converted = hound::WavReader::open(&prepared.plan.primary_path).expect("converted wav");
+        assert_eq!(converted.spec().channels, 1);
+        assert_eq!(
+            converted.spec().sample_rate,
+            audio_import::IMPORT_SAMPLE_RATE_HZ
+        );
+        assert_eq!(prepared.validated.duration_seconds, 2);
+        assert_eq!(prepared.title, "Q3 planning call");
+        assert_eq!(prepared.source_file_name, "Q3 planning call.wav");
+
+        let mut db = db::Database::new_in_memory_for_test().expect("in-memory db");
+        let recording = imported_recording_row(&prepared, "inbox", chrono::Utc::now());
+        persist_audio_import(&mut db, &prepared, &recording).expect("persist the imported meeting");
+
+        let stored = db
+            .get_recording(&recording.id)
+            .expect("read back")
+            .expect("the import must produce a recording row");
+        assert_eq!(stored.source_type, "meeting");
+        assert_eq!(stored.status, "processing");
+        assert_eq!(stored.meeting_capture_mode.as_deref(), Some("imported"));
+        assert_eq!(
+            stored.imported_source_name.as_deref(),
+            Some("Q3 planning call.wav")
+        );
+        assert_eq!(stored.title, "Q3 planning call");
+        assert_eq!(stored.duration, 2);
+        // Nobody was in the room, so no consent prompt is claimed.
+        assert!(!stored.consent_prompt_shown);
+        // The audio the pipeline will read is registered as owned, not orphaned.
+        let bundle = db
+            .load_recording_audio_bundle(&recording.id)
+            .expect("audio bundle");
+        assert_eq!(
+            bundle.primary.as_ref().map(|asset| asset.path.clone()),
+            Some(prepared.plan.primary_path.clone())
+        );
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn a_refused_file_leaves_nothing_in_the_recordings_store() {
+        let root = scratch_dir("refused");
+        let recordings_dir = root.join("recordings");
+
+        // Wrong container: refused before anything is written.
+        let text = root.join("notes.pdf");
+        std::fs::write(&text, b"not audio").expect("write");
+        let refusal = prepare_audio_import(&text, &recordings_dir).unwrap_err();
+        assert!(refusal.contains(".pdf"), "{refusal}");
+        assert!(
+            !recordings_dir.exists(),
+            "a refused extension writes nothing"
+        );
+
+        // Right container, unreadable contents: afinfo cannot state a length,
+        // so the file is refused before afconvert is spawned at all.
+        let fake = root.join("broken.mp3");
+        std::fs::write(&fake, b"\x00\x01\x02 not an mp3").expect("write");
+        let decode_failure = prepare_audio_import(&fake, &recordings_dir).unwrap_err();
+        assert!(
+            decode_failure.contains("could not determine the length"),
+            "{decode_failure}"
+        );
+        let leftovers: Vec<_> = std::fs::read_dir(&recordings_dir)
+            .map(|entries| entries.flatten().map(|entry| entry.path()).collect())
+            .unwrap_or_default();
+        assert!(
+            leftovers.is_empty(),
+            "a refused conversion must leave no file behind: {leftovers:?}"
+        );
+
+        // A directory is not a file, however it is spelled.
+        let dir = root.join("album.wav");
+        std::fs::create_dir_all(&dir).expect("mkdir");
+        let not_a_file = prepare_audio_import(&dir, &recordings_dir).unwrap_err();
+        assert!(not_a_file.contains("not a folder"), "{not_a_file}");
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// The import wrote its converted WAV into the recordings store and started
+    /// the pipeline without ever encrypting it, so with the vault on an
+    /// imported meeting was plaintext audio sitting under a vault the UI says
+    /// is on. `import_audio_file_impl` now runs the stop path's encryption step
+    /// before the pipeline; this is the storage half of that, showing the asset
+    /// the import registers is one the vault operation picks up.
+    #[test]
+    fn an_imported_meetings_audio_is_an_asset_the_vault_operation_can_encrypt() {
+        let root = scratch_dir("vault");
+        let source = root.join("board call.wav");
+        write_stereo_fixture(&source, 1);
+        let recordings_dir = root.join("recordings");
+
+        let prepared = prepare_audio_import(&source, &recordings_dir).expect("import");
+        let mut db = db::Database::new_in_memory_for_test().expect("in-memory db");
+        let recording = imported_recording_row(&prepared, "inbox", chrono::Utc::now());
+        persist_audio_import(&mut db, &prepared, &recording).expect("persist");
+
+        // As persisted it is plaintext, like a meeting's audio at finalize.
+        assert_eq!(db.count_encrypted_recordings().expect("counts"), (0, 1));
+
+        let operation = db
+            .begin_recording_audio_encryption(&recording.id)
+            .expect("begin encryption")
+            .expect("an imported meeting must open an encryption operation");
+        assert_eq!(operation.items.len(), 1);
+        assert_eq!(operation.items[0].source_path, prepared.plan.primary_path);
+
+        db.switch_recording_audio_encryption(&operation)
+            .expect("switch");
+        assert_eq!(db.count_encrypted_recordings().expect("counts"), (1, 1));
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// The probe is what the four-hour guard depends on, so it has to state a
+    /// real length for a real file rather than shrugging.
+    #[test]
+    fn the_duration_probe_reads_a_real_file_and_refuses_one_it_cannot_read() {
+        let root = scratch_dir("probe");
+        let source = root.join("two seconds.wav");
+        write_stereo_fixture(&source, 2);
+
+        let seconds = probe_audio_duration_seconds(&source)
+            .expect("afinfo must state the length of a WAV it just wrote");
+        assert!(
+            (seconds - 2.0).abs() < 0.05,
+            "probed {seconds} s for a 2 s file"
+        );
+        // The length is well under the guard, and the guard agrees.
+        assert!(audio_import::validate_import_duration(seconds).is_ok());
+
+        // A file CoreAudio cannot open has no length, and that is a refusal.
+        let junk = root.join("not audio.wav");
+        std::fs::write(&junk, b"RIFFnope").expect("write");
+        let refusal = probe_audio_duration_seconds(&junk).unwrap_err();
+        assert!(
+            refusal.contains("could not determine the length"),
+            "{refusal}"
+        );
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// A conversion that will not finish must not hold the caller's locks
+    /// forever, and must not leave the child running behind the error.
+    #[test]
+    fn a_conversion_that_does_not_finish_is_killed_and_reported() {
+        let root = scratch_dir("timeout");
+        let source = root.join("silence.wav");
+        write_stereo_fixture(&source, 1);
+        let destination = root.join("out.wav");
+
+        let started = std::time::Instant::now();
+        let failure =
+            run_afconvert(&source, &destination, std::time::Duration::from_millis(0)).unwrap_err();
+        // A zero budget is past its deadline on the first poll, so this is the
+        // timeout path even though the file itself is trivial.
+        assert!(failure.contains("Plainsong stopped it"), "{failure}");
+        assert!(failure.contains("network volume"), "{failure}");
+        // The wait is bounded by the budget, not by the converter.
+        assert!(
+            started.elapsed() < std::time::Duration::from_secs(5),
+            "the timeout must return promptly, took {:?}",
+            started.elapsed()
+        );
+
+        // The same call with a real budget succeeds, so the timeout is the
+        // only thing the failure above proves.
+        assert!(run_afconvert(
+            &source,
+            &destination,
+            audio_import::import_conversion_timeout(1.0)
+        )
+        .is_ok());
+        assert!(destination.is_file());
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// Every extension the picker offers must be one macOS can actually open.
+    #[test]
+    fn every_advertised_extension_is_one_afconvert_can_open() {
+        let root = scratch_dir("formats");
+        let source = root.join("source.wav");
+        write_stereo_fixture(&source, 1);
+
+        // .wav, .m4a, .mp4 and .aac are all CoreAudio-native; converting into
+        // each one and probing it back proves the pipeline's own claim.
+        for (extension, file_format) in [("m4a", "m4af"), ("mp4", "mp4f"), ("caf", "caff")] {
+            let converted = root.join(format!("probe.{extension}"));
+            let status = std::process::Command::new("/usr/bin/afconvert")
+                .args(["-f", file_format, "-d", "aac"])
+                .arg(&source)
+                .arg(&converted)
+                .status()
+                .expect("run afconvert");
+            if !status.success() {
+                continue;
+            }
+            let seconds = probe_audio_duration_seconds(&converted)
+                .unwrap_or_else(|error| panic!("afinfo could not read .{extension}: {error}"));
+            assert!(seconds > 0.5, ".{extension} probed as {seconds} s");
+        }
+
+        // And the one that is gone: a real WebM is refused by name before
+        // anything runs, which is the whole reason it was dropped.
+        let webm = root.join("call.webm");
+        std::fs::write(&webm, b"\x1a\x45\xdf\xa3 matroska").expect("write");
+        let refusal = prepare_audio_import(&webm, &root.join("recordings")).unwrap_err();
+        assert!(refusal.contains(".webm"), "{refusal}");
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
 }
 
 fn emit_completed_after_persistence(
@@ -27885,6 +29678,20 @@ pub async fn dispatch_command(
                 "deletedAudioFiles": deletion.deleted_files,
                 "failedAudioFileDeletions": [],
             }))
+        }
+        "import_audio_file" => {
+            // The path comes from the native open dialog in the main Electron
+            // process, never from the renderer: `import_audio_file` is not on
+            // the renderer command allowlist, so the only caller that can
+            // reach here is the one that just showed the user a file picker.
+            let path: String = params
+                .get("path")
+                .and_then(|value| value.as_str())
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .ok_or_else(|| "Choose an audio file to import.".to_string())?
+                .to_string();
+            import_audio_file_impl(state, handle, PathBuf::from(path)).await
         }
         "retranscribe_recording" => {
             // Recovery path for meetings stranded by a crash or transient ASR
@@ -29905,12 +31712,80 @@ pub async fn dispatch_command(
                 transcript_artifact.as_ref(),
                 insertion_action.as_ref(),
             );
+            let history_text = db
+                .get_dictation_history_text(&recording_id)
+                .map_err(|e| e.to_string())?;
+            let recording = db.get_recording(&recording_id).map_err(|e| e.to_string())?;
+            let reprocessed_from = match history_text
+                .as_ref()
+                .and_then(|text| text.reprocessed_from_id.as_deref())
+            {
+                Some(source_id) => db.get_recording(source_id).map_err(|e| e.to_string())?,
+                None => None,
+            };
+            let details = enrich_dictation_history_details(
+                details,
+                history_text.as_ref(),
+                recording.as_ref(),
+                reprocessed_from.as_ref(),
+            );
             let result = if dictation_history_details_is_empty(&details) {
                 None
             } else {
                 Some(details)
             };
             serde_json::to_value(result).map_err(|e| e.to_string())
+        }
+        "search_dictation_history" => {
+            let query: String = params
+                .get("query")
+                .and_then(|value| value.as_str())
+                .unwrap_or_default()
+                .to_string();
+            let limit = params
+                .get("limit")
+                .and_then(|value| value.as_u64())
+                .unwrap_or(25) as usize;
+            let offset = params
+                .get("offset")
+                .and_then(|value| value.as_u64())
+                .unwrap_or(0) as usize;
+            let db = state.db.lock().await;
+            let hits = db
+                .search_dictation_history(&query, limit, offset)
+                .map_err(|e| e.to_string())?;
+            // Deliberately not audited. Searching is a read that changes
+            // nothing, and the search field re-runs on a debounce and again on
+            // every change to the recordings list, so one minute of typing
+            // appended dozens of rows and buried the ones that record a change.
+            // "Process again", deletion and retention still write theirs.
+            serde_json::to_value(hits).map_err(|e| e.to_string())
+        }
+        "reprocess_dictation" => {
+            let history_id: String = params
+                .get("historyId")
+                .or_else(|| params.get("recordingId"))
+                .and_then(|value| value.as_str())
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .ok_or_else(|| "Process again needs the id of a saved dictation.".to_string())?
+                .to_string();
+            let optional_string = |key: &str| {
+                params
+                    .get(key)
+                    .and_then(|value| value.as_str())
+                    .map(str::trim)
+                    .filter(|value| !value.is_empty())
+                    .map(str::to_string)
+            };
+            let request = DictationReprocessRequest {
+                history_id,
+                mode_id: optional_string("modeId"),
+                provider: optional_string("provider"),
+                model_id: optional_string("modelId"),
+            };
+            let outcome = reprocess_dictation_impl(state.as_ref(), handle, request).await?;
+            serde_json::to_value(outcome).map_err(|e| e.to_string())
         }
         "get_dictation_insights" => {
             // Bounded aggregate query: this used to load every dictation and

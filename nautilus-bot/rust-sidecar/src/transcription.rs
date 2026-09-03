@@ -258,6 +258,7 @@ mod tests {
             meeting_notes: None,
             meeting_template_id: None,
             meeting_capture_mode: None,
+            imported_source_name: None,
             notes_updated_at: None,
             consent_prompt_shown: false,
             consent_notice_mode: None,

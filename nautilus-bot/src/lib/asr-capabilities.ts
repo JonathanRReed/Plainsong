@@ -63,13 +63,33 @@ const MEETING_GRADE_PROVIDER_SET = new Set<AsrProviderType>([
   "qwen3_asr",
 ]);
 
+// whisper.cpp is deliberately absent: its meeting support is per model (see
+// `WHISPER_MEETING_MODEL_IDS` below), so the provider is neither dictation-only
+// nor meeting-grade as a whole.
 const DICTATION_ONLY_PROVIDER_SET = new Set<AsrProviderType>([
   "macos_apple_speech",
   "windows_sdk_dictation",
   "moonshine",
-  "whisper",
   "whisper_candle",
 ]);
+
+/**
+ * The whisper.cpp ggml models the meeting lane accepts. Mirrors
+ * `WHISPER_MEETING_MODEL_IDS` in rust-sidecar/src/lib.rs: multilingual
+ * `small` and up, never tiny/base, never a `.en` build. They exist in the
+ * meeting lane for the ~100 languages Parakeet v3 and Distil-Whisper cannot
+ * hear, and whisper.cpp returns per-segment timestamps for them.
+ */
+const WHISPER_MEETING_MODEL_IDS = new Set([
+  "small",
+  "medium",
+  "large-v3",
+  "large-v3-turbo",
+]);
+
+export function isWhisperMeetingModel(modelId: string) {
+  return WHISPER_MEETING_MODEL_IDS.has(modelId.trim().toLowerCase());
+}
 
 const CLOUD_PROVIDER_SET = new Set<AsrProviderType>([
   "groq",
@@ -111,10 +131,14 @@ export function isMeetingEligibleModel(providerType: AsrProviderType, modelId: s
 
   const normalizedModelId = modelId.trim().toLowerCase();
   if (!normalizedModelId) {
-    return true;
+    // whisper.cpp has no meeting-safe default: its provider default is
+    // base.en, which is dictation-only.
+    return providerType !== "whisper";
   }
 
   switch (providerType) {
+    case "whisper":
+      return isWhisperMeetingModel(normalizedModelId);
     case "distil_whisper":
       return normalizedModelId.startsWith("distil");
     case "parakeet":

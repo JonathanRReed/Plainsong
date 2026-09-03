@@ -335,6 +335,46 @@ describe("asr-route-catalog", () => {
     expect(recommended?.modelId).toBe("parakeet-tdt-0.6b-v3");
   });
 
+  it("ranks a multilingual whisper.cpp model after Parakeet and before Distil for meetings, and keeps base.en out", () => {
+    const whisper = {
+      ...providers[0],
+      providerType: "whisper" as const,
+      name: "Whisper.cpp",
+      description: "Local Whisper family",
+      selectedModelId: "large-v3-turbo",
+      modelOptions: [
+        { id: "base.en", label: "base.en (balanced, English)" },
+        { id: "large-v3-turbo", label: "large-v3-turbo (fast + accurate)" },
+      ],
+    };
+    for (const policy of ["prefer_local", "best_available"] as const) {
+      const routes = buildAsrRouteCatalog(
+        [whisper, providers[1], providers[2]],
+        policy,
+      );
+      const meetingRoutes = getLaneRoutes(routes, "meeting", policy);
+      const order = meetingRoutes.map((route) => route.routeId);
+
+      expect(order).not.toContain("whisper:base.en");
+      expect(order.indexOf("parakeet:parakeet-tdt-0.6b-v3")).toBeLessThan(
+        order.indexOf("whisper:large-v3-turbo"),
+      );
+      expect(order.indexOf("whisper:large-v3-turbo")).toBeLessThan(
+        order.indexOf("distil_whisper:distil-large-v3.5"),
+      );
+      expect(getRecommendedLaneRoute(routes, "meeting", policy)?.providerType).toBe(
+        "parakeet",
+      );
+    }
+
+    const turbo = buildAsrRouteCatalog([whisper], "prefer_local").find(
+      (route) => route.routeId === "whisper:large-v3-turbo",
+    );
+    expect(turbo?.summary).toContain("100 languages, runs on the GPU, slower than Parakeet");
+    expect(turbo?.laneCompatibility.meeting).toBe(true);
+    expect(turbo?.experimental).toBe(false);
+  });
+
   it("recommends Parakeet before Distil Whisper for local meetings", () => {
     const routes = buildAsrRouteCatalog(
       [providers[1], providers[2]],

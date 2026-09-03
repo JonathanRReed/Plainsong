@@ -488,12 +488,35 @@ describe("Models screen", () => {
     });
 
     const options = within(meetings).getAllByRole("radio");
-    const labels = options.map((option) => option.textContent ?? "");
-    expect(labels.some((label) => label.includes("base.en"))).toBe(false);
-    expect(labels.some((label) => label.includes("Apple Speech"))).toBe(false);
-    expect(labels.some((label) => label.includes("Parakeet TDT 0.6B v3"))).toBe(
+    // The route's own name, not the whole card: a card's fact sentence may
+    // legitimately name another model to give a size or speed comparison
+    // ("about eleven times the size of base.en"), and matching on the card
+    // text read that as an offer of base.en.
+    const names = options.map(
+      (option) => option.querySelector("span > span")?.textContent ?? "",
+    );
+
+    // Positive first, and exhaustive. A `?? ""` fallback means a selector that
+    // stops matching the name element yields a list of empty strings, and a
+    // suite that only asks "does any name contain base.en" passes on that
+    // happily while checking nothing at all. Naming every option the lane
+    // offers makes the list itself the assertion.
+    expect(names).toEqual([
+      "large-v3-turbo (fast + accurate)",
+      "Distil Whisper Large v3.5",
+      "Parakeet TDT 0.6B v3",
+    ]);
+    expect(names.every((name) => name.trim().length > 0)).toBe(true);
+
+    // And then the exclusions the list above already implies, spelled out so a
+    // future addition to the fixture cannot quietly bring one back.
+    expect(names.some((name) => name.includes("base.en"))).toBe(false);
+    expect(names.some((name) => name.includes("Apple Speech"))).toBe(false);
+    expect(names.some((name) => name.includes("Parakeet TDT 0.6B v3"))).toBe(
       true,
     );
+    // whisper.cpp reaches this lane only through a multilingual model.
+    expect(names.some((name) => name.includes("large-v3-turbo"))).toBe(true);
   });
 
   it("keeps an engine whose permission was denied visible but unpickable", async () => {
