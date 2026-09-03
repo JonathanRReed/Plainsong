@@ -31,6 +31,9 @@ interface SavedPromptChat {
    * Whether the picker is currently taking the arrow keys and Enter. The
    * chat input's own Enter handler must check this: while the picker is
    * open, Enter chooses a prompt rather than sending "/dec" as a question.
+   *
+   * False whenever nothing matches, so a question that merely begins with a
+   * path stays sendable.
    */
   pickerOpen: boolean;
   /** Wire onto the chat input's `onKeyDown`, before its own handling. */
@@ -76,15 +79,21 @@ export function useSavedPromptChat({
     if (query === null) setDismissed(false);
   }, [query]);
 
-  const pickerOpen = query !== null && !dismissed && !managerOpen;
+  // No match, no picker -- and so no Send block either.
+  //
+  // The trigger is any leading "/", which is also how a path is written. A
+  // question that opens "/Users/me/notes.txt is failing to import" filtered
+  // the library down to nothing, and both chat surfaces refuse to send while
+  // the picker is open, so that question could not be asked at all: Enter
+  // chose a prompt that did not exist and the Send button did nothing, with a
+  // panel saying "No saved prompt matches that" as the only explanation.
+  // A picker offering nothing has nothing to take the keyboard for.
+  const pickerOpen =
+    query !== null && matches.length > 0 && !dismissed && !managerOpen;
 
   // Keep the highlight on a row that still exists as the filter narrows.
   useEffect(() => {
     if (!pickerOpen) return;
-    if (matches.length === 0) {
-      setActiveId("");
-      return;
-    }
     setActiveId((current) =>
       matches.some((prompt) => prompt.id === current) ? current : matches[0].id,
     );
@@ -106,7 +115,6 @@ export function useSavedPromptChat({
         setDismissed(true);
         return;
       }
-      if (matches.length === 0) return;
       const index = matches.findIndex((prompt) => prompt.id === activeId);
       if (event.key === "ArrowDown") {
         event.preventDefault();

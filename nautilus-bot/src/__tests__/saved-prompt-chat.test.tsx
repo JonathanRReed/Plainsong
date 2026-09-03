@@ -47,6 +47,19 @@ function ChatHarness({ scope }: { scope: "meeting" | "memory" }) {
         }}
       />
       {chat.picker}
+      {/* Both real surfaces refuse to send while the picker is open --
+          `ai-analysis-panel.tsx` and `dashboard-view.tsx` both return early on
+          `pickerOpen` -- so the harness has to as well, or it cannot show the
+          bug where a question starting with a path could not be sent. */}
+      <button
+        type="button"
+        onClick={() => {
+          if (chat.pickerOpen) return;
+          setSent((current) => [...current, value]);
+        }}
+      >
+        Send
+      </button>
       <button type="button" onClick={() => chat.saveTextAsPrompt("Who owns the migration?")}>
         Save as prompt
       </button>
@@ -138,6 +151,57 @@ describe("the saved prompt picker in a chat box", () => {
 
     expect(screen.queryByRole("group", { name: "Saved prompts" })).toBeNull();
     expect(input.value).toBe("/dec");
+  });
+
+  /**
+   * The trigger is any leading "/", which is also how a path is written. This
+   * used to leave the reader unable to ask the question at all: the picker
+   * stayed open over an empty list, Enter chose nothing, and both surfaces
+   * refuse to send while it is open.
+   */
+  it("closes and unblocks Send when nothing matches what was typed", async () => {
+    render(<ChatHarness scope="meeting" />);
+    await waitFor(() => expect(backendMocks.getSettings).toHaveBeenCalled());
+    const input = screen.getByLabelText("Ask") as HTMLInputElement;
+
+    fireEvent.change(input, { target: { value: "/" } });
+    expect(screen.getByRole("group", { name: "Saved prompts" })).toBeTruthy();
+
+    fireEvent.change(input, {
+      target: { value: "/Users/me/notes.txt is failing to import" },
+    });
+    expect(screen.queryByRole("group", { name: "Saved prompts" })).toBeNull();
+
+    fireEvent.keyDown(input, { key: "Enter" });
+    expect(screen.getByTestId("sent").textContent).toBe(
+      "/Users/me/notes.txt is failing to import",
+    );
+
+    fireEvent.click(screen.getByRole("button", { name: "Send" }));
+    expect(screen.getByTestId("sent").textContent).toBe(
+      "/Users/me/notes.txt is failing to import|/Users/me/notes.txt is failing to import",
+    );
+  });
+
+  it("reopens when the reader backspaces to something that does match", async () => {
+    render(<ChatHarness scope="meeting" />);
+    await waitFor(() => expect(backendMocks.getSettings).toHaveBeenCalled());
+    const input = screen.getByLabelText("Ask") as HTMLInputElement;
+
+    fireEvent.change(input, { target: { value: "/follow-up-xyz" } });
+    expect(screen.queryByRole("group", { name: "Saved prompts" })).toBeNull();
+
+    fireEvent.change(input, { target: { value: "/follow" } });
+    expect(screen.getByRole("group", { name: "Saved prompts" })).toBeTruthy();
+  });
+
+  it("tells the reader how to close it", async () => {
+    render(<ChatHarness scope="meeting" />);
+    await waitFor(() => expect(backendMocks.getSettings).toHaveBeenCalled());
+    fireEvent.change(screen.getByLabelText("Ask"), { target: { value: "/" } });
+
+    const picker = screen.getByRole("group", { name: "Saved prompts" });
+    expect(within(picker).getByText(/Esc closes this/)).toBeTruthy();
   });
 
   it("opens the manage dialog on a new prompt seeded from a sent message", async () => {

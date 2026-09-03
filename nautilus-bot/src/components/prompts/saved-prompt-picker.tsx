@@ -1,9 +1,14 @@
-import { Command, CommandEmpty, CommandGroup, CommandItem, CommandList } from "@/components/ui/command";
+import { Command, CommandGroup, CommandItem, CommandList } from "@/components/ui/command";
 import { Button } from "@/components/ui/button";
 import type { SavedPrompt } from "@/lib/saved-prompts";
 
 interface SavedPromptPickerProps {
-  /** Already filtered to this surface's scope and to the typed query. */
+  /**
+   * Already filtered to this surface's scope and to the typed query, and
+   * never empty: the caller closes the picker instead of showing an empty
+   * one, so a question that just happens to start with a path is still
+   * sendable.
+   */
   matches: readonly SavedPrompt[];
   /** The highlighted row's id, owned by the caller's keyboard handler. */
   activeId: string;
@@ -42,32 +47,27 @@ export function SavedPromptPicker({
     >
       <Command shouldFilter={false} value={activeId} onValueChange={onActiveIdChange}>
         <CommandList className="max-h-56">
-          {matches.length === 0 ? (
-            <CommandEmpty className="text-sm text-muted-foreground">
-              No saved prompt matches that.
-            </CommandEmpty>
-          ) : (
-            <CommandGroup>
-              {matches.map((prompt) => (
-                <CommandItem
-                  key={prompt.id}
-                  value={prompt.id}
-                  onSelect={() => onSelect(prompt)}
-                  className="flex-col items-start gap-0.5 py-2"
-                >
-                  <span className="text-sm font-medium">{prompt.name}</span>
-                  <span className="line-clamp-1 text-sm text-muted-foreground">
-                    {prompt.prompt}
-                  </span>
-                </CommandItem>
-              ))}
-            </CommandGroup>
-          )}
+          <CommandGroup>
+            {matches.map((prompt) => (
+              <CommandItem
+                key={prompt.id}
+                value={prompt.id}
+                onSelect={() => onSelect(prompt)}
+                className="flex-col items-start gap-0.5 py-2"
+              >
+                <span className="text-sm font-medium">{prompt.name}</span>
+                <span className="line-clamp-1 text-sm text-muted-foreground">
+                  {prompt.prompt}
+                </span>
+              </CommandItem>
+            ))}
+          </CommandGroup>
         </CommandList>
       </Command>
       <div className="flex items-center justify-between gap-2 border-t px-3 py-2">
         <p className="text-sm text-muted-foreground">
-          Saved on this Mac. Picking one only fills the box.
+          Saved on this Mac. Picking one only fills the box.{" "}
+          <span className="whitespace-nowrap">Esc closes this.</span>
         </p>
         <Button
           type="button"
