@@ -80,6 +80,94 @@ function dependencyClosure(roots: string[]): Set<string> {
 }
 
 /**
+ * How an allow-list read out of `files:` differs from the closure the packaged
+ * app actually needs, in the terms `files:` can express.
+ *
+ * `missing` breaks the app at runtime (MODULE_NOT_FOUND on first use);
+ * `surplus` quietly puts the dead weight back. Pure, so the scoped case can be
+ * proven without adding a scoped dependency to the project.
+ */
+export function allowListDrift(
+  kept: ReadonlySet<string>,
+  required: ReadonlySet<string>,
+): { missing: string[]; surplus: string[] } {
+  const requiredSegments = new Set(
+    [...required].map((name) => packedPathSegment(name)),
+  );
+  return {
+    missing: [...requiredSegments].filter((name) => !kept.has(name)).sort(),
+    surplus: [...kept].filter((name) => !requiredSegments.has(name)).sort(),
+  };
+}
+
+/** Node built-ins are importable with and without the `node:` prefix. */
+const NODE_BUILTINS = [
+  "child_process",
+  "crypto",
+  "events",
+  "fs",
+  "fs/promises",
+  "http",
+  "https",
+  "net",
+  "os",
+  "path",
+  "readline",
+  "stream",
+  "timers",
+  "url",
+  "util",
+  "zlib",
+];
+
+/**
+ * The npm package names one TypeScript source imports. Pure so it can be run
+ * against a fixture: the alternative is a regex nobody can prove anything
+ * about, guarding the contents of a shipped archive.
+ *
+ * A package is named by its FIRST PATH SEGMENT, because that is what
+ * `files:` in electron-builder.yml can express — the `!node_modules/!(...)/**`
+ * extglob is matched by minimatch one path segment at a time, so a scoped
+ * package is kept or dropped by its whole scope (`@scope`), never by
+ * `@scope/name`.
+ */
+export function packageSpecifiersIn(source: string): string[] {
+  // Only real module specifiers: an `import`/`export ... from` clause that ends
+  // a statement, a bare `import "..."`, a `require(...)`, or a dynamic
+  // `import(...)`. Prose in a comment that happens to contain the word "from"
+  // is not one.
+  const specifiers = [
+    ...source.matchAll(/^\s*(?:import|export)\b[^;]*?\bfrom\s*["']([^"']+)["']/gm),
+    ...source.matchAll(/^\s*import\s*["']([^"']+)["']/gm),
+    ...source.matchAll(/\brequire\(\s*["']([^"']+)["']\s*\)/g),
+    // A lazily imported package is packaged like any other — and if it is
+    // missing from the allow-list it throws MODULE_NOT_FOUND the first time
+    // the feature behind it runs, in a shipped bundle, rather than here.
+    ...source.matchAll(/\bimport\(\s*["']([^"']+)["']\s*\)/g),
+  ].map(([, specifier]) => specifier);
+
+  const found = new Set<string>();
+  for (const specifier of specifiers) {
+    if (specifier.startsWith(".")) continue;
+    if (specifier === "electron" || specifier.startsWith("electron/")) continue;
+    if (specifier.startsWith("node:")) continue;
+    if (NODE_BUILTINS.includes(specifier)) continue;
+    found.add(
+      specifier.split("/").slice(0, specifier.startsWith("@") ? 2 : 1).join("/"),
+    );
+  }
+  return [...found].sort();
+}
+
+/**
+ * The one path segment `files:` matches on. `@scope/name` is kept by listing
+ * `@scope`; an unscoped package is its own segment.
+ */
+export function packedPathSegment(packageName: string): string {
+  return packageName.split("/")[0];
+}
+
+/**
  * The npm packages the main process imports, read from `electron/`. Electron's
  * own module and Node's built-ins are not npm packages and are not listed.
  */
@@ -101,43 +189,8 @@ function mainProcessPackages(): string[] {
 
   const found = new Set<string>();
   for (const sourcePath of sources) {
-    const source = readFileSync(sourcePath, "utf8");
-    // Only real module specifiers: an `import`/`export ... from` clause that
-    // ends a statement, or a `require(...)` call. Prose in a comment that
-    // happens to contain the word "from" is not one.
-    const specifiers = [
-      ...source.matchAll(/^\s*(?:import|export)\b[^;]*?\bfrom\s*["']([^"']+)["']/gm),
-      ...source.matchAll(/^\s*import\s*["']([^"']+)["']/gm),
-      ...source.matchAll(/\brequire\(\s*["']([^"']+)["']\s*\)/g),
-    ].map(([, specifier]) => specifier);
-    for (const specifier of specifiers) {
-      if (specifier.startsWith(".")) continue;
-      if (specifier === "electron" || specifier.startsWith("electron/")) continue;
-      if (specifier.startsWith("node:")) continue;
-      // Node's built-ins are importable without the `node:` prefix too.
-      if (
-        [
-          "child_process",
-          "crypto",
-          "events",
-          "fs",
-          "fs/promises",
-          "http",
-          "https",
-          "net",
-          "os",
-          "path",
-          "readline",
-          "stream",
-          "timers",
-          "url",
-          "util",
-          "zlib",
-        ].includes(specifier)
-      ) {
-        continue;
-      }
-      found.add(specifier.split("/").slice(0, specifier.startsWith("@") ? 2 : 1).join("/"));
+    for (const name of packageSpecifiersIn(readFileSync(sourcePath, "utf8"))) {
+      found.add(name);
     }
   }
   return [...found].sort();
@@ -289,9 +342,16 @@ describe("what the packaged bundle is allowed to contain", () => {
     // written as "everything except this list", so the list has to be exactly
     // the runtime closure — too small and the app breaks, too large and the
     // dead weight comes back.
+    //
+    // Compared on the FIRST PATH SEGMENT, because that is the unit
+    // `!node_modules/!(...)/**` can express: minimatch matches the extglob
+    // against one segment, so a scoped package is kept by naming its whole
+    // scope. Comparing `@scope/name` against a `files:` entry that can only
+    // ever say `@scope` would fail for the wrong reason, or — with the
+    // membership test the other way round — pass for one.
     const kept = asarNodeModuleAllowList();
     const required = dependencyClosure(mainProcessPackages());
-    expect([...kept].sort()).toEqual([...required].sort());
+    expect(allowListDrift(kept, required)).toEqual({ missing: [], surplus: [] });
   });
 
   it("names electron-updater as the only npm package the main process loads", () => {
@@ -299,6 +359,57 @@ describe("what the packaged bundle is allowed to contain", () => {
     // than assumed: a new `import` of a real package in electron/ fails here
     // until it is added to the allow-list it now depends on.
     expect(mainProcessPackages()).toEqual(["electron-updater"]);
+  });
+
+  it("also sees a package the main process imports lazily", () => {
+    // A `const { x } = await import("pkg")` behind a feature flag is packaged
+    // like any other dependency — and if the allow-list has never heard of it,
+    // it throws MODULE_NOT_FOUND the first time a user reaches that feature,
+    // in a shipped bundle. The reader used to match only static imports and
+    // `require`, so such a package passed every test here and then broke.
+    expect(
+      packageSpecifiersIn(`
+        const updater = await import("electron-updater");
+        void import("@scope/lazy/sub/path");
+        import("./local-module");
+        import("node:fs");
+      `),
+    ).toEqual(["@scope/lazy", "electron-updater"]);
+  });
+
+  it("reads static imports, re-exports and require the same way", () => {
+    expect(
+      packageSpecifiersIn(`
+        import { app } from "electron/main";
+        import path from "node:path";
+        import fs from "fs";
+        import helper from "./helper";
+        import { autoUpdater } from "electron-updater";
+        export { something } from "lazy-val";
+        import "sax";
+        const yaml = require("js-yaml");
+        // A prose comment that mentions importing from "not-a-package".
+      `),
+    ).toEqual(["electron-updater", "js-yaml", "lazy-val", "sax"]);
+  });
+
+  it("compares the allow-list on the segment `files:` can actually match", () => {
+    // minimatch splits on "/", so `!node_modules/!(...)/**` decides per path
+    // segment: a scoped package is kept by listing its scope. A comparison that
+    // looked for "@scope/name" in the list would report drift that is not there
+    // and, worse, would let a REAL omission hide behind the noise.
+    expect(
+      allowListDrift(new Set(["@scope", "ms"]), new Set(["@scope/name", "ms"])),
+    ).toEqual({ missing: [], surplus: [] });
+
+    expect(
+      allowListDrift(new Set(["ms"]), new Set(["@scope/name", "ms"])),
+    ).toEqual({ missing: ["@scope"], surplus: [] });
+
+    expect(allowListDrift(new Set(["ms", "left-pad"]), new Set(["ms"]))).toEqual({
+      missing: [],
+      surplus: ["left-pad"],
+    });
   });
 
   it("still drops the renderer's own packages, not just their leaves", () => {

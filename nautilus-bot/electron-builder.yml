@@ -107,6 +107,12 @@ files:
   # Nested node_modules under a kept package are unaffected (the pattern only
   # matches the first path segment), so electron-updater keeps any hoist-broken
   # copies of its own dependencies.
+  #
+  # That one-segment rule is also how a SCOPED package would have to be listed:
+  # minimatch matches this extglob against a single path segment, so
+  # `@scope/name` is kept by naming `@scope` — the whole scope — and never by
+  # `@scope/name`, which can never match anything. The test compares the two
+  # sides on that same first segment for the same reason.
   - "!node_modules/!(argparse|builder-util-runtime|debug|electron-updater|fs-extra|graceful-fs|js-yaml|jsonfile|lazy-val|lodash.escaperegexp|lodash.isequal|ms|sax|semver|tiny-typed-emitter|universalify)/**"
 
 extraResources:
