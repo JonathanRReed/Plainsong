@@ -5,6 +5,8 @@ import path from "node:path";
 import { pathToFileURL } from "node:url";
 import { describe, expect, it } from "vitest";
 
+import { sidecarSource } from "./sidecar-source";
+
 const repoRoot = path.resolve(import.meta.dirname, "../..");
 
 /**
@@ -402,10 +404,9 @@ describe("macOS Apple Speech helper contract", () => {
       path.join(repoRoot, "rust-sidecar/src/asr/platform/macos_speech.rs"),
       "utf8",
     );
-    const sidecar = fs.readFileSync(
-      path.join(repoRoot, "rust-sidecar/src/lib.rs"),
-      "utf8",
-    );
+    // Both live in modules lib.rs was split into, so read the whole crate
+    // rather than guessing which one.
+    const sidecar = sidecarSource();
 
     expect(helper).toContain("SFSpeechAudioBufferRecognitionRequest");
     expect(helper).toContain('type: result.isFinal ? "final" : "partial"');

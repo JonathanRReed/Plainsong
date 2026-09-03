@@ -5,7 +5,10 @@ import path from "node:path";
 const repoRoot = process.cwd();
 const bridgePath = path.join(repoRoot, "electron/ipc-bridge.ts");
 const mainPath = path.join(repoRoot, "electron/main.ts");
-const sidecarPath = path.join(repoRoot, "rust-sidecar/src/lib.rs");
+// The router lives in its own module since lib.rs was split; both the forward
+// and the reverse check read it and nothing else, because every command the
+// renderer can name is an arm of `dispatch_command`.
+const sidecarPath = path.join(repoRoot, "rust-sidecar/src/dispatch.rs");
 
 function read(filePath) {
   return fs.readFileSync(filePath, "utf8");
@@ -35,7 +38,7 @@ function extractSidecarCommands(source) {
 function extractDispatchedSidecarCommands(source) {
   const start = source.indexOf("pub async fn dispatch_command(");
   if (start === -1) {
-    throw new Error("Could not find dispatch_command in rust-sidecar/src/lib.rs");
+    throw new Error("Could not find dispatch_command in rust-sidecar/src/dispatch.rs");
   }
   const matchStart = source.indexOf("    match method {", start);
   if (matchStart === -1) {

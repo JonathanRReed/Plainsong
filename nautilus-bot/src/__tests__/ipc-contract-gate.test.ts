@@ -76,7 +76,7 @@ function runGate(fixture: {
       "utf8",
     );
     writeFileSync(
-      path.join(tempRoot, "rust-sidecar/src/lib.rs"),
+      path.join(tempRoot, "rust-sidecar/src/dispatch.rs"),
       sidecarFixture(fixture.dispatched),
       "utf8",
     );
