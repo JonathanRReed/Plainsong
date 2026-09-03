@@ -32542,10 +32542,7 @@ pub async fn dispatch_command(
                 ));
             }
             if target.is_dir() {
-                return Err(format!(
-                    "targetPath is a directory: '{}'",
-                    canonical_parent.display()
-                ));
+                return Err(format!("targetPath is a directory: '{}'", target_path));
             }
             let file_name = target
                 .file_name()

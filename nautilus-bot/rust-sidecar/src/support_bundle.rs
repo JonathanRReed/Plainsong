@@ -155,9 +155,21 @@ static EMAIL_RE: LazyLock<regex::Regex> = LazyLock::new(|| {
         .expect("email pattern is valid")
 });
 
+/// A path under a home directory, including the parts of it that follow a
+/// space.
+///
+/// The obvious pattern -- stop at the first whitespace -- leaves the tail of
+/// `~/Library/Application Support/Plainsong/models/base.bin` in the clear,
+/// which is a file name, and file names are on the never-included list. So
+/// after the first run this keeps consuming space-separated tokens for as long
+/// as they still look like path segments (they contain a `/`). A trailing
+/// prose word with no slash in it ends the match, so "in 42ms" survives and
+/// the path does not.
 static HOME_PATH_RE: LazyLock<regex::Regex> = LazyLock::new(|| {
-    regex::Regex::new(r#"(?i)(?:/Users/|/home/|[A-Za-z]:\\Users\\)[^\s"',;)\]}]*"#)
-        .expect("home path pattern is valid")
+    regex::Regex::new(
+        r#"(?i)(?:/Users/|/home/|[A-Za-z]:\\Users\\)[^\s"',;)\]}]*(?: [^\s"',;)\]}]*/[^\s"',;)\]}]*)*"#,
+    )
+    .expect("home path pattern is valid")
 });
 
 static API_KEY_RE: LazyLock<regex::Regex> = LazyLock::new(|| {
@@ -640,6 +652,23 @@ mod tests {
         let with_key =
             redact_log_line("WARN llm: provider rejected sk-ant-AAAABBBBCCCCDDDDEEEEFFFF1234");
         assert!(with_key.contains("[redacted:key]"), "{with_key}");
+    }
+
+    #[test]
+    fn a_home_path_with_a_space_in_it_is_redacted_whole() {
+        // ~/Library/Application Support/... : the space used to end the match
+        // and leave the file name behind.
+        let redacted = redact_log_line(
+            "INFO plainsong_lib::download: staged \
+             /Users/jonathanreed/Library/Application Support/Plainsong/models/base.bin",
+        );
+        assert!(!redacted.contains("base.bin"), "{redacted}");
+        assert!(!redacted.contains("jonathanreed"), "{redacted}");
+
+        // A prose word after the path is not swallowed with it.
+        let with_tail = redact_log_line("INFO opened /Users/jonathanreed/x.txt in 42ms");
+        assert!(with_tail.contains("in 42ms"), "{with_tail}");
+        assert!(!with_tail.contains("x.txt"), "{with_tail}");
     }
 
     #[test]
