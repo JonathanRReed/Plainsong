@@ -156,21 +156,36 @@ That conclusion was wrong, and the reason is worth keeping:
   (gap +0.258, the second widest of the four) and scores the **best** frame
   error in the two-speaker diarization eval.
 - The divergence is real but length-dependent and lives in the runtime, not the
-  features. Feeding an identical 300-frame input tensor to `campplus.onnx`
-  through the Rust `ort` 2.0.0-rc.13 crate and through Python `onnxruntime`
-  1.19.2 produced completely different embeddings, while ECAPA-TDNN agreed
-  between them to six decimal places on the same input. CAM++ is the only one
-  of the four whose graph is built from `Pad`/`AveragePool`/`Slice`-heavy D-TDNN
+  features. **Reported, not reproduced here.** Feeding an identical 300-frame
+  input tensor to `campplus.onnx` through the Rust `ort` 2.0.0-rc.13 crate and
+  through Python `onnxruntime` 1.19.2 produced completely different embeddings,
+  while ECAPA-TDNN agreed between them to six decimal places on the same input.
+  What this receipt does **not** carry is the script, the exact input, or the
+  cosine between the two runs, so treat the claim as an observation rather than
+  a measurement you can check from here. The reproduction is lane C7's
+  deliverable and lands with it as
+  `artifacts/qa/campplus-divergence-2026-09-02.md`; until that file exists in
+  the tree, nothing in this document depends on the claim. The circumstantial
+  part that *is* checkable from the model files: CAM++ is the only one of the
+  four whose graph is built from `Pad`/`AveragePool`/`Slice`-heavy D-TDNN
   context blocks (209 `Pad`, 208 `AveragePool`, 726 `Slice` versus zero, zero
   and zero for ECAPA-TDNN).
-- The app never feeds sequences that long: `generate_segments(duration, 2.0,
-  1.0)` caps every window at 2 s (≈200 frames), which is where all four models
-  behave.
+- The app never feeds sequences that long: `generate_segments(duration,
+  SEGMENT_SECONDS, SEGMENT_OVERLAP_SECONDS)` caps every window at 2 s
+  (98–198 FBank frames), which is where all four models behave.
 
 Two things follow. First, **a calibration harness has to measure the object the
 product compares**, and this one now does. Second, the CAM++ / long-input
 divergence is a latent hazard: any future change that lengthens the diarization
 window would walk into it. It is not exploited today and is not fixed here.
+
+The window is now named rather than written down twice —
+`SEGMENT_SECONDS` / `SEGMENT_OVERLAP_SECONDS` / `MIN_SEGMENT_SECONDS` in
+`rust-sidecar/src/diarization/embedder.rs`, used by both `diarize_real` and
+this harness — and the embedder warns (and trips a `debug_assert!`) when a
+window arrives outside the 98–198 FBank frames those constants imply. That is
+the tripwire for the hazard above: a longer window now announces itself instead
+of quietly being compared against thresholds that were never measured for it.
 
 **Not the cause, checked:** `compute_fbank_features` already applies
 per-utterance cepstral mean normalization (subtracting the per-bin mean across

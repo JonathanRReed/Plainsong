@@ -23,7 +23,9 @@ pub mod voiceprints;
 mod speakrs_backend;
 
 #[cfg(feature = "diarization")]
-pub use embedder::{generate_segments, EmbeddingClusterer};
+pub use embedder::{
+    generate_segments, EmbeddingClusterer, SEGMENT_OVERLAP_SECONDS, SEGMENT_SECONDS,
+};
 
 #[cfg(feature = "diarization")]
 use ndarray::Array1;
@@ -125,7 +127,7 @@ impl DiarizationEngine {
         audio_path: &Path,
         duration: f64,
     ) -> Result<DiarizationResult> {
-        let segments = generate_segments(duration, 2.0, 1.0);
+        let segments = generate_segments(duration, SEGMENT_SECONDS, SEGMENT_OVERLAP_SECONDS);
         if segments.is_empty() {
             return Ok(DiarizationResult {
                 segments: Vec::new(),
@@ -1048,7 +1050,7 @@ mod calibration {
             let duration = super::get_audio_duration(fixture)
                 .await
                 .expect("fixture duration");
-            let segments = generate_segments(duration, 2.0, 1.0);
+            let segments = generate_segments(duration, SEGMENT_SECONDS, SEGMENT_OVERLAP_SECONDS);
             let embeddings = extractor
                 .extract_embeddings(fixture, &segments)
                 .await
