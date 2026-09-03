@@ -23,7 +23,9 @@ allowed to serve.
   `build.rs` does — `xcrun swiftc -O -target arm64-apple-macosx13.0`,
   `MACOSX_DEPLOYMENT_TARGET=13.0`, ad-hoc signed with
   `macos_speech_helper.entitlements.plist` (Speech recognition only, nothing
-  else). Binary sha256 `28cc21d0…5649`.
+  else). Binary sha256 `28cc21d0…5649` as committed. The measurements below
+  were taken on `d18cb796…50c7`, which differs only in rejecting
+  `--live --engine auto` at argument parsing; no measured path changed.
 - Source: this lane's branch at `12139d03`, cut from `parity-waves` at
   `c865ba8f`.
 - **Machine state: shared with other parity lanes.** The 1-minute load average
