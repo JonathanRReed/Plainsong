@@ -384,9 +384,10 @@ evidence is stale and must be recaptured before this becomes a candidate.
   deadline and no way out: an install that never finished held the button,
   the progress line and a background helper process until Plainsong was
   quit. It now stops after twenty minutes, or after three minutes with no
-  progress reported, and Cancel ends it immediately. Live Apple dictation
-  gets the same treatment: a helper that stops responding is ended and says
-  so instead of hanging.
+  progress reported, and Cancel ends it immediately — and reads as "Language
+  install stopped", not as a failure. Live Apple dictation gets the same
+  treatment: a helper that stops responding is ended and says so instead of
+  hanging.
 - A meeting transcribed with Apple Speech can no longer be saved without
   timestamps. The meeting route decided that SpeechAnalyzer would run and
   then let the transcription decide again a moment later; if the language

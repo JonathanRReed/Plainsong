@@ -191,6 +191,19 @@ machine.
 | `bun run gate:dead-code` | pass |
 | `node scripts/verify-macos-speech-helper.mjs` | `{"pass":true,…,"engine":"speech_analyzer"}` |
 
+Re-run after the review pass (same machine, still shared):
+
+| Gate | Result |
+| --- | --- |
+| `bun run typecheck` | pass (no output) |
+| `bun run test` | 146 files, 1668 tests passed |
+| `bun run lint:rust` | clean |
+| `bun run test:rust` | 1423 + 19 + 0 + 4 passed, 9 ignored, 0 failed |
+| `bun run gate:ipc-contract` | pass — 196 renderer commands, 182 dispatched commands reachable |
+| `bun run gate:dead-code` | pass |
+| `bun run gate:rust-features` | pass — all 4 non-shipped feature combinations compile |
+| `node scripts/verify-macos-speech-helper.mjs` | `{"pass":true,…,"engine":"speech_analyzer","olderSdkFallback":{"compiled":true,"engine":"sf_speech_recognizer","speechAnalyzerAvailable":false}}` |
+
 `verify-macos-speech-helper.mjs` was extended for this lane: it now checks the
 `#available(macOS 26, *)` guard, the timestamp attribute, the refusal when
 assets are missing, the `--live` default staying on the old protocol, the two
@@ -199,6 +212,36 @@ new typed error codes, every new probe field's type, that a resolved
 unknown `--engine` and `--live --engine auto` return a typed
 `malformed_request` — live mode refuses to auto-select rather than resolving
 to one engine silently.
+
+## Review pass (2026-09-02, after the lane landed)
+
+The nine C5 review findings were fixed on top of the work above. Nothing
+measured here was re-measured; what changed is what the code refuses to do.
+
+| Finding | What changed | Evidence |
+| --- | --- | --- |
+| H1 build breaks on a pre-26 SDK | `build.rs` probes `xcrun --sdk macosx --show-sdk-version` and compiles the helper with `-D NO_SPEECH_ANALYZER` below 26; the Swift analyzer section sits behind `#if !NO_SPEECH_ANALYZER` | Verify script compiles that variant and probes it: `{"compiled":true,"engine":"sf_speech_recognizer","speechAnalyzerAvailable":false}` |
+| H2 meeting result with no timestamps | The engine is carried from the meeting gate into `transcribe_file` instead of re-probed; a mismatched or segment-less result is a typed `engine_mismatch`; `AsrManager` refuses a text-only Apple meeting result | `a_required_engine_refuses_anything_that_did_not_run_it`, `an_apple_meeting_result_without_timestamps_is_refused` |
+| M1 unbounded install and live waits | 20-minute install budget with a 3-minute progress liveness window, 5-minute live idle window, bounded `child.wait()`, and a Cancel button wired to a new `cancel_apple_speech_language_install` command | `a_language_install_gives_up_on_a_total_budget_and_on_silence`, two stub-child tests, "lets the reader stop a language install that is taking too long" |
+| M2 analyzer path skipped the authorization gate | `requireSpeechAuthorization()` runs at the top of both transcription entry points | Same request, before: reached `AVAudioFile` and failed `malformed_request`. After: `{"code":"authorization_not_determined",...}`, exit 1 |
+| M3 meeting capability false before any probe | Tri-state flag; `meetings_supported()` runs one bounded probe when nothing has looked | `an_unprobed_meeting_capability_looks_instead_of_answering_no` |
+| L1 volatile text near the insertion path | Source guard in `lib.rs` | `no_volatile_streaming_text_reaches_the_insertion_path` |
+| L2 refusal test only ever ran one branch | Capability pinned for each branch | `apple_speech_reaches_meeting_transcription_only_through_speech_analyzer` |
+| L3 silence frames vs reported offset | Both derived from `prepended_silence(sample_rate)` | `prepended_silence_frames_and_seconds_describe_the_same_gap` |
+| Copy: "Speech Recognition" read as a network grant | The permission row says it records consent to on-device processing and is not permission to use a server | "says what granting Speech Recognition actually permits" |
+
+Disagreement, on the evidence: L3's stated threshold ("below ~1334 Hz") is not
+where the two values diverge. `.max(1)` only binds at 1 Hz, where
+`sample_rate * 750 / 1000` truncates to zero. The divergence is the truncation
+itself, at any rate that is not a multiple of 4 — 22 050 Hz loses half a frame.
+The fix is the one the finding asked for; the test asserts the general
+invariant (the offset is the duration of the frames actually written) instead
+of the threshold.
+
+The decision table above is unchanged by this pass. The "relax the permission
+gate" answer is now additionally wrong to revisit casually: the helper itself
+enforces the gate, so the observation that SpeechAnalyzer transcribed with
+`authorization: not_determined` no longer holds for this binary.
 
 ## What a reader still has to do on-device
 

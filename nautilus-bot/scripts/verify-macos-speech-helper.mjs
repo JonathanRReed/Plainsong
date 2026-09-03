@@ -440,7 +440,21 @@ function verifyOlderSdkFallbackBuild() {
       analyzerRequest.stdout,
       "older-SDK helper SpeechAnalyzer request",
     );
-    if (analyzerPayload.type !== "error" || analyzerPayload.code !== "on_device_unavailable") {
+    // Which refusal comes first depends on this machine's Speech
+    // authorization -- the helper checks that before it chooses an engine --
+    // so any of the typed refusals is correct here. What must never happen is
+    // the request proceeding; `speech_analyzer_available: false` above is what
+    // proves the symbols are gone.
+    const acceptableRefusals = new Set([
+      "on_device_unavailable",
+      "authorization_not_determined",
+      "authorization_denied",
+      "authorization_restricted",
+    ]);
+    if (
+      analyzerPayload.type !== "error" ||
+      !acceptableRefusals.has(analyzerPayload.code)
+    ) {
       fail(
         `the older-SDK helper must refuse SpeechAnalyzer with a typed error: ${JSON.stringify(
           analyzerPayload,

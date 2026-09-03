@@ -261,6 +261,17 @@ fn take_install_cancellation() -> bool {
     APPLE_SPEECH_INSTALL_CANCELLED.swap(false, Ordering::Relaxed)
 }
 
+/// The exact error a cancelled install returns, so callers that have to tell
+/// "stopped on purpose" from "failed" can assert against it rather than
+/// rebuilding the payload.
+pub fn install_language_cancelled_error() -> anyhow::Error {
+    typed_error(
+        "cancelled",
+        "The macOS language install was cancelled.",
+        false,
+    )
+}
+
 /// Refuses a helper result that did not come from the engine the caller
 /// required.
 ///
@@ -792,6 +803,15 @@ fn parse_helper_error_line(line: &str) -> Option<HelperErrorPayload> {
     } else {
         None
     }
+}
+
+/// The typed code inside one of this module's errors, when it carries one.
+///
+/// The errors serialize their payload as their message, so a caller that needs
+/// to tell "the reader cancelled" from "the install failed" can read the code
+/// rather than matching on prose.
+pub fn typed_error_code(error: &anyhow::Error) -> Option<String> {
+    parse_helper_error_line(&error.to_string()).map(|payload| payload.code)
 }
 
 #[cfg(any(test, all(target_os = "macos", target_arch = "aarch64")))]
@@ -1524,11 +1544,7 @@ where
     let mut stop_reason: Option<anyhow::Error> = None;
     loop {
         if take_install_cancellation() {
-            stop_reason = Some(typed_error(
-                "cancelled",
-                "The macOS language install was cancelled.",
-                false,
-            ));
+            stop_reason = Some(install_language_cancelled_error());
             break;
         }
         let line = match tokio::time::timeout(INSTALL_CANCEL_POLL, lines.next_line()).await {
@@ -1570,13 +1586,16 @@ where
             continue;
         }
         if let Ok(payload) = serde_json::from_str::<HelperAssetInstallPayload>(&line) {
-            last_progress = Instant::now();
             install = Some(AppleSpeechAssetInstall {
                 locale: payload.locale,
                 installed: payload.installed,
                 asset_status: payload.asset_status,
                 engine: payload.engine,
             });
+            // The helper emits this line and exits, so waiting for stdout to
+            // close would risk the liveness window expiring on a finished
+            // install and reporting a timeout for work that succeeded.
+            break;
         }
     }
 

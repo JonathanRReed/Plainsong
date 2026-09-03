@@ -1227,6 +1227,19 @@ struct AppleSpeechLanguageInstallResult {
     notes: Vec<String>,
 }
 
+/// What to tell the reader when a language install ended without installing.
+///
+/// Stopping on purpose is not a failure: reporting it as one puts a serialized
+/// error payload in front of somebody who pressed Cancel and already knows
+/// what happened. Everything else keeps the underlying error, which carries
+/// the code and details the Models screen needs to say what to do next.
+fn apple_speech_install_note(error: &anyhow::Error) -> String {
+    if crate::asr::platform::macos_speech::typed_error_code(error).as_deref() == Some("cancelled") {
+        return "Language install stopped.".to_string();
+    }
+    format!("Apple Speech language install failed: {}", error)
+}
+
 /// Installs the SpeechAnalyzer assets for one language.
 ///
 /// This is the only place in the app that starts an Apple language download,
@@ -1255,7 +1268,7 @@ async fn install_apple_speech_language_impl(
         {
             Ok(install) => Some(install),
             Err(error) => {
-                notes.push(format!("Apple Speech language install failed: {}", error));
+                notes.push(apple_speech_install_note(&error));
                 None
             }
         };
@@ -13326,6 +13339,27 @@ mod tests {
                  what may cross."
             );
         }
+    }
+
+    /// A reader who pressed Cancel does not need the serialized error payload
+    /// the sidecar uses to route failures; they need to know it stopped.
+    #[test]
+    fn a_cancelled_language_install_reads_as_stopped_not_failed() {
+        let cancelled = crate::asr::platform::macos_speech::install_language_cancelled_error();
+        assert_eq!(
+            super::apple_speech_install_note(&cancelled),
+            "Language install stopped."
+        );
+
+        // Anything else keeps the underlying error, which carries the code and
+        // details the Models screen needs to say what to do next.
+        let failed = anyhow::anyhow!("the helper exited");
+        let note = super::apple_speech_install_note(&failed);
+        assert!(
+            note.starts_with("Apple Speech language install failed"),
+            "{note}"
+        );
+        assert!(note.contains("the helper exited"), "{note}");
     }
 
     #[test]
