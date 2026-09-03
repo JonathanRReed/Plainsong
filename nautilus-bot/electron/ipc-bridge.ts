@@ -8,6 +8,7 @@ import { trustedSenderFrameUrl } from "./trusted-sender";
 import {
   isExpectedSidecarStdinClose,
   retryOnceAfterMicrophonePreparationTimeout,
+  shouldRestartTerminatedSidecar,
   SIDECAR_SHUTDOWN_MESSAGE,
 } from "./sidecar-recovery-policy";
 
@@ -438,12 +439,23 @@ export class IpcBridge {
       // A recycle we initiated knows why it killed the process; anything else
       // is classified from how the process actually died. A signal means
       // something killed it, no signal means it went away on its own.
+      const initiatedByThisProcess = this.pendingTerminationReason !== null;
       const reason =
         this.pendingTerminationReason ?? (signal ? "killed" : "crash");
       this.pendingTerminationReason = null;
+      const restart = shouldRestartTerminatedSidecar({
+        signal,
+        initiatedByThisProcess,
+      });
+      if (!restart) {
+        console.log(
+          `[sidecar] not restarting: ${signal} came from outside this process, so the app is being torn down`,
+        );
+      }
       this.handleSidecarTermination(
         reason,
         `Sidecar process exited (code=${code}, signal=${signal})`,
+        restart,
       );
     });
 
@@ -480,9 +492,15 @@ export class IpcBridge {
   // human-readable string, kept alongside it. The renderer used to receive only
   // the string and had to match on its wording to tell a crash from a failed
   // spawn, which broke silently whenever the wording changed.
+  //
+  // `restart` is false only when the caller has established that the sidecar
+  // died because the whole process group is going down (see
+  // shouldRestartTerminatedSidecar). Pending requests are still rejected and
+  // the renderer is still told the sidecar is gone.
   private handleSidecarTermination(
     reason: SidecarTerminationReason,
     message: string,
+    restart = true,
   ): void {
     this.sidecarHealthy = false;
     this.eventCallback?.("sidecar-runtime-changed", {
@@ -498,7 +516,7 @@ export class IpcBridge {
       this.restartTimer = null;
     }
 
-    if (!this.shuttingDown && this.restartAttempts < this.maxRestarts) {
+    if (restart && !this.shuttingDown && this.restartAttempts < this.maxRestarts) {
       const delay = Math.min(1000 * 2 ** this.restartAttempts, 30000);
       this.restartAttempts++;
       console.log(`[sidecar] restarting in ${delay}ms (attempt ${this.restartAttempts}/${this.maxRestarts})`);
@@ -509,7 +527,7 @@ export class IpcBridge {
         }
         this.spawnSidecar();
       }, delay);
-    } else if (this.restartAttempts >= this.maxRestarts) {
+    } else if (restart && this.restartAttempts >= this.maxRestarts) {
       console.error("[sidecar] max restarts reached, giving up");
     }
     // Reject all pending requests with a clear error message

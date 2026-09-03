@@ -449,6 +449,75 @@ describe("IpcBridge crash-loop containment", () => {
     consoleLog.mockRestore();
     consoleWarn.mockRestore();
   });
+
+  // A SIGTERM aimed at the process group (logout, restart, a QA harness) can
+  // reach the sidecar before Electron's own quit path marks the bridge as
+  // shutting down. The bridge used to read that as a fault and schedule a
+  // replacement, which is where "[sidecar] restarting in 1000ms (attempt 1/5)"
+  // came from in packaged smoke logs that had nothing wrong with them.
+  it("does not replace a sidecar killed by a process-group teardown signal", async () => {
+    const consoleLog = vi.spyOn(console, "log").mockImplementation(() => {});
+    const consoleWarn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const firstChild = fakeChildProcess();
+    const spawnProcess = vi
+      .fn()
+      .mockReturnValueOnce(firstChild)
+      .mockReturnValue(
+        fakeChildProcess(),
+      ) as unknown as typeof import("node:child_process").spawn;
+
+    const { IpcBridge } = await import("../../electron/ipc-bridge");
+    const bridge = new IpcBridge("/tmp/plainsong-sidecar", spawnProcess);
+    const runtimeEvents: Array<{ name: string; payload: unknown }> = [];
+    bridge.onEvent((name, payload) => runtimeEvents.push({ name, payload }));
+    bridge.start();
+
+    firstChild.emit("exit", null, "SIGTERM");
+    await vi.advanceTimersByTimeAsync(31_000);
+
+    // One spawn: the original. No replacement was scheduled.
+    expect((spawnProcess as unknown as { mock: { calls: unknown[] } }).mock.calls)
+      .toHaveLength(1);
+    // The renderer is still told the sidecar is gone and why.
+    expect(runtimeEvents).toContainEqual({
+      name: "sidecar-runtime-changed",
+      payload: {
+        ready: false,
+        reason: "killed",
+        message: "Sidecar process exited (code=null, signal=SIGTERM)",
+      },
+    });
+
+    bridge.shutdown();
+    consoleLog.mockRestore();
+    consoleWarn.mockRestore();
+  });
+
+  // SIGKILL is how jetsam and a force-kill arrive, and those are exactly the
+  // faults a replacement sidecar exists for.
+  it("still replaces a sidecar killed by SIGKILL", async () => {
+    const consoleLog = vi.spyOn(console, "log").mockImplementation(() => {});
+    const consoleWarn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const children: FakeChild[] = [];
+    const spawnProcess = vi.fn(() => {
+      const child = fakeChildProcess();
+      children.push(child);
+      return child as never;
+    });
+
+    const { IpcBridge } = await import("../../electron/ipc-bridge");
+    const bridge = new IpcBridge("/tmp/plainsong-sidecar", spawnProcess);
+    bridge.start();
+
+    children[0]?.emit("exit", null, "SIGKILL");
+    await vi.advanceTimersByTimeAsync(31_000);
+
+    expect(spawnProcess.mock.calls.length).toBe(2);
+
+    bridge.shutdown();
+    consoleLog.mockRestore();
+    consoleWarn.mockRestore();
+  });
 });
 
 /**

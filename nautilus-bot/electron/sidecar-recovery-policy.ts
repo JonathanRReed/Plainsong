@@ -13,6 +13,39 @@ const MICROPHONE_RECOVERY_BUDGET_MS = 6_000;
 
 export const SIDECAR_SHUTDOWN_MESSAGE = "Plainsong is shutting down";
 
+// A sidecar that died from one of these signals was killed by whoever owns our
+// process group -- a macOS logout or restart, a `kill` aimed at the group, a QA
+// harness tearing the app down -- not by anything wrong with the sidecar. The
+// whole app is going away, so a replacement would only open the vault, read the
+// keychain and enumerate Core Audio devices on the way out, and the
+// "[sidecar] restarting in 1000ms (attempt 1/5)" it logs on the way reads like
+// a fault that never happened.
+//
+// SIGKILL is deliberately absent: jetsam under memory pressure and a hung
+// process being force-killed both arrive as SIGKILL, and those are exactly the
+// cases a replacement sidecar exists for.
+const PROCESS_GROUP_TEARDOWN_SIGNALS = new Set(["SIGTERM", "SIGINT", "SIGHUP"]);
+
+/**
+ * Whether a terminated sidecar should be replaced.
+ *
+ * `initiatedByThisProcess` is true only when the bridge itself killed the
+ * sidecar (the unresponsive-recycle path). That path uses SIGTERM too and must
+ * still get its replacement, so it is checked before the signal is.
+ */
+export function shouldRestartTerminatedSidecar({
+  signal,
+  initiatedByThisProcess,
+}: {
+  signal: NodeJS.Signals | string | null;
+  initiatedByThisProcess: boolean;
+}): boolean {
+  if (initiatedByThisProcess) {
+    return true;
+  }
+  return !(signal !== null && PROCESS_GROUP_TEARDOWN_SIGNALS.has(signal));
+}
+
 export function isExpectedSidecarStdinClose(error: unknown): boolean {
   if (!error || typeof error !== "object" || !("code" in error)) {
     return false;

@@ -95,10 +95,10 @@
   "homepage": "https://github.com/JonathanRReed/Plainsong",
   "website": "https://plainsong.jonathanrreed.com",
   "overrides": {
-    "@xmldom/xmldom": "^0.8.13",
+    "@xmldom/xmldom": "^0.8.15",
     "electron-builder-squirrel-windows": "26.15.3",
     "esbuild": "^0.28.2",
-    "fast-uri": "^3.1.5",
+    "fast-uri": "^3.1.6",
     "form-data": "^4.0.6",
     "ip-address": "^10.3.1",
     "js-yaml": "^4.3.1",

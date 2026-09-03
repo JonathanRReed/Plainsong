@@ -472,6 +472,16 @@ evidence is stale and must be recaptured before this becomes a candidate.
   files that still carry it load cleanly and are rewritten without it.
 
 ### Fixed
+- Quitting Plainsong no longer schedules a sidecar it is about to throw away.
+  When the whole process group is signalled — a macOS logout or restart, or a
+  QA harness stopping the app — the sidecar can die before Electron's own quit
+  path has marked itself as shutting down, and the app read that as a fault and
+  logged `[sidecar] restarting in 1000ms (attempt 1/5)` on the way out. The
+  replacement was always cancelled a moment later, so nothing was left running,
+  but the line reads like a crash that never happened and sent one review after
+  a ghost. A sidecar killed by SIGTERM, SIGINT or SIGHUP that Plainsong did not
+  send is now treated as the app going away; SIGKILL, a non-zero exit and a
+  recycle Plainsong initiated itself still get their replacement.
 - Remembered voices now store what Settings says they store. A per-meeting
   voice signature is written only for a speaker who is given a name — by you,
   or by "Apply a confident match without asking" — instead of for every
@@ -1014,6 +1024,13 @@ evidence is stale and must be recaptured before this becomes a candidate.
   download existed to fix a problem no route has.
 
 ### Security
+- The build dependency graph is clean again. `@xmldom/xmldom` is pinned to
+  0.8.15 and `fast-uri` to 3.1.7, clearing one moderate XML-injection advisory
+  and four high-severity `fast-uri` advisories (host confusion, two SSRF paths,
+  percent-encoded scheme normalization). Both are build-time packages —
+  electron-builder's plist writer and Ajv's URI resolver — and neither is in
+  the shipped `app.asar`, but `bun run gate:release:dependencies` fails on any
+  advisory and a release does not go out over a failing security gate.
 - The window title a call was detected through no longer leaves the sidecar.
   It was broadcast to every app window on `meeting-call-detected`, and for
   Google Meet that title is the meeting's own name; only whether a window
